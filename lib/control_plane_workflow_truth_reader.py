@@ -50,7 +50,8 @@ from weakref import WeakKeyDictionary
 __all__ = ["SCHEMA_VERSION", "READING_NOT_MINTED", "READING_PAYLOAD_REPLACED",
            "WorkflowTruthReading", "WorkflowTruthReadingError",
            "is_workflow_truth_reading", "read_workflow_truth_reading",
-           "read_workflow_truth_snapshot", "verify_workflow_truth_reading"]
+           "read_workflow_truth_snapshot", "render_reading",
+           "verify_workflow_truth_reading"]
 
 SCHEMA_VERSION = "control-plane-workflow-truth-reader.v1"
 
@@ -242,7 +243,7 @@ def read_workflow_truth_snapshot() -> dict[str, Any]:
 # THE REGISTRY IS KEYED BY OBJECT IDENTITY.  ``_MINTED`` is a
 # ``WeakKeyDictionary`` whose key is the handle object, mapping to the single
 # deep-immutable value captured at mint and the digest of that value.  A handle
-# is looked up by BEING itself: ``rendered()`` and the A01 adapter pass the
+# is looked up by BEING itself: ``render_reading()`` and the A01 adapter pass the
 # object, never a string, an int or anything read off it.
 #
 # AND THE LOOKUP IS IDENTITY EVEN THOUGH A WEAK MAPPING HASHES ITS KEYS.  A weak
@@ -264,7 +265,8 @@ def read_workflow_truth_snapshot() -> dict[str, Any]:
 # freezes the snapshot into a value built only from tuples at mint -- immutable in
 # fact rather than by interface, because a read-only VIEW over a dict still has a
 # writable dict one ``gc.get_referents()`` hop behind it;
-# ``rendered()`` thaws a fresh mutable copy of THAT value and of nothing else.  A
+# ``render_reading()`` thaws a fresh mutable copy of THAT value and of nothing
+# else.  A
 # stateful mapping installed in the snapshot source is read once and never again;
 # a consumer that mutates its copy changes nothing any other consumer sees.
 # ---------------------------------------------------------------------------
@@ -357,10 +359,19 @@ class WorkflowTruthReading(_WeakReferenceable):
     caller could read or write on the handle, so there is no longer one.
 
     WHAT BINDS IT TO A READING is the module-private ``_MINTED`` registry, which
-    is keyed by THIS OBJECT.  ``rendered()`` looks the handle up by identity and
-    thaws a copy of the value captured at mint.  A handle this module did not
-    mint is not a key in that registry, so it renders nothing -- not because a
-    check rejected it, but because there is no entry to find.
+    is keyed by THIS OBJECT.  The module function ``render_reading()`` looks the
+    handle up by identity and thaws a copy of the value captured at mint.  A
+    handle this module did not mint is not a key in that registry, so it renders
+    nothing -- not because a check rejected it, but because there is no entry to
+    find.
+
+    AND THE HANDLE DEFINES NO METHOD A CONSUMER CALLS.  It used to carry
+    ``rendered()``, and a method is dispatched through the instance: the raw base
+    descriptor ``object.__dict__["__class__"].__set__(handle, Forger)`` re-points
+    the type slot of an object this module really did mint, and ``handle.rendered()``
+    then runs the caller's code.  The trusted path therefore calls NOTHING on the
+    handle; it passes the object to ``render_reading()``, whose name resolves on
+    this module and cannot be re-pointed by anything a caller does to an instance.
 
     There is no public constructor: ``__init__`` refuses without the
     module-private mint token, which is never stored.
@@ -389,6 +400,18 @@ class WorkflowTruthReading(_WeakReferenceable):
         assignment an ``AttributeError`` on both paths.  ``type()``, ``isinstance``,
         ``copy`` and ``pickle`` are unaffected: they read the real type slot, and
         this returns the same class they would find.
+
+        WHAT IT DOES NOT STOP, WHICH IS WHY THERE IS NO METHOD LEFT TO RE-POINT.
+        A property shadows the ATTRIBUTE, not the base descriptor underneath it:
+        ``object.__dict__["__class__"].__set__(handle, SameLayoutForger)`` calls
+        that descriptor directly and the type slot changes.  Nothing in a class
+        body can close that route.  So the close is elsewhere: the trusted path
+        calls no method on a handle at all -- ``render_reading()`` is a module
+        function and ``_entry()`` reads the REAL type slot, so a retyped handle is
+        refused as not minted rather than rendering the forger's answer.  This
+        property is kept because it still costs a caller the cheap routes
+        (``setattr`` and ``object.__setattr__``) and makes the expensive one
+        visible.
         """
         return WorkflowTruthReading
 
@@ -414,16 +437,6 @@ class WorkflowTruthReading(_WeakReferenceable):
         raise TypeError(
             "a workflow-truth reading carries no state: there is nothing on this "
             f"handle to delete, and {name!r} does not exist on it")
-
-    def rendered(self) -> dict[str, Any]:
-        """A private mutable copy of the reading captured for THIS handle.
-
-        One registry lookup, by object identity, and the copy is thawed from the
-        captured value that lookup returned.  Nothing is read off the handle,
-        nothing is looked up twice, and no caller-reachable object is traversed
-        between the lookup and the copy.
-        """
-        return _thawed(_entry_or_refuse(self)[0])
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic only
         entry = _entry(self)
@@ -538,6 +551,38 @@ def verify_workflow_truth_reading(value: Any) -> None:
     mistake the check for the contents.
     """
     _entry_or_refuse(value)
+
+
+def render_reading(reading: Any) -> dict[str, Any]:
+    """A private mutable copy of the reading captured for THIS handle.
+
+    THE TRUSTED PATH'S ONLY WAY TO CONTENT, AND IT TOUCHES NOTHING ON THE HANDLE.
+    Both consumers -- ``tools/health-check.py`` and the A01 adapter in
+    ``lib/assurance_health_sources`` -- call this function.  No attribute is read,
+    no method is dispatched, and nothing about the object is consulted except the
+    type slot ``type()`` reads and the object's own identity.
+
+    WHY A FUNCTION AND NOT A METHOD, which is the eighth review's defect.  A
+    method is looked up through the instance, so re-pointing the instance's type
+    re-points the method: ``object.__dict__["__class__"].__set__(handle, Forger)``
+    is a raw base-descriptor write that no class body can intercept, and
+    ``handle.rendered()`` afterwards ran the caller's code and returned the
+    caller's census on an object the reader really had minted.  A module function
+    resolves on THIS module; a caller who retypes a handle changes nothing about
+    which code runs here.
+
+    ONE RESOLUTION, AND NOTHING BETWEEN IT AND THE COPY.  ``_entry_or_refuse``
+    performs the single registry lookup and the thaw is taken from what that
+    lookup returned, so there is no window between a check and a use for anything
+    to change -- a consumer that verified first and rendered second had one, and
+    this is the shape that removes it rather than narrowing it.
+
+    Two outcomes and no third: the value captured at mint, or
+    ``WorkflowTruthReadingError(READING_NOT_MINTED)``.  A retyped handle takes the
+    refusal, because ``_entry()`` compares the REAL type slot and a forged type is
+    not ``WorkflowTruthReading``.  Caller content is not among the outcomes.
+    """
+    return _thawed(_entry_or_refuse(reading)[0])
 
 
 def read_workflow_truth_reading() -> WorkflowTruthReading:

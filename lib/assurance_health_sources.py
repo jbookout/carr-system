@@ -104,7 +104,7 @@ from lib.control_plane_workflow_truth import (
 from lib.control_plane_workflow_truth_reader import (
     WorkflowTruthReading as _WorkflowTruthReading,
     WorkflowTruthReadingError as _WorkflowTruthReadingError,
-    verify_workflow_truth_reading as _verify_workflow_truth_reading,
+    render_reading as _render_workflow_truth_reading,
 )
 
 SCHEMA_VERSION = "assurance-health-sources.v1"
@@ -318,11 +318,19 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     lookup is the object itself and there is nothing about it a caller can change
     between the check and the projection.
 
-    This entry still calls the reader's own ``verify_workflow_truth_reading``
-    first, which refuses anything that is not a key in that registry with
-    ``READING_NOT_MINTED``.  (``READING_PAYLOAD_REPLACED`` is retired: it named a
-    genuinely minted handle re-pointed at another reading, which needed a key to
-    re-point, and the reader can no longer raise it.)
+    AND IT CALLS NOTHING ON THE HANDLE, which is the eighth review's close.  This
+    entry used to verify the handle and then dispatch ``reading.rendered()``: a
+    method resolves through the instance, so a raw base-descriptor write --
+    ``object.__dict__["__class__"].__set__(reading, SameLayoutForger)``, which no
+    class body can intercept -- re-pointed dispatch on a genuinely minted handle
+    between the two lines and this function returned the caller's census.  It now
+    passes the object to the reader's module function
+    ``render_reading``, which performs ONE registry lookup and thaws the value
+    that lookup returned.  There is no verification window because there is no
+    second act, and a retyped handle is refused there with ``READING_NOT_MINTED``
+    rather than rendering anything.  (``READING_PAYLOAD_REPLACED`` is retired: it
+    named a genuinely minted handle re-pointed at another reading, which needed a
+    key to re-point, and the reader can no longer raise it.)
 
     Consuming the reading rather than repeating it is what makes a health run one
     moment: ``tools/health-check.py`` performs the F09 read once and renders both
@@ -334,14 +342,15 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     reading is reported absent; it is never projected as an empty or a healthy
     census.
     """
-    # THE READER OWNS THE VERDICT, AND ITS REASON ID.  Asking it once -- rather
-    # than testing the shape here and verifying there -- is what keeps this seam
-    # from growing a second, differently-worded definition of "a reading", which
-    # is how the two halves of a door come to disagree.  The refusal is a
-    # TypeError: WorkflowTruthReadingError subclasses it, so every caller that
-    # already refuses a non-reading with TypeError still does.
+    # THE READER OWNS THE VERDICT, ITS REASON ID, AND THE CONTENTS -- in ONE act.
+    # Asking it once, rather than testing the shape here and reading the contents
+    # there, is what keeps this seam from growing a second, differently-worded
+    # definition of "a reading" AND what leaves no instant between the check and
+    # the use for a caller to act in.  The refusal is a TypeError:
+    # WorkflowTruthReadingError subclasses it, so every caller that already
+    # refuses a non-reading with TypeError still does.
     try:
-        _verify_workflow_truth_reading(reading)
+        captured = _render_workflow_truth_reading(reading)
     except _WorkflowTruthReadingError as exc:
         raise _WorkflowTruthReadingError(
             exc.reason_id,
@@ -350,9 +359,9 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
             f"{type(reading).__name__} is caller-supplied data, and a census a caller "
             f"composed is its assertion about the control plane, not a reading of it "
             f"({exc})") from None
-    # What the handle then renders is the reader's single capture, which this
-    # module never had a way to reach and a caller never had a way to write.
-    return _project(reading.rendered(), now=_datetime.now(_timezone.utc))
+    # What that returned is a private copy of the reader's single capture, which
+    # this module never had a way to reach and a caller never had a way to write.
+    return _project(captured, now=_datetime.now(_timezone.utc))
 
 
 def _would_be_assurance_health_if_authoritative(workflows: _Any, *, now: _Any) -> dict[str, _Any]:

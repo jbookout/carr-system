@@ -287,12 +287,19 @@ def _workflow_truth_reading():
     """
     try:
         sys.path.insert(0, REPO_ROOT)
-        from lib.control_plane_workflow_truth_reader import read_workflow_truth_reading
+        from lib.control_plane_workflow_truth_reader import (
+            read_workflow_truth_reading, render_reading)
     except Exception as exc:
         return None, {"available": False,
                       "reason": f"adapter unavailable ({type(exc).__name__}: {exc})"}
     reading = read_workflow_truth_reading()
-    return reading, reading.rendered()
+    # NOTHING IS CALLED ON THE HANDLE. render_reading is the reader's own module
+    # function: it resolves the registry entry once, by object identity, and thaws
+    # that capture. The handle used to carry a rendered() method, and a method is
+    # dispatched through the instance -- so a raw base-descriptor write to
+    # __class__ re-pointed it on a genuinely minted handle and this surface would
+    # have printed the caller's census as the control plane's own answer.
+    return reading, render_reading(reading)
 
 
 def _canonical_workflow_truth(snap):

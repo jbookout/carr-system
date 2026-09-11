@@ -1517,11 +1517,21 @@ def source_adapter_checks() -> None:
               if not _raises_type_error(write) and not _raises_attribute_error(write)]
     check("no caller write or read reaches any state on a minted handle",
           not landed, json.dumps(landed))
-    check("the handle exposes no public accessor a value could be read out of",
+    # NOT EVEN A METHOD.  ``rendered()`` was the last public name on the class,
+    # and a method is dispatched through the INSTANCE -- which is the whole of the
+    # eighth review's defect.  Content now comes from the reader's module function
+    # ``render_reading(handle)``, so a caller who re-points a handle's type
+    # re-points nothing the trusted path calls.
+    check("the handle exposes no public accessor or method at all",
           [name for name in dir(reader.WorkflowTruthReading)
-           if not name.startswith("__")] == ["rendered"],
+           if not name.startswith("__")] == [],
           json.dumps([name for name in dir(reader.WorkflowTruthReading)
                       if not name.startswith("__")]))
+    check("the reader owns the render function, and the handle class does not",
+          callable(getattr(reader, "render_reading", None))
+          and "render_reading" in reader.__all__
+          and not hasattr(reader.WorkflowTruthReading, "rendered"),
+          json.dumps(sorted(reader.__all__)))
     check("the handle class refuses to be subclassed at class creation",
           _raises_type_error(lambda: type(
               "_ForgedSubclass", (reader.WorkflowTruthReading,), {})),
@@ -1543,7 +1553,7 @@ def source_adapter_checks() -> None:
                             owners={"class-swap-forged@v1": MANIFEST_OWNER})
 
     dispatch = _minted_reading(reader, "CLASS-SWAP-PROBE-READING")[0]
-    dispatch_baseline = dispatch.rendered()
+    dispatch_baseline = reader.render_reading(dispatch)
     class_writes = {
         "object.__setattr__": lambda: object.__setattr__(
             dispatch, "__class__", _DispatchForger),
@@ -1553,9 +1563,146 @@ def source_adapter_checks() -> None:
                if not _raises_type_error(write) and not _raises_attribute_error(write)]
     check("__class__ cannot be reassigned, so method dispatch cannot be re-pointed",
           not swapped and type(dispatch) is reader.WorkflowTruthReading
-          and dispatch.rendered() == dispatch_baseline
-          and "class-swap-forged" not in json.dumps(dispatch.rendered(), default=str),
+          and reader.render_reading(dispatch) == dispatch_baseline
+          and "class-swap-forged" not in json.dumps(
+              reader.render_reading(dispatch), default=str),
           json.dumps(swapped))
+
+    # THE ROUTE A PROPERTY CANNOT CLOSE, AND THE REASON NOTHING IS CALLED ON A
+    # HANDLE ANY MORE.  ``__class__`` as a read-only property intercepts the
+    # ATTRIBUTE; it does not intercept the base descriptor underneath it.
+    # ``object.__dict__["__class__"].__set__(handle, SameLayoutForger)`` calls that
+    # descriptor directly, and the type slot of an object the reader really did
+    # mint changes.  The eighth review drove exactly that between the adapter's
+    # verification and its ``reading.rendered()`` dispatch, and a handle captured
+    # as AUTHORITY-UNAVAILABLE projected available=true with a caller-chosen owner.
+    #
+    # THE BAR HERE IS NOT THAT THE SWAP FAILS -- no class body can stop it.  It is
+    # that the TRUSTED PATH, which calls the reader's module function and never a
+    # method on the handle, answers with the captured reading or refuses, and
+    # never with caller content: before the swap, after it, and with the swap
+    # driven into the old verify-then-use window.
+    RAW_FORGED = "raw-descriptor-forged"
+
+    class _RecordingForger:
+        """Same layout as a handle, and it records every attribute touched on it.
+
+        The layout match (one ``__weakref__`` slot, no ``__dict__``) is what makes
+        the raw descriptor write legal at all.  ``__getattribute__`` records, so
+        "the trusted path touches nothing on the handle" is MEASURED here rather
+        than asserted: if anything resolved ``rendered`` -- or any other name --
+        through the instance, the name appears in ``touched``.
+        """
+
+        __slots__ = ("__weakref__",)
+        touched: list = []
+
+        def __getattribute__(self, name):
+            _RecordingForger.touched.append(name)
+            return object.__getattribute__(self, name)
+
+        def rendered(self) -> dict[str, Any]:
+            return _reading(keys=((RAW_FORGED, 1),),
+                            owners={f"{RAW_FORGED}@v1": MANIFEST_OWNER})
+
+    def _raw_class_swap(handle) -> str:
+        """Drive the raw base-descriptor write; report what the interpreter did."""
+        try:
+            object.__dict__["__class__"].__set__(handle, _RecordingForger)
+        except Exception as exc:
+            return f"refused ({type(exc).__name__})"
+        return "landed"
+
+    def _trusted_render(handle):
+        """What the trusted path answers: ('value', copy) or ('refused', reason).
+
+        The reader's module function, which is what both consumers call.  Caller
+        content is not among the outcomes, and this is the instrument that says so.
+        """
+        try:
+            return ("value", reader.render_reading(handle))
+        except TypeError as exc:
+            return ("refused", getattr(exc, "reason_id", type(exc).__name__))
+
+    def _trusted_project(handle):
+        """The same question asked of the A01 seam, which is the other consumer."""
+        try:
+            return ("value", sources.assurance_health_census(handle))
+        except TypeError as exc:
+            return ("refused", getattr(exc, "reason_id", type(exc).__name__))
+
+    # (1) THE SWAP BEFORE ANY USE.
+    raw = _minted_reading(reader, "RAW-DESCRIPTOR-PROBE-READING")[0]
+    raw_before = _trusted_render(raw)
+    raw_verdict = _raw_class_swap(raw)
+    _RecordingForger.touched.clear()
+    raw_after = _trusted_render(raw)
+    raw_seam = _trusted_project(raw)
+    raw_rendered = json.dumps([raw_after, raw_seam], default=str)
+    check("the raw base-descriptor __class__ swap on a minted handle answers the "
+          "capture or a refusal, never caller content",
+          raw_before[0] == "value"
+          and "RAW-DESCRIPTOR-PROBE-READING" in json.dumps(raw_before[1], default=str)
+          and (raw_after == raw_before
+               or (raw_after[0] == "refused"
+                   and raw_after[1] == reader.READING_NOT_MINTED))
+          and RAW_FORGED not in raw_rendered,
+          json.dumps({"swap": raw_verdict, "after": str(raw_after)[:160]}))
+    check("the A01 seam answers the same way for a raw-descriptor-retyped handle",
+          (raw_seam[0] == "refused"
+           or "RAW-DESCRIPTOR-PROBE-READING" in json.dumps(raw_seam[1], default=str))
+          and RAW_FORGED not in raw_rendered,
+          json.dumps(str(raw_seam)[:200]))
+    check("neither consumer touched a single attribute of the retyped handle",
+          _RecordingForger.touched == [],
+          json.dumps(_RecordingForger.touched[:8]))
+
+    # (2) THE SWAP IN THE OLD WINDOW -- verified, then retyped, then used.  This is
+    # the interleaving the review drove: it is reproduced here exactly, against the
+    # path that replaced it.  The window is gone because the trusted path resolves
+    # the entry ONCE and thaws what that resolution returned, so the "use" half can
+    # only answer the capture or refuse.
+    interleaved = _minted_reading(reader, "INTERLEAVED-PROBE-READING")[0]
+    interleaved_baseline = reader.render_reading(interleaved)
+    reader.verify_workflow_truth_reading(interleaved)   # the verification
+    interleaved_verdict = _raw_class_swap(interleaved)  # the window
+    _RecordingForger.touched.clear()
+    interleaved_after = _trusted_render(interleaved)    # the use
+    interleaved_seam = _trusted_project(interleaved)
+    interleaved_rendered = json.dumps(
+        [interleaved_after, interleaved_seam], default=str)
+    check("a retype between verification and use yields the captured reading or a "
+          "refusal, never the forger's census",
+          (interleaved_after == ("value", interleaved_baseline)
+           or (interleaved_after[0] == "refused"
+               and interleaved_after[1] == reader.READING_NOT_MINTED))
+          and RAW_FORGED not in interleaved_rendered,
+          json.dumps({"swap": interleaved_verdict,
+                      "after": str(interleaved_after)[:160]}))
+    check("and the seam, asked after that same window, projects no forged owner "
+          "or workflow either",
+          (interleaved_seam[0] == "refused"
+           or ("INTERLEAVED-PROBE-READING" in json.dumps(
+               interleaved_seam[1], default=str)
+               and interleaved_seam[1].get("available") is not True))
+          and RAW_FORGED not in interleaved_rendered
+          and "caller-owner" not in interleaved_rendered,
+          json.dumps(str(interleaved_seam)[:200]))
+
+    # (3) THE CONTROL, so the two probes above measure the door and not a dead
+    # instrument: the SAME forger class, reached the way a caller would have
+    # reached it before, really does serve forged content.  If this stops being
+    # true the probes above pass for the wrong reason.
+    control_forger = object.__new__(_RecordingForger)
+    _RecordingForger.touched.clear()
+    control_answer = json.dumps(control_forger.rendered(), default=str)
+    check("the control: the forger class really does serve a forged census",
+          RAW_FORGED in control_answer and "rendered" in _RecordingForger.touched,
+          json.dumps({"touched": _RecordingForger.touched[:4]}))
+    check("the trusted path refuses that forger outright, by identity",
+          _trusted_render(control_forger)[0] == "refused"
+          and _trusted_project(control_forger)[0] == "refused",
+          json.dumps(str(_trusted_render(control_forger))[:160]))
 
     # AND THE CAPTURE IS IMMUTABLE IN FACT, NOT BY INTERFACE.  A MappingProxyType
     # is a read-only VIEW over a dict that still exists: one gc.get_referents()
@@ -1668,14 +1815,16 @@ def source_adapter_checks() -> None:
           and _raises_type_error(lambda: reader.verify_workflow_truth_reading(look_alike)),
           "a matching __hash__/__eq__ reached a genuine registry entry")
     check("the handle a look-alike was built to match still renders its own reading",
-          "LOOK-ALIKE-TWIN-READING" in json.dumps(twin.rendered(), default=str),
-          json.dumps(twin.rendered(), default=str)[:200])
+          "LOOK-ALIKE-TWIN-READING" in json.dumps(
+              reader.render_reading(twin), default=str),
+          json.dumps(reader.render_reading(twin), default=str)[:200])
     check("the reader refuses to mint a reading from caller data",
           _raises_type_error(lambda: reader.WorkflowTruthReading(object()))
           and _raises_type_error(lambda: reader.WorkflowTruthReading()),
           "the handle has a public constructor")
     check("a handle that skipped the mint cannot hand out a reading",
-          _raises_type_error(shell.rendered), "an unminted shell rendered a census")
+          _raises_type_error(lambda: reader.render_reading(shell)),
+          "an unminted shell rendered a census")
     # THE CONTROL: a handle the reader actually minted IS accepted, so the
     # refusals above measure the door rather than a seam that refuses everything.
     minted, invocations = _minted_reading(reader, "SOURCE-ADAPTER-CONTROL-READING")
@@ -1686,10 +1835,21 @@ def source_adapter_checks() -> None:
           answered["schema_version"] == sources.SCHEMA_VERSION
           and "SOURCE-ADAPTER-CONTROL-READING" in json.dumps(answered, default=str),
           json.dumps(answered, default=str)[:300])
+    health_source = (REPO / "tools" / "health-check.py").read_text(encoding="utf-8")
     check("the health surface takes its census from that same reader",
-          "from lib.control_plane_workflow_truth_reader import read_workflow_truth_reading"
-          in (REPO / "tools" / "health-check.py").read_text(encoding="utf-8"),
+          "from lib.control_plane_workflow_truth_reader import (" in health_source
+          and "read_workflow_truth_reading, render_reading)" in health_source,
           "tools/health-check.py reads the census some other way")
+    # AND IT RENDERS THROUGH THE READER'S FUNCTION, NOT THROUGH THE HANDLE.  The
+    # method it used to call was dispatched through the instance, so a retyped
+    # handle made this surface print the caller's census as the control plane's.
+    adapter_source = (REPO / "lib" / "assurance_health_sources.py").read_text(
+        encoding="utf-8")
+    check("neither consumer dispatches a method on the reading handle",
+          "render_reading(reading)" in health_source
+          and "_render_workflow_truth_reading(reading)" in adapter_source
+          and not hasattr(reader.WorkflowTruthReading, "rendered"),
+          "a consumer still calls a method on the handle")
     reader_source = (REPO / "lib" / "control_plane_workflow_truth_reader.py").read_text(
         encoding="utf-8")
     check("the reader itself takes no argument through which a census could arrive",
@@ -1754,7 +1914,7 @@ def source_adapter_checks() -> None:
             return len(honest)
 
     baseline_handle = _mint(honest)
-    baseline = baseline_handle.rendered()
+    baseline = reader.render_reading(baseline_handle)
     check("the control: a minted handle renders the reading the reader performed",
           baseline.get("available") is True
           and FORGED_KEY not in json.dumps(baseline, default=str),
@@ -1782,20 +1942,20 @@ def source_adapter_checks() -> None:
         object.__setattr__(handle, "_key", "another-readings-key")
 
     def _swaps_a_nested_mapping_after_minting(handle):
-        rendered = handle.rendered()
+        rendered = reader.render_reading(handle)
         rendered["census"]["summary"] = copy.deepcopy(forged["census"]["summary"])
         rendered["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
         rendered["owners"][f"{FORGED_KEY}@v1"] = MANIFEST_OWNER
 
     def _swaps_a_nested_mapping_twice_over(handle):
-        first = handle.rendered()
+        first = reader.render_reading(handle)
         first["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
-        second = handle.rendered()
+        second = reader.render_reading(handle)
         second["surfaces"] = copy.deepcopy(forged["surfaces"])
         second["census"].setdefault("rows", []).extend(first["census"]["rows"])
 
     def _writes_a_key_of_what_it_was_handed(handle):
-        handle.rendered()["census"] = copy.deepcopy(forged["census"])
+        reader.render_reading(handle)["census"] = copy.deepcopy(forged["census"])
 
     forgery_attempts = {
         "replacing the payload attribute with object.__setattr__":
@@ -1827,9 +1987,10 @@ def source_adapter_checks() -> None:
         except Exception as exc:
             verdicts[label] = f"write refused ({type(exc).__name__})"
         try:
-            after_rendered = handle.rendered()
+            after_rendered = reader.render_reading(handle)
         except TypeError as exc:
-            verdicts[label] += f"; rendered() refused ({getattr(exc, 'reason_id', 'TypeError')})"
+            verdicts[label] += \
+                f"; render_reading() refused ({getattr(exc, 'reason_id', 'TypeError')})"
             after_rendered = None
         if after_rendered is not None and after_rendered != baseline:
             divergent.append(f"{label}: {verdicts[label]}")
@@ -1871,7 +2032,7 @@ def source_adapter_checks() -> None:
         captured = reader.read_workflow_truth_reading()
     finally:
         reader.read_workflow_truth_snapshot = real_snapshot
-    renders = [captured.rendered() for _ in range(3)]
+    renders = [reader.render_reading(captured) for _ in range(3)]
     projected = sources.assurance_health_census(captured)
     check("a stateful reading source is traversed exactly once, at mint",
           all(render == renders[0] for render in renders)
@@ -1890,10 +2051,10 @@ def source_adapter_checks() -> None:
     own = _mint(honest)
     other = _mint(forged)
     check("two genuine handles each render only their own reading",
-          own.rendered() == baseline
-          and FORGED_KEY in json.dumps(other.rendered(), default=str)
-          and FORGED_KEY not in json.dumps(own.rendered(), default=str),
-          json.dumps(own.rendered(), default=str)[:200])
+          reader.render_reading(own) == baseline
+          and FORGED_KEY in json.dumps(reader.render_reading(other), default=str)
+          and FORGED_KEY not in json.dumps(reader.render_reading(own), default=str),
+          json.dumps(reader.render_reading(own), default=str)[:200])
     check("a str subclass offered as a handle never runs inside a registry lookup",
           reader.is_workflow_truth_reading(str_handle) is False
           and _StrSubclassHandle.hashes == 0,
@@ -1916,7 +2077,7 @@ def source_adapter_checks() -> None:
           not retired, json.dumps(retired))
     shell_reason = None
     try:
-        shell.rendered()
+        reader.render_reading(shell)
     except TypeError as exc:
         shell_reason = getattr(exc, "reason_id", type(exc).__name__)
     check("a handle the reader never minted refuses under the not-minted reason id",
@@ -1927,9 +2088,9 @@ def source_adapter_checks() -> None:
     # nothing any attempt wrote -- so the sweep measured a door that stayed shut
     # rather than a handle that had been killed along the way.
     check("the swept handle still renders its own reading after every attempt",
-          own.rendered() == baseline
+          reader.render_reading(own) == baseline
           and sources.assurance_health_census(own).get("available") is True,
-          json.dumps(own.rendered(), default=str)[:300])
+          json.dumps(reader.render_reading(own), default=str)[:300])
 
 
 def sources_public_surface_guard_checks(health) -> None:
@@ -1957,8 +2118,9 @@ def sources_public_surface_guard_checks(health) -> None:
     (6) Every caller-controlled census shape is pushed at every public callable
     positionally and under every plausible keyword, and neither the privileged
     strings nor the caller's own sentinel value ever come back.  (7) The public
-    entry is called for real -- it performs the F09 read -- and its answer
-    carries no privileged string either.  (8) A control proves the probe fires.
+    entry is called for real, over a reading the F09 READER performs first and
+    hands over as its own handle -- the entry performs no read of its own -- and
+    its answer carries no privileged string either.  (8) A control proves the probe fires.
     """
     import inspect
 
@@ -2125,9 +2287,10 @@ def sources_public_surface_guard_checks(health) -> None:
           not refused, json.dumps(sorted(set(refused))[:4]))
 
     # ---- (7) the public entry, called for real ------------------------------
-    # This performs the F09 read. On a machine with no database tap it comes back
-    # available=False with the reason, which is the honest answer and is still
-    # asserted to carry no privileged string.
+    # The READER performs the F09 read here and mints the handle; the public entry
+    # projects that reading and performs no read of its own. On a machine with no
+    # database tap the reading comes back available=False with its reason, which is
+    # the honest answer and is still asserted to carry no privileged string.
     import lib.control_plane_workflow_truth_reader as reader
     read = sources.assurance_health_census(reader.read_workflow_truth_reading())
     rendered_read = json.dumps(read, default=str)
