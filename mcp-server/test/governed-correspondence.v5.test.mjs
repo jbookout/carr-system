@@ -30,9 +30,12 @@ import assert from "node:assert/strict";
 // Read by the dependency-boundary test at the bottom of this file, which reads
 // J103's own source and the rest of mcp-server/src the way a linter would. The
 // module under test still reaches no filesystem; this suite does.
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { join, basename } from "node:path";
+import esbuild from "esbuild";
 
 import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
@@ -1775,281 +1778,159 @@ const J103_FILE = "governed-correspondence.v5.js";
 const J103_SOURCE = readFileSync(new URL(J103_FILE, SRC_DIR), "utf8");
 
 // ---------------------------------------------------------------------------
-// THE IMPORT GUARD IS A PARSER, NOT A REGEX.
+// THE IMPORT GUARD IS A REAL PARSER, NOT A HAND-ROLLED TOKENIZER.
 //
-// The re-review broke the first version by hand: its patterns missed
-// `import /* x */ "./google-oidc.js";` — valid syntax, a real side-effect import
-// of a fetching module — and the closed-set assertion downstream stayed green. A
-// pattern that can be stepped around by a comment is not a dependency boundary.
+// Two rounds of review broke the guard by hand. The first version was patterns,
+// and they missed `import /* x */ "./google-oidc.js";`. The second version was a
+// tokenizer written for this file, and the third review broke THAT: it treated a
+// non-breaking space as punctuation, so `import "./google-oidc.js";` — valid
+// ECMAScript, a real side-effect import of a fetching module — was invisible and
+// the closed-set assertion downstream stayed green.
 //
-// Neither acorn nor es-module-lexer is installed in mcp-server/node_modules, so
-// this is a real tokenizer: it walks the source character by character, knows line
-// comments, block comments, single and double quoted strings, template literals
-// with their `${}` nesting, and regular-expression literals, and emits only the
-// tokens that are actually code. The import forms are then read off that token
-// stream. `node --check` runs beside it, so the file this parser is trusted with
-// is a file the engine agrees is parseable.
+// The lesson both rounds taught is that a JavaScript parser written by hand in a
+// test file is a liability, so this one is not written here. The parse is done by
+// esbuild, which is present in mcp-server/node_modules (acorn, es-module-lexer and
+// typescript are not), and which reports the module's imports — static, dynamic,
+// and require() — with the kind of each. Its parser is the same one that compiles
+// this repository's Worker bundle, so it agrees with the engine about whitespace,
+// comments, strings, templates and regular expressions without this file having an
+// opinion about any of them.
+//
+// Two things esbuild cannot answer are answered CONSERVATIVELY, on purpose. A call
+// site whose specifier is not a literal (`import(name)`, `require(name)`) resolves
+// to no path at all, and `createRequire` reaches CommonJS without the token
+// `require(` appearing anywhere. Both are found by counting names in the raw text,
+// which over-reports — a mention inside a comment counts — and that is the safe
+// direction: a false alarm is a review, a missed call site is a hole in the
+// allow-list.
 // ---------------------------------------------------------------------------
 
-/** The tokens that can precede a `/` that starts a REGEX rather than a division. */
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "do", "else",
-  "yield", "await", "case", "throw",
-]);
+/** esbuild refuses to run at all if it is missing, rather than degrading quietly. */
+assert.equal(typeof esbuild.buildSync, "function",
+  "the import guard needs a real parser; esbuild is not loadable");
 
-/**
- * Tokenize JavaScript far enough to read its module graph.
- *
- * Returns `{ type, value }` tokens for code only: comments are dropped, string and
- * template literals become one `string` token carrying their text, and regex
- * literals become one opaque token so the quotes and slashes inside them cannot
- * be mistaken for the start of a string.
- */
-function tokenize(source) {
-  const tokens = [];
-  const last = () => (tokens.length === 0 ? null : tokens[tokens.length - 1]);
-  const regexAllowed = () => {
-    const previous = last();
-    if (previous === null) return true;
-    if (previous.type === "name") return REGEX_PRECEDING_KEYWORDS.has(previous.value);
-    if (previous.type === "string" || previous.type === "regex" || previous.type === "number") {
-      return false;
-    }
-    return !([")", "]", "}"].includes(previous.value));
-  };
-  const readString = (index, quote) => {
-    let text = "";
-    let i = index + 1;
-    while (i < source.length) {
-      const ch = source[i];
-      if (ch === "\\") { text += source[i + 1] ?? ""; i += 2; continue; }
-      if (ch === quote) return [text, i + 1];
-      text += ch;
-      i += 1;
-    }
-    throw new Error(`unterminated string at ${index}`);
-  };
-
-  let i = 0;
-  // Template literals nest: `${ `${x}` }`. The stack holds the brace depth each
-  // open template is waiting on, so the closing backtick is found correctly.
-  const templates = [];
-  let braceDepth = 0;
-  while (i < source.length) {
-    const ch = source[i];
-    const next = source[i + 1];
-    if (ch === "/" && next === "/") {
-      while (i < source.length && source[i] !== "\n") i += 1;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = source.indexOf("*/", i + 2);
-      if (end === -1) throw new Error("unterminated block comment");
-      i = end + 2;
-      continue;
-    }
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") { i += 1; continue; }
-    if (ch === '"' || ch === "'") {
-      const [text, end] = readString(i, ch);
-      tokens.push({ type: "string", value: text });
-      i = end;
-      continue;
-    }
-    if (ch === "`") {
-      // Read the template, stopping at an unescaped `${` so the expression inside
-      // is tokenized as ordinary code, and remembering we are inside one.
-      let text = "";
-      let k = i + 1;
-      let closed = false;
-      while (k < source.length) {
-        if (source[k] === "\\") { text += source[k + 1] ?? ""; k += 2; continue; }
-        if (source[k] === "`") { closed = true; k += 1; break; }
-        if (source[k] === "$" && source[k + 1] === "{") {
-          templates.push(braceDepth);
-          braceDepth += 1;
-          k += 2;
-          break;
-        }
-        text += source[k];
-        k += 1;
-      }
-      tokens.push({ type: "string", value: text, template: true, closed });
-      i = k;
-      continue;
-    }
-    if (ch === "}" ) {
-      braceDepth -= 1;
-      if (templates.length > 0 && templates[templates.length - 1] === braceDepth) {
-        // Back inside the template literal this `}` closes.
-        templates.pop();
-        let text = "";
-        let k = i + 1;
-        while (k < source.length) {
-          if (source[k] === "\\") { text += source[k + 1] ?? ""; k += 2; continue; }
-          if (source[k] === "`") { k += 1; break; }
-          if (source[k] === "$" && source[k + 1] === "{") {
-            templates.push(braceDepth);
-            braceDepth += 1;
-            k += 2;
-            break;
-          }
-          text += source[k];
-          k += 1;
-        }
-        tokens.push({ type: "string", value: text, template: true });
-        i = k;
-        continue;
-      }
-      tokens.push({ type: "punct", value: "}" });
-      i += 1;
-      continue;
-    }
-    if (ch === "{") { braceDepth += 1; tokens.push({ type: "punct", value: "{" }); i += 1; continue; }
-    if (ch === "/" && regexAllowed()) {
-      let k = i + 1;
-      let inClass = false;
-      while (k < source.length) {
-        const c = source[k];
-        if (c === "\\") { k += 2; continue; }
-        if (c === "[") inClass = true;
-        else if (c === "]") inClass = false;
-        else if (c === "/" && !inClass) { k += 1; break; }
-        else if (c === "\n") throw new Error(`unterminated regex at ${i}`);
-        k += 1;
-      }
-      while (k < source.length && /[a-z]/.test(source[k])) k += 1;
-      tokens.push({ type: "regex", value: source.slice(i, k) });
-      i = k;
-      continue;
-    }
-    if (/[A-Za-z_$]/.test(ch)) {
-      let k = i;
-      while (k < source.length && /[\w$]/.test(source[k])) k += 1;
-      tokens.push({ type: "name", value: source.slice(i, k) });
-      i = k;
-      continue;
-    }
-    if (/[0-9]/.test(ch)) {
-      let k = i;
-      while (k < source.length && /[\w.]/.test(source[k])) k += 1;
-      tokens.push({ type: "number", value: source.slice(i, k) });
-      i = k;
-      continue;
-    }
-    tokens.push({ type: "punct", value: ch });
-    i += 1;
-  }
-  return tokens;
-}
-
-/** A plain string literal token — a template with an interpolation is not one. */
-function literalString(token) {
-  return token !== undefined && token !== null && token.type === "string"
-    && token.template !== true;
+/** Parse `source` and return esbuild's import records: `{ path, kind }` each. */
+function importRecords(source) {
+  const built = esbuild.buildSync({
+    stdin: {
+      contents: source,
+      loader: "js",
+      sourcefile: "module-under-guard.js",
+      resolveDir: fileURLToPath(SRC_DIR),
+    },
+    bundle: false,
+    write: false,
+    metafile: true,
+    format: "esm",
+    platform: "neutral",
+    logLevel: "silent",
+    logLimit: 0,
+  });
+  const output = Object.values(built.metafile.outputs)[0];
+  return output === undefined ? [] : output.imports;
 }
 
 /**
- * The single literal argument of a call, or null.
+ * How many times `callee(` appears in the raw text, as a whole word.
  *
- * The literal has to be the WHOLE argument: `import("./pre" + "fix.js")` names a
- * module this parser cannot know, and reading its first half as the specifier
- * would be worse than admitting the specifier is computed.
+ * Deliberately a SUPERSET: an occurrence inside a comment or a string is counted.
+ * This number is only ever compared against what the parser resolved, and only to
+ * decide whether some call site went unresolved, so counting too many raises a
+ * false alarm and counting too few would hide a door.
  */
-function soleLiteralArgument(tokens, open) {
-  return literalString(tokens[open + 1]) && tokens[open + 2]?.value === ")"
-    ? tokens[open + 1].value
-    : null;
+function callSiteCount(source, callee) {
+  return source.split(new RegExp(`(?<![\\w$.])${callee}\\s*\\(`)).length - 1;
 }
 
 /**
- * Read the module graph off the token stream: every specifier, in every form that
- * actually loads code, plus the named bindings each static import takes.
+ * Every module specifier a source file loads, by any form that actually loads.
  *
- * A dynamic `import(expr)` whose argument is not a literal is reported as
- * `<computed import>` rather than ignored, because a computed specifier is
- * precisely the hole a closed allow-list has to notice.
+ * A call site the parser could not resolve to a literal is reported as
+ * `<computed import>` / `<computed require>` rather than dropped, and a source
+ * that so much as names `createRequire` reports `createRequire`, because a closed
+ * allow-list has to notice exactly the specifiers it cannot see.
  */
-function parseModuleGraph(source) {
-  const tokens = tokenize(source);
-  const specifiers = new Set();
-  const bindings = new Map();
-  const addBinding = (specifier, names) => {
-    if (!bindings.has(specifier)) bindings.set(specifier, []);
-    bindings.get(specifier).push(...names);
-  };
-
-  // The back door into CommonJS is looked for over the WHOLE token stream, before
-  // anything else: a clause scan that jumps past a specifier would otherwise step
-  // over the very name it is there to notice.
-  if (tokens.some(t => t.type === "name" && t.value === "createRequire")) {
-    specifiers.add("createRequire");
-  }
-
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (token.type !== "name") continue;
-
-    if (token.value === "require" && tokens[i + 1]?.value === "(") {
-      specifiers.add(soleLiteralArgument(tokens, i + 1) ?? "<computed require>");
-      continue;
-    }
-
-    if (token.value === "import") {
-      const after = tokens[i + 1];
-      if (after === undefined) continue;
-      if (after.value === ".") continue;                       // import.meta
-      if (after.value === "(") {                                // dynamic import
-        specifiers.add(soleLiteralArgument(tokens, i + 1) ?? "<computed import>");
-        continue;
-      }
-      if (literalString(after)) { specifiers.add(after.value); continue; }  // side effect
-    }
-
-    if (token.value === "import" || token.value === "export") {
-      // A clause form: walk to `from "<specifier>"`, bounded by the statement's
-      // own semicolon so a later import cannot be attributed to this one.
-      const names = [];
-      let inClause = false;
-      for (let j = i + 1; j < tokens.length && j < i + 200; j += 1) {
-        const t = tokens[j];
-        if (t.value === ";") break;
-        if (t.value === "{") { inClause = true; continue; }
-        if (t.value === "}") { inClause = false; continue; }
-        if (inClause && t.type === "name" && t.value !== "as") {
-          // The IMPORTED name, not the local alias: it is the imported name that
-          // says what was taken from the other module.
-          if (tokens[j - 1]?.value !== "as") names.push(t.value);
-          continue;
-        }
-        if (t.type === "name" && t.value === "from" && literalString(tokens[j + 1])) {
-          const specifier = tokens[j + 1].value;
-          specifiers.add(specifier);
-          if (names.length > 0) addBinding(specifier, names);
-          i = j + 1;
-          break;
-        }
-      }
-    }
-  }
-  return { specifiers: [...specifiers].sort(), bindings };
-}
-
-/** Every module specifier a source file imports, by any of the forms that work. */
 function importSpecifiers(source) {
-  return parseModuleGraph(source).specifiers;
+  const records = importRecords(source);
+  const specifiers = new Set(records.map(record => record.path));
+  const resolved = kind => records.filter(record => record.kind === kind).length;
+  if (callSiteCount(source, "import") > resolved("dynamic-import")) {
+    specifiers.add("<computed import>");
+  }
+  if (callSiteCount(source, "require") > resolved("require-call")) {
+    specifiers.add("<computed require>");
+  }
+  if (/(?<![\w$])createRequire(?![\w$])/.test(source)) specifiers.add("createRequire");
+  return [...specifiers].sort();
 }
 
-/** The names a source file binds from one specifier. */
+/**
+ * The names a source file binds out of one specifier — the IMPORTED names, not the
+ * local aliases, because it is the imported name that says what was taken.
+ *
+ * Read out of the linker rather than off a token stream: the source is bundled
+ * against an EMPTY stub for each of its relative dependencies, and esbuild reports
+ * one "No matching export ... for import X" per name the source asked that module
+ * for. A namespace import (`import * as ns`) asks for no names and so reports
+ * none — and an assertion of an exact binding list still fails if a named import
+ * is replaced by one, which is the case that matters here.
+ */
 function importedBindings(source, specifier) {
-  return [...(parseModuleGraph(source).bindings.get(specifier) ?? [])].sort();
+  const directory = mkdtempSync(join(tmpdir(), "j103-import-guard-"));
+  try {
+    writeFileSync(join(directory, "entry.js"), source);
+    for (const record of importRecords(source)) {
+      if (record.path.startsWith(".")) writeFileSync(join(directory, record.path), "export {};\n");
+    }
+    let diagnostics = [];
+    try {
+      esbuild.buildSync({
+        entryPoints: [join(directory, "entry.js")],
+        bundle: true,
+        write: false,
+        format: "esm",
+        platform: "node",
+        packages: "external",
+        treeShaking: false,
+        logLevel: "silent",
+        logLimit: 0,
+      });
+    } catch (failure) {
+      diagnostics = failure.errors ?? [];
+    }
+    const wanted = basename(specifier);
+    const names = new Set();
+    for (const diagnostic of diagnostics) {
+      const match = /^No matching export in "(.+)" for import "(.+)"$/.exec(diagnostic.text);
+      if (match !== null && basename(match[1]) === wanted) names.add(match[2]);
+    }
+    return [...names].sort();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
-test("the import parser reads the forms a regex missed, and ignores the ones it faked", () => {
-  // THE RE-REVIEW'S OWN COUNTEREXAMPLE FIRST. The previous guard's patterns did
-  // not match this, so a side-effect import of a fetching module could be added
-  // and the closed-set assertion stayed green.
+test("the import parser reads the forms two hand-written guards missed", () => {
+  // BOTH REVIEWS' COUNTEREXAMPLES FIRST, because each one was a live hole: the
+  // pattern guard did not match the comment form, and the hand tokenizer that
+  // replaced it did not match the non-breaking-space form, which is ordinary
+  // ECMAScript whitespace. Either one could have added a side-effect import of a
+  // fetching module with the closed-set assertion below still green.
   assert.deepEqual(importSpecifiers('import /* x */ "./google-oidc.js";'),
     ["./google-oidc.js"]);
+  assert.deepEqual(importSpecifiers('import\u00a0"./google-oidc.js";'),
+    ["./google-oidc.js"], "a non-breaking space is whitespace, not punctuation");
+  // The same two forms reaching a FORBIDDEN module are caught by the real
+  // assertion, not just by the parser in isolation.
+  for (const smuggled of ['import /* x */ "node:child_process";',
+    'import\u00a0"node:https";',
+    'const c = await import("child_process");',
+    'const h = require("node:https");']) {
+    const found = importSpecifiers(smuggled);
+    assert.equal(found.length, 1, smuggled);
+    assert.ok(FORBIDDEN_PACKAGES.includes(found[0]),
+      `${smuggled} must surface a forbidden specifier, got ${found[0]}`);
+  }
 
   const cases = [
     ['import "./plain.js";', ["./plain.js"]],
@@ -2067,8 +1948,11 @@ test("the import parser reads the forms a regex missed, and ignores the ones it 
     ['import { createRequire } from "node:module";', ["createRequire", "node:module"]],
     // Computed specifiers are NAMED rather than skipped: an allow-list that
     // silently ignores import(name) is an allow-list with a door in it.
-    ['const m = await import("./pre" + "fix.js");', ["<computed import>"]],
+    ['const m = await import(name);', ["<computed import>"]],
     ['const m = require(name);', ["<computed require>"]],
+    // A specifier the parser CAN fold is reported as the module it really names,
+    // which is strictly better than calling it computed.
+    ['const m = await import("./pre" + "fix.js");', ["./prefix.js"]],
     // And the shapes that only LOOK like imports.
     ['// import "./commented-out.js";\nimport "./real.js";', ["./real.js"]],
     ['/* import "./block-commented.js"; */ import "./real.js";', ["./real.js"]],
