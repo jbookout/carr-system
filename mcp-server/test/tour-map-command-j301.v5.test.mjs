@@ -228,7 +228,12 @@ test("an active Journey 1 map command fails", () => {
   }), error => error.code === "j1_map_command_refused");
 });
 
-test("a caller-supplied verdict is refused at the request and in the arguments", () => {
+test("a caller-supplied verdict cannot be read at either level", () => {
+  // The refusal here is the CLOSED SCHEMA, not a name scan: the request has
+  // exactly five keys and a command has exactly the arguments its registry
+  // entry declares, so every authority field is an unknown field. Asserted as
+  // the exact code rather than as "one of two", because "either error is fine"
+  // is how an unreachable check hides behind a reachable one.
   for (const field of V5_J301_CALLER_AUTHORITY_FIELDS) {
     assert.throws(() => normalizeMapCommand({
       organization_tenant_id: ORGANIZATION_TENANT_ID,
@@ -237,7 +242,7 @@ test("a caller-supplied verdict is refused at the request and in the arguments",
       command: "set_selection_cart",
       arguments: FIXTURE_ARGUMENTS.set_selection_cart,
       [field]: { status: "pass" },
-    }), error => error.code === "unknown_field" || error.code === "caller_supplied_authority_field", field);
+    }), error => error instanceof V5J301CommandError && error.code === "unknown_field", field);
 
     assert.throws(() => normalizeMapCommand({
       organization_tenant_id: ORGANIZATION_TENANT_ID,
@@ -245,7 +250,7 @@ test("a caller-supplied verdict is refused at the request and in the arguments",
       origin: "clickable_map",
       command: "set_selection_cart",
       arguments: { ...FIXTURE_ARGUMENTS.set_selection_cart, [field]: true },
-    }), error => error.code === "unknown_field" || error.code === "caller_supplied_authority_field", field);
+    }), error => error.code === "unknown_field", field);
   }
 });
 

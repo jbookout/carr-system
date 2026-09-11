@@ -328,14 +328,37 @@ test("an actor class the action does not call for is refused", () => {
 // ---------------------------------------------------------------------------
 
 test("a stage cannot skip the stage before it", () => {
-  const result = evaluate({
-    stage: "deterministic_generation", action_kind: "generate_route_version",
-    actor_class: "deterministic",
+  // The NEAREST illegal jump, which is the one an off-by-one would let through:
+  // the journal reaches stage 0, and stage 2 is asked for. Proving only the
+  // distant jump (0 to 3) would pass a rule that permitted every skip of one.
+  const nearest = evaluate({
+    stage: "agent_assisted_assembly", action_kind: "rank_candidate_stops",
+    actor_class: "model_assisted",
     journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation")],
   });
-  assert.equal(result.decision, "refused");
-  assert.equal(result.reason_id, "stage_skipped");
-  assert.equal(result.earliest_unstarted_stage, "deterministic_normalization");
+  assert.equal(nearest.decision, "refused");
+  assert.equal(nearest.reason_id, "stage_skipped");
+  assert.equal(nearest.earliest_unstarted_stage, "deterministic_normalization");
+  assert.deepEqual([...nearest.stages_seen], ["attended_mls_acquisition"]);
+
+  const distant = evaluate({
+    stage: "client_facing_review", action_kind: "record_client_review_note",
+    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation")],
+  });
+  assert.equal(distant.decision, "refused");
+  assert.equal(distant.reason_id, "stage_skipped");
+
+  // And the boundary from an empty journal: intake is the only stage that may
+  // begin, and the very next stage is already a skip.
+  const fromNothing = evaluate({ journal_view: [] });
+  assert.equal(fromNothing.decision, "unavailable");
+  const skipFromNothing = evaluate({
+    stage: "deterministic_normalization", action_kind: "normalize_property_fact",
+    actor_class: "deterministic", journal_view: [],
+  });
+  assert.equal(skipFromNothing.decision, "refused");
+  assert.equal(skipFromNothing.reason_id, "stage_skipped");
+  assert.deepEqual([...skipFromNothing.stages_seen], []);
 });
 
 test("the next stage after an interruption is not a skip", () => {

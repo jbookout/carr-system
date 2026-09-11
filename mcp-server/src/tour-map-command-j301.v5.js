@@ -35,8 +35,14 @@
 //     surfaces) from J3 (map commands behind the mandatory map contract), and
 //     an ACTIVE J1 map command is named as a failure in its own acceptance
 //     predicate;
-//   * a caller-supplied gate receipt, approval or override field, because a
-//     verdict handed in by the caller is the thing this system refuses;
+//   * a caller-supplied gate receipt, approval or override field. Here that
+//     refusal is the CLOSED SCHEMA doing it rather than a name scan: a map
+//     command has exactly the arguments its registry entry declares and the
+//     request has exactly five keys, so `gate_receipt` or `approved` is an
+//     unknown field at either level and cannot be read at all. (The workflow
+//     module scans by name instead, because its Tour activity payload is open
+//     by nature and a closed schema cannot reach inside one.) The suite walks
+//     the whole authority-field list from both positions to prove it;
 //   * navigation handoff without the human promotion receipt the map doctrine
 //     requires — which does not exist here, so it is unavailable rather than
 //     performed.
@@ -45,7 +51,6 @@ import { canonicalJson, digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
-  V5_J301_CALLER_AUTHORITY_FIELDS,
   V5_J301_MAP_CONTRACT,
   V5_J301_MAP_CONTRACT_GATE,
   V5_J301_MAP_CONTRACT_PRODUCTION_STATUS,
@@ -307,7 +312,8 @@ const REQUEST_KEYS = Object.freeze([
  *
  * The ordered questions:
  *   1. Can the request be read?                      -> throw
- *   2. Does it carry its own authority?               -> throw caller_supplied_authority_field
+ *   2. Does it carry its own authority, at either
+ *      level?                                        -> throw unknown_field (the closed schema)
  *   3. Is it an ACTIVE Journey 1 map command?         -> throw j1_map_command_refused (Q124.D2)
  *   4. Is the command registered?                     -> throw unknown_command
  *   5. Are its governed arguments exactly right?      -> throw missing/unknown_field
@@ -324,14 +330,6 @@ export function normalizeMapCommand(request) {
   assertRequiredKeys(request, [...REQUEST_KEYS], "request");
   assertTenant(request.organization_tenant_id, "request.organization_tenant_id");
 
-  for (const key of Object.keys(request)) {
-    if (V5_J301_CALLER_AUTHORITY_FIELDS.includes(key)) {
-      fail("caller_supplied_authority_field",
-        `request.${key} tries to supply the verdict this module refuses to take from a caller`,
-        { key });
-    }
-  }
-
   const journey = assertEnum(request.journey, V5_J301_COMMAND_JOURNEYS, "request.journey", "unknown_journey");
   if (journey !== V5_J301_COMMAND_PERMITTED_JOURNEY) {
     fail("j1_map_command_refused",
@@ -345,12 +343,6 @@ export function normalizeMapCommand(request) {
   const supplied = assertObject(request.arguments, "request.arguments");
   assertClosedKeys(supplied, [...contract.governed_arguments], "request.arguments");
   assertRequiredKeys(supplied, [...contract.governed_arguments], "request.arguments");
-  for (const key of Object.keys(supplied)) {
-    if (V5_J301_CALLER_AUTHORITY_FIELDS.includes(key)) {
-      fail("caller_supplied_authority_field", `request.arguments.${key} supplies a verdict`, { key });
-    }
-  }
-
   // Built in the contract's own argument order, then canonicalized, so the two
   // origins cannot differ merely by the order their arguments arrived in.
   const governed_arguments = {};
