@@ -58,6 +58,7 @@ else:
         self.base_env = {**os.environ,
             "CARR_CLAUDE_CONTINUITY_MODE_FILE": str(self.mode),
             "CARR_CLAUDE_CONTINUITY_SPOOL_DIR": str(self.spool),
+            "CARR_CLAUDE_CONTINUITY_SESSION_DIR": str(self.root / "session-state"),
             "CARR_CLAUDE_CONTINUITY_CALL": str(self.caller),
             "CARR_CLAUDE_TRANSCRIPT_ROOTS": str(self.root),
             "CARR_CLAUDE_CONTINUITY_AUDIT": str(self.audit),
@@ -301,6 +302,78 @@ else:
         result = self.run_hook("PreCompact", agent_id="leaf-7")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.call_rows()[0]["args"]["parent_session_id"], "session-1")
+
+
+class ClaudeContinuityDeliversTest(ClaudeContinuityHookTest):
+    """Checks on whether the protocol does its job, not only whether it refuses bad input."""
+
+    def grow(self, size):
+        with open(self.transcript, "a", encoding="utf-8") as handle:
+            handle.write("x" * size + "\n")
+
+    def test_a_directory_change_mid_session_does_not_break_the_binding(self):
+        # The failure this replaces: cwd moved, project affinity moved with it,
+        # and every later write was refused for the life of the session.
+        self.set_mode("checkpoint")
+        self.run_hook("UserPromptSubmit")
+        moved = self.root / "elsewhere"
+        moved.mkdir()
+        self.run_hook("UserPromptSubmit", cwd=str(moved))
+        rows = self.call_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["args"]["project_affinity"], rows[1]["args"]["project_affinity"],
+                         "a cwd change must not repin the leaf binding")
+        self.assertEqual(rows[1]["args"]["cwd"], str(moved.resolve()),
+                         "the new cwd still travels as telemetry")
+
+    def test_a_deep_session_is_asked_for_a_checkpoint_with_a_fresh_cursor(self):
+        self.set_mode("inject")
+        self.base_env["CARR_CLAUDE_CONTINUITY_NUDGE_FIRST"] = "4096"
+        self.base_env["CARR_CLAUDE_CONTINUITY_NUDGE_INTERVAL"] = "4096"
+        self.assertEqual(self.run_hook("UserPromptSubmit").stdout, "",
+                         "a shallow session is never nudged")
+        self.grow(8192)
+        context = json.loads(self.run_hook("UserPromptSubmit").stdout)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "UserPromptSubmit")
+        body = context["additionalContext"]
+        self.assertIn("claude-checkpoint", body)
+        self.assertIn("expected_version=3", body)
+        self.assertIn('"session_id":"session-1"', body)
+        offset = json.loads(body.split("state.source_cursor=")[1].split("\n")[0])["byte_offset"]
+        self.assertEqual(offset, self.transcript.stat().st_size,
+                         "the ask must carry the cursor as of this prompt, not session start")
+
+    def test_the_checkpoint_ask_repeats_only_after_real_growth(self):
+        self.set_mode("inject")
+        self.base_env["CARR_CLAUDE_CONTINUITY_NUDGE_FIRST"] = "4096"
+        self.base_env["CARR_CLAUDE_CONTINUITY_NUDGE_INTERVAL"] = "4096"
+        self.grow(8192)
+        self.assertNotEqual(self.run_hook("UserPromptSubmit").stdout, "")
+        self.grow(16)
+        self.assertEqual(self.run_hook("UserPromptSubmit").stdout, "",
+                         "a nudge per prompt would be nagging, not a trigger")
+        self.grow(8192)
+        self.assertNotEqual(self.run_hook("UserPromptSubmit").stdout, "")
+
+    def test_an_unread_spool_is_announced_instead_of_accumulating_silently(self):
+        self.set_mode("inject")
+        self.base_env["CARR_CLAUDE_CONTINUITY_CALL"] = str(self.root / "absent")
+        self.run_hook("UserPromptSubmit")
+        self.base_env["CARR_CLAUDE_CONTINUITY_CALL"] = str(self.caller)
+        context = json.loads(self.run_hook("SessionStart", source="startup").stdout)
+        self.assertIn("unsent continuity receipt", context["hookSpecificOutput"]["additionalContext"])
+
+    def test_an_unsampled_tool_event_never_reads_the_transcript(self):
+        self.set_mode("checkpoint")
+        hook = load_hook()
+        unsampled = next(f"tool-{index}" for index in range(1000)
+                         if not hook._sample_post_tool({"tool_use_id": f"tool-{index}"},
+                                                       {"session_id": "session-1"}))
+        self.transcript.unlink()
+        result = self.run_hook("PostToolUse", tool_use_id=unsampled, tool_name="Bash")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "", "the sample is decided before the bounded tail read")
+        self.assertEqual(self.call_rows(), [])
 
 
 if __name__ == "__main__":

@@ -40,9 +40,17 @@ EVENT_MAP = {
 MAX_INPUT_BYTES = 1_000_000
 MAX_TAIL_BYTES = 262_144
 MAX_CAPSULE_BYTES = 4_800
+MAX_NUDGE_BYTES = 2_400
 MAX_SPOOL_BYTES = 1_000_000
 MAX_SPOOL_FILES = 100
+MAX_SESSION_FILES = 500
 CALL_TIMEOUT_SECONDS = 7.0
+# Observed on this machine 2026-09-11: the earliest native compaction in 1821
+# transcripts happened at 5.46 MB, the deepest at 21 MB.  Asking at 2 MB and
+# again every 2 MB puts at least two checkpoint prompts before the earliest
+# boundary ever seen here, without nagging an ordinary session (median 572 KB).
+NUDGE_FIRST_BYTES = int(os.environ.get("CARR_CLAUDE_CONTINUITY_NUDGE_FIRST", 2_000_000))
+NUDGE_INTERVAL_BYTES = int(os.environ.get("CARR_CLAUDE_CONTINUITY_NUDGE_INTERVAL", 2_000_000))
 NATIVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
 
 
@@ -64,8 +72,116 @@ def spool_dir() -> pathlib.Path:
                  pathlib.Path.home() / ".config/carr/claude-continuity-spool")
 
 
+def session_dir() -> pathlib.Path:
+    return _path("CARR_CLAUDE_CONTINUITY_SESSION_DIR",
+                 pathlib.Path.home() / ".config/carr/claude-continuity-session")
+
+
 def expected_config_digest() -> str:
     return continuity_config.load(REPO).config_digest
+
+
+def _prune(directory: pathlib.Path, keep: int, suffix: str) -> None:
+    files = sorted(directory.glob(f"*{suffix}"), key=lambda path: path.stat().st_mtime_ns)
+    for victim in files[:max(0, len(files) - keep)]:
+        victim.unlink(missing_ok=True)
+
+
+def pinned_affinity(transcript_path_digest: str, live: str) -> str:
+    """Decide a session's project once.
+
+    The Worker treats project affinity as part of an immutable leaf binding, so
+    a session that reports a different value later is refused for the rest of
+    its life.  cwd is not stable — EnterWorktree, a directory change, or a
+    task-assigned clone all move it — so the first observation wins and every
+    later cwd travels as telemetry instead.
+    """
+    directory = session_dir()
+    path = directory / f"{transcript_path_digest}.affinity.json"
+
+    def read() -> str | None:
+        try:
+            document = json.loads(path.read_bytes())
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        pinned = document.get("project_affinity")
+        return pinned if isinstance(pinned, str) and pinned else None
+
+    existing = read()
+    if existing is not None:
+        return existing
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _prune(directory, MAX_SESSION_FILES, ".affinity.json")
+        fd, temp_name = tempfile.mkstemp(prefix=".affinity-", dir=directory)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(_canonical({"schema_version": 1, "project_affinity": live}))
+                handle.flush()
+                os.fsync(handle.fileno())
+            # link() refuses to clobber, so a concurrent hook cannot repin.
+            os.link(temp_name, path)
+        except FileExistsError:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            pathlib.Path(temp_name).unlink(missing_ok=True)
+    except OSError as exc:
+        _warn(f"affinity pin unavailable ({exc.__class__.__name__})")
+        return live
+    return read() or live
+
+
+def _nudge_path(transcript_path_digest: str) -> pathlib.Path:
+    return session_dir() / f"{transcript_path_digest}.nudge.json"
+
+
+def due_for_nudge(transcript_path_digest: str, byte_offset: int) -> bool:
+    """Ask again only once per interval of real transcript growth."""
+    if byte_offset < NUDGE_FIRST_BYTES:
+        return False
+    try:
+        document = json.loads(_nudge_path(transcript_path_digest).read_bytes())
+        last = document.get("byte_offset")
+    except (OSError, ValueError, json.JSONDecodeError):
+        last = None
+    if isinstance(last, int) and byte_offset - last < NUDGE_INTERVAL_BYTES:
+        return False
+    return True
+
+
+def mark_nudged(transcript_path_digest: str, byte_offset: int) -> None:
+    directory = session_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _prune(directory, MAX_SESSION_FILES, ".nudge.json")
+        fd, temp_name = tempfile.mkstemp(prefix=".nudge-", dir=directory)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(_canonical({"schema_version": 1, "byte_offset": byte_offset}))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, _nudge_path(transcript_path_digest))
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            pathlib.Path(temp_name).unlink(missing_ok=True)
+    except OSError as exc:
+        _warn(f"nudge state unavailable ({exc.__class__.__name__})")
+
+
+def unsent_receipts() -> int:
+    try:
+        return len(list(spool_dir().glob("*.json")))
+    except OSError:
+        return 0
 
 
 def _read_mode() -> str:
@@ -225,9 +341,11 @@ def _identity(payload: dict) -> tuple[dict, pathlib.Path]:
                                  or NATIVE_ID.fullmatch(agent_id) is None):
         raise ValueError("invalid agent_id")
     _validate_transcript_location(transcript, session_id, agent_id)
+    transcript_path_digest = _path_digest(transcript)
     base = {"runtime": "claude", "session_id": session_id,
-            "transcript_path_digest": _path_digest(transcript),
-            "project_affinity": project_affinity(cwd), "cwd": str(cwd)}
+            "transcript_path_digest": transcript_path_digest,
+            "project_affinity": pinned_affinity(transcript_path_digest, project_affinity(cwd)),
+            "cwd": str(cwd)}
     if agent_id is not None:
         base["native_agent_id"] = agent_id
         base["parent_session_id"] = session_id
@@ -356,8 +474,8 @@ def _sample_post_tool(payload: dict, identity: dict) -> bool:
     return digest[0] < 26  # Stable ~10% sample.
 
 
-def _emit_context(event: str, context: str) -> None:
-    if len(context.encode("utf-8")) > MAX_CAPSULE_BYTES:
+def _emit_context(event: str, context: str, limit: int = MAX_CAPSULE_BYTES) -> None:
+    if len(context.encode("utf-8")) > limit:
         raise ValueError("Worker capsule exceeded native byte bound")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
                                               "additionalContext": context}},
@@ -378,21 +496,55 @@ def _checkpoint_version(response: dict | None) -> int | None:
 
 def _activation_envelope(identity: dict, cursor: dict, response: dict | None) -> str:
     current_version = _checkpoint_version(response)
-    binding = {key: identity.get(key) for key in (
-        "runtime", "session_id", "transcript_path_digest", "project_affinity",
-        "parent_session_id", "native_agent_id") if identity.get(key) is not None}
-    source = {key: cursor[key] for key in (
-        "byte_offset", "mtime_ns", "source_digest", "startup_pending") if key in cursor}
     version_text = str(current_version) if current_version is not None else "unavailable"
-    return "\n".join([
+    lines = [
         "CARR Claude continuity activation (trusted native controller binding).",
-        "binding=" + json.dumps(binding, sort_keys=True, separators=(",", ":")),
+        "binding=" + json.dumps(_binding(identity), sort_keys=True, separators=(",", ":")),
         f"current_checkpoint_version={version_text}; source_cursor="
-        + json.dumps(source, sort_keys=True, separators=(",", ":")),
+        + json.dumps(_source(cursor), sort_keys=True, separators=(",", ":")),
         "At a meaningful semantic milestone, call mcp__carr-continuity__claude-checkpoint with this exact binding, "
         "expected_version=current_checkpoint_version, compaction_generation nondecreasing, and state.source_cursor/source_observed_at. "
         "Do not infer completion from tool telemetry.",
         "Pending external effects must be verified and must never be replayed automatically.",
+    ]
+    unsent = unsent_receipts()
+    if unsent:
+        lines.append(f"Local spool holds {unsent} unsent continuity receipt(s); nothing replays them. "
+                     "A spool that keeps growing means writes are being refused, not that they are queued.")
+    return "\n".join(lines)
+
+
+def _binding(identity: dict) -> dict:
+    return {key: identity.get(key) for key in (
+        "runtime", "session_id", "transcript_path_digest", "project_affinity",
+        "parent_session_id", "native_agent_id") if identity.get(key) is not None}
+
+
+def _source(cursor: dict) -> dict:
+    return {key: cursor[key] for key in (
+        "byte_offset", "mtime_ns", "source_digest", "startup_pending") if key in cursor}
+
+
+def checkpoint_request(identity: dict, cursor: dict, response: dict | None) -> str:
+    """The ask that actually fires, carrying a cursor fresh as of this prompt.
+
+    The startup envelope can only speak once, at the top of a session, and its
+    cursor is stale by the time anything worth saving has happened.  This is
+    re-issued on transcript growth so the binding, the expected version, and the
+    source cursor a checkpoint must carry are all current when the ask arrives.
+    """
+    current_version = _checkpoint_version(response)
+    version_text = str(current_version) if current_version is not None else "unavailable"
+    return "\n".join([
+        "CARR Claude continuity: this session is now deep enough that losing it would cost real work.",
+        "Save a checkpoint with mcp__carr-continuity__claude-checkpoint before continuing, using exactly:",
+        "binding=" + json.dumps(_binding(identity), sort_keys=True, separators=(",", ":")),
+        f"expected_version={version_text}; compaction_generation nondecreasing",
+        "state.source_cursor=" + json.dumps(_source(cursor), sort_keys=True, separators=(",", ":")),
+        f"state.source_observed_at={datetime.now(timezone.utc).isoformat()}",
+        "Write what a session with no memory of this one would need to carry on: the objective, the "
+        "decisions with their reasons and refs, unresolved defects, pending external effects (to be "
+        "verified, never replayed), and the single next action. Do not infer completion from tool telemetry.",
     ])
 
 
@@ -409,6 +561,11 @@ def main() -> int:
             raise ValueError("unsupported event")
         event_name = payload["hook_event_name"]
         identity, transcript = _identity(payload)
+        # Decide the sample before the bounded tail read, not after: the read
+        # hashes up to 256 KB and nine out of ten PostToolUse events discard it.
+        if (event_name == "PostToolUse" and mode != "shadow"
+                and not _sample_post_tool(payload, identity)):
+            return 0
         try:
             cursor, source_digest = source_cursor(transcript)
         except FileNotFoundError:
@@ -441,8 +598,15 @@ def main() -> int:
             _warn(str(exc))
         return 0
     event = EVENT_MAP[event_name]
-    if event == "post_tool_use" and not _sample_post_tool(payload, identity):
-        return 0
+    if (event_name == "UserPromptSubmit" and mode == "inject"
+            and due_for_nudge(identity["transcript_path_digest"], cursor["byte_offset"])):
+        response = _call("claude-read-recovery", identity)
+        try:
+            _emit_context("UserPromptSubmit", checkpoint_request(identity, cursor, response),
+                          MAX_NUDGE_BYTES)
+            mark_nudged(identity["transcript_path_digest"], cursor["byte_offset"])
+        except ValueError as exc:
+            _warn(str(exc))
     telemetry = None
     if event == "post_tool_use":
         telemetry = {"tool_name": str(payload.get("tool_name", ""))[:200],
