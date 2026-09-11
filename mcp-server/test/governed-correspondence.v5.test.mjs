@@ -31,6 +31,8 @@ import assert from "node:assert/strict";
 // J103's own source and the rest of mcp-server/src the way a linter would. The
 // module under test still reaches no filesystem; this suite does.
 import { readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
@@ -79,8 +81,10 @@ import {
   V5_J103_THREAD_SCHEMA_VERSION,
   assertJ103DecisionBinding,
   buildSourceConflictQueueEntry,
+  V5_J103_PRIVILEGED_OUTCOMES,
+  V5_J103_PUBLIC_SURFACE,
+  __j103ClassificationProbe,
   compileCorrespondenceBinding,
-  compileCorrespondenceBindingFixture,
   correspondenceBindingCanonicalBytes,
   draftCorrespondence,
   evaluateProposedFact,
@@ -88,11 +92,6 @@ import {
   projectCorrespondenceCoverage,
   readCorrespondenceThread,
   resolveAdapterAvailability,
-  unwiredBuildSourceConflictQueueEntry,
-  unwiredDraftCorrespondence,
-  unwiredEvaluateProposedFact,
-  unwiredProjectCorrespondenceCoverage,
-  unwiredReadCorrespondenceThread,
   v5J103AbsentWriteOperations,
   v5J103CorrespondenceProjection,
   v5J103DecisionSubsetDigest,
@@ -101,6 +100,32 @@ import {
   v5J103PolicyDigest,
   v5J103PolicyPreimage,
 } from "../src/governed-correspondence.v5.js";
+
+// ---------------------------------------------------------------------------
+// THE CLASSIFICATION PROBE — the only route to the decision logic, and it cannot
+// hand back an outcome.
+//
+// Round two of this review found the previous correction's actual defect: the
+// logic had been kept as `unwired*` EXPORTS, so `read`, `covered`, `drafted`,
+// `proposed` and `queued` were still returnable to any caller willing to call the
+// other name, with `wired: false` riding along as a label. The logic is now
+// module-private, and the single non-consumer entry that runs it renames every
+// verdict on the way out — `would_read_if_authoritative` and its four siblings —
+// and throws if a privileged string survives the rename.
+//
+// Every assertion below that used to read `.decision === "read"` therefore reads
+// `.classification === "would_read_if_authoritative"`: the rendering is proved,
+// and proving it does not also deliver it.
+// ---------------------------------------------------------------------------
+
+const probe = __j103ClassificationProbe;
+
+/** The classification name for an internal verdict, so the tests read as intent. */
+const WOULD_READ = "would_read_if_authoritative";
+const WOULD_COVER = "would_cover_if_authoritative";
+const WOULD_DRAFT = "would_draft_if_authoritative";
+const WOULD_PROPOSE = "would_propose_if_authoritative";
+const WOULD_QUEUE = "would_queue_if_authoritative";
 
 // ---------------------------------------------------------------------------
 // Fixtures.
@@ -135,7 +160,7 @@ function bindingConfig(overrides = {}) {
  * binding produces is stamped `wired: false` and is refused by the wired seams.
  */
 function binding(overrides = {}) {
-  return compileCorrespondenceBindingFixture(bindingConfig(overrides));
+  return probe.fixtureBinding(bindingConfig(overrides));
 }
 
 /** The wired binding a real caller gets. Its availability is never the config's. */
@@ -180,7 +205,7 @@ function thread(overrides = {}) {
 
 /** A FIXTURE read: the predicate, not the interface. Every result says so. */
 function read(overrides = {}, b = binding()) {
-  return unwiredReadCorrespondenceThread({ binding: b, thread: thread(overrides), now: NOW });
+  return probe.wouldRead({ binding: b, thread: thread(overrides), now: NOW });
 }
 
 function draft(overrides = {}) {
@@ -366,14 +391,14 @@ test("a partner slug is a CARR reference, cannot be an address, and must be a pa
 
 test("a binding edited after compilation no longer hashes to its own digest", () => {
   const forged = { ...binding(), account: DELL_ACCOUNT };
-  assert.throws(() => unwiredReadCorrespondenceThread({ binding: forged, thread: thread(), now: NOW }),
+  assert.throws(() => probe.wouldRead({ binding: forged, thread: thread(), now: NOW }),
     e => e.code === "binding_digest_mismatch");
 });
 
 test("a hand-built object claiming to be compiled is refused", () => {
   const b = binding();
   const forged = { ...b, compiled: false };
-  assert.throws(() => unwiredReadCorrespondenceThread({ binding: forged, thread: thread(), now: NOW }),
+  assert.throws(() => probe.wouldRead({ binding: forged, thread: thread(), now: NOW }),
     e => e.code === "binding_not_compiled");
 });
 
@@ -383,7 +408,7 @@ test("a hand-built object claiming to be compiled is refused", () => {
 
 test("a read preserves the account and the full native identity triple", () => {
   const result = capture(read());
-  assert.equal(result.decision, "read");
+  assert.equal(result.classification, WOULD_READ);
   assert.equal(result.schema_version, V5_J103_THREAD_SCHEMA_VERSION);
   assert.equal(result.provenance.account, JOE_ACCOUNT);
   assert.equal(result.provenance.source_system, SOURCE);
@@ -406,7 +431,7 @@ test("provenance rides on the refusals too, so a refusal can be audited", () => 
   ];
   for (const result of cases) {
     capture(result);
-    assert.notEqual(result.decision, "read");
+    assert.notEqual(result.classification, WOULD_READ);
     assert.equal(result.provenance.account, JOE_ACCOUNT);
     assert.equal(result.provenance.native_identity.native_id, "thread-aaa-test");
     assert.equal(result.thread, null);
@@ -445,7 +470,7 @@ test("an account outside the binding is refused, and so is a foreign source syst
 test("an adapter nobody has observed is unavailable, and unknown sits with unavailable", () => {
   for (const availability of V5_J103_NON_READING_AVAILABILITY) {
     const result = capture(read({}, binding({ availability })));
-    assert.equal(result.decision, "unavailable");
+    assert.equal(result.classification, "would_unavailable");
     assert.equal(result.reason_id, "authorized_adapter_unavailable");
     assert.equal(result.availability, availability);
   }
@@ -456,12 +481,12 @@ test("an adapter nobody has observed is unavailable, and unknown sits with unava
 test("privacy is S01's answer carried through, and it is evaluated before relevance", () => {
   const refused = capture(read({ declared_data_classes: ["phi"] }));
   const s01 = evaluatePrivacyBoundary({ data_classes: ["phi"] });
-  assert.equal(refused.decision, "refuse");
+  assert.equal(refused.classification, "would_refuse");
   assert.equal(refused.reason_id, s01.reason_id);
   assert.deepEqual(refused.prohibited_classes, [...s01.prohibited_classes]);
 
   const routed = capture(read({ declared_data_classes: ["aggregate_patient_volume_estimate"] }));
-  assert.equal(routed.decision, "needs_independent_privacy_route");
+  assert.equal(routed.classification, "would_needs_independent_privacy_route");
   assert.equal(routed.required_evidence,
     evaluatePrivacyBoundary({ data_classes: ["aggregate_patient_volume_estimate"] }).required_evidence);
 
@@ -469,14 +494,14 @@ test("privacy is S01's answer carried through, and it is evaluated before releva
   // which is only true if privacy ran first. Excluded-without-classification and
   // classified-then-excluded are different facts about the same item.
   const both = capture(read({ relevance_state: "unrelated", declared_data_classes: ["phi"] }));
-  assert.equal(both.decision, "refuse");
+  assert.equal(both.classification, "would_refuse");
   assert.equal(both.reason_id, "phi_or_raw_patient_location_refused");
 });
 
 test("unrelated mail is excluded and ambiguity stays private; neither falls through", () => {
-  assert.equal(capture(read({ relevance_state: "unrelated" })).decision, "exclude_unrelated");
+  assert.equal(capture(read({ relevance_state: "unrelated" })).classification, "would_exclude_unrelated");
   const ambiguous = capture(read({ relevance_state: "ambiguous" }));
-  assert.equal(ambiguous.decision, "withhold_ambiguous");
+  assert.equal(ambiguous.classification, "would_withhold_ambiguous");
   assert.equal(ambiguous.reason_id, "ambiguity_remains_private");
   assert.equal(ambiguous.thread, null);
 });
@@ -517,7 +542,7 @@ test("a thread observed after now refuses rather than being read", () => {
 test("raw correspondence never crosses the seam, refused by field name", () => {
   for (const field of ["body", "body_html", "message_text", "subject_line", "preview_snippet",
     "attachment_bytes"]) {
-    assert.throws(() => unwiredReadCorrespondenceThread({
+    assert.throws(() => probe.wouldRead({
       binding: binding(), thread: { ...thread(), [field]: "x" }, now: NOW,
     }), e => e instanceof V5J103Error && e.code === "source_content_must_not_cross_seam",
     `expected ${field} to be refused`);
@@ -534,7 +559,7 @@ test("the attachment descriptor holds no filename and no bytes", () => {
 test("a dispatch instruction is refused before any value is read", () => {
   for (const field of ["send_after", "dispatch_at", "deliver_to", "smtp_relay",
     "schedule_send_at", "recipient_address"]) {
-    assert.throws(() => unwiredReadCorrespondenceThread({
+    assert.throws(() => probe.wouldRead({
       binding: binding(), thread: { ...thread(), [field]: "x" }, now: NOW,
     }), e => e.code === "dispatch_instruction_refused", `expected ${field} to be refused`);
   }
@@ -558,17 +583,17 @@ test("a routable address anywhere but the partner's own account is refused", () 
     { record_kind: "party", record_ref: "party ref with spaces" },
   ] }), e => e.code === "invalid_reference");
   // The exemption is exactly one key wide, and it is pinned to the binding.
-  assert.equal(read().decision, "read", "the partner's own account may be an address");
+  assert.equal(read().classification, WOULD_READ, "the partner's own account may be an address");
   assert.equal(read({ account: DELL_ACCOUNT }).reason_id, "account_outside_binding");
 });
 
 test("a draft body carrying an address or a phone number is refused", () => {
   const b = binding();
   const r = read({}, b);
-  assert.throws(() => unwiredDraftCorrespondence({ binding: b, thread_read: r, now: NOW,
+  assert.throws(() => probe.wouldDraft({ binding: b, thread_read: r, now: NOW,
     draft: draft({ draft_body: "Reply to counterparty@elsewhere.invalid with the terms." }) }),
   e => e.code === "routable_address_refused");
-  assert.throws(() => unwiredDraftCorrespondence({ binding: b, thread_read: r, now: NOW,
+  assert.throws(() => probe.wouldDraft({ binding: b, thread_read: r, now: NOW,
     draft: draft({ draft_body: "Call them on +1 555 010 4477 to confirm." }) }),
   e => e.code === "routable_address_refused");
 });
@@ -578,10 +603,10 @@ test("a guard can never refuse a field this module's own schemas require", () =>
   // asymmetry visible. `draft_body` contains "body" and is legitimate precisely
   // because the draft seam does not run the source-content scan.
   const b = binding();
-  const drafted = capture(unwiredDraftCorrespondence({
+  const drafted = capture(probe.wouldDraft({
     binding: b, thread_read: read({}, b), now: NOW, draft: draft(),
   }));
-  assert.equal(drafted.decision, "drafted");
+  assert.equal(drafted.classification, WOULD_DRAFT);
   assert.ok(V5_J103_SOURCE_CONTENT_FRAGMENTS.includes("body"));
 });
 
@@ -591,32 +616,32 @@ test("a guard can never refuse a field this module's own schemas require", () =>
 
 test("both-partner coverage is unavailable from every input", () => {
   const b = binding();
-  const combined = capture(unwiredProjectCorrespondenceCoverage({
+  const combined = capture(probe.wouldCover({
     binding: b, requested_partner_slugs: ["joe", "dell"],
   }));
-  assert.equal(combined.decision, "unavailable");
+  assert.equal(combined.classification, "would_unavailable");
   assert.equal(combined.reason_id, "combined_partner_coverage_unavailable");
 
-  const other = capture(unwiredProjectCorrespondenceCoverage({
+  const other = capture(probe.wouldCover({
     binding: b, requested_partner_slugs: ["dell"],
   }));
-  assert.equal(other.decision, "unavailable");
+  assert.equal(other.classification, "would_unavailable");
   assert.equal(other.reason_id, "partner_outside_binding_not_covered");
 
-  const own = capture(unwiredProjectCorrespondenceCoverage({
+  const own = capture(probe.wouldCover({
     binding: b, requested_partner_slugs: ["joe"],
   }));
-  assert.equal(own.decision, "covered");
+  assert.equal(own.classification, WOULD_COVER);
   assert.equal(own.covered_partner_slug, "joe");
   assert.equal(own.combined_partner_coverage, "unavailable");
   assert.equal(own.coverage_gate_satisfied, false);
 });
 
 test("an unavailable adapter cannot even cover its own partner", () => {
-  const result = capture(unwiredProjectCorrespondenceCoverage({
+  const result = capture(probe.wouldCover({
     binding: binding({ availability: "unknown" }), requested_partner_slugs: ["joe"],
   }));
-  assert.equal(result.decision, "unavailable");
+  assert.equal(result.classification, "would_unavailable");
   assert.equal(result.reason_id, "authorized_adapter_unavailable");
 });
 
@@ -634,10 +659,10 @@ test("every thread answer states single-partner coverage, including the refusals
 
 test("a draft is produced for a human to send and names no provider operation", () => {
   const b = binding();
-  const result = capture(unwiredDraftCorrespondence({
+  const result = capture(probe.wouldDraft({
     binding: b, thread_read: read({}, b), now: NOW, draft: draft(),
   }));
-  assert.equal(result.decision, "drafted");
+  assert.equal(result.classification, WOULD_DRAFT);
   assert.equal(result.schema_version, V5_J103_DRAFT_SCHEMA_VERSION);
   assert.equal(result.dispatchable, false);
   assert.equal(result.provider_operation, null);
@@ -688,9 +713,9 @@ test("a withheld or excluded thread cannot become a draft or a proposal", () => 
   for (const overrides of [{ relevance_state: "ambiguous" }, { relevance_state: "unrelated" },
     { declared_data_classes: ["phi"] }]) {
     const r = read(overrides, b);
-    assert.throws(() => unwiredDraftCorrespondence({ binding: b, thread_read: r, now: NOW, draft: draft() }),
+    assert.throws(() => probe.wouldDraft({ binding: b, thread_read: r, now: NOW, draft: draft() }),
       e => e.code === "work_from_non_readable_thread");
-    assert.throws(() => unwiredEvaluateProposedFact({ binding: b, thread_read: r, now: NOW,
+    assert.throws(() => probe.wouldProposeFact({ binding: b, thread_read: r, now: NOW,
       proposal: proposal() }), e => e.code === "work_from_non_readable_thread");
   }
 });
@@ -702,10 +727,10 @@ test("a hand-built read result claiming a withheld thread is still refused", () 
   const b = binding();
   const genuine = read({}, b);
   const forged = { ...read({ relevance_state: "ambiguous" }, b), thread: genuine.thread };
-  assert.throws(() => unwiredDraftCorrespondence({
+  assert.throws(() => probe.wouldDraft({
     binding: b, thread_read: forged, now: NOW, draft: draft(),
   }), e => e.code === "work_from_non_readable_thread");
-  assert.throws(() => unwiredEvaluateProposedFact({
+  assert.throws(() => probe.wouldProposeFact({
     binding: b, thread_read: forged, now: NOW, proposal: proposal(),
   }), e => e.code === "work_from_non_readable_thread");
 });
@@ -714,18 +739,18 @@ test("one partner's thread is not another partner's to draft from", () => {
   const joe = binding();
   const dell = binding({ partner_slug: "dell", account: DELL_ACCOUNT });
   const joeRead = read({}, joe);
-  assert.throws(() => unwiredDraftCorrespondence({
+  assert.throws(() => probe.wouldDraft({
     binding: dell, thread_read: joeRead, now: NOW, draft: draft(),
   }), e => e.code === "thread_outside_binding");
 });
 
 test("a recipient who is not on the thread is refused rather than quietly added", () => {
   const b = binding();
-  const result = capture(unwiredDraftCorrespondence({
+  const result = capture(probe.wouldDraft({
     binding: b, thread_read: read({}, b), now: NOW,
     draft: draft({ intended_participant_refs: ["party:someone-else-test"] }),
   }));
-  assert.equal(result.decision, "refuse");
+  assert.equal(result.classification, "would_refuse");
   assert.equal(result.reason_id, "recipient_outside_thread");
   assert.deepEqual(result.unknown_participant_refs, ["party:someone-else-test"]);
   assert.equal(result.draft, null);
@@ -734,22 +759,22 @@ test("a recipient who is not on the thread is refused rather than quietly added"
 test("a reply into a resolved thread, and a draft dated before the read, both refuse", () => {
   const b = binding();
   const resolved = read({ correspondence_state: "resolved" }, b);
-  assert.equal(capture(unwiredDraftCorrespondence({
+  assert.equal(capture(probe.wouldDraft({
     binding: b, thread_read: resolved, now: NOW, draft: draft(),
   })).reason_id, "reply_into_resolved_thread_refused");
 
-  assert.equal(capture(unwiredDraftCorrespondence({
+  assert.equal(capture(probe.wouldDraft({
     binding: b, thread_read: read({}, b), now: "2026-09-10T17:59:00Z", draft: draft(),
   })).reason_id, "draft_precedes_thread_observation");
 });
 
 test("a draft carrying a prohibited class refuses on S01's answer", () => {
   const b = binding();
-  const result = capture(unwiredDraftCorrespondence({
+  const result = capture(probe.wouldDraft({
     binding: b, thread_read: read({}, b), now: NOW,
     draft: draft({ declared_data_classes: ["patient_record"] }),
   }));
-  assert.equal(result.decision, "refuse");
+  assert.equal(result.classification, "would_refuse");
   assert.equal(result.reason_id, "phi_or_raw_patient_location_refused");
   assert.equal(result.draft, null);
   assert.equal(result.dispatchable, false);
@@ -761,10 +786,10 @@ test("a draft carrying a prohibited class refuses on S01's answer", () => {
 
 test("a proposed fact cites the message it came from and establishes nothing", () => {
   const b = binding();
-  const result = capture(unwiredEvaluateProposedFact({
+  const result = capture(probe.wouldProposeFact({
     binding: b, thread_read: read({}, b), now: NOW, proposal: proposal(),
   }));
-  assert.equal(result.decision, "proposed");
+  assert.equal(result.classification, WOULD_PROPOSE);
   assert.equal(result.schema_version, V5_J103_PROPOSAL_SCHEMA_VERSION);
   assert.equal(result.applied, false);
   assert.equal(result.authority_established, false);
@@ -777,11 +802,11 @@ test("a proposed fact cites the message it came from and establishes nothing", (
 
 test("a proposal citing a message that is not on the thread is refused", () => {
   const b = binding();
-  const result = capture(unwiredEvaluateProposedFact({
+  const result = capture(probe.wouldProposeFact({
     binding: b, thread_read: read({}, b), now: NOW,
     proposal: proposal({ evidence_provider_message_id: "pm-99-test" }),
   }));
-  assert.equal(result.decision, "refuse");
+  assert.equal(result.classification, "would_refuse");
   assert.equal(result.reason_id, "evidence_message_not_on_thread");
   assert.equal(result.observation_candidate, null);
 });
@@ -789,7 +814,7 @@ test("a proposal citing a message that is not on the thread is refused", () => {
 test("a proposal citing evidence from after now is refused, naming the evidence", () => {
   const b = binding();
   const r = read({}, b);
-  const result = capture(unwiredEvaluateProposedFact({
+  const result = capture(probe.wouldProposeFact({
     binding: b, thread_read: r, now: "2026-09-10T16:00:00Z", proposal: proposal(),
   }));
   assert.equal(result.reason_id, "evidence_message_occurs_after_now");
@@ -799,7 +824,7 @@ test("a proposal carrying a field that claims authority is refused", () => {
   const b = binding();
   const r = read({}, b);
   for (const field of ["authorized_by", "approved_by_partner", "owner_override", "acting_as"]) {
-    assert.throws(() => unwiredEvaluateProposedFact({
+    assert.throws(() => probe.wouldProposeFact({
       binding: b, thread_read: r, now: NOW, proposal: { ...proposal(), [field]: "joe" },
     }), e => e.code === "authority_claim_in_proposal", `expected ${field} to be refused`);
   }
@@ -807,13 +832,13 @@ test("a proposal carrying a field that claims authority is refused", () => {
 
 test("ordinary business prose is not an authority claim", () => {
   const b = binding();
-  const result = capture(unwiredEvaluateProposedFact({
+  const result = capture(probe.wouldProposeFact({
     binding: b, thread_read: read({}, b), now: NOW,
     proposal: proposal({
       rationale: "The landlord said they would grant an extension once the admin fee is approved.",
     }),
   }));
-  assert.equal(result.decision, "proposed",
+  assert.equal(result.classification, WOULD_PROPOSE,
     "the authority guard reads field names, not the words a broker uses");
 });
 
@@ -822,7 +847,7 @@ test("the observation candidate is one F01 itself accepts", () => {
   // can read the candidate and reach a decision about the FIELD rather than about
   // the request, the mapping is right. It is not graded by the code that built it.
   const b = binding();
-  const result = unwiredEvaluateProposedFact({
+  const result = probe.wouldProposeFact({
     binding: b, thread_read: read({}, b), now: NOW, proposal: proposal(),
   });
   const resolved = resolveObservation({
@@ -919,7 +944,7 @@ test("the four conflict kinds this module routes are exactly the four F01 emits"
 
 test("a queued conflict shows both values, each labelled with the source that owns it", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const entry = capture(unwiredBuildSourceConflictQueueEntry({
+  const entry = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -929,7 +954,7 @@ test("a queued conflict shows both values, each labelled with the source that ow
     },
     now: NOW,
   }));
-  assert.equal(entry.decision, "queued");
+  assert.equal(entry.classification, WOULD_QUEUE);
   assert.equal(entry.schema_version, V5_J103_CONFLICT_SCHEMA_VERSION);
   assert.equal(entry.both_values_visible, true);
   assert.equal(entry.sides.established.value_text, "32.50");
@@ -948,7 +973,7 @@ test("a queued conflict shows both values, each labelled with the source that ow
 
 test("the owning side is computed from F01's owner_source, not asserted by the caller", () => {
   const item = f01Conflicts().forbidden_overwrite_by_non_owner;
-  const entry = capture(unwiredBuildSourceConflictQueueEntry({
+  const entry = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "owner value", value_digest: item.established.value_digest,
@@ -965,7 +990,7 @@ test("the owning side is computed from F01's owner_source, not asserted by the c
 test("a conflict with no established side presents one value and says so", () => {
   const item = f01Conflicts().non_owner_establishment_attempt;
   assert.equal(item.established, null);
-  const entry = capture(unwiredBuildSourceConflictQueueEntry({
+  const entry = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       observed: { value_text: "33.75", value_digest: item.observed.value_digest,
@@ -973,14 +998,14 @@ test("a conflict with no established side presents one value and says so", () =>
     },
     now: NOW,
   }));
-  assert.equal(entry.decision, "queued");
+  assert.equal(entry.classification, WOULD_QUEUE);
   assert.equal(entry.both_values_visible, false);
   assert.equal(entry.sides.established, null);
 });
 
 test("a review surface may not invent a side of the conflict", () => {
   const item = f01Conflicts().non_owner_establishment_attempt;
-  assert.throws(() => unwiredBuildSourceConflictQueueEntry({
+  assert.throws(() => probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "invented", value_digest: sha("ee"),
@@ -994,7 +1019,7 @@ test("a review surface may not invent a side of the conflict", () => {
 
 test("a presented value that is not the value F01 conflicted on is refused", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const wrongObserved = capture(unwiredBuildSourceConflictQueueEntry({
+  const wrongObserved = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -1004,12 +1029,12 @@ test("a presented value that is not the value F01 conflicted on is refused", () 
     },
     now: NOW,
   }));
-  assert.equal(wrongObserved.decision, "refuse");
+  assert.equal(wrongObserved.classification, "would_refuse");
   assert.equal(wrongObserved.reason_id, "presented_value_digest_mismatch");
   assert.equal(wrongObserved.side, "observed");
   assert.equal(wrongObserved.sides, null);
 
-  const wrongEstablished = capture(unwiredBuildSourceConflictQueueEntry({
+  const wrongEstablished = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "a value nobody established", value_digest: sha("ef"),
@@ -1032,32 +1057,32 @@ test("every way of saying whoever wrote last wins is refused by name", () => {
       declared_data_classes: ["lease_economics"] },
   };
   for (const basis of V5_J103_REFUSED_RESOLUTION_BASES) {
-    const entry = capture(unwiredBuildSourceConflictQueueEntry({
+    const entry = capture(probe.wouldQueueConflict({
       reconciliation_item: item, presented_values: sides,
       proposed_resolution_basis: basis, now: NOW,
     }));
-    assert.equal(entry.decision, "refuse", `${basis} must refuse`);
+    assert.equal(entry.classification, "would_refuse", `${basis} must refuse`);
     assert.equal(entry.reason_id, "timestamp_alone_refused");
     assert.equal(entry.sides, null);
   }
-  const unregistered = capture(unwiredBuildSourceConflictQueueEntry({
+  const unregistered = capture(probe.wouldQueueConflict({
     reconciliation_item: item, presented_values: sides,
     proposed_resolution_basis: "whichever_looks_right", now: NOW,
   }));
   assert.equal(unregistered.reason_id, "unregistered_resolution_basis");
 
-  const accepted = capture(unwiredBuildSourceConflictQueueEntry({
+  const accepted = capture(probe.wouldQueueConflict({
     reconciliation_item: item, presented_values: sides,
     proposed_resolution_basis: V5_J103_RESOLUTION_BASIS, now: NOW,
   }));
-  assert.equal(accepted.decision, "queued");
+  assert.equal(accepted.classification, WOULD_QUEUE);
   assert.equal(accepted.timestamp_alone_is_not_authority, true);
 });
 
 test("a queue entry is built only from an item F01 emitted", () => {
   const item = f01Conflicts().equal_version_contradiction;
   assert.equal(item.schema_version, V5_F01_RECONCILIATION_SCHEMA_VERSION);
-  assert.throws(() => unwiredBuildSourceConflictQueueEntry({
+  assert.throws(() => probe.wouldQueueConflict({
     reconciliation_item: { ...item, schema_version: "something-else.v1" },
     presented_values: { observed: { value_text: "x", value_digest: item.observed.value_digest,
       declared_data_classes: ["lease_economics"] } },
@@ -1067,7 +1092,7 @@ test("a queue entry is built only from an item F01 emitted", () => {
 
 test("a conflict queued before the observation that caused it is refused", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const entry = capture(unwiredBuildSourceConflictQueueEntry({
+  const entry = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -1082,7 +1107,7 @@ test("a conflict queued before the observation that caused it is refused", () =>
 
 test("a presented value carrying a prohibited class refuses on S01's answer", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const entry = capture(unwiredBuildSourceConflictQueueEntry({
+  const entry = capture(probe.wouldQueueConflict({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -1092,7 +1117,7 @@ test("a presented value carrying a prohibited class refuses on S01's answer", ()
     },
     now: NOW,
   }));
-  assert.equal(entry.decision, "refuse");
+  assert.equal(entry.classification, "would_refuse");
   assert.equal(entry.reason_id, "phi_or_raw_patient_location_refused");
   assert.equal(entry.sides, null);
 });
@@ -1155,8 +1180,8 @@ test("the module reaches no clock, network, database or filesystem", () => {
   const b = binding();
   assert.deepEqual(read({}, b), read({}, b));
   assert.deepEqual(
-    unwiredDraftCorrespondence({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }),
-    unwiredDraftCorrespondence({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }));
+    probe.wouldDraft({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }),
+    probe.wouldDraft({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }));
 });
 
 test("correspondence states and the module's own vocabulary stay closed", () => {
@@ -1164,7 +1189,7 @@ test("correspondence states and the module's own vocabulary stay closed", () => 
     ["awaiting_counterparty", "awaiting_us", "informational", "resolved"]);
   assert.throws(() => read({ relevance_state: "probably_relevant" }),
     e => e.code === "unknown_relevance_state");
-  assert.throws(() => unwiredReadCorrespondenceThread({
+  assert.throws(() => probe.wouldRead({
     binding: binding(), thread: { ...thread(), extra_field: 1 }, now: NOW,
   }), e => e.code === "unknown_field");
 });
@@ -1356,34 +1381,44 @@ test("a read result shaped like this module's own is refused, because it is not 
   // cannot answer: did this object come out of this module?
   const b = binding();
   const genuine = read({}, b);
-  const copy = { ...genuine };
-  assert.deepEqual(copy, genuine, "the copy is identical field for field");
-  assert.throws(() => unwiredDraftCorrespondence({
+  // The forger's best copy: every field of a genuine classification, with the
+  // privileged verdict typed back in by hand where the rename took it out. This is
+  // the most complete read result a caller can build, and it is still not one.
+  const { classification, classification_only, not_an_outcome, ...fields } = genuine;
+  assert.equal(classification, WOULD_READ);
+  assert.equal(classification_only, true);
+  assert.equal(not_an_outcome, true);
+  const copy = { ...fields, decision: "read" };
+  assert.deepEqual(Object.keys(copy).sort().filter(k => k !== "decision"),
+    Object.keys(genuine).sort()
+      .filter(k => !["classification", "classification_only", "not_an_outcome"].includes(k)),
+    "the copy carries every field a genuine result carries");
+  assert.throws(() => probe.wouldDraft({
     binding: b, thread_read: copy, now: NOW, draft: draft(),
   }), e => e instanceof V5J103Error && e.code === "thread_read_not_produced_here");
-  assert.throws(() => unwiredEvaluateProposedFact({
+  assert.throws(() => probe.wouldProposeFact({
     binding: b, thread_read: copy, now: NOW, proposal: proposal(),
   }), e => e.code === "thread_read_not_produced_here");
   // And the genuine one still works, so the check is not refusing everything.
-  assert.equal(unwiredDraftCorrespondence({
+  assert.equal(probe.wouldDraft({
     binding: b, thread_read: genuine, now: NOW, draft: draft(),
-  }).decision, "drafted");
+  }).classification, WOULD_DRAFT);
 });
 
 test("the predicates are marked not wired, and neither path is a door into the other", () => {
   assert.equal(read().wired, false);
   assert.equal(binding().wired, false);
   assert.equal(binding().availability_source, "fixture_declared_not_wired");
-  assert.equal(unwiredProjectCorrespondenceCoverage({
+  assert.equal(probe.wouldCover({
     binding: binding(), requested_partner_slugs: ["joe"],
   }).wired, false);
 
   assert.throws(() => readCorrespondenceThread({ binding: binding(), thread: thread(), now: NOW }),
     e => e.code === "binding_mode_mismatch", "a fixture binding is not a binding");
-  assert.throws(() => unwiredReadCorrespondenceThread({
+  assert.throws(() => probe.wouldRead({
     binding: wiredBinding(), thread: thread(), now: NOW,
   }), e => e.code === "binding_mode_mismatch", "a wired binding is not a fixture");
-  assert.throws(() => unwiredDraftCorrespondence({
+  assert.throws(() => probe.wouldDraft({
     binding: binding(),
     thread_read: { ...read(), wired: true },
     now: NOW,
@@ -1465,13 +1500,13 @@ test("the items the wired seam refuses are ones the predicate would really have 
   // fixtures is not a seam that refuses valid ones.
   let queued = 0;
   for (const [label, item] of forgedReconciliationItems()) {
-    const rendered = capture(unwiredBuildSourceConflictQueueEntry({
+    const rendered = capture(probe.wouldQueueConflict({
       reconciliation_item: item, presented_values: presentedFor(item), now: NOW,
     }));
     assert.equal(rendered.wired, false, label);
-    if (rendered.decision === "queued") {
+    if (rendered.classification === WOULD_QUEUE) {
       queued += 1;
-      assert.equal(rendered.visible, true, label);
+      assert.equal(rendered.would_be_visible, true, label);
       assert.ok(rendered.sides.observed.value_text.length > 0, label);
     }
   }
@@ -1494,6 +1529,235 @@ test("even an item F01 itself emitted is unavailable, because no store issued it
 });
 
 // ---------------------------------------------------------------------------
+// Re-review 983, defects 1 and 2 — THE PUBLIC SURFACE ITSELF.
+//
+// The first correction kept the decision logic as `unwired*` EXPORTS. That left
+// `read`, `covered`, `drafted`, `proposed` and `queued` reachable by direct valid
+// caller input through a second name, with `wired: false` riding along as a
+// label — and a label is not access control.
+//
+// These two tests are about the surface rather than about any one seam. The first
+// enumerates the exports a consumer sees. The second runs EVERY export over every
+// caller-controlled input shape this suite can build, including the reviewer's own
+// constructions, and asserts where a privileged outcome string is allowed to
+// appear at all — as vocabulary, never as an answer.
+// ---------------------------------------------------------------------------
+
+/** The one export that is not consumer surface, marked by a prefix no other carries. */
+const NON_CONSUMER_EXPORT = "__j103ClassificationProbe";
+
+test("the export list is the declared public surface plus one non-consumer probe", () => {
+  const exported = Object.keys(J103_NAMESPACE).sort();
+  assert.ok(exported.length > 40, "there must be a surface to check");
+
+  // Nothing named for the fixture or unwired route survives. This is the literal
+  // shape of the defect: a second name for the same decision logic.
+  const bypassNames = exported.filter(name => /unwired|fixture|predicate|probe/i.test(name));
+  assert.deepEqual(bypassNames, [NON_CONSUMER_EXPORT],
+    "the only non-consumer name is the classification probe, and it cannot answer");
+
+  assert.deepEqual(exported, [...V5_J103_PUBLIC_SURFACE, NON_CONSUMER_EXPORT].sort(),
+    "the module exports exactly its declared public surface plus the probe");
+  assert.ok(!V5_J103_PUBLIC_SURFACE.includes(NON_CONSUMER_EXPORT),
+    "the probe must not be on the public surface it is excluded from");
+  assert.deepEqual(exported.filter(name => name.startsWith("__")), [NON_CONSUMER_EXPORT]);
+
+  // And the probe's own methods are named for what they are: a classification of
+  // what WOULD happen, never the happening.
+  assert.deepEqual(Object.keys(probe).sort(),
+    ["fixtureBinding", "wouldCover", "wouldDraft", "wouldProposeFact", "wouldQueueConflict",
+      "wouldRead"]);
+  assert.deepEqual([...V5_J103_PRIVILEGED_OUTCOMES].sort(),
+    ["covered", "drafted", "proposed", "queued", "read"]);
+});
+
+/**
+ * Every value every export of this module returns, over every caller-controlled
+ * input shape this suite knows how to build.
+ *
+ * Two passes, deliberately. The TARGETED pass builds the realistic requests —
+ * including the reviewer's exact constructions, each labelled — because a generic
+ * pass would mostly throw on shape and prove nothing. The GENERIC pass then calls
+ * every export, named or not, with a spread of caller objects, so an export nobody
+ * thought to list here is still swept.
+ */
+function everyPublicReturn() {
+  const returns = [];
+  const record = (label, fn) => {
+    const outcome = attempt(fn);
+    if (!outcome.threw) returns.push([label, outcome.value]);
+  };
+
+  const callerBindings = [
+    ["a wired binding told the adapter is available", () => wiredBinding({ availability: "available" })],
+    ["a wired binding told unknown", () => wiredBinding({ availability: "unknown" })],
+    ["a forged compiled binding, digest recomputed to match", () => forgeBinding()],
+    ["a forged binding claiming an owner-issued receipt", () =>
+      forgeBinding({ availability_source: "owner_issued_adapter_read_receipt" })],
+    ["a fixture binding from the probe", () => binding()],
+    ["a fixture binding repainted as wired", () => ({ ...binding(), wired: true })],
+  ];
+
+  for (const [bindingLabel, makeBinding] of callerBindings) {
+    const b = attempt(makeBinding);
+    if (b.threw) continue;
+    record(`${bindingLabel}: the binding itself`, () => b.value);
+    record(`${bindingLabel}: read`, () =>
+      readCorrespondenceThread({ binding: b.value, thread: thread(), now: NOW }));
+    record(`${bindingLabel}: classification read`, () =>
+      probe.wouldRead({ binding: b.value, thread: thread(), now: NOW }));
+    for (const slugs of [["joe"], ["dell"], ["joe", "dell"]]) {
+      record(`${bindingLabel}: coverage ${slugs.join("+")}`, () =>
+        projectCorrespondenceCoverage({ binding: b.value, requested_partner_slugs: slugs }));
+      record(`${bindingLabel}: classification coverage ${slugs.join("+")}`, () =>
+        probe.wouldCover({ binding: b.value, requested_partner_slugs: slugs }));
+    }
+
+    // The reviewer's exact read candidates: the module's own classification, that
+    // classification repainted, and a wholly hand-built read carrying the
+    // privileged verdict.
+    const classified = read({}, binding());
+    const candidates = [
+      ["the wired answer itself", attempt(() =>
+        readCorrespondenceThread({ binding: b.value, thread: thread(), now: NOW })).value],
+      ["a classification result", classified],
+      ["a classification repainted as wired", { ...classified, wired: true }],
+      ["a classification repainted and re-bound",
+        { ...classified, wired: true, binding_digest: b.value.binding_digest }],
+      ["a wholly hand-built read", {
+        ...classified, wired: true, binding_digest: b.value.binding_digest,
+        decision: "read", reason_id: "relevant_business_context_within_boundary",
+      }],
+    ];
+    for (const [candidateLabel, thread_read] of candidates) {
+      if (thread_read === null || thread_read === undefined) continue;
+      record(`${bindingLabel} / ${candidateLabel}: draft`, () =>
+        draftCorrespondence({ binding: b.value, thread_read, now: NOW, draft: draft() }));
+      record(`${bindingLabel} / ${candidateLabel}: classification draft`, () =>
+        probe.wouldDraft({ binding: b.value, thread_read, now: NOW, draft: draft() }));
+      record(`${bindingLabel} / ${candidateLabel}: proposal`, () =>
+        evaluateProposedFact({ binding: b.value, thread_read, now: NOW, proposal: proposal() }));
+      record(`${bindingLabel} / ${candidateLabel}: classification proposal`, () =>
+        probe.wouldProposeFact({ binding: b.value, thread_read, now: NOW, proposal: proposal() }));
+    }
+  }
+
+  // The reviewer's second construction: a valid F01-shaped reconciliation item.
+  for (const [itemLabel, item] of forgedReconciliationItems()) {
+    const request = { reconciliation_item: item, presented_values: presentedFor(item), now: NOW };
+    record(`${itemLabel}: conflict queue`, () => buildSourceConflictQueueEntry(request));
+    record(`${itemLabel}: classification conflict`, () => probe.wouldQueueConflict(request));
+  }
+
+  // The generic pass: every export, named or not, over a spread of caller objects.
+  const genericArgs = [
+    undefined, null, {}, [], "read", { availability: "available" }, { decision: "read" },
+    { classification: "read", wired: true }, { binding: binding(), thread: thread(), now: NOW },
+    { binding: wiredBinding(), thread: thread(), now: NOW },
+    { binding: binding(), requested_partner_slugs: ["joe"] },
+    { binding: binding(), thread_read: read(), now: NOW, draft: draft() },
+    { binding: binding(), thread_read: read(), now: NOW, proposal: proposal() },
+    { reconciliation_item: f01Conflicts().equal_version_contradiction,
+      presented_values: presentedFor(f01Conflicts().equal_version_contradiction), now: NOW },
+  ];
+  const callables = [
+    ...Object.entries(J103_NAMESPACE).filter(([, value]) => typeof value === "function"),
+    ...Object.entries(probe).map(([name, fn]) => [`${NON_CONSUMER_EXPORT}.${name}`, fn]),
+  ];
+  assert.ok(callables.length >= 15, "there must be callable exports to sweep");
+  for (const [name, fn] of callables) {
+    for (const arg of genericArgs) {
+      record(`${name}(${JSON.stringify(arg) ?? "undefined"})`.slice(0, 120), () => fn(arg));
+    }
+  }
+
+  // And every non-function export, because a constant is a return value too.
+  for (const [name, value] of Object.entries(J103_NAMESPACE)) {
+    if (typeof value !== "function") returns.push([`the constant ${name}`, value]);
+  }
+  return returns;
+}
+
+/**
+ * WHERE A PRIVILEGED OUTCOME STRING MAY APPEAR AT ALL, as a closed list of paths.
+ *
+ * A blanket "the word never appears" would be false and would teach nothing: the
+ * adapter's mode IS the string "read" — it is read-only, and the opposite value
+ * would be the alarming one — and the module publishes its own decision
+ * vocabulary, which names all five. So the test is stricter than a word ban and
+ * more honest than a field-name check: it collects every path at which a
+ * privileged string appears across every return above, normalises array indices,
+ * and asserts the set is EXACTLY this list. A leak anywhere — `decision: "read"`
+ * back on a result, a new "outcome" field, a renamed bypass — adds a path and
+ * turns this red.
+ */
+const PRIVILEGED_STRING_PATHS = [
+  // The adapter is read-only. That is a capability, not an answer — and the
+  // opposite value here would be the alarming one.
+  "binding.adapter_mode",
+  "constant.V5_J103_ADAPTERS.v5_f10_partner_mail_calendar_adapter.mode",
+  "result.read_interface.adapter_kinds[].mode",
+  // The module's published vocabulary, and the same vocabulary echoed into the
+  // policy preimage. A list of the names a decision may take is not a decision.
+  "constant.V5_J103_CONFLICT_DECISIONS[]",
+  "constant.V5_J103_DRAFT_DECISIONS[]",
+  "constant.V5_J103_PRIVILEGED_OUTCOMES[]",
+  "constant.V5_J103_PROPOSAL_DECISIONS[]",
+  "constant.V5_J103_THREAD_DECISIONS[]",
+  "result.draft_and_proposal.draft_decisions[]",
+  "result.draft_and_proposal.proposal_decisions[]",
+  "result.read_interface.decisions[]",
+  "result.source_reconciliation.decisions[]",
+].sort();
+
+test("no export returns a privileged outcome, whatever a caller passes in", () => {
+  const returns = everyPublicReturn();
+  assert.ok(returns.length > 200,
+    `the sweep must actually have returns to sweep; it had ${returns.length}`);
+
+  const found = new Map();
+  const seen = new WeakSet();
+  const walk = (value, path, label) => {
+    if (typeof value === "string") {
+      if (V5_J103_PRIVILEGED_OUTCOMES.includes(value)) {
+        if (!found.has(path)) found.set(path, []);
+        found.get(path).push(`${label} → "${value}"`);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(entry => walk(entry, `${path}[]`, label));
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    for (const [key, entry] of Object.entries(value)) walk(entry, `${path}.${key}`, label);
+  };
+
+  for (const [label, value] of returns) {
+    const root = label.startsWith("the constant ") ? `constant.${label.slice(13)}`
+      : label.endsWith("the binding itself") ? "binding"
+        : "result";
+    walk(value, root, label);
+  }
+
+  // THE ASSERTION THAT MATTERS: no decision-bearing field anywhere carries one.
+  const decisionFields = [...found.keys()]
+    .filter(path => /\.(decision|classification|outcome|verdict|status|answer)$/.test(path));
+  assert.deepEqual(decisionFields, [],
+    `a privileged outcome was returned as an answer: ${JSON.stringify(
+      decisionFields.map(p => [p, found.get(p)[0]]))}`);
+
+  // And the closed list: the only places the words appear at all are vocabulary.
+  assert.deepEqual([...found.keys()].sort(), PRIVILEGED_STRING_PATHS,
+    "a privileged outcome string appeared at a path this module does not allow it");
+
+  // Non-vacuous: the sweep really does see the vocabulary it is allowing.
+  assert.ok(found.size >= 5, "the sweep found nothing at all, which cannot be right");
+});
+
+// ---------------------------------------------------------------------------
 // Review 983, defect 3 — "no sending client is imported" was a clause with no
 // test behind it. The F10 oracle test above proves F10 REFUSES every write
 // operation, which is a different claim: a send-capable client could be imported
@@ -1510,38 +1774,325 @@ const SRC_DIR = new URL("../src/", import.meta.url);
 const J103_FILE = "governed-correspondence.v5.js";
 const J103_SOURCE = readFileSync(new URL(J103_FILE, SRC_DIR), "utf8");
 
-/** Every module specifier a source file imports, by any of the forms that work. */
-function importSpecifiers(source) {
-  const found = new Set();
-  const patterns = [
-    /\bimport\s+[\s\S]*?\bfrom\s*["']([^"']+)["']/g,   // import x from "y"
-    /\bimport\s*["']([^"']+)["']/g,                      // import "y"
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,            // await import("y")
-    /\bexport\s+[\s\S]*?\bfrom\s*["']([^"']+)["']/g,     // export { x } from "y"
-    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,           // require("y")
-    /\bcreateRequire\b/g,                                 // the back door into require
-  ];
-  for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) {
-      found.add(match[1] ?? "createRequire");
+// ---------------------------------------------------------------------------
+// THE IMPORT GUARD IS A PARSER, NOT A REGEX.
+//
+// The re-review broke the first version by hand: its patterns missed
+// `import /* x */ "./google-oidc.js";` — valid syntax, a real side-effect import
+// of a fetching module — and the closed-set assertion downstream stayed green. A
+// pattern that can be stepped around by a comment is not a dependency boundary.
+//
+// Neither acorn nor es-module-lexer is installed in mcp-server/node_modules, so
+// this is a real tokenizer: it walks the source character by character, knows line
+// comments, block comments, single and double quoted strings, template literals
+// with their `${}` nesting, and regular-expression literals, and emits only the
+// tokens that are actually code. The import forms are then read off that token
+// stream. `node --check` runs beside it, so the file this parser is trusted with
+// is a file the engine agrees is parseable.
+// ---------------------------------------------------------------------------
+
+/** The tokens that can precede a `/` that starts a REGEX rather than a division. */
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "do", "else",
+  "yield", "await", "case", "throw",
+]);
+
+/**
+ * Tokenize JavaScript far enough to read its module graph.
+ *
+ * Returns `{ type, value }` tokens for code only: comments are dropped, string and
+ * template literals become one `string` token carrying their text, and regex
+ * literals become one opaque token so the quotes and slashes inside them cannot
+ * be mistaken for the start of a string.
+ */
+function tokenize(source) {
+  const tokens = [];
+  const last = () => (tokens.length === 0 ? null : tokens[tokens.length - 1]);
+  const regexAllowed = () => {
+    const previous = last();
+    if (previous === null) return true;
+    if (previous.type === "name") return REGEX_PRECEDING_KEYWORDS.has(previous.value);
+    if (previous.type === "string" || previous.type === "regex" || previous.type === "number") {
+      return false;
+    }
+    return !([")", "]", "}"].includes(previous.value));
+  };
+  const readString = (index, quote) => {
+    let text = "";
+    let i = index + 1;
+    while (i < source.length) {
+      const ch = source[i];
+      if (ch === "\\") { text += source[i + 1] ?? ""; i += 2; continue; }
+      if (ch === quote) return [text, i + 1];
+      text += ch;
+      i += 1;
+    }
+    throw new Error(`unterminated string at ${index}`);
+  };
+
+  let i = 0;
+  // Template literals nest: `${ `${x}` }`. The stack holds the brace depth each
+  // open template is waiting on, so the closing backtick is found correctly.
+  const templates = [];
+  let braceDepth = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (ch === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      if (end === -1) throw new Error("unterminated block comment");
+      i = end + 2;
+      continue;
+    }
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") { i += 1; continue; }
+    if (ch === '"' || ch === "'") {
+      const [text, end] = readString(i, ch);
+      tokens.push({ type: "string", value: text });
+      i = end;
+      continue;
+    }
+    if (ch === "`") {
+      // Read the template, stopping at an unescaped `${` so the expression inside
+      // is tokenized as ordinary code, and remembering we are inside one.
+      let text = "";
+      let k = i + 1;
+      let closed = false;
+      while (k < source.length) {
+        if (source[k] === "\\") { text += source[k + 1] ?? ""; k += 2; continue; }
+        if (source[k] === "`") { closed = true; k += 1; break; }
+        if (source[k] === "$" && source[k + 1] === "{") {
+          templates.push(braceDepth);
+          braceDepth += 1;
+          k += 2;
+          break;
+        }
+        text += source[k];
+        k += 1;
+      }
+      tokens.push({ type: "string", value: text, template: true, closed });
+      i = k;
+      continue;
+    }
+    if (ch === "}" ) {
+      braceDepth -= 1;
+      if (templates.length > 0 && templates[templates.length - 1] === braceDepth) {
+        // Back inside the template literal this `}` closes.
+        templates.pop();
+        let text = "";
+        let k = i + 1;
+        while (k < source.length) {
+          if (source[k] === "\\") { text += source[k + 1] ?? ""; k += 2; continue; }
+          if (source[k] === "`") { k += 1; break; }
+          if (source[k] === "$" && source[k + 1] === "{") {
+            templates.push(braceDepth);
+            braceDepth += 1;
+            k += 2;
+            break;
+          }
+          text += source[k];
+          k += 1;
+        }
+        tokens.push({ type: "string", value: text, template: true });
+        i = k;
+        continue;
+      }
+      tokens.push({ type: "punct", value: "}" });
+      i += 1;
+      continue;
+    }
+    if (ch === "{") { braceDepth += 1; tokens.push({ type: "punct", value: "{" }); i += 1; continue; }
+    if (ch === "/" && regexAllowed()) {
+      let k = i + 1;
+      let inClass = false;
+      while (k < source.length) {
+        const c = source[k];
+        if (c === "\\") { k += 2; continue; }
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) { k += 1; break; }
+        else if (c === "\n") throw new Error(`unterminated regex at ${i}`);
+        k += 1;
+      }
+      while (k < source.length && /[a-z]/.test(source[k])) k += 1;
+      tokens.push({ type: "regex", value: source.slice(i, k) });
+      i = k;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(ch)) {
+      let k = i;
+      while (k < source.length && /[\w$]/.test(source[k])) k += 1;
+      tokens.push({ type: "name", value: source.slice(i, k) });
+      i = k;
+      continue;
+    }
+    if (/[0-9]/.test(ch)) {
+      let k = i;
+      while (k < source.length && /[\w.]/.test(source[k])) k += 1;
+      tokens.push({ type: "number", value: source.slice(i, k) });
+      i = k;
+      continue;
+    }
+    tokens.push({ type: "punct", value: ch });
+    i += 1;
+  }
+  return tokens;
+}
+
+/** A plain string literal token — a template with an interpolation is not one. */
+function literalString(token) {
+  return token !== undefined && token !== null && token.type === "string"
+    && token.template !== true;
+}
+
+/**
+ * The single literal argument of a call, or null.
+ *
+ * The literal has to be the WHOLE argument: `import("./pre" + "fix.js")` names a
+ * module this parser cannot know, and reading its first half as the specifier
+ * would be worse than admitting the specifier is computed.
+ */
+function soleLiteralArgument(tokens, open) {
+  return literalString(tokens[open + 1]) && tokens[open + 2]?.value === ")"
+    ? tokens[open + 1].value
+    : null;
+}
+
+/**
+ * Read the module graph off the token stream: every specifier, in every form that
+ * actually loads code, plus the named bindings each static import takes.
+ *
+ * A dynamic `import(expr)` whose argument is not a literal is reported as
+ * `<computed import>` rather than ignored, because a computed specifier is
+ * precisely the hole a closed allow-list has to notice.
+ */
+function parseModuleGraph(source) {
+  const tokens = tokenize(source);
+  const specifiers = new Set();
+  const bindings = new Map();
+  const addBinding = (specifier, names) => {
+    if (!bindings.has(specifier)) bindings.set(specifier, []);
+    bindings.get(specifier).push(...names);
+  };
+
+  // The back door into CommonJS is looked for over the WHOLE token stream, before
+  // anything else: a clause scan that jumps past a specifier would otherwise step
+  // over the very name it is there to notice.
+  if (tokens.some(t => t.type === "name" && t.value === "createRequire")) {
+    specifiers.add("createRequire");
+  }
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.type !== "name") continue;
+
+    if (token.value === "require" && tokens[i + 1]?.value === "(") {
+      specifiers.add(soleLiteralArgument(tokens, i + 1) ?? "<computed require>");
+      continue;
+    }
+
+    if (token.value === "import") {
+      const after = tokens[i + 1];
+      if (after === undefined) continue;
+      if (after.value === ".") continue;                       // import.meta
+      if (after.value === "(") {                                // dynamic import
+        specifiers.add(soleLiteralArgument(tokens, i + 1) ?? "<computed import>");
+        continue;
+      }
+      if (literalString(after)) { specifiers.add(after.value); continue; }  // side effect
+    }
+
+    if (token.value === "import" || token.value === "export") {
+      // A clause form: walk to `from "<specifier>"`, bounded by the statement's
+      // own semicolon so a later import cannot be attributed to this one.
+      const names = [];
+      let inClause = false;
+      for (let j = i + 1; j < tokens.length && j < i + 200; j += 1) {
+        const t = tokens[j];
+        if (t.value === ";") break;
+        if (t.value === "{") { inClause = true; continue; }
+        if (t.value === "}") { inClause = false; continue; }
+        if (inClause && t.type === "name" && t.value !== "as") {
+          // The IMPORTED name, not the local alias: it is the imported name that
+          // says what was taken from the other module.
+          if (tokens[j - 1]?.value !== "as") names.push(t.value);
+          continue;
+        }
+        if (t.type === "name" && t.value === "from" && literalString(tokens[j + 1])) {
+          const specifier = tokens[j + 1].value;
+          specifiers.add(specifier);
+          if (names.length > 0) addBinding(specifier, names);
+          i = j + 1;
+          break;
+        }
+      }
     }
   }
-  return [...found].sort();
+  return { specifiers: [...specifiers].sort(), bindings };
+}
+
+/** Every module specifier a source file imports, by any of the forms that work. */
+function importSpecifiers(source) {
+  return parseModuleGraph(source).specifiers;
 }
 
 /** The names a source file binds from one specifier. */
 function importedBindings(source, specifier) {
-  const pattern = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*["']${
-    specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`, "g");
-  const names = [];
-  for (const match of source.matchAll(pattern)) {
-    for (const raw of match[1].split(",")) {
-      const name = raw.trim().split(/\s+as\s+/).pop().trim();
-      if (name.length > 0) names.push(name);
-    }
-  }
-  return names.sort();
+  return [...(parseModuleGraph(source).bindings.get(specifier) ?? [])].sort();
 }
+
+test("the import parser reads the forms a regex missed, and ignores the ones it faked", () => {
+  // THE RE-REVIEW'S OWN COUNTEREXAMPLE FIRST. The previous guard's patterns did
+  // not match this, so a side-effect import of a fetching module could be added
+  // and the closed-set assertion stayed green.
+  assert.deepEqual(importSpecifiers('import /* x */ "./google-oidc.js";'),
+    ["./google-oidc.js"]);
+
+  const cases = [
+    ['import "./plain.js";', ["./plain.js"]],
+    ['import /* a */ /* b */ "./commented.js";', ["./commented.js"]],
+    ['import // a line comment\n  "./after-line-comment.js";', ["./after-line-comment.js"]],
+    ['import { a as b } from /* c */ "./named.js";', ["./named.js"]],
+    ['import def, { a } from "./default-and-named.js";', ["./default-and-named.js"]],
+    ['import * as ns from "./star.js";', ["./star.js"]],
+    ['export { a } from "./re-exported.js";', ["./re-exported.js"]],
+    ['export * from "./star-export.js";', ["./star-export.js"]],
+    ['await import("./dynamic.js");', ["./dynamic.js"]],
+    ['const p = import(\n  /* lazy */ "./dynamic-multiline.js"\n);', ["./dynamic-multiline.js"]],
+    ['const cp = require("child_process");', ["child_process"]],
+    ['const r = require(\n  "node:https"\n);', ["node:https"]],
+    ['import { createRequire } from "node:module";', ["createRequire", "node:module"]],
+    // Computed specifiers are NAMED rather than skipped: an allow-list that
+    // silently ignores import(name) is an allow-list with a door in it.
+    ['const m = await import("./pre" + "fix.js");', ["<computed import>"]],
+    ['const m = require(name);', ["<computed require>"]],
+    // And the shapes that only LOOK like imports.
+    ['// import "./commented-out.js";\nimport "./real.js";', ["./real.js"]],
+    ['/* import "./block-commented.js"; */ import "./real.js";', ["./real.js"]],
+    ['const s = "import \\"./in-a-string.js\\";";', []],
+    ["const t = `import \"./in-a-template.js\";`;", []],
+    ['const re = /["\']import "x"/g;\nimport "./real.js";', ["./real.js"]],
+    ['const u = import.meta.url;', []],
+    ['const ratio = a / b; const other = c / d;', []],
+    ["const t = `a ${ 1 / 2 } b`; import \"./real.js\";", ["./real.js"]],
+  ];
+  for (const [source, expected] of cases) {
+    assert.deepEqual(importSpecifiers(source), expected.sort(), source);
+  }
+
+  // The parser is trusted with a file the engine agrees is parseable, so a source
+  // it silently mis-tokenized would be caught by node itself.
+  const checked = spawnSync(process.execPath, ["--check", fileURLToPath(new URL(J103_FILE, SRC_DIR))],
+    { encoding: "utf8" });
+  assert.equal(checked.status, 0, `node --check rejected the module: ${checked.stderr}`);
+
+  // Non-vacuous: the parser really is reading THIS module, not an empty set.
+  assert.ok(importSpecifiers(J103_SOURCE).length >= 5);
+  assert.deepEqual(importedBindings('import { A, B as C } from "./x.js";', "./x.js"), ["A", "B"]);
+});
 
 /**
  * The modules in mcp-server/src that can actually reach the outside world, found

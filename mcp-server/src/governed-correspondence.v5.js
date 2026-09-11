@@ -98,11 +98,17 @@
 // absent, both answer `unavailable` naming the seam that is owed, and the four
 // privileged outcomes downstream of them (`read`, `covered`, `drafted`,
 // `proposed`) plus `queued` are unreachable from caller input by construction.
-// The decision logic those outcomes guard is not deleted: it lives in the
-// `unwired*` predicates, which take fixture bindings, are unit-tested against
-// fixture shapes, and stamp `wired: false` on every result so a fixture answer
-// cannot be handed back into the wired interface. Honestly deferred means
-// unreachable, not reachable by saying the magic word.
+// The decision logic those outcomes guard is not deleted, and it is not exported
+// either. It lives in module-private `classify*IfAuthoritative` functions that no
+// consumer can reach, and the one non-consumer entry that runs them —
+// `__j103ClassificationProbe`, absent from V5_J103_PUBLIC_SURFACE — renames every
+// privileged outcome on its way out (`would_read_if_authoritative` and its four
+// siblings) and THROWS if one survives the rename. So there is no export of this
+// module, under any name or any flag, that can return `read`, `covered`,
+// `drafted`, `proposed` or `queued` for any caller input. A label such as
+// `wired: false` was the earlier attempt and it was the wrong shape: a label is
+// not access control. Honestly deferred means unreachable, not reachable by
+// saying the magic word.
 //
 // SUBJECT LINES AND MESSAGE BODIES ARE NOT IN THE SCHEMA, and their absence is
 // deliberate rather than unfinished. Q133 enumerates what DoctorCRE stores —
@@ -753,9 +759,10 @@ function privacyClasses(value, path, { max = 16 } = {}) {
 // input rather than discouraged by convention.
 //
 // The decision logic those outcomes used to guard is not deleted. It moves to the
-// `unwired*` predicates below, which take fixture shapes, are unit-tested against
-// them, and stamp `wired: false` on everything they return so a fixture result
-// can never be handed back into the wired interface.
+// module-private `classify*IfAuthoritative` functions below, which take fixture
+// shapes and are reachable only through the classification probe at the foot of
+// this file — a non-consumer entry that renames every privileged outcome and
+// refuses to return one under any name.
 // ---------------------------------------------------------------------------
 
 /** Where an owner-issued adapter read receipt would come from. Nothing issues one. */
@@ -839,15 +846,18 @@ export function compileCorrespondenceBinding(config) {
 }
 
 /**
- * NOT WIRED. Compile a FIXTURE binding that carries the availability a test says
- * it has, so the read/coverage/draft/proposal predicates can be exercised against
- * fixture shapes while the wired interface stays honestly unavailable.
+ * MODULE-PRIVATE, AND NOT EXPORTED. Compile a FIXTURE binding carrying the
+ * availability a test says it has, so the classification functions can be
+ * exercised against fixture shapes while the wired interface stays honestly
+ * unavailable.
  *
  * A fixture binding is stamped `wired: false` inside its own digest preimage, so
- * it is refused by every wired entry point — and the wired bindings are refused by
- * the predicates, so neither path is a door into the other.
+ * it is refused by every wired entry point — and a wired binding is refused by the
+ * classification functions, so neither path is a door into the other. It is
+ * reachable only through __j103ClassificationProbe, which cannot return a
+ * privileged outcome.
  */
-export function compileCorrespondenceBindingFixture(config) {
+function classificationFixtureBinding(config) {
   return compileBinding(config, UNWIRED);
 }
 
@@ -1147,40 +1157,44 @@ function assertRelatedRecords(value, path) {
  * WIRED, STEP 3 IS THE ONLY STEP THAT EVER ANSWERS. Availability is the owner's
  * fact and no owner issues it here, so every wired call stops at `unavailable`
  * naming the owed seam. Steps 4 to 6 are real logic and they are proved against
- * fixtures through unwiredReadCorrespondenceThread, which is the same code in the
- * same order — marked `wired: false` so its results go nowhere near the interface.
+ * fixtures through the module-private classifyReadIfAuthoritative, which is the
+ * same code in the same order and is not reachable from any export that could
+ * return its verdict under the privileged name.
  */
 export function readCorrespondenceThread(request) {
   return correspondenceReadCore(request, WIRED);
 }
 
 /**
- * NOT WIRED. The read predicate over a FIXTURE binding, for unit tests only.
+ * MODULE-PRIVATE, AND NOT EXPORTED. The read classification over a FIXTURE
+ * binding.
  *
- * It reaches `read` because the fixture says the adapter is available, and that
- * is the whole difference: nothing it returns is a read of anything, every result
- * carries `wired: false`, and the wired draft and proposal seams refuse a
- * `wired: false` read outright.
+ * It reaches the internal `read` verdict because the fixture says the adapter is
+ * available — which is exactly why it is not exported: the probe that runs it
+ * renames that verdict to `would_read_if_authoritative` before anything leaves
+ * this module, and throws if the privileged string survives.
  */
-export function unwiredReadCorrespondenceThread(request) {
+function classifyReadIfAuthoritative(request) {
   return correspondenceReadCore(request, UNWIRED);
 }
 
 /**
- * The reads this module actually produced, by mode.
+ * The reads this module actually produced. ONE set, not one per mode.
  *
  * A read result is a plain frozen object, so a caller can build one that looks
  * exactly like it — `decision: "read"`, a real thread, the right binding digest —
  * and hand it to the draft seam. Every field-by-field check would pass, because
- * every field came from the caller. Membership of these sets cannot be forged: the
- * only way an object gets in is for this module to have returned it, and the wired
- * path never returns one carrying a thread.
+ * every field came from the caller. Membership cannot be forged: the only way an
+ * object gets in is for this module to have returned it, and the wired path never
+ * returns one carrying a thread. The earlier per-mode pair implied the set was
+ * about keeping modes apart; that job belongs to the `wired` check above it, and
+ * this one is about provenance and nothing else.
  */
-const PRODUCED_READS = Object.freeze({ wired: new WeakSet(), unwired: new WeakSet() });
+const PRODUCED_READS = new WeakSet();
 
 function correspondenceReadCore(request, mode) {
   const result = readDecisionCore(request, mode);
-  PRODUCED_READS[mode.wired ? "wired" : "unwired"].add(result);
+  PRODUCED_READS.add(result);
   return result;
 }
 
@@ -1361,15 +1375,16 @@ const COVERAGE_REQUEST_KEYS = Object.freeze(["binding", "requested_partner_slugs
  * refusal would suggest a permission somewhere could change the answer.
  *
  * `covered` IS UNREACHABLE ON THE WIRED PATH for the same reason `read` is: it is
- * coverage BY AN ADAPTER, and no adapter read receipt exists. The predicate below
- * proves the single-partner rendering against fixtures.
+ * coverage BY AN ADAPTER, and no adapter read receipt exists. The module-private
+ * classification below proves the single-partner rendering against fixtures and is
+ * not exported.
  */
 export function projectCorrespondenceCoverage(request) {
   return coverageCore(request, WIRED);
 }
 
-/** NOT WIRED. The coverage predicate over a fixture binding, for unit tests only. */
-export function unwiredProjectCorrespondenceCoverage(request) {
+/** MODULE-PRIVATE. The coverage classification over a fixture binding. */
+function classifyCoverageIfAuthoritative(request) {
   return coverageCore(request, UNWIRED);
 }
 
@@ -1447,7 +1462,7 @@ function requireReadThread(value, binding, path, mode) {
   // seam would put the caller's word back in charge by a longer route.
   if (read.wired !== mode.wired) {
     fail("thread_read_mode_mismatch",
-      `${path} came from the ${read.wired === true ? "wired" : "unwired predicate"} path and this`
+      `${path} came from the ${read.wired === true ? "wired" : "classification"} path and this`
       + ` is the ${mode.label} path; a fixture result is not correspondence`,
       { path, read_wired: read.wired === true, expected_wired: mode.wired });
   }
@@ -1465,7 +1480,7 @@ function requireReadThread(value, binding, path, mode) {
   // Last, and the check the others cannot make: this object has to BE one this
   // module returned, not one shaped like it. Every field above is a field a caller
   // could have typed.
-  if (!PRODUCED_READS[mode.wired ? "wired" : "unwired"].has(read)) {
+  if (!PRODUCED_READS.has(read)) {
     fail("thread_read_not_produced_here",
       `${path} is shaped like a read this module produced and is not one; a draft is built from`
       + " correspondence that was actually read, never from an object describing one",
@@ -1488,11 +1503,10 @@ export function draftCorrespondence(request) {
 }
 
 /**
- * NOT WIRED. The draft predicate, which takes a FIXTURE read and is unit-tested
- * against fixture shapes. The wired seam cannot be fed one: `drafted` is
- * unreachable there because `read` is.
+ * MODULE-PRIVATE. The draft classification, which takes a FIXTURE read. The wired
+ * seam cannot be fed one: `drafted` is unreachable there because `read` is.
  */
-export function unwiredDraftCorrespondence(request) {
+function classifyDraftIfAuthoritative(request) {
   return draftCore(request, UNWIRED);
 }
 
@@ -1663,11 +1677,12 @@ export function evaluateProposedFact(request) {
 }
 
 /**
- * NOT WIRED. The proposed-fact predicate over a FIXTURE read. It builds the exact
- * F01 observation shape and F01 still refuses it; what it cannot do is arrive from
- * a caller's own say-so, because the fixture read it needs has no wired twin.
+ * MODULE-PRIVATE. The proposed-fact classification over a FIXTURE read. It builds
+ * the exact F01 observation shape and F01 still refuses it; what it cannot do is
+ * arrive from a caller's own say-so, because the fixture read it needs has no
+ * wired twin and no export hands one out.
  */
-export function unwiredEvaluateProposedFact(request) {
+function classifyProposedFactIfAuthoritative(request) {
   return proposedFactCore(request, UNWIRED);
 }
 
@@ -1839,12 +1854,13 @@ export function buildSourceConflictQueueEntry(request) {
 }
 
 /**
- * NOT WIRED. The conflict rendering predicate, over a FIXTURE item shaped like the
- * one F01 emits. Everything Q076 asks a review surface to do — both values, the
- * owning side computed from F01's own owner_source, the digest check, the refused
- * resolution bases — is proved here against fixtures and reaches no partner.
+ * MODULE-PRIVATE. The conflict rendering classification, over a FIXTURE item
+ * shaped like the one F01 emits. Everything Q076 asks a review surface to do —
+ * both values, the owning side computed from F01's own owner_source, the digest
+ * check, the refused resolution bases — is proved here against fixtures, reaches
+ * no partner, and cannot come back out of this module as `queued`.
  */
-export function unwiredBuildSourceConflictQueueEntry(request) {
+function classifyConflictEntryIfAuthoritative(request) {
   return conflictEntryCore(request, UNWIRED);
 }
 
@@ -2215,7 +2231,8 @@ export function governedCorrespondenceGaps() {
         + " cannot be resolved against one and a caller-presented item cannot be shown to have"
         + " come from F01 at all. The wired queue seam therefore answers `unavailable` for every"
         + " item: a queued review prompt is a partner's attention, and no caller buys that with a"
-        + " schema-version string. The rendering is kept as a predicate over fixtures",
+        + " schema-version string. The rendering is kept module-private and is provable only"
+        + " through a probe that cannot return `queued`",
       landed: false,
     },
     {
@@ -2225,8 +2242,8 @@ export function governedCorrespondenceGaps() {
         + " caller's `availability` is recorded as `claimed_availability` and decides nothing:"
         + " availability is re-derived from the absent receipt store at compile time and again on"
         + " every use, so it is `unavailable` for every binding and `read` is unreachable from any"
-        + " caller input. The read, coverage, draft and proposal logic is unit-tested as an"
-        + " explicitly unwired predicate against fixture shapes",
+        + " caller input. The read, coverage, draft and proposal logic is module-private and is"
+        + " unit-tested through a probe that renames every privileged outcome",
       landed: false,
     },
     {
@@ -2314,3 +2331,162 @@ for (const [seam, keys, guards] of [
     assertNoGuardCollision(keys, V5_F01_AUTHORITY_INJECTION_FRAGMENTS, seam, "authority claim");
   }
 }
+
+// ---------------------------------------------------------------------------
+// THE PUBLIC SURFACE, DECLARED, AND THE ONE ENTRY THAT IS NOT ON IT.
+//
+// Round two of the review found the previous correction's real defect: the
+// decision logic had been kept as `unwired*` EXPORTS, so `read`, `covered`,
+// `drafted`, `proposed` and `queued` were still returnable to any caller that
+// called the other name. `wired: false` rode along on those results, and a label
+// is not access control.
+//
+// So the logic is module-private now, and the one entry that runs it is built so
+// that returning a privileged outcome is IMPOSSIBLE rather than discouraged:
+// every verdict is renamed on the way out, and the renamed value is swept for the
+// privileged strings before it is returned. If a future edit ever lets one
+// through, the probe throws instead of answering — the failure mode is a loud
+// refusal, not a quiet bypass.
+//
+// V5_J103_PUBLIC_SURFACE is the consumer surface. `__j103ClassificationProbe` is
+// deliberately absent from it, is marked by the `__` prefix no consumer name
+// carries, and is the only export of this module whose name is not on that list.
+// ---------------------------------------------------------------------------
+
+/** The outcome strings a caller must never be able to obtain from this module. */
+export const V5_J103_PRIVILEGED_OUTCOMES = deepFreeze([
+  "covered", "drafted", "proposed", "queued", "read",
+]);
+
+/** What each privileged verdict is called once it leaves as a classification. */
+const CLASSIFICATION_NAMES = Object.freeze({
+  covered: "would_cover_if_authoritative",
+  drafted: "would_draft_if_authoritative",
+  proposed: "would_propose_if_authoritative",
+  queued: "would_queue_if_authoritative",
+  read: "would_read_if_authoritative",
+});
+
+/**
+ * The classification views this probe handed out, mapped to the internal results
+ * behind them.
+ *
+ * A classification is chained — a read classification is the input to a draft
+ * classification — and the internal checks (PRODUCED_READS above, the decision
+ * check, the binding digest) work on the internal object. The view is what leaves
+ * the module; this WeakMap is how a view gets back to its own internals WITHOUT
+ * the privileged shape ever being handed to a caller. A value that is not a view
+ * passes through untouched, so a forged object still meets every refusal it
+ * would have met before.
+ */
+const CLASSIFICATION_VIEWS = new WeakMap();
+
+function assertNoPrivilegedOutcome(value, path) {
+  if (typeof value === "string") {
+    if (V5_J103_PRIVILEGED_OUTCOMES.includes(value)) {
+      fail("classification_would_leak_privileged_outcome",
+        `${path} would carry the privileged outcome "${value}"; a classification names what WOULD`
+        + " happen if an authority existed, and never the outcome itself",
+        { path, outcome: value });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertNoPrivilegedOutcome(entry, `${path}[${index}]`));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      assertNoPrivilegedOutcome(entry, `${path}.${key}`);
+    }
+  }
+}
+
+/**
+ * Turn an internal result into the classification a test may see.
+ *
+ * `decision` becomes `classification` and its value becomes a `would_*` name; the
+ * two fields that would read as a real review prompt — `visible` and `queued_at` —
+ * become `would_be_visible` and `would_queue_at`. Then the whole view is swept,
+ * so a privileged string surviving anywhere, including in a field nobody thought
+ * about, throws rather than returns.
+ */
+function classificationView(result) {
+  const { decision, visible, queued_at, ...rest } = result;
+  const view = {
+    classification: CLASSIFICATION_NAMES[decision] ?? `would_${decision}`,
+    classification_only: true,
+    not_an_outcome: true,
+    ...rest,
+  };
+  if (visible !== undefined) view.would_be_visible = visible;
+  if (queued_at !== undefined) view.would_queue_at = queued_at;
+  const frozen = deepFreeze(view);
+  assertNoPrivilegedOutcome(frozen, "classification");
+  CLASSIFICATION_VIEWS.set(frozen, result);
+  return frozen;
+}
+
+function internalOf(value) {
+  return (value !== null && typeof value === "object" && CLASSIFICATION_VIEWS.has(value))
+    ? CLASSIFICATION_VIEWS.get(value)
+    : value;
+}
+
+function withInternalRead(request) {
+  if (request === null || typeof request !== "object" || Array.isArray(request)) return request;
+  if (!("thread_read" in request)) return request;
+  return { ...request, thread_read: internalOf(request.thread_read) };
+}
+
+/**
+ * NOT A CONSUMER SURFACE, and not on V5_J103_PUBLIC_SURFACE.
+ *
+ * The only route to the module-private classification logic. It exists so the
+ * logic Q076, Q133 and Q134 settled can be PROVED while the two owner-issued
+ * seams are absent — and it is shaped so that proving it cannot also deliver it:
+ * nothing it returns carries `read`, `covered`, `drafted`, `proposed` or
+ * `queued`, in any field, by construction and under a runtime sweep.
+ */
+export const __j103ClassificationProbe = Object.freeze({
+  fixtureBinding: config => classificationFixtureBinding(config),
+  wouldRead: request => classificationView(classifyReadIfAuthoritative(request)),
+  wouldCover: request => classificationView(classifyCoverageIfAuthoritative(request)),
+  wouldDraft: request =>
+    classificationView(classifyDraftIfAuthoritative(withInternalRead(request))),
+  wouldProposeFact: request =>
+    classificationView(classifyProposedFactIfAuthoritative(withInternalRead(request))),
+  wouldQueueConflict: request =>
+    classificationView(classifyConflictEntryIfAuthoritative(request)),
+});
+
+/**
+ * The consumer surface, named so a reviewer can check the export list against a
+ * list rather than against a memory of one. The suite asserts this IS the module's
+ * export set, minus the single `__`-prefixed probe above.
+ */
+export const V5_J103_PUBLIC_SURFACE = deepFreeze([
+  "V5J103Error", "V5_J103_ACCEPTANCE_HOOK", "V5_J103_ADAPTERS", "V5_J103_ADAPTER_KINDS",
+  "V5_J103_ADAPTER_READ_RECEIPT_SEAM", "V5_J103_AVAILABILITY_STATES",
+  "V5_J103_BINDING_SCHEMA_VERSION", "V5_J103_CONFLICT_DECISIONS", "V5_J103_CONFLICT_KINDS",
+  "V5_J103_CONFLICT_ROUTES", "V5_J103_CONFLICT_SCHEMA_VERSION", "V5_J103_CONSUMER_GATES",
+  "V5_J103_CONTRACT_BINDING_STEP", "V5_J103_CORRESPONDENCE_STATES",
+  "V5_J103_COVERAGE_SCHEMA_VERSION", "V5_J103_CREDENTIAL_FRAGMENTS",
+  "V5_J103_DISPATCH_FRAGMENTS", "V5_J103_DRAFT_DECISIONS", "V5_J103_DRAFT_KINDS",
+  "V5_J103_DRAFT_SCHEMA_VERSION", "V5_J103_MODEL_SEAMS", "V5_J103_MODEL_SEAM_KEYS",
+  "V5_J103_NON_READING_AVAILABILITY", "V5_J103_PARTICIPANT_ROLES", "V5_J103_PARTY_KINDS",
+  "V5_J103_POLICY_VERSION", "V5_J103_PRIVILEGED_OUTCOMES", "V5_J103_PROJECTION_SCHEMA_VERSION", "V5_J103_PROPOSAL_DECISIONS",
+  "V5_J103_PROPOSAL_SCHEMA_VERSION", "V5_J103_PUBLIC_SURFACE",
+  "V5_J103_RECONCILIATION_ITEM_SEAM", "V5_J103_REFUSED_RESOLUTION_BASES",
+  "V5_J103_RELATED_RECORD_KINDS", "V5_J103_RELEVANCE_STATES", "V5_J103_RESOLUTION_BASIS",
+  "V5_J103_REVIEW_ROUTES", "V5_J103_SCHEMA_VERSION", "V5_J103_SEND_AUTHORITY_HOLDER",
+  "V5_J103_SEND_AUTHORITY_SEAM", "V5_J103_SETTLED_DECISIONS", "V5_J103_SETTLED_DECISION_IDS",
+  "V5_J103_SOURCE_CONTENT_FRAGMENTS", "V5_J103_TAINT_CLASS", "V5_J103_THREAD_DECISIONS",
+  "V5_J103_THREAD_SCHEMA_VERSION", "V5_NO_EFFECTS", "assertJ103DecisionBinding",
+  "buildSourceConflictQueueEntry", "compileCorrespondenceBinding",
+  "correspondenceBindingCanonicalBytes", "draftCorrespondence", "evaluateProposedFact",
+  "governedCorrespondenceGaps", "projectCorrespondenceCoverage", "readCorrespondenceThread",
+  "resolveAdapterAvailability", "v5J103AbsentWriteOperations", "v5J103CorrespondenceProjection",
+  "v5J103DecisionSubsetDigest", "v5J103DecisionSubsetPreimage", "v5J103PolicyCanonicalBytes",
+  "v5J103PolicyDigest", "v5J103PolicyPreimage",
+]);
