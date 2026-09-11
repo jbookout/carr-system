@@ -84,9 +84,10 @@ from __future__ import annotations
 # would put a second callable that accepts caller input on this module's surface,
 # and re-exporting the reader would invite a consumer to perform the read and
 # hand the result back in.  Aliasing them out makes the claim in ``__all__``
-# literally true -- this module's public surface is one callable that accepts
-# nothing -- and lets the acceptance suite assert exactly that.  A caller that
-# wants the domain or the reader imports it from the module that owns it.
+# literally true -- this module's public surface is one callable, and the one
+# argument it takes is a reading no caller can build -- and lets the acceptance
+# suite assert exactly that.  A caller that wants the domain or the reader
+# imports it from the module that owns it.
 from datetime import datetime as _datetime, timezone as _timezone
 from typing import Any as _Any
 
@@ -103,11 +104,14 @@ from lib.control_plane_workflow_truth import (
 from lib.control_plane_workflow_truth_reader import (
     WorkflowTruthReading as _WorkflowTruthReading,
     is_workflow_truth_reading as _is_workflow_truth_reading,
+    verify_workflow_truth_reading as _verify_workflow_truth_reading,
 )
 
 SCHEMA_VERSION = "assurance-health-sources.v1"
 
-# THE PUBLIC SURFACE, EXHAUSTIVELY.  One callable, and it accepts nothing.
+# THE PUBLIC SURFACE, EXHAUSTIVELY.  One callable, and the only value it accepts
+# is an opaque reading handle minted by the F09 reader -- no census, row set,
+# clock or path can arrive through it, and a caller cannot manufacture one.
 # Everything that turns a reading into a state is absent from this list.
 __all__ = [
     "SCHEMA_VERSION",
@@ -300,6 +304,16 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     this parameter and nothing shaped like a handle passes for one.  Anything
     else is a ``TypeError``.  The instant is still this function's own.
 
+    AND PROVENANCE IS RE-CHECKED AGAINST CONTENTS, NOT ONLY AGAINST IDENTITY.  A
+    review took a handle the reader really had minted, replaced its payload
+    through ``object.__setattr__``, and projected a complete forged census
+    through this entry -- every identity check passed, because the handle's
+    provenance was genuine and only its CONTENTS were the caller's.  So this
+    entry re-verifies the reading through the reader's own
+    ``verify_workflow_truth_reading``, which re-derives the content digest the
+    reader bound at mint time and refuses with ``READING_PAYLOAD_REPLACED`` if
+    what the handle is holding is no longer what was read.
+
     Consuming the reading rather than repeating it is what makes a health run one
     moment: ``tools/health-check.py`` performs the F09 read once and renders both
     its workflow-census section and its assurance-health section from that single
@@ -316,6 +330,9 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
             "lib/control_plane_workflow_truth_reader.read_workflow_truth_reading(); "
             f"{type(reading).__name__} is caller-supplied data, and a census a caller "
             "composed is its assertion about the control plane, not a reading of it")
+    # Identity says this handle came from the reader; the digest says it is still
+    # holding what the reader read. Both, in that order, or nothing is projected.
+    _verify_workflow_truth_reading(reading)
     return _project(reading.rendered(), now=_datetime.now(_timezone.utc))
 
 

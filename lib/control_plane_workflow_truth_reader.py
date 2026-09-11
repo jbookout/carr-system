@@ -35,16 +35,21 @@ became the system's own answer.
 """
 from __future__ import annotations
 
-import copy
+import hashlib
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any
 
-__all__ = ["SCHEMA_VERSION", "WorkflowTruthReading", "is_workflow_truth_reading",
-           "read_workflow_truth_reading", "read_workflow_truth_snapshot"]
+__all__ = ["SCHEMA_VERSION", "READING_NOT_MINTED", "READING_PAYLOAD_REPLACED",
+           "WorkflowTruthReading", "WorkflowTruthReadingError",
+           "is_workflow_truth_reading", "read_workflow_truth_reading",
+           "read_workflow_truth_snapshot", "verify_workflow_truth_reading"]
 
 SCHEMA_VERSION = "control-plane-workflow-truth-reader.v1"
 
@@ -210,55 +215,179 @@ def read_workflow_truth_snapshot() -> dict[str, Any]:
 #
 # SO THE READING TRAVELS AS AN OPAQUE RECEIPT.  ``read_workflow_truth_reading()``
 # performs exactly one read and returns a handle this module minted.  The handle
-# holds a copy no caller can reach, hands out only copies, and is registered by
-# IDENTITY -- so a forged instance, a subclass, and an ``object.__new__`` shell
-# are all rejected by ``is_workflow_truth_reading`` no matter what they contain.
-# A caller cannot manufacture one; the only way to hold a reading is for this
-# module to have performed it.
+# is registered by IDENTITY -- so a forged instance, a subclass, and an
+# ``object.__new__`` shell are all rejected by ``is_workflow_truth_reading`` no
+# matter what they contain.  A caller cannot manufacture one; the only way to
+# hold a reading is for this module to have performed it.
+#
+# AND IDENTITY ALONE WAS NOT ENOUGH, which is the correction this block most
+# recently took.  A review took a GENUINELY MINTED handle -- one that passed
+# every identity check because it really was minted here -- replaced its
+# ``_payload`` through ``object.__setattr__``, and projected a complete forged
+# census through the A01 adapter as if this module had read it.  Identity proved
+# the handle's provenance and said nothing about its CONTENTS, so the door the
+# mint closed was reopened one attribute assignment later.
+#
+# THE CONTENTS ARE NOW BOUND TO THE HANDLE AT MINT TIME.  Three separate
+# measures, because each one alone has a way around it:
+#
+#   1. THE PAYLOAD IS DEEP-IMMUTABLE.  What the handle holds is frozen on the way
+#      in -- every mapping becomes a ``MappingProxyType``, every sequence a
+#      tuple, all the way down -- so no consumer can reach into a nested dict or
+#      list of the reading and edit it in place.  ``rendered()`` thaws a fresh
+#      mutable copy for its caller, so what a consumer prints or projects from is
+#      still its own and still cannot write back.
+#   2. THE HANDLE ITSELF IS FROZEN.  It is a frozen, slotted dataclass: ordinary
+#      attribute assignment raises, and there is no ``__dict__`` to grow a second
+#      payload beside the first.
+#   3. THE CONTENT DIGEST IS THE ONE THAT ACTUALLY BINDS, because 1 and 2 are
+#      both reachable through ``object.__setattr__``.  At mint time a sha256 over
+#      the canonical form of the payload is recorded in a MODULE-PRIVATE registry
+#      keyed by the handle's object id -- deliberately NOT on the handle, where
+#      whoever replaced the payload would simply replace the digest beside it.
+#      ``rendered()`` and every consumer re-derive the digest from the payload the
+#      handle is holding NOW and refuse with ``READING_PAYLOAD_REPLACED`` if it
+#      differs from the one bound at mint.  The registry holds a strong reference
+#      to each handle, so a minted id can never be reused by a later object.
 # ---------------------------------------------------------------------------
 _MINT = object()
-_MINTED: list["WorkflowTruthReading"] = []
+
+# id(handle) -> (handle, digest-at-mint).  The handle is kept in the value, not
+# merely keyed by, so the object stays alive for the process and its id can never
+# be recycled onto something a caller built.
+_MINTED: dict[int, tuple["WorkflowTruthReading", str]] = {}
+
+READING_NOT_MINTED = "workflow_truth_reading_not_minted"
+READING_PAYLOAD_REPLACED = "workflow_truth_reading_payload_replaced"
 
 
+class WorkflowTruthReadingError(TypeError):
+    """A reading was refused, carrying the machine-readable reason id.
+
+    It subclasses ``TypeError`` because that is what every consumer of this
+    module already refuses a non-reading with, and a payload that no longer
+    matches the reading this module performed is the same kind of refusal: the
+    value is not a reading, whatever it is shaped like.
+    """
+
+    def __init__(self, reason_id: str, message: str) -> None:
+        self.reason_id = reason_id
+        super().__init__(f"{reason_id}: {message}")
+
+
+def _frozen(value: Any) -> Any:
+    """The deep-immutable form of a reading: proxies for mappings, tuples for lists."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _frozen(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen(item) for item in value)
+    return value
+
+
+def _thawed(value: Any) -> Any:
+    """A fresh mutable copy, for a consumer to render or project from."""
+    if isinstance(value, Mapping):
+        return {key: _thawed(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thawed(item) for item in value]
+    return value
+
+
+def _content_digest(value: Any) -> str:
+    """A canonical sha256 over a reading's contents.
+
+    Sorted keys and separators make it independent of dict ordering, and
+    ``default=repr`` means a value JSON cannot encode still contributes its own
+    identity rather than raising -- an unencodable value must not be a hole a
+    replacement could hide in.
+    """
+    return hashlib.sha256(json.dumps(_thawed(value), sort_keys=True, default=repr,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
 class WorkflowTruthReading:
     """An opaque receipt for ONE reading THIS module performed.
 
     There is no public constructor: ``__init__`` refuses without the
-    module-private mint token, and every accessor re-checks that this exact
-    object is in the mint registry, so bypassing ``__init__`` altogether gets a
-    refusal rather than a reading.  What it carries is never handed out by
-    reference -- ``rendered()`` returns a deep copy, so a consumer that mutates
-    what it printed cannot change what another consumer projects from.
+    module-private mint token, which is an ``InitVar`` and is therefore never
+    stored on the instance for a holder to read back off it.  Every accessor
+    re-checks BOTH that this exact object is in the mint registry AND that what
+    it is holding still digests to what was read, so neither bypassing
+    ``__init__`` nor replacing the payload afterwards yields a reading.
+
+    What it carries is never handed out by reference -- ``rendered()`` returns a
+    fresh mutable copy, so a consumer that mutates what it printed cannot change
+    what another consumer projects from.
     """
 
-    __slots__ = ("_payload",)
+    _mint: InitVar[Any]
+    _payload: Any
 
-    def __init__(self, mint: Any, payload: dict[str, Any]) -> None:
-        if mint is not _MINT:
+    def __post_init__(self, _mint: Any) -> None:
+        if _mint is not _MINT:
             raise TypeError(
                 "a workflow-truth reading is minted by read_workflow_truth_reading(); "
                 "it cannot be constructed from caller-supplied data")
-        self._payload = payload
 
     def rendered(self) -> dict[str, Any]:
         """A private copy of this reading, for rendering or projection."""
-        if not is_workflow_truth_reading(self):
-            raise TypeError("this object was not minted by this module's reader")
-        return copy.deepcopy(self._payload)
+        verify_workflow_truth_reading(self)
+        return _thawed(self._payload)
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic only
-        available = bool(self._payload.get("available")) \
-            if isinstance(self._payload, dict) else False
+        payload = getattr(self, "_payload", None)
+        available = bool(payload.get("available")) if isinstance(payload, Mapping) else False
         return f"<WorkflowTruthReading available={available}>"
 
 
 def is_workflow_truth_reading(value: Any) -> bool:
     """True only for a handle minted here for a reading performed here.
 
-    Identity, not shape: ``value is minted`` cannot be satisfied by anything a
-    caller builds, whatever its type name, attributes or contents.
+    Identity, not shape: the registry entry must be THIS object, which nothing a
+    caller builds can satisfy, whatever its type name, attributes or contents.
+    It says nothing about the contents -- ``verify_workflow_truth_reading`` is
+    what binds those, and every consumer calls it.
     """
-    return type(value) is WorkflowTruthReading and any(value is minted for minted in _MINTED)
+    if type(value) is not WorkflowTruthReading:
+        return False
+    entry = _MINTED.get(id(value))
+    return entry is not None and entry[0] is value
+
+
+def verify_workflow_truth_reading(value: Any) -> None:
+    """Refuse unless ``value`` is a minted handle STILL holding what was read.
+
+    The decision procedure, in order, and each step has its own reason id:
+
+      1. Is this object one this module minted?  If not, ``READING_NOT_MINTED``.
+      2. Does the payload it is holding right now digest to the digest bound at
+         mint?  If not, ``READING_PAYLOAD_REPLACED`` -- the provenance is real and
+         the contents are not, which is exactly the forgery identity alone let
+         through.
+
+    Returns ``None`` on success; it hands back no payload, so no caller can
+    mistake the check for the reading.
+    """
+    if not is_workflow_truth_reading(value):
+        raise WorkflowTruthReadingError(
+            READING_NOT_MINTED,
+            "a workflow-truth reading is minted by read_workflow_truth_reading(); "
+            f"{type(value).__name__} is caller-supplied data")
+    bound = _MINTED[id(value)][1]
+    try:
+        current = _content_digest(object.__getattribute__(value, "_payload"))
+    except AttributeError:
+        raise WorkflowTruthReadingError(
+            READING_PAYLOAD_REPLACED,
+            "this handle is no longer holding the reading it was minted for") from None
+    if current != bound:
+        raise WorkflowTruthReadingError(
+            READING_PAYLOAD_REPLACED,
+            "this handle was minted for a reading whose contents digested to "
+            f"{bound[:12]}, and it is now holding contents that digest to "
+            f"{current[:12]}; a replaced payload is caller-supplied data wearing a "
+            "genuine receipt, and it is refused for the same reason a forged handle is")
 
 
 def read_workflow_truth_reading() -> WorkflowTruthReading:
@@ -269,6 +398,7 @@ def read_workflow_truth_reading() -> WorkflowTruthReading:
     too -- the receipt then carries ``available=False`` with its reason, which is
     what every consumer prints, rather than one section going silent.
     """
-    handle = WorkflowTruthReading(_MINT, read_workflow_truth_snapshot())
-    _MINTED.append(handle)
+    payload = _frozen(read_workflow_truth_snapshot())
+    handle = WorkflowTruthReading(_MINT, payload)
+    _MINTED[id(handle)] = (handle, _content_digest(payload))
     return handle

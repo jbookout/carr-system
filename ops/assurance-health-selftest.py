@@ -28,6 +28,7 @@ fail rather than paper over it.
 """
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 import sys
@@ -1524,6 +1525,104 @@ def source_adapter_checks() -> None:
           "def read_workflow_truth_snapshot() -> dict[str, Any]:" in reader_source
           and "def read_workflow_truth_reading() -> WorkflowTruthReading:" in reader_source,
           "the reader accepts caller input")
+
+    # ---- THE MUTATED-HANDLE DOOR, WHICH IDENTITY ALONE LEFT OPEN -----------
+    # THE DEFECT THIS EXISTS FOR.  Every refusal above measures PROVENANCE: is
+    # this object one the reader minted?  A review answered yes -- it took a
+    # handle the reader really had minted, replaced the payload behind it, and
+    # projected a complete forged census through the seam.  Identity passed
+    # because the provenance was genuine; only the CONTENTS were the caller's.
+    # The checks above could not have caught it, because none of them mutates a
+    # handle the reader minted.
+    #
+    # SO EACH MUTATION IS TRIED ON A GENUINE HANDLE, and the bar is that the
+    # forged contents never reach the seam's answer.  There are two honest ways
+    # for that to hold and both are accepted here: the write itself is refused
+    # because the reading is deep-immutable, or the write lands through
+    # ``object.__setattr__`` and the seam refuses the handle because the content
+    # digest bound at mint no longer matches.  What is NOT accepted is the seam
+    # answering with anything the mutation wrote.
+    FORGED_KEY = "forged-by-mutation"
+    honest = _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
+    forged = _reading(keys=((FORGED_KEY, 1),), owners={f"{FORGED_KEY}@v1": MANIFEST_OWNER})
+
+    def _mint(snapshot):
+        """A GENUINELY minted handle for ``snapshot`` -- the reader performs the read."""
+        real = reader.read_workflow_truth_snapshot
+        reader.read_workflow_truth_snapshot = lambda: copy.deepcopy(snapshot)
+        try:
+            return reader.read_workflow_truth_reading()
+        finally:
+            reader.read_workflow_truth_snapshot = real
+
+    def _writes_a_key(handle):
+        handle._payload["census"] = forged["census"]
+
+    def _replaces_the_attribute(handle):
+        object.__setattr__(handle, "_payload", reader._frozen(forged))
+
+    def _swaps_a_nested_mapping(handle):
+        handle._payload["census"]["summary"] = forged["census"]["summary"]
+
+    def _assigns_the_attribute(handle):
+        handle._payload = forged
+
+    mutations = {
+        "writing a key of a minted reading in place": _writes_a_key,
+        "replacing the payload with object.__setattr__": _replaces_the_attribute,
+        "swapping a nested mapping inside the census": _swaps_a_nested_mapping,
+        "assigning the payload attribute outright": _assigns_the_attribute,
+    }
+    leaked, verdicts = [], {}
+    for label, mutate in mutations.items():
+        handle = _mint(honest)
+        # THE PER-CASE CONTROL: this handle answers BEFORE the mutation, so a
+        # refusal afterwards measures the mutation and not a dead handle.
+        before = sources.assurance_health_census(handle)
+        if before.get("available") is not True:
+            leaked.append(f"{label} (control: the honest handle did not project)")
+            continue
+        try:
+            mutate(handle)
+            verdicts[label] = "write landed"
+        except Exception as exc:
+            verdicts[label] = f"write refused ({type(exc).__name__})"
+        try:
+            after = sources.assurance_health_census(handle)
+        except TypeError as exc:
+            verdicts[label] += f"; seam refused ({getattr(exc, 'reason_id', 'TypeError')})"
+            continue
+        if FORGED_KEY in json.dumps(after, default=str):
+            leaked.append(f"{label}: {verdicts[label]}; the seam projected the forgery")
+    check("a genuinely minted handle whose contents were mutated never projects them",
+          not leaked, json.dumps(leaked))
+    check("each mutation of a minted reading is refused at the write or at the seam",
+          all("refused" in verdict for verdict in verdicts.values()),
+          json.dumps(verdicts))
+    # THE DIGEST IS THE THING THAT BINDS, named rather than inferred: a replaced
+    # payload refuses under its own reason id, not as an incidental TypeError.
+    replaced = _mint(honest)
+    object.__setattr__(replaced, "_payload", reader._frozen(forged))
+    reason_ids = []
+    for call in (replaced.rendered, lambda: sources.assurance_health_census(replaced)):
+        try:
+            call()
+        except TypeError as exc:
+            reason_ids.append(getattr(exc, "reason_id", type(exc).__name__))
+        else:
+            reason_ids.append("accepted")
+    check("rendered() and the seam both refuse a replaced payload by reason id",
+          reason_ids == [reader.READING_PAYLOAD_REPLACED, reader.READING_PAYLOAD_REPLACED],
+          json.dumps(reason_ids))
+    # AND THE DIGEST IS NOT MERELY DECORATIVE: restoring the exact contents the
+    # reader read makes the same handle answer again, so the refusal above is
+    # bound to the CONTENTS and not to the fact that anything was written at all.
+    object.__setattr__(replaced, "_payload", reader._frozen(copy.deepcopy(honest)))
+    restored = sources.assurance_health_census(replaced)
+    check("the digest tracks contents, not the act of writing: restored contents project",
+          restored.get("available") is True and FORGED_KEY not in json.dumps(
+              restored, default=str),
+          json.dumps({k: v for k, v in restored.items() if k != "projection"})[:300])
 
 
 def sources_public_surface_guard_checks(health) -> None:
