@@ -34,8 +34,11 @@ import {
   V5_J301_COMMAND_ORIGINS,
   V5_J301_COMMAND_PERMITTED_JOURNEY,
   V5_J301_COMMAND_PUBLIC_SURFACE,
-  V5_J301_COMMAND_VERBS,
-  V5_J301_HUMAN_PROMOTION_RECEIPT_SEAM,
+  V5_J301_COMMAND_INTENDED_VERBS,
+  V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+  V5_J301_COMMANDS_WITHOUT_A_VERB,
+  V5_J301_PROMOTION_RECEIPT_AUTHORITY,
+  V5_J301_PROMOTION_RECEIPT_READER_SEAM,
   V5_J301_MAP_COMMANDS,
   V5_J301_NAVIGATION_PLATFORMS,
   V5_J301_POSITION_ROLES,
@@ -113,8 +116,12 @@ test("a map click and a Doc sentence expressing one intent are one command", () 
     }));
     assert.equal(comparison.equivalent, true, command);
     assert.equal(comparison.command_digests_match, true, command);
-    assert.equal(comparison.traverses_same_verb, true, command);
-    assert.equal(comparison.writes_through_verb, V5_J301_MAP_COMMANDS[command].writes_through_verb);
+    assert.equal(comparison.names_same_intended_verb, true, command);
+    // EQUIVALENT is not APPLIED. Said on every comparison.
+    assert.equal(comparison.governed_state_equivalent, false, command);
+    assert.equal(comparison.governed_state_equivalence_reason_id, "no_command_is_applied_here");
+    assert.equal(comparison.verb_adapter_bound, false, command);
+    assert.equal(comparison.intended_verb, V5_J301_MAP_COMMANDS[command].intended_verb);
     assert.deepEqual(comparison.divergences, []);
     // And it is still not permission.
     assert.equal(comparison.admission, "unavailable", command);
@@ -186,8 +193,8 @@ test("two different commands are not equivalent, and the divergence says so", ()
     doc_command: normalize("reorder_route_stops", "doc_command"),
   }));
   assert.equal(comparison.equivalent, false);
-  assert.equal(comparison.traverses_same_verb, false);
-  assert.equal(comparison.writes_through_verb, null);
+  assert.equal(comparison.names_same_intended_verb, false);
+  assert.equal(comparison.intended_verb, null);
   assert.deepEqual(comparison.divergences.map(entry => entry.field), ["command"]);
 });
 
@@ -335,14 +342,25 @@ test("no command is admissible, and each says which receipt it is waiting on", (
       assert.equal(result.map_contract_gate, V5_J301_MAP_CONTRACT_GATE);
       assert.equal(result.map_contract_production_status,
         "approved_architecture_not_implemented_in_production");
+      // Said on every answer, whichever shape of no it is.
+      assert.equal(result.verb_adapter_bound, false, command);
+      assert.equal(result.verb_adapter_seam, V5_J301_COMMAND_VERB_ADAPTER_SEAM, command);
       if (command === "hand_off_native_navigation") {
         assert.equal(result.decision, "refused");
-        assert.equal(result.reason_id, "human_promotion_receipt_unavailable");
-        assert.ok(result.owed_seams.includes(V5_J301_HUMAN_PROMOTION_RECEIPT_SEAM));
+        assert.equal(result.reason_id, "promotion_receipt_reader_unavailable");
+        assert.ok(result.owed_seams.includes(V5_J301_PROMOTION_RECEIPT_READER_SEAM));
+        // THE CORRECTION A REVIEWER FORCED: the store is real, and the refusal
+        // names it rather than claiming it is missing.
+        assert.equal(result.promotion_receipt_authority.store_exists_here, true);
+        assert.equal(result.promotion_receipt_authority.reader_exists_here, false);
+        assert.equal(result.promotion_receipt_authority.table, "ops.tour_map_promotion_receipt");
+        assert.equal(result.promotion_receipt_authority.writer_verb,
+          "record-tour-map-promotion-receipt");
       } else {
         assert.equal(result.decision, "unavailable");
         assert.equal(result.reason_id, "map_contract_receipt_unavailable");
-        assert.deepEqual([...result.owed_seams], [V5_J301_MAP_CONTRACT_RECEIPT_STEP]);
+        assert.deepEqual([...result.owed_seams],
+          [V5_J301_COMMAND_VERB_ADAPTER_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP]);
       }
     }
   }
@@ -364,13 +382,81 @@ test("there is exactly one command family per axis Q124.D2 names", () => {
   assert.deepEqual(axes, [...V5_J301_COMMAND_AXES].sort());
 });
 
-test("every command traverses a verb that really exists in the deployed registry", () => {
-  assert.equal(V5_J301_COMMAND_VERBS.length, 4);
-  for (const verb of V5_J301_COMMAND_VERBS) {
+test("every verb a command NAMES resolves in the deployed registry", () => {
+  // Three commands name a verb; navigation names none, because the nearest
+  // deployed verb writes a human promotion decision rather than performing a
+  // handoff. Naming that one would have made a receipt write look like
+  // navigation, which is the claim a reviewer rejected.
+  assert.equal(V5_J301_COMMAND_INTENDED_VERBS.length, 3);
+  for (const verb of V5_J301_COMMAND_INTENDED_VERBS) {
     assert.ok(Object.hasOwn(TOOLS, verb), `${verb} is not a deployed verb`);
   }
+  assert.deepEqual([...V5_J301_COMMANDS_WITHOUT_A_VERB], ["hand_off_native_navigation"]);
   // The control: an invented verb fails the same check.
   assert.equal(Object.hasOwn(TOOLS, "apply-tour-map-command"), false);
+});
+
+/**
+ * THE GAP, CHECKED AGAINST THE REAL inputSchema OF THE REAL VERB.
+ *
+ * The claim this replaces was that every command "traverses" a deployed verb.
+ * It does not: it names one, and the arguments it emits do not satisfy that
+ * verb's own schema. Rather than assert compatibility that is not there, each
+ * registry entry RECORDS the gap, and this test reads the deployed verb's
+ * `inputSchema.required` and `properties` straight out of tools.js and asserts
+ * the recorded gap is exactly right. A verb that gains or loses a required
+ * field fails here, so the gap cannot silently go stale.
+ */
+test("each command's recorded verb gap is exactly what the deployed schema says", () => {
+  let checked = 0;
+  for (const name of V5_J301_COMMAND_NAMES) {
+    const contract = V5_J301_MAP_COMMANDS[name];
+    if (contract.intended_verb === null) {
+      assert.deepEqual([...contract.verb_required_not_supplied], []);
+      assert.deepEqual([...contract.supplied_not_in_verb_schema], []);
+      continue;
+    }
+    const schema = TOOLS[contract.intended_verb].inputSchema;
+    const required = [...schema.required].sort();
+    const properties = Object.keys(schema.properties);
+    const supplied = [...contract.governed_arguments];
+
+    const missing = required.filter(field => !supplied.includes(field));
+    assert.deepEqual([...contract.verb_required_not_supplied].sort(), missing,
+      `${name}: the recorded missing-field list is not what ${contract.intended_verb} requires`);
+    const unknown = supplied.filter(field => !properties.includes(field));
+    assert.deepEqual([...contract.supplied_not_in_verb_schema].sort(), unknown.sort(),
+      `${name}: the recorded unknown-field list is not what ${contract.intended_verb} accepts`);
+    // And the point of recording it: the gap is never empty, so no command is
+    // one rename away from looking like a call.
+    assert.ok(missing.length > 0,
+      `${name} now satisfies ${contract.intended_verb}; the adapter claim can be revisited`);
+    checked++;
+  }
+  assert.equal(checked, 3);
+});
+
+test("an envelope says the adapter is unbound and carries the gap", () => {
+  for (const name of V5_J301_COMMAND_NAMES) {
+    const envelope = record(normalize(name, "doc_command"));
+    assert.equal(envelope.verb_adapter_bound, false, name);
+    assert.equal(envelope.verb_adapter_seam, V5_J301_COMMAND_VERB_ADAPTER_SEAM, name);
+    assert.deepEqual([...envelope.verb_argument_gap.required_by_verb_not_supplied],
+      [...V5_J301_MAP_COMMANDS[name].verb_required_not_supplied], name);
+  }
+});
+
+test("the promotion receipt store is named as existing, because it does", () => {
+  // migrations/0430_tour_delivery_data_plane.sql creates ops.tour_map_promotion_receipt,
+  // db/schema.sql carries it, and record-tour-map-promotion-receipt is the
+  // deployed humanOnly verb that writes it. The earlier draft of this slice
+  // said the store did not exist; it did.
+  assert.equal(V5_J301_PROMOTION_RECEIPT_AUTHORITY.store_exists_here, true);
+  assert.equal(V5_J301_PROMOTION_RECEIPT_AUTHORITY.reader_exists_here, false);
+  const verb = V5_J301_PROMOTION_RECEIPT_AUTHORITY.writer_verb;
+  assert.ok(Object.hasOwn(TOOLS, verb), `${verb} is not a deployed verb`);
+  assert.equal(TOOLS[verb].humanOnly, true);
+  assert.equal(V5_J301_PROMOTION_RECEIPT_AUTHORITY.writer_verb_is_human_only, true);
 });
 
 test("the vocabularies are the ones the map doctrine names", () => {
@@ -471,7 +557,7 @@ test("the projection tells the same story the evaluators do", () => {
   assert.equal(projection.navigation_handoff_reachable_today, false);
   assert.equal(projection.admission_reachable_today, false);
   assert.equal(projection.admission_reason_id, "map_contract_receipt_unavailable");
-  assert.deepEqual([...projection.command_verbs], [...V5_J301_COMMAND_VERBS]);
+  assert.deepEqual([...projection.command_verbs], [...V5_J301_COMMAND_INTENDED_VERBS]);
   assert.equal(projection.public_projection_here, false);
   assert.equal(projection.share_grant_issuance_here, false);
   assert.equal(projection.pdf_render_request_here, false);

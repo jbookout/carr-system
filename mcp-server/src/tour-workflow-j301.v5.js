@@ -54,14 +54,26 @@
 //     timestamps are not policy questions; the module cannot read the request
 //     at all, so it fails closed rather than guessing which boundary was meant.
 //
-// THERE IS NO THIRD ANSWER. No exported function in this module returns an
-// allow, a commit, an advance, a resume point, a completion or any other
-// privileged outcome, under any name, from any input a caller controls. The
-// resume CLASSIFICATION exists — it has to, or the staging rules could not be
-// checked — but it is module-private, it is reachable only through
-// __V5_J301_TEST_ONLY__ (deliberately excluded from V5_J301_PUBLIC_SURFACE),
-// and even there it answers under the name `would_resume_at_if_authoritative`
-// so that no consumer can mistake it for a decision that something may proceed.
+// THERE IS NO THIRD ANSWER, AND NO EXCEPTION TO IT. No exported function in
+// this module returns an allow, a commit, an advance, a resume point, a
+// completion or any other privileged outcome, under any name, from any input a
+// caller controls. The module's real exports equal V5_J301_PUBLIC_SURFACE
+// EXACTLY — there is no test-only member on the list and none off it. The
+// resume CLASSIFICATION exists, because the staging rules could not be checked
+// without it, and it is a module-private function that never leaves this file:
+// its content reaches a reader only as the BODY OF A REFUSAL. A suite that
+// wants the classification derives it by probing the public refusals from
+// mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs, a file in the
+// test tree that no production module can import — proved by a parser-backed
+// scan of every module under src/, not by a promise.
+//
+// ATTENDANCE IS NOT A STRING. `declared_actor_slug` is exactly what its name
+// says: something a caller typed. This module runs no membership test on it,
+// echoes it in no answer, and is provably indifferent to it. The authenticated
+// actor that COULD establish attendance lives behind the identity seam
+// (mcp-server/src/identity.js), which reads server-derived grant props a pure
+// evaluator never sees — so every attended action ends at
+// `attended_actor_source_unavailable` naming that seam.
 //
 // A CALLER-SUPPLIED GATE RECEIPT IS REFUSED BY NAME. Tour and map-capable
 // behavior is blocked until `tour-map-contract-1.2.0-accepted`, whose producer
@@ -73,7 +85,7 @@
 // read.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
-import { ORGANIZATION_TENANT_ID, isKnownPartner } from "./identity.js";
+import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
   V5_J102_ASSIGNMENT_PHASES,
@@ -93,6 +105,8 @@ export const V5_J301_ACTIVITY_SCHEMA_VERSION =
   "doctorcre-v5-j301-tour-assignment-activity.v1";
 export const V5_J301_PROJECTION_SCHEMA_VERSION =
   "doctorcre-v5-j301-tour-workflow-projection.v1";
+export const V5_J301_RESUME_SCHEMA_VERSION =
+  "doctorcre-v5-j301-tour-workflow-resume.v1";
 
 // ---------------------------------------------------------------------------
 // Local primitives. Each v5 module carries its own copy on purpose: a shared
@@ -373,50 +387,53 @@ export const V5_J301_ACTOR_CLASSES = deepFreeze([
 
 /**
  * THE STAGE REGISTRY. Every action this workflow recognizes, the actor class
- * that may perform it, and the deployed record-layer verb the write must
- * traverse. `writes_through_verb: null` marks an action that produces a
- * PROPOSAL rather than a record — the model stage's two actions, which is the
- * whole of the model judgment boundary this slice was given.
+ * that may perform it, and the record-layer verb the write is INTENDED to
+ * traverse. `intended_verb: null` marks an action that produces a PROPOSAL
+ * rather than a record — the model stage's two actions, which is the whole of
+ * the model judgment boundary this slice was given.
  *
- * The verb names are not decoration. The suite checks every one of them against
- * the deployed registry in tools.js, so a renamed or retired verb fails here
- * rather than at a caller.
+ * `intended_verb` IS A NAME AND NOTHING MORE. This module builds no argument
+ * list for any of these verbs, calls none of them, and has no adapter that
+ * could. The suite checks every name against the deployed registry in tools.js
+ * so a renamed or retired verb fails here rather than at a caller — that proves
+ * the NAME still resolves, which is not the same fact as a write traversing it.
+ * The adapter is owed at V5_J301_VERB_ADAPTER_SEAM and does not exist.
  */
 export const V5_J301_STAGE_ACTIONS = deepFreeze({
   attended_mls_acquisition: {
     capture_listing_observation: {
-      actor_class: "human_attended", writes_through_verb: "append-tour-source-evidence",
+      actor_class: "human_attended", intended_verb: "append-tour-source-evidence",
     },
     attach_property_identifier: {
-      actor_class: "human_attended", writes_through_verb: "append-tour-property-identifier-assertion",
+      actor_class: "human_attended", intended_verb: "append-tour-property-identifier-assertion",
     },
   },
   deterministic_normalization: {
     normalize_property_fact: {
-      actor_class: "deterministic", writes_through_verb: "append-tour-field-assertion",
+      actor_class: "deterministic", intended_verb: "append-tour-field-assertion",
     },
     normalize_entrance_coordinate: {
-      actor_class: "deterministic", writes_through_verb: "append-tour-coordinate-candidate",
+      actor_class: "deterministic", intended_verb: "append-tour-coordinate-candidate",
     },
   },
   agent_assisted_assembly: {
-    rank_candidate_stops: { actor_class: "model_assisted", writes_through_verb: null },
-    draft_stop_narrative: { actor_class: "model_assisted", writes_through_verb: null },
+    rank_candidate_stops: { actor_class: "model_assisted", intended_verb: null },
+    draft_stop_narrative: { actor_class: "model_assisted", intended_verb: null },
   },
   deterministic_generation: {
     generate_route_version: {
-      actor_class: "deterministic", writes_through_verb: "prepare-tour-route-version",
+      actor_class: "deterministic", intended_verb: "prepare-tour-route-version",
     },
     generate_selection_cart_version: {
-      actor_class: "deterministic", writes_through_verb: "append-tour-selection-cart-version",
+      actor_class: "deterministic", intended_verb: "append-tour-selection-cart-version",
     },
   },
   client_facing_review: {
     record_client_review_note: {
-      actor_class: "human_attended", writes_through_verb: "append-tour-cheat-sheet-revision",
+      actor_class: "human_attended", intended_verb: "append-tour-cheat-sheet-revision",
     },
     accept_route_for_client_review: {
-      actor_class: "human_attended", writes_through_verb: "accept-tour-route-version",
+      actor_class: "human_attended", intended_verb: "accept-tour-route-version",
     },
   },
 });
@@ -424,10 +441,10 @@ export const V5_J301_STAGE_ACTIONS = deepFreeze({
 export const V5_J301_ACTION_KINDS = deepFreeze(
   [...new Set(V5_J301_STAGES.flatMap(stage => Object.keys(V5_J301_STAGE_ACTIONS[stage])))].sort());
 
-export const V5_J301_WRITE_VERBS = deepFreeze(
+export const V5_J301_INTENDED_VERBS = deepFreeze(
   [...new Set(V5_J301_STAGES.flatMap(stage =>
     Object.values(V5_J301_STAGE_ACTIONS[stage])
-      .map(action => action.writes_through_verb)
+      .map(action => action.intended_verb)
       .filter(verb => verb !== null)))].sort());
 
 /** The stages a model may occupy. Exactly one, and it is named in the decision. */
@@ -500,6 +517,48 @@ export const V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM =
 /** The Assignment activity record's owner. V5-J102 is a kernel, not a store. */
 export const V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM =
   "seam:v5-j301-durable-assignment-tour-activity-record";
+
+/**
+ * THE AUTHENTICATED ATTENDED-ACTOR SOURCE, AND WHY NOTHING HERE CAN STAND IN
+ * FOR IT.
+ *
+ * "Attended" is a claim about the WORLD — a human was present when this action
+ * happened — and the only thing in this repository that can turn an incoming
+ * request into a verified human is the identity seam, mcp-server/src/identity.js.
+ * Its `actorFromProps` reads SERVER-DERIVED grant props (`via`, `client_id`, the
+ * sponsoring human) that the request handler holds and a verb argument can never
+ * carry; `isKnownPartner` below it is a two-name set lookup over a STRING, which
+ * answers "is this spelled like a partner slug", not "is a partner here".
+ *
+ * This module is a pure evaluator. No grant props reach it, and accepting an
+ * actor object as an argument would make the caller its own authenticator —
+ * exactly the injected holder the standing rule forbids. So there is no
+ * membership test on a slug anywhere in this file, and every action whose actor
+ * class is `human_attended` ends at `attended_actor_source_unavailable` naming
+ * this seam. A declared actor slug may still CONDEMN a request (it is carried
+ * into the future journal for attribution); it can never absolve one.
+ */
+export const V5_J301_ATTENDED_ACTOR_SOURCE_SEAM =
+  "seam:v5-j301-authenticated-attended-actor-source";
+
+/**
+ * The durable journal READER. Distinct from the journal owner above: even once
+ * the table exists, something has to read it on this module's behalf, and the
+ * public resume path is unavailable until it does. A caller-supplied view is
+ * never that reader.
+ */
+export const V5_J301_WORKFLOW_JOURNAL_READER_SEAM =
+  "seam:v5-j301-tour-workflow-stage-journal-reader";
+
+/**
+ * The adapter that would turn a named `intended_verb` into a call the deployed
+ * verb's own inputSchema accepts. It does not exist, and the gap is not
+ * cosmetic: `prepare-tour-route-version` requires `idempotency_key` and
+ * `stop_ids`, `append-tour-selection-cart-version` requires six fields, and
+ * `append-tour-coordinate-candidate` requires provenance, rights and review
+ * fields this module never produces. Naming a verb is not traversing it.
+ */
+export const V5_J301_VERB_ADAPTER_SEAM = "seam:v5-j301-record-layer-verb-adapter";
 
 export const V5_J301_MAP_CONTRACT = "carr-map-tour-v1";
 export const V5_J301_MAP_CONTRACT_VERSION = "1.2.0";
@@ -593,11 +652,12 @@ export function tourWorkflowStepKey(request) {
 // ---------------------------------------------------------------------------
 
 const JOURNAL_ENTRY_KEYS = Object.freeze([
-  "tour_id", "stage", "action_kind", "action_subject_digest", "actor_slug",
-  "recorded_at", "corrects_step_key",
+  "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
+  "action_subject_digest", "declared_actor_slug", "recorded_at", "corrects_step_key",
 ]);
 const JOURNAL_ENTRY_REQUIRED = Object.freeze([
-  "tour_id", "stage", "action_kind", "action_subject_digest", "actor_slug", "recorded_at",
+  "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
+  "action_subject_digest", "declared_actor_slug", "recorded_at",
 ]);
 
 /**
@@ -606,6 +666,12 @@ const JOURNAL_ENTRY_REQUIRED = Object.freeze([
  * WHAT THIS IS NOT: an admission that the entry happened. The return carries
  * `authority: "caller_supplied_view"` for exactly that reason. Shape validation
  * is not authentication, and this module never pretends otherwise.
+ *
+ * EVERY ENTRY NAMES ITS TENANT, TOUR AND ASSIGNMENT, and they are required
+ * rather than optional, because an entry that does not say which Tour it
+ * belongs to cannot be checked against the one being asked about — and an
+ * unchecked entry from another Tour was able to change this Tour's answer.
+ * `evaluateStageAction` refuses any entry whose binding is not the request's.
  */
 export function assertTourWorkflowJournalEntry(entry, path = "entry") {
   assertObject(entry, path);
@@ -619,11 +685,16 @@ export function assertTourWorkflowJournalEntry(entry, path = "entry") {
   }
   const normalized = {
     schema_version: V5_J301_JOURNAL_ENTRY_SCHEMA_VERSION,
+    organization_tenant_id: assertTenant(entry.organization_tenant_id, `${path}.organization_tenant_id`),
     tour_id: assertExternalIdent(entry.tour_id, `${path}.tour_id`),
+    assignment_id: assertExternalIdent(entry.assignment_id, `${path}.assignment_id`),
     stage,
     action_kind: entry.action_kind,
     action_subject_digest: assertDigestRef(entry.action_subject_digest, `${path}.action_subject_digest`),
-    actor_slug: assertExternalIdent(entry.actor_slug, `${path}.actor_slug`, { maxLength: 64 }),
+    // DECLARED, and named so at the call site. Attribution carried toward a
+    // future journal; never a test this module passes anyone on.
+    declared_actor_slug:
+      assertExternalIdent(entry.declared_actor_slug, `${path}.declared_actor_slug`, { maxLength: 64 }),
     recorded_at: entry.recorded_at,
     recorded_at_epoch_ms: assertInstant(entry.recorded_at, `${path}.recorded_at`),
     corrects_step_key: entry.corrects_step_key === undefined || entry.corrects_step_key === null
@@ -646,15 +717,23 @@ function normalizeJournalView(value, path) {
 }
 
 /**
- * MODULE-PRIVATE, and it stays that way.
+ * MODULE-PRIVATE, and it stays that way. Nothing re-exports it, no test entry
+ * reaches it, and the suite proves the module's real exports equal
+ * V5_J301_PUBLIC_SURFACE with NO exception.
  *
- * Given a journal view, work out which stage the workflow would sit at. The
- * answer is a real deterministic classification and it is genuinely useful —
- * it is what makes the staging refusals below possible — but it is NOT a
- * decision that anything may proceed, and the moment it were exported under a
- * name like "resume_at" a caller could manufacture a position by handing in a
- * journal it wrote itself. The test-only entry reaches it under the name
- * `would_resume_at_if_authoritative`; nothing else may.
+ * Given a journal view already bound to this Tour, work out which stage the
+ * workflow would sit at. The answer is a real deterministic classification and
+ * it is what makes the staging refusals below possible — but it is not a
+ * decision that anything may proceed, so it never leaves this file except as
+ * the CONTENT of a refusal. A test that wants the classification derives it by
+ * probing the public refusals; see
+ * mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs.
+ *
+ * `contiguity_gap` is the first stage that has no entry while a LATER stage
+ * does. A journal holding only `client_facing_review` cannot be a history of
+ * this Tour's ordered workflow — the four stages before it left no trace — and
+ * a history that cannot be this Tour's is refused before it is read for
+ * position, rather than quietly treated as "the workflow is at stage five".
  */
 function classifyResumePoint(entries) {
   const seen = new Set();
@@ -674,11 +753,16 @@ function classifyResumePoint(entries) {
   for (const stage of V5_J301_STAGES) {
     if (seen.has(stage)) highestSeenIndex = V5_J301_STAGE_INDEX[stage];
   }
+  let contiguityGap = null;
+  for (let index = 0; index < highestSeenIndex; index += 1) {
+    if (!seen.has(V5_J301_STAGES[index])) { contiguityGap = V5_J301_STAGES[index]; break; }
+  }
   return {
     open_stage: highestSeenIndex === -1 ? V5_J301_STAGES[0] : V5_J301_STAGES[highestSeenIndex],
     next_stage: V5_J301_STAGES[highestSeenIndex + 1] ?? null,
     highest_seen_index: highestSeenIndex,
     stages_seen: V5_J301_STAGES.filter(stage => seen.has(stage)),
+    contiguity_gap: contiguityGap,
     step_keys: stepKeys,
   };
 }
@@ -737,12 +821,12 @@ function scanFieldNames(value, forbidden, path, depth = 0) {
 
 const STAGE_ACTION_KEYS = Object.freeze([
   "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
-  "actor_slug", "attended_intent", "actor_class", "action_subject_digest",
+  "declared_actor_slug", "attended_intent", "actor_class", "action_subject_digest",
   "tour_activity", "corrects_step_key", "journal_view",
 ]);
 const STAGE_ACTION_REQUIRED = Object.freeze([
   "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
-  "actor_slug", "attended_intent", "actor_class", "action_subject_digest", "journal_view",
+  "declared_actor_slug", "attended_intent", "actor_class", "action_subject_digest", "journal_view",
 ]);
 
 /**
@@ -758,17 +842,31 @@ const STAGE_ACTION_REQUIRED = Object.freeze([
  *   4. Is the intent unattended?                 -> refused, unattended_intake_refused (Q014.D2)
  *   5. Is a model speaking outside its stage?    -> refused, model_outside_declared_seam
  *   6. Does the actor class match the action?    -> refused, actor_class_mismatch
- *   7. Does an attended action name a partner?   -> refused, attended_action_requires_verified_partner
- *   8. Does the stage jump past the stage after
+ *   7. Does any journal entry belong to another
+ *      tenant, Tour or Assignment?               -> refused, journal_entry_foreign_to_tour
+ *   8. Does the journal skip a stage that a later
+ *      entry presupposes?                        -> refused, journal_history_noncontiguous
+ *   9. Does the stage jump past the stage after
  *      the furthest one with any activity?       -> refused, stage_skipped (Q060.D1)
- *   9. Does it move backwards without being a
+ *  10. Does it move backwards without being a
  *      correction against an existing entry?     -> refused, backward_stage_requires_correction
- *  10. Has this exact step key already been
+ *  11. Has this exact step key already been
  *      recorded in the view?                     -> refused, duplicate_step_key_replay
- *  11. Anything else                             -> unavailable, journal owner does not exist
+ *  12. Is this an attended action?               -> unavailable, attended_actor_source_unavailable
+ *  13. Anything else                             -> unavailable, journal owner does not exist
  *
- * Step 11 is the ONLY exit for a well-formed, rule-abiding request, and it is
- * an honest one: there is no durable journal in this repository to advance.
+ * THERE IS NO STEP THAT SAYS YES, and the two exits at 12 and 13 are why. A
+ * refusal can always be given honestly, because denial needs no authority the
+ * repository lacks. Permission does, twice over here: no authenticated actor
+ * source can tell this module a human is present (step 12), and no durable
+ * journal can tell it where the workflow actually stands (step 13).
+ *
+ * WHY 12 COMES BEFORE 13. A caller writing `declared_actor_slug: "joe"` and
+ * `attended_intent: "human_present_for_this_action"` used to reach the ordinary
+ * journal-owner answer, which read as "attendance was satisfied, only the store
+ * is missing". It was not satisfied and it cannot be here. The attended exit
+ * names the missing authenticator first, and the journal seam rides along in
+ * `owed_seams` so neither hole is hidden by the other.
  */
 export function evaluateStageAction(request) {
   assertObject(request, "request");
@@ -794,7 +892,10 @@ export function evaluateStageAction(request) {
       { stage, registered: Object.keys(actions).sort() });
   }
   const action = actions[request.action_kind];
-  const actor_slug = assertExternalIdent(request.actor_slug, "request.actor_slug", { maxLength: 64 });
+  // DECLARED, not verified, and the name says so. Nothing below reads it: it is
+  // validated for shape, echoed nowhere, and the suite proves every answer is
+  // byte-identical across every slug a caller could write here.
+  assertExternalIdent(request.declared_actor_slug, "request.declared_actor_slug", { maxLength: 64 });
   const intent = assertEnum(request.attended_intent, V5_J301_INTENTS,
     "request.attended_intent", "unknown_intent");
   const actor_class = assertEnum(request.actor_class, V5_J301_ACTOR_CLASSES,
@@ -845,19 +946,42 @@ export function evaluateStageAction(request) {
     });
   }
 
-  // 6. and 7. The actor class the action declares is the one that may perform it,
-  //    and an attended action needs a verified partner behind it.
+  // 6. The actor class the action declares is the one that may perform it. There
+  //    is deliberately no seventh question about WHO the actor is: a slug is a
+  //    string, and a set lookup over a string is not an authentication.
   if (actor_class !== action.actor_class) {
     return refused("actor_class_mismatch", {
       ...common, actor_class, required_actor_class: action.actor_class,
     });
   }
-  if (action.actor_class === "human_attended" && !isKnownPartner(actor_slug)) {
-    return refused("attended_action_requires_verified_partner", { ...common, actor_slug });
+
+  // 7. EVERY ENTRY MUST BE AN ENTRY OF THIS TOUR. Checked before the journal is
+  //    read for position, because an entry from another Tour was able to move
+  //    this Tour's answer — a cross-Tour entry at a later stage produced
+  //    backward_stage_requires_correction for a request that was not going
+  //    backwards at all.
+  for (let index = 0; index < journal.length; index += 1) {
+    const entry = journal[index];
+    if (entry.tour_id !== tour_id || entry.assignment_id !== assignment_id) {
+      return refused("journal_entry_foreign_to_tour", {
+        ...common,
+        entry_index: index,
+        entry_tour_id: entry.tour_id,
+        entry_assignment_id: entry.assignment_id,
+      });
+    }
   }
 
-  // 8., 9. and 10. The staging rules, read off the journal view.
+  // 8., 9., 10. and 11. The staging rules, read off the journal view.
   const resume = classifyResumePoint(journal);
+  if (resume.contiguity_gap !== null) {
+    return refused("journal_history_noncontiguous", {
+      ...common,
+      stages_seen: [...resume.stages_seen],
+      missing_stage: resume.contiguity_gap,
+      furthest_stage_seen: resume.open_stage,
+    });
+  }
   const requestedIndex = V5_J301_STAGE_INDEX[stage];
   if (requestedIndex > resume.highest_seen_index + 1) {
     return refused("stage_skipped", {
@@ -880,26 +1004,42 @@ export function evaluateStageAction(request) {
     return refused("duplicate_step_key_replay", { ...common, already_recorded_in_view: true });
   }
 
-  // 11. Well-formed, rule-abiding, and still not admissible: the durable journal
+  const tail = {
+    ...common,
+    intended_verb: action.intended_verb,
+    // Said on every answer: the verb is NAMED, and nothing here builds a call
+    // its inputSchema would accept.
+    intended_verb_adapter_bound: false,
+    intended_verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
+    attended_actor_source_bound: false,
+    declared_actor_slug_is_authority: false,
+  };
+
+  // 12. An attended action, with no authenticated actor source to say a human
+  //     was here. This exit is reached by EVERY attended action, whatever slug
+  //     the caller declared, which is the property the suite sweeps.
+  if (action.actor_class === "human_attended") {
+    return unavailable("attended_actor_source_unavailable",
+      [V5_J301_ATTENDED_ACTOR_SOURCE_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
+        V5_J301_MAP_CONTRACT_RECEIPT_STEP],
+      { ...tail, identity_seam_module: "mcp-server/src/identity.js" });
+  }
+
+  // 13. Well-formed, rule-abiding, and still not admissible: the durable journal
   //     that owns workflow position does not exist in this repository, and the
   //     map contract has no independent acceptance receipt.
   return unavailable("workflow_journal_owner_unavailable",
-    [V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP],
-    {
-      ...common,
-      writes_through_verb: action.writes_through_verb,
-      would_be_recorded_by: action.writes_through_verb === null
-        ? "model_proposal_not_a_record" : action.writes_through_verb,
-    });
+    [V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP], tail);
 }
 
 const ACTIVITY_KEYS = Object.freeze([
   "organization_tenant_id", "assignment_id", "tour_id", "activity_kind",
-  "actor_slug", "attended_intent", "occurred_at", "activity_payload", "corrects_activity_id",
+  "declared_actor_slug", "attended_intent", "occurred_at", "activity_payload",
+  "corrects_activity_id",
 ]);
 const ACTIVITY_REQUIRED = Object.freeze([
   "organization_tenant_id", "assignment_id", "tour_id", "activity_kind",
-  "actor_slug", "attended_intent", "occurred_at",
+  "declared_actor_slug", "attended_intent", "occurred_at",
 ]);
 
 /**
@@ -910,7 +1050,8 @@ const ACTIVITY_REQUIRED = Object.freeze([
  * and negotiation phase and every Deal axis stay independently evidenced. So a
  * request that carries any of them is refused by field NAME, and a request that
  * carries none of them still cannot be admitted, because the durable Assignment
- * activity record does not exist here either.
+ * activity record does not exist here either — and before that, because no
+ * authenticated actor source can say a human was present for it.
  *
  * A correction is an APPEND — Q072.D2's "records any correction with preserved
  * history". A request that names a prior activity carries it as
@@ -943,7 +1084,10 @@ export function evaluateTourAssignmentActivity(request) {
   const tour_id = assertExternalIdent(request.tour_id, "request.tour_id");
   const activity_kind = assertEnum(request.activity_kind, V5_J301_ACTIVITY_KINDS,
     "request.activity_kind", "unknown_activity_kind");
-  const actor_slug = assertExternalIdent(request.actor_slug, "request.actor_slug", { maxLength: 64 });
+  // DECLARED, not verified, and the name says so. Nothing below reads it: it is
+  // validated for shape, echoed nowhere, and the suite proves every answer is
+  // byte-identical across every slug a caller could write here.
+  assertExternalIdent(request.declared_actor_slug, "request.declared_actor_slug", { maxLength: 64 });
   const intent = assertEnum(request.attended_intent, V5_J301_INTENTS,
     "request.attended_intent", "unknown_intent");
   assertInstant(request.occurred_at, "request.occurred_at");
@@ -993,11 +1137,6 @@ export function evaluateTourAssignmentActivity(request) {
       accepted_intent: V5_J301_ATTENDED_INTENT,
     });
   }
-  if (!isKnownPartner(actor_slug)) {
-    return deepFreeze({
-      ...base, decision: "refused", reason_id: "attended_action_requires_verified_partner", actor_slug,
-    });
-  }
   if (activity_kind === "tour_corrected" && corrects_activity_id === null) {
     return deepFreeze({
       ...base, decision: "refused", reason_id: "correction_must_name_its_target",
@@ -1009,15 +1148,60 @@ export function evaluateTourAssignmentActivity(request) {
     });
   }
 
+  // EVERY Tour activity is an attended one — all four activity kinds record
+  // something a human did on a tour — so this function has exactly one exit and
+  // it names the missing authenticator before the missing store.
   return deepFreeze({
     ...base,
     decision: "unavailable",
-    reason_id: "assignment_activity_owner_unavailable",
-    owed_seams: [V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP],
+    reason_id: "attended_actor_source_unavailable",
+    owed_seams: [V5_J301_ATTENDED_ACTOR_SOURCE_SEAM, V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
+      V5_J301_MAP_CONTRACT_RECEIPT_STEP],
+    identity_seam_module: "mcp-server/src/identity.js",
+    attended_actor_source_bound: false,
+    declared_actor_slug_is_authority: false,
     map_contract: V5_J301_MAP_CONTRACT,
     map_contract_version: V5_J301_MAP_CONTRACT_VERSION,
     map_contract_gate: V5_J301_MAP_CONTRACT_GATE,
     map_contract_production_status: V5_J301_MAP_CONTRACT_PRODUCTION_STATUS,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The public resume path.
+// ---------------------------------------------------------------------------
+
+/**
+ * Where does this Tour's workflow stand?
+ *
+ * THE ANSWER IS UNAVAILABLE, ALWAYS, AND IT IS THE SAME ANSWER FOR EVERY INPUT.
+ * A resume point is a fact about what really happened, and the only thing that
+ * could know it is a durable journal read by something this module trusts.
+ * There is no such table and no such reader here, so this function names both
+ * seams and answers nothing else. It deliberately does not look at its argument
+ * at all: a function that READ a caller-supplied journal and reported a position
+ * would be letting the caller choose where its own workflow resumes, which is
+ * the whole defect this path exists to avoid.
+ *
+ * The suite proves the answer is byte-identical across every shape a caller can
+ * pass, including no argument at all.
+ */
+export function readTourWorkflowResumePoint() {
+  return deepFreeze({
+    schema_version: V5_J301_RESUME_SCHEMA_VERSION,
+    policy_version: V5_J301_POLICY_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    decision: "unavailable",
+    reason_id: "workflow_journal_reader_unavailable",
+    owed_seams: [V5_J301_WORKFLOW_JOURNAL_READER_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM],
+    journal_reader_bound: false,
+    journal_owner_exists_here: false,
+    request_read: false,
+    caller_journal_admitted: false,
+    resume_stage: null,
+    next_stage: null,
+    governed_state_applied: false,
+    effects: V5_NO_EFFECTS,
   });
 }
 
@@ -1031,6 +1215,14 @@ export function tourWorkflowGaps() {
     stage_journal_owner_seam: V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
     assignment_activity_owner_exists_here: false,
     assignment_activity_owner_seam: V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
+    journal_reader_exists_here: false,
+    journal_reader_seam: V5_J301_WORKFLOW_JOURNAL_READER_SEAM,
+    attended_actor_source_exists_here: false,
+    attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
+    identity_seam_module: "mcp-server/src/identity.js",
+    verb_adapter_exists_here: false,
+    verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
+    intended_verbs_are_named_not_traversed: true,
     map_contract_receipt_exists_here: false,
     map_contract_receipt_step: V5_J301_MAP_CONTRACT_RECEIPT_STEP,
     map_contract_production_status: V5_J301_MAP_CONTRACT_PRODUCTION_STATUS,
@@ -1064,7 +1256,7 @@ export function v5J301PolicyPreimage() {
         .map(kind => [kind, { ...V5_J301_STAGE_ACTIONS[stage][kind] }])),
     ])),
     action_kinds: [...V5_J301_ACTION_KINDS],
-    write_verbs: [...V5_J301_WRITE_VERBS],
+    intended_verbs: [...V5_J301_INTENDED_VERBS],
     actor_classes: [...V5_J301_ACTOR_CLASSES],
     model_permitted_stages: [...V5_J301_MODEL_PERMITTED_STAGES],
     attended_intent: V5_J301_ATTENDED_INTENT,
@@ -1075,6 +1267,9 @@ export function v5J301PolicyPreimage() {
     activity_kinds: [...V5_J301_ACTIVITY_KINDS],
     caller_authority_fields: [...V5_J301_CALLER_AUTHORITY_FIELDS],
     workflow_journal_owner_seam: V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
+    workflow_journal_reader_seam: V5_J301_WORKFLOW_JOURNAL_READER_SEAM,
+    attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
+    verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
     assignment_activity_owner_seam: V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
     map_contract: V5_J301_MAP_CONTRACT,
     map_contract_version: V5_J301_MAP_CONTRACT_VERSION,
@@ -1111,6 +1306,13 @@ export function v5J301TourWorkflowProjection() {
     stages: [...V5_J301_STAGES],
     stages_are_separate_and_ordered: true,
     intake_requires_human_present: true,
+    // The requirement is real and the PROOF of it is missing, which are two
+    // different facts and both are stated.
+    human_presence_provable_here: false,
+    attended_actions_reachable_today: false,
+    attended_actions_reason_id: "attended_actor_source_unavailable",
+    attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
+    declared_actor_slug_is_authority: false,
     accepted_intent: V5_J301_ATTENDED_INTENT,
     refused_intents: [...V5_J301_REFUSED_INTENTS],
     model_permitted_stages: [...V5_J301_MODEL_PERMITTED_STAGES],
@@ -1143,6 +1345,7 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_ACTOR_CLASSES",
   "V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM",
   "V5_J301_ASSIGNMENT_PHASES",
+  "V5_J301_ATTENDED_ACTOR_SOURCE_SEAM",
   "V5_J301_ATTENDED_INTENT",
   "V5_J301_CALLER_AUTHORITY_FIELDS",
   "V5_J301_CONSUMER_GATES",
@@ -1160,6 +1363,7 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_PRODUCTION_OUTCOME_STEP",
   "V5_J301_PROJECTION_SCHEMA_VERSION",
   "V5_J301_PUBLIC_SURFACE",
+  "V5_J301_RESUME_SCHEMA_VERSION",
   "V5_J301_REFUSED_INTENTS",
   "V5_J301_SCHEMA_VERSION",
   "V5_J301_SETTLED_DECISIONS",
@@ -1169,13 +1373,16 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_STAGE_ACTIONS",
   "V5_J301_STAGE_ACTION_SCHEMA_VERSION",
   "V5_J301_STAGE_INDEX",
+  "V5_J301_VERB_ADAPTER_SEAM",
   "V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM",
-  "V5_J301_WRITE_VERBS",
+  "V5_J301_WORKFLOW_JOURNAL_READER_SEAM",
+  "V5_J301_INTENDED_VERBS",
   "V5_NO_EFFECTS",
   "assertJ301DecisionBinding",
   "assertTourWorkflowJournalEntry",
   "evaluateStageAction",
   "evaluateTourAssignmentActivity",
+  "readTourWorkflowResumePoint",
   "tourWorkflowGaps",
   "tourWorkflowStepKey",
   "v5J301PolicyCanonicalBytes",
@@ -1183,36 +1390,3 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "v5J301PolicyPreimage",
   "v5J301TourWorkflowProjection",
 ]);
-
-/**
- * THE TEST-ONLY ENTRY, AND WHY IT ANSWERS UNDER A DIFFERENT NAME.
- *
- * `classifyResumePoint` is the deterministic core of the staging rules, and a
- * suite that could not reach it could only prove the refusals, never the
- * classification underneath them. So it is reachable — but ONLY here, ONLY
- * through the dedicated test entry in mcp-server/test, and ONLY under the name
- * `would_resume_at_if_authoritative`.
- *
- * The name is the point. There is no durable journal in this repository, so the
- * position a caller-supplied view implies is a HYPOTHETICAL: what the workflow
- * would resume at IF an authoritative journal said so. No consumer may read it
- * as permission to resume, and no production path in this module calls it for
- * that purpose. This member is deliberately absent from V5_J301_PUBLIC_SURFACE
- * and the suite proves both that absence and that no file under mcp-server/src
- * other than this one mentions it.
- */
-export const __V5_J301_TEST_ONLY__ = Object.freeze({
-  wouldResumeAtIfAuthoritative(journal_view) {
-    const entries = normalizeJournalView(journal_view, "journal_view");
-    const resume = classifyResumePoint(entries);
-    return deepFreeze({
-      would_resume_at_if_authoritative: resume.open_stage,
-      would_next_stage_be_if_authoritative: resume.next_stage,
-      stages_seen_in_view: [...resume.stages_seen],
-      step_keys_in_view: [...resume.step_keys].sort(),
-      journal_authority: "caller_supplied_view",
-      governed_state_applied: false,
-      effects: V5_NO_EFFECTS,
-    });
-  },
-});

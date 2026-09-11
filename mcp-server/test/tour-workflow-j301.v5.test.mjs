@@ -43,6 +43,7 @@ import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { V5_J102_ASSIGNMENT_PHASES, V5_J102_DEAL_AXES } from "../src/cre-lifecycle.v5.js";
 import { TOOLS } from "../src/tools.js";
 import * as j301 from "../src/tour-workflow-j301.v5.js";
+import * as command from "../src/tour-map-command-j301.v5.js";
 import {
   V5J301Error,
   V5_J301_ACTOR_CLASSES,
@@ -62,7 +63,7 @@ import {
   V5_J301_STAGE_ACTIONS,
   V5_J301_STAGE_INDEX,
   V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
-  V5_J301_WRITE_VERBS,
+  V5_J301_INTENDED_VERBS,
   V5_NO_EFFECTS,
   assertJ301DecisionBinding,
   assertTourWorkflowJournalEntry,
@@ -76,9 +77,9 @@ import {
   v5J301TourWorkflowProjection,
 } from "../src/tour-workflow-j301.v5.js";
 import {
-  J301_TEST_ONLY_MEMBER_NAME,
+  V5_J301_CLASSIFIER_EVIDENCE_SOURCE,
   wouldResumeAtIfAuthoritative,
-} from "./tour-workflow-j301.v5.test-entry.mjs";
+} from "./tour-workflow-classifiers.v5.testhelper.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.join(HERE, "..", "src");
@@ -87,6 +88,11 @@ const TOUR = "tour-j301-fixture-0001";
 const ASSIGNMENT = "assignment-j301-fixture-0001";
 const SUBJECT_A = `sha256:${"a".repeat(64)}`;
 const SUBJECT_B = `sha256:${"b".repeat(64)}`;
+// Slugs a caller might write into declared_actor_slug. Two of them are the real
+// partner slugs, which is the point: the module must be unable to tell.
+const DECLARED_SLUGS = Object.freeze([
+  "joe", "dell", "claude", "codex", "mls-scraper-bot", "nobody-at-all",
+]);
 const PARTNER = "joe";
 
 // Every result this suite produces is collected here and swept at the end for
@@ -104,7 +110,7 @@ function stageRequest(overrides = {}) {
     assignment_id: ASSIGNMENT,
     stage: "attended_mls_acquisition",
     action_kind: "capture_listing_observation",
-    actor_slug: PARTNER,
+    declared_actor_slug: PARTNER,
     attended_intent: V5_J301_ATTENDED_INTENT,
     actor_class: "human_attended",
     action_subject_digest: SUBJECT_A,
@@ -115,14 +121,24 @@ function stageRequest(overrides = {}) {
 
 function journalEntry(stage, action_kind, subject = SUBJECT_A, extra = {}) {
   return {
+    organization_tenant_id: ORGANIZATION_TENANT_ID,
     tour_id: TOUR,
+    assignment_id: ASSIGNMENT,
     stage,
     action_kind,
     action_subject_digest: subject,
-    actor_slug: PARTNER,
+    declared_actor_slug: PARTNER,
     recorded_at: "2026-09-11T14:00:00Z",
     ...extra,
   };
+}
+
+/** A contiguous history up to and including `stage`. */
+function historyThrough(stage) {
+  const first = kind => Object.keys(V5_J301_STAGE_ACTIONS[kind])[0];
+  return V5_J301_STAGES
+    .slice(0, V5_J301_STAGE_INDEX[stage] + 1)
+    .map(one => journalEntry(one, first(one)));
 }
 
 function evaluate(overrides) {
@@ -270,10 +286,64 @@ test("an unregistered intent cannot be read at all", () => {
     error => error.code === "unknown_intent");
 });
 
-test("an attended action by something that is not a verified partner is refused", () => {
-  const result = evaluate({ actor_slug: "mls-scraper-bot" });
-  assert.equal(result.decision, "refused");
-  assert.equal(result.reason_id, "attended_action_requires_verified_partner");
+test("a caller writing \"joe\" does not thereby make a human present", () => {
+  // THE SPOOF. This request is well formed, rule abiding, attended in intent and
+  // signed with a real partner slug. Before this correction it reached the
+  // ordinary journal-owner answer, which read as "attendance satisfied, only the
+  // store is missing". Attendance was NOT satisfied: the slug is a string a
+  // caller typed, and nothing in this repository can turn it into a verified
+  // human from inside a pure evaluator.
+  for (const declared_actor_slug of ["joe", "dell"]) {
+    const result = evaluate({ declared_actor_slug });
+    assert.equal(result.decision, "unavailable", declared_actor_slug);
+    assert.equal(result.reason_id, "attended_actor_source_unavailable", declared_actor_slug);
+    assert.equal(result.attended_actor_source_bound, false);
+    assert.equal(result.declared_actor_slug_is_authority, false);
+    assert.ok(result.owed_seams.includes(j301.V5_J301_ATTENDED_ACTOR_SOURCE_SEAM));
+    assert.equal(result.identity_seam_module, "mcp-server/src/identity.js");
+    // The journal hole is still named; one missing thing does not hide another.
+    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
+  }
+});
+
+test("every attended action ends at the same answer, whoever the caller claims to be", () => {
+  // INDIFFERENCE IS THE PROPERTY, not a list of rejected slugs: if no slug
+  // changes the answer, no slug is authority. The answers are compared as whole
+  // objects, so a future field that leaked the slug would fail here.
+  const answers = DECLARED_SLUGS.map(declared_actor_slug =>
+    JSON.stringify(evaluate({ declared_actor_slug })));
+  for (const answer of answers) assert.equal(answer, answers[0]);
+  // And the slug appears nowhere in the answer at all.
+  for (const slug of DECLARED_SLUGS) assert.equal(answers[0].includes(slug), false);
+});
+
+test("the Assignment activity path refuses attendance the same way", () => {
+  const answers = DECLARED_SLUGS.map(declared_actor_slug => JSON.stringify(record(
+    evaluateTourAssignmentActivity({
+      organization_tenant_id: ORGANIZATION_TENANT_ID,
+      assignment_id: ASSIGNMENT,
+      tour_id: TOUR,
+      activity_kind: "tour_conducted",
+      declared_actor_slug,
+      attended_intent: V5_J301_ATTENDED_INTENT,
+      occurred_at: "2026-09-11T15:00:00Z",
+    }))));
+  for (const answer of answers) assert.equal(answer, answers[0]);
+  const first = JSON.parse(answers[0]);
+  assert.equal(first.decision, "unavailable");
+  assert.equal(first.reason_id, "attended_actor_source_unavailable");
+  assert.ok(first.owed_seams.includes(j301.V5_J301_ATTENDED_ACTOR_SOURCE_SEAM));
+});
+
+test("no membership test on a slug survives anywhere in the module", () => {
+  // The old shape asked `isKnownPartner(actor_slug)`. A set lookup over a string
+  // answers "is this SPELLED like a partner", which is not the question.
+  const source = readFileSync(path.join(SRC_DIR, "tour-workflow-j301.v5.js"), "utf8");
+  const identifiers = identifiersOutsideLiterals(source);
+  assert.equal(identifiers.has("isKnownPartner"), false,
+    "a partner membership test is back in the module");
+  assert.equal(identifiers.has("actor_slug"), false,
+    "an unqualified actor_slug is back; the field is declared_actor_slug");
 });
 
 // ---------------------------------------------------------------------------
@@ -299,13 +369,14 @@ test("a model may occupy the assembly stage and no other", () => {
     ],
   });
   assert.equal(inside.decision, "unavailable");
-  assert.equal(inside.would_be_recorded_by, "model_proposal_not_a_record");
+  assert.equal(inside.intended_verb, null);
+  assert.equal(inside.intended_verb_adapter_bound, false);
 });
 
 test("every model action produces a proposal rather than a record", () => {
   for (const [kind, action] of Object.entries(V5_J301_STAGE_ACTIONS.agent_assisted_assembly)) {
     assert.equal(action.actor_class, "model_assisted", kind);
-    assert.equal(action.writes_through_verb, null, kind);
+    assert.equal(action.intended_verb, null, kind);
   }
 });
 
@@ -414,8 +485,11 @@ test("a correction whose target is in the view passes the staging rules", () => 
     action_kind: "capture_listing_observation", action_subject_digest: `sha256:${"c".repeat(64)}`,
     corrects_step_key: normalized.step_key, journal_view: view,
   });
+  // It passes the STAGING rules — no skip, no unbacked backward move — and then
+  // stops at the missing authenticator, because a correction is an attended act.
   assert.equal(result.decision, "unavailable");
-  assert.equal(result.reason_id, "workflow_journal_owner_unavailable");
+  assert.equal(result.reason_id, "attended_actor_source_unavailable");
+  assert.ok(result.owed_seams.includes(V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
 });
 
 test("there is no field through which a correction can erase its target", () => {
@@ -439,7 +513,8 @@ test("a replayed action is refused as a duplicate rather than applied twice", ()
 
 test("the hypothetical resume point tracks the journal, stage by stage", () => {
   const view = [];
-  assert.equal(wouldResumeAtIfAuthoritative(view).would_resume_at_if_authoritative,
+  assert.equal(wouldResumeAtIfAuthoritative(view,
+    { tour_id: TOUR, assignment_id: ASSIGNMENT }).would_resume_at_if_authoritative,
     "attended_mls_acquisition");
 
   // An interrupted stage is resumed IN that stage, and the stage after it is
@@ -454,11 +529,114 @@ test("the hypothetical resume point tracks the journal, stage by stage", () => {
   ];
   for (const [stage, action_kind, expectedNext] of walk) {
     view.push(journalEntry(stage, action_kind));
-    const seen = record(wouldResumeAtIfAuthoritative(view));
+    const seen = record(wouldResumeAtIfAuthoritative(view,
+      { tour_id: TOUR, assignment_id: ASSIGNMENT }));
     assert.equal(seen.would_resume_at_if_authoritative, stage, stage);
     assert.equal(seen.would_next_stage_be_if_authoritative, expectedNext, stage);
-    assert.equal(seen.journal_authority, "caller_supplied_view");
-    assert.equal(seen.governed_state_applied, false);
+    assert.equal(seen.view_is_a_readable_history, true, stage);
+    assert.equal(seen.is_not_authority, true);
+    assert.equal(seen.evidence_source, V5_J301_CLASSIFIER_EVIDENCE_SOURCE);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A journal that cannot be this Tour's history. The two shapes a reviewer found
+// reaching an answer they had no business reaching.
+// ---------------------------------------------------------------------------
+
+test("a journal holding only the final stage is refused, not read as stage five", () => {
+  // The four stages before client_facing_review left no trace, so this cannot be
+  // a history of an ordered five-stage workflow. It used to reach the ordinary
+  // journal-owner answer, which treated it as a workflow standing at stage five.
+  const view = [journalEntry("client_facing_review", "record_client_review_note")];
+  const result = evaluate({
+    stage: "client_facing_review", action_kind: "accept_route_for_client_review",
+    journal_view: view,
+  });
+  assert.equal(result.decision, "refused");
+  assert.equal(result.reason_id, "journal_history_noncontiguous");
+  assert.equal(result.missing_stage, "attended_mls_acquisition");
+  assert.equal(result.furthest_stage_seen, "client_facing_review");
+
+  const seen = record(wouldResumeAtIfAuthoritative(view,
+    { tour_id: TOUR, assignment_id: ASSIGNMENT }));
+  assert.equal(seen.view_is_a_readable_history, false);
+  assert.equal(seen.would_resume_at_if_authoritative, null);
+  assert.equal(seen.refused_reason_id, "journal_history_noncontiguous");
+});
+
+test("every interior gap in a history is caught, not just the first stage", () => {
+  // Stages 0 and 2 present, stage 1 missing. Naming only the first stage would
+  // have let this through.
+  const view = [
+    journalEntry("attended_mls_acquisition", "capture_listing_observation"),
+    journalEntry("agent_assisted_assembly", "rank_candidate_stops"),
+  ];
+  const result = evaluate({
+    stage: "agent_assisted_assembly", action_kind: "draft_stop_narrative",
+    actor_class: "model_assisted", journal_view: view,
+  });
+  assert.equal(result.decision, "refused");
+  assert.equal(result.reason_id, "journal_history_noncontiguous");
+  assert.equal(result.missing_stage, "deterministic_normalization");
+});
+
+test("an entry belonging to another Tour cannot change this Tour's answer", () => {
+  // A cross-Tour entry at a later stage used to make a perfectly ordinary
+  // request look like a backward move.
+  const foreign = journalEntry("client_facing_review", "record_client_review_note", SUBJECT_B,
+    { tour_id: "tour-j301-fixture-9999" });
+  const result = evaluate({
+    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B), foreign],
+  });
+  assert.equal(result.decision, "refused");
+  assert.equal(result.reason_id, "journal_entry_foreign_to_tour");
+  assert.equal(result.entry_tour_id, "tour-j301-fixture-9999");
+  assert.equal(result.entry_index, 1);
+});
+
+test("an entry belonging to another Assignment is refused the same way", () => {
+  const foreign = journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B,
+    { assignment_id: "assignment-j301-fixture-9999" });
+  const result = evaluate({ journal_view: [foreign] });
+  assert.equal(result.decision, "refused");
+  assert.equal(result.reason_id, "journal_entry_foreign_to_tour");
+  assert.equal(result.entry_assignment_id, "assignment-j301-fixture-9999");
+});
+
+test("a journal entry that does not say which Tour it belongs to cannot be read", () => {
+  for (const missing of ["organization_tenant_id", "tour_id", "assignment_id"]) {
+    const entry = journalEntry("attended_mls_acquisition", "capture_listing_observation");
+    delete entry[missing];
+    assert.throws(() => evaluateStageAction(stageRequest({ journal_view: [entry] })),
+      error => error.code === "missing_field", missing);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The public resume path.
+// ---------------------------------------------------------------------------
+
+test("the public resume path is unavailable and never reads its argument", () => {
+  const shapes = [
+    undefined, null, {}, [], "resume", 1, true,
+    { journal_view: historyThrough("deterministic_generation") },
+    { resume_stage: "client_facing_review", verified: true },
+    historyThrough("client_facing_review"),
+  ];
+  const first = JSON.stringify(record(j301.readTourWorkflowResumePoint()));
+  for (const shape of shapes) {
+    const result = record(j301.readTourWorkflowResumePoint(shape));
+    assert.equal(JSON.stringify(result), first,
+      `the resume path answered differently for ${JSON.stringify(shape) ?? "undefined"}`);
+    assert.equal(result.decision, "unavailable");
+    assert.equal(result.reason_id, "workflow_journal_reader_unavailable");
+    assert.equal(result.request_read, false);
+    assert.equal(result.caller_journal_admitted, false);
+    assert.equal(result.resume_stage, null);
+    assert.equal(result.next_stage, null);
+    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_READER_SEAM));
+    assert.ok(Object.isFrozen(result));
   }
 });
 
@@ -510,12 +688,13 @@ test("an activity record on an Assignment never reports a phase change or a Deal
   const ok = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_created",
-    actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
     occurred_at: "2026-09-11T14:30:00Z",
     activity_payload: { stop_count: 4, market: "fixture-market" },
   }));
   assert.equal(ok.decision, "unavailable");
-  assert.equal(ok.reason_id, "assignment_activity_owner_unavailable");
+  assert.equal(ok.reason_id, "attended_actor_source_unavailable");
+  assert.ok(ok.owed_seams.includes(j301.V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM));
   assert.equal(ok.assignment_phase_changed, false);
   assert.equal(ok.deal_created, false);
   assert.equal(ok.preserves_history, true);
@@ -524,7 +703,7 @@ test("an activity record on an Assignment never reports a phase change or a Deal
   const phase = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_conducted",
-    actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
     occurred_at: "2026-09-11T14:30:00Z",
     activity_payload: { assignment_phase: "negotiation" },
   }));
@@ -537,7 +716,7 @@ test("a correction names its target, and only a correction may", () => {
   const missing = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_corrected",
-    actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
     occurred_at: "2026-09-11T15:00:00Z",
   }));
   assert.equal(missing.reason_id, "correction_must_name_its_target");
@@ -545,7 +724,7 @@ test("a correction names its target, and only a correction may", () => {
   const wrong = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_created",
-    actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
     occurred_at: "2026-09-11T15:00:00Z", corrects_activity_id: "activity-fixture-1",
   }));
   assert.equal(wrong.reason_id, "only_a_correction_may_name_a_prior_activity");
@@ -553,7 +732,7 @@ test("a correction names its target, and only a correction may", () => {
   const good = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_corrected",
-    actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
     occurred_at: "2026-09-11T15:00:00Z", corrects_activity_id: "activity-fixture-1",
   }));
   assert.equal(good.decision, "unavailable");
@@ -594,8 +773,14 @@ test("the tenant is the tenant, whatever the caller says", () => {
 // The honest unavailable, and the gaps it comes from.
 // ---------------------------------------------------------------------------
 
-test("a well-formed, rule-abiding action is unavailable and says exactly why", () => {
-  const result = evaluate({});
+test("a well-formed, rule-abiding DETERMINISTIC action is unavailable and says exactly why", () => {
+  // A deterministic action is the only kind that reaches the journal answer:
+  // every attended one stops one question earlier, at the missing authenticator.
+  const result = evaluate({
+    stage: "deterministic_normalization", action_kind: "normalize_property_fact",
+    actor_class: "deterministic",
+    journal_view: historyThrough("attended_mls_acquisition"),
+  });
   assert.equal(result.decision, "unavailable");
   assert.equal(result.reason_id, "workflow_journal_owner_unavailable");
   assert.deepEqual([...result.owed_seams],
@@ -603,7 +788,9 @@ test("a well-formed, rule-abiding action is unavailable and says exactly why", (
   assert.equal(result.map_contract_gate, V5_J301_MAP_CONTRACT_GATE);
   assert.equal(result.map_contract_production_status,
     "approved_architecture_not_implemented_in_production");
-  assert.equal(result.writes_through_verb, "append-tour-source-evidence");
+  assert.equal(result.intended_verb, "append-tour-field-assertion");
+  assert.equal(result.intended_verb_adapter_bound, false);
+  assert.equal(result.intended_verb_adapter_seam, j301.V5_J301_VERB_ADAPTER_SEAM);
   assert.equal(result.governed_state_applied, false);
   assert.deepEqual(result.effects, V5_NO_EFFECTS);
 });
@@ -615,6 +802,16 @@ test("the projection reads its claims off the gaps rather than beside them", () 
   assert.equal(projection.resume_reason_id, gaps.advance_reason_id);
   assert.equal(projection.map_contract_production_status, gaps.map_contract_production_status);
   assert.equal(gaps.stage_journal_owner_exists_here, false);
+  assert.equal(gaps.journal_reader_exists_here, false);
+  assert.equal(gaps.attended_actor_source_exists_here, false);
+  assert.equal(gaps.attended_actor_source_seam, j301.V5_J301_ATTENDED_ACTOR_SOURCE_SEAM);
+  assert.equal(gaps.identity_seam_module, "mcp-server/src/identity.js");
+  assert.equal(gaps.verb_adapter_exists_here, false);
+  assert.equal(gaps.intended_verbs_are_named_not_traversed, true);
+  assert.equal(projection.human_presence_provable_here, false);
+  assert.equal(projection.attended_actions_reachable_today, false);
+  assert.equal(projection.attended_actions_reason_id, "attended_actor_source_unavailable");
+  assert.equal(projection.declared_actor_slug_is_authority, false);
   assert.equal(gaps.map_contract_receipt_exists_here, false);
   assert.equal(projection.tour_may_change_assignment_phase, false);
   assert.equal(projection.tour_may_create_or_execute_deal, false);
@@ -654,8 +851,8 @@ test("the policy digest moves when the policy moves", () => {
 // ---------------------------------------------------------------------------
 
 test("every verb the stage registry names exists in the deployed registry", () => {
-  assert.ok(V5_J301_WRITE_VERBS.length >= 7);
-  for (const verb of V5_J301_WRITE_VERBS) {
+  assert.ok(V5_J301_INTENDED_VERBS.length >= 7);
+  for (const verb of V5_J301_INTENDED_VERBS) {
     assert.ok(Object.hasOwn(TOOLS, verb), `${verb} is not a deployed verb`);
   }
   // And the control: a verb this slice invented would fail the same check.
@@ -676,9 +873,13 @@ test("every registered action names a registered actor class", () => {
 
 const PRIVILEGED = Object.freeze([
   "allow", "allowed", "commit", "committed", "prompt", "suppress", "release",
-  "covered", "coverage_complete", "drafted", "proposed", "queued", "healthy",
-  "passing", "passable", "green", "advance", "advanced", "resume_at",
+  // `read` is in the standing rule's own list and was missing from this guard.
+  // It is the outcome that matters most here: the whole slice turns on nothing
+  // being READ from an authority that does not exist.
+  "read", "covered", "coverage_complete", "drafted", "proposed", "queued",
+  "healthy", "passing", "passable", "green", "advance", "advanced", "resume_at",
   "admitted", "accepted", "approved", "authorized", "granted", "applied",
+  "attended", "verified", "present",
 ]);
 
 /**
@@ -724,47 +925,84 @@ test("the privileged-string detector actually fires", () => {
   assert.equal(privilegedHit({ reason_id: "caller_supplied_authority_field", field: "allow" }), null);
 });
 
-test("no public export yields a privileged outcome from any caller-controlled input", () => {
-  const inputs = [];
+/**
+ * EVERY CALLABLE ON THE PUBLIC SURFACE, enumerated from the module namespace
+ * rather than from a hand-kept list — so a function added tomorrow is swept
+ * tomorrow, without anyone remembering to add it here.
+ */
+function callablePublicExports() {
+  return Object.entries(j301)
+    .filter(([, value]) => typeof value === "function" && !/^V5J301Error$/.test(value.name))
+    .map(([name, fn]) => [name, fn]);
+}
+
+/** Every caller-controlled shape any of them could ever be handed. */
+function callerControlledShapes() {
+  const shapes = [];
   for (const stage of V5_J301_STAGES) {
     for (const kind of Object.keys(V5_J301_STAGE_ACTIONS[stage])) {
       for (const actor_class of V5_J301_ACTOR_CLASSES) {
         for (const intent of [V5_J301_ATTENDED_INTENT, ...V5_J301_REFUSED_INTENTS]) {
-          for (const slug of [PARTNER, "dell", "some-agent"]) {
-            inputs.push(stageRequest({
-              stage, action_kind: kind, actor_class, attended_intent: intent, actor_slug: slug,
-              journal_view: V5_J301_STAGES.slice(0, V5_J301_STAGE_INDEX[stage]).map((earlier, index) =>
-                journalEntry(earlier, Object.keys(V5_J301_STAGE_ACTIONS[earlier])[0],
-                  `sha256:${String(index).padStart(64, "0")}`)),
+          for (const declared_actor_slug of DECLARED_SLUGS) {
+            shapes.push(stageRequest({
+              stage, action_kind: kind, actor_class, attended_intent: intent,
+              declared_actor_slug,
+              journal_view: V5_J301_STAGES.slice(0, V5_J301_STAGE_INDEX[stage]).map(earlier =>
+                journalEntry(earlier, Object.keys(V5_J301_STAGE_ACTIONS[earlier])[0])),
             }));
           }
         }
       }
     }
   }
-  // Plus the shapes that try hardest to be a grant.
-  inputs.push(stageRequest({ tour_activity: { gate_receipt: { status: "pass" }, allow: true } }));
-  inputs.push(stageRequest({ tour_activity: { assignment_phase: "committed" } }));
+  // The shapes that try hardest to be a grant, plus the unreadable ones.
+  shapes.push(stageRequest({ tour_activity: { gate_receipt: { status: "pass" }, allow: true } }));
+  shapes.push(stageRequest({ tour_activity: { assignment_phase: "committed" } }));
+  shapes.push({ ...stageRequest(), verified: true, admission: "allow", approved: true });
+  shapes.push({ decision: "allow", resume_at: "client_facing_review" });
+  shapes.push({}, null, undefined, "allow", 1, true, [], [{ allow: true }]);
+  return shapes;
+}
 
+test("NO callable on the public surface yields a privileged outcome, from any input", () => {
+  const callables = callablePublicExports();
+  // The list is derived, so assert it actually found the surface rather than an
+  // empty set that would make this test vacuous.
+  assert.ok(callables.length >= 9, `only ${callables.length} callables found`);
+  for (const name of ["evaluateStageAction", "evaluateTourAssignmentActivity",
+    "readTourWorkflowResumePoint", "tourWorkflowStepKey", "assertTourWorkflowJournalEntry",
+    "assertJ301DecisionBinding", "tourWorkflowGaps", "v5J301TourWorkflowProjection",
+    "v5J301PolicyPreimage", "v5J301PolicyDigest", "v5J301PolicyCanonicalBytes"]) {
+    assert.ok(callables.some(([one]) => one === name), `${name} is not being swept`);
+  }
+
+  const shapes = callerControlledShapes();
+  assert.ok(shapes.length > 100, `expected a wide sweep, built ${shapes.length} shapes`);
   let evaluated = 0;
-  for (const request of inputs) {
-    let result;
-    try { result = evaluateStageAction(request); } catch (error) {
-      assert.ok(error instanceof V5J301Error);
-      continue;
+  for (const [name, fn] of callables) {
+    for (const shape of shapes) {
+      let result;
+      try { result = fn(shape); } catch (error) {
+        // A contract violation is a legitimate answer for a shape the module
+        // cannot read. It is never a privileged outcome.
+        assert.ok(error instanceof V5J301Error || error instanceof TypeError,
+          `${name} threw something other than a boundary error: ${error}`);
+        continue;
+      }
+      evaluated++;
+      if (result && typeof result === "object") {
+        record(result);
+        if ("decision" in result) {
+          assert.ok(V5_J301_DECISIONS.includes(result.decision),
+            `${name} answered ${JSON.stringify(result.decision)}`);
+        }
+      }
+      const hit = privilegedHit(result);
+      assert.equal(hit, null,
+        `${name} leaked privileged token "${hit}" for ${String(JSON.stringify(shape)).slice(0, 120)}`);
     }
-    evaluated++;
-    record(result);
-    assert.ok(V5_J301_DECISIONS.includes(result.decision), JSON.stringify(result.decision));
-    const hit = privilegedHit(result);
-    assert.equal(hit, null, `privileged token "${hit}" in ${JSON.stringify(result).slice(0, 240)}`);
   }
-  assert.ok(evaluated > 100, `expected a wide sweep, evaluated ${evaluated}`);
-
-  // The zero-argument public functions too.
-  for (const fn of [tourWorkflowGaps, v5J301PolicyPreimage, v5J301TourWorkflowProjection, v5J301PolicyDigest]) {
-    assert.equal(privilegedHit(record(fn())), null, fn.name);
-  }
+  assert.ok(evaluated > 500, `expected a wide sweep, evaluated ${evaluated}`);
 });
 
 test("every result this suite produced reports no effect and no lifecycle move", () => {
@@ -846,41 +1084,112 @@ function identifiersOutsideLiterals(source) {
 
 test("the tokenizer ignores identifiers that live inside comments and strings", () => {
   const sample = [
-    "// __V5_J301_TEST_ONLY__ in a line comment",
-    "/* __V5_J301_TEST_ONLY__ in a block comment */",
-    'const a = "__V5_J301_TEST_ONLY__";',
-    "const re = /__V5_J301_TEST_ONLY__/;",
+    "// isKnownPartner in a line comment",
+    "/* isKnownPartner in a block comment */",
+    'const a = "isKnownPartner";',
+    "const re = /isKnownPartner/;",
     "const real = realIdentifier;",
   ].join("\n");
   const found = identifiersOutsideLiterals(sample);
-  assert.equal(found.has("__V5_J301_TEST_ONLY__"), false);
+  assert.equal(found.has("isKnownPartner"), false);
   assert.equal(found.has("realIdentifier"), true);
 });
 
-test("the module's real exports are exactly its declared surface plus the quarantined member", () => {
-  const exported = Object.keys(j301).sort();
-  const expected = [...V5_J301_PUBLIC_SURFACE, J301_TEST_ONLY_MEMBER_NAME].sort();
-  assert.deepEqual(exported, expected);
-  assert.equal(V5_J301_PUBLIC_SURFACE.includes(J301_TEST_ONLY_MEMBER_NAME), false);
+test("the module's real exports are EXACTLY its declared surface, with no exception", () => {
+  // The previous shape of this slice asserted "the declared surface PLUS the
+  // quarantined member", which blessed a real production export by naming it.
+  // Excluding a name from a list does not make an ESM export private, so there
+  // is no longer a name to exclude.
+  assert.deepEqual(Object.keys(j301).sort(), [...V5_J301_PUBLIC_SURFACE].sort());
+  for (const name of Object.keys(j301)) {
+    assert.equal(name.startsWith("__"), false, `${name} is a test-shaped export`);
+    assert.equal(/TEST_ONLY|TESTONLY|_test_/i.test(name), false, `${name} is a test-shaped export`);
+    assert.equal(/^(classify|wouldResume)/.test(name), false,
+      `${name} is a classifier name on the public surface`);
+  }
+  // And the map half, to the same standard.
+  assert.deepEqual(Object.keys(command).sort(), [...command.V5_J301_COMMAND_PUBLIC_SURFACE].sort());
 });
 
-test("no production module reaches the test-only member", () => {
-  const files = readdirSync(SRC_DIR).filter(name => name.endsWith(".js"));
-  assert.ok(files.length > 50, `expected the real src tree, saw ${files.length} files`);
-  const referencing = [];
-  for (const name of files) {
-    if (identifiersOutsideLiterals(readFileSync(path.join(SRC_DIR, name), "utf8"))
-      .has(J301_TEST_ONLY_MEMBER_NAME)) {
-      referencing.push(name);
-    }
-  }
-  assert.deepEqual(referencing, ["tour-workflow-j301.v5.js"],
-    "only the module that defines it may mention the test-only member");
+// ---------------------------------------------------------------------------
+// ISOLATION, PARSED RATHER THAN GREPPED.
+//
+// V8's own ESM parser, through vm.SourceTextModule in a child process — a real
+// parser, and the one Node itself uses. `dependencySpecifiers` is the module
+// record's own import list, so a dynamic or concatenated specifier cannot hide
+// from it the way it could from a regex.
+// ---------------------------------------------------------------------------
 
-  // The tokenizer's premise is that it is walking JavaScript, so the file it
-  // found and the two this slice added are handed to node's own parser. A
-  // tokenizer over source that does not parse would be reading noise.
-  for (const name of ["tour-workflow-j301.v5.js", "tour-map-command-j301.v5.js"]) {
+function moduleImports(directory) {
+  const script = `
+    const { readdirSync, readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    const vm = require("node:vm");
+    const dir = process.argv[1];
+    const out = {};
+    for (const name of readdirSync(dir).sort()) {
+      if (!name.endsWith(".js")) continue;
+      const source = readFileSync(join(dir, name), "utf8");
+      out[name] = new vm.SourceTextModule(source, { identifier: name }).dependencySpecifiers;
+    }
+    process.stdout.write(JSON.stringify(out));
+  `;
+  const stdout = execFileSync(process.execPath,
+    ["--experimental-vm-modules", "-e", script, directory], { encoding: "utf8" });
+  return JSON.parse(stdout);
+}
+
+test("ISOLATION: src holds no test-only entry, and none of it reaches the test tree", () => {
+  const strays = readdirSync(SRC_DIR).filter(name => /\.(testonly|testhelper|test-entry)\./.test(name));
+  assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");
+
+  const imports = moduleImports(SRC_DIR);
+  // The parser must have seen this slice at all, or the scan proves nothing.
+  assert.ok(Object.hasOwn(imports, "tour-workflow-j301.v5.js"));
+  assert.ok(Object.hasOwn(imports, "tour-map-command-j301.v5.js"));
+  assert.ok(Object.keys(imports).length > 50, "every module in src must have been parsed");
+
+  const offenders = Object.entries(imports)
+    .filter(([, specifiers]) => specifiers.some(one =>
+      one.includes("/test/") || one.startsWith("../test") ||
+      one.includes(".testonly.") || one.includes(".testhelper.")))
+    .map(([name]) => name);
+  assert.deepEqual(offenders, [], "a production module reached into the test directory");
+
+  // And specifically: this slice's two modules import exactly these, none of
+  // them a classifier helper.
+  assert.deepEqual(imports["tour-workflow-j301.v5.js"],
+    ["./artifact-trust.js", "./identity.js", "./global-boundaries.v5.js", "./cre-lifecycle.v5.js"]);
+  assert.deepEqual(imports["tour-map-command-j301.v5.js"],
+    ["./artifact-trust.js", "./identity.js", "./global-boundaries.v5.js",
+      "./tour-workflow-j301.v5.js"]);
+});
+
+test("ISOLATION: the classifier helper lives in the test tree and answers conditionally", () => {
+  const helper = path.join(HERE, "tour-workflow-classifiers.v5.testhelper.mjs");
+  execFileSync(process.execPath, ["--check", helper]);
+  const source = readFileSync(helper, "utf8");
+  // It reaches the classification by PROBING the public surface; it holds no
+  // second copy of the staging rules to drift from the first.
+  assert.ok(source.includes("evaluateStageAction"));
+  for (const forbidden of ["resume_at:", "decision:", "admitted:", "allow:"]) {
+    assert.equal(source.includes(`\n    ${forbidden}`), false, `${forbidden} is a privileged field`);
+  }
+  const answer = wouldResumeAtIfAuthoritative([], { tour_id: TOUR, assignment_id: ASSIGNMENT });
+  assert.equal(answer.is_not_authority, true);
+  assert.equal(answer.evidence_source, V5_J301_CLASSIFIER_EVIDENCE_SOURCE);
+  assert.equal(Object.hasOwn(answer, "decision"), false);
+  assert.equal(Object.hasOwn(answer, "resume_at"), false);
+  assert.equal(answer.would_resume_at_if_authoritative, "attended_mls_acquisition");
+});
+
+test("ISOLATION: no production module runs a partner membership test for this slice", () => {
+  const files = readdirSync(SRC_DIR).filter(name => name.startsWith("tour-") && name.includes("j301"));
+  assert.deepEqual(files.sort(), ["tour-map-command-j301.v5.js", "tour-workflow-j301.v5.js"]);
+  for (const name of files) {
+    const identifiers = identifiersOutsideLiterals(readFileSync(path.join(SRC_DIR, name), "utf8"));
+    assert.equal(identifiers.has("isKnownPartner"), false, name);
+    assert.equal(identifiers.has("__V5_J301_TEST_ONLY__"), false, name);
     execFileSync(process.execPath, ["--check", path.join(SRC_DIR, name)]);
   }
 });

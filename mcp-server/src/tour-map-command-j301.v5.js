@@ -17,13 +17,22 @@
 // become a statement that either of them may run: `admission` is `unavailable`
 // on every envelope and every comparison.
 //
-// EVERY COMMAND NAMES THE DEPLOYED VERB ITS WRITE MUST TRAVERSE. That is what
-// "no bypass" means in a system where the record layer already owns the writes:
-// there is no second path to governed state, so an equivalent command from
-// either origin reaches the same handler under the same idempotency envelope.
-// The suite checks each named verb against the deployed registry in tools.js,
-// so a renamed verb fails here rather than at a caller. This file adds no verb,
-// rewrites no Tour module, and issues nothing.
+// EVERY COMMAND NAMES THE VERB ITS WRITE IS INTENDED TO TRAVERSE — AND NAMING
+// IS NOT TRAVERSING. An earlier draft of this header claimed traversal, and a
+// reviewer was right that the code does not support it. What is true: three of
+// the four commands name a verb that resolves in the deployed registry, and the
+// suite checks those names against tools.js so a rename fails here rather than
+// at a caller. What is NOT true, and is now stated per command: the emitted
+// arguments do not satisfy those verbs' own inputSchemas. `reorder_route_stops`
+// emits `ordered_route_stop_ids` where prepare-tour-route-version requires
+// `stop_ids` and an `idempotency_key`; `set_selection_cart` emits two fields
+// where the verb requires six; `set_entrance_coordinate` omits the provenance,
+// rights and review fields the coordinate verb requires; and native navigation
+// names NO verb, because the nearest one writes a human promotion decision
+// rather than performing a handoff. Each command carries the exact gap in
+// `verb_argument_gap`, every envelope says `verb_adapter_bound: false`, and the
+// adapter that would close it is owed at V5_J301_COMMAND_VERB_ADAPTER_SEAM.
+// This file adds no verb, rewrites no Tour module, and issues nothing.
 //
 // THE FOUR AXES ARE Q124.D2'S OWN LIST — coordinate, route, selection,
 // navigation — and the registry has exactly one command family per axis. A
@@ -44,8 +53,11 @@
 //     by nature and a closed schema cannot reach inside one.) The suite walks
 //     the whole authority-field list from both positions to prove it;
 //   * navigation handoff without the human promotion receipt the map doctrine
-//     requires — which does not exist here, so it is unavailable rather than
-//     performed.
+//     requires. The receipt STORE exists — ops.tour_map_promotion_receipt, its
+//     writer function, and the humanOnly verb record-tour-map-promotion-receipt
+//     — and an earlier draft of this module wrongly said it did not. What is
+//     missing is a READER this module could consult, so the refusal names that
+//     adapter and names the authoritative store it would read.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
@@ -261,40 +273,107 @@ const ARGUMENT_CONTRACTS = Object.freeze({
 export const V5_J301_MAP_COMMANDS = deepFreeze({
   set_entrance_coordinate: {
     axis: "coordinate",
-    writes_through_verb: "append-tour-coordinate-candidate",
+    intended_verb: "append-tour-coordinate-candidate",
     governed_arguments: ["property_id", "latitude", "longitude", "position_role"],
+    // The verb's own inputSchema, read from mcp-server/src/tour-property-jurisdiction.js.
+    // `position_role` is this contract's name for what the verb calls
+    // `coordinate_role`, and the provenance/rights/review fields below are
+    // facts this module cannot produce: they are readings of a source, not
+    // arguments of a map gesture.
+    verb_required_not_supplied: [
+      "access_notes", "coordinate_role", "idempotency_key", "observed_at",
+      "precision_class", "provider", "review_state", "rights_receipt_id",
+      "source_evidence_id",
+    ],
+    supplied_not_in_verb_schema: ["position_role"],
     requires_human_promotion_receipt: false,
   },
   reorder_route_stops: {
     axis: "route",
-    writes_through_verb: "prepare-tour-route-version",
+    intended_verb: "prepare-tour-route-version",
     governed_arguments: ["tour_id", "base_route_version_id", "expected_route_version", "ordered_route_stop_ids"],
+    // The verb calls the ordered list `stop_ids` and requires UUIDs; this
+    // contract calls it `ordered_route_stop_ids`. One rename and one missing
+    // idempotency key is still an incompatible call.
+    verb_required_not_supplied: ["idempotency_key", "stop_ids"],
+    supplied_not_in_verb_schema: ["ordered_route_stop_ids"],
     requires_human_promotion_receipt: false,
   },
   set_selection_cart: {
     axis: "selection",
-    writes_through_verb: "append-tour-selection-cart-version",
+    intended_verb: "append-tour-selection-cart-version",
     governed_arguments: ["tour_id", "selected_property_ids"],
+    verb_required_not_supplied: [
+      "base_selection_version_id", "expected_selection_version", "idempotency_key",
+      "property_ids", "selection_digest",
+    ],
+    supplied_not_in_verb_schema: ["selected_property_ids"],
     requires_human_promotion_receipt: false,
   },
   hand_off_native_navigation: {
     axis: "navigation",
-    writes_through_verb: "record-tour-map-promotion-receipt",
+    // THERE IS NO DEPLOYED NAVIGATION-HANDOFF VERB, and the nearest thing is not
+    // a substitute. `record-tour-map-promotion-receipt` writes the human
+    // PROMOTION DECISION the map doctrine's gate requires — a different
+    // operation, humanOnly and authorityOnly, over a projection rather than a
+    // route stop. Naming it here would have made a receipt write look like a
+    // navigation handoff, so this command names no verb at all.
+    intended_verb: null,
     governed_arguments: ["route_version_id", "route_stop_id", "platform", "travel_mode"],
+    verb_required_not_supplied: [],
+    supplied_not_in_verb_schema: [],
     // The map doctrine's promotion gate: exact approved coordinates reach native
-    // navigation only behind a human promotion receipt. There is no such receipt
-    // store in this repository, so this command is unavailable rather than done.
+    // navigation only behind a human promotion receipt. The receipt STORE exists
+    // (ops.tour_map_promotion_receipt, written by record-tour-map-promotion-
+    // receipt); what is missing is a reader this module can consult, so the
+    // answer names that adapter rather than pretending the store is absent.
     requires_human_promotion_receipt: true,
   },
 });
 
 export const V5_J301_COMMAND_NAMES = deepFreeze(Object.keys(V5_J301_MAP_COMMANDS).sort());
 
-export const V5_J301_COMMAND_VERBS = deepFreeze(
-  [...new Set(V5_J301_COMMAND_NAMES.map(name => V5_J301_MAP_COMMANDS[name].writes_through_verb))].sort());
+export const V5_J301_COMMAND_INTENDED_VERBS = deepFreeze(
+  [...new Set(V5_J301_COMMAND_NAMES
+    .map(name => V5_J301_MAP_COMMANDS[name].intended_verb)
+    .filter(verb => verb !== null))].sort());
 
-export const V5_J301_HUMAN_PROMOTION_RECEIPT_SEAM =
-  "seam:v5-j301-human-map-promotion-receipt-store";
+/** The commands that name no deployed verb at all. Navigation handoff is one. */
+export const V5_J301_COMMANDS_WITHOUT_A_VERB = deepFreeze(
+  V5_J301_COMMAND_NAMES.filter(name => V5_J301_MAP_COMMANDS[name].intended_verb === null));
+
+/**
+ * THE ADAPTER SEAM, AND THE CORRECTION IT CARRIES.
+ *
+ * An earlier draft of this module said the human map-promotion receipt STORE
+ * does not exist. That was false, and a reviewer was right to say so: the table
+ * `ops.tour_map_promotion_receipt` is in migrations/0430_tour_delivery_data_plane.sql
+ * and in db/schema.sql, `ops.record_tour_map_promotion_receipt` is its writer,
+ * and `record-tour-map-promotion-receipt` is the deployed humanOnly,
+ * authorityOnly verb that calls it.
+ *
+ * What is actually missing is a READER: nothing in this repository hands a
+ * promotion receipt back to a caller, and nothing turns a typed map command
+ * into arguments the deployed verbs' own inputSchemas accept. Those two holes
+ * are named below, and every command carries the exact field-level gap between
+ * what it emits and what its intended verb requires.
+ */
+export const V5_J301_PROMOTION_RECEIPT_READER_SEAM =
+  "seam:v5-j301-tour-map-promotion-receipt-reader-adapter";
+export const V5_J301_COMMAND_VERB_ADAPTER_SEAM =
+  "seam:v5-j301-map-command-record-layer-verb-adapter";
+
+/** The authoritative promotion-receipt path that DOES exist, named exactly. */
+export const V5_J301_PROMOTION_RECEIPT_AUTHORITY = deepFreeze({
+  table: "ops.tour_map_promotion_receipt",
+  migration: "migrations/0430_tour_delivery_data_plane.sql",
+  writer_function: "ops.record_tour_map_promotion_receipt",
+  writer_verb: "record-tour-map-promotion-receipt",
+  writer_verb_is_human_only: true,
+  store_exists_here: true,
+  reader_exists_here: false,
+  reader_seam: V5_J301_PROMOTION_RECEIPT_READER_SEAM,
+});
 
 /** The two answers this module can give. There is deliberately no third. */
 export const V5_J301_COMMAND_DECISIONS = deepFreeze(["refused", "unavailable"]);
@@ -358,7 +437,7 @@ export function normalizeMapCommand(request) {
     journey,
     command,
     axis: contract.axis,
-    writes_through_verb: contract.writes_through_verb,
+    intended_verb: contract.intended_verb,
     governed_arguments,
     // NOTE THE ABSENCE: no origin, no session, no device, no clock. That is the
     // equivalence property, written as an omission rather than as a promise.
@@ -370,7 +449,17 @@ export function normalizeMapCommand(request) {
     axis: contract.axis,
     journey,
     origin,
-    writes_through_verb: contract.writes_through_verb,
+    // NAMED, not called. `verb_adapter_bound: false` is on every envelope
+    // because no code here builds an argument list the deployed verb's own
+    // inputSchema would accept, and `verb_argument_gap` says exactly which
+    // fields are missing and which are named differently.
+    intended_verb: contract.intended_verb,
+    verb_adapter_bound: false,
+    verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+    verb_argument_gap: deepFreeze({
+      required_by_verb_not_supplied: [...contract.verb_required_not_supplied],
+      supplied_not_in_verb_schema: [...contract.supplied_not_in_verb_schema],
+    }),
     governed_arguments,
     command_preimage,
     command_digest: digest(command_preimage),
@@ -384,7 +473,7 @@ export function normalizeMapCommand(request) {
 }
 
 const ENVELOPE_SHAPE_KEYS = Object.freeze([
-  "command", "axis", "journey", "origin", "writes_through_verb", "governed_arguments",
+  "command", "axis", "journey", "origin", "intended_verb", "governed_arguments",
 ]);
 
 function assertEnvelope(envelope, path) {
@@ -460,9 +549,15 @@ export function compareMapCommandOrigins(request) {
     command_digests_match: digestsMatch,
     clickable_map_command_digest: left.command_digest,
     doc_command_command_digest: right.command_digest,
-    traverses_same_verb: left.writes_through_verb === right.writes_through_verb,
-    writes_through_verb: left.writes_through_verb === right.writes_through_verb
-      ? left.writes_through_verb : null,
+    names_same_intended_verb: left.intended_verb === right.intended_verb,
+    intended_verb: left.intended_verb === right.intended_verb
+      ? left.intended_verb : null,
+    // Equivalence is a statement about two caller inputs. It is not traversal,
+    // and no adapter exists that could make it one.
+    verb_adapter_bound: false,
+    verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+    governed_state_equivalent: false,
+    governed_state_equivalence_reason_id: "no_command_is_applied_here",
     divergences,
     // Said on every comparison, equivalent or not: this is a reading of two
     // requests, not a decision about either.
@@ -500,7 +595,10 @@ export function evaluateMapCommandAdmission(request) {
     axis: envelope.axis,
     origin: envelope.origin,
     command_digest: envelope.command_digest,
-    writes_through_verb: envelope.writes_through_verb,
+    intended_verb: envelope.intended_verb,
+    verb_adapter_bound: false,
+    verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+    verb_argument_gap: envelope.verb_argument_gap,
     map_contract: V5_J301_MAP_CONTRACT,
     map_contract_version: V5_J301_MAP_CONTRACT_VERSION,
     map_contract_gate: V5_J301_MAP_CONTRACT_GATE,
@@ -513,15 +611,18 @@ export function evaluateMapCommandAdmission(request) {
     return deepFreeze({
       ...base,
       decision: "refused",
-      reason_id: "human_promotion_receipt_unavailable",
-      owed_seams: [V5_J301_HUMAN_PROMOTION_RECEIPT_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP],
+      reason_id: "promotion_receipt_reader_unavailable",
+      // The store is REAL and named; the reader is the hole.
+      promotion_receipt_authority: V5_J301_PROMOTION_RECEIPT_AUTHORITY,
+      owed_seams: [V5_J301_PROMOTION_RECEIPT_READER_SEAM, V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+        V5_J301_MAP_CONTRACT_RECEIPT_STEP],
     });
   }
   return deepFreeze({
     ...base,
     decision: "unavailable",
     reason_id: "map_contract_receipt_unavailable",
-    owed_seams: [V5_J301_MAP_CONTRACT_RECEIPT_STEP],
+    owed_seams: [V5_J301_COMMAND_VERB_ADAPTER_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP],
   });
 }
 
@@ -545,12 +646,14 @@ export function v5J301CommandPolicyPreimage() {
       ...V5_J301_MAP_COMMANDS[name],
       governed_arguments: [...V5_J301_MAP_COMMANDS[name].governed_arguments],
     }])),
-    command_verbs: [...V5_J301_COMMAND_VERBS],
+    command_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
     position_roles: [...V5_J301_POSITION_ROLES],
     navigation_platforms: [...V5_J301_NAVIGATION_PLATFORMS],
     travel_modes: [...V5_J301_TRAVEL_MODES],
     decisions: [...V5_J301_COMMAND_DECISIONS],
-    human_promotion_receipt_seam: V5_J301_HUMAN_PROMOTION_RECEIPT_SEAM,
+    promotion_receipt_reader_seam: V5_J301_PROMOTION_RECEIPT_READER_SEAM,
+    promotion_receipt_store_exists_here: true,
+    command_verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
     map_contract: V5_J301_MAP_CONTRACT,
     map_contract_version: V5_J301_MAP_CONTRACT_VERSION,
     map_contract_gate: V5_J301_MAP_CONTRACT_GATE,
@@ -578,10 +681,11 @@ export function v5J301MapCommandProjection() {
     commands: [...V5_J301_COMMAND_NAMES],
     axes: [...V5_J301_COMMAND_AXES],
     every_command_traverses_a_deployed_verb: true,
-    command_verbs: [...V5_J301_COMMAND_VERBS],
+    command_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
     journey_one_map_commands_permitted: false,
     navigation_handoff_reachable_today: false,
-    navigation_handoff_reason_id: "human_promotion_receipt_unavailable",
+    navigation_handoff_reason_id: "promotion_receipt_reader_unavailable",
+    promotion_receipt_authority: V5_J301_PROMOTION_RECEIPT_AUTHORITY,
     admission_reachable_today: false,
     admission_reason_id: "map_contract_receipt_unavailable",
     map_contract: `${V5_J301_MAP_CONTRACT} ${V5_J301_MAP_CONTRACT_VERSION}`,
@@ -611,8 +715,11 @@ export const V5_J301_COMMAND_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_COMMAND_PROJECTION_SCHEMA_VERSION",
   "V5_J301_COMMAND_PUBLIC_SURFACE",
   "V5_J301_COMMAND_SCHEMA_VERSION",
-  "V5_J301_COMMAND_VERBS",
-  "V5_J301_HUMAN_PROMOTION_RECEIPT_SEAM",
+  "V5_J301_COMMANDS_WITHOUT_A_VERB",
+  "V5_J301_COMMAND_INTENDED_VERBS",
+  "V5_J301_COMMAND_VERB_ADAPTER_SEAM",
+  "V5_J301_PROMOTION_RECEIPT_AUTHORITY",
+  "V5_J301_PROMOTION_RECEIPT_READER_SEAM",
   "V5_J301_MAP_COMMANDS",
   "V5_J301_NAVIGATION_PLATFORMS",
   "V5_J301_POSITION_ROLES",
