@@ -37,6 +37,7 @@ import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import { GATE_ZERO_STEP_REF } from "../src/benchmark-minimum.v5.js";
 
 import * as surface from "../src/gate-zero-assurance.v5.js";
+import * as producerModule from "../src/gate-zero-producer-registration.v5.js";
 import {
   V5_A02_GATE_ZERO_SCHEMA_VERSION,
   V5_A02_POLICY_VERSION,
@@ -267,6 +268,85 @@ test("SURFACE: the public export list is exactly the unavailable surface", () =>
       `${name} is a classifier name on the public surface`);
     assert.ok(!name.includes("would_"), `${name} is a classifier field on the public surface`);
   }
+});
+
+/**
+ * Exactly what the producer registration module may export. The authority-
+ * bearing record is ONE frozen constant over four hard-bound predecessors; the
+ * rest are the pure constants it is assembled from. There is no builder, so
+ * there is no argument, so there is no caller-supplied predecessor set — which
+ * was the PR 990 defect: an exported builder handed back an authority-stamped
+ * provisional registration over whatever references the caller passed in.
+ */
+const EXPECTED_PRODUCER_EXPORTS = [
+  "GATE_ZERO_STEP_REF",
+  "UNRESOLVED_WITHOUT_R7",
+  "V5_A02_GATE_ZERO_COMBINER",
+  "V5_A02_GATE_ZERO_GATE_ID",
+  "V5_A02_GATE_ZERO_ORACLE_REF",
+  "V5_A02_GATE_ZERO_ORACLE_VERSION",
+  "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
+  "V5_A02_GATE_ZERO_PRODUCER_DECISION_REF",
+  "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
+  "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS",
+  "V5_A02_GATE_ZERO_PRODUCER_ROLE",
+  "V5_A02_GATE_ZERO_R7_ENTRY_PRESENT",
+  "V5_A02_GATE_ZERO_RECEIPT_REF",
+  "V5_A02_GATE_ZERO_RETRY_POLICY",
+  "V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION",
+  "V5_A02_SCHEDULER_STEP_REF",
+];
+
+test("PRODUCER: the registration module exports the frozen record and pure readers only", () => {
+  assert.deepEqual(Object.keys(producerModule).sort(), EXPECTED_PRODUCER_EXPORTS);
+  // Not one export is callable. A builder is the only shape that could take a
+  // predecessor argument, and the module has none — proved by value, not by name.
+  const callable = Object.entries(producerModule)
+    .filter(([, value]) => typeof value === "function").map(([name]) => name);
+  assert.deepEqual(callable, [],
+    "an exported builder can be handed caller-supplied predecessor references");
+  // And proved again in the source, so a future `export function` is red on
+  // sight rather than red only once someone adds it to the list above.
+  const source = readFileSync(
+    fileURLToPath(new URL("../src/gate-zero-producer-registration.v5.js", import.meta.url)), "utf8");
+  for (const shape of [/\bexport\s+function\b/, /\bexport\s+default\b/,
+    /\bexport\s+(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:function\b|\()/])
+    assert.equal(shape.test(source), false,
+      `the registration module exports a callable: ${shape}`);
+});
+
+test("PRODUCER: the four canonical predecessors are hard-bound into the frozen registration", () => {
+  const registration = producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION;
+  assert.deepEqual([...registration.registry_entry.depends_on_step_refs],
+    [...producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS]);
+  assert.deepEqual([...producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS], [
+    "step:scheduler-active-receipt",
+    "step:wr40-repository-outcome",
+    "step:wr46-dissolution-outcome",
+    "step:wr54-backup-recovery-outcome",
+  ]);
+  // Frozen all the way down: no caller can edit the record in place either.
+  assert.ok(Object.isFrozen(registration));
+  assert.ok(Object.isFrozen(registration.registry_entry));
+  assert.ok(Object.isFrozen(registration.registry_entry.depends_on_step_refs));
+  assert.ok(Object.isFrozen(producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));
+  assert.throws(() => { registration.registry_entry.depends_on_step_refs.push("step:mine"); },
+    TypeError);
+});
+
+test("PRODUCER: the checker's binding constant IS the frozen registration", () => {
+  // Same object, not an equal copy — the checker cannot be reading a second
+  // registration built over some other predecessor set.
+  assert.equal(surface.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+    producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION);
+  assert.equal(surface.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
+    producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS);
+  assert.equal(surface.V5_A02_SCHEDULER_STEP_REF, producerModule.V5_A02_SCHEDULER_STEP_REF);
+  // And what the checker reports comes from that one record.
+  const result = emitGateZeroOutcome(cleanJoin());
+  assert.equal(result.producer_role,
+    producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry.producer_role);
+  assert.equal(result.producer_registration, surface.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION);
 });
 
 test("SURFACE: no caller-controlled shape produces a privileged outcome", () => {

@@ -83,6 +83,32 @@ export const V5_A02_GATE_ZERO_RECEIPT_REF = "receipt:gate-zero-read-only-outcome
  */
 export const V5_A02_GATE_ZERO_COMBINER = "all_current_independent_pass";
 
+/**
+ * THE FOUR CANONICAL PREDECESSORS, HARD-BOUND, and the one authority for them.
+ * Exactly the `depends_on` set that tools/doctorcre-v5-review.cjs:1234-1244
+ * asserts on `step:gate-zero-read-only-outcome`, C-sorted so two readers
+ * enumerate it identically. They are restated here because that validator is
+ * CommonJS plan-shape code no ESM module can import, and
+ * gate-zero-assurance.v5.test.mjs reads that file and asserts the two lists are
+ * identical — so a change to the frozen plan turns the test red instead of
+ * letting the two drift apart in silence.
+ *
+ * They live in THIS file, beside the registration they stamp, because a
+ * registration that took its predecessors from a caller would let any caller
+ * obtain an authority-stamped record over references of their own choosing.
+ * There is no such door: the list is a literal and the builders below are
+ * module-private.
+ */
+export const V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS = Object.freeze([
+  "step:scheduler-active-receipt",
+  "step:wr40-repository-outcome",
+  "step:wr46-dissolution-outcome",
+  "step:wr54-backup-recovery-outcome",
+].sort());
+
+/** The one predecessor the scheduler canary must itself be bound to. */
+export const V5_A02_SCHEDULER_STEP_REF = "step:scheduler-active-receipt";
+
 function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
   if (value !== null && typeof value === "object") {
@@ -103,7 +129,7 @@ function deepFreeze(value) {
  * already proves identical to the validator's assertion at
  * tools/doctorcre-v5-review.cjs:1234-1244. Two copies would be two authorities.
  */
-export function v5A02GateZeroProducerRegistryEntry(predecessorStepRefs) {
+function v5A02GateZeroProducerRegistryEntry(predecessorStepRefs) {
   if (!Array.isArray(predecessorStepRefs) || predecessorStepRefs.length === 0)
     throw new TypeError("the predecessor step refs are required and are not defaulted here");
   return deepFreeze({
@@ -170,7 +196,7 @@ export const V5_A02_GATE_ZERO_RETRY_POLICY = deepFreeze({
  * The registration as one closed record. Callers read this; they cannot change
  * it, and binding a seat to the role is not something any caller can do here.
  */
-export function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
+function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
   return deepFreeze({
     schema_version: V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION,
     registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
@@ -186,3 +212,12 @@ export function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
       "an independent seat, distinct from the V5-A02 builder, holding oracle:gate-producer:gate-zero-read-only",
   });
 }
+
+/**
+ * THE REGISTRATION. One frozen constant over the hard-bound predecessors above
+ * — the only authority-bearing export of this module. Callers read it; they
+ * cannot build another one over references of their own, and binding a seat to
+ * the role is not something any caller can do here.
+ */
+export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION = deepFreeze(
+  v5A02GateZeroProducerRegistration(V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));

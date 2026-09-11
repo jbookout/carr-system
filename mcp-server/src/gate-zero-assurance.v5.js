@@ -62,9 +62,11 @@
 // enforced today at tools/doctorcre-v5-review.cjs:1234-1244, which asserts that
 // `step:gate-zero-read-only-outcome`'s `depends_on` is exactly
 // {wr46-dissolution, wr40-repository, wr54-backup-recovery, scheduler-active}.
-// They are restated here because that validator is CommonJS plan-shape code that
-// this module cannot import, and gate-zero-assurance.v5.test.mjs reads that file
-// and asserts the two lists are identical — so a change to the frozen plan turns
+// They are restated ONCE, in gate-zero-producer-registration.v5.js beside the
+// registration they stamp, because that validator is CommonJS plan-shape code no
+// ESM module can import; this module re-exports that one list rather than
+// keeping a second. gate-zero-assurance.v5.test.mjs reads the validator and
+// asserts the two lists are identical — so a change to the frozen plan turns
 // this module's test red instead of letting the two drift apart in silence.
 //
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js:
@@ -91,10 +93,12 @@ import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { GATE_ZERO_STEP_REF } from "./benchmark-minimum.v5.js";
 import {
+  V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
   V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
   V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
   V5_A02_GATE_ZERO_R7_ENTRY_PRESENT,
-  v5A02GateZeroProducerRegistration,
+  V5_A02_SCHEDULER_STEP_REF,
 } from "./gate-zero-producer-registration.v5.js";
 
 export { GATE_ZERO_STEP_REF, V5_NO_EFFECTS };
@@ -131,28 +135,21 @@ function fail(code, message, detail) {
 // ---------------------------------------------------------------------------
 
 /**
- * Exactly the `depends_on` set that tools/doctorcre-v5-review.cjs:1234-1244
- * asserts on `step:gate-zero-read-only-outcome`, C-sorted so two readers
- * enumerate it identically. A member absent here is not admissible evidence for
- * Gate Zero; a member present here is mandatory.
+ * The four predecessors and the scheduler among them, re-exported from
+ * gate-zero-producer-registration.v5.js — which holds them as a hard-bound
+ * literal beside the registration they stamp. This module does not restate
+ * them: two copies would be two authorities. A member absent there is not
+ * admissible evidence for Gate Zero; a member present there is mandatory.
+ *
+ * The provisionally-ruled producer registration comes from the same module as
+ * ONE frozen constant. There is no builder to call and no predecessor set to
+ * hand in. It names a role; it staffs nobody and binds nothing.
  */
-export const V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS = deepFreeze([
-  "step:scheduler-active-receipt",
-  "step:wr40-repository-outcome",
-  "step:wr46-dissolution-outcome",
-  "step:wr54-backup-recovery-outcome",
-].sort());
-
-/** The one predecessor the scheduler canary must itself be bound to. */
-export const V5_A02_SCHEDULER_STEP_REF = "step:scheduler-active-receipt";
-
-/**
- * The provisionally-ruled producer registration, built over the frozen
- * predecessor list above so the two can never disagree. It names a role; it
- * staffs nobody and binds nothing.
- */
-export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION = deepFreeze(
-  v5A02GateZeroProducerRegistration(V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));
+export {
+  V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+  V5_A02_SCHEDULER_STEP_REF,
+};
 
 /** What an observation says it saw. "pending" and "absent" are both "no". */
 export const V5_A02_OBSERVATION_STATES = deepFreeze(["absent", "observed", "pending"]);
