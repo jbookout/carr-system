@@ -379,20 +379,32 @@ def _canonical_workflow_truth(snap):
 
 
 def _canonical_assurance_health(snap):
-    """Print the A01 assurance-health census and return rc.
+    """Print the A01 assurance-health item, WHICH IS NOT PROVEN, and return 0.
 
-    THE CENSUS IS READ, NEVER SUPPLIED, AND READ ONCE FOR BOTH SECTIONS.  This
-    section projects THE SAME reading the workflow-truth section above printed:
-    lib/control_plane_workflow_truth_reader performed it once for this run and
-    handed back an opaque WorkflowTruthReading, which is what
-    ``lib/assurance_health_sources.assurance_health_census`` accepts and the only
-    thing it accepts.  The handle is registered by object identity in the reader,
-    so nothing a caller composes -- including anything carried in a --fixture
-    file, which is JSON and can hold no handle at all -- can be passed for one.
-    An adapter that accepts a census accepts its caller's assertion about the
-    control plane, and a review reproduced ``{"state": "healthy", "green": true}``
-    through exactly that door before it was closed; an adapter that reads a
-    SECOND time describes a second moment, which is the defect this shape closes.
+    THERE IS NO STATE ON THIS SECTION, AND THAT IS THE FINDING.  Nine review
+    rounds tried to derive a health label for each bound workflow scope out of the
+    F09 reading, and each round closed the exact forgery route it was shown and
+    left the class open: a caller-supplied census, a caller-supplied receipt, a
+    payload attribute on the reading handle, a stateful mapping honest during
+    verification and forged during rendering, an opaque registry key swapped
+    inside its own ``__hash__``, a raw base-descriptor write to ``__class__``,
+    and finally -- against a handle carrying no state at all -- rebinding the
+    reader's own snapshot function, writing its private mint registry, and a
+    hostile mapping key running caller code during the thaw.
+
+    So the label route took the stated fallback instead of a tenth narrowing.
+    ``lib/assurance_health_sources.assurance_health_census`` returns
+    ``available=False`` with reason ``reading_handle_integrity_unprovable`` for
+    every input, and this section prints that, the ``not_proven`` disposition, and
+    the durable-store seam that is owed before a state could honestly be printed
+    here.  What is missing is an OWNER for "this reading is the one the control
+    plane served"; an object in this process cannot be that owner.
+
+    THE SECTION ABOVE IS UNAFFECTED, and the difference is the point: the
+    workflow-truth section DISPLAYS the F09 reading it was handed, which is a
+    report of what was read, while this section would have CONVERTED it into a
+    state, which is a claim about the world.  Only the second one needs an
+    authority it does not have.
 
     THE --fixture DOOR IS A TEST DOOR AND LABELS ITSELF AS ONE.  A fixture census
     still has to drive this section hermetically -- that is what proves the
@@ -401,73 +413,49 @@ def _canonical_assurance_health(snap):
     hypothetical: the states are rendered as would-be-<state>-if-authoritative,
     no CANONICAL_FINDING is emitted, and the section can never turn this process
     red.  Nothing a fixture says is evidence, and nothing it says is healthy.
-
-    NO LABEL ON THE READ LINE CLAIMS EVIDENCE THE READING DID NOT HOLD.  Today
-    every one of the six layers comes back explicitly UNREAD: none of them has an
-    evidence owner that could verify a receipt, so the states below are what this
-    surface can honestly derive from F09 workflow truth alone -- unknown,
-    disabled -- with every unread layer printed as the gap it is rather than
-    passing silently.  A healthy scope is unreachable here by construction, and
-    that is the point.
-
-    RED ONLY WHERE THE FINDINGS THEMSELVES WITHDREW EVERYTHING (rule bd4a6d22).
-    unknown, disabled and not-yet-operational are evidence-backed states, not
-    faults, and are carried with their counts.  A degraded scope is a real
-    finding and is PRINTED as one -- _canonical_finding writes a single stdout
-    line and there is no record-layer seam behind it, so nothing here is
-    recorded; only a failed scope -- where the findings alone withdrew every
-    capability -- turns this surface red.
     """
     try:
         sys.path.insert(0, REPO_ROOT)
         import lib.assurance_health_sources as sources
     except Exception as exc:
-        print("Assurance health — evidence-backed state per bound workflow scope")
+        print("Assurance health — NOT PROVEN: no owner exists for the fact this "
+              "would rest on")
         print(f"  -- assurance health   UNAVAILABLE — seam unavailable "
               f"({type(exc).__name__}: {exc})")
         return 0
     if CANONICAL_FIXTURE:
         return _fixture_assurance_health(sources, snap)
 
-    print("Assurance health — evidence-backed state per bound workflow scope")
+    print("Assurance health — NOT PROVEN: no owner exists for the fact this would rest on")
     reading = (snap or {}).get("workflow_reading")
-    if reading is None:
-        print("  -- assurance health   UNAVAILABLE — this run holds no F09 reading to "
-              "project; the workflow-truth section above carries the reason")
-        return 0
     try:
         result = sources.assurance_health_census(reading)
     except Exception as exc:
-        print(f"  -- assurance health   UNAVAILABLE — the read refused "
+        print(f"  -- assurance health   UNAVAILABLE — the label route refused "
               f"({type(exc).__name__}: {exc})")
         return 0
     if not result.get("available"):
-        print(f"  -- assurance health   UNAVAILABLE — {result.get('reason', 'unstated')}")
+        # THE EXPECTED PATH, EVERY RUN. The route answers the same way whatever it
+        # is handed, including when this run holds no reading at all, so there is
+        # nothing to branch on here and no case in which a state is printed.
+        print(f"  -- assurance health   NOT PROVEN ({result.get('reason', 'unstated')}) — "
+              f"this item is carried as "
+              f"{result.get('item_disposition', sources.LABEL_ITEM_DISPOSITION)}, not as "
+              f"unread and not as healthy")
+        print(f"  -- OWED SEAM {result.get('owed_seam', sources.OWED_LABEL_AUTHORITY_SEAM)}")
         return 0
 
-    projection = result["projection"]
-    summary = projection["summary"]
-    states = summary["states"]
-    print(f"  {summary['scopes']} bound scope(s): "
-          + ", ".join(f"{states.get(state, 0)} {state}" for state in projection["states"])
-          + f"; {summary['green']} green")
-    for entry in result.get("unprojectable", []):
-        print(f"  -- UNPROJECTABLE {entry['workflow']} — {entry['reason']}")
-    rc = 0
-    for row in projection["rows"]:
-        scope = row["scope"]
-        identity = f"{scope['workflow_key']} v{scope['workflow_version']}"
-        if row["state"] == "failed":
-            detail = f"{identity} FAILED: {row['state_reason']}"
-            print(f"  ⚠︎ {detail}")
-            _canonical_finding("assurance_health_failed", detail)
-            rc = 1
-        elif row["state"] == "degraded":
-            detail = f"{identity} DEGRADED: {row['state_reason']}"
-            print(f"  ⚠︎ {detail}")
-            _canonical_finding("assurance_health_degraded", detail)
-    _print_assurance_layer_gaps(projection)
-    return rc
+    # UNREACHABLE BY CONSTRUCTION, AND DELETED RATHER THAN LEFT STANDING. The
+    # branch that printed "<n> bound scope(s): ... ; <n> green" and recorded
+    # assurance_health_failed / assurance_health_degraded findings lived here. The
+    # route above can no longer return available=True, so that code could only
+    # have been dead code carrying live state names -- which is the shape a grep,
+    # a screenshot or a later editor reads as a health claim this surface makes.
+    # The projection it printed still exists, module-private, in
+    # lib/assurance_health_sources; the day a durable store can prove a reading,
+    # this consumer is rewritten against that store rather than resurrected.
+    raise AssertionError(
+        "unreachable: assurance_health_census reports not_proven for every input")
 
 
 def _print_assurance_layer_gaps(projection):

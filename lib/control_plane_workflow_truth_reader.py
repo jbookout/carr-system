@@ -34,6 +34,49 @@ THE ONLY INPUT IS THE REQUEST TO READ.  This function takes no arguments.  There
 is deliberately no parameter through which a caller could supply rows, a census,
 a clock or a path: every one of those would be a route by which caller input
 became the system's own answer.
+
+WHAT THIS MODULE CANNOT PROVE, STATED FIRST BECAUSE IT DECIDES WHO MAY TRUST IT.
+A reading minted here is bound to its capture by PYTHON OBJECT IDENTITY inside
+one process, and object identity in a process the caller shares is not integrity.
+Three routes were demonstrated by review, and none of them is closable from
+inside this file:
+
+  1. MODULE REBINDING.  ``read_workflow_truth_reading`` resolves
+     ``read_workflow_truth_snapshot`` on this module at call time, so
+     ``reader.read_workflow_truth_snapshot = <caller's function>`` makes the
+     reader genuinely mint a handle over a census the caller wrote.  Every name
+     in Python resolves through a writable namespace; there is no spelling of
+     this call that removes that.
+  2. REGISTRY REPLACEMENT.  ``_MINTED`` is a module-private mapping, and
+     module-private is a convention: ``reader._MINTED[handle] = (caller_value,
+     digest)`` re-points an already-minted handle at a reading the caller chose.
+  3. A HOSTILE KEY EXECUTING DURING THE THAW.  ``_frozen`` preserves mapping KEYS
+     as they were, and ``_thawed`` hashes them while it builds its dictionaries.
+     A ``str`` subclass installed as a key in the snapshot runs caller code
+     inside ``__hash__`` during a render -- late enough that one consumer can
+     receive the original capture and a later consumer the replacement.
+
+SO THE LABEL ROUTE DOES NOT RELY ON THIS MODULE, AND SAYS SO.  Five rounds of
+narrowing produced a smaller handle each time and never produced a proof, which
+is itself the finding: the authority that is missing is not a better object, it
+is a DURABLE STORE that returns a reading whose integrity IT proves -- the store
+signs what it served and a consumer re-reads the reading back from it by id, so
+"is this the reading that was performed" is answered by the store rather than by
+an object graph the caller shares.  That store does not exist in this repository.
+``lib/assurance_health_sources.assurance_health_census`` therefore derives no
+health label from a reading at all: it reports
+``reading_handle_integrity_unprovable`` invariantly and the A01 item is carried
+as ``not_proven``.  ``render_reading`` remains for the consumer that prints the
+F09 census itself, where the reading is displayed as what it is rather than
+converted into a state, and that consumer prints exactly what it was handed.
+
+There is consequently NO exported verification function here.  ``verify_...``
+and ``is_workflow_truth_reading`` were removed rather than kept: an exported
+predicate that answers "this reading is genuine" is a self-declared authority
+over a fact this module cannot establish, which is the shape the standing rule
+forbids.  ``_entry`` still refuses an object this module never minted, because a
+stranger renders nothing; that refusal is not a proof of integrity and is no
+longer offered as one.
 """
 from __future__ import annotations
 
@@ -47,11 +90,10 @@ from datetime import datetime, timezone
 from typing import Any
 from weakref import WeakKeyDictionary
 
-__all__ = ["SCHEMA_VERSION", "READING_NOT_MINTED", "READING_PAYLOAD_REPLACED",
+__all__ = ["SCHEMA_VERSION", "READING_NOT_MINTED",
            "WorkflowTruthReading", "WorkflowTruthReadingError",
-           "is_workflow_truth_reading", "read_workflow_truth_reading",
-           "read_workflow_truth_snapshot", "render_reading",
-           "verify_workflow_truth_reading"]
+           "read_workflow_truth_reading", "read_workflow_truth_snapshot",
+           "render_reading"]
 
 SCHEMA_VERSION = "control-plane-workflow-truth-reader.v1"
 
@@ -459,15 +501,6 @@ _MINTED: "WeakKeyDictionary[WorkflowTruthReading, tuple[Any, str]]" = WeakKeyDic
 
 READING_NOT_MINTED = "workflow_truth_reading_not_minted"
 
-# RETIRED, AND KEPT VISIBLY SO RATHER THAN DELETED.  This was the refusal for a
-# genuinely minted handle no longer bound to its own reading -- the shape that
-# existed only while the handle carried a re-pointable key.  A handle now carries
-# nothing to re-point, so this module can no longer raise it, and
-# ``reader_refuses_only_by_identity_checks`` in ops/assurance-health-selftest.py
-# pins that.  The name stays exported so an importing consumer does not break on
-# a defect that was closed.
-READING_PAYLOAD_REPLACED = "workflow_truth_reading_payload_replaced"
-
 
 class WorkflowTruthReadingError(TypeError):
     """A reading was refused, carrying the machine-readable reason id.
@@ -510,16 +543,6 @@ def _entry(value: Any) -> tuple[Any, str] | None:
         return None
 
 
-def is_workflow_truth_reading(value: Any) -> bool:
-    """True only for a handle minted here.
-
-    Identity, not shape.  It cannot be answered incorrectly by contents, because
-    a handle carries none: what it is bound to is the captured reading in the
-    mint registry, which no caller can reach, replace, or key into.
-    """
-    return _entry(value) is not None
-
-
 def _entry_or_refuse(value: Any) -> tuple[Any, str]:
     """The mint entry for ``value``, or the refusal.  MODULE-PRIVATE.
 
@@ -535,22 +558,6 @@ def _entry_or_refuse(value: Any) -> tuple[Any, str]:
             "is recognised by being the very object that mint registered; "
             f"{type(value).__name__} is caller-supplied data")
     return entry
-
-
-def verify_workflow_truth_reading(value: Any) -> None:
-    """Refuse unless ``value`` is a handle THIS MODULE minted.
-
-    One question, because there is only one left to ask: is this object a key in
-    the mint registry?  If it is, the contents it renders are the ones captured
-    at mint -- there is nothing further to check, because there is nothing else it
-    can render and no state on it a caller could have changed since.  If it is
-    not, ``READING_NOT_MINTED``: whatever it is shaped like, this module never
-    read it.
-
-    Returns ``None`` on success; it hands back no reading, so no caller can
-    mistake the check for the contents.
-    """
-    _entry_or_refuse(value)
 
 
 def render_reading(reading: Any) -> dict[str, Any]:

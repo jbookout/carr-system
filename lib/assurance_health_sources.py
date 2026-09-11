@@ -1,11 +1,52 @@
-"""Bind the A01 assurance-health projection to the F09 census this seam READS.
+"""The A01 assurance-health label route, WHICH REPORTS THAT IT CANNOT BE PROVEN.
 
-WHAT THIS IS.  One public function, ``assurance_health_census(reading)``, whose
-one parameter accepts NOTHING a caller can build: the only value it takes is an
-opaque ``WorkflowTruthReading`` minted by ``lib/control_plane_workflow_truth_reader``
-for a read that module performed -- the same reader ``tools/health-check.py
---canonical`` renders its own F09 section from.  It projects the bound scopes
-``lib/assurance_health`` turns into health states.
+WHAT THIS IS NOW, AND WHY, BEFORE ANYTHING ELSE.  ``assurance_health_census`` is
+the public route by which a health LABEL -- a state, a capability stage, a green
+flag -- could be derived for a workflow scope.  It derives none.  It returns
+
+    available = False, reason = "reading_handle_integrity_unprovable"
+
+for every call, whatever it is handed, and the A01 item is carried as
+``not_proven`` in the pull request, the slice report and any catalog or receipt
+row.  ``OWED_LABEL_AUTHORITY_SEAM`` below names what is missing.
+
+THE NINE ROUNDS THAT PRODUCED THAT ANSWER, compressed, because the shape of the
+failure is the reason for the fallback.  Round after round the census could be
+forged through a different door -- a caller-supplied census; a caller-supplied
+receipt; a payload attribute on the reading handle; a stateful mapping that was
+honest during verification and forged during rendering; an opaque registry key
+swapped from inside its own ``__hash__``; a raw base-descriptor write to
+``__class__`` that re-pointed method dispatch -- and each round closed the exact
+door used and left the CLASS open.  The ninth round closed the last door on the
+handle (it carries no state at all now) and was beaten anyway, by rebinding the
+reader's own module-level snapshot function, by writing the reader's private
+mint registry directly, and by a hostile mapping key that runs caller code during
+the thaw.  None of those is closable from inside a Python module the caller
+shares a process with.
+
+SO THE HONEST CLOSE IS THE STATED FALLBACK, not a tenth narrowing.  What is
+missing is not a better object: it is an OWNER for the fact "this reading is the
+one the control plane served", and that owner is a durable store, not an object
+graph.  Until that store exists, a label derived here would be a label this
+repository cannot stand behind, and the standing rule is explicit that where the
+authoritative owner of a fact does not exist, the code reports unavailable and
+names the seam it is owed.  That is what this module does.
+
+WHAT STILL WORKS, AND WHERE.  ``tools/health-check.py`` still prints the F09
+workflow census itself, from ``render_reading`` -- that consumer DISPLAYS the
+reading rather than converting it into a label, so it is not this route and does
+not borrow its authority.  The classification logic that would turn a reading
+into 26 bound scopes is intact and module-private (``_assurance_health_scopes``,
+``_project``); the acceptance suite and the ``--fixture`` test door reach it only
+through ``_would_be_assurance_health_if_authoritative``, whose answer comes back
+under a hypothetical name no consumer can read as a state. It is kept, unreached
+by any public route, so the day the store exists this seam is a wiring job rather
+than a rebuild.
+
+WHAT THE REST OF THIS DOCSTRING DESCRIBES is that private projection: it is still
+accurate about how a reading WOULD be bound, and it is deliberately not deleted,
+because a projection nobody can read is easier to re-authorise than one nobody
+can find.
 
 THE CORRECTION THIS MODULE MOST RECENTLY TOOK, and it is the reason the shape
 changed.  This module used to export ``assurance_health_scopes(workflows)`` and
@@ -101,10 +142,15 @@ from lib.control_plane_workflow_truth import (
     SCHEMA_VERSION as _WORKFLOW_TRUTH_SCHEMA_VERSION,
     UNREADABLE as _UNREADABLE,
 )
+# ONE NAME, AND IT IS ONLY A TYPE.  ``render_reading`` and
+# ``WorkflowTruthReadingError`` used to be imported here because this module
+# rendered the reading and translated the reader's refusal.  It does neither now:
+# the public label route consumes no reading at all, so importing the reader's
+# render function would be importing a capability this module has ruled it cannot
+# honestly use.  The handle type stays, as the annotation on the parameter that
+# records the shape of the seam that is owed.
 from lib.control_plane_workflow_truth_reader import (
     WorkflowTruthReading as _WorkflowTruthReading,
-    WorkflowTruthReadingError as _WorkflowTruthReadingError,
-    render_reading as _render_workflow_truth_reading,
 )
 
 SCHEMA_VERSION = "assurance-health-sources.v1"
@@ -116,8 +162,33 @@ SCHEMA_VERSION = "assurance-health-sources.v1"
 __all__ = [
     "SCHEMA_VERSION",
     "UNREAD_LAYER_SOURCE",
+    "LABEL_ROUTE_UNAVAILABLE_REASON",
+    "LABEL_ITEM_DISPOSITION",
+    "OWED_LABEL_AUTHORITY_SEAM",
     "assurance_health_census",
 ]
+
+# THE INVARIANT ANSWER OF THE PUBLIC LABEL ROUTE, and the seam that is owed
+# before it could ever be anything else.  These are constants rather than
+# branches because the answer does not depend on anything: see
+# ``assurance_health_census`` below.
+LABEL_ROUTE_UNAVAILABLE_REASON = "reading_handle_integrity_unprovable"
+
+# The disposition this A01 item carries everywhere it is listed -- the pull
+# request body, the slice report, and any catalog or receipt row.  NOT_PROVEN is
+# not "unread": the projection exists and its inputs are reachable; what is
+# missing is any way to prove that the reading those inputs came from is the one
+# the control plane served.
+LABEL_ITEM_DISPOSITION = "not_proven"
+
+OWED_LABEL_AUTHORITY_SEAM = (
+    "a durable store that proves a reading's integrity itself: it records the "
+    "reading it served under an id and signs it, and a consumer re-reads that id "
+    "back from the store before deriving anything from it, so 'is this the "
+    "reading the control plane performed' is answered by the store rather than "
+    "by Python object identity inside the caller's own process. No such store "
+    "exists in this repository, so no label derived from an in-process reading "
+    "handle is proven, and this route reports that instead of a state.")
 
 # The exact source each layer this reading does NOT contain would have to come
 # from.  Naming it is the whole difference between an unread layer and a silence.
@@ -294,74 +365,49 @@ def _project(workflows: _Any, *, now: _Any) -> dict[str, _Any]:
 
 
 def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
-    """Project assurance health from ONE reading the F09 reader performed.
+    """THE PUBLIC LABEL ROUTE, AND IT REPORTS THAT IT CANNOT BE PROVEN.
 
-    THE ONLY PUBLIC ENTRY, AND THE ONLY THING IT ACCEPTS IS A READING IT COULD
-    NOT HAVE BEEN GIVEN BY A CALLER.  ``reading`` must be a
-    ``WorkflowTruthReading`` minted by
-    ``lib/control_plane_workflow_truth_reader.read_workflow_truth_reading`` for a
-    read that module performed; the handle is registered by object identity, so
-    no census, row set, surface list, owner map, clock or path can arrive through
-    this parameter and nothing shaped like a handle passes for one.  Anything
-    else is a ``TypeError``.  The instant is still this function's own.
+    ONE OUTCOME, INVARIANT, WHATEVER IS PASSED.  This function reads nothing off
+    ``reading``, calls nothing on it, passes it to nothing, and branches on
+    nothing about it.  It returns the same dictionary for a handle the F09 reader
+    genuinely minted, for a handle minted over a census a caller installed by
+    rebinding the reader's snapshot function, for a handle whose registry entry a
+    caller replaced, for a forged look-alike, for ``None`` and for a hand-written
+    census: ``available`` is ``False`` and ``reason`` is
+    ``reading_handle_integrity_unprovable``.  There is no input that produces any
+    other answer, which is the only form of "caller input is not authority" that
+    does not depend on a check being correct.
 
-    AND THE CONTENTS COME FROM THE READER'S CAPTURE, NOT FROM THE HANDLE.  Every
-    review that got a forged census through this entry needed the same thing:
-    STATE ON THE HANDLE.  One replaced the payload attribute
-    through ``object.__setattr__``; one installed a stateful mapping that served
-    authentic content to the verification traversal and forged content to the
-    render traversal; one swapped the opaque string key the registry was reached
-    by, from inside that string's own ``__hash__``, so the entry verified and the
-    entry consumed were two different readings.  The handle now carries NOTHING --
-    empty ``__slots__``, refused ``__setattr__``, no field and no accessor -- and
-    the reader's registry is keyed by the handle OBJECT, so the only input to a
-    lookup is the object itself and there is nothing about it a caller can change
-    between the check and the projection.
+    WHY IT DOES NOT REFUSE BY TYPE ANY MORE.  It used to raise ``TypeError``
+    unless the argument was a reading the reader minted, and that refusal was
+    itself a claim: it said that a handle passing the test WAS a reading of the
+    control plane.  Review showed that claim cannot be made from inside this
+    process -- the reader's snapshot function can be rebound, its private mint
+    registry can be written, and a hostile mapping key can swap a registry entry
+    during the thaw -- so the refusal was distinguishing objects, not proving
+    readings.  Refusing everything equally says the true thing: this route has no
+    authority to distinguish them.
 
-    AND IT CALLS NOTHING ON THE HANDLE, which is the eighth review's close.  This
-    entry used to verify the handle and then dispatch ``reading.rendered()``: a
-    method resolves through the instance, so a raw base-descriptor write --
-    ``object.__dict__["__class__"].__set__(reading, SameLayoutForger)``, which no
-    class body can intercept -- re-pointed dispatch on a genuinely minted handle
-    between the two lines and this function returned the caller's census.  It now
-    passes the object to the reader's module function
-    ``render_reading``, which performs ONE registry lookup and thaws the value
-    that lookup returned.  There is no verification window because there is no
-    second act, and a retyped handle is refused there with ``READING_NOT_MINTED``
-    rather than rendering anything.  (``READING_PAYLOAD_REPLACED`` is retired: it
-    named a genuinely minted handle re-pointed at another reading, which needed a
-    key to re-point, and the reader can no longer raise it.)
+    WHAT A CONSUMER SHOULD DO WITH THIS.  Print it as unavailable and carry the
+    A01 item as ``not_proven`` naming ``OWED_LABEL_AUTHORITY_SEAM``, which is what
+    ``tools/health-check.py`` does.  Do not fall back to the private projection:
+    it is reachable only through an unexported hypothetical hook whose answer is
+    named for what it is worth, and a consumer that reads that name as a state
+    has reintroduced exactly the defect this fallback closes.
 
-    Consuming the reading rather than repeating it is what makes a health run one
-    moment: ``tools/health-check.py`` performs the F09 read once and renders both
-    its workflow-census section and its assurance-health section from that single
-    reading.
-
-    Returns ``{"available": False, "reason": ...}`` whenever the reading itself
-    refused, which is what a machine with no database tap gets.  An absent
-    reading is reported absent; it is never projected as an empty or a healthy
-    census.
+    ``reading`` is kept in the signature -- required, and annotated with the
+    reader's handle type -- so that the shape of the seam that is owed stays
+    visible at the call site, and so no caller can pass a census through it the
+    day it is wired to a store.  It is deliberately unused.
     """
-    # THE READER OWNS THE VERDICT, ITS REASON ID, AND THE CONTENTS -- in ONE act.
-    # Asking it once, rather than testing the shape here and reading the contents
-    # there, is what keeps this seam from growing a second, differently-worded
-    # definition of "a reading" AND what leaves no instant between the check and
-    # the use for a caller to act in.  The refusal is a TypeError:
-    # WorkflowTruthReadingError subclasses it, so every caller that already
-    # refuses a non-reading with TypeError still does.
-    try:
-        captured = _render_workflow_truth_reading(reading)
-    except _WorkflowTruthReadingError as exc:
-        raise _WorkflowTruthReadingError(
-            exc.reason_id,
-            "assurance_health_census accepts only a workflow-truth reading minted by "
-            "lib/control_plane_workflow_truth_reader.read_workflow_truth_reading(); "
-            f"{type(reading).__name__} is caller-supplied data, and a census a caller "
-            f"composed is its assertion about the control plane, not a reading of it "
-            f"({exc})") from None
-    # What that returned is a private copy of the reader's single capture, which
-    # this module never had a way to reach and a caller never had a way to write.
-    return _project(captured, now=_datetime.now(_timezone.utc))
+    del reading  # unused, and unusable: see the docstring above
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "available": False,
+        "reason": LABEL_ROUTE_UNAVAILABLE_REASON,
+        "item_disposition": LABEL_ITEM_DISPOSITION,
+        "owed_seam": OWED_LABEL_AUTHORITY_SEAM,
+    }
 
 
 def _would_be_assurance_health_if_authoritative(workflows: _Any, *, now: _Any) -> dict[str, _Any]:
