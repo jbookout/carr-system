@@ -1210,10 +1210,13 @@ export const V5_LEDGER_OPERATION_KINDS = Object.freeze(Object.keys(V5_LEDGER_OPE
  * Apply a sequence of operations in the given order, returning the final ledger
  * and every outcome.
  *
- * THIS IS WHAT A RACE IS, HERE. There are no threads: concurrency is modelled
- * as an ORDER, and the property that matters is that every order produces a
- * conserved ledger inside its ceilings. Running the same two operations both
- * ways round and comparing is how the race fixtures are written.
+ * THIS IS AN ORDER AND IT IS NOT A RACE. Each step here sees the ledger the
+ * step before it produced, which is the single-writer case: what it proves is
+ * that no sequence can admit more than a ceiling allows, and that is worth
+ * proving in both directions. It proves nothing about two callers who computed
+ * against the SAME ledger, because a sequence cannot express that — the
+ * compare-and-swap boundary below is where that case is settled, and the
+ * fixtures that drive it are the ones labelled RACE.
  */
 export function applyOperations(ledger, operations) {
   assertLedger(ledger);
