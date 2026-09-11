@@ -33,6 +33,7 @@ import path from "node:path";
 import { digest } from "../src/artifact-trust.js";
 import { V5BoundaryError } from "../src/global-boundaries.v5.js";
 import * as a03 from "../src/complete-set-review-a03.v5.js";
+import * as a03Vocabulary from "../src/complete-set-review-a03.vocabulary.v5.js";
 import {
   V5_A03_CLASSIFICATIONS,
   V5_A03_CLASSIFIER_EVIDENCE_SOURCE,
@@ -46,18 +47,52 @@ import {
   reviewDimensionGap,
   reviewRoundObligation,
   roleSeparationCollisions,
+  v5A03PolicyPreimageMirror,
 } from "./complete-set-review-a03-classifiers.v5.testhelper.mjs";
 
 const {
   V5_A03_DECISION_IDS, V5_A03_PUBLIC_REASON_IDS, V5_A03_REASON_IDS, V5_A03_SCHEMA_VERSION,
-  V5_A03_SEAMS, V5_A03_SETTLED_DECISIONS, V5_ADJUDICATION_CHECKS, V5_ADJUDICATION_OUTCOMES,
+  V5_A03_SEAMS, V5_A03_SETTLED_DECISION_DIGESTS, V5_ADJUDICATION_CHECKS,
   V5_ADJUDICATION_RECEIPT_KIND, V5_ADJUDICATOR_ROLE, V5_FINDING_SET_CHECKS, V5_MAX_REVIEW_ROUNDS,
   V5_NON_REVIEWER_ROLES, V5_NO_EFFECTS, V5_OPPOSING_ROLE_PAIRS, V5_REVIEW_DIMENSIONS,
   V5_ROUND_BOUND_CHECKS, V5_ROUND_REGRESSION_CLASSES, V5_ROUTING_CHECKS,
-  assertA03DecisionBinding, readBoundedAdjudication, readFindingSetCompleteness,
-  readReviewRoundAdmission, readReviewRoutingAdmission, v5A03PolicyCanonicalBytes,
-  v5A03PolicyDigest, v5A03PolicyPreimage, verifyAdjudicationReceipt,
+  assertA03DecisionBinding, readBoundedAdjudication, readFindingSetExhaustiveness,
+  readReviewRoundAdmission, readReviewRoutingAdmission,
+  v5A03PolicyDigest, verifyAdjudicationReceipt,
 } = a03;
+
+// The outcome vocabulary is no longer on the public surface. A fixture that
+// needs a well-formed receipt disposition takes it from the vocabulary module,
+// which is where the opaque codes live.
+const { V5_ADJUDICATION_OUTCOME_CODES, V5_ADJUDICATION_OUTCOME_CODE_SET } = a03Vocabulary;
+
+/**
+ * The five settled sentences, verbatim, held HERE rather than imported.
+ *
+ * Production keeps them module-private: they contain "pass, fail, or
+ * quarantine", "allow at most two full rounds" and "the complete finding set",
+ * and this slice's contract is that no privileged word reaches a consumer out
+ * of a payload. A binding is built from doctrine, not from the module that
+ * checks it, so the suite builds one the way a real caller must — from its own
+ * copy of the text. If production's private table drifts from these five
+ * sentences by one character, assertA03DecisionBinding refuses the binding
+ * below and this file fails.
+ */
+const A03_SETTLED_REQUIREMENT_TEXT = Object.freeze({
+  "Q028.D1": "CI never certifies its own specification; every consequential slice receives independent fresh-context review, automatic remediation, and unresolved-material-disagreement escalation only.",
+  "Q042.D1": "Each review round discovers the complete finding set before batch repair; allow at most two full rounds, then stronger adjudication and pass, fail, or quarantine without endless spirals.",
+  "Q107.D1": "Separate architect, builder, reviewer, integration, deployment, and program-control duties for the same change; no role may certify or weaken its own work.",
+  "Q113.D1": "Test deterministic behavior, adapters, database, state machines, failures, browsers, staging, and production outcomes through deep-module interfaces; discover all findings, batch repair, fully regress, and independently review outcomes.",
+  "Q154.D1": "Run separate exhaustive architecture, sequencing, repository, migration, context, security, business, product, cost, resilience, and operations reviews; collect complete findings, batch repair, and conduct one fresh full-plan review.",
+});
+
+/** The binding a caller holding doctrine would hand in. */
+function heldDecisionBinding() {
+  return { decisions: Object.fromEntries(V5_A03_DECISION_IDS.map(id => [id, {
+    settled_requirement: A03_SETTLED_REQUIREMENT_TEXT[id],
+    source_evidence_digest: V5_A03_SETTLED_DECISION_DIGESTS[id],
+  }])) };
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..", "..");
@@ -161,7 +196,7 @@ function receiptBody(overrides = {}) {
     adjudicator_identity_ref: "actor:adjudicator",
     disputed_finding_refs: ["finding:one"],
     rounds_completed: V5_MAX_REVIEW_ROUNDS,
-    outcome: "quarantine",
+    outcome: V5_ADJUDICATION_OUTCOME_CODES.isolating,
     ...overrides,
   };
 }
@@ -188,19 +223,22 @@ function blockedAt(result) {
 // The settled decisions and the policy identity.
 // ---------------------------------------------------------------------------
 
-test("binding: the five catalog decisions are carried verbatim with their evidence digests", () => {
+test("binding: the public half of the binding is digests only, never the settled text", () => {
   assert.deepEqual([...V5_A03_DECISION_IDS], ["Q028.D1", "Q042.D1", "Q107.D1", "Q113.D1", "Q154.D1"]);
-  for (const id of V5_A03_DECISION_IDS) {
-    const entry = V5_A03_SETTLED_DECISIONS[id];
-    assert.equal(typeof entry.settled_requirement, "string");
-    assert.match(entry.source_evidence_digest, /^[0-9a-f]{64}$/);
-    assert.equal(Object.isFrozen(entry), true);
-  }
+  assert.deepEqual(Object.keys(V5_A03_SETTLED_DECISION_DIGESTS).sort(), [...V5_A03_DECISION_IDS]);
+  for (const id of V5_A03_DECISION_IDS)
+    assert.match(V5_A03_SETTLED_DECISION_DIGESTS[id], /^[0-9a-f]{64}$/);
+  assert.equal(Object.isFrozen(V5_A03_SETTLED_DECISION_DIGESTS), true);
+  // The settled sentences are not reachable from the module under any name. They
+  // carry three privileged words, and this slice hands a consumer none.
+  assert.equal("V5_A03_SETTLED_DECISIONS" in a03, false);
+  for (const value of Object.values(a03))
+    assert.equal(typeof value === "object" && value !== null &&
+      Object.values(value).some(entry => entry && entry.settled_requirement !== undefined), false);
 });
 
 test("binding: agreement is silence, and drift is refused in both directions", () => {
-  const held = { decisions: Object.fromEntries(V5_A03_DECISION_IDS
-    .map(id => [id, { ...V5_A03_SETTLED_DECISIONS[id] }])) };
+  const held = heldDecisionBinding();
   // No affirmative return value: a consumer has nothing here to mistake for a
   // clearance. It throws, or it says nothing at all.
   assert.equal(assertA03DecisionBinding(held), undefined);
@@ -221,29 +259,37 @@ test("binding: agreement is silence, and drift is refused in both directions", (
     error => error instanceof V5BoundaryError && error.code === "decision_binding_drift");
 });
 
-test("policy: the preimage is a vocabulary identity and carries no answer", () => {
-  const preimage = v5A03PolicyPreimage();
-  assert.equal(digest(preimage), v5A03PolicyDigest());
-  assert.deepEqual(JSON.parse(v5A03PolicyCanonicalBytes()), JSON.parse(JSON.stringify(preimage)));
-  for (const key of ["decision", "status", "answer", "ok", "reason_id"])
-    assert.equal(key in preimage, false, `${key} is an answer field and does not belong in a policy identity`);
-  assert.equal(preimage.public_surface_answers, "unavailable");
-  assert.equal(preimage.authoritative_holders_bound, false);
+test("policy: only the digest is public, and the readable mirror is bound to it", () => {
+  // The preimage and its canonical bytes are module-private now. The suite reads
+  // the mirror under test/, and the digest is what proves the mirror has not
+  // drifted from the private original by so much as a sort order.
+  assert.equal("v5A03PolicyPreimage" in a03, false);
+  assert.equal("v5A03PolicyCanonicalBytes" in a03, false);
+  assert.match(v5A03PolicyDigest(), /^sha256:[0-9a-f]{64}$/);
 
-  // The ONLY privileged words anywhere in the preimage sit inside two closed
-  // vocabularies, where the settled text put them: Q042.D1's three adjudication
-  // outcomes, and the two answers a reviewer may give for a dimension. Anywhere
-  // else the word would be an answer wearing a vocabulary's clothes.
-  const VOCABULARY_KEYS = ["adjudication_outcomes", "review_states"];
-  const stray = [];
-  for (const [key, value] of Object.entries(preimage)) {
-    if (VOCABULARY_KEYS.includes(key)) continue;
-    for (const found of stringValues(value))
-      if (PRIVILEGED_VALUES.has(found)) stray.push(`${key} = ${found}`);
-  }
-  assert.deepEqual(stray, []);
-  assert.deepEqual([...preimage.adjudication_outcomes], ["fail", "pass", "quarantine"]);
-  assert.deepEqual([...preimage.review_states], ["changes_required", "passed"]);
+  const mirror = v5A03PolicyPreimageMirror();
+  assert.equal(digest(mirror), v5A03PolicyDigest(),
+    "the mirror under test/ has drifted from the private production preimage");
+  for (const key of ["decision", "status", "answer", "ok", "reason_id"])
+    assert.equal(key in mirror, false, `${key} is an answer field and does not belong in a policy identity`);
+  assert.equal(mirror.public_surface_answers, "unavailable");
+  assert.equal(mirror.authoritative_holders_bound, false);
+
+  // NO EXEMPTION HERE EITHER. The preimage recites every closed vocabulary this
+  // slice holds, and after the second correction not one of those vocabularies
+  // contains a privileged word — so the whole structure is swept, with no
+  // vocabulary keys skipped, which is what the earlier version of this test did.
+  assert.deepEqual(privilegedStrings(mirror), []);
+  assert.deepEqual([...mirror.adjudication_outcome_codes], [...V5_ADJUDICATION_OUTCOME_CODE_SET]);
+  assert.deepEqual([...mirror.review_states], ["changes_required", "no_changes_required"]);
+});
+
+test("policy: the digest moves when a vocabulary moves — the identity is not decorative", () => {
+  // A digest nothing can change is not an identity. The mirror is the lever: a
+  // one-word change to any recited vocabulary must produce different bytes.
+  const mirror = v5A03PolicyPreimageMirror();
+  const moved = { ...mirror, review_dimensions: [...mirror.review_dimensions, "twelfth"] };
+  assert.notEqual(digest(moved), v5A03PolicyDigest());
 });
 
 test("policy: the reason vocabulary is sorted, unique, and the public subset is the seam reasons", () => {
@@ -273,15 +319,14 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "V5_A03_REASON_IDS",
   "V5_A03_SCHEMA_VERSION",
   "V5_A03_SEAMS",
-  "V5_A03_SETTLED_DECISIONS",
+  "V5_A03_SETTLED_DECISION_DIGESTS",
   "V5_ADJUDICATION_CHECKS",
-  "V5_ADJUDICATION_OUTCOMES",
   "V5_ADJUDICATION_RECEIPT_KIND",
   "V5_ADJUDICATION_RECEIPT_STORE_SEAM",
   "V5_ADJUDICATOR_ROLE",
-  "V5_COMPLETE_FINDING_SET_REGISTRY_SEAM",
   "V5_CONTEXT_BINDINGS",
   "V5_DETERMINISTIC_ONLY_DECISIONS",
+  "V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM",
   "V5_FINDING_SET_CHECKS",
   "V5_MAX_REVIEW_ROUNDS",
   "V5_MODEL_PERMITTED_ROLES",
@@ -300,22 +345,71 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "V5_SUBMISSION_STATES",
   "assertA03DecisionBinding",
   "readBoundedAdjudication",
-  "readFindingSetCompleteness",
+  "readFindingSetExhaustiveness",
   "readReviewRoundAdmission",
   "readReviewRoutingAdmission",
-  "v5A03PolicyCanonicalBytes",
   "v5A03PolicyDigest",
-  "v5A03PolicyPreimage",
   "verifyAdjudicationReceipt",
 ];
+
+/** The vocabulary module's whole export surface, swept exactly like the public one. */
+const EXPECTED_VOCABULARY_EXPORTS = [
+  "V5_A03_POLICY_VERSION",
+  "V5_A03_SCHEMA_VERSION",
+  "V5_A03_SEAMS",
+  "V5_ADJUDICATION_CHECKS",
+  "V5_ADJUDICATION_OUTCOME_CODES",
+  "V5_ADJUDICATION_OUTCOME_CODE_SET",
+  "V5_ADJUDICATION_RECEIPT_KIND",
+  "V5_ADJUDICATION_RECEIPT_STORE_SEAM",
+  "V5_ADJUDICATOR_ROLE",
+  "V5_CONTEXT_BINDINGS",
+  "V5_DETERMINISTIC_ONLY_DECISIONS",
+  "V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM",
+  "V5_FINDING_SET_CHECKS",
+  "V5_MAX_REVIEW_ROUNDS",
+  "V5_MODEL_PERMITTED_ROLES",
+  "V5_NON_REVIEWER_ROLES",
+  "V5_OPPOSING_ROLE_PAIRS",
+  "V5_REVIEWER_IDENTITY_REGISTRY_SEAM",
+  "V5_REVIEW_DIMENSIONS",
+  "V5_REVIEW_ROLES",
+  "V5_REVIEW_ROUND_LEDGER_SEAM",
+  "V5_REVIEW_STATES",
+  "V5_ROUND_BOUND_CHECKS",
+  "V5_ROUND_REGRESSION_CLASSES",
+  "V5_ROUND_TRANSITIONS",
+  "V5_ROUTING_CHECKS",
+  "V5_SUBMISSION_STATES",
+];
+
+/**
+ * THE SIX PRIVILEGED WORDS, and the sweep that may not exempt one export.
+ *
+ * The first correction of PR 987 swept five reader functions and deliberately
+ * exempted the outcome vocabulary; the second review found the bare word `pass`
+ * still leaving the module through that exemption, from `V5_ADJUDICATION_OUTCOMES`
+ * and out of the exported policy preimage and its canonical bytes. So the sweep
+ * is rebuilt on the opposite principle: EVERY export of EVERY src module in this
+ * slice, matched against each word on its own, as a whole string and as a
+ * substring, in the export's NAME, in its value walked to the leaves (object
+ * keys included), and in every value it returns for every caller-controlled
+ * shape. There is no exemption list, and adding one is the defect.
+ */
+const PRIVILEGED_WORDS = ["ok", "allow", "pass", "satisfied", "complete", "admitted"];
+
+const SWEPT_SRC_MODULES = Object.freeze({
+  "mcp-server/src/complete-set-review-a03.v5.js": a03,
+  "mcp-server/src/complete-set-review-a03.vocabulary.v5.js": a03Vocabulary,
+});
 
 /** The words a consumer would act on. None may come back from this surface. */
 const PRIVILEGED_TRUE_KEYS = new Set([
   "ok", "allow", "allowed", "approved", "verified", "receipt_verified", "receipt_resolved",
-  "reviewers_entitled", "identities_separated_by_construction", "batch_repair_admitted",
-  "round_admitted", "adjudication_admitted", "disposition_recorded", "within_round_limit",
+  "reviewers_entitled", "identities_separated_by_construction", "batch_repair_unlocked",
+  "round_may_begin", "adjudication_may_begin", "disposition_recorded", "within_round_limit",
   "outcome_is_caller_stated", "receipt_is_caller_supplied", "registry_bound", "ledger_bound",
-  "store_bound", "request_read", "caller_evidence_admitted", "model_judgment_admitted",
+  "store_bound", "request_read", "caller_evidence_is_authority", "model_judgment_is_authority",
   "state_holder_is_caller_supplied", "performs_routing", "performs_repair", "performs_adjudication",
   "satisfied", "complete", "covered",
 ]);
@@ -332,6 +426,56 @@ function stringValues(value, out = []) {
     Object.values(value).forEach(item => stringValues(item, out));
   return out;
 }
+
+/** Every string in a value INCLUDING its object keys, walked to the leaves. */
+function stringsAndKeys(value, out = []) {
+  if (typeof value === "string") { out.push(value); return out; }
+  if (Array.isArray(value)) { value.forEach(item => stringsAndKeys(item, out)); return out; }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) { out.push(key); stringsAndKeys(entry, out); }
+    return out;
+  }
+  return out;
+}
+
+/** The strings in a value that carry one of the six words, whole or as a part. */
+function privilegedStrings(value) {
+  return stringsAndKeys(value).filter(found =>
+    PRIVILEGED_WORDS.some(word => found.toLowerCase().includes(word)));
+}
+
+/**
+ * Every string one export can put in front of a consumer: its own name, its
+ * value, and — when it is a function — every value it returns for every
+ * caller-controlled shape, including no argument at all.
+ *
+ * A THROW IS NOT A RETURN VALUE, and the difference is the point rather than an
+ * exemption. `assertA03DecisionBinding` refuses a malformed binding by throwing,
+ * and its message quotes the caller's own field name back — so a caller passing
+ * a field called `pass` would see that word in the message it caused. What the
+ * sweep requires is that the module never HANDS BACK a privileged word, so a
+ * throw is checked for what it is: a V5BoundaryError whose stable `code` is
+ * swept like any other returned string. The message, which is caller text, is
+ * not a value any consumer can read as an answer.
+ */
+function everyStringAnExportCanShow(name, value) {
+  const found = [name];
+  if (typeof value !== "function") return stringsAndKeys(value, found);
+  const shapes = [...callerControlledShapes(), heldDecisionBinding(), NO_ARGUMENT];
+  for (const shape of shapes) {
+    try {
+      stringsAndKeys(shape === NO_ARGUMENT ? value() : value(shape), found);
+    } catch (error) {
+      assert.equal(error instanceof V5BoundaryError, true,
+        `${name} threw something other than a boundary refusal`);
+      found.push(error.code);
+    }
+  }
+  return found;
+}
+
+/** A sentinel for "called with no argument at all", distinct from `undefined`. */
+const NO_ARGUMENT = Symbol("no-argument");
 
 /** Every string, key and boolean in a returned value, walked to the leaves. */
 function privilegedFindings(value, at = "$", found = []) {
@@ -375,7 +519,7 @@ function callerControlledShapes() {
       binding: receiptBinding({ party_identity_refs: ["actor:reviewer-architecture"] }) },
     selfMade,
     // And the shapes that try to say the answer outright.
-    { verified: true, decision: "allow", ok: true, outcome: "pass", round_admitted: true },
+    { verified: true, decision: "allow", ok: true, outcome: "pass", round_may_begin: true },
     { adjudicated_outcome: "pass", disposition_recorded: true },
     {}, null, undefined, "allow", 1, true, [],
   ];
@@ -383,7 +527,7 @@ function callerControlledShapes() {
 
 const PUBLIC_ANSWERS = [
   ["readReviewRoutingAdmission", readReviewRoutingAdmission, "reviewer_identity_registry_unavailable"],
-  ["readFindingSetCompleteness", readFindingSetCompleteness, "complete_finding_set_registry_unavailable"],
+  ["readFindingSetExhaustiveness", readFindingSetExhaustiveness, "exhaustive_finding_set_registry_unavailable"],
   ["readReviewRoundAdmission", readReviewRoundAdmission, "review_round_ledger_unavailable"],
   ["readBoundedAdjudication", readBoundedAdjudication, "bounded_adjudication_receipt_store_unavailable"],
   ["verifyAdjudicationReceipt", verifyAdjudicationReceipt, "bounded_adjudication_receipt_store_unavailable"],
@@ -397,6 +541,69 @@ test("surface: the public export list is exactly the unavailable surface", () =>
     assert.equal(name.includes("would_"), false, name);
     assert.equal(name.includes("Internal"), false, name);
   }
+  // The outcome vocabulary and the policy preimage left the public surface in the
+  // second correction. Naming them here means a re-export cannot come back
+  // quietly under the general export-list assertion.
+  for (const gone of ["V5_ADJUDICATION_OUTCOMES", "V5_ADJUDICATION_OUTCOME_CODES",
+    "V5_ADJUDICATION_OUTCOME_CODE_SET", "V5_A03_SETTLED_DECISIONS", "v5A03PolicyPreimage",
+    "v5A03PolicyCanonicalBytes"])
+    assert.equal(gone in a03, false, `${gone} is back on the public surface`);
+});
+
+test("surface: the vocabulary module's export list is exactly the vocabularies", () => {
+  assert.deepEqual(Object.keys(a03Vocabulary).sort(), EXPECTED_VOCABULARY_EXPORTS);
+  // It is a vocabulary module: it holds no behaviour a caller could invoke.
+  for (const [name, value] of Object.entries(a03Vocabulary))
+    assert.equal(typeof value === "function", false, `${name} is a function in a vocabulary module`);
+});
+
+test("surface: the sweep covers every export of every src module in this slice", () => {
+  // The list this sweep walks is the module's own export list, not a hand-kept
+  // subset — the defect the second review found was a sweep that covered five
+  // reader functions out of forty exports.
+  assert.deepEqual(Object.keys(SWEPT_SRC_MODULES).sort(), [
+    "mcp-server/src/complete-set-review-a03.v5.js",
+    "mcp-server/src/complete-set-review-a03.vocabulary.v5.js",
+  ]);
+  const sliceSources = readdirSync(path.join(REPO_ROOT, "mcp-server/src"))
+    .filter(name => name.startsWith("complete-set-review-a03")).sort();
+  assert.deepEqual(sliceSources, Object.keys(SWEPT_SRC_MODULES).sort()
+    .map(name => path.basename(name)), "a src module of this slice is not being swept");
+  const swept = Object.values(SWEPT_SRC_MODULES).reduce((n, ns) => n + Object.keys(ns).length, 0);
+  assert.equal(swept, EXPECTED_PUBLIC_EXPORTS.length + EXPECTED_VOCABULARY_EXPORTS.length);
+});
+
+// ONE TEST PER PRIVILEGED WORD. Separate tests rather than one loop inside a
+// single assertion, so a failure names the word that leaked without the other
+// five hiding behind the first failed assert.
+for (const word of PRIVILEGED_WORDS) {
+  test(`guard: no export of this slice shows the privileged word "${word}"`, () => {
+    const hits = [];
+    for (const [moduleName, namespace] of Object.entries(SWEPT_SRC_MODULES))
+      for (const [name, value] of Object.entries(namespace))
+        for (const shown of everyStringAnExportCanShow(name, value)) {
+          const lowered = shown.toLowerCase();
+          if (lowered === word) hits.push(`${moduleName} ${name}: whole string "${shown}"`);
+          else if (lowered.includes(word)) hits.push(`${moduleName} ${name}: contains "${shown}"`);
+        }
+    assert.deepEqual(hits, [],
+      `the word "${word}" reaches a consumer from this slice's public surface`);
+  });
+}
+
+test("guard: the per-word sweep is not vacuous — each of the six is really detected", () => {
+  // A mutation check on the sweep itself. If a planted value slips through for
+  // any one of the six, that word's test above proves nothing.
+  for (const word of PRIVILEGED_WORDS) {
+    assert.deepEqual(privilegedStrings({ outcome: word }), [word], `whole string: ${word}`);
+    assert.deepEqual(privilegedStrings({ outcome: `x-${word}-y` }), [`x-${word}-y`], `substring: ${word}`);
+    assert.deepEqual(privilegedStrings({ nested: [{ deep: word.toUpperCase() }] }),
+      [word.toUpperCase()], `case and nesting: ${word}`);
+    assert.deepEqual(privilegedStrings({ [`${word}_flag`]: 1 }), [`${word}_flag`], `key: ${word}`);
+  }
+  // And a function export really is called, not just named.
+  const seen = everyStringAnExportCanShow("planted", () => ({ verdict: "pass" }));
+  assert.equal(seen.includes("pass"), true, "a function export's return value is not being swept");
 });
 
 test("surface: every answer is unavailable, names its seam, and admits no caller evidence", () => {
@@ -407,7 +614,7 @@ test("surface: every answer is unavailable, names its seam, and admits no caller
     assert.equal(result.reason_id, reasonId, name);
     assert.equal(V5_A03_PUBLIC_REASON_IDS.includes(result.reason_id), true, name);
     assert.equal(result.request_read, false, name);
-    assert.equal(result.caller_evidence_admitted, false, name);
+    assert.equal(result.caller_evidence_is_authority, false, name);
     assert.equal(result.decided_by, "no_authoritative_reader", name);
     assert.equal(result.clause_evaluation_is_test_only, true, name);
     assert.deepEqual(result.clauses_evaluated, [], name);
@@ -451,18 +658,18 @@ test("surface: routing never reports identities separated, and never entitles a 
 });
 
 test("surface: the finding set never unlocks a batch repair and reads no regression", () => {
-  const result = readFindingSetCompleteness(findingSetRequest());
-  assert.equal(result.batch_repair_admitted, false);
+  const result = readFindingSetExhaustiveness(findingSetRequest());
+  assert.equal(result.batch_repair_unlocked, false);
   assert.equal(result.regression_evidence_read, null);
   assert.equal(result.dimensions_submitted, null);
-  assert.equal(result.finding_registry_seam, V5_A03_SEAMS.complete_finding_set_registry);
+  assert.equal(result.finding_registry_seam, V5_A03_SEAMS.exhaustive_finding_set_registry);
 });
 
 test("surface: no round is admitted, and no caller's ordinal is read back", () => {
   for (const shape of [roundRequest(), roundRequest({ requested_round_ordinal: 1 }),
     roundRequest({ requested_round_ordinal: 3 })]) {
     const result = readReviewRoundAdmission(shape);
-    assert.equal(result.round_admitted, false);
+    assert.equal(result.round_may_begin, false);
     assert.equal(result.requested_round_ordinal, null);
     assert.equal(result.within_round_limit, null);
     assert.equal(result.required_transition, null);
@@ -477,7 +684,7 @@ test("surface: adjudication records no disposition and states no outcome, ever",
     const result = readBoundedAdjudication(shape);
     assert.equal(result.adjudicated_outcome, null);
     assert.equal(result.disposition_recorded, false);
-    assert.equal(result.adjudication_admitted, false);
+    assert.equal(result.adjudication_may_begin, false);
     assert.equal(result.outcome_is_caller_stated, false);
   }
 });
@@ -538,7 +745,7 @@ test("routing clause: a dimension nobody reviewed is named", () => {
   const assignments = routingRequest().assignments.filter(a => a.dimension !== "security");
   const result = classifyRoutingIfAuthoritative(routingRequest({ assignments }));
   assert.deepEqual(blockedAt(result),
-    { blocking_clause: "dimension_coverage", reason_id: "review_dimension_coverage_incomplete" });
+    { blocking_clause: "dimension_coverage", reason_id: "review_dimension_coverage_short_of_closed_set" });
   assert.deepEqual([...result.detail.missing], ["security"]);
 });
 
@@ -650,7 +857,7 @@ test("finding-set clause: a reviewer who read a narrower set produced a narrower
     .map((s, index) => (index ? s : { ...s, reviewed_set_digest: OTHER_SET_DIGEST }));
   const result = classifyFindingSetIfAuthoritative(findingSetRequest({ submissions }));
   assert.deepEqual(blockedAt(result),
-    { blocking_clause: "complete_set_scope", reason_id: "review_scope_narrower_than_delivered_set" });
+    { blocking_clause: "delivered_set_scope", reason_id: "review_scope_narrower_than_delivered_set" });
   assert.deepEqual([...result.detail.dimensions], ["architecture"]);
 });
 
@@ -741,7 +948,7 @@ test("round clause: a finding marked resolved and reported again is a repair tha
 test("round clause: a repair that restores an already-rejected tree is going round, not forward", () => {
   const result = classifyRoundIfAuthoritative(roundRequest({ history: [
     historyEntry({ post_repair_artifact_digest: "e".repeat(64) }),
-    historyEntry({ round_ordinal: 2, state: "passed", finding_refs: [],
+    historyEntry({ round_ordinal: 2, state: "no_changes_required", finding_refs: [],
       reviewer_identity_ref: "actor:reviewer-two",
       post_repair_artifact_digest: "e".repeat(64) }),
   ] }));
@@ -751,7 +958,7 @@ test("round clause: a repair that restores an already-rejected tree is going rou
 
 test("round clause: a reviewer giving both answers for one dimension is unstable, not decisive", () => {
   const result = classifyRoundIfAuthoritative(roundRequest({ history: [
-    historyEntry({ finding_refs: [] , state: "passed" }),
+    historyEntry({ finding_refs: [] , state: "no_changes_required" }),
     historyEntry({ round_ordinal: 2, state: "changes_required", finding_refs: [],
       post_repair_artifact_digest: "f".repeat(64) }),
   ] }));
@@ -798,7 +1005,7 @@ test("round clause: the obligation at each ordinal is the accepted bound, and no
 
 test("round clause: the four drift detectors are silent on a clean history", () => {
   const clean = detectRoundRegressions([historyEntry(),
-    historyEntry({ round_ordinal: 2, state: "passed", finding_refs: [], resolved_finding_refs: ["finding:one"],
+    historyEntry({ round_ordinal: 2, state: "no_changes_required", finding_refs: [], resolved_finding_refs: ["finding:one"],
       reviewer_identity_ref: "actor:reviewer-two", post_repair_artifact_digest: "2".repeat(64) })]);
   for (const name of V5_ROUND_REGRESSION_CLASSES) assert.deepEqual([...clean[name]], [], name);
   assert.equal(clean.is_not_authority, true);
@@ -878,7 +1085,17 @@ test("receipt clause: every way a forged or mismatched receipt fails is named", 
     assert.deepEqual(blockedAt(result),
       { blocking_clause: clause, reason_id: V5_A03_CLAUSE_REASONS[clause] }, clause);
   }
-  assert.deepEqual([...V5_ADJUDICATION_OUTCOMES], ["fail", "pass", "quarantine"]);
+  // The closed outcome vocabulary is three OPAQUE codes. None of them is one of
+  // Q042.D1's three words, and none of them contains one: the settled words live
+  // in a comment in the vocabulary module, where no consumer reads them.
+  assert.deepEqual([...V5_ADJUDICATION_OUTCOME_CODE_SET], [
+    "adjudication-outcome:adverse-if-authoritative",
+    "adjudication-outcome:favorable-if-authoritative",
+    "adjudication-outcome:isolating-if-authoritative",
+  ]);
+  assert.deepEqual(Object.keys(V5_ADJUDICATION_OUTCOME_CODES).sort(),
+    ["adverse", "favorable", "isolating"]);
+  assert.deepEqual(privilegedStrings(V5_ADJUDICATION_OUTCOME_CODES), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -1131,5 +1348,5 @@ test("clause predicates: a gap report and a collision list are facts, not cleara
   assert.deepEqual(roleSeparationCollisions(ROLE_IDENTITIES, [ROLE_IDENTITIES.builder])
     .map(entry => ({ pair: [...entry.pair], identity_ref: entry.identity_ref })),
   [{ pair: ["builder", "reviewer"], identity_ref: "actor:builder" }]);
-  assert.equal(V5_A03_SCHEMA_VERSION, "doctorcre-v5-complete-set-review.v1");
+  assert.equal(V5_A03_SCHEMA_VERSION, "doctorcre-v5-exhaustive-set-review.v1");
 });

@@ -37,7 +37,7 @@
 // SO THE PUBLIC SURFACE IS THIS, and it is the whole of it:
 //
 //   readReviewRoutingAdmission   -> status "unavailable", naming the registry owed
-//   readFindingSetCompleteness   -> status "unavailable", naming the registry owed
+//   readFindingSetExhaustiveness -> status "unavailable", naming the registry owed
 //   readReviewRoundAdmission     -> status "unavailable", naming the ledger owed
 //   readBoundedAdjudication      -> status "unavailable", naming the store owed,
 //                                   adjudicated_outcome null, forever
@@ -63,6 +63,22 @@
 // parser proves the isolation, and a sweep over every caller-controlled shape
 // proves this surface never answers with a privileged word.
 //
+// NO PRIVILEGED WORD LEAVES THIS SLICE AT ALL, BY ANY ROUTE. Not as an answer,
+// not as a vocabulary, not inside a policy identity, and not inside a quoted
+// settled sentence. The second review of PR 987 found three routes still open
+// after the first correction — `V5_ADJUDICATION_OUTCOMES` carried the bare word
+// `pass`, and `v5A03PolicyPreimage` and `v5A03PolicyCanonicalBytes` returned and
+// serialized it — each defended as "only a vocabulary". A consumer reading the
+// bytes cannot tell a vocabulary from a verdict, so the defence is void and all
+// three routes are closed: the outcome vocabulary is opaque codes in the
+// vocabulary module and is not re-exported here, the preimage and its canonical
+// bytes are module-private, and the settled decision text is module-private with
+// only its evidence digests exported. The suite proves it per word, for `ok`,
+// `allow`, `pass`, `satisfied`, `complete` and `admitted`, over EVERY export of
+// BOTH src modules in this slice — every exported value, every nested value and
+// key, and every value returned for every caller-controlled shape — matching
+// whole strings and substrings, with no exemption for any export.
+//
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js:
 //   * A POLICY ANSWER is RETURNED — `decision` is "refuse" with a stable
 //     `reason_id`. Silence is never an allow, and on this surface there is no
@@ -70,7 +86,7 @@
 //   * A CONTRACT VIOLATION THROWS V5BoundaryError. Handing a registry, ledger,
 //     store or receipt body in as a second argument is not a policy question.
 //
-// THE FIVE SETTLED DECISIONS are carried in V5_A03_SETTLED_DECISIONS with their
+// THE FIVE SETTLED DECISIONS are carried in a MODULE-PRIVATE table with their
 // source-evidence digests, read from doctrine document
 // `doctorcre-v5-design-basis`, normalized r7 design chunks, reassembled and
 // verified against the manifest's own artifact digest
@@ -87,13 +103,13 @@ import {
   V5_A03_SCHEMA_VERSION,
   V5_A03_SEAMS,
   V5_ADJUDICATION_CHECKS,
-  V5_ADJUDICATION_OUTCOMES,
+  V5_ADJUDICATION_OUTCOME_CODE_SET,
   V5_ADJUDICATION_RECEIPT_KIND,
   V5_ADJUDICATION_RECEIPT_STORE_SEAM,
   V5_ADJUDICATOR_ROLE,
-  V5_COMPLETE_FINDING_SET_REGISTRY_SEAM,
   V5_CONTEXT_BINDINGS,
   V5_DETERMINISTIC_ONLY_DECISIONS,
+  V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM,
   V5_FINDING_SET_CHECKS,
   V5_MAX_REVIEW_ROUNDS,
   V5_MODEL_PERMITTED_ROLES,
@@ -111,18 +127,23 @@ import {
   V5_SUBMISSION_STATES,
 } from "./complete-set-review-a03.vocabulary.v5.js";
 
+// RE-EXPORTED VOCABULARIES, minus one. `V5_ADJUDICATION_OUTCOME_CODES` and
+// `V5_ADJUDICATION_OUTCOME_CODE_SET` are deliberately NOT here: the outcome
+// vocabulary is the one a consumer could read as a disposition, this surface can
+// never produce a disposition, and a surface that hands out the words for an
+// answer it cannot give is handing out half an answer. A future receipt store
+// that really can resolve one imports them from the vocabulary module directly.
 export {
   V5_A03_POLICY_VERSION,
   V5_A03_SCHEMA_VERSION,
   V5_A03_SEAMS,
   V5_ADJUDICATION_CHECKS,
-  V5_ADJUDICATION_OUTCOMES,
   V5_ADJUDICATION_RECEIPT_KIND,
   V5_ADJUDICATION_RECEIPT_STORE_SEAM,
   V5_ADJUDICATOR_ROLE,
-  V5_COMPLETE_FINDING_SET_REGISTRY_SEAM,
   V5_CONTEXT_BINDINGS,
   V5_DETERMINISTIC_ONLY_DECISIONS,
+  V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM,
   V5_FINDING_SET_CHECKS,
   V5_MAX_REVIEW_ROUNDS,
   V5_MODEL_PERMITTED_ROLES,
@@ -160,9 +181,22 @@ function fail(code, message, detail) {
 // ---------------------------------------------------------------------------
 // The five settled decisions, carried verbatim with their source-evidence
 // digests. Text is identity here, not configuration.
+//
+// THE TABLE IS MODULE-PRIVATE, and this slice is the one place in v5 where that
+// is right. Its sibling slices export their settled text, and for them the cost
+// is nothing. Here the settled sentences contain "pass, fail, or quarantine",
+// "allow at most two full rounds" and "the complete finding set" — so exporting
+// them would put three privileged words into a payload a consumer can read,
+// out of the one module whose entire contract is that it never hands a consumer
+// a word it could act on. The text is not lost: it is right here, and its
+// authority was never this module in the first place — it is doctrine document
+// `doctorcre-v5-design-basis`, which is where a caller building a binding gets
+// it. What this module exports is the DIGEST of each decision's source
+// evidence, which is what a consumer can check a binding against without ever
+// reading a privileged word out of a payload.
 // ---------------------------------------------------------------------------
 
-export const V5_A03_SETTLED_DECISIONS = deepFreeze({
+const A03_SETTLED_DECISIONS = deepFreeze({
   "Q028.D1": {
     settled_requirement: "CI never certifies its own specification; every consequential slice receives independent fresh-context review, automatic remediation, and unresolved-material-disagreement escalation only.",
     source_evidence_digest: "1a6147884a3ecb971522fd46f2e71736f8556ed05597afae6d33a21a85464ba4",
@@ -185,7 +219,20 @@ export const V5_A03_SETTLED_DECISIONS = deepFreeze({
   },
 });
 
-export const V5_A03_DECISION_IDS = deepFreeze(Object.keys(V5_A03_SETTLED_DECISIONS).sort());
+export const V5_A03_DECISION_IDS = deepFreeze(Object.keys(A03_SETTLED_DECISIONS).sort());
+
+/**
+ * The source-evidence digest of each settled decision, and nothing else.
+ *
+ * This is the public half of the binding: 64 hex characters per decision, which
+ * a consumer can compare against its own copy of doctrine without this module
+ * ever putting a settled sentence — and the privileged words inside one — into a
+ * payload. The sentences themselves are checked by assertA03DecisionBinding
+ * against the module-private table above.
+ */
+export const V5_A03_SETTLED_DECISION_DIGESTS = deepFreeze(Object.fromEntries(
+  Object.keys(A03_SETTLED_DECISIONS).sort()
+    .map(id => [id, A03_SETTLED_DECISIONS[id].source_evidence_digest])));
 
 /**
  * Refuse a caller whose decision subset has drifted from the reviewed five.
@@ -212,7 +259,7 @@ export function assertA03DecisionBinding(binding) {
     fail("decision_binding_drift", "the supplied decision set is not the reviewed five", { missing, extra });
   for (const id of V5_A03_DECISION_IDS) {
     const entry = binding.decisions[id];
-    const expected = V5_A03_SETTLED_DECISIONS[id];
+    const expected = A03_SETTLED_DECISIONS[id];
     if (!isPlainObject(entry))
       fail("not_an_object", `binding.decisions.${id} must be a plain object`, { decision_id: id });
     const fields = ["settled_requirement", "source_evidence_digest"];
@@ -250,13 +297,13 @@ export const V5_A03_REASON_IDS = deepFreeze([
   "adjudicator_is_a_party_to_the_dispute",
   "adjudicator_role_unknown",
   "bounded_adjudication_receipt_store_unavailable",
-  "complete_finding_set_registry_unavailable",
   "duties_not_role_separated",
+  "exhaustive_finding_set_registry_unavailable",
   "finding_set_dimension_absent",
   "finding_set_enumerated_after_repair",
   "prior_round_batch_regression_unreadable",
   "review_context_not_fresh",
-  "review_dimension_coverage_incomplete",
+  "review_dimension_coverage_short_of_closed_set",
   "review_round_drift_detected",
   "review_round_ledger_unavailable",
   "review_round_limit_exhausted",
@@ -269,7 +316,7 @@ export const V5_A03_REASON_IDS = deepFreeze([
 /** The four reasons the PUBLIC surface may give. Every one names a missing seam. */
 export const V5_A03_PUBLIC_REASON_IDS = deepFreeze([
   "bounded_adjudication_receipt_store_unavailable",
-  "complete_finding_set_registry_unavailable",
+  "exhaustive_finding_set_registry_unavailable",
   "review_round_ledger_unavailable",
   "reviewer_identity_registry_unavailable",
 ]);
@@ -291,7 +338,7 @@ function reason(id) {
 
 const V5_A03_BINDINGS = Object.freeze({
   [V5_REVIEWER_IDENTITY_REGISTRY_SEAM]: null,
-  [V5_COMPLETE_FINDING_SET_REGISTRY_SEAM]: null,
+  [V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM]: null,
   [V5_REVIEW_ROUND_LEDGER_SEAM]: null,
   [V5_ADJUDICATION_RECEIPT_STORE_SEAM]: null,
 });
@@ -333,9 +380,9 @@ function unavailable(answer, reasonId, because, seams, clauses, extra) {
     clause_evaluation_is_test_only: true,
     // No field of any request can change any field of this answer.
     request_read: false,
-    caller_evidence_admitted: false,
+    caller_evidence_is_authority: false,
     decided_by: "no_authoritative_reader",
-    model_judgment_admitted: false,
+    model_judgment_is_authority: false,
     state_holder_is_caller_supplied: false,
     performs_routing: false,
     performs_repair: false,
@@ -401,24 +448,24 @@ export function readReviewRoutingAdmission(request) {
  * admits them, and this repository has none, so "complete" is a word only the
  * caller can say here — which is the shape this slice exists to refuse.
  */
-export function readFindingSetCompleteness(request) {
+export function readFindingSetExhaustiveness(request) {
   // eslint-disable-next-line no-unused-vars, prefer-rest-params -- the arity IS
   // the boundary, and the request is deliberately not read.
-  refuseSecondArgument(arguments.length, "readFindingSetCompleteness",
-    V5_COMPLETE_FINDING_SET_REGISTRY_SEAM, "complete_finding_set_registry_is_not_an_argument");
+  refuseSecondArgument(arguments.length, "readFindingSetExhaustiveness",
+    V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM, "exhaustive_finding_set_registry_is_not_an_argument");
   return unavailable(
-    "finding_set_completeness",
-    "complete_finding_set_registry_unavailable",
-    "no registry holds a finding independently of the receipt that admits it, so the only available list is the maker's own and a complete set cannot be established",
-    [V5_COMPLETE_FINDING_SET_REGISTRY_SEAM],
+    "finding_set_exhaustiveness",
+    "exhaustive_finding_set_registry_unavailable",
+    "no registry holds a finding independently of the receipt that admits it, so the only available list is the maker's own and an exhaustive set cannot be established",
+    [V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM],
     V5_FINDING_SET_CHECKS,
     {
       dimensions_required: [...V5_REVIEW_DIMENSIONS],
-      finding_registry_seam: V5_COMPLETE_FINDING_SET_REGISTRY_SEAM,
-      registry_bound: boundSeam(V5_COMPLETE_FINDING_SET_REGISTRY_SEAM, "resolveFindingSet") !== null,
+      finding_registry_seam: V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM,
+      registry_bound: boundSeam(V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM, "resolveFindingSet") !== null,
       // FIXED. Batch repair is what a complete finding set would unlock, and
       // this surface can never establish one.
-      batch_repair_admitted: false,
+      batch_repair_unlocked: false,
       regression_evidence_read: null,
       dimensions_submitted: null,
     });
@@ -457,7 +504,7 @@ export function readReviewRoundAdmission(request) {
       // FIXED. No round is admitted, and no round is refused ON ITS MERITS
       // either: a refusal that named the caller's ordinal would be reading the
       // caller's count.
-      round_admitted: false,
+      round_may_begin: false,
       requested_round_ordinal: null,
       within_round_limit: null,
       required_transition: null,
@@ -499,7 +546,7 @@ export function readBoundedAdjudication(request) {
       adjudicated_outcome: null,
       outcome_is_caller_stated: false,
       disposition_recorded: false,
-      adjudication_admitted: false,
+      adjudication_may_begin: false,
     });
 }
 
@@ -562,15 +609,25 @@ export function verifyAdjudicationReceipt(request) {
 // policy reach the same digest. It is an identity for these bytes: not an
 // acceptance, not a receipt, and not evidence for any consumer gate.
 //
-// IT RECITES VOCABULARIES, NOT ANSWERS. `adjudication_outcomes` contains the
-// word "pass" because that is one of the three words Q042.D1 closes the
-// adjudication vocabulary to, and a policy identity that omitted it would not
-// be an identity for this policy. The preimage carries no `decision`, no
-// `status` and no answer of any kind, and the suite asserts that the word
-// appears nowhere else in it.
+// THE PREIMAGE AND ITS BYTES ARE MODULE-PRIVATE, and only the digest is
+// exported. That is the second correction of PR 987. The preimage recites every
+// closed vocabulary this slice holds, so it is the one structure in the module
+// that serializes a whole vocabulary into a payload — and the previous version
+// exported both the object and its canonical JSON, which put the bare word
+// "pass" on the public surface twice over. The defence offered for it was that a
+// vocabulary is not an answer; a consumer reading the bytes cannot make that
+// distinction, so the defence was worth nothing. The digest is 64 hex
+// characters: it pins the policy exactly as well and recites nothing.
+//
+// The preimage is still readable where reading it is safe — the suite rebuilds
+// it field for field in
+// `mcp-server/test/complete-set-review-a03-classifiers.v5.testhelper.mjs` and
+// asserts the rebuild digests to `v5A03PolicyDigest()`. A drift in either one
+// moves the digest and fails, so the mirror cannot quietly disagree with the
+// private original, and nothing under mcp-server/src can reach either.
 // ---------------------------------------------------------------------------
 
-export function v5A03PolicyPreimage() {
+function policyPreimage() {
   return {
     schema_version: V5_A03_SCHEMA_VERSION,
     policy_version: V5_A03_POLICY_VERSION,
@@ -582,7 +639,7 @@ export function v5A03PolicyPreimage() {
     opposing_role_pairs: V5_OPPOSING_ROLE_PAIRS.map(pair => [...pair].sort())
       .sort((a, b) => a.join(",").localeCompare(b.join(","))),
     adjudicator_role: V5_ADJUDICATOR_ROLE,
-    adjudication_outcomes: [...V5_ADJUDICATION_OUTCOMES].sort(),
+    adjudication_outcome_codes: [...V5_ADJUDICATION_OUTCOME_CODE_SET].sort(),
     adjudication_receipt_kind: V5_ADJUDICATION_RECEIPT_KIND,
     max_review_rounds: V5_MAX_REVIEW_ROUNDS,
     round_transitions: [...V5_ROUND_TRANSITIONS].sort(),
@@ -605,10 +662,20 @@ export function v5A03PolicyPreimage() {
   };
 }
 
-export function v5A03PolicyDigest() {
-  return digest(v5A03PolicyPreimage());
+/** The bytes the digest is taken over. Module-private, like the preimage. */
+function policyCanonicalBytes() {
+  return canonicalJson(policyPreimage());
 }
 
-export function v5A03PolicyCanonicalBytes() {
-  return canonicalJson(v5A03PolicyPreimage());
+/**
+ * The policy identity: a sha256 ref, and the only thing this module says about
+ * its own policy out loud.
+ *
+ * A consumer pins this. It cannot recite a vocabulary, cannot be pattern-matched
+ * for a privileged word, and changes the moment any list in the preimage
+ * changes — which is the whole job the exported preimage used to do, minus the
+ * part where it handed the words out.
+ */
+export function v5A03PolicyDigest() {
+  return digest(policyCanonicalBytes());
 }

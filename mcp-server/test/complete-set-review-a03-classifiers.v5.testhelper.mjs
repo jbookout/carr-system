@@ -81,9 +81,13 @@
 import { digest } from "../src/artifact-trust.js";
 import { V5BoundaryError } from "../src/global-boundaries.v5.js";
 import {
+  V5_A03_DECISION_IDS,
+  V5_A03_POLICY_VERSION,
+  V5_A03_PUBLIC_REASON_IDS,
   V5_A03_REASON_IDS,
+  V5_A03_SCHEMA_VERSION,
+  V5_A03_SEAMS,
   V5_ADJUDICATION_CHECKS,
-  V5_ADJUDICATION_OUTCOMES,
   V5_ADJUDICATION_RECEIPT_KIND,
   V5_ADJUDICATOR_ROLE,
   V5_CONTEXT_BINDINGS,
@@ -91,13 +95,26 @@ import {
   V5_MAX_REVIEW_ROUNDS,
   V5_NON_REVIEWER_ROLES,
   V5_OPPOSING_ROLE_PAIRS,
+  V5_DETERMINISTIC_ONLY_DECISIONS,
+  V5_MODEL_PERMITTED_ROLES,
   V5_REVIEW_DIMENSIONS,
+  V5_REVIEW_ROLES,
   V5_REVIEW_STATES,
   V5_ROUND_BOUND_CHECKS,
   V5_ROUND_REGRESSION_CLASSES,
+  V5_ROUND_TRANSITIONS,
   V5_ROUTING_CHECKS,
   V5_SUBMISSION_STATES,
 } from "../src/complete-set-review-a03.v5.js";
+import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
+// The outcome vocabulary is NOT re-exported by the public module — that is the
+// second correction of PR 987 — so the test-only classifier reaches the opaque
+// codes where they live. Production cannot follow it here: nothing under
+// mcp-server/src imports this file, and the suite proves that with Node's own
+// module parser.
+import {
+  V5_ADJUDICATION_OUTCOME_CODE_SET,
+} from "../src/complete-set-review-a03.vocabulary.v5.js";
 
 /** Said on every result, so an escaped value still reads as "not authority". */
 export const V5_A03_CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_shapes_not_authority";
@@ -119,12 +136,12 @@ export const V5_A03_CLASSIFICATIONS = Object.freeze({
 
 /** Which reason each clause gives when it blocks. */
 export const V5_A03_CLAUSE_REASONS = Object.freeze({
-  dimension_coverage: "review_dimension_coverage_incomplete",
+  dimension_coverage: "review_dimension_coverage_short_of_closed_set",
   reviewer_role_separation: "reviewer_not_role_separated",
   duty_role_separation: "duties_not_role_separated",
   fresh_context: "review_context_not_fresh",
   dimension_submission: "finding_set_dimension_absent",
-  complete_set_scope: "review_scope_narrower_than_delivered_set",
+  delivered_set_scope: "review_scope_narrower_than_delivered_set",
   enumeration_before_repair: "finding_set_enumerated_after_repair",
   round_reopened_after_adjudication: "review_round_reopened_after_adjudication",
   round_limit: "review_round_limit_exhausted",
@@ -148,7 +165,7 @@ export const V5_A03_CLAUSE_REASONS = Object.freeze({
 export const V5_A03_CLASSIFIER_CLAUSE_ORDERS = Object.freeze({
   routing: Object.freeze(V5_ROUTING_CHECKS.filter(check => check !== "reviewer_identity_registry")),
   finding_set: Object.freeze(
-    V5_FINDING_SET_CHECKS.filter(check => check !== "complete_finding_set_registry")),
+    V5_FINDING_SET_CHECKS.filter(check => check !== "exhaustive_finding_set_registry")),
   round: Object.freeze(V5_ROUND_BOUND_CHECKS.filter(check => check !== "review_round_ledger")),
   adjudication: Object.freeze(
     V5_ADJUDICATION_CHECKS.filter(check => check !== "bounded_adjudication_receipt_store")),
@@ -462,7 +479,7 @@ export function classifyFindingSetIfAuthoritative(request) {
   const narrowed = request.submissions
     .filter(submission => submission.reviewed_set_digest !== request.delivered_set_digest)
     .map(submission => submission.dimension);
-  if (narrowed.length) return blocked("complete_set_scope", { dimensions: narrowed });
+  if (narrowed.length) return blocked("delivered_set_scope", { dimensions: narrowed });
 
   const edited = request.submissions
     .filter(submission => submission.enumerated_before_repair !== true)
@@ -747,10 +764,62 @@ export function classifyAdjudicationReceiptIfAuthoritative(kind, receiptRef, bod
     return blocked("receipt_change_binding", { receipt_ref: receiptRef });
   if (body.delivered_set_digest !== binding.delivered_set_digest)
     return blocked("receipt_delivered_set_binding", { receipt_ref: receiptRef });
-  if (typeof body.outcome !== "string" || !V5_ADJUDICATION_OUTCOMES.includes(body.outcome))
+  if (typeof body.outcome !== "string" || !V5_ADJUDICATION_OUTCOME_CODE_SET.includes(body.outcome))
     return blocked("receipt_outcome_vocabulary", { receipt_ref: receiptRef });
   if (binding.party_identity_refs.includes(body.adjudicator_identity_ref))
     return blocked("receipt_adjudicator_separation", { receipt_ref: receiptRef });
 
   return clear(V5_A03_CLASSIFICATIONS.receipt);
+}
+
+// ---------------------------------------------------------------------------
+// THE POLICY PREIMAGE MIRROR.
+//
+// `v5A03PolicyPreimage` and `v5A03PolicyCanonicalBytes` are module-private in
+// production as of the second correction of PR 987, because the preimage
+// recites every closed vocabulary this slice holds and a consumer reading those
+// bytes cannot tell a vocabulary from a verdict. Only the digest is exported.
+//
+// This is the readable copy, and it lives on the test side of the wall with the
+// classifiers. It is not a second source of truth: the suite asserts that its
+// canonical bytes digest to `v5A03PolicyDigest()`, so if production's preimage
+// and this mirror ever disagree by one field, one key or one sort order, the
+// digests differ and the suite fails. That is what makes it safe to read this
+// instead of the original.
+// ---------------------------------------------------------------------------
+
+/** The fields the private production preimage carries, in the same shapes. */
+export function v5A03PolicyPreimageMirror() {
+  return {
+    schema_version: V5_A03_SCHEMA_VERSION,
+    policy_version: V5_A03_POLICY_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    decision_ids: [...V5_A03_DECISION_IDS].sort(),
+    review_dimensions: [...V5_REVIEW_DIMENSIONS].sort(),
+    review_roles: [...V5_REVIEW_ROLES].sort(),
+    non_reviewer_roles: [...V5_NON_REVIEWER_ROLES].sort(),
+    opposing_role_pairs: V5_OPPOSING_ROLE_PAIRS.map(pair => [...pair].sort())
+      .sort((a, b) => a.join(",").localeCompare(b.join(","))),
+    adjudicator_role: V5_ADJUDICATOR_ROLE,
+    adjudication_outcome_codes: [...V5_ADJUDICATION_OUTCOME_CODE_SET].sort(),
+    adjudication_receipt_kind: V5_ADJUDICATION_RECEIPT_KIND,
+    max_review_rounds: V5_MAX_REVIEW_ROUNDS,
+    round_transitions: [...V5_ROUND_TRANSITIONS].sort(),
+    round_regression_classes: [...V5_ROUND_REGRESSION_CLASSES].sort(),
+    review_states: [...V5_REVIEW_STATES].sort(),
+    context_bindings: [...V5_CONTEXT_BINDINGS].sort(),
+    submission_states: [...V5_SUBMISSION_STATES].sort(),
+    model_permitted_roles: [...V5_MODEL_PERMITTED_ROLES].sort(),
+    deterministic_only_decisions: [...V5_DETERMINISTIC_ONLY_DECISIONS].sort(),
+    routing_checks: [...V5_ROUTING_CHECKS],
+    finding_set_checks: [...V5_FINDING_SET_CHECKS],
+    round_bound_checks: [...V5_ROUND_BOUND_CHECKS],
+    adjudication_checks: [...V5_ADJUDICATION_CHECKS],
+    reason_ids: [...V5_A03_REASON_IDS].sort(),
+    public_reason_ids: [...V5_A03_PUBLIC_REASON_IDS].sort(),
+    seams: Object.fromEntries(Object.keys(V5_A03_SEAMS).sort().map(key => [key, V5_A03_SEAMS[key]])),
+    authoritative_holders_bound: false,
+    public_surface_answers: "unavailable",
+    clause_evaluation_is_test_only: true,
+  };
 }

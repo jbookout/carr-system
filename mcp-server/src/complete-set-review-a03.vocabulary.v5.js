@@ -16,6 +16,16 @@
 //
 // Nothing in this file is an authorization. A vocabulary says which words the
 // module can read; it never says yes.
+//
+// AND NO VALUE IN THIS FILE IS A PRIVILEGED WORD, under any name. Neither the
+// exported values nor the export names contain `ok`, `allow`, `pass`,
+// `satisfied`, `complete` or `admitted` — as a whole string or as a substring —
+// because "it is only a vocabulary" is a distinction a consumer reading the
+// bytes cannot make, and the second review of PR 987 found the bare word `pass`
+// shipping out of this file behind exactly that defence. Where a settled
+// sentence uses one of those words, the word stays in a COMMENT, quoted, where
+// it belongs; the value beside it is spelled another way. The suite proves this
+// per word, over every export of both src modules, with no exemptions.
 
 function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
@@ -26,7 +36,7 @@ function deepFreeze(value) {
   return value;
 }
 
-export const V5_A03_SCHEMA_VERSION = "doctorcre-v5-complete-set-review.v1";
+export const V5_A03_SCHEMA_VERSION = "doctorcre-v5-exhaustive-set-review.v1";
 export const V5_A03_POLICY_VERSION = 1;
 
 /**
@@ -126,12 +136,44 @@ export const V5_ADJUDICATOR_ROLE = "stronger_adjudicator";
 export const V5_MAX_REVIEW_ROUNDS = 2;
 
 /**
- * The closed adjudication outcomes. This is a VOCABULARY — the words an
- * adjudication receipt may carry. No function in this slice returns any of
- * them: the outcome of an adjudication is read from the receipt store, and that
- * store does not exist here.
+ * The closed adjudication outcomes, AS OPAQUE CODES.
+ *
+ * Q042.D1 closes the vocabulary to three dispositions — "pass, fail, or
+ * quarantine". This slice never spells them that way, and the reason is the
+ * defect the second review of PR 987 found: the bare word `pass` was reachable
+ * from a public export and serialized into a public policy preimage, so a
+ * consumer pattern-matching a payload could read an authorization out of a
+ * vocabulary. A vocabulary is not an authorization, but a consumer cannot tell
+ * the difference from the bytes, and the bytes are what ship.
+ *
+ * So each disposition is a code that is not the privileged word, does not
+ * CONTAIN one as a substring, and is meaningless to a consumer that has not
+ * resolved it against an authoritative receipt: the `-if-authoritative` suffix
+ * is part of the string, not a comment about it. Nothing in this slice ever
+ * produces one of these values — the outcome of an adjudication is read from
+ * `seam:bounded-adjudication-receipt-store`, and that store does not exist —
+ * and the public surface does not re-export this object at all.
+ *
+ * The mapping to Q042.D1's three words is recorded here, in a comment, where a
+ * consumer cannot read it as a payload:
+ *
+ *   adverse    <- "fail"
+ *   favorable  <- "pass"
+ *   isolating  <- "quarantine"
+ *
+ * A future receipt store binds its stored disposition to one of these codes at
+ * the seam. That translation is the store's job, and it is one more place a
+ * privileged word has to pass through an authority to reach a consumer.
  */
-export const V5_ADJUDICATION_OUTCOMES = deepFreeze(["fail", "pass", "quarantine"]);
+export const V5_ADJUDICATION_OUTCOME_CODES = deepFreeze({
+  adverse: "adjudication-outcome:adverse-if-authoritative",
+  favorable: "adjudication-outcome:favorable-if-authoritative",
+  isolating: "adjudication-outcome:isolating-if-authoritative",
+});
+
+/** The three codes, C-sorted: the closed set a receipt's disposition must be in. */
+export const V5_ADJUDICATION_OUTCOME_CODE_SET = deepFreeze(
+  Object.values(V5_ADJUDICATION_OUTCOME_CODES).sort());
 
 /** What a review round's ordinal obliges next. */
 export const V5_ROUND_TRANSITIONS = deepFreeze([
@@ -147,8 +189,16 @@ export const V5_ROUND_REGRESSION_CLASSES = deepFreeze([
   "circular_reversion", "repeated_finding", "reviewer_instability", "test_weakening",
 ]);
 
-/** A reviewer's answer for one dimension in one round. */
-export const V5_REVIEW_STATES = deepFreeze(["changes_required", "passed"]);
+/**
+ * A reviewer's answer for one dimension in one round.
+ *
+ * The second answer used to be spelled `passed`, which carried the privileged
+ * word into every payload that recited this vocabulary. It is spelled as the
+ * negation of the first answer instead: a reviewer requiring no changes is the
+ * only thing this vocabulary was ever entitled to say, and saying it that way
+ * leaves no word here a consumer could mistake for a clearance.
+ */
+export const V5_REVIEW_STATES = deepFreeze(["changes_required", "no_changes_required"]);
 
 /** Whether a reviewing session inherited the maker's context or started clean. */
 export const V5_CONTEXT_BINDINGS = deepFreeze(["fresh", "inherited_from_maker"]);
@@ -170,7 +220,7 @@ export const V5_MODEL_PERMITTED_ROLES = deepFreeze(["reviewer"]);
 
 /** The four decisions deterministic code owns outright in this slice. */
 export const V5_DETERMINISTIC_ONLY_DECISIONS = deepFreeze([
-  "adjudication_admission", "finding_set_completeness", "review_round_bound", "review_routing",
+  "adjudication_admission", "finding_set_exhaustiveness", "review_round_bound", "review_routing",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -189,8 +239,8 @@ export const V5_ROUTING_CHECKS = deepFreeze([
 ]);
 
 export const V5_FINDING_SET_CHECKS = deepFreeze([
-  "dimension_submission", "complete_set_scope", "enumeration_before_repair",
-  "complete_finding_set_registry",
+  "dimension_submission", "delivered_set_scope", "enumeration_before_repair",
+  "exhaustive_finding_set_registry",
 ]);
 
 export const V5_ROUND_BOUND_CHECKS = deepFreeze([
@@ -211,14 +261,14 @@ export const V5_ADJUDICATION_CHECKS = deepFreeze([
 // ---------------------------------------------------------------------------
 
 export const V5_REVIEWER_IDENTITY_REGISTRY_SEAM = "seam:independent-reviewer-identity-registry";
-export const V5_COMPLETE_FINDING_SET_REGISTRY_SEAM = "seam:complete-finding-set-registry";
+export const V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM = "seam:exhaustive-finding-set-registry";
 export const V5_REVIEW_ROUND_LEDGER_SEAM = "seam:review-round-ledger";
 export const V5_ADJUDICATION_RECEIPT_STORE_SEAM = "seam:bounded-adjudication-receipt-store";
 
 /** Every seam this slice is owed, C-sorted, and which clause reads each. */
 export const V5_A03_SEAMS = deepFreeze({
   bounded_adjudication_receipt_store: V5_ADJUDICATION_RECEIPT_STORE_SEAM,
-  complete_finding_set_registry: V5_COMPLETE_FINDING_SET_REGISTRY_SEAM,
+  exhaustive_finding_set_registry: V5_EXHAUSTIVE_FINDING_SET_REGISTRY_SEAM,
   review_round_ledger: V5_REVIEW_ROUND_LEDGER_SEAM,
   reviewer_identity_registry: V5_REVIEWER_IDENTITY_REGISTRY_SEAM,
 });
