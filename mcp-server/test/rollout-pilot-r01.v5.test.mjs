@@ -3257,10 +3257,85 @@ test("guard: no refusal carries a frame of the caller's, under any stack hook", 
   assert.ok(underCapture.surfaced > 30);
 });
 
-test("guard: all 54 registered codes construct, carrying four own properties and this module's stack", () => {
-  assert.equal(vocabulary.V5_R01_ERROR_CODES.length, 54,
+/**
+ * THE SEVENTH RE-REVIEW'S FINDING, WRITTEN AS PROBES.
+ *
+ * The constructor used to reach `this.name` and `this.code` by ORDINARY
+ * ASSIGNMENT, and an ordinary assignment walks the prototype chain. Construct the
+ * exported class with a caller-defined subclass as `new.target` — either
+ * `Reflect.construct(V5R01Error, [code], Derived)` or `new Derived(code)` — and
+ * the object being built wears `Derived.prototype`, so a setter the caller put
+ * there RAN. The reviewer's throwing setter escaped the constructor and surfaced
+ * a native `Error` carrying their sentence in `message` and `stack`; their
+ * getter/no-op-setter variant surfaced a frozen error whose `stack` began with
+ * their sentence.
+ *
+ * These are the three shapes a caller can put on a subclass prototype that the
+ * old constructor would have touched. They are applied to the real export in the
+ * guard below, and to a CLASS THAT ASSIGNS in the non-vacuity test after it — so
+ * "no leak" is a fact about the fix rather than a fact about the probe.
+ */
+function throwingSetterSubclass(base) {
+  class Derived extends base {}
+  Object.defineProperty(Derived.prototype, "name",
+    { set() { throw new Error(CALLER_SENTINEL); }, configurable: true });
+  return Derived;
+}
+
+function gettingSubclass(base) {
+  class Derived extends base {}
+  for (const key of ["name", "code"]) {
+    Object.defineProperty(Derived.prototype, key,
+      { get() { return CALLER_SENTINEL; }, set() {}, configurable: true });
+  }
+  return Derived;
+}
+
+function symbolTrickSubclass(base) {
+  class Derived extends base {
+    static [Symbol.hasInstance]() { throw new Error(CALLER_SENTINEL); }
+    static get [Symbol.species]() { throw new Error(CALLER_SENTINEL); }
+  }
+  Object.defineProperty(Derived.prototype, Symbol.toStringTag,
+    { get() { return CALLER_SENTINEL; }, configurable: true });
+  Object.defineProperty(Derived.prototype, "code",
+    { set() { throw new Error(CALLER_SENTINEL); }, configurable: true });
+  return Derived;
+}
+
+const SUBCLASS_SHAPES = Object.freeze([
+  ["a throwing name setter", throwingSetterSubclass],
+  ["a getter with a no-op setter", gettingSubclass],
+  ["Symbol.hasInstance and Symbol.species", symbolTrickSubclass],
+]);
+
+const DERIVED_CONSTRUCTION_FORMS = Object.freeze([
+  ["Reflect.construct", (base, Derived, code) => Reflect.construct(base, [code], Derived)],
+  ["new Derived", (base, Derived, code) => new Derived(code)],
+]);
+
+/** Every own property and every named property of a surfaced value, swept whole. */
+function callerTextOn(value) {
+  const parts = [String(value?.stack), String(value?.message), String(value?.code),
+    String(value?.name)];
+  for (const key of Object.getOwnPropertyNames(value ?? {})) parts.push(String(value[key]));
+  return parts.filter(part => part.includes(CALLER_SENTINEL) || part.includes("CALLER_SENTINEL"));
+}
+
+/** Build through a caller subclass, returning whatever surfaced — value or throw. */
+function surfaceDerivedConstruction(base, Derived, code, construct) {
+  try {
+    return construct(base, Derived, code);
+  } catch (caught) {
+    return caught;
+  }
+}
+
+test("guard: all 55 registered codes construct, carrying four own properties and this module's stack", () => {
+  assert.equal(vocabulary.V5_R01_ERROR_CODES.length, 55,
     "the registered code set changed size; the roster or the arity table moved");
   const stacks = new Set();
+  let derivedProbes = 0;
   for (const code of vocabulary.V5_R01_ERROR_CODES) {
     const error = invokeThroughCallerFrame(V5R01Error, [code], true);
     assert.deepEqual(Object.getOwnPropertyNames(error).sort(),
@@ -3277,8 +3352,97 @@ test("guard: all 54 registered codes construct, carrying four own properties and
     assert.equal(descriptor.writable, false);
     assert.equal(descriptor.configurable, false);
     stacks.add(error.stack);
+
+    // DERIVED CONSTRUCTION, FOR THIS CODE, IN EVERY SHAPE AND EVERY FORM. The
+    // guard above constructs DIRECTLY, which is the door the reviewer walked
+    // around: `new.target` was the caller's subclass, so the constructor's
+    // assignments reached the caller's setters. `new.target` is now compared by
+    // identity before `super()` runs — before a derived constructor has fetched
+    // `new.target.prototype` at all — so the caller's prototype is never read,
+    // let alone invoked, and what surfaces is one of this module's own refusals.
+    for (const [shapeName, makeSubclass] of SUBCLASS_SHAPES) {
+      for (const [formName, construct] of DERIVED_CONSTRUCTION_FORMS) {
+        const at = `${code} via ${shapeName} / ${formName}`;
+        const Derived = makeSubclass(V5R01Error);
+        const surfaced = surfaceDerivedConstruction(V5R01Error, Derived, code, construct);
+        assert.equal(surfaced instanceof V5R01Error, true,
+          `${at} surfaced ${surfaced?.name}: ${surfaced?.message}`);
+        assert.equal(surfaced.code, "refused_subclass", `${at} did not refuse the subclass`);
+        assert.equal(surfaced.name, "V5R01Error", at);
+        assert.equal(Object.getPrototypeOf(surfaced), V5R01Error.prototype,
+          `${at} surfaced an object wearing the caller's prototype`);
+        assert.deepEqual(Object.getOwnPropertyNames(surfaced).sort(),
+          ["code", "message", "name", "stack"], `${at} carries an unexpected own property`);
+        assert.equal(surfaced.stack, `${surfaced.name}: ${surfaced.message}`,
+          `${at} carries a captured stack`);
+        assert.deepEqual(callerTextOn(surfaced), [],
+          `${at} carried text the caller wrote`);
+        assert.equal(Object.isFrozen(surfaced), true, `${at} is not frozen`);
+        // EVERY own property is a NON-WRITABLE, NON-CONFIGURABLE DATA property,
+        // which is the second half of the fix: `defineProperty` consults no
+        // inherited setter, so even a bypass of the refusal above runs no code of
+        // the caller's while a refusal is being built.
+        for (const key of Object.getOwnPropertyNames(surfaced)) {
+          const own = Object.getOwnPropertyDescriptor(surfaced, key);
+          assert.equal(Object.hasOwn(own, "value"), true, `${at}: ${key} is an accessor`);
+          assert.equal(own.writable, false, `${at}: ${key} is writable`);
+          assert.equal(own.configurable, false, `${at}: ${key} is configurable`);
+        }
+        derivedProbes += 1;
+      }
+    }
   }
+  assert.equal(derivedProbes,
+    vocabulary.V5_R01_ERROR_CODES.length * SUBCLASS_SHAPES.length
+      * DERIVED_CONSTRUCTION_FORMS.length,
+    "the derived-construction matrix did not cover every code, shape and form");
+  assert.equal(derivedProbes, 330, `only ${derivedProbes} derived constructions were probed`);
+
   // Every code has its own fixed message, so every stack is distinct: a single
   // shared constant would be a message table that had collapsed.
-  assert.equal(stacks.size, 54, "two codes share a stack, so two share a message");
+  assert.equal(stacks.size, 55, "two codes share a stack, so two share a message");
+});
+
+/**
+ * THE PROBES ARE LIVE, which is what makes the guard above a fact about the fix.
+ *
+ * The same three subclass shapes, in the same two construction forms, are pointed
+ * at a class built the way `V5R01Error` used to be built — `super(message)`, then
+ * `this.name = ...` and `this.code = ...` by assignment, then a freeze. Every one
+ * of the six leaks the caller's sentence. An assertion that no leak reaches the
+ * real export means nothing unless these six do.
+ */
+test("guard: the subclass probes really do break a constructor that assigns", () => {
+  class AssigningRefusal extends Error {
+    constructor(code) {
+      super("a message this control wrote");
+      this.name = "AssigningRefusal";
+      this.code = code;
+      Object.freeze(this);
+    }
+  }
+
+  const leaked = [];
+  for (const [shapeName, makeSubclass] of SUBCLASS_SHAPES) {
+    for (const [formName, construct] of DERIVED_CONSTRUCTION_FORMS) {
+      const Derived = makeSubclass(AssigningRefusal);
+      const surfaced = surfaceDerivedConstruction(
+        AssigningRefusal, Derived, "invalid_shape", construct);
+      if (callerTextOn(surfaced).length > 0) leaked.push(`${shapeName} / ${formName}`);
+    }
+  }
+  assert.equal(leaked.length, SUBCLASS_SHAPES.length * DERIVED_CONSTRUCTION_FORMS.length,
+    `only ${leaked.length} of the probe shapes reached a constructor that assigns, `
+    + "so the guard above proves less than it claims");
+
+  // AND THE FIX IS WHAT SEPARATES THEM: the identical shape, pointed at the real
+  // export, surfaces this module's own refusal instead.
+  for (const [, makeSubclass] of SUBCLASS_SHAPES) {
+    for (const [, construct] of DERIVED_CONSTRUCTION_FORMS) {
+      const surfaced = surfaceDerivedConstruction(
+        V5R01Error, makeSubclass(V5R01Error), "invalid_shape", construct);
+      assert.equal(surfaced.code, "refused_subclass");
+      assert.deepEqual(callerTextOn(surfaced), []);
+    }
+  }
 });

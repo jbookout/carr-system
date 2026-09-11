@@ -101,6 +101,7 @@ export const V5_R01_ERROR_CODES = Object.freeze([
   "onboarding_step_requires_a_developer_tool",
   "onboarding_step_requires_an_unregistered_tool",
   "partner_roles_collapsed",
+  "refused_subclass",
   "seam_claimed_to_exist",
   "text_too_long",
   "too_many_entries",
@@ -184,6 +185,8 @@ const V5_R01_FIXED_MESSAGES = Object.freeze({
     "an onboarding step requires a tool class this slice does not register",
   partner_roles_collapsed:
     "the pilot and beta partners must be distinct; S01 no longer distinguishes them",
+  refused_subclass:
+    "this refusal type does not build a derived instance",
   seam_claimed_to_exist: "a seam claims to exist; this slice holds no seam that does",
   text_too_long: "a field is longer than this slice permits",
   too_many_entries: "an array holds more entries than this slice permits",
@@ -229,42 +232,75 @@ for (const code of Object.keys(V5_R01_FIXED_MESSAGES)) {
  * it. The recursion terminates at one level, because `invalid_shape` is
  * registered and a registered code takes the path below.
  */
+/**
+ * INSTALL THE FOUR OWN PROPERTIES OF A REFUSAL, NONE OF THEM BY ASSIGNMENT.
+ *
+ * THE SEVENTH RE-REVIEW'S FINDING, second half. `this.name = "V5R01Error"` and
+ * `this.code = code` are ORDINARY ASSIGNMENTS, and an ordinary assignment walks
+ * the prototype chain: if the object being built has an inherited `name` setter,
+ * the assignment CALLS IT. The reviewer put a throwing setter on a subclass
+ * prototype and read its own sentence back out of `message` and `stack`, because
+ * the setter's throw escaped this constructor and became the surfaced error.
+ *
+ * `Object.defineProperty` defines an own property outright. It consults no
+ * setter, inherited or otherwise, so no code but this module's runs while a
+ * refusal is being built — and that stays true even if the subclass refusal above
+ * is ever bypassed, which is why both halves of the fix are here rather than one.
+ *
+ * The descriptors reproduce what the engine and the old assignments produced, so
+ * the observable shape is unchanged: `name` and `code` enumerable, `message` and
+ * `stack` not, all four non-writable and non-configurable. `stack` is this
+ * module's two words rather than a captured trace, for the sixth re-review's
+ * reason: `super(...)` captures the frames that led here, and the frames that led
+ * here are the CALLER'S — the reviewer invoked every export through a computed
+ * method named with a sentinel and read that exact text back off `error.stack`.
+ * A data property also leaves no accessor for `Error.prepareStackTrace` to run
+ * through and nothing lazy for a caller's override to reach; `captureStackTrace`
+ * is never called by this module, so an override of it intercepts nothing either.
+ */
+function installRefusalProperties(refusal, code) {
+  const name = "V5R01Error";
+  const message = V5_R01_FIXED_MESSAGES[code];
+  const fixed = { writable: false, configurable: false };
+  Object.defineProperty(refusal, "name", { value: name, enumerable: true, ...fixed });
+  Object.defineProperty(refusal, "code", { value: code, enumerable: true, ...fixed });
+  Object.defineProperty(refusal, "message", { value: message, enumerable: false, ...fixed });
+  Object.defineProperty(refusal, "stack",
+    { value: `${name}: ${message}`, enumerable: false, ...fixed });
+  V5_R01_REFUSAL_CODES.set(refusal, code);
+  Object.freeze(refusal);
+}
+
 export class V5R01Error extends Error {
   constructor(...args) {
+    // SUBCLASSING IS REFUSED BEFORE ANY CALLER CODE CAN RUN, and that ordering is
+    // the whole of the seventh re-review's finding.
+    //
+    // `Reflect.construct(V5R01Error, [code], Derived)` and `new Derived(code)`
+    // both enter HERE with `new.target` set to the caller's `Derived`, and a
+    // derived constructor does not fetch `new.target.prototype` until `super()`
+    // runs. So this check — an IDENTITY comparison, which invokes no trap on a
+    // Proxy constructor and reads no property of it — happens while the caller's
+    // prototype has still never been touched: no setter of theirs has been
+    // reached, no getter, no `Symbol.hasInstance`, no `Symbol.species`.
+    //
+    // Returning an object from a derived constructor before `super()` is exactly
+    // how a constructor declines to build: the returned object becomes the result
+    // of `new Derived(...)` and of `Reflect.construct`, so the caller gets a
+    // refusal of this module's own shape rather than a half-built instance
+    // wearing their prototype. `new V5R01Error(...)` forces `new.target` back to
+    // this class by syntax — it is not `Reflect.construct`, so there is no
+    // builtin in the path a caller could have replaced.
+    if (new.target !== V5R01Error) return new V5R01Error("refused_subclass");
     const [code] = args;
     if (args.length !== 1 || typeof code !== "string" || !V5_R01_ERROR_CODE_SET.has(code)) {
       throw new V5R01Error("invalid_shape");
     }
-    super(V5_R01_FIXED_MESSAGES[code]);
-    this.name = "V5R01Error";
-    this.code = code;
-    // THE STACK IS THIS MODULE'S TWO WORDS, AND THE SIXTH RE-REVIEW'S SECOND
-    // FINDING IS WHY. `super(...)` captures the frames that led here, and the
-    // frames that led here are the CALLER'S: the reviewer invoked every export
-    // through a computed method named `allow::CALLER_SENTINEL` and read that
-    // exact caller-written text back off `error.stack` on all 34 callables. A
-    // function name is caller-controlled memory just as much as an argument is,
-    // and the previous round froze the captured stack rather than replacing it,
-    // which preserved the leak instead of closing it.
-    //
-    // So the stack is REPLACED with the name and the fixed message — two strings
-    // this module wrote — and it is installed as a DATA property rather than
-    // assigned. Assignment goes through V8's own `stack` setter and leaves an
-    // accessor in place; `defineProperty` removes the accessor, so there is no
-    // getter left for `Error.prepareStackTrace` to run through and nothing lazy
-    // for a caller's override to reach. `Error.captureStackTrace` is never called
-    // by this module, so an override of it has nothing to intercept either.
-    //
-    // The own-property set is unchanged — `code`, `message`, `name`, `stack` —
-    // because the property being replaced is one the engine had already put there.
-    Object.defineProperty(this, "stack", {
-      value: `${this.name}: ${this.message}`,
-      writable: false,
-      enumerable: false,
-      configurable: false,
-    });
-    V5_R01_REFUSAL_CODES.set(this, code);
-    Object.freeze(this);
+    // `super()` TAKES NO MESSAGE. Every own property of a refusal is installed
+    // below by `defineProperty`, `message` included, so there is not one property
+    // on a refusal whose descriptor this module did not write.
+    super();
+    installRefusalProperties(this, code);
   }
 }
 
