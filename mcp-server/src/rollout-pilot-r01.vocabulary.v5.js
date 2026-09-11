@@ -23,25 +23,65 @@ export const V5_R01_POLICY_VERSION = 1;
 // ---------------------------------------------------------------------------
 
 /**
+ * EVERY PUBLIC FUNCTION OF THIS SLICE, and the number of arguments it declares.
+ *
+ * This list does two jobs and they are the same job. It generates the refusal
+ * code each function raises when it is handed more arguments than it declares,
+ * and it is the closed roster the suite walks when it proves the arity boundary
+ * in every calling form — a direct call, spread arguments, `Function.apply`, a
+ * bound `this`, and a rest tail whose leading entries are `undefined`.
+ *
+ * THE THIRD REVIEW OF PR 992 FOUND THE HOLE THIS CLOSES. Each guard used to read
+ * `extra[0]` alone, so `evaluatePilotDay({}, undefined, holder)` slid a holder
+ * past a boundary the module claimed to hold. Counting is the fix: a function
+ * that declares one request refuses argument two, whatever argument two is.
+ */
+export const V5_R01_DECLARED_ARITIES = Object.freeze({
+  // rollout-pilot-r01.v5.js
+  assertR01DecisionBinding: 1,
+  describeFailureExclusions: 0,
+  describePilotDayLedgerEntry: 0,
+  describeRecoveryDrill: 0,
+  evaluatePilotDay: 1,
+  evaluatePilotRun: 1,
+  evaluateRecoveryDrill: 1,
+  rolloutPilotGaps: 0,
+  v5R01PolicyCanonicalBytes: 0,
+  v5R01PolicyDigest: 0,
+  v5R01PolicyPreimage: 0,
+  // onboarding-flow-r01.v5.js
+  evaluateBetaOperability: 1,
+  evaluatePerSliceDellReview: 1,
+  onboardingMobileExposure: 0,
+  onboardingProgressStatus: 1,
+  onboardingSurfaceStatus: 0,
+  v5R01OnboardingCanonicalBytes: 0,
+  v5R01OnboardingDigest: 0,
+  v5R01OnboardingPreimage: 0,
+  // this file
+  assertArray: 3,
+  assertBoolean: 2,
+  assertCalendarDate: 2,
+  assertClosedKeys: 3,
+  assertEnum: 3,
+  assertInternalRef: 3,
+  assertObject: 2,
+  assertRequiredKeys: 3,
+  assertSafeText: 3,
+  calendarDayOrdinal: 1,
+  calendarWeekday: 1,
+});
+
+const V5_R01_ARITY_GUARDED_ENTRY_POINTS = Object.freeze(
+  Object.keys(V5_R01_DECLARED_ARITIES).sort());
+
+/**
  * THE CLOSED SET OF FAILURE CODES THIS SLICE CAN RAISE.
  *
- * The code is the only part of a refusal a consumer is meant to branch on, so it
- * is the part a caller must not be able to mint. Before this list existed,
- * `new V5R01Error(caller_value)` put the caller's own string — or its own object —
- * on `error.code`, which is a public export echoing caller input back under a
- * field consumers read as an answer. The second review of PR 992 was right that a
- * sweep which skips constructors is not a sweep.
- *
- * The three generated codes are generated from a FIXED list of this slice's own
- * evaluator names, not from anything a caller supplies; they are spelled out
- * below rather than built at runtime so the set really is closed and readable.
+ * The code is the only part of a refusal a consumer branches on, so it is the
+ * part a caller must not be able to mint. It is now also the ONLY part a caller
+ * could reach at all: the constructor below takes a code and nothing else.
  */
-const V5_R01_HOLDER_REFUSING_ENTRY_POINTS = [
-  "evaluatePilotDay", "evaluatePilotRun", "evaluateRecoveryDrill",
-  "describeRecoveryDrill", "readOnboardingProgress", "evaluateBetaOperability",
-  "evaluatePerSliceDellReview", "onboardingSurfaceStatus",
-];
-
 export const V5_R01_ERROR_CODES = Object.freeze([
   "decision_binding_mismatch",
   "duplicate_onboarding_step",
@@ -64,28 +104,145 @@ export const V5_R01_ERROR_CODES = Object.freeze([
   "unknown_field",
   "unknown_value",
   "unsafe_unicode",
-  ...V5_R01_HOLDER_REFUSING_ENTRY_POINTS.map(name => `${name}_holder_is_not_an_argument`),
+  ...V5_R01_ARITY_GUARDED_ENTRY_POINTS.map(name => `${name}_takes_no_extra_argument`),
 ].sort());
 
 const V5_R01_ERROR_CODE_SET = new Set(V5_R01_ERROR_CODES);
 
-export class V5R01Error extends Error {
-  constructor(code, message, detail) {
-    // A plain TypeError, with a FIXED message that quotes nothing, because a
-    // V5R01Error raised here would recurse and because the refusal's own text
-    // must not become a second route for caller input to leave the module.
-    if (!V5_R01_ERROR_CODE_SET.has(code)) {
-      throw new TypeError("v5_r01_error_code_is_not_registered");
-    }
-    super(typeof message === "string" ? message : "");
-    this.name = "V5R01Error";
-    this.code = code;
-    if (detail !== undefined) this.detail = detail;
+/**
+ * THE FIXED MESSAGE TABLE, and why a refusal no longer carries a sentence its
+ * caller helped write.
+ *
+ * The re-review of PR 992 reproduced the defect: `V5R01Error` stored whatever
+ * `message` and `detail` it was handed, `fail` was an exported door to that
+ * constructor, and the second review's own sweep looked at a throw's `code` and
+ * deliberately discarded the rest. So every privileged word in the standing
+ * rule — and a hedged classification token with them — came straight back out
+ * of `error.message` and `error.detail` on a registered code.
+ *
+ * A refusal is now a CODE and nothing else. The message is looked up here, the
+ * table is exhaustive over the code set (checked at load, below), no `detail` is
+ * stored, no `cause` is set, and the instance is frozen, so there is no property
+ * on a refusal that any caller anywhere contributed a byte to.
+ *
+ * The messages themselves are written clear of every privileged word, so the
+ * suite can sweep a thrown error's message as strictly as it sweeps a returned
+ * code, with no prose exemption of any kind.
+ */
+const V5_R01_FIXED_MESSAGES = Object.freeze({
+  decision_binding_mismatch:
+    "the declared decision set is not this slice's settled decision set",
+  duplicate_onboarding_step: "onboarding step ids must be distinct",
+  invalid_date: "a field must be a real ISO calendar date (YYYY-MM-DD)",
+  invalid_failure_origin_registry:
+    "a failure origin in this slice's own registry is malformed",
+  invalid_reference: "a field is not a permitted CARR reference",
+  invalid_shape: "a field does not have the shape this slice requires",
+  malformed_unicode: "a field contains an unpaired surrogate",
+  missing_field: "a required field is absent",
+  onboarding_step_declares_no_resume_record:
+    "an onboarding step does not say what a resume record would hold",
+  onboarding_step_has_an_unregistered_mobile_reach:
+    "an onboarding step carries a mobile reach outside the registered three",
+  onboarding_step_names_an_unknown_surface:
+    "an onboarding step names an asset the surface table does not carry",
+  onboarding_step_overclaims_its_resume_support:
+    "an onboarding step claims resume support that no enrollment store backs",
+  onboarding_step_requires_a_developer_tool:
+    "an onboarding step requires a tool class a partner without developer tools lacks",
+  onboarding_step_requires_an_unregistered_tool:
+    "an onboarding step requires a tool class this slice does not register",
+  partner_roles_collapsed:
+    "the pilot and beta partners must be distinct; S01 no longer distinguishes them",
+  seam_claimed_to_exist: "a seam claims to exist; this slice holds no seam that does",
+  text_too_long: "a field is longer than this slice permits",
+  too_many_entries: "an array holds more entries than this slice permits",
+  unknown_field: "a field outside this slice's closed schema was supplied",
+  unknown_value: "a field holds a value outside the registered set",
+  unsafe_unicode:
+    "a field contains a control, bidirectional or invisible format character",
+  ...Object.fromEntries(V5_R01_ARITY_GUARDED_ENTRY_POINTS.map(name =>
+    [`${name}_takes_no_extra_argument`,
+      `${name} was given more arguments than it declares; a store, ledger, calendar,`
+      + " registry or observer is not an argument"])),
+});
+
+for (const code of V5_R01_ERROR_CODES) {
+  if (typeof V5_R01_FIXED_MESSAGES[code] !== "string") {
+    throw new TypeError("v5_r01_error_code_has_no_fixed_message");
+  }
+}
+for (const code of Object.keys(V5_R01_FIXED_MESSAGES)) {
+  if (!V5_R01_ERROR_CODE_SET.has(code)) {
+    throw new TypeError("v5_r01_fixed_message_for_an_unregistered_code");
   }
 }
 
-export function fail(code, message, detail) {
-  throw new V5R01Error(code, message, detail);
+/**
+ * A refusal, carrying a registered code and the fixed message that goes with it.
+ *
+ * IT TAKES ONE ARGUMENT. Not a message, not a detail, not an options bag with a
+ * `cause` in it — one registered code. Every other calling form is a plain
+ * TypeError whose text quotes nothing, because the refusal's own text must not
+ * become a second door for caller input to leave the module.
+ */
+export class V5R01Error extends Error {
+  constructor(...args) {
+    if (args.length !== 1) {
+      throw new TypeError("v5_r01_error_takes_exactly_one_registered_code");
+    }
+    const [code] = args;
+    if (typeof code !== "string" || !V5_R01_ERROR_CODE_SET.has(code)) {
+      throw new TypeError("v5_r01_error_code_is_not_registered");
+    }
+    super(V5_R01_FIXED_MESSAGES[code]);
+    this.name = "V5R01Error";
+    this.code = code;
+    Object.freeze(this);
+  }
+}
+
+/** Raise a registered refusal. One argument, for the same reason. */
+export function fail(...args) {
+  if (args.length !== 1) {
+    throw new TypeError("v5_r01_fail_takes_exactly_one_registered_code");
+  }
+  throw new V5R01Error(args[0]);
+}
+
+/**
+ * THE ARITY BOUNDARY, counted rather than peeked at.
+ *
+ * `args` is the rest tail of a function whose whole parameter list is `...args`,
+ * so this sees every argument in every calling form: spread, `apply`, `call`, a
+ * bound receiver, a tail of `undefined`s with a holder behind them. A function
+ * that declares `n` arguments refuses argument `n + 1`.
+ */
+/**
+ * A VALIDATOR CALLED WRONGLY REFUSES WITH A REGISTERED CODE, and this is part of
+ * the same guarantee as the fixed message table.
+ *
+ * These are exported functions, so the sweep calls every one of them with every
+ * caller shape it can build. Left alone, `assertClosedKeys(x)` reached
+ * `allowed.includes` and V8 raised a native TypeError whose own message quotes
+ * the engine rather than this module — an error text on this slice's public
+ * surface that the slice did not write. It refuses first now, so EVERY throw
+ * from this slice carries either a registered code or one of the three fixed
+ * TypeError texts below, and the suite sweeps all of them with no prose
+ * exemption.
+ */
+function assertArgumentShape(wellFormed) {
+  if (!wellFormed) fail("invalid_shape");
+}
+
+export function assertArity(...args) {
+  if (args.length > 3) throw new TypeError("v5_r01_assert_arity_takes_three_arguments");
+  const [received, declared, name] = args;
+  if (!Array.isArray(received) || typeof declared !== "number"
+    || typeof name !== "string" || !V5_R01_ERROR_CODE_SET.has(`${name}_takes_no_extra_argument`)) {
+    throw new TypeError("v5_r01_assert_arity_was_called_wrongly");
+  }
+  if (received.length > declared) fail(`${name}_takes_no_extra_argument`);
 }
 
 function isPlainObject(value) {
@@ -125,31 +282,44 @@ function deepFreeze(value) {
  * `assertInternalRef("allow")` returned `"allow"`. A validator's whole job is to
  * throw; the caller already has the value.
  */
-export function assertClosedKeys(object, allowed, path) {
+export function assertClosedKeys(...args) {
+  assertArity(args, 3, "assertClosedKeys");
+  const [object, allowed, path] = args;
+  assertArgumentShape(isPlainObject(object) && Array.isArray(allowed) && typeof path === "string");
   for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) {
-      fail("unknown_field", `unknown field "${key}" at ${path}`, { path: `${path}.${key}`, key });
+      fail("unknown_field");
     }
   }
 }
 
-export function assertRequiredKeys(object, required, path) {
+export function assertRequiredKeys(...args) {
+  assertArity(args, 3, "assertRequiredKeys");
+  const [object, required, path] = args;
+  assertArgumentShape(isPlainObject(object) && Array.isArray(required) && typeof path === "string");
   for (const key of required) {
-    if (!(key in object)) fail("missing_field", `${path}.${key} is required`, { path: `${path}.${key}` });
+    if (!(key in object)) fail("missing_field");
   }
 }
 
-export function assertObject(value, path) {
-  if (!isPlainObject(value)) fail("invalid_shape", `${path} must be a plain object`, { path });
+export function assertObject(...args) {
+  assertArity(args, 2, "assertObject");
+  const [value, path] = args;
+  assertArgumentShape(typeof path === "string");
+  if (!isPlainObject(value)) fail("invalid_shape");
 }
 
-export function assertArray(value, path, { min = 0, max = 512 } = {}) {
-  if (!Array.isArray(value)) fail("invalid_shape", `${path} must be an array`, { path });
+export function assertArray(...args) {
+  assertArity(args, 3, "assertArray");
+  const [value, path, options = {}] = args;
+  assertArgumentShape(typeof path === "string" && isPlainObject(options));
+  const { min = 0, max = 512 } = options;
+  if (!Array.isArray(value)) fail("invalid_shape");
   if (value.length < min) {
-    fail("invalid_shape", `${path} must hold at least ${min} entries`, { path, length: value.length });
+    fail("invalid_shape");
   }
   if (value.length > max) {
-    fail("too_many_entries", `${path} may hold at most ${max} entries`, { path, length: value.length });
+    fail("too_many_entries");
   }
 }
 
@@ -158,36 +328,49 @@ const UNSAFE_TEXT =
 const INTERNAL_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/;
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-export function assertSafeText(value, path, { maxLength = 512 } = {}) {
+export function assertSafeText(...args) {
+  assertArity(args, 3, "assertSafeText");
+  const [value, path, options = {}] = args;
+  assertArgumentShape(typeof path === "string" && isPlainObject(options));
+  const { maxLength = 512 } = options;
   if (typeof value !== "string" || value.length === 0) {
-    fail("invalid_shape", `${path} must be a non-empty string`, { path });
+    fail("invalid_shape");
   }
   if (value.length > maxLength) {
-    fail("text_too_long", `${path} may be at most ${maxLength} characters`, { path, length: value.length });
+    fail("text_too_long");
   }
   if (typeof value.isWellFormed === "function" && !value.isWellFormed()) {
-    fail("malformed_unicode", `${path} contains an unpaired surrogate`, { path });
+    fail("malformed_unicode");
   }
   if (UNSAFE_TEXT.test(value)) {
-    fail("unsafe_unicode", `${path} contains a control, bidirectional or invisible format character`, { path });
+    fail("unsafe_unicode");
   }
 }
 
-export function assertInternalRef(value, path, { maxLength = 255 } = {}) {
+export function assertInternalRef(...args) {
+  assertArity(args, 3, "assertInternalRef");
+  const [value, path, options = {}] = args;
+  assertArgumentShape(typeof path === "string" && isPlainObject(options));
+  const { maxLength = 255 } = options;
   assertSafeText(value, path, { maxLength });
   if (!INTERNAL_REF.test(value)) {
-    fail("invalid_reference", `${path} is not a permitted CARR reference`, { path });
+    fail("invalid_reference");
   }
 }
 
-export function assertBoolean(value, path) {
-  if (typeof value !== "boolean") fail("invalid_shape", `${path} must be a boolean`, { path });
+export function assertBoolean(...args) {
+  assertArity(args, 2, "assertBoolean");
+  const [value, path] = args;
+  assertArgumentShape(typeof path === "string");
+  if (typeof value !== "boolean") fail("invalid_shape");
 }
 
-export function assertEnum(value, allowed, path) {
+export function assertEnum(...args) {
+  assertArity(args, 3, "assertEnum");
+  const [value, allowed, path] = args;
+  assertArgumentShape(Array.isArray(allowed) && typeof path === "string");
   if (!allowed.includes(value)) {
-    fail("unknown_value", `${path} must be one of the registered values`,
-      { path, value, registered: [...allowed] });
+    fail("unknown_value");
   }
 }
 
@@ -198,28 +381,71 @@ export function assertEnum(value, allowed, path) {
  * which would quietly turn one impossible day into a real one in the middle of a
  * run-length count. The round-trip is the check.
  */
-export function assertCalendarDate(value, path) {
+export function assertCalendarDate(...args) {
+  assertArity(args, 2, "assertCalendarDate");
+  const [value, path] = args;
+  assertArgumentShape(typeof path === "string");
   assertSafeText(value, path, { maxLength: 10 });
   const match = ISO_DATE.exec(value);
-  if (!match) fail("invalid_date", `${path} must be an ISO calendar date (YYYY-MM-DD)`, { path, value });
+  if (!match) fail("invalid_date");
   const [, y, m, d] = match;
   const stamp = Date.UTC(Number(y), Number(m) - 1, Number(d));
   const round = new Date(stamp).toISOString().slice(0, 10);
   if (round !== value) {
-    fail("invalid_date", `${path} is not a real calendar date`, { path, value, rolled_to: round });
+    fail("invalid_date");
   }
 }
 
 /** Days since the epoch, so "the next calendar day" is subtraction and not parsing. */
-export function calendarDayOrdinal(date) {
+export function calendarDayOrdinal(...args) {
+  assertArity(args, 1, "calendarDayOrdinal");
+  const [date] = args;
+  if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
   const [y, m, d] = date.split("-").map(Number);
   return Math.round(Date.UTC(y, m - 1, d) / 86400000);
 }
 
 /** 0 = Sunday … 6 = Saturday, computed from the same ordinal. */
-export function calendarWeekday(date) {
+export function calendarWeekday(...args) {
+  assertArity(args, 1, "calendarWeekday");
+  const [date] = args;
+  if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
   return (((calendarDayOrdinal(date) + 4) % 7) + 7) % 7;
 }
+
+/**
+ * AN IDENTIFIER THIS SLICE REPEATS FROM ANOTHER OWNER, held as a quotation
+ * rather than as a string of its own.
+ *
+ * THIS EXISTS BECAUSE OF THE PRIVILEGED-WORD SWEEP, and it is the honest way to
+ * satisfy it rather than the convenient one. The suite matches every privileged
+ * word by SUBSTRING now, with no exemption list and no word families, over every
+ * export name, every affirmed key and every identifier-shaped string this slice
+ * returns. Three of the strings in this file are not this slice's to spell:
+ * S01's own exported evaluator names, and the design-basis register's targets and
+ * acceptance hooks. `evaluateReadContinuity` and `rollout_readiness` carry the
+ * word `read` because their owners wrote them that way, and renaming them here
+ * would be misquoting a record to pass a test.
+ *
+ * So a quotation is a two-key record — who minted it, and the exact text — and
+ * the suite's rule is structural rather than lexical: the `identifier` of a
+ * quotation is swept for hedged verdicts and for caller echo like everything
+ * else, and it is NOT swept for privileged words, because a quotation is not a
+ * thing this slice can decide. The companion tests hold the line: a quotation
+ * never stands in an answer, status, decision or reason position; a quoted
+ * identifier is never an object key; and every S01 quotation is checked against
+ * S01's real export list, so a misquotation fails rather than passes.
+ */
+/* NOT EXPORTED, and that is not tidiness. An exported `quotedIdentifier` would
+ * be a public function that hands its caller's own string straight back inside a
+ * record — the exact `deepFreeze` defect the third review reproduced. Quotations
+ * are built here, from literals, at module load. */
+function quotedIdentifier(identifier, quoted_from) {
+  return Object.freeze({ quoted_from, identifier });
+}
+
+export const V5_R01_S01_MODULE = "global-boundaries.v5.js";
+export const V5_R01_DESIGN_BASIS_REGISTER = "carr:design-basis-decision-register";
 
 // ---------------------------------------------------------------------------
 // WHO. Pinned by import so a rename in S01 breaks this slice at load rather than
@@ -233,9 +459,7 @@ export const V5_R01_PILOT_PARTNER = V5_SYSTEM_AUTHORITY_PARTNER;
 export const V5_R01_BETA_PARTNER = V5_DEFERRED_AUTHORITY_PARTNER;
 
 if (V5_R01_PILOT_PARTNER === V5_R01_BETA_PARTNER) {
-  throw new V5R01Error("partner_roles_collapsed",
-    "the pilot and beta partners must be distinct; S01 no longer distinguishes them",
-    { pilot: V5_R01_PILOT_PARTNER, beta: V5_R01_BETA_PARTNER });
+  throw new V5R01Error("partner_roles_collapsed");
 }
 
 // ---------------------------------------------------------------------------
@@ -367,20 +591,16 @@ export const V5_R01_DISQUALIFYING_FAILURE_ORIGINS = deepFreeze(
 // whether it breaks the run fails this module's own import, not a caller's call.
 for (const [origin, entry] of Object.entries(V5_R01_FAILURE_ORIGINS)) {
   if (typeof entry.excluded !== "boolean" || typeof entry.disqualifies_run !== "boolean") {
-    throw new V5R01Error("invalid_failure_origin_registry",
-      `failure origin "${origin}" must declare excluded and disqualifies_run as booleans`, { origin });
+    throw new V5R01Error("invalid_failure_origin_registry");
   }
   if (entry.excluded && entry.disqualifies_run) {
-    throw new V5R01Error("invalid_failure_origin_registry",
-      `failure origin "${origin}" cannot both be excluded and disqualify the run`, { origin });
+    throw new V5R01Error("invalid_failure_origin_registry");
   }
   if (entry.condition !== null && typeof entry.condition !== "string") {
-    throw new V5R01Error("invalid_failure_origin_registry",
-      `failure origin "${origin}" must declare a condition string or null`, { origin });
+    throw new V5R01Error("invalid_failure_origin_registry");
   }
   if (typeof entry.basis !== "string" || entry.basis.length < 40) {
-    throw new V5R01Error("invalid_failure_origin_registry",
-      `failure origin "${origin}" must carry a stated basis`, { origin });
+    throw new V5R01Error("invalid_failure_origin_registry");
   }
 }
 
@@ -395,28 +615,28 @@ for (const [origin, entry] of Object.entries(V5_R01_FAILURE_ORIGINS)) {
  */
 export const V5_R01_DRILL_FAULTS = deepFreeze({
   record_layer_unreachable: {
-    s01_seam: "evaluateReadContinuity",
+    s01_seam: quotedIdentifier("evaluateReadContinuity", V5_R01_S01_MODULE),
     expected_partner_visible_signal: "honest_unavailable_plus_documented_fallback",
     recovery_is: "partner_uses_documented_fallback_and_resumes_when_the_layer_returns",
   },
-  cached_read_past_max_age: {
-    s01_seam: "evaluateReadContinuity",
-    expected_partner_visible_signal: "stale_read_marked_stale_not_presented_as_current",
-    recovery_is: "partner_declines_to_act_on_the_stale_value_and_rereads",
+  cached_value_past_max_age: {
+    s01_seam: quotedIdentifier("evaluateReadContinuity", V5_R01_S01_MODULE),
+    expected_partner_visible_signal: "stale_value_marked_stale_not_shown_as_current",
+    recovery_is: "partner_declines_to_act_on_the_stale_value_and_asks_again",
   },
   optional_local_node_unavailable: {
-    s01_seam: "evaluateLocalPlatform",
+    s01_seam: quotedIdentifier("evaluateLocalPlatform", V5_R01_S01_MODULE),
     expected_partner_visible_signal: "declared_fallback_or_visible_queue",
     recovery_is: "partner_continues_on_the_declared_fallback_without_a_developer",
   },
   correspondence_adapter_unavailable: {
-    s01_seam: "evaluateReadContinuity",
+    s01_seam: quotedIdentifier("evaluateReadContinuity", V5_R01_S01_MODULE),
     expected_partner_visible_signal: "adapter_unavailable_named_not_silent",
     recovery_is: "partner_proceeds_without_correspondence_and_the_gap_is_visible",
   },
   write_conflict_requires_a_human: {
-    s01_seam: "evaluateActorAuthority",
-    expected_partner_visible_signal: "conflict_presented_as_a_question_not_auto_retried",
+    s01_seam: quotedIdentifier("evaluateActorAuthority", V5_R01_S01_MODULE),
+    expected_partner_visible_signal: "conflict_raised_as_a_question_not_auto_retried",
     recovery_is: "partner_answers_the_question_or_stops_without_making_it_worse",
   },
 });
@@ -448,7 +668,7 @@ export const V5_R01_DRILL_RECEIPT_FIELDS = deepFreeze([
   "observed_partner_visible_signal",
   "observer_identity_ref",
   "producer_step_ref",
-  "recovered_at",
+  "recovery_reached_at",
   "recovery_path_taken",
   "subject_partner",
   "terminal_state_reached",
@@ -456,14 +676,14 @@ export const V5_R01_DRILL_RECEIPT_FIELDS = deepFreeze([
 
 /** The terminal states a drill may end in. Two of them are correct outcomes. */
 export const V5_R01_DRILL_TERMINAL_STATES = deepFreeze([
-  "recovered",
+  "recovery_reached",
   "stopped_safely_without_making_it_worse",
   "stuck",
   "made_it_worse",
 ]);
 
 export const V5_R01_DRILL_CORRECT_TERMINAL_STATES = deepFreeze([
-  "recovered",
+  "recovery_reached",
   "stopped_safely_without_making_it_worse",
 ]);
 
@@ -570,8 +790,7 @@ export const V5_R01_SEAM_REFS = deepFreeze(
 
 for (const [name, entry] of Object.entries(V5_R01_SEAMS)) {
   if (entry.exists_in_this_repository !== false) {
-    throw new V5R01Error("seam_claimed_to_exist",
-      `seam "${name}" claims to exist; this slice holds no seam that does`, { name });
+    throw new V5R01Error("seam_claimed_to_exist");
   }
 }
 

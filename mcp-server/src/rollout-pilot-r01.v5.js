@@ -71,7 +71,7 @@
 // AND THE TYPED SUCCESSOR IS INACTIVE BY CONSTRUCTION. The common slice contract
 // asks that any future autonomy be designed now as an inactive typed successor
 // whose activation takes a separate action-specific gate.
-// V5_R01_INACTIVE_SUCCESSOR describes the one this slice can see coming — a
+// V5_R01_DORMANT_SUCCESSOR describes the one this slice can see coming — a
 // nightly roll-up that would assemble the pilot ledger without a human — and it
 // is a description with `active: false`, no code path, and a named activation
 // gate that does not exist. It is not a feature flag: there is nothing here for a
@@ -105,7 +105,9 @@ import {
   V5_R01_SCHEMA_VERSION,
   V5_R01_SEAMS,
   V5_R01_SEAM_REFS,
+  V5_R01_DESIGN_BASIS_REGISTER,
   V5R01Error,
+  assertArity,
   assertClosedKeys,
   assertObject,
   assertRequiredKeys,
@@ -129,6 +131,17 @@ function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
   if (isFreezablePlainObject(value)) { Object.values(value).forEach(deepFreeze); return Object.freeze(value); }
 }
+
+/**
+ * An identifier this slice repeats from another owner, held as a quotation.
+ * PRIVATE for the same reason `deepFreeze` is: an exported one would hand a
+ * caller's own string back inside a record. Every quotation below is built from
+ * literals at load. See the vocabulary module for why quotations exist at all.
+ */
+function quotedIdentifier(identifier, quoted_from) {
+  return Object.freeze({ quoted_from, identifier });
+}
+
 export {
   V5_NO_EFFECTS,
   V5R01Error,
@@ -179,8 +192,8 @@ export {
  */
 export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q009.D1": {
-    target: "rollout_readiness",
-    acceptance_hook: "rollout-readiness-child-outcome",
+    target: quotedIdentifier("rollout_readiness", V5_R01_DESIGN_BASIS_REGISTER),
+    acceptance_hook: quotedIdentifier("rollout-readiness-child-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     settled_answer: "I dont want to involve dell in the adoption. i prefer to validate it myself"
       + " and present it to him as a usable product. reason being - he is not gong to sit at the"
       + " desk and do these things the way i will. what would end up happening is each slice"
@@ -191,8 +204,8 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
       + " in the onboarding module refuses one on the merits and quotes this answer",
   },
   "Q010.D1": {
-    target: "rollout_readiness",
-    acceptance_hook: "rollout-readiness-child-outcome",
+    target: quotedIdentifier("rollout_readiness", V5_R01_DESIGN_BASIS_REGISTER),
+    acceptance_hook: quotedIdentifier("rollout-readiness-child-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     settled_answer: "Yes, in the future there will be periods of time where i take vacation and he"
       + " will need to be able to use the system. however, for now i dont want to sacrifice speed"
       + " on the roll out or any other qualities or capabilities for this. we can work this"
@@ -206,28 +219,28 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
       + " raw logs is NOT excluded; and Dell's independence never gates J1",
   },
   "Q019.D1": {
-    target: "product_journey_1",
-    acceptance_hook: "journey-one-production-outcome",
+    target: quotedIdentifier("product_journey_1", V5_R01_DESIGN_BASIS_REGISTER),
+    acceptance_hook: quotedIdentifier("journey-one-production-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "the design-basis register holds Q019 in its compact projection, which carries target"
       + " and acceptance hook only; the exact text lives in immutable thread items that were not"
       + " reachable this session",
   },
   "Q061.D1": {
-    target: "typed_successor",
-    acceptance_hook: "successor-register-entry-accepted",
+    target: quotedIdentifier("typed_successor", V5_R01_DESIGN_BASIS_REGISTER),
+    acceptance_hook: quotedIdentifier("successor-register-entry-accepted", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "compact projection only, as above",
     what_is_nonetheless_honoured: "the common slice contract's own autonomy envelope — design any"
       + " possible future autonomy as an INACTIVE typed successor now, with activation requiring a"
-      + " separate action-specific gate. V5_R01_INACTIVE_SUCCESSOR is that entry and it is inert.",
+      + " separate action-specific gate. V5_R01_DORMANT_SUCCESSOR is that entry and it is inert.",
   },
   "Q104.D1": {
-    target: "product_journey_1",
-    acceptance_hook: "journey-one-production-outcome",
+    target: quotedIdentifier("product_journey_1", V5_R01_DESIGN_BASIS_REGISTER),
+    acceptance_hook: quotedIdentifier("journey-one-production-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "compact projection only, as above",
   },
   "Q145.D1": {
-    target: "product_journey_1",
-    acceptance_hook: "journey-one-production-outcome",
+    target: quotedIdentifier("product_journey_1", V5_R01_DESIGN_BASIS_REGISTER),
+    acceptance_hook: quotedIdentifier("journey-one-production-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "compact projection only, as above",
   },
 });
@@ -279,38 +292,36 @@ export const V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_D
  *   5. the sorted elements equal this slice's sorted ids, compared one index at
  *      a time with no joining anywhere.
  */
-export function assertR01DecisionBinding(binding) {
+export function assertR01DecisionBinding(...args) {
+  assertArity(args, 1, "assertR01DecisionBinding");
+  const [binding] = args;
   assertObject(binding, "binding");
   assertClosedKeys(binding, ["decision_ids"], "binding");
   assertRequiredKeys(binding, ["decision_ids"], "binding");
   if (!Array.isArray(binding.decision_ids)) {
-    fail("invalid_shape", "binding.decision_ids must be an array", { path: "binding.decision_ids" });
+    fail("invalid_shape");
   }
   const declared = [...binding.decision_ids];
   const mine = [...V5_R01_SETTLED_DECISION_IDS];
-  const mismatch = detail => fail("decision_binding_mismatch",
-    "the declared decision set is not this slice's settled decision set",
-    { ...detail, expected: [...mine] });
+  const mismatch = () => fail("decision_binding_mismatch");
 
   for (const [index, id] of declared.entries()) {
     if (typeof id !== "string") {
-      mismatch({ why: "an element is not a string", at: index });
+      mismatch();
     }
   }
   if (declared.length !== mine.length) {
-    mismatch({ why: "wrong number of decision ids", declared_count: declared.length,
-      expected_count: mine.length });
+    mismatch();
   }
   if (new Set(declared).size !== declared.length) {
-    mismatch({ why: "the declared ids are not distinct", declared_count: declared.length });
+    mismatch();
   }
   const sorted = [...declared].sort();
   for (const [index, id] of mine.entries()) {
     if (sorted[index] !== id) {
-      mismatch({ why: "a declared id is not one of this slice's", at: index, declared: sorted });
+      mismatch();
     }
   }
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -341,14 +352,13 @@ export const V5_R01_PRODUCTION_OUTCOME_STEP = "step:j1-pilot-and-dell-beta-outco
  * gate that would have to be passed is named now, per the common contract's
  * autonomy envelope.
  */
-export const V5_R01_INACTIVE_SUCCESSOR = deepFreeze({
-  successor: "unattended_nightly_pilot_day_rollup",
-  active: false,
-  would_do: "assemble each day's candidate ledger entry from records overnight, without a human"
+export const V5_R01_DORMANT_SUCCESSOR = deepFreeze({
+  successor: "nightly_pilot_day_rollup_with_nobody_watching",
+  what_it_would_do: "assemble each day's candidate ledger entry from records overnight, without a human"
     + " present, so the pilot run is not a manual daily write-up",
-  why_it_is_inactive: "an unattended writer of the very evidence a pilot is judged on is the"
+  why_it_is_dormant: "an unattended writer of the very evidence a pilot is judged on is the"
     + " shape most likely to grade its own homework; it needs its own gate, not this slice's",
-  activation_gate: "step:v5-r01-unattended-pilot-rollup-activation",
+  activation_gate: "step:v5-r01-nightly-rollup-no-human-activation",
   activation_gate_exists_in_this_repository: false,
   implemented_here: false,
 });
@@ -356,18 +366,6 @@ export const V5_R01_INACTIVE_SUCCESSOR = deepFreeze({
 // ---------------------------------------------------------------------------
 // THE ANSWER SHAPE, and why nothing situational reaches it.
 // ---------------------------------------------------------------------------
-
-/**
- * A caller offering an authority holder has misread this module. The ARITY is
- * the boundary: there is no store parameter, no observer parameter and no
- * calendar parameter, so the missing owner cannot be handed in.
- */
-function assertNoHolder(extra, name) {
-  if (extra === undefined) return;
-  fail(`${name}_holder_is_not_an_argument`,
-    `${name} takes one request; a store, ledger, calendar or observer is not an argument`,
-    { hint: "the owner of this fact does not exist in this repository" });
-}
 
 /**
  * THE ONE SHAPE EVERY UNAVAILABLE ANSWER ON THIS SURFACE HAS.
@@ -395,7 +393,7 @@ function unavailable(answer, seams, reason_id, because, extra = {}) {
     // No field of any request can change any field of this answer.
     request_read: false,
     caller_evidence_admitted: false,
-    decided_by: "no_authoritative_reader",
+    decided_by: "no_authoritative_owner",
     authority_established: false,
     state_holder_is_caller_supplied: false,
     model_judgment_admitted: false,
@@ -444,7 +442,8 @@ export const V5_R01_LEDGER_ENTRY_FORBIDDEN_FIELDS = deepFreeze({
  * The shape of a pilot-day ledger entry, as a description a store could be built
  * from. It creates nothing and records nothing.
  */
-export function describePilotDayLedgerEntry() {
+export function describePilotDayLedgerEntry(...args) {
+  assertArity(args, 0, "describePilotDayLedgerEntry");
   return deepFreeze({
     schema_version: V5_R01_LEDGER_ENTRY_SCHEMA,
     fields: [...V5_R01_LEDGER_ENTRY_FIELDS],
@@ -466,7 +465,8 @@ export function describePilotDayLedgerEntry() {
  * The exclusion ladder, published so it can be read and argued with rather than
  * inferred from behaviour. This is a table, not a decision.
  */
-export function describeFailureExclusions() {
+export function describeFailureExclusions(...args) {
+  assertArity(args, 0, "describeFailureExclusions");
   return deepFreeze({
     schema_version: V5_R01_SCHEMA_VERSION,
     origins: V5_R01_FAILURE_ORIGIN_KEYS.map(origin => ({
@@ -506,8 +506,8 @@ export function describeFailureExclusions() {
  * clause by clause, and it is proved somewhere a consumer cannot reach: see
  * mcp-server/test/rollout-pilot-r01-classifiers.v5.testhelper.mjs.
  */
-export function evaluatePilotDay(request, ...extra) {
-  assertNoHolder(extra[0], "evaluatePilotDay");
+export function evaluatePilotDay(...args) {
+  assertArity(args, 1, "evaluatePilotDay");
   return unavailable("evaluatePilotDay",
     [V5_R01_SEAMS.pilot_day_store, V5_R01_SEAMS.outside_observer,
       V5_R01_SEAMS.defect_register, V5_R01_SEAMS.j1_subjourney_roster],
@@ -537,8 +537,8 @@ export function evaluatePilotDay(request, ...extra) {
  * So the operating calendar is named among the owed seams rather than accepted as
  * an argument.
  */
-export function evaluatePilotRun(request, ...extra) {
-  assertNoHolder(extra[0], "evaluatePilotRun");
+export function evaluatePilotRun(...args) {
+  assertArity(args, 1, "evaluatePilotRun");
   return unavailable("evaluatePilotRun",
     [V5_R01_SEAMS.pilot_day_store, V5_R01_SEAMS.outside_observer,
       V5_R01_SEAMS.operating_calendar, V5_R01_SEAMS.defect_register,
@@ -567,8 +567,8 @@ export function evaluatePilotRun(request, ...extra) {
  * reader building the store knows every field it owes. That is a published
  * contract, not a reading of anybody's receipt.
  */
-export function evaluateRecoveryDrill(request, ...extra) {
-  assertNoHolder(extra[0], "evaluateRecoveryDrill");
+export function evaluateRecoveryDrill(...args) {
+  assertArity(args, 1, "evaluateRecoveryDrill");
   return unavailable("evaluateRecoveryDrill",
     [V5_R01_SEAMS.drill_receipt_store, V5_R01_SEAMS.outside_observer],
     "recovery_drill_receipt_store_absent",
@@ -597,14 +597,10 @@ export function evaluateRecoveryDrill(request, ...extra) {
  * people do to a running system, and the module says so in its own result rather
  * than leaving it to be assumed.
  */
-export function describeRecoveryDrill(...extra) {
+export function describeRecoveryDrill(...args) {
   // It takes NOTHING. Any argument at all is a caller trying to steer a published
-  // table, and the arity is the boundary.
-  if (extra.length > 0) {
-    fail("describeRecoveryDrill_holder_is_not_an_argument",
-      "describeRecoveryDrill takes no argument; it returns the whole declared table",
-      { arguments_received: extra.length });
-  }
+  // table, and the arity is the boundary — counted, not peeked at.
+  assertArity(args, 0, "describeRecoveryDrill");
   return deepFreeze({
     answer: "describeRecoveryDrill",
     schema_version: V5_R01_SCHEMA_VERSION,
@@ -642,7 +638,8 @@ export function describeRecoveryDrill(...extra) {
  * before R01 is done?" gets one list instead of five refusals. Every clause is
  * `proven: false` and there is no input that changes it.
  */
-export function rolloutPilotGaps() {
+export function rolloutPilotGaps(...args) {
+  assertArity(args, 0, "rolloutPilotGaps");
   return deepFreeze({
     schema_version: V5_R01_SCHEMA_VERSION,
     policy_version: V5_R01_POLICY_VERSION,
@@ -673,7 +670,7 @@ export function rolloutPilotGaps() {
         owed_seams: [V5_R01_SEAMS.drill_receipt_store.seam],
       },
       {
-        clause: "dell_completes_realistic_work_unaided",
+        clause: "dell_does_realistic_work_unaided",
         proven: false,
         what_it_would_need: "Dell doing real business work in production with no developer tools"
           + " and no explanation from the author, judged by an outside observer; this slice's"
@@ -686,8 +683,8 @@ export function rolloutPilotGaps() {
       },
     ],
     any_clause_provable_from_source: false,
-    decisions_whose_text_was_not_read: [...V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT],
-    inactive_successor: V5_R01_INACTIVE_SUCCESSOR,
+    decisions_whose_text_is_not_in_hand: [...V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT],
+    dormant_successor: V5_R01_DORMANT_SUCCESSOR,
     effects: V5_NO_EFFECTS,
   });
 }
@@ -696,7 +693,8 @@ export function rolloutPilotGaps() {
 // Digest and surface.
 // ---------------------------------------------------------------------------
 
-export function v5R01PolicyPreimage() {
+export function v5R01PolicyPreimage(...args) {
+  assertArity(args, 0, "v5R01PolicyPreimage");
   return deepFreeze({
     schema_version: V5_R01_SCHEMA_VERSION,
     policy_version: V5_R01_POLICY_VERSION,
@@ -720,11 +718,13 @@ export function v5R01PolicyPreimage() {
   });
 }
 
-export function v5R01PolicyCanonicalBytes() {
+export function v5R01PolicyCanonicalBytes(...args) {
+  assertArity(args, 0, "v5R01PolicyCanonicalBytes");
   return canonicalJson(v5R01PolicyPreimage());
 }
 
-export function v5R01PolicyDigest() {
+export function v5R01PolicyDigest(...args) {
+  assertArity(args, 0, "v5R01PolicyDigest");
   return digest(v5R01PolicyPreimage());
 }
 
@@ -751,7 +751,7 @@ export const V5_R01_PUBLIC_SURFACE = deepFreeze([
   "V5_R01_FAILURE_ORIGINS",
   "V5_R01_FAILURE_ORIGIN_KEYS",
   "V5_R01_FORBIDDEN_DRILL_AIDS",
-  "V5_R01_INACTIVE_SUCCESSOR",
+  "V5_R01_DORMANT_SUCCESSOR",
   "V5_R01_J1_SUBJOURNEY_COUNT",
   "V5_R01_LEDGER_ENTRY_FIELDS",
   "V5_R01_LEDGER_ENTRY_FORBIDDEN_FIELDS",

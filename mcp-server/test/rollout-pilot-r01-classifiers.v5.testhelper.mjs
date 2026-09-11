@@ -438,7 +438,7 @@ export function classifyPilotRunIfAuthoritative(request) {
  *
  * The previous round declared twelve fields in V5_R01_DRILL_RECEIPT_FIELDS and
  * then validated eight, so a complete receipt built to the published schema was
- * rejected as carrying four unknown fields — `injected_at`, `recovered_at`,
+ * rejected as carrying four unknown fields — `injected_at`, `recovery_reached_at`,
  * `producer_step_ref` and `recovery_path_taken`. The review of PR 992
  * reproduced it. Binding this list to the exported constant is the fix that
  * cannot drift back: a field added to the registry is a field this classifier
@@ -491,7 +491,7 @@ export function classifyRecoveryDrillIfAuthoritative(drill) {
   assertInternalRef(drill.producer_step_ref, "drill.producer_step_ref");
   assertInternalRef(drill.recovery_path_taken, "drill.recovery_path_taken");
   const injectedAt = assertInstant(drill.injected_at, "drill.injected_at");
-  const recoveredAt = assertInstant(drill.recovered_at, "drill.recovered_at");
+  const recoveryReachedAt = assertInstant(drill.recovery_reached_at, "drill.recovery_reached_at");
 
   const fault = V5_R01_DRILL_FAULTS[drill.fault_injected];
 
@@ -525,11 +525,11 @@ export function classifyRecoveryDrillIfAuthoritative(drill) {
   // Check 0b — a recovery cannot precede the fault it recovered from. The two
   // instants are in the receipt because the drill is a thing that happened over
   // an interval, and an interval that runs backwards describes no drill at all.
-  if (recoveredAt <= injectedAt) {
+  if (recoveryReachedAt <= injectedAt) {
     return classified(CLASSIFICATIONS.refuse, "recovery_does_not_follow_the_injection", {
       drill_ref: drill.drill_ref,
       injected_at: drill.injected_at,
-      recovered_at: drill.recovered_at,
+      recovery_reached_at: drill.recovery_reached_at,
     });
   }
 
@@ -574,7 +574,7 @@ export function classifyRecoveryDrillIfAuthoritative(drill) {
     terminal_state_reached: drill.terminal_state_reached,
     producer_step_ref: drill.producer_step_ref,
     injected_at: drill.injected_at,
-    recovered_at: drill.recovered_at,
+    recovery_reached_at: drill.recovery_reached_at,
   });
 }
 

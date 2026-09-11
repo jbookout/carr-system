@@ -87,10 +87,10 @@ import {
   V5_R01_POLICY_VERSION,
   V5_R01_SEAMS,
   V5R01Error,
+  assertArity,
   assertClosedKeys,
   assertObject,
   assertRequiredKeys,
-  fail,
 } from "./rollout-pilot-r01.vocabulary.v5.js";
 
 export { V5_NO_EFFECTS, V5R01Error };
@@ -179,11 +179,11 @@ const STEP_DECLARATIONS = Object.freeze([
     resume_record_would_hold: "nothing beyond the session itself",
   }),
   Object.freeze({
-    step: "read_home",
-    plain: "Read Home: today's work and whether the system is healthy.",
+    step: "open_home",
+    plain: "Open Home: today's work and whether the system is in good order.",
     asset: "workspace.html",
     requires_tool_classes: Object.freeze(["product_ui"]),
-    resume_record_would_hold: "that Home was read at least once",
+    resume_record_would_hold: "that Home was opened at least once",
   }),
   Object.freeze({
     step: "open_a_client",
@@ -200,11 +200,11 @@ const STEP_DECLARATIONS = Object.freeze([
     resume_record_would_hold: "the deal reference that was opened",
   }),
   Object.freeze({
-    step: "read_an_assignment",
-    plain: "Read the assignment on that deal — what the engagement actually covers.",
+    step: "open_an_assignment",
+    plain: "Open the assignment on that deal — what the engagement actually covers.",
     asset: "index.html",
     requires_tool_classes: Object.freeze(["product_ui"]),
-    resume_record_would_hold: "the assignment reference that was read",
+    resume_record_would_hold: "the assignment reference that was opened",
   }),
   Object.freeze({
     step: "ask_doc",
@@ -241,8 +241,7 @@ const STEP_DECLARATIONS = Object.freeze([
 function surfaceRow(asset) {
   if (asset === null) return null;
   if (!Object.prototype.hasOwnProperty.call(V5_R01_SURFACE_PHONE_NAV, asset)) {
-    throw new V5R01Error("onboarding_step_names_an_unknown_surface",
-      `onboarding names asset "${asset}", which the surface table does not carry`, { asset });
+    throw new V5R01Error("onboarding_step_names_an_unknown_surface");
   }
   return V5_R01_SURFACE_PHONE_NAV[asset];
 }
@@ -288,38 +287,26 @@ export const V5_R01_ONBOARDING_STEP_IDS =
 for (const step of V5_R01_ONBOARDING_STEPS) {
   for (const tool of step.requires_tool_classes) {
     if (V5_R01_FORBIDDEN_TOOL_CLASSES.includes(tool)) {
-      throw new V5R01Error("onboarding_step_requires_a_developer_tool",
-        `onboarding step "${step.step}" requires "${tool}", which a partner with no developer`
-        + " tools does not have",
-        { step: step.step, tool });
+      throw new V5R01Error("onboarding_step_requires_a_developer_tool");
     }
     if (!V5_R01_PERMITTED_TOOL_CLASSES.includes(tool)) {
-      throw new V5R01Error("onboarding_step_requires_an_unregistered_tool",
-        `onboarding step "${step.step}" requires unregistered tool class "${tool}"`,
-        { step: step.step, tool });
+      throw new V5R01Error("onboarding_step_requires_an_unregistered_tool");
     }
   }
   if (step.resumable_today !== false) {
-    throw new V5R01Error("onboarding_step_overclaims_its_resume_support",
-      `onboarding step "${step.step}" claims to be resumable today; no enrollment store exists`,
-      { step: step.step, owed_seam: V5_R01_SEAMS.onboarding_enrollment_store.seam });
+    throw new V5R01Error("onboarding_step_overclaims_its_resume_support");
   }
   if (typeof step.resume_record_would_hold !== "string"
     || step.resume_record_would_hold.length === 0) {
-    throw new V5R01Error("onboarding_step_declares_no_resume_record",
-      `onboarding step "${step.step}" does not say what a resume record would hold`,
-      { step: step.step });
+    throw new V5R01Error("onboarding_step_declares_no_resume_record");
   }
   if (!V5_R01_MOBILE_REACH.includes(step.mobile_reach)) {
-    throw new V5R01Error("onboarding_step_has_an_unregistered_mobile_reach",
-      `onboarding step "${step.step}" carries reach "${step.mobile_reach}"`,
-      { step: step.step });
+    throw new V5R01Error("onboarding_step_has_an_unregistered_mobile_reach");
   }
 }
 
 if (new Set(V5_R01_ONBOARDING_STEP_IDS).size !== V5_R01_ONBOARDING_STEP_IDS.length) {
-  throw new V5R01Error("duplicate_onboarding_step", "onboarding step ids must be distinct",
-    { steps: [...V5_R01_ONBOARDING_STEP_IDS] });
+  throw new V5R01Error("duplicate_onboarding_step");
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +332,8 @@ if (new Set(V5_R01_ONBOARDING_STEP_IDS).size !== V5_R01_ONBOARDING_STEP_IDS.leng
  * That is a detection guarantee, not an automatic one, and the distinction is
  * the whole point of writing it down.
  */
-export function onboardingMobileExposure() {
+export function onboardingMobileExposure(...args) {
+  assertArity(args, 0, "onboardingMobileExposure");
   const byReach = reach => V5_R01_ONBOARDING_STEPS
     .filter(step => step.mobile_reach === reach).map(step => step.step);
   const assets = Object.keys(V5_R01_SURFACE_PHONE_NAV);
@@ -403,14 +391,10 @@ export function onboardingMobileExposure() {
  * five surfaces without the phone bar lay out correctly at phone width, and this
  * module will not answer it by looking at its own steps.
  */
-export function onboardingSurfaceStatus(...extra) {
+export function onboardingSurfaceStatus(...args) {
   // It takes NOTHING, so any argument at all is a caller trying to hand something
-  // in — a holder, a request, a fixture. The arity is the boundary.
-  if (extra.length > 0) {
-    fail("onboardingSurfaceStatus_holder_is_not_an_argument",
-      "onboardingSurfaceStatus takes no argument; a surface registry is not one",
-      { arguments_received: extra.length });
-  }
+  // in — a holder, a request, a fixture. The arity is the boundary, counted.
+  assertArity(args, 0, "onboardingSurfaceStatus");
   return deepFreeze({
     answer: "onboardingSurfaceStatus",
     schema_version: V5_R01_ONBOARDING_SCHEMA_VERSION,
@@ -442,17 +426,6 @@ export function onboardingSurfaceStatus(...extra) {
 // ---------------------------------------------------------------------------
 
 /**
- * A caller offering an authority holder has misread this module. The ARITY is the
- * boundary: there is no store parameter and no observer parameter.
- */
-function assertNoHolder(extra, name) {
-  if (extra === undefined) return;
-  fail(`${name}_holder_is_not_an_argument`,
-    `${name} takes one request; a store, registry, ledger or observer is not an argument`,
-    { hint: "the owner of this fact does not exist in this repository" });
-}
-
-/**
  * THE ONE SHAPE EVERY UNAVAILABLE ANSWER HERE HAS. Every field is a module
  * constant or a literal; nothing is derived from a request. Two callers handing
  * in opposite evidence get byte-identical answers, and the suite digests every
@@ -471,7 +444,7 @@ function unavailable(answer, seams, reason_id, because, extra = {}) {
     seams_bound: deepFreeze(seams.map(seam => ({ seam: seam.seam, holds: seam.holds, bound: false }))),
     request_read: false,
     caller_evidence_admitted: false,
-    decided_by: "no_authoritative_reader",
+    decided_by: "no_authoritative_owner",
     authority_established: false,
     state_holder_is_caller_supplied: false,
     model_judgment_admitted: false,
@@ -495,9 +468,9 @@ function unavailable(answer, seams, reason_id, because, extra = {}) {
  * mcp-server/test/rollout-pilot-r01-classifiers.v5.testhelper.mjs, where a
  * consumer cannot reach it.
  */
-export function readOnboardingProgress(request, ...extra) {
-  assertNoHolder(extra[0], "readOnboardingProgress");
-  return unavailable("readOnboardingProgress",
+export function onboardingProgressStatus(...args) {
+  assertArity(args, 1, "onboardingProgressStatus");
+  return unavailable("onboardingProgressStatus",
     [V5_R01_SEAMS.onboarding_enrollment_store],
     "onboarding_enrollment_store_absent",
     "no enrollment store exists, so how far a partner has got can only be asserted by its caller",
@@ -526,8 +499,8 @@ export function readOnboardingProgress(request, ...extra) {
  * a goal of this slice; it is not a gate on J1, and this module will not become
  * one.
  */
-export function evaluateBetaOperability(request, ...extra) {
-  assertNoHolder(extra[0], "evaluateBetaOperability");
+export function evaluateBetaOperability(...args) {
+  assertArity(args, 1, "evaluateBetaOperability");
   return unavailable("evaluateBetaOperability",
     [V5_R01_SEAMS.outside_observer, V5_R01_SEAMS.onboarding_enrollment_store],
     "outside_observer_receipt_absent",
@@ -556,8 +529,8 @@ export function evaluateBetaOperability(request, ...extra) {
  * answer, and the quote travels with it so a reader can see it was ruled rather
  * than overlooked.
  */
-export function evaluatePerSliceDellReview(request, ...extra) {
-  assertNoHolder(extra[0], "evaluatePerSliceDellReview");
+export function evaluatePerSliceDellReview(...args) {
+  assertArity(args, 1, "evaluatePerSliceDellReview");
   return deepFreeze({
     answer: "evaluatePerSliceDellReview",
     schema_version: V5_R01_ONBOARDING_SCHEMA_VERSION,
@@ -583,7 +556,8 @@ export function evaluatePerSliceDellReview(request, ...extra) {
 // Digest and surface.
 // ---------------------------------------------------------------------------
 
-export function v5R01OnboardingPreimage() {
+export function v5R01OnboardingPreimage(...args) {
+  assertArity(args, 0, "v5R01OnboardingPreimage");
   return deepFreeze({
     schema_version: V5_R01_ONBOARDING_SCHEMA_VERSION,
     policy_version: V5_R01_POLICY_VERSION,
@@ -606,11 +580,13 @@ export function v5R01OnboardingPreimage() {
   });
 }
 
-export function v5R01OnboardingCanonicalBytes() {
+export function v5R01OnboardingCanonicalBytes(...args) {
+  assertArity(args, 0, "v5R01OnboardingCanonicalBytes");
   return canonicalJson(v5R01OnboardingPreimage());
 }
 
-export function v5R01OnboardingDigest() {
+export function v5R01OnboardingDigest(...args) {
+  assertArity(args, 0, "v5R01OnboardingDigest");
   return digest(v5R01OnboardingPreimage());
 }
 
@@ -632,7 +608,7 @@ export const V5_R01_ONBOARDING_PUBLIC_SURFACE = deepFreeze([
   "evaluatePerSliceDellReview",
   "onboardingMobileExposure",
   "onboardingSurfaceStatus",
-  "readOnboardingProgress",
+  "onboardingProgressStatus",
   "v5R01OnboardingCanonicalBytes",
   "v5R01OnboardingDigest",
   "v5R01OnboardingPreimage",

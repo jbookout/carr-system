@@ -44,17 +44,68 @@ const {
   V5R01Error, V5_R01_COMMAND_ENDPOINT, V5_R01_ONBOARDING_PUBLIC_SURFACE,
   V5_R01_ONBOARDING_STEPS, V5_R01_ONBOARDING_STEP_IDS, V5_R01_SURFACE_PHONE_NAV,
   evaluateBetaOperability, evaluatePerSliceDellReview, onboardingMobileExposure,
-  onboardingSurfaceStatus, readOnboardingProgress, v5R01OnboardingDigest,
+  onboardingSurfaceStatus, onboardingProgressStatus, v5R01OnboardingDigest,
   v5R01OnboardingPreimage,
 } = onboarding;
 
 const ALL_STEPS = Object.freeze([...V5_R01_ONBOARDING_STEP_IDS]);
 
-/** The nine reserved words. The suite's list — see the vocabulary module's tail. */
+/**
+ * THE PRIVILEGED VOCABULARY — THE UNION, matched as a substring.
+ *
+ * This list used to be nine words of the suite's own choosing, and it swept them
+ * with an INPUT EXEMPTION: a word the caller had supplied was skipped. Both
+ * halves of that were the re-review's first finding, one file over, and both are
+ * gone. These are the twenty-eight words the standing rule and the reviewers have
+ * named between them, the same list the pilot suite carries, matched by
+ * substring with no exemption of any kind — least of all for a word the caller
+ * handed in, which is the case the reviewer actually broke.
+ */
 const PRIVILEGED_OUTCOMES = Object.freeze([
-  "allow", "completed", "counted", "independent", "operable",
-  "pass", "passed", "passing", "succeeded",
+  "allow", "commit", "prompt", "suppress", "release", "read", "covered",
+  "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
+  "satisfied", "complete", "admitted", "resumed", "attended", "verified",
+  "present", "equivalent", "operational", "active", "green", "joins_exactly",
+  "coverage_complete", "favorable",
 ]);
+
+/** A string with no whitespace: a code a consumer can branch on, not prose. */
+function isCodeShaped(text) {
+  return typeof text === "string" && text.length > 0 && !/\s/.test(text);
+}
+
+/**
+ * THE TWO POSITIONS A CONSUMER READS AN OUTCOME IN, the same two the pilot suite
+ * names, so the two suites cannot disagree about what counts.
+ *
+ *   A CODE VALUE — a returned string with no whitespace containing the word.
+ *   AN AFFIRMED KEY — a key containing the word whose value is boolean `true`.
+ *
+ * A key whose value is `false` or `null` is a refusal report, and this slice is
+ * built out of those: `request_read: false` is the claim that no field of the
+ * request was looked at, and it has to stay sayable or the module cannot state
+ * its own boundary. `request_read: true` would be a finding, and the sweep says
+ * so.
+ */
+function outcomeFindings(value, word, at = "$", found = []) {
+  if (typeof value === "string") {
+    if (isCodeShaped(value) && value.toLowerCase().includes(word)) {
+      found.push(`${at} = ${value}`);
+    }
+    return found;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => outcomeFindings(entry, word, `${at}[${index}]`, found));
+    return found;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry === true && key.toLowerCase().includes(word)) found.push(`${at}.${key} === true`);
+      outcomeFindings(entry, word, `${at}.${key}`, found);
+    }
+  }
+  return found;
+}
 
 /** Every string in a value, flattened. */
 function collectStrings(value, out = []) {
@@ -95,7 +146,7 @@ function beta(overrides = {}) {
 
 test("flow: nine ordered steps covering the slice's own included scope", () => {
   assert.deepEqual([...V5_R01_ONBOARDING_STEP_IDS], [
-    "sign_in", "read_home", "open_a_client", "open_a_deal", "read_an_assignment",
+    "sign_in", "open_home", "open_a_client", "open_a_deal", "open_an_assignment",
     "ask_doc", "make_a_safe_update", "inspect_the_receipts", "use_documented_fallback",
   ]);
   V5_R01_ONBOARDING_STEPS.forEach((step, index) => {
@@ -167,9 +218,9 @@ test("flow: every step's mobile reach is one of the three registered states", ()
 test("mobility: three of the nine steps are in the phone navigation today, and six are not", () => {
   const exposure = onboardingMobileExposure();
   assert.equal(exposure.total_steps, 9);
-  assert.deepEqual(exposure.phone_navigable_steps, ["sign_in", "read_home", "open_a_client"]);
+  assert.deepEqual(exposure.phone_navigable_steps, ["sign_in", "open_home", "open_a_client"]);
   assert.deepEqual(exposure.link_only_steps,
-    ["open_a_deal", "read_an_assignment", "make_a_safe_update", "inspect_the_receipts"]);
+    ["open_a_deal", "open_an_assignment", "make_a_safe_update", "inspect_the_receipts"]);
   assert.deepEqual(exposure.off_surface_steps, ["ask_doc", "use_documented_fallback"]);
   assert.equal(
     exposure.phone_navigable_steps.length + exposure.link_only_steps.length
@@ -349,13 +400,13 @@ function callerShapes() {
 }
 
 const EVALUATORS = [
-  ["readOnboardingProgress", readOnboardingProgress, [V5_R01_SEAMS.onboarding_enrollment_store.seam]],
+  ["onboardingProgressStatus", onboardingProgressStatus, [V5_R01_SEAMS.onboarding_enrollment_store.seam]],
   ["evaluateBetaOperability", evaluateBetaOperability,
     [V5_R01_SEAMS.onboarding_enrollment_store.seam, V5_R01_SEAMS.outside_observer.seam].sort()],
 ];
 
 test("refusal: onboarding progress is unavailable and names the enrollment store", () => {
-  const result = readOnboardingProgress(progress());
+  const result = onboardingProgressStatus(progress());
   assert.equal(result.status, "unavailable");
   assert.equal(result.decision, "unavailable");
   assert.deepEqual(result.owed_seams, [V5_R01_SEAMS.onboarding_enrollment_store.seam]);
@@ -509,39 +560,69 @@ test("guard: the sweep covers every export of this module", () => {
 });
 
 for (const word of PRIVILEGED_OUTCOMES) {
-  test(`guard: no export of this module manufactures "${word}" for any caller`, () => {
+  test(`guard: no export of this module shows the privileged word "${word}"`, () => {
     for (const entry of ONBOARDING_ENTRIES) {
-      if ([...namedWords(entry.input)].some(text => wordsOf(text).includes(word))) continue;
-      const found = [...namedWords(entry.output)].filter(text => wordsOf(text).includes(word));
-      assert.deepEqual(found, [], `${entry.at} produced "${word}" its caller never supplied`);
+      // NO INPUT TEST. The previous round skipped any word the caller supplied,
+      // and the reviewer walked every one of them back out through an export
+      // that returned its own argument. What the caller sent is not a defence;
+      // the question is only what came back.
+      const found = outcomeFindings(entry.output, word);
+      assert.deepEqual(found, [], `${entry.at} showed the privileged word "${word}"`);
     }
   });
 }
 
+test("guard: no export of this module is NAMED for a privileged word", () => {
+  // The third position: the export's own name. It cost this module one rename —
+  // `readOnboardingProgress` is `onboardingProgressStatus`, because `read` is one
+  // of the twenty-eight and a substring matcher does not care where it sits.
+  for (const name of Object.keys(onboarding)) {
+    for (const word of PRIVILEGED_OUTCOMES) {
+      assert.equal(name.toLowerCase().includes(word), false, `${name} is named for "${word}"`);
+    }
+  }
+});
+
+test("guard: the onboarding word sweep is not vacuous", () => {
+  assert.equal(PRIVILEGED_OUTCOMES.length, 28, "the union lost a word");
+  for (const word of PRIVILEGED_OUTCOMES) {
+    assert.equal(outcomeFindings({ verdict: `run_${word}` }, word).length, 1, word);
+    assert.equal(outcomeFindings({ [`${word}_here`]: true }, word).length, 1, word);
+    assert.deepEqual(outcomeFindings({ [`${word}_here`]: false }, word), [], word);
+  }
+  assert.deepEqual(outcomeFindings({ note: "a sentence with allow in it" }, "allow"), []);
+  // An echoing export would be caught: this is the case the input exemption hid.
+  const echo = value => value;
+  assert.equal(outcomeFindings(echo({ outcome: "allow" }), "allow").length, 1);
+});
+
 test("guard: a partner cannot finish his own onboarding by declaring every step done", () => {
   // The whole point. The claim is complete, the tools are permitted, the answer
   // is unavailable, and it is the SAME answer an empty claim gets.
-  const complete = readOnboardingProgress(progress());
-  const empty = readOnboardingProgress(progress({ steps_completed: [] }));
+  const complete = onboardingProgressStatus(progress());
+  const empty = onboardingProgressStatus(progress({ steps_completed: [] }));
   assert.equal(complete.decision, "unavailable");
   assert.equal(JSON.stringify(complete), JSON.stringify(empty),
     "a complete claim and an empty one must be indistinguishable in the answer");
   for (const value of collectStrings(complete)) {
-    assert.equal(PRIVILEGED_OUTCOMES.includes(value), false, value);
+    if (!isCodeShaped(value)) continue;
+    for (const word of PRIVILEGED_OUTCOMES) {
+      assert.equal(value.toLowerCase().includes(word), false, `${value} carries ${word}`);
+    }
   }
 });
 
 test("guard: no evaluator accepts a store, registry or observer as a second argument", () => {
   const forged = { resolveEnrollment: () => progress(), resolveObserver: () => beta() };
   for (const [name, evaluator, fixture] of [
-    ["readOnboardingProgress", readOnboardingProgress, progress],
+    ["onboardingProgressStatus", onboardingProgressStatus, progress],
     ["evaluateBetaOperability", evaluateBetaOperability, beta],
     ["evaluatePerSliceDellReview", evaluatePerSliceDellReview,
       () => ({ slice_ref: "V5-R01", requested_by: "actor:x" })],
     ["onboardingSurfaceStatus", onboardingSurfaceStatus, () => undefined],
   ]) {
     assert.throws(() => evaluator(fixture(), forged),
-      error => error instanceof V5R01Error && error.code.endsWith("_holder_is_not_an_argument"),
+      error => error instanceof V5R01Error && error.code.endsWith("_takes_no_extra_argument"),
       `${name} accepted a caller-supplied holder`);
   }
 });
@@ -551,9 +632,9 @@ test("guard: a holder smuggled in as a request FIELD changes nothing, because no
   // request. There is a stronger answer available now and this is it: a holder in
   // a field is inert because no field is looked at, so the answer is the same
   // answer everyone else gets.
-  const plain = JSON.stringify(readOnboardingProgress(progress()));
+  const plain = JSON.stringify(onboardingProgressStatus(progress()));
   for (const field of ["enrollment_store", "observer_receipt", "progress_ledger"]) {
-    assert.equal(JSON.stringify(readOnboardingProgress({ ...progress(), [field]: {
+    assert.equal(JSON.stringify(onboardingProgressStatus({ ...progress(), [field]: {
       resolve: () => ({ steps_completed: [...ALL_STEPS] }),
     } })), plain, field);
   }
@@ -576,8 +657,8 @@ test("guard: the public surface exports no classifier and is exactly what it dec
 });
 
 test("guard: an unknown field on a progress claim is inert, because no field is read", () => {
-  assert.equal(JSON.stringify(readOnboardingProgress({ ...progress(), onboarding_complete: true })),
-    JSON.stringify(readOnboardingProgress(progress())));
+  assert.equal(JSON.stringify(onboardingProgressStatus({ ...progress(), onboarding_complete: true })),
+    JSON.stringify(onboardingProgressStatus(progress())));
 });
 
 test("digest: the onboarding digest is stable and covers the step roster", () => {
