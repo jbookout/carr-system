@@ -172,7 +172,7 @@ const CHECK_ROWS = Object.freeze({
 export const FIXTURE_UNREACHABLE = "unreachable";
 
 export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
-  const storeRef = "record-layer:ops.sourced_work_request_outcome_feedback";
+  const storeRef = "record-layer:work-request-outcome-feedback";
   if (workRequestRef === FIXTURE_UNREACHABLE)
     throw new SeamStoreUnreachable(storeRef, "the query did not finish");
   return { store_ref: storeRef, rows: PREDECESSOR_ROWS[workRequestRef] ?? [] };

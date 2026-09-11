@@ -42,6 +42,8 @@
  * was unreachable is one of the phrases below, and the real cause travels as
  * `error.cause` for a human reading a log — never into an answer.
  */
+import { ORGANIZATION_TENANT_ID } from "./identity.js";
+
 export const SEAM_STORE_UNREACHABLE_REASONS = Object.freeze([
   "the checks source answer did not parse",
   "the checks source credentials are not configured in this process",
@@ -70,8 +72,13 @@ function configured(name, storeRef, because) {
   return value;
 }
 
-/** One read-only query, one pool, closed before returning. No shared state. */
-async function readOnlyQuery(storeRef, text, params) {
+/**
+ * Several statements, ONE read-only transaction, one pool, closed before
+ * returning. One transaction because the clauses compare facts to each other: a
+ * receipt read at one instant and a card read at another could disagree, and a
+ * reader that joined two instants would be reporting a state that never existed.
+ */
+async function readOnlyStatements(storeRef, statements) {
   const connectionString = configured("DATABASE_URL_READER", storeRef,
     "the connection target for this store is not configured in this process");
   let pg;
@@ -85,9 +92,10 @@ async function readOnlyQuery(storeRef, text, params) {
     const client = await pool.connect();
     try {
       await client.query("begin read only");
-      const result = await client.query(text, params);
+      const results = [];
+      for (const { text, params } of statements) results.push((await client.query(text, params)).rows);
       await client.query("commit");
-      return result.rows;
+      return results;
     } finally {
       client.release();
     }
@@ -104,34 +112,77 @@ async function readOnlyQuery(storeRef, text, params) {
 // ---------------------------------------------------------------------------
 
 /**
- * Every outcome-feedback row a Work Request carries, newest first, with the
- * acceptance receipt beside it.
+ * A Work Request's outcome feedback, through the three doors the record layer
+ * already opens — and NOT through ops.sourced_work_request_outcome_feedback,
+ * which is granted to nobody.
  *
- * `status` is DERIVED IN SQL FROM THE RECEIPT TABLE, not read from a column: an
- * outcome is accepted exactly when
- * ops.sourced_work_request_outcome_feedback_acceptance_receipt holds a row for
- * it, which is the same test ops.accept_sourced_work_request_outcome_feedback
- * enforces when it writes one. `accepted_feedback_hash` is the receipt's own
- * hash column, which is what the caller's asked-about hash is matched against —
- * never the proposal's, because a proposal is what the machine wrote and the
- * receipt is what Joe signed.
+ * THAT IS A BOUNDARY, NOT A MISSING GRANT. The proposal table is reached only by
+ * security-definer functions; a handler that selected from it directly would
+ * fail with sqlstate 42501, and tools/test-handler-reads-are-granted.py refuses
+ * the attempt at push time. It refused this reader's first draft, which is how
+ * the boundary was found. The fix is to read what the record layer exposes, not
+ * to widen a role.
+ *
+ *   ops.sourced_work_request_outcome_feedback_acceptance_receipt — THE
+ *     AUTHORITY. One row per acceptance, carrying the hash a human signed. An
+ *     outcome is accepted exactly when this table holds a row for it.
+ *   ops.work_request_card — the readable detail: feedback_ref, the proposal's
+ *     own hash and the outcome it concluded, for the latest accepted feedback
+ *     and up to twenty of its history.
+ *   ops.pending_sourced_work_request_outcome_feedback — the still-unsigned
+ *     proposal, so "proposed and never accepted" stays distinguishable from
+ *     "nothing was ever proposed". Without it both would look like absence, and
+ *     those are different facts about a predecessor.
+ *
+ * `accepted_feedback_hash` IS SET ONLY FROM THE RECEIPT. The card's own
+ * `feedback_hash` is the proposal's, and it is carried separately under that
+ * name. They are equal in production, which is exactly why they must not be the
+ * same field here: a reader that matched on the proposal's hash would look
+ * correct for as long as nothing ever went wrong.
  */
 export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
-  const storeRef = "record-layer:ops.sourced_work_request_outcome_feedback";
-  const rows = await readOnlyQuery(storeRef, `
-    select f.feedback_ref,
-           f.feedback_hash,
-           f.feedback_version,
-           f.outcome,
-           f.created_at,
-           case when r.id is null then 'pending_human_acceptance' else 'accepted' end as status,
-           r.feedback_hash as accepted_feedback_hash,
-           r.accepted_at
-      from ops.work_request w
-      join ops.sourced_work_request_outcome_feedback f on f.work_request_id = w.id
-      left join ops.sourced_work_request_outcome_feedback_acceptance_receipt r on r.feedback_id = f.id
-     where w.ref = $1
-     order by f.feedback_version desc`, [workRequestRef]);
+  const storeRef = "record-layer:work-request-outcome-feedback";
+  const [receipts, cards, pending] = await readOnlyStatements(storeRef, [
+    { text: `select r.feedback_hash as accepted_feedback_hash, r.accepted_at
+               from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
+               join ops.work_request w on w.id = r.work_request_id
+              where w.ref = $1
+              order by r.accepted_at desc`, params: [workRequestRef] },
+    { text: `select outcome_feedback, outcome_feedback_history, accepted_feedback_count
+               from ops.work_request_card($1::text, $2::text)`,
+      params: [workRequestRef, ORGANIZATION_TENANT_ID] },
+    { text: `select feedback_ref, feedback_hash, outcome, status
+               from ops.pending_sourced_work_request_outcome_feedback($1::text, $2::text)`,
+      params: [workRequestRef, ORGANIZATION_TENANT_ID] },
+  ]);
+
+  const card = cards[0] ?? {};
+  const detail = new Map();
+  for (const entry of [card.outcome_feedback, ...(Array.isArray(card.outcome_feedback_history)
+    ? card.outcome_feedback_history : [])])
+    if (entry && typeof entry === "object" && typeof entry.feedback_hash === "string")
+      detail.set(entry.feedback_hash, entry);
+
+  const rows = receipts.map(receipt => {
+    const entry = detail.get(receipt.accepted_feedback_hash) ?? {};
+    return {
+      status: "accepted",
+      accepted_feedback_hash: receipt.accepted_feedback_hash,
+      accepted_at: receipt.accepted_at,
+      feedback_ref: entry.feedback_ref ?? null,
+      feedback_hash: entry.feedback_hash ?? null,
+      outcome: entry.outcome ?? null,
+    };
+  });
+  for (const proposal of pending)
+    rows.push({
+      status: proposal.status ?? "pending_human_acceptance",
+      accepted_feedback_hash: null,
+      accepted_at: null,
+      feedback_ref: proposal.feedback_ref ?? null,
+      feedback_hash: proposal.feedback_hash ?? null,
+      outcome: proposal.outcome ?? null,
+    });
   return { store_ref: storeRef, rows };
 }
 
@@ -151,7 +202,7 @@ export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
  */
 export async function fetchSchedulerLedgerRows({ serviceKey, canaryRunKey }) {
   const storeRef = "control-plane:ops.service+ops.run";
-  const rows = await readOnlyQuery(storeRef, `
+  const [rows] = await readOnlyStatements(storeRef, [{ text: `
     select s.key            as service_key,
            s.registered_at  as service_registered_at,
            s.retired_at     as service_retired_at,
@@ -168,7 +219,7 @@ export async function fetchSchedulerLedgerRows({ serviceKey, canaryRunKey }) {
       from ops.service s
       left join ops.run r on r.service_id = s.id and r.run_key = $2
      where s.key = $1
-     order by r.observed_at desc nulls last`, [serviceKey, canaryRunKey]);
+     order by r.observed_at desc nulls last`, params: [serviceKey, canaryRunKey] }]);
   return { store_ref: storeRef, rows };
 }
 

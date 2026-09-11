@@ -47,7 +47,7 @@
 export const GATE_ZERO_SEAM_STORE_REFS = Object.freeze([
   "control-plane:ops.service+ops.run",
   "github:checks",
-  "record-layer:ops.sourced_work_request_outcome_feedback",
+  "record-layer:work-request-outcome-feedback",
 ].sort());
 
 /**
@@ -60,7 +60,7 @@ export const GATE_ZERO_SEAM_RULINGS = Object.freeze({
     card: 11,
     question: "which store an accepted predecessor outcome comes from",
     proposed_store: "the record layer's own Work Request outcome feedback, status accepted",
-    store_ref: "record-layer:ops.sourced_work_request_outcome_feedback",
+    store_ref: "record-layer:work-request-outcome-feedback",
     decision_id: null,
   }),
   "seam:scheduler-canary-reader": Object.freeze({

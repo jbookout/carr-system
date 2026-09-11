@@ -451,7 +451,7 @@ test("RULED: the predecessor reader admits only an accepted outcome whose receip
   assert.equal(accepted.work_request_ref, "WR-000046");
   assert.equal(accepted.ruling_decision_ref, FIXTURE_DECISION_IDS[0],
     "the predecessor seam took the wrong seam's ruling");
-  assert.equal(accepted.store_ref, "record-layer:ops.sourced_work_request_outcome_feedback");
+  assert.equal(accepted.store_ref, "record-layer:work-request-outcome-feedback");
   assert.deepEqual(privilegedFindings(accepted), []);
 
   // A forged hash — well-formed, and no row carries it.
@@ -764,8 +764,9 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   assert.deepEqual(Object.entries(imports)
     .filter(([, specifiers]) => specifiers.includes(`./${RULINGS_FILE}`)).map(([name]) => name),
   ["gate-zero-seam-readers.v5.js"]);
-  // The stores module imports nothing statically — `pg` is dynamic on purpose.
-  assert.deepEqual(imports[STORES_FILE], []);
+  // The stores module statically imports ONE thing, the tenant constant. `pg`
+  // is dynamic on purpose, so the Worker bundle never pulls it in through here.
+  assert.deepEqual(imports[STORES_FILE], ["./identity.js"]);
 
   const strays = readdirSync(SRC).filter(name => /\.(testonly|testhelper|fixture)\./.test(name));
   assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");
