@@ -122,7 +122,23 @@ EVIDENCE_SLOTS = PREACTIVATION_SLOTS + POSTACTIVATION_SLOTS
 
 # The exact identity a scope is bound by.  Identities only: adding a label-shaped
 # field here is what "no name/title heuristic" forbids.
+#
+# THE WORK REQUEST IDENTITY IS OPTIONAL ON THE SCOPE AND REQUIRED FOR THE LAYER
+# THAT JOINS THROUGH IT.  The authoritative workflow census this projection is
+# wired to carries workflow identities and no Work Request identity, so making a
+# Work Request part of every scope key would have left every real scope
+# unbindable -- and a surface that can bind no scope is silent, not honest.  A
+# scope may therefore be bound by workflow identity alone; the only consequence,
+# and it is the correct one, is that ``actual_business_outcome`` then has no
+# admissible join, so act capability and green are unreachable for it.
 SCOPE_IDENTITY_FIELDS = ("workflow_key", "workflow_version", "work_request_id")
+REQUIRED_SCOPE_IDENTITY_FIELDS = ("workflow_key", "workflow_version")
+OPTIONAL_SCOPE_IDENTITY_FIELDS = ("work_request_id",)
+
+# The exact scope identity each layer must be able to join through.  A layer whose
+# required identity the scope does not carry is ``unbindable``: it is not a
+# finding against the scope, and it is never a pass.
+SLOT_REQUIRED_SCOPE_IDENTITY = {"actual_business_outcome": "work_request_id"}
 
 # What a source can say about its own evidence.  Anything else is refused.
 EVIDENCE_STATUSES = ("pass", "fail", "skipped", "untested", "error", "conflicting")
@@ -134,6 +150,7 @@ EVIDENCE_STATES = (
     "unreadable",          # the caller could not read the source
     "missing",             # read, and there is genuinely no evidence
     "mismatched",          # evidence exists but binds a different exact scope
+    "unbindable",          # this scope carries no identity this layer can join through
     "conflicting",         # the record contradicts itself or its neighbours
     "refused_substitute",  # a basis that is never sufficient for THIS slot
     "failed",              # a real, current, exactly bound non-pass
@@ -146,9 +163,11 @@ EVIDENCE_STATES = (
     "passing",             # the ONLY state that can contribute to healthy
 )
 
-# "missing" belongs to neither class: it is the absence that "not-yet-operational"
-# is allowed to describe, and it is never a finding on its own.
+# "missing" and "unbindable" belong to neither class: they are the two absences
+# that "not-yet-operational" is allowed to describe, and neither is a finding on
+# its own.  Neither is ever green either -- both block the act stage.
 INDETERMINATE_EVIDENCE_STATES = ("unreadable", "mismatched", "conflicting", "indistinct")
+UNEARNED_EVIDENCE_STATES = ("missing", "unbindable")
 DETERMINATE_NONPASS_EVIDENCE_STATES = (
     "refused_substitute", "failed", "error", "skipped", "untested", "self_attested", "stale",
 )
@@ -286,7 +305,7 @@ def scope_identity(scope: Any, *, field: str = "scope") -> dict[str, Any]:
     stand in for one of these values.
     """
     mapping = _require_mapping(scope, field=field)
-    missing = [name for name in SCOPE_IDENTITY_FIELDS if name not in mapping]
+    missing = [name for name in REQUIRED_SCOPE_IDENTITY_FIELDS if name not in mapping]
     if missing:
         raise AssuranceHealthContractError(
             f"{field} is missing the exact scope-binding identities {sorted(missing)}; "
@@ -294,11 +313,17 @@ def scope_identity(scope: Any, *, field: str = "scope") -> dict[str, Any]:
     version = mapping["workflow_version"]
     if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
         raise AssuranceHealthContractError(f"{field}.workflow_version must be a positive integer")
+    # Absent and explicitly null are the same fact: this scope is not bound to a
+    # Work Request.  Anything else present must be an exact identity -- an empty
+    # or non-string value is refused rather than quietly read as unbound, because
+    # "no binding" and "a broken binding" are different facts.
+    work_request_id = mapping.get("work_request_id")
+    if work_request_id is not None:
+        work_request_id = _require_text(work_request_id, field=f"{field}.work_request_id")
     return {
         "workflow_key": _require_text(mapping["workflow_key"], field=f"{field}.workflow_key"),
         "workflow_version": version,
-        "work_request_id": _require_text(mapping["work_request_id"],
-                                         field=f"{field}.work_request_id"),
+        "work_request_id": work_request_id,
     }
 
 
@@ -380,6 +405,13 @@ def _classify(record: dict[str, Any], *, bound: dict[str, Any], now: datetime,
             f"{slot}: evidence binds workflow {record['scope']['workflow_key']}"
             f":v{record['scope']['workflow_version']} / work request "
             f"{record['scope']['work_request_id']}, which is not this bound scope")
+
+    required_identity = SLOT_REQUIRED_SCOPE_IDENTITY.get(slot)
+    if required_identity is not None and bound.get(required_identity) is None:
+        flags.add("unbindable")
+        reasons.append(
+            f"{slot}: this scope carries no {required_identity}, so there is no identity "
+            "this layer can be joined through; no receipt can fill it until the binding exists")
 
     for name in ("observed_at",) + _INSTANT_FIELDS:
         instant = record.get(name)
@@ -559,7 +591,18 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
             states[slot] = "missing"
             slot_reasons[slot].append(f"{slot}: read, and there is no evidence")
         else:
+            # A record for a layer this scope cannot join is still VALIDATED, so a
+            # malformed one is refused rather than excused; _classify then reports
+            # the join it cannot make rather than the claim it makes.
             records[slot] = _evidence_record(slot, value)
+
+    for slot, required_identity in SLOT_REQUIRED_SCOPE_IDENTITY.items():
+        if slot in records or bound.get(required_identity) is not None:
+            continue
+        states[slot] = "unbindable"
+        slot_reasons[slot].append(
+            f"{slot}: this scope carries no {required_identity}, so there is no identity "
+            "this layer can be joined through; no receipt can fill it until the binding exists")
 
     shared = _shared_identities(records)
     for slot, record in records.items():
@@ -607,6 +650,7 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     determinate_nonpass = sorted(slot for slot in EVIDENCE_SLOTS
                                  if states[slot] in DETERMINATE_NONPASS_EVIDENCE_STATES)
     missing = sorted(slot for slot in EVIDENCE_SLOTS if states[slot] == "missing")
+    unbindable = sorted(slot for slot in EVIDENCE_SLOTS if states[slot] == "unbindable")
     preactivation_passing = all(states[slot] == "passing" for slot in PREACTIVATION_SLOTS)
 
     reasons: list[str] = []
@@ -636,14 +680,14 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
             f"{withdrawn} capability; {retained} remains")
     elif not determinate_nonpass and not indeterminate and (
             not truth["live_admissible"]
-            or any(states[slot] == "missing" for slot in POSTACTIVATION_SLOTS)):
+            or any(states[slot] in UNEARNED_EVIDENCE_STATES for slot in POSTACTIVATION_SLOTS)):
         state = "not-yet-operational"
         state_reason = (
             "nothing failed and nothing is operational yet: "
             + ("the F09 evidence ladder has not admitted live execution"
                if not truth["live_admissible"] else
-               f"{sorted(slot for slot in POSTACTIVATION_SLOTS if states[slot] == 'missing')} "
-               "has no evidence yet"))
+               f"{sorted(slot for slot in POSTACTIVATION_SLOTS if states[slot] in UNEARNED_EVIDENCE_STATES)} "
+               "has no evidence the bound scope can yet carry"))
     elif stage == "act":
         state = "healthy"
         state_reason = (
@@ -711,6 +755,7 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         "indeterminate_layers": indeterminate,
         "failing_layers": determinate_nonpass,
         "missing_layers": missing,
+        "unbindable_layers": unbindable,
         "impact": impact,
         "recovery": recovery,
         "reasons": sorted(set(reasons)),
@@ -758,8 +803,12 @@ def assurance_health(*, scopes: Any, now: Any) -> dict[str, Any]:
             scope=bundle["scope"], workflow_truth=bundle["workflow_truth"],
             evidence=bundle["evidence"], now=instant))
 
+    # An unbound scope sorts before its Work Request-bound siblings; None is not
+    # orderable against a string, so the absence is spelled out rather than
+    # crashing the whole census on one unbound row.
     rows.sort(key=lambda row: (row["scope"]["workflow_key"], row["scope"]["workflow_version"],
-                               row["scope"]["work_request_id"]))
+                               row["scope"]["work_request_id"] is not None,
+                               row["scope"]["work_request_id"] or ""))
     summary = {
         "scopes": len(rows),
         "states": {state: sum(1 for row in rows if row["state"] == state)

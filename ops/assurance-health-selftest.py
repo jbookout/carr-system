@@ -77,7 +77,7 @@ PROJECTED: list[dict] = []
 
 def _identity(scope):
     return {name: scope[name] for name in
-            ("workflow_key", "workflow_version", "work_request_id")}
+            ("workflow_key", "workflow_version", "work_request_id") if name in scope}
 
 
 def _truth(scope, *, enabled=True, shadow="accepted", canary="accepted",
@@ -640,9 +640,12 @@ def refusal_checks(health) -> None:
         ("a scope with no owner",
          {"scope": {key: value for key, value in SCOPE.items() if key != "owner"},
           "truth": _truth(SCOPE), "evidence": _evidence()}),
-        ("a scope with no work request identity",
-         {"scope": {key: value for key, value in SCOPE.items()
-                    if key != "work_request_id"},
+        # A scope with no Work Request identity is NOT refused any more: it is a
+        # legitimate workflow-only binding whose outcome layer is unbindable, and
+        # workflow_only_scope_checks proves it can never be green.  What is still
+        # refused is a work_request_id that is present and malformed.
+        ("a scope whose work request identity is present and empty",
+         {"scope": {**SCOPE, "work_request_id": "  "},
           "truth": _truth(SCOPE), "evidence": _evidence()}),
         ("a scope version that is not a positive integer",
          {"scope": {**SCOPE, "workflow_version": 0},
@@ -735,6 +738,102 @@ def output_discipline_checks(health) -> None:
           and "def workflow_truth" not in source)
 
 
+WORKFLOW_ONLY = {
+    "workflow_key": "assurance-fabric-child",
+    "workflow_version": 1,
+    "owner": "assurance_fabric_child_owner",
+}
+
+
+def workflow_only_scope_checks(health) -> None:
+    """A scope may be bound by workflow identity alone, and then it cannot be green.
+
+    THE DEFECT THIS FIXES. The first cut of this module made ``work_request_id``
+    part of every scope's identity, so a truthful-health surface that reads the
+    workflow census -- which carries no Work Request identity at all -- could bind
+    no scope and therefore could not be wired to this projection.  Requiring an
+    identity the authoritative reading does not carry does not make a surface
+    honest; it makes it silent.
+
+    The rule instead: the Work Request identity is OPTIONAL on the scope and
+    REQUIRED for exactly the layer that joins through it.  A workflow-only scope
+    projects every other layer normally and reports ``actual_business_outcome`` as
+    ``unbindable`` -- so act capability, and therefore green, is unreachable until
+    the binding exists.  That is the settled position (Q043: no layer may be
+    inferred from another) expressed as a join rather than as silence.
+    """
+    row = _row(scope=WORKFLOW_ONLY, evidence=_evidence(WORKFLOW_ONLY))
+    check("a scope bound by workflow identity alone is projected, not refused",
+          row["scope"]["workflow_key"] == "assurance-fabric-child"
+          and row["scope"]["work_request_id"] is None,
+          json.dumps(row["scope"]))
+    outcome = row["evidence"]["actual_business_outcome"]
+    check("a workflow-only scope reports the business outcome layer as unbindable",
+          outcome["state"] == "unbindable", outcome["state"])
+    check("unbindable names the exact missing identity, not a vague absence",
+          any("work_request_id" in reason for reason in outcome["reasons"]),
+          json.dumps(outcome["reasons"]))
+    check("a perfect outcome receipt cannot fill a layer the scope cannot join",
+          outcome["state"] == "unbindable" and outcome.get("status") == "pass",
+          json.dumps(outcome))
+    check("a workflow-only scope is never green however good its other evidence is",
+          row["state"] != health.GREEN_STATE and not row["green"], row["state"])
+    check("a workflow-only scope with five passing layers is not-yet-operational",
+          row["state"] == "not-yet-operational", row["state_reason"])
+    check("act capability is unreachable without the Work Request join",
+          row["capability_stage"] == "draft"
+          and "actual_business_outcome" in row["impact"]["blocking_act"],
+          f"{row['capability_stage']} {row['impact']['blocking_act']}")
+    check("the recovery block names the outcome evidence the owner still owes",
+          any(item["slot"] == "actual_business_outcome"
+              and item["evidence_state"] == "unbindable"
+              for item in row["recovery"]["required_evidence"]),
+          json.dumps(row["recovery"]["required_evidence"]))
+
+    explicit = _row(scope={**WORKFLOW_ONLY, "work_request_id": None},
+                    evidence=_evidence(WORKFLOW_ONLY))
+    check("an explicit null Work Request identity binds exactly as its absence does",
+          explicit["state"] == row["state"]
+          and explicit["evidence"]["actual_business_outcome"]["state"] == "unbindable",
+          explicit["state"])
+
+    bound_evidence = _evidence(WORKFLOW_ONLY)
+    bound_evidence["artifact_assessment"] = _ev("artifact_assessment", scope=SCOPE)
+    joined = _row(scope=WORKFLOW_ONLY, evidence=bound_evidence)
+    check("evidence carrying a Work Request identity cannot join a workflow-only scope",
+          joined["evidence"]["artifact_assessment"]["state"] == "mismatched",
+          joined["evidence"]["artifact_assessment"]["state"])
+
+    both = health.assurance_health(scopes=[
+        {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
+         "evidence": _evidence(WORKFLOW_ONLY)},
+        {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence(SCOPE)},
+    ], now=NOW)
+    PROJECTED.extend(both["rows"])
+    check("the same workflow bound with and without a Work Request is two scopes",
+          both["summary"]["scopes"] == 2, json.dumps(both["summary"]))
+    check("a workflow-only row and a Work Request row sort deterministically",
+          [r["scope"]["work_request_id"] for r in both["rows"]] == [None, "wr-a01-0001"],
+          json.dumps([r["scope"]["work_request_id"] for r in both["rows"]]))
+
+    for bad in ("", "   ", 7, True, [], {}):
+        try:
+            health.assurance_health_row(
+                scope={**WORKFLOW_ONLY, "work_request_id": bad},
+                workflow_truth=_truth(WORKFLOW_ONLY), evidence=_evidence(WORKFLOW_ONLY),
+                now=NOW)
+            refused = False
+        except health.AssuranceHealthContractError:
+            refused = True
+        check(f"a malformed Work Request identity {bad!r} is refused, never coerced to unbound",
+              refused)
+
+    check("unbindable is a declared evidence state that is not a passing one",
+          "unbindable" in health.EVIDENCE_STATES
+          and "unbindable" not in health.DETERMINATE_NONPASS_EVIDENCE_STATES
+          and "unbindable" not in health.INDETERMINATE_EVIDENCE_STATES)
+
+
 def main() -> int:
     try:
         import lib.assurance_health as health
@@ -749,6 +848,7 @@ def main() -> int:
     scoped_degradation_checks(health)
     workflow_truth_governance_checks(health)
     scope_identity_checks(health)
+    workflow_only_scope_checks(health)
     refusal_checks(health)
     output_discipline_checks(health)
 
