@@ -392,12 +392,24 @@ test("admission: the shared repository root is not an owned writer tree", () => 
 });
 
 test("admission: two slices may not share one writer tree", () => {
-  const request = admissionRequest(r => {
+  const byPath = admissionRequest(r => {
     r.census.active_leases[0].worktree_path = r.lease.worktree_path;
   });
-  const answer = evaluateSliceAdmission(request);
+  const answer = evaluateSliceAdmission(byPath);
   refusalOf(answer, "writer_tree_shared_with_active_lease", "owned_worktree");
   assert.equal(answer.check_states.owned_worktree.detail.conflicting_slice_ref, "slice:v5-a04");
+
+  // A tree has two names and either one being shared is the same defect. A peer
+  // on a different path under the same stable reference is one tree, two
+  // writers -- and it is the reference resume compares, so admission must not
+  // hand out a tree whose identity is already held.
+  const byRef = admissionRequest(r => {
+    r.census.active_leases[0].worktree_ref = r.lease.worktree_ref;
+  });
+  const refAnswer = evaluateSliceAdmission(byRef);
+  refusalOf(refAnswer, "writer_tree_shared_with_active_lease", "owned_worktree");
+  assert.equal(refAnswer.check_states.owned_worktree.detail.worktree_ref, "worktree:v5-f02-slice-8dcd");
+  assert.equal(refAnswer.check_states.owned_worktree.detail.conflicting_slice_ref, "slice:v5-a04");
 });
 
 test("admission: whole-tree and glob staging are refused as inexact", () => {
