@@ -34,9 +34,14 @@ is admitted under a decision procedure rather than a judgement:
   3. More than one -- two receipts are two identities, and one controller
      assessment needs one: hand over ``UNREADABLE`` naming both surface ids.
      Picking either would be the cross-layer guessing this slice removes.
-  4. Exactly one -- build the evidence record from it, with the expiry taken
-     from the registry's OWN ``observation_max_age_seconds``.  This module
-     defines no freshness window of its own.
+  4. Exactly one -- hand its two facts (scheduler state, observed_at) and the
+     registry's OWN ``observation_max_age_seconds`` to the domain's registered
+     evidence owner, ``admit_scheduler_observation_receipt``.  THIS MODULE DOES
+     NOT BUILD THE RECORD: the owner derives the basis, status, refs, digest,
+     evaluator identity and expiry itself, and refuses any readback the
+     authoritative census did not itself classify as seen.  So nothing this
+     adapter says about a receipt -- and nothing its caller says -- can make a
+     layer passing; only the authoritative reading can.
 
 WHAT IT REFUSES TO INVENT.  An owner is read from the checked-in workflow
 manifest (``inventory.owner``); a workflow that declares none is reported as
@@ -48,16 +53,15 @@ green state is therefore unreachable by construction.
 """
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Any
 
 from lib.assurance_health import (
     EVIDENCE_SLOTS,
     AssuranceHealthContractError,
+    admit_scheduler_observation_receipt,
     assurance_health,
 )
 from lib.control_plane_workflow_truth import (
-    NATIVE_SCHEDULER_STATES,
     SCHEMA_VERSION as WORKFLOW_TRUTH_SCHEMA_VERSION,
     UNREADABLE,
 )
@@ -83,11 +87,6 @@ UNREAD_LAYER_SOURCE = {
         "an accepted sourced outcome-feedback receipt joined through a Work Request "
         "identity; the canonical health snapshot reads no outcome-feedback surface",
 }
-
-# The identity that writes a scheduler observation receipt.  It is named as a
-# constant so the evaluator of this evidence can never silently become the
-# subject it assessed.
-_OBSERVATION_EVALUATOR = "receipt-producer:ops.legacy_schedule_observation_receipt"
 
 
 def _workflow_identity(key: Any, version: Any) -> str:
@@ -117,7 +116,7 @@ def _observation_records(surfaces: Any, key: Any, version: Any) -> tuple[
 
 
 def _controller_evidence(surfaces: Any, key: Any, version: Any, max_age_seconds: int,
-                         notes: list[str]) -> Any:
+                         truth_row: Any, notes: list[str]) -> Any:
     found, ids = _observation_records(surfaces, key, version)
     if not found:
         notes.append(
@@ -133,35 +132,24 @@ def _controller_evidence(surfaces: Any, key: Any, version: Any, max_age_seconds:
 
     surface, observation = found[0]
     surface_id = str(surface.get("surface_id"))
-    state = str(observation["scheduler_state"])
-    observed_at = str(observation["observed_at"])
+    # ADMISSION, NOT CONSTRUCTION.  This module does not build the evidence record:
+    # it hands the receipt's own two facts and the registry's own window to the
+    # domain's single registered evidence owner, which derives the basis, status,
+    # refs, digest, evaluator identity and expiry itself and refuses a readback the
+    # authoritative census never classified.  Nothing this adapter could say about
+    # a receipt can make it pass.
     try:
-        from lib.assurance_health import _utc  # noqa: PLC0415 - one shared parser, not a second
-        expires_at = (_utc(observed_at, field="observation.observed_at")
-                      + timedelta(seconds=int(max_age_seconds))).isoformat()
+        return admit_scheduler_observation_receipt(
+            workflow_truth_row=truth_row,
+            surface_id=surface_id,
+            scheduler_state=observation["scheduler_state"],
+            observed_at=observation["observed_at"],
+            observation_max_age_seconds=int(max_age_seconds))
     except (AssuranceHealthContractError, TypeError, ValueError) as exc:
         notes.append(
-            f"controller_assessment: {surface_id} carries an observation this reading cannot "
-            f"place in time ({exc}); an undatable readback is unread, never current")
+            f"controller_assessment: {surface_id} carries an observation the evidence owner "
+            f"would not admit ({exc}); an unadmitted readback is unread, never current")
         return UNREADABLE
-    return {
-        "layer": "controller_assessment",
-        "basis": "controller_readback",
-        # A readback that came back with a state the provider vocabulary declares is a
-        # completed reading. Anything else did not complete, and says so.
-        "status": "pass" if state in NATIVE_SCHEDULER_STATES else "error",
-        "evidence_ref": f"observation-receipt:{surface_id}",
-        "evidence_digest": f"observation-receipt:{surface_id}@{observed_at}",
-        "evaluator_identity": _OBSERVATION_EVALUATOR,
-        "subject_identity": f"scheduler-surface:{surface_id}",
-        "observed_at": observed_at,
-        # The registry's own window, never one invented here.
-        "expires_at": expires_at,
-        "scope": {"workflow_key": key, "workflow_version": version},
-        "controller_state": state,
-        "readback_source": f"ops.legacy_schedule_observation_receipt:{surface_id}",
-        "readback_at": observed_at,
-    }
 
 
 def _owner(owners: Any, key: str, version: int) -> str | None:
@@ -225,7 +213,7 @@ def assurance_health_scopes(workflows: Any) -> dict[str, Any]:
         for slot, source in UNREAD_LAYER_SOURCE.items():
             row_notes.append(f"{slot}: not read by this surface — it would come from {source}")
         evidence["controller_assessment"] = _controller_evidence(
-            surfaces, key, version, max_age, row_notes)
+            surfaces, key, version, max_age, row, row_notes)
         scopes.append({
             # No work_request_id: the census carries none, so this is a workflow-only
             # scope and its business-outcome layer is unbindable by construction.

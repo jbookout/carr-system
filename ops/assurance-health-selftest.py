@@ -162,8 +162,15 @@ _DEFAULT = object()
 
 
 def _row(scope=SCOPE, truth=_DEFAULT, evidence=_DEFAULT, now=NOW):
-    from lib.assurance_health import assurance_health_row
-    row = assurance_health_row(
+    """One row from the PURE LABEL PREDICATE, which is not the wired surface.
+
+    Fixture-shaped evidence is exactly what the predicate exists to be tested
+    against -- including the six-passing shape, which is the only way to prove
+    the ladder really requires all six layers.  The wired entry points admit
+    none of it, and ``caller_evidence_is_never_authority_checks`` pins that.
+    """
+    from lib.assurance_health import unwired_label_predicate_row
+    row = unwired_label_predicate_row(
         scope=scope,
         workflow_truth=_truth(scope) if truth is _DEFAULT else truth,
         evidence=_evidence(scope) if evidence is _DEFAULT else evidence,
@@ -413,7 +420,7 @@ def actual_outcome_separation_checks(health) -> None:
 
 def scoped_degradation_checks(health) -> None:
     """One workflow walks the ladder; an unrelated bound scope does not move."""
-    from lib.assurance_health import assurance_health
+    from lib.assurance_health import unwired_label_predicate as assurance_health
 
     def project(**failing):
         bundles = [
@@ -595,7 +602,7 @@ def scope_identity_checks(health) -> None:
           wrong_request["evidence"]["actual_business_outcome"]["state"] == "mismatched"
           and wrong_request["green"] is False)
 
-    from lib.assurance_health import assurance_health
+    from lib.assurance_health import unwired_label_predicate as assurance_health
     try:
         assurance_health(scopes=[
             {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence()},
@@ -810,7 +817,7 @@ def workflow_only_scope_checks(health) -> None:
           joined["evidence"]["artifact_assessment"]["state"] == "mismatched",
           joined["evidence"]["artifact_assessment"]["state"])
 
-    both = health.assurance_health(scopes=[
+    both = health.unwired_label_predicate(scopes=[
         {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
          "evidence": _evidence(WORKFLOW_ONLY)},
         {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence(SCOPE)},
@@ -825,7 +832,7 @@ def workflow_only_scope_checks(health) -> None:
     bad_identities: tuple[Any, ...] = ("", "   ", 7, True, [], {})
     for bad in bad_identities:
         try:
-            health.assurance_health_row(
+            health.unwired_label_predicate_row(
                 scope={**WORKFLOW_ONLY, "work_request_id": bad},
                 workflow_truth=_truth(WORKFLOW_ONLY), evidence=_evidence(WORKFLOW_ONLY),
                 now=NOW)
@@ -839,6 +846,185 @@ def workflow_only_scope_checks(health) -> None:
           "unbindable" in health.EVIDENCE_STATES
           and "unbindable" not in health.DETERMINATE_NONPASS_EVIDENCE_STATES
           and "unbindable" not in health.INDETERMINATE_EVIDENCE_STATES)
+
+
+def caller_evidence_is_never_authority_checks(health) -> None:
+    """THE EXHAUSTIVE UNREACHABILITY MATRIX for the WIRED projection.
+
+    A caller-supplied label, class string, flag, receipt object or injected
+    holder is never authority.  ``lib/assurance_health`` owns the label logic and
+    owns no evidence: five of its six layers have NO evidence owner anywhere in
+    this repository, so there is no admission point through which a caller could
+    make one of them passing, whatever it passes in.  This iterates every
+    caller-controlled input shape the wired entry points accept and asserts the
+    privileged outcomes -- ``passing``, ``healthy``/green and ``act`` -- are
+    unreachable rather than merely undocumented.
+    """
+    ownerless = [slot for slot in health.EVIDENCE_SLOTS
+                 if slot not in health.EVIDENCE_OWNERS]
+    check("five of the six layers have no evidence owner in this repository",
+          sorted(ownerless) == ["activation_readback", "actual_business_outcome",
+                                "artifact_assessment", "candidate_outcome_oracle",
+                                "execution_assessment"],
+          json.dumps(sorted(ownerless)))
+    check("the one owned layer names the authoritative source that owns it",
+          set(health.EVIDENCE_OWNERS) == {"controller_assessment"}
+          and "legacy_schedule_observation_receipt"
+          in health.EVIDENCE_OWNERS["controller_assessment"],
+          json.dumps(health.EVIDENCE_OWNERS))
+    check("every ownerless layer names the seam that is owed before it can pass",
+          all(slot in health.OWED_EVIDENCE_OWNER_SEAMS for slot in ownerless)
+          and all(health.OWED_EVIDENCE_OWNER_SEAMS[slot].strip() for slot in ownerless),
+          json.dumps(sorted(health.OWED_EVIDENCE_OWNER_SEAMS)))
+
+    # ---- every caller-controlled shape, for every slot ----------------------
+    far_future = "2099-01-01T00:00:00+00:00"
+
+    class _LooksAdmitted:
+        """An injected holder wearing the admitted shape.  Shape is not authority."""
+        def __init__(self, slot, record):
+            self.slot = slot
+            self.owner = health.EVIDENCE_OWNERS.get("controller_assessment", "")
+            self.record = record
+
+    class _EvidenceDict(dict):
+        """A dict subclass, in case isinstance(..., dict) were the whole test."""
+
+    def caller_shapes(slot):
+        """Every shape a caller can hand this slot, most plausible first."""
+        perfect = _ev(slot)
+        yield f"{slot}: a perfectly shaped passing record", perfect
+        yield f"{slot}: a record whose expiry is decades away", _ev(slot, expires=far_future)
+        yield (f"{slot}: a record naming this repository's own admission function",
+               _ev(slot, evaluator_identity="lib/assurance_health.admit_evidence"))
+        yield (f"{slot}: a record claiming the owned layer's evaluator identity",
+               _ev(slot, evaluator_identity=
+                   "receipt-producer:ops.legacy_schedule_observation_receipt"))
+        yield (f"{slot}: a record carrying an extra admitted/verified flag",
+               dict(perfect, admitted=True, verified=True, authority="authoritative"))
+        yield f"{slot}: the same record as a dict subclass", _EvidenceDict(perfect)
+        yield f"{slot}: an injected holder wearing the admitted shape", _LooksAdmitted(slot, perfect)
+        yield (f"{slot}: an object whose attributes spell an admitted record",
+               type("Forged", (), {"slot": slot, "owner": "authoritative", "record": perfect})())
+
+    forged_green: list[str] = []
+    forged_passing: list[str] = []
+    for slot in health.EVIDENCE_SLOTS:
+        for label, shape in caller_shapes(slot):
+            bundle = _evidence()
+            bundle[slot] = shape
+            try:
+                row = health.assurance_health_row(
+                    scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=bundle, now=NOW)
+            except health.AssuranceHealthContractError:
+                continue  # a refusal is an acceptable non-green outcome
+            PROJECTED.append(row)
+            if row["green"] or row["state"] == health.GREEN_STATE \
+                    or row["capability_stage"] == "act":
+                forged_green.append(label)
+            if row["evidence"][slot]["state"] == "passing" \
+                    and slot not in health.EVIDENCE_OWNERS:
+                forged_passing.append(label)
+    check("no caller-controlled evidence shape reaches passing on an ownerless layer",
+          not forged_passing, json.dumps(forged_passing[:4]))
+    check("no caller-controlled evidence shape reaches green or act capability",
+          not forged_green, json.dumps(forged_green[:4]))
+
+    # ---- the whole bundle at once, through both wired entry points ----------
+    whole = health.assurance_health_row(
+        scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=_evidence(), now=NOW)
+    PROJECTED.append(whole)
+    check("six perfectly shaped caller-supplied receipts are unreadable, never passing",
+          all(whole["evidence"][slot]["state"] == "unreadable"
+              for slot in health.EVIDENCE_SLOTS)
+          and not whole["green"] and whole["capability_stage"] == "unavailable",
+          json.dumps({slot: whole["evidence"][slot]["state"]
+                      for slot in health.EVIDENCE_SLOTS}))
+    check("each unreadable reason names the owed seam, or the owner that alone admits it",
+          all(any(("no evidence owner" if slot not in health.EVIDENCE_OWNERS
+                   else "only that owner's admission") in reason
+                  for reason in whole["evidence"][slot]["reasons"])
+              for slot in health.EVIDENCE_SLOTS),
+          json.dumps(whole["evidence"]["controller_assessment"]["reasons"]))
+    census = health.assurance_health(scopes=[
+        {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence()},
+        {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
+         "evidence": _evidence(WORKFLOW_ONLY)}], now=NOW)
+    PROJECTED.extend(census["rows"])
+    check("a whole census of caller-supplied receipts renders no green row",
+          census["summary"]["green"] == 0
+          and census["summary"]["states"]["healthy"] == 0,
+          json.dumps(census["summary"]["states"]))
+
+    # ---- the admitted holder itself has no public constructor ---------------
+    refused = []
+    for args, kwargs in ((("controller_assessment", _ev("controller_assessment")), {}),
+                         ((), {"slot": "controller_assessment",
+                               "record": _ev("controller_assessment")}),
+                         ((object(), "controller_assessment", "owner",
+                           _ev("controller_assessment")), {})):
+        try:
+            health.AdmittedEvidence(*args, **kwargs)  # type: ignore[call-arg]
+            refused.append(False)
+        except (health.AssuranceHealthContractError, TypeError):
+            refused.append(True)
+    check("AdmittedEvidence cannot be constructed by a caller at all",
+          all(refused), json.dumps(refused))
+
+    # ---- the one owned layer derives every field it asserts ------------------
+    # The census row this admission stands on is built by the real F09 projection
+    # from the same observation receipt, so the corroboration below is the
+    # authoritative reading's, not a restatement of the caller's.
+    seen = _census(surfaces=[_surface("assurance-fabric-child.launchd.v1",
+                                      observed=OBSERVED)])["rows"][0]
+    check("the census row this admission stands on saw the receipt itself",
+          seen["evidence"]["native_schedule"] in ("observed", "stale"),
+          seen["evidence"]["native_schedule"])
+    record = health.admit_scheduler_observation_receipt(
+        workflow_truth_row=seen, surface_id="assurance-fabric-child.launchd.v1",
+        scheduler_state="enabled", observed_at=OBSERVED,
+        observation_max_age_seconds=MAX_AGE).record
+    check("the owned layer derives its ref, digest, evaluator, basis, status and expiry",
+          record["evidence_ref"] == "observation-receipt:assurance-fabric-child.launchd.v1"
+          and record["basis"] == "controller_readback"
+          and record["status"] == "pass"
+          and record["evaluator_identity"].startswith("receipt-producer:")
+          and record["expires_at"].startswith("2026-09-09T11:15:00"),
+          json.dumps(record))
+    check("a scheduler state outside the provider vocabulary is never a pass",
+          health.admit_scheduler_observation_receipt(
+              workflow_truth_row=seen,
+              surface_id="assurance-fabric-child.launchd.v1",
+              scheduler_state="totally-fine", observed_at=OBSERVED,
+              observation_max_age_seconds=MAX_AGE).record["status"] == "error")
+    refused_rows = ({}, {"schema_version": "not-f09"},
+                    dict(seen, evidence={"native_schedule": "missing"}),
+                    dict(seen, evidence={"native_schedule": "not_required"}),
+                    dict(seen, evidence={"native_schedule": "conflicting"}),
+                    _census()["rows"][0])
+    corroboration_refused = 0
+    for row_shape in refused_rows:
+        try:
+            health.admit_scheduler_observation_receipt(
+                workflow_truth_row=row_shape,
+                surface_id="assurance-fabric-child.launchd.v1",
+                scheduler_state="enabled", observed_at=OBSERVED,
+                observation_max_age_seconds=MAX_AGE)
+        except health.AssuranceHealthContractError:
+            corroboration_refused += 1
+    check("a readback the authoritative census never saw is refused admission",
+          corroboration_refused == len(refused_rows), str(corroboration_refused))
+    bad_windows = 0
+    for window in (0, -1, None, "900", True, 900.0):
+        try:
+            health.admit_scheduler_observation_receipt(
+                workflow_truth_row=seen, surface_id="assurance-fabric-child.launchd.v1",
+                scheduler_state="enabled", observed_at=OBSERVED,
+                observation_max_age_seconds=window)
+        except health.AssuranceHealthContractError:
+            bad_windows += 1
+    check("the freshness window must be the registry's own positive window",
+          bad_windows == 6, str(bad_windows))
 
 
 MANIFEST_OWNER = "ops.job dispatcher"
@@ -1156,7 +1342,9 @@ def surface_wiring_checks() -> None:
 
     check("an injected failure degrades the scope it was injected into",
           "degrading v1 DEGRADED" in section, section[:600])
-    check("the degraded scope is recorded as a finding, not only printed",
+    # PRINTED, not recorded: _canonical_finding writes one stdout line and there
+    # is no record-layer seam behind it.  The claim is kept exactly that size.
+    check("the degraded scope prints a CANONICAL_FINDING line on the surface",
           "CANONICAL_FINDING assurance_health_degraded" in section
           and "degrading v1" in section, section[:600])
     check("the unaffected scope keeps its own evidence-derived state",
@@ -1167,6 +1355,60 @@ def surface_wiring_checks() -> None:
           section[:600])
     check("the surface says which layer's evidence withdrew the capability",
           "controller_assessment" in section, section[:600])
+
+    # TWO DEGRADED WORKFLOW-ONLY SCOPES, ON THE REAL SURFACE.
+    #
+    # THE DEFECT THIS PINS.  Every scope the live census binds is bound by
+    # workflow identity alone and carries NO Work Request id, and the summary
+    # listed its degraded scopes by that absent identity.  One degraded scope
+    # never compared anything, so every fixture stayed green while the first
+    # live reading with two of them raised TypeError inside the projection --
+    # which the adapter does not catch, so the whole section printed
+    # "UNAVAILABLE (TypeError)" instead of the two findings it holds.  The
+    # assertion therefore has to be driven through the surface with TWO of them.
+    both_degraded_surfaces = [
+        dict(surfaces[0], surface_id=f"{key}.launchd.v1", workflow_key=key,
+             observation={"scheduler_state": "enabled", "observed_at": stale_at})
+        for key in ("degrading", "also-degrading")]
+    both_degraded_census = workflow_truth(
+        declarations=[{"key": key, "version": 1, "enabled": True,
+                       "legacy_schedule": {"provider": "none", "status": "disabled"}}
+                      for key in ("degrading", "also-degrading")],
+        definitions=[{"key": key, "version": 1, "enabled": True,
+                      "execution_contract": {}, "legacy_disabled_at": None}
+                     for key in ("degrading", "also-degrading")],
+        acceptances=[{"workflow_key": key, "workflow_version": 1,
+                      "mode": "shadow", "status": "accepted"}
+                     for key in ("degrading", "also-degrading")],
+        surfaces=both_degraded_surfaces, completion={},
+        observation_max_age_seconds=900, now=now)
+    both_degraded = {"errors": [], "workflows": {
+        "available": True, "census": both_degraded_census,
+        "surfaces": both_degraded_surfaces,
+        "owners": {"degrading@v1": "ops.job dispatcher",
+                   "also-degrading@v1": "ops.job dispatcher"}}}
+    handle, path = tempfile.mkstemp(suffix=".json", prefix="assurance-health-two-degraded-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            json.dump(both_degraded, fh)
+        two_proc = subprocess.run(
+            [sys.executable, str(REPO / "tools/health-check.py"), "--canonical",
+             "--section", "jobs", "--fixture", path],
+            cwd=str(REPO), text=True, capture_output=True, timeout=120)
+    finally:
+        os.unlink(path)
+    two_section = two_proc.stdout.split("Assurance health —", 1)[-1]
+    check("two degraded workflow-only scopes do not make the surface unavailable",
+          "assurance health   UNAVAILABLE" not in two_section
+          and "TypeError" not in two_section, two_section[:600])
+    check("both degraded workflow-only scopes are counted on the surface",
+          "2 bound scope(s): 0 healthy, 2 degraded, 0 failed" in two_section,
+          two_section[:600])
+    check("both degraded workflow-only scopes are named, neither swallowed",
+          "degrading v1 DEGRADED" in two_section
+          and "also-degrading v1 DEGRADED" in two_section
+          and two_section.count("CANONICAL_FINDING assurance_health_degraded") == 2,
+          two_section[:600])
 
 
 def main() -> int:
@@ -1184,6 +1426,7 @@ def main() -> int:
     workflow_truth_governance_checks(health)
     scope_identity_checks(health)
     workflow_only_scope_checks(health)
+    caller_evidence_is_never_authority_checks(health)
     source_adapter_checks()
     surface_wiring_checks()
     refusal_checks(health)
