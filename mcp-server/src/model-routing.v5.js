@@ -1101,7 +1101,13 @@ const QUALIFICATION_KEYS = Object.freeze([
   "measurement_digest", "verifier_id",
 ]);
 
-const SELF_CERTIFICATION_FIELDS = Object.freeze([
+/**
+ * Exported so the evaluation kernel refuses the SAME reserved names on the
+ * OBSERVATIONS it counts that this module refuses on the record it reads. One
+ * list: a second copy would drift, and the name somebody actually reaches for
+ * would end up refused on one side of the seam and admitted on the other.
+ */
+export const V5_SELF_CERTIFICATION_FIELDS = Object.freeze([
   "qualified", "is_qualified", "self_qualified", "self_reported_quality", "model_says_qualified",
   "model_self_assessment", "confidence", "assumed_capable", "trust_me", "override", "bypass",
 ]);
@@ -1109,7 +1115,7 @@ const SELF_CERTIFICATION_FIELDS = Object.freeze([
 /** Validate one measured qualification record. */
 export function assertQualificationRecord(record, path = "qualification") {
   assertObject(record, path);
-  const selfCertified = Object.keys(record).filter(key => SELF_CERTIFICATION_FIELDS.includes(key)).sort();
+  const selfCertified = Object.keys(record).filter(key => V5_SELF_CERTIFICATION_FIELDS.includes(key)).sort();
   if (selfCertified.length > 0) {
     fail("self_certified_qualification_refused",
       "qualification is a measurement read from a trusted verifier, never a claim carried in the record",
@@ -2214,7 +2220,7 @@ export function v5ModelRoutingProjection() {
     // Named gaps. None of these is simulated, stubbed into a fake success, or
     // implied by any result this module returns.
     unimplemented_dependencies: [
-      "live route-qualification.v1 producer: no measured evaluation kernel exists in this repository, so every qualification record reaching this module today is a fixture. When one exists it must project exactly ONE current measurement per exact task-class/backend/model/version/effort route: two records for one route refuse here as an ambiguous projection rather than being resolved by a freshness rule this module has no authority to invent, and choosing the authoritative one — while retaining the superseded measurements as history — is the producer's job",
+      "live route-qualification.v1 producer: model-qualification-kernel.v5.js now DERIVES a record from task-class evaluation observations, but nothing in this repository produces those observations — that needs dispatch, which is V5-F06/V5-F07 work — and nothing authenticates one, so every qualification record reaching this module today is still a fixture. A producer must also project exactly ONE current measurement per exact task-class/backend/model/version/effort route: two records for one route refuse here as an ambiguous projection rather than being resolved by a freshness rule this module has no authority to invent, and choosing the authoritative one — while retaining the superseded measurements as history — is the producer's job",
       "durable qualification and decision record store: this slice adds no table, no migration and no SQL integration",
       "model dispatch: V5-F06/V5-F07 own it; the adapter boundary fails closed",
       "live backend health source: local node state is a request input, never observed here",
