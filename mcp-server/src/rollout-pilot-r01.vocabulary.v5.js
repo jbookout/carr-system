@@ -22,9 +22,62 @@ export const V5_R01_POLICY_VERSION = 1;
 // Failure shape.
 // ---------------------------------------------------------------------------
 
+/**
+ * THE CLOSED SET OF FAILURE CODES THIS SLICE CAN RAISE.
+ *
+ * The code is the only part of a refusal a consumer is meant to branch on, so it
+ * is the part a caller must not be able to mint. Before this list existed,
+ * `new V5R01Error(caller_value)` put the caller's own string — or its own object —
+ * on `error.code`, which is a public export echoing caller input back under a
+ * field consumers read as an answer. The second review of PR 992 was right that a
+ * sweep which skips constructors is not a sweep.
+ *
+ * The three generated codes are generated from a FIXED list of this slice's own
+ * evaluator names, not from anything a caller supplies; they are spelled out
+ * below rather than built at runtime so the set really is closed and readable.
+ */
+const V5_R01_HOLDER_REFUSING_ENTRY_POINTS = [
+  "evaluatePilotDay", "evaluatePilotRun", "evaluateRecoveryDrill",
+  "describeRecoveryDrill", "readOnboardingProgress", "evaluateBetaOperability",
+  "evaluatePerSliceDellReview", "onboardingSurfaceStatus",
+];
+
+export const V5_R01_ERROR_CODES = Object.freeze([
+  "decision_binding_mismatch",
+  "duplicate_onboarding_step",
+  "invalid_date",
+  "invalid_failure_origin_registry",
+  "invalid_reference",
+  "invalid_shape",
+  "malformed_unicode",
+  "missing_field",
+  "onboarding_step_declares_no_resume_record",
+  "onboarding_step_has_an_unregistered_mobile_reach",
+  "onboarding_step_names_an_unknown_surface",
+  "onboarding_step_overclaims_its_resume_support",
+  "onboarding_step_requires_a_developer_tool",
+  "onboarding_step_requires_an_unregistered_tool",
+  "partner_roles_collapsed",
+  "seam_claimed_to_exist",
+  "text_too_long",
+  "too_many_entries",
+  "unknown_field",
+  "unknown_value",
+  "unsafe_unicode",
+  ...V5_R01_HOLDER_REFUSING_ENTRY_POINTS.map(name => `${name}_holder_is_not_an_argument`),
+].sort());
+
+const V5_R01_ERROR_CODE_SET = new Set(V5_R01_ERROR_CODES);
+
 export class V5R01Error extends Error {
   constructor(code, message, detail) {
-    super(message);
+    // A plain TypeError, with a FIXED message that quotes nothing, because a
+    // V5R01Error raised here would recurse and because the refusal's own text
+    // must not become a second route for caller input to leave the module.
+    if (!V5_R01_ERROR_CODE_SET.has(code)) {
+      throw new TypeError("v5_r01_error_code_is_not_registered");
+    }
+    super(typeof message === "string" ? message : "");
     this.name = "V5R01Error";
     this.code = code;
     if (detail !== undefined) this.detail = detail;
@@ -41,7 +94,22 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
-export function deepFreeze(value) {
+/**
+ * MODULE-PRIVATE ON PURPOSE, and this is the third review's finding.
+ *
+ * `deepFreeze(x)` returns `x`. Exported, it was a public function of this slice
+ * that handed a caller's own object straight back, so every privileged token the
+ * standing rule names — and a `would_*` token with it — could be obtained from
+ * this surface by passing it in. A token a module returns is a token a module
+ * returns; that the caller supplied it is not a defence, because the sweep's
+ * question is what leaves the module, not where it came from.
+ *
+ * It is not exported now. Freezing is a local structural habit, not vocabulary a
+ * consumer needs, and the other two modules of this slice each keep their own
+ * private copy, which is already the pattern the rest of mcp-server/src follows
+ * (backup-quarantine.v5.js, command-supervisor-admission.v5.js and others).
+ */
+function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
   if (isPlainObject(value)) { Object.values(value).forEach(deepFreeze); return Object.freeze(value); }
 }
@@ -521,15 +589,17 @@ for (const [name, entry] of Object.entries(V5_R01_SEAMS)) {
 //     rollout-pilot-r01.v5.test.mjs asserts that no file in mcp-server/src
 //     contains any of them.
 //
-//   * V5_R01_PRIVILEGED_OUTCOMES — the nine words no caller may obtain. That
+//   * V5_R01_PRIVILEGED_OUTCOMES — the words no caller may obtain. That
 //     list was a runtime denylist swept over each refusal, which was necessary
 //     only because refusals used to compose strings out of caller input. They no
 //     longer do: every public answer in this slice is a fixed value that reads no
 //     field of its request, so there is nothing left to sweep at runtime and a
 //     denylist shipped in production would be nine privileged words exported
 //     from the very surface that must not produce them. The list is now the
-//     suite's, and the suite runs one test per word over every export of every
-//     module in this slice.
+//     suite's — fifteen words now, the twelve the standing rule names plus
+//     `healthy`, `passing` and the `would_*` form — and the suite runs one test
+//     per word over every export of every module in this slice, constructors
+//     included, with no exemption for a word the caller happened to supply.
 //
 // What remains here is vocabulary a consumer genuinely needs: the closed
 // enumerations, the seams, and the validators.

@@ -80,9 +80,58 @@ import {
   assertRequiredKeys,
   calendarDayOrdinal,
   calendarWeekday,
-  deepFreeze,
   fail,
 } from "../src/rollout-pilot-r01.vocabulary.v5.js";
+
+/**
+ * PRIVATE TO THIS HELPER. `deepFreeze` left the vocabulary's export list because
+ * `deepFreeze(x)` returns `x`, which made a public function of this slice hand a
+ * caller's own object — privileged tokens and all — straight back. Every module
+ * that freezes keeps its own copy now.
+ */
+function deepFreeze(value) {
+  if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
+  if (value !== null && typeof value === "object"
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    Object.values(value).forEach(deepFreeze);
+    return Object.freeze(value);
+  }
+}
+
+/**
+ * THE CLASSIFIER'S OWN FAILURE SHAPE, and why it is not production's.
+ *
+ * This helper raises four refusals that no production module can raise —
+ * a duplicated pilot day, an unreadable instant, a classification that forgot to
+ * be hypothetical, and a derivation that disagrees with the vocabulary. They used
+ * to travel as V5R01Error codes, which meant the production error class had to
+ * accept codes only a test could produce. Production's `V5_R01_ERROR_CODES` is a
+ * CLOSED set now — that is what stopped `new V5R01Error(callerValue)` from
+ * putting caller input on `error.code` — so test-only codes get a test-only
+ * class rather than a hole in the production one.
+ */
+export const V5_R01_CLASSIFIER_ERROR_CODES = Object.freeze([
+  "classification_is_not_conditional",
+  "duplicate_pilot_day",
+  "failure_origin_derivation_disagrees",
+  "not_an_instant",
+]);
+
+export class V5R01ClassifierError extends Error {
+  constructor(code, message, detail) {
+    if (!V5_R01_CLASSIFIER_ERROR_CODES.includes(code)) {
+      throw new TypeError("v5_r01_classifier_error_code_is_not_registered");
+    }
+    super(message);
+    this.name = "V5R01ClassifierError";
+    this.code = code;
+    if (detail !== undefined) this.detail = detail;
+  }
+}
+
+function classifierFail(code, message, detail) {
+  throw new V5R01ClassifierError(code, message, detail);
+}
 
 /** Saturday and Sunday, by weekday ordinal. The only part of the calendar that is arithmetic. */
 const WEEKEND = Object.freeze([0, 6]);
@@ -109,7 +158,7 @@ export const CLASSIFICATIONS = deepFreeze({
 
 for (const value of Object.values(CLASSIFICATIONS)) {
   if (!value.startsWith("would_")) {
-    fail("classification_is_not_conditional",
+    classifierFail("classification_is_not_conditional",
       `classification "${value}" does not name a hypothetical`, { value });
   }
 }
@@ -129,18 +178,18 @@ const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
  */
 function assertInstant(value, path) {
   if (typeof value !== "string" || !ISO_INSTANT.test(value)) {
-    fail("not_an_instant", `${path} must be an ISO-8601 UTC instant`, { path, value });
+    classifierFail("not_an_instant", `${path} must be an ISO-8601 UTC instant`, { path, value });
   }
   const epoch = Date.parse(value);
   if (!Number.isFinite(epoch)) {
-    fail("not_an_instant", `${path} is not a readable instant`, { path, value });
+    classifierFail("not_an_instant", `${path} is not a readable instant`, { path, value });
   }
   // A DATE THAT ROLLS OVER IS NOT THE DATE THAT WAS WRITTEN. Date.parse happily
   // reads 2026-02-30 and hands back March 2, so a finite epoch proves only that
   // the engine made something of the string. The round trip is the real check:
   // the instant the engine produced must spell the same instant back.
   if (new Date(epoch).toISOString().slice(0, 19) !== value.replace(/\.\d{1,3}Z$/, "Z").slice(0, 19)) {
-    fail("not_an_instant", `${path} names no such instant`, { path, value });
+    classifierFail("not_an_instant", `${path} names no such instant`, { path, value });
   }
   return epoch;
 }
@@ -314,7 +363,7 @@ export function classifyPilotRunIfAuthoritative(request) {
     assertObject(day, `request.days[${index}]`);
     assertCalendarDate(day.date, `request.days[${index}].date`);
     if (byDate.has(day.date)) {
-      fail("duplicate_pilot_day", `two entries claim ${day.date}; a day has one entry`,
+      classifierFail("duplicate_pilot_day", `two entries claim ${day.date}; a day has one entry`,
         { date: day.date });
     }
     byDate.set(day.date, day);
@@ -672,7 +721,7 @@ for (const [derived, declared] of [
   [disqualifyingFailureOrigins(), V5_R01_DISQUALIFYING_FAILURE_ORIGINS],
 ]) {
   if (derived.join("|") !== [...declared].sort().join("|")) {
-    fail("failure_origin_derivation_disagrees",
+    classifierFail("failure_origin_derivation_disagrees",
       "the internal derivation of the failure-origin sets disagrees with the vocabulary's",
       { derived, declared: [...declared] });
   }

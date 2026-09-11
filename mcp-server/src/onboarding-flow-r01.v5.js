@@ -90,11 +90,28 @@ import {
   assertClosedKeys,
   assertObject,
   assertRequiredKeys,
-  deepFreeze,
   fail,
 } from "./rollout-pilot-r01.vocabulary.v5.js";
 
 export { V5_NO_EFFECTS, V5R01Error };
+
+/**
+ * PRIVATE, AND NOT IMPORTED. `deepFreeze(x)` returns `x`, so an exported one is a
+ * public function that hands a caller's own object — and every privileged token
+ * inside it — straight back. It left the vocabulary's export list in this
+ * correction, and each module of the slice keeps its own copy, which is already
+ * the pattern elsewhere in mcp-server/src.
+ */
+function isFreezablePlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function deepFreeze(value) {
+  if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
+  if (isFreezablePlainObject(value)) { Object.values(value).forEach(deepFreeze); return Object.freeze(value); }
+}
 
 export const V5_R01_ONBOARDING_SCHEMA_VERSION = V5_R01_ONBOARDING_SCHEMA;
 
@@ -283,7 +300,7 @@ for (const step of V5_R01_ONBOARDING_STEPS) {
     }
   }
   if (step.resumable_today !== false) {
-    throw new V5R01Error("onboarding_step_claims_to_be_resumable",
+    throw new V5R01Error("onboarding_step_overclaims_its_resume_support",
       `onboarding step "${step.step}" claims to be resumable today; no enrollment store exists`,
       { step: step.step, owed_seam: V5_R01_SEAMS.onboarding_enrollment_store.seam });
   }
@@ -313,11 +330,20 @@ if (new Set(V5_R01_ONBOARDING_STEP_IDS).size !== V5_R01_ONBOARDING_STEP_IDS.leng
  * How much of onboarding a partner can do through the phone navigation the
  * product actually ships today, and exactly what is missing.
  *
- * Everything here is DERIVED. `phone_navigable` is the count of steps whose
- * surface carries J101's `mobile_nav` flag; `surfaces_without_phone_navigation`
- * is read straight off the inventory. If someone adds the phone bar to the Deal
- * Room, this function's answer changes without anyone editing it, which is the
- * only way a number like this stays true.
+ * Everything here is DERIVED FROM THIS SLICE'S OWN COPY of J101's surface
+ * inventory: `phone_navigable_steps` is the set of steps whose surface carries
+ * the `mobile_nav` flag in `V5_R01_SURFACE_PHONE_NAV`, and
+ * `surfaces_without_phone_navigation` is read straight off that same table.
+ *
+ * WHAT THAT DOES NOT MEAN, said here because an earlier draft of this comment
+ * claimed the opposite and the `reported_by` field below already said the truth:
+ * the table is a COPY, so if someone adds the phone bar to the Deal Room
+ * upstream, this answer does NOT change until `V5_R01_SURFACE_PHONE_NAV` is
+ * edited here. What the copy buys is that the change cannot land SILENTLY — the
+ * suite pins this table to J101's `AUTHENTICATED_SURFACES` in both directions,
+ * so an upstream flip turns this slice's suite red until the copy is updated.
+ * That is a detection guarantee, not an automatic one, and the distinction is
+ * the whole point of writing it down.
  */
 export function onboardingMobileExposure() {
   const byReach = reach => V5_R01_ONBOARDING_STEPS

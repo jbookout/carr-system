@@ -140,7 +140,7 @@ test("flow: a step that claimed to be resumable today would not load", () => {
   // The property belongs to the FILE: the load-time check is what makes it one,
   // and this proves the check would fire rather than trusting that it exists.
   const source = readFileSync(new URL("../src/onboarding-flow-r01.v5.js", import.meta.url), "utf8");
-  assert.ok(source.includes("onboarding_step_claims_to_be_resumable"));
+  assert.ok(source.includes("onboarding_step_overclaims_its_resume_support"));
   assert.ok(source.includes("step.resumable_today !== false"));
 });
 

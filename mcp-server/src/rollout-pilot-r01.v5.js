@@ -109,9 +109,26 @@ import {
   assertClosedKeys,
   assertObject,
   assertRequiredKeys,
-  deepFreeze,
   fail,
 } from "./rollout-pilot-r01.vocabulary.v5.js";
+
+/**
+ * PRIVATE, AND NOT IMPORTED. `deepFreeze(x)` returns `x`, so an exported one is a
+ * public function that hands a caller's own object — and every privileged token
+ * inside it — straight back. It left the vocabulary's export list in this
+ * correction, and each module of the slice keeps its own copy, which is already
+ * the pattern elsewhere in mcp-server/src.
+ */
+function isFreezablePlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function deepFreeze(value) {
+  if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
+  if (isFreezablePlainObject(value)) { Object.values(value).forEach(deepFreeze); return Object.freeze(value); }
+}
 export {
   V5_NO_EFFECTS,
   V5R01Error,
@@ -164,7 +181,6 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q009.D1": {
     target: "rollout_readiness",
     acceptance_hook: "rollout-readiness-child-outcome",
-    text_read_this_session: true,
     settled_answer: "I dont want to involve dell in the adoption. i prefer to validate it myself"
       + " and present it to him as a usable product. reason being - he is not gong to sit at the"
       + " desk and do these things the way i will. what would end up happening is each slice"
@@ -177,7 +193,6 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q010.D1": {
     target: "rollout_readiness",
     acceptance_hook: "rollout-readiness-child-outcome",
-    text_read_this_session: true,
     settled_answer: "Yes, in the future there will be periods of time where i take vacation and he"
       + " will need to be able to use the system. however, for now i dont want to sacrifice speed"
       + " on the roll out or any other qualities or capabilities for this. we can work this"
@@ -193,7 +208,6 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q019.D1": {
     target: "product_journey_1",
     acceptance_hook: "journey-one-production-outcome",
-    text_read_this_session: false,
     why_not: "the design-basis register holds Q019 in its compact projection, which carries target"
       + " and acceptance hook only; the exact text lives in immutable thread items that were not"
       + " reachable this session",
@@ -201,7 +215,6 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q061.D1": {
     target: "typed_successor",
     acceptance_hook: "successor-register-entry-accepted",
-    text_read_this_session: false,
     why_not: "compact projection only, as above",
     what_is_nonetheless_honoured: "the common slice contract's own autonomy envelope — design any"
       + " possible future autonomy as an INACTIVE typed successor now, with activation requiring a"
@@ -210,13 +223,11 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q104.D1": {
     target: "product_journey_1",
     acceptance_hook: "journey-one-production-outcome",
-    text_read_this_session: false,
     why_not: "compact projection only, as above",
   },
   "Q145.D1": {
     target: "product_journey_1",
     acceptance_hook: "journey-one-production-outcome",
-    text_read_this_session: false,
     why_not: "compact projection only, as above",
   },
 });
@@ -224,17 +235,49 @@ export const V5_R01_SETTLED_DECISIONS = deepFreeze({
 export const V5_R01_SETTLED_DECISION_IDS =
   deepFreeze(Object.keys(V5_R01_SETTLED_DECISIONS).sort());
 
-export const V5_R01_DECISIONS_READ_IN_FULL = deepFreeze(V5_R01_SETTLED_DECISION_IDS
-  .filter(id => V5_R01_SETTLED_DECISIONS[id].text_read_this_session === true));
+/**
+ * WHICH OF THE SIX CARRY THEIR SETTLED TEXT, DERIVED RATHER THAN DECLARED.
+ *
+ * These two lists used to be filtered on a hand-written `text_read_this_session`
+ * boolean — an author's own assertion that the text had been read, which is the
+ * shape this slice spends the rest of its length refusing. The fact is checkable
+ * from the record itself: either `settled_answer` holds the verbatim text or it
+ * does not. So the boolean is gone and the lists are read off the presence of
+ * the text, which cannot disagree with the text.
+ *
+ * The names say what the lists ARE — which records carry the settled wording —
+ * rather than reporting `read` as an outcome of this module.
+ */
+export const V5_R01_DECISIONS_WITH_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_DECISION_IDS
+  .filter(id => typeof V5_R01_SETTLED_DECISIONS[id].settled_answer === "string"));
 
-export const V5_R01_DECISIONS_NOT_READ = deepFreeze(V5_R01_SETTLED_DECISION_IDS
-  .filter(id => V5_R01_SETTLED_DECISIONS[id].text_read_this_session !== true));
+export const V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_DECISION_IDS
+  .filter(id => typeof V5_R01_SETTLED_DECISIONS[id].settled_answer !== "string"));
 
 /**
  * Bind a caller's declared decision set to this module's.
  *
  * An exact set, not a subset: a binding that names five of the six has dropped
  * one, and a binding that names seven has picked one up somewhere else.
+ *
+ * THE JOINED STRING WAS THE DEFECT, and the third review of PR 992 reproduced it.
+ * The check used to be `sorted.join("|") === mine.join("|")`, and a ONE-element
+ * array holding all six ids already glued together with `|` produces exactly the
+ * same string. A caller could therefore declare a binding of one meaningless
+ * value and be told it matched. A separator is not a delimiter unless the thing
+ * being separated cannot contain it, and an arbitrary caller string can contain
+ * anything.
+ *
+ * So the check is now element-wise, in this order, and each step has its own
+ * refusal rather than folding into one comparison:
+ *
+ *   1. the value is an array;
+ *   2. every element is a string — a nested array or object is not an id;
+ *   3. the count equals this slice's count (six), so no element can stand in for
+ *      several and none can be dropped;
+ *   4. the elements are distinct, so six copies of one id cannot pass a count;
+ *   5. the sorted elements equal this slice's sorted ids, compared one index at
+ *      a time with no joining anywhere.
  */
 export function assertR01DecisionBinding(binding) {
   assertObject(binding, "binding");
@@ -243,12 +286,29 @@ export function assertR01DecisionBinding(binding) {
   if (!Array.isArray(binding.decision_ids)) {
     fail("invalid_shape", "binding.decision_ids must be an array", { path: "binding.decision_ids" });
   }
-  const declared = [...binding.decision_ids].sort().join("|");
-  const mine = [...V5_R01_SETTLED_DECISION_IDS].join("|");
-  if (declared !== mine) {
-    fail("decision_binding_mismatch",
-      "the declared decision set is not this slice's settled decision set",
-      { declared: [...binding.decision_ids].sort(), expected: [...V5_R01_SETTLED_DECISION_IDS] });
+  const declared = [...binding.decision_ids];
+  const mine = [...V5_R01_SETTLED_DECISION_IDS];
+  const mismatch = detail => fail("decision_binding_mismatch",
+    "the declared decision set is not this slice's settled decision set",
+    { ...detail, expected: [...mine] });
+
+  for (const [index, id] of declared.entries()) {
+    if (typeof id !== "string") {
+      mismatch({ why: "an element is not a string", at: index });
+    }
+  }
+  if (declared.length !== mine.length) {
+    mismatch({ why: "wrong number of decision ids", declared_count: declared.length,
+      expected_count: mine.length });
+  }
+  if (new Set(declared).size !== declared.length) {
+    mismatch({ why: "the declared ids are not distinct", declared_count: declared.length });
+  }
+  const sorted = [...declared].sort();
+  for (const [index, id] of mine.entries()) {
+    if (sorted[index] !== id) {
+      mismatch({ why: "a declared id is not one of this slice's", at: index, declared: sorted });
+    }
   }
   return true;
 }
@@ -626,7 +686,7 @@ export function rolloutPilotGaps() {
       },
     ],
     any_clause_provable_from_source: false,
-    decisions_whose_text_was_not_read: [...V5_R01_DECISIONS_NOT_READ],
+    decisions_whose_text_was_not_read: [...V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT],
     inactive_successor: V5_R01_INACTIVE_SUCCESSOR,
     effects: V5_NO_EFFECTS,
   });
@@ -678,8 +738,8 @@ export const V5_R01_PUBLIC_SURFACE = deepFreeze([
   "V5_R01_BREAKING_FAILURE_ORIGINS",
   "V5_R01_BUSINESS_DAY_BASIS",
   "V5_R01_DAY_CHECKS",
-  "V5_R01_DECISIONS_NOT_READ",
-  "V5_R01_DECISIONS_READ_IN_FULL",
+  "V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT",
+  "V5_R01_DECISIONS_WITH_SETTLED_TEXT",
   "V5_R01_DISQUALIFYING_FAILURE_ORIGINS",
   "V5_R01_DRILL_CORRECT_TERMINAL_STATES",
   "V5_R01_DRILL_FAULTS",

@@ -44,11 +44,12 @@ import {
   classifyPilotRunIfAuthoritative,
   classifyRecoveryDrillIfAuthoritative,
   disqualifyingFailureOrigins,
+  V5R01ClassifierError,
 } from "./rollout-pilot-r01-classifiers.v5.testhelper.mjs";
 
 const {
   V5R01Error, V5_R01_BREAKING_FAILURE_ORIGINS, V5_R01_DAY_CHECKS,
-  V5_R01_DECISIONS_NOT_READ, V5_R01_DECISIONS_READ_IN_FULL,
+  V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT, V5_R01_DECISIONS_WITH_SETTLED_TEXT,
   V5_R01_DISQUALIFYING_FAILURE_ORIGINS, V5_R01_DRILL_FAULTS, V5_R01_DRILL_FAULT_KEYS,
   V5_R01_DRILL_RECEIPT_FIELDS, V5_R01_DRILL_TERMINAL_STATES,
   V5_R01_EXCLUDED_FAILURE_ORIGINS, V5_R01_FAILURE_ORIGINS,
@@ -352,7 +353,7 @@ test("ladder: an open high defect anywhere disqualifies the whole run, not one d
 test("ladder: two entries claiming the same date is a contract violation", () => {
   assert.throws(() => classifyPilotRunIfAuthoritative(run({
     days: [day({ date: "2026-09-07" }), day({ date: "2026-09-07" })],
-  })), error => error instanceof V5R01Error && error.code === "duplicate_pilot_day");
+  })), error => error instanceof V5R01ClassifierError && error.code === "duplicate_pilot_day");
 });
 
 test("ladder: a weekend entry does not lengthen a run", () => {
@@ -495,9 +496,9 @@ test("interval: a recovery cannot precede, or coincide with, the injection", () 
 
 test("interval: an instant that matches the pattern but names no date is refused", () => {
   assert.throws(() => classifyRecoveryDrillIfAuthoritative(drill({ injected_at: "2026-02-30T14:00:00Z" })),
-    error => error instanceof V5R01Error && error.code === "not_an_instant");
+    error => error instanceof V5R01ClassifierError && error.code === "not_an_instant");
   assert.throws(() => classifyRecoveryDrillIfAuthoritative(drill({ recovered_at: "2026-09-11 14:11:00" })),
-    error => error instanceof V5R01Error && error.code === "not_an_instant");
+    error => error instanceof V5R01ClassifierError && error.code === "not_an_instant");
 });
 
 test("path: the recovery has to be the one the product declares for that fault", () => {
@@ -677,14 +678,14 @@ test("decisions: the slice binds exactly its six catalog decisions", () => {
 });
 
 test("decisions: the two that were read carry their settled text, the four that were not say so", () => {
-  assert.deepEqual([...V5_R01_DECISIONS_READ_IN_FULL], ["Q009.D1", "Q010.D1"]);
-  assert.deepEqual([...V5_R01_DECISIONS_NOT_READ],
+  assert.deepEqual([...V5_R01_DECISIONS_WITH_SETTLED_TEXT], ["Q009.D1", "Q010.D1"]);
+  assert.deepEqual([...V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT],
     ["Q019.D1", "Q061.D1", "Q104.D1", "Q145.D1"]);
-  for (const id of V5_R01_DECISIONS_READ_IN_FULL) {
+  for (const id of V5_R01_DECISIONS_WITH_SETTLED_TEXT) {
     assert.equal(typeof r01.V5_R01_SETTLED_DECISIONS[id].settled_answer, "string", id);
     assert.equal(r01.V5_R01_SETTLED_DECISIONS[id].settled_answer.length > 100, true, id);
   }
-  for (const id of V5_R01_DECISIONS_NOT_READ) {
+  for (const id of V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT) {
     // Not paraphrased: there is no settled_answer field at all on an unread one.
     assert.equal("settled_answer" in r01.V5_R01_SETTLED_DECISIONS[id], false, id);
     assert.equal(typeof r01.V5_R01_SETTLED_DECISIONS[id].why_not, "string", id);
@@ -744,12 +745,14 @@ function sortDeep(value) {
 //     the dynamic and computed forms are reported rather than dropped.
 // ===========================================================================
 
-/** THE NINE WORDS. The suite's list, not production's: see the vocabulary's tail. */
-const PRIVILEGED_OUTCOMES = Object.freeze([
-  "allow", "completed", "counted", "independent", "operable",
-  "pass", "passed", "passing", "succeeded",
-]);
-
+/**
+ * THE FIFTEEN PRIVILEGED TOKENS, and the sweep that exempts nothing.
+ *
+ * The previous round listed nine words of its own choosing and overlapped the
+ * standing rule on two of them. These are the twelve the standing rule names,
+ * plus `healthy` and `passing`, plus the `would_*` form, which the rule adds
+ * expressly so a classification cannot be smuggled out wearing a hedge.
+ */
 /**
  * The conditional tokens a classifier answers in. None of them may appear in any
  * module under mcp-server/src, in a value OR in its source text: a `would_` field
@@ -757,18 +760,39 @@ const PRIVILEGED_OUTCOMES = Object.freeze([
  */
 const CLASSIFICATION_TOKENS = Object.freeze(Object.values(CLASSIFICATIONS));
 
+const PRIVILEGED_TOKENS = Object.freeze([
+  "ok", "allow", "pass", "satisfied", "complete", "admitted", "resumed",
+  "attended", "verified", "present", "read", "equivalent", "healthy", "passing",
+]);
+
 /**
- * Does `text` contain `word` as a WORD, in any of the spellings this codebase
- * writes words in — bare, snake_case, kebab-case, or camelCase?
+ * The spellings of one token that are the SAME WORD.
  *
- * This is the fix for the review's "rejects only exact bare words". `"passed"`
- * must be caught inside `run_passed`, `run-passed`, `runPassed` and `passed the
- * check`, and must NOT be caught inside `passenger` or `bypassed`, which are
- * different words that merely contain the letters.
+ * A guard that matches `complete` and not `completed` is a guard a rename walks
+ * through, so each token carries a closed family: the token with each of a fixed
+ * suffix list, plus the irregular forms that no suffix produces. The family is
+ * closed and written down rather than computed loosely, so a second reader can
+ * check membership without sharing anyone's judgement.
  */
-function namesWord(text, word) {
-  return wordsOf(text).includes(word);
-}
+const TOKEN_SUFFIXES = Object.freeze(["", "s", "d", "ed", "es", "ing", "able", "ly"]);
+const TOKEN_IRREGULARS = Object.freeze({
+  ok: ["okay"],
+  pass: ["passing", "passed", "passable"],
+  complete: ["completion", "completeness"],
+  admitted: ["admit", "admits", "admission", "admissible"],
+  resumed: ["resume", "resumes", "resumable", "resumption"],
+  attended: ["attend", "attends", "attendance"],
+  verified: ["verify", "verifies", "verification"],
+  satisfied: ["satisfy", "satisfies", "satisfaction"],
+  present: ["presence"],
+  equivalent: ["equivalence"],
+  healthy: ["health"],
+  passing: ["pass", "passed"],
+});
+
+const TOKEN_FAMILY = Object.freeze(Object.fromEntries(PRIVILEGED_TOKENS.map(token =>
+  [token, new Set([...TOKEN_SUFFIXES.map(suffix => token + suffix),
+    ...(TOKEN_IRREGULARS[token] ?? [])])])));
 
 /**
  * The words of a string, however this codebase spells a compound: separators
@@ -785,18 +809,114 @@ function wordsOf(text) {
     .map(word => word.toLowerCase());
 }
 
+function isFamilyWord(word, token) {
+  return TOKEN_FAMILY[token].has(word);
+}
+
+/** A string with no whitespace: a code a consumer can branch on, not prose. */
+function isIdentifierShaped(text) {
+  return typeof text === "string" && text.length > 0 && !/\s/.test(text);
+}
+
+// ---------------------------------------------------------------------------
+// THE DECISION PROCEDURE, stated as ordered questions so a second reader reaches
+// the same verdict on the same value.
+//
+// The question is not "does this word occur anywhere in anything this slice
+// returns" — it cannot be, because this slice returns English. `V5_R01_SEAMS`
+// says a seam holds "how far a partner has actually got, so the flow can be
+// resumed", a step's plain text is "Read Home: today's work and whether the
+// system is healthy", and a fault is named `cached_read_past_max_age`. Banning
+// those would not make the module honest; it would make it unreadable, and the
+// words would come back as synonyms the next reviewer cannot grep for.
+//
+// The question the standing rule actually asks is whether a CONSUMER can read a
+// privileged outcome off this surface. A consumer reads an outcome in exactly
+// four positions, and each is decided by a test, not by taste:
+//
+//   P1 CODE VALUE — a returned string with no whitespace in it (a code, a status,
+//      an enum member; prose has spaces) whose LAST word, or whose whole text, is
+//      a family word of the token. `"allow"`, `"passed"`, `"run_passed"`,
+//      `"runPassed"` and `"day_complete"` are answers. `cached_read_past_max_age`
+//      and `evaluateReadContinuity` are not: their answer word is `age` and
+//      `continuity`.
+//
+//   P2 AFFIRMED FLAG — an object key ANY of whose words is a family word, whose
+//      value is boolean `true`. `verified: true` is an answer. `resumable_today:
+//      false` is a refusal report and is exactly the shape this slice is built
+//      out of, so it must remain sayable.
+//
+//   P3 EXPORT NAME — the export's own name, last word or whole text a family
+//      word. `export const ok` is an answer.
+//
+//   P4 HEDGED VERDICT — any key beginning with `would_` whose value is a boolean,
+//      at any depth. That is a classification with a hedge in front of it, which
+//      the standing rule names specifically. A `would_` key holding PROSE is a
+//      description of something unbuilt (`would_do: "assemble each day's..."`)
+//      and decides nothing.
+//
+// NO EXEMPTION ANYWHERE, and in particular none for a token the caller supplied.
+// The previous round exempted exactly that and the reviewer walked all twelve
+// tokens out through `deepFreeze({outcome: token})`, which returns the caller's
+// own object. `deepFreeze` is module-private now; the rule that would have
+// caught it is P1 with no input test in front of it.
+//
+// WHAT THIS DOES NOT CATCH, said plainly: a privileged word inside a sentence.
+// That gap is closed from a different direction by the byte-identity test — every
+// public evaluator's answer is byte-identical across every caller shape — so no
+// caller string, in any position, reaches any answer at all. The two properties
+// are one guarantee and neither is sufficient alone.
+// ---------------------------------------------------------------------------
+
+function namesTokenAsCode(text, token) {
+  if (!isIdentifierShaped(text)) return false;
+  const words = wordsOf(text);
+  if (words.length === 0) return false;
+  return isFamilyWord(text.toLowerCase(), token) || isFamilyWord(words[words.length - 1], token);
+}
+
+function namesTokenAnywhere(text, token) {
+  return wordsOf(text).some(word => isFamilyWord(word, token));
+}
+
+/** Every P1/P2/P4 finding inside one value, with the path that produced it. */
+function findingsIn(value, token, at = "$", found = []) {
+  if (typeof value === "string") {
+    if (namesTokenAsCode(value, token)) found.push(`${at} = ${JSON.stringify(value)} (P1 code value)`);
+    return found;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => findingsIn(entry, token, `${at}[${index}]`, found));
+    return found;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      const where = `${at}.${key}`;
+      if (entry === true && namesTokenAnywhere(key, token)) found.push(`${where} === true (P2 affirmed flag)`);
+      if (key.startsWith("would_") && typeof entry === "boolean") {
+        found.push(`${where} is a hedged verdict (P4)`);
+      }
+      findingsIn(entry, token, where, found);
+    }
+    return found;
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// THE SWEPT DOMAIN.
+// ---------------------------------------------------------------------------
+
 /**
  * EVERY CALLER-CONTROLLED SHAPE, generated rather than listed.
  *
  * The honest fixtures, each field of each one mutated through its whole domain,
- * the shapes that try to state the answer outright, and the non-objects. If none
- * of them changes any answer, none of them is authority.
+ * the shapes that try to state the answer outright, one shape per privileged
+ * token carrying that token in every string-bearing field, and the non-objects.
  */
 function callerShapes() {
   const shapes = [];
-  // The honest ones.
   shapes.push({ date: "2026-09-07", entry: day() }, run(), { receipt: drill() });
-  // Every failure origin, both honesty booleans, on a day.
   for (const origin of V5_R01_FAILURE_ORIGIN_KEYS) {
     for (const honest of [true, false]) {
       shapes.push({ date: "2026-09-07",
@@ -804,173 +924,251 @@ function callerShapes() {
           product_reported_honestly: honest, documented_fallback_offered: honest })] }) });
     }
   }
-  // The disqualifier, the short day, the empty day.
   shapes.push({ date: "2026-09-07", entry: day({ high_defect_open_against_j1: true }) });
   shapes.push({ date: "2026-09-07", entry: day({ subjourneys_exercised: [] }) });
   shapes.push({ date: "2026-09-07", entry: day({ real_business_actions: [] }) });
-  // THE DATE DISAGREEMENT the review reproduced: an outer date that is not the
-  // entry's date. It changes nothing now because neither is read.
   shapes.push({ date: "2026-09-07", entry: day({ date: "2026-09-08" }) });
-  // Runs: complete, short, empty, and one with an edited denominator.
   shapes.push(run(), run({ days: [] }),
     run({ days: TEN_BUSINESS_DAYS.slice(0, 3).map(d => day({ date: d })) }),
     run({ non_business_dates: [...TEN_BUSINESS_DAYS] }));
-  // Every terminal state and every fault on a receipt.
   for (const state of V5_R01_DRILL_TERMINAL_STATES) shapes.push({ receipt: drill({ terminal_state_reached: state }) });
   for (const fault of V5_R01_DRILL_FAULT_KEYS) shapes.push({ receipt: drill({ fault_injected: fault }) });
-  // One person in all three roles.
   shapes.push({ receipt: drill({ injected_by_identity_ref: V5_R01_PILOT_PARTNER,
     observer_identity_ref: V5_R01_PILOT_PARTNER }) });
-  // Caller references that ARE privileged words, in every field that takes one.
-  shapes.push({ date: "2026-09-07", entry: day({
-    subjourneys_exercised: ["pass", "allow", "completed"],
-    real_business_actions: ["deal:passed-through", "counted", "runPassed"],
-  }) });
-  shapes.push({ receipt: drill({ drill_ref: "passed", recovery_path_taken: "succeeded",
-    aids_used: ["allow"] }) });
-  // The one shape the decision-binding assertion reads.
+
+  // ONE SHAPE PER PRIVILEGED TOKEN, carrying that token wherever a caller string
+  // can go. This is the reviewer's own reproduction, generalised: if any export
+  // hands any of these back, P1 and P2 see it, because there is no input test.
+  for (const token of PRIVILEGED_TOKENS) {
+    shapes.push({ date: "2026-09-07", entry: day({
+      subjourneys_exercised: [token, `run_${token}`, `${token}`],
+      real_business_actions: [`deal:${token}`, `run_${token}`],
+      failures: [failure({ failure_ref: token })] }) });
+    shapes.push({ receipt: drill({ drill_ref: token, recovery_path_taken: token,
+      aids_used: [token] }) });
+    shapes.push({ outcome: token, [token]: true, [`would_${token}_if_authoritative`]: true });
+    shapes.push(token);
+  }
   shapes.push({ decision_ids: ["Q009.D1", "Q010.D1", "Q019.D1", "Q061.D1", "Q104.D1", "Q145.D1"] });
-  // And the shapes that try to say the answer outright.
   shapes.push({ decision: "allow", status: "passed", passable: true, verified: true });
   shapes.push({ would_complete_run_if_authoritative: true, ok: true });
   shapes.push({}, null, undefined, "allow", 1, true, [], [{ passed: true }]);
   return shapes;
 }
 
+const CALLER_SHAPES = callerShapes();
+
+/** A sentinel for "called with no argument at all", distinct from `undefined`. */
+const NO_ARGUMENT = Symbol("no-argument");
+
+/** A class, read off its own source rather than guessed from its name. */
+function isClass(value) {
+  return typeof value === "function"
+    && /^\s*class[\s{]/.test(Function.prototype.toString.call(value));
+}
+
 /**
- * EVERY EXPORT OF EVERY SRC MODULE IN THIS SLICE.
+ * EVERY EXPORT OF EVERY SRC MODULE IN THIS SLICE, AS A CONSUMER SEES IT.
  *
  * A CONSTANT is one entry: the value as it stands.
- * A FUNCTION is one entry PER CALLER-CONTROLLED SHAPE, carrying both what went in
- * and what came out, because the question the standing rule actually asks is
- * whether a privileged outcome came out THAT THE CALLER DID NOT PUT IN.
+ * A FUNCTION is one entry per caller-controlled shape, plus one for no argument.
+ * A CLASS is CONSTRUCTED with each of the same shapes, plus no argument — the
+ *   defect the second review named was a sweep that looked at a constructor's
+ *   NAME and stopped, so `new V5R01Error(callerValue)` put the caller's own
+ *   object on `error.code`, a field consumers read as the answer to a refusal.
  *
- * Nothing is exempt. Not the vocabulary, not the descriptions, not the policy
- * preimage, and not the structural utilities — `deepFreeze(x)` returns `x` by
- * contract, so a caller who hands it the string "allow" gets "allow" back, and
- * the rule below says the honest thing about that case rather than adding
- * `deepFreeze` to an allow-list. An allow-list is where the next defect would
- * live.
+ * A THROW is swept as its `code` alone, and the reason is a property rather than
+ * an exemption: a separate test below asserts that every throw from this slice is
+ * a V5R01Error whose code is in the module's own closed `V5_R01_ERROR_CODES`, or
+ * the one fixed TypeError the error constructor raises for an unregistered code.
+ * The `message` and `detail` of a refusal are the caller's own text handed back
+ * on the failure path, which no consumer can read as an answer, and the closed
+ * code set is what makes that claim checkable instead of convenient.
  */
 function everyExportedValue() {
   const entries = [];
-  for (const [moduleName, surface] of [["rollout-pilot-r01.v5.js", r01],
-    ["onboarding-flow-r01.v5.js", onboarding],
-    ["rollout-pilot-r01.vocabulary.v5.js", vocabulary]]) {
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
     for (const [name, exported] of Object.entries(surface)) {
       const at = `${moduleName}#${name}`;
-      if (typeof exported !== "function") { entries.push({ at, input: undefined, output: exported }); continue; }
-      // A class (V5R01Error) is not an evaluator; its NAME is what is checked.
-      if (/^[A-Z]/.test(name)) { entries.push({ at, input: undefined, output: name }); continue; }
-      for (const shape of callerShapes()) {
-        // A THROW IS SWEPT TOO. An export that refuses every shape would otherwise
-        // be an export no test ever looked at, and the refusal's own code and
-        // message are strings a consumer reads.
-        let output;
-        try { output = exported(shape); } catch (failure) { output = { threw: failure.code ?? failure.message }; }
-        entries.push({ at: `${at}(${String(JSON.stringify(shape))})`.slice(0, 120), input: shape, output });
+      if (typeof exported !== "function") {
+        entries.push({ at, name, output: exported });
+        continue;
       }
-      try {
-        entries.push({ at: `${at}()`, input: undefined, output: exported() });
-      } catch (failure) {
-        entries.push({ at: `${at}()`, input: undefined, output: { threw: failure.code ?? failure.message } });
+      const construct = isClass(exported);
+      for (const shape of [...CALLER_SHAPES, NO_ARGUMENT]) {
+        const label = shape === NO_ARGUMENT ? `${at}()` : `${at}(${JSON.stringify(shape)})`.slice(0, 140);
+        let output;
+        try {
+          const args = shape === NO_ARGUMENT ? [] : [shape];
+          output = construct ? { constructed: { ...new exported(...args) } } : exported(...args);
+        } catch (thrown) {
+          THROWN.push({ at: label, thrown });
+          output = { threw: thrown.code ?? null };
+        }
+        entries.push({ at: label, name, output });
       }
     }
   }
   return entries;
 }
 
-/** Computed once: the sweep is the same for every word and it is not cheap. */
+const SWEPT_SRC_MODULES = [
+  ["rollout-pilot-r01.v5.js", r01],
+  ["onboarding-flow-r01.v5.js", onboarding],
+  ["rollout-pilot-r01.vocabulary.v5.js", vocabulary],
+];
+
+/** Every refusal the sweep provoked, kept so the closed-code test can read them. */
+const THROWN = [];
+
+/** Computed once: the sweep is the same for every token and it is not cheap. */
 const EXPORTED_VALUES = everyExportedValue();
 
-/**
- * THE RULE, stated as a procedure so a second reader reaches the same verdict.
- *
- * For one privileged word W and one entry:
- *   1. Collect every string and every object key in the OUTPUT.
- *   2. Collect every string and every object key in the INPUT.
- *   3. The entry VIOLATES if W is named in the output and was not named in the
- *      input — that is, the export MANUFACTURED the word rather than echoing
- *      back something the caller already held.
- *
- * "Named" is word-level, not equality, which is the half the previous round got
- * wrong: `passed` is named by `run_passed`, `run-passed`, `runPassed` and by the
- * sentence "it passed", and is NOT named by `passenger` or `bypassed`.
- *
- * THE CASE THIS RULE ALONE WOULD MISS, and how it is closed: an export that
- * copied a caller's label into its own verdict field would satisfy step 3,
- * because the word was in the input. That route is shut by a different test —
- * every public evaluator's answer is byte-identical across all of these shapes,
- * so no caller string reaches any answer at all. The two tests are one property
- * and neither is sufficient alone.
- */
-function namedWords(value, out = new Set()) {
-  if (typeof value === "string") { out.add(value); return out; }
-  if (Array.isArray(value)) { value.forEach(entry => namedWords(entry, out)); return out; }
-  if (value !== null && typeof value === "object") {
-    for (const [key, entry] of Object.entries(value)) { out.add(key); namedWords(entry, out); }
-  }
-  return out;
-}
-
-function violations(entry, word) {
-  const inInput = [...namedWords(entry.input)].some(text => namesWord(text, word));
-  if (inInput) return [];
-  return [...namedWords(entry.output)].filter(text => namesWord(text, word));
-}
-
-test("guard: the sweep is reading a real surface, not an empty one", () => {
-  // A sweep that swept nothing would pass every test below. This is the
-  // non-vacuity check that makes the fifteen tests mean something.
-  assert.ok(EXPORTED_VALUES.length > 500,
+test("guard: the sweep is reading a real surface, and its matcher is not vacuous", () => {
+  assert.ok(EXPORTED_VALUES.length > 1000,
     `the sweep covered only ${EXPORTED_VALUES.length} values`);
   const modules = new Set(EXPORTED_VALUES.map(entry => entry.at.split("#")[0]));
   assert.deepEqual([...modules].sort(), [
     "onboarding-flow-r01.v5.js", "rollout-pilot-r01.v5.js", "rollout-pilot-r01.vocabulary.v5.js",
   ]);
-  // Every export of every module is represented — no export may be skipped.
-  for (const [moduleName, surface] of [["rollout-pilot-r01.v5.js", r01],
-    ["onboarding-flow-r01.v5.js", onboarding],
-    ["rollout-pilot-r01.vocabulary.v5.js", vocabulary]]) {
+  // Every export of every module is represented, constructors included.
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
     for (const name of Object.keys(surface)) {
       assert.ok(EXPORTED_VALUES.some(entry => entry.at.startsWith(`${moduleName}#${name}`)),
         `${moduleName}#${name} was not swept`);
     }
   }
-  // And the word matcher catches the aliases the review said walked through.
-  for (const alias of ["run_passed", "runPassed", "run-passed", "it passed.", "passed"]) {
-    assert.ok(namesWord(alias, "passed"), alias);
+  // The class export really was CONSTRUCTED, not merely named.
+  assert.equal(isClass(vocabulary.V5R01Error), true);
+  assert.ok(EXPORTED_VALUES.some(entry => entry.name === "V5R01Error"
+    && (entry.output?.constructed !== undefined || entry.output?.threw !== undefined)),
+  "the error class was not constructed by the sweep");
+
+  // The word matcher: aliases caught, near misses not.
+  for (const alias of ["run_passed", "runPassed", "run-passed", "passed"]) {
+    assert.equal(namesTokenAsCode(alias, "pass"), true, alias);
   }
-  assert.equal(namesWord("passenger", "passed"), false);
-  assert.equal(namesWord("bypassed", "passed"), false);
-  // Non-vacuity of the rule itself: a manufactured word IS caught.
-  assert.deepEqual(violations({ at: "synthetic", input: { a: 1 }, output: { verdict: "run_passed" } },
-    "passed"), ["run_passed"]);
+  assert.equal(namesTokenAsCode("passenger", "pass"), false);
+  assert.equal(namesTokenAsCode("bypassed", "pass"), false);
+  assert.equal(namesTokenAsCode("cached_read_past_max_age", "read"), false);
+  assert.equal(namesTokenAsCode("evaluateReadContinuity", "read"), false);
+  assert.equal(namesTokenAsCode("Read Home: today's work.", "read"), false, "prose is not a code");
+
+  // And each of the four positions really fires.
+  assert.deepEqual(findingsIn({ verdict: "allow" }, "allow").length, 1, "P1");
+  assert.deepEqual(findingsIn({ verified: true }, "verified").length, 1, "P2");
+  assert.deepEqual(findingsIn({ resumable_today: false }, "resumed"), [], "P2 permits a false");
+  assert.deepEqual(findingsIn({ would_do: "prose" }, "ok"), [], "P4 permits prose");
+  assert.deepEqual(findingsIn({ would_pass_if_authoritative: true }, "ok").length, 1, "P4");
 });
 
-// ONE TEST PER PRIVILEGED STRING. Nine words, no allow-list, no skipped export.
-for (const word of PRIVILEGED_OUTCOMES) {
-  test(`guard: no export of this slice manufactures "${word}" for any caller`, () => {
+// ONE TEST PER PRIVILEGED TOKEN. Fifteen tokens, no allow-list, no skipped
+// export, and no exemption for a token the caller supplied.
+for (const token of PRIVILEGED_TOKENS) {
+  test(`guard: no export of this slice shows the privileged token "${token}"`, () => {
+    const hits = [];
     for (const entry of EXPORTED_VALUES) {
-      assert.deepEqual(violations(entry, word), [],
-        `${entry.at} produced "${word}" its caller never supplied`);
+      if (namesTokenAsCode(entry.name, token)) hits.push(`${entry.at} (P3 export name)`);
+      for (const finding of findingsIn(entry.output, token)) hits.push(`${entry.at} ${finding}`);
     }
+    assert.deepEqual(hits, [],
+      `the token "${token}" reaches a consumer from this slice's surface`);
   });
 }
 
-// AND ONE PER CONDITIONAL TOKEN, because the review's remedy was explicit that a
-// `would_*` value is not an acceptable substitute for the privileged one.
-for (const token of CLASSIFICATION_TOKENS) {
-  test(`guard: no export of this slice manufactures "${token}" for any caller`, () => {
-    for (const entry of EXPORTED_VALUES) {
-      // Same rule, same reason: `deepFreeze` handed an object whose own key is the
-      // token gives that key back, and that is the caller's token, not a verdict.
-      // What no export may do is produce one the caller never held.
-      if ([...namedWords(entry.input)].some(text => text.includes(token))) continue;
-      assert.deepEqual([...namedWords(entry.output)].filter(text => text.includes(token)), [],
-        `${entry.at} manufactured ${token}`);
+test("guard: the per-token sweep is not vacuous — each token is really detected", () => {
+  // A mutation check on the sweep itself: a planted value must be caught for
+  // every token, or that token's test above proves nothing.
+  for (const token of PRIVILEGED_TOKENS) {
+    assert.deepEqual(findingsIn({ verdict: token }, token).length, 1, `whole code: ${token}`);
+    assert.deepEqual(findingsIn({ verdict: `run_${token}` }, token).length, 1, `suffix code: ${token}`);
+    assert.deepEqual(findingsIn({ nested: [{ deep: token.toUpperCase() }] }, token).length, 1,
+      `case and nesting: ${token}`);
+    assert.deepEqual(findingsIn({ [`${token}_here`]: true }, token).length, 1, `key: ${token}`);
+    assert.equal(namesTokenAsCode(token, token), true, `bare: ${token}`);
+  }
+  // And an export that echoed its caller would be caught, which is the exact
+  // defect the third review reproduced through the then-exported deepFreeze.
+  const echo = value => value;
+  const caught = [];
+  for (const shape of CALLER_SHAPES) caught.push(...findingsIn(echo(shape), "allow"));
+  assert.ok(caught.length > 0, "an echoing export would not be caught");
+});
+
+test("guard: deepFreeze is not on any surface of this slice, by name or by behaviour", () => {
+  // The reviewer's reproduction, run as a test. `deepFreeze(x)` returns `x`, so
+  // an exported one is a public function that hands every privileged token back.
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
+    assert.equal("deepFreeze" in surface, false, `${moduleName} still exports deepFreeze`);
+    // Not just that NAME: no export of this slice returns its own argument.
+    for (const [name, exported] of Object.entries(surface)) {
+      if (typeof exported !== "function" || isClass(exported)) continue;
+      for (const token of PRIVILEGED_TOKENS) {
+        const probe = { outcome: token };
+        let returned;
+        try { returned = exported(probe); } catch { continue; }
+        assert.notEqual(returned, probe, `${moduleName}#${name} returned its own argument`);
+      }
     }
+  }
+});
+
+test("guard: every refusal this slice raises carries a code from its own closed set", () => {
+  // This is what lets the sweep read a throw as its `code` alone. A refusal whose
+  // code could be anything would be a second door for caller input.
+  assert.ok(THROWN.length > 100, `only ${THROWN.length} refusals were provoked`);
+  const registered = new Set(vocabulary.V5_R01_ERROR_CODES);
+  assert.ok(registered.size >= 20, "the error-code registry must not have quietly emptied");
+  let refusals = 0;
+  for (const { at, thrown } of THROWN) {
+    // A NATIVE TypeError IS NOT A REFUSAL AND IS NOT READ AS ONE. The sweep hands
+    // every export a single argument whatever its arity, so `assertClosedKeys(x)`
+    // reaches `allowed.includes` with `allowed` undefined and V8 raises. That is
+    // the sweep's own doing, it carries no code at all, and the test below
+    // exercises the constructor's refusal directly rather than relying on these.
+    if (!(thrown instanceof V5R01Error)) {
+      assert.equal(thrown instanceof TypeError, true, `${at} threw ${thrown}`);
+      assert.equal(thrown.code, undefined, `${at} threw a coded non-V5R01Error`);
+      continue;
+    }
+    assert.equal(registered.has(thrown.code), true, `${at} raised unregistered code ${thrown.code}`);
+    refusals += 1;
+  }
+  assert.ok(refusals > 100, `only ${refusals} coded refusals were provoked`);
+  // And a caller cannot mint one: the constructor refuses an unregistered code,
+  // which is how `error.code` stopped being a place caller input could land.
+  assert.throws(() => new V5R01Error("allow", "m"), TypeError);
+  assert.throws(() => new V5R01Error({ outcome: "allow" }, "m"), TypeError);
+  assert.throws(() => new V5R01Error(undefined, "m"), TypeError);
+  assert.equal(new V5R01Error("invalid_shape", "m").code, "invalid_shape");
+});
+
+// AND ONE PER CONDITIONAL TOKEN, because the review's remedy was explicit that a
+// `would_*` value is not an acceptable substitute for the privileged one. No
+// input exemption here either: the classifier tokens do not occur in src at all
+// (the isolation test below proves that over the whole directory), so the only
+// way one could surface is an export echoing its caller.
+for (const token of CLASSIFICATION_TOKENS) {
+  test(`guard: no export of this slice shows the conditional token "${token}"`, () => {
+    const hits = [];
+    for (const entry of EXPORTED_VALUES) {
+      if (String(entry.name).includes(token)) hits.push(`${entry.at} (export name)`);
+      for (const text of allStrings(entry.output)) {
+        if (text.includes(token)) hits.push(`${entry.at} = ${text.slice(0, 60)}`);
+      }
+    }
+    assert.deepEqual(hits, [], `${token} reaches a consumer from this slice's surface`);
   });
+}
+
+/** Every string and every object key in a value, walked to the leaves. */
+function allStrings(value, out = []) {
+  if (typeof value === "string") { out.push(value); return out; }
+  if (Array.isArray(value)) { value.forEach(entry => allStrings(entry, out)); return out; }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) { out.push(key); allStrings(entry, out); }
+  }
+  return out;
 }
 
 test("guard: no export of either public surface is named for a classifier", () => {
@@ -1043,30 +1241,104 @@ assert.equal(typeof esbuild.buildSync, "function",
   "the import guard needs a real parser; esbuild is not loadable");
 
 /**
- * Every module specifier a source file loads, by any form that actually loads.
+ * Parse `source` and return esbuild's own import records: `{ path, kind }` each.
  *
- * esbuild reports static imports, dynamic imports and require calls with the kind
- * of each. The two things it cannot fold — `import(name)` and `require(name)`
- * with a computed specifier — are found by counting call sites in the raw text
- * and reported as `<computed import>` / `<computed require>` rather than dropped.
- * That over-reports (an occurrence in a comment counts) and over-reporting is the
- * safe direction: a false alarm is a review, a missed call site is a door.
+ * The parser reads static imports, re-exports, dynamic `import()` and `require()`
+ * alike, with the kind of each. Copied from the shape the Tour slice
+ * (mcp-server/test/tour-workflow-j301.v5.test.mjs) proves today rather than
+ * reinvented here.
  */
-function importSpecifiers(source) {
+function importRecords(source) {
   const built = esbuild.buildSync({
     stdin: { contents: source, loader: "js", sourcefile: "module-under-guard.js", resolveDir: SRC_DIR },
     bundle: false, write: false, metafile: true, format: "esm",
     platform: "neutral", logLevel: "silent", logLimit: 0,
   });
   const output = Object.values(built.metafile.outputs)[0];
-  const records = output === undefined ? [] : output.imports;
+  return output === undefined ? [] : output.imports;
+}
+
+/**
+ * A module's CODE WITH EVERY COMMENT REMOVED — esbuild's own printer, not a
+ * strip-the-comments regex. String literals, identifiers and property names all
+ * survive; prose does not.
+ *
+ * THIS IS THE FIX FOR THE DEFECT THE THIRD REVIEW FOUND. The previous guard
+ * counted call sites in RAW TEXT with `(?<![\w$.])import\s*\(`, which does not
+ * match `await import /* gap *\/ (HELPER)` — a comment between the keyword and
+ * the parenthesis is legal JavaScript and defeats the pattern. So
+ * `importSpecifiers` reported no computed import for a module that loads one,
+ * and a production module could have reached the classifier helper through a
+ * define-substituted identifier without failing the asserted guard. Normalising
+ * through the parser first removes the gap by construction: after printing,
+ * the call site is `import(HELPER)`.
+ */
+const CODE_TEXT_CACHE = new Map();
+function codeText(source) {
+  let code = CODE_TEXT_CACHE.get(source);
+  if (code === undefined) {
+    code = esbuild.transformSync(source, {
+      loader: "js", format: "esm", platform: "neutral",
+      minify: false, legalComments: "none", logLevel: "silent", logLimit: 0,
+    }).code;
+    CODE_TEXT_CACHE.set(source, code);
+  }
+  return code;
+}
+
+/**
+ * How many times `callee(` appears as a whole word, counted in BOTH the raw text
+ * and the comment-free print, taking the larger.
+ *
+ * Raw text OVER-reports (a mention inside a comment counts) and the print
+ * UNDER-reports nothing the parser can see, so the maximum is the safe reading in
+ * both directions: a false alarm is a review, a missed call site is a door.
+ */
+function callSiteCount(source, callee) {
+  const pattern = new RegExp(`(?<![\\w$.])${callee}\\s*\\(`);
+  const count = text => text.split(pattern).length - 1;
+  return Math.max(count(source), count(codeText(source)));
+}
+
+/**
+ * Every module specifier a source loads, by any form that actually loads.
+ *
+ * A call site the parser could not fold to a literal is reported as
+ * `<computed import>` / `<computed require>` rather than dropped, and a source
+ * that so much as names `createRequire` reports it, because a closed allow-list
+ * has to notice exactly the specifiers it cannot see.
+ */
+function importSpecifiers(source) {
+  const records = importRecords(source);
   const specifiers = new Set(records.map(record => record.path));
-  const callSites = callee => source.split(new RegExp(`(?<![\\w$.])${callee}\\s*\\(`)).length - 1;
   const resolved = kind => records.filter(record => record.kind === kind).length;
-  if (callSites("import") > resolved("dynamic-import")) specifiers.add("<computed import>");
-  if (callSites("require") > resolved("require-call")) specifiers.add("<computed require>");
+  if (callSiteCount(source, "import") > resolved("dynamic-import")) specifiers.add("<computed import>");
+  if (callSiteCount(source, "require") > resolved("require-call")) specifiers.add("<computed require>");
   if (/(?<![\w$])createRequire(?![\w$])/.test(source)) specifiers.add("createRequire");
   return [...specifiers].sort();
+}
+
+/** Whole-word `import(` call sites in already-printed, comment-free code. */
+const DYNAMIC_IMPORT_CALL = /(?<![\w$.])import\s*\(/g;
+
+/**
+ * Dynamic-import call sites WHOSE ARGUMENT IS NOT A STRING LITERAL — the form no
+ * lexical guard, this one included, can follow to a destination.
+ *
+ * This closes what a specifier allow-list structurally cannot. `const p =
+ * "../test/x.testhelper.mjs"; import(p)` resolves to no path, so it matches no
+ * offender filter and a scan over resolved specifiers reports a clean tree. The
+ * FORM is banned instead of the destination, over every module in src rather than
+ * the three this slice owns.
+ */
+function computedImportCallSites(source) {
+  const code = codeText(source);
+  const sites = [];
+  for (const match of code.matchAll(DYNAMIC_IMPORT_CALL)) {
+    const rest = code.slice(match.index + match[0].length).replace(/^\s+/, "");
+    if (!/^["'`]/.test(rest)) sites.push(code.slice(match.index, match.index + 72).split("\n")[0]);
+  }
+  return sites;
 }
 
 test("isolation: the parser reads the loading forms a specifier scan misses", () => {
@@ -1094,6 +1366,110 @@ test("isolation: the parser reads the loading forms a specifier scan misses", ()
   assert.deepEqual(
     importSpecifiers('const c = await import("../test/rollout-pilot-r01-classifiers.v5.testhelper.mjs");'),
     ["../test/rollout-pilot-r01-classifiers.v5.testhelper.mjs"]);
+});
+
+test("isolation: THE GAP FORM — a comment between `import` and `(` no longer hides a computed import", () => {
+  // THE DEFECT, REPRODUCED FIRST. This is the review's own case: the raw-text
+  // counter matched only `import` followed directly by whitespace and `(`, so a
+  // comment in between made `importSpecifiers` report nothing at all, and a
+  // production module could have reached the test helper through a substituted
+  // identifier without failing the asserted guard.
+  const gap = "const helper = await import /* gap */ (HELPER);";
+  const RAW_ONLY = /(?<![\w$.])import\s*\(/;
+  assert.equal(RAW_ONLY.test(gap), false,
+    "the premise has changed: the old raw-text pattern now matches the gap form");
+
+  // THE FIX, MEASURED. The parser's print removes the comment, so both readings
+  // of the question see the call site.
+  assert.equal(codeText(gap).includes("import(HELPER)"), true,
+    `the normalized print did not fold the gap: ${codeText(gap)}`);
+  assert.deepEqual(importSpecifiers(gap), ["<computed import>"],
+    "THE HOLE IS OPEN: the gap form resolved to no specifier at all");
+  assert.notDeepEqual(computedImportCallSites(gap), [],
+    "THE HOLE IS OPEN: the gap form was not caught by the form ban");
+
+  // Every spelling of the same evasion, each caught by both readings.
+  for (const form of [
+    "await import /* gap */ (HELPER);",
+    "await import\n  // a line comment\n  (HELPER);",
+    "await import /* a */ /* b */ (HELPER);",
+    "const p = '../test/x.testhelper.mjs'; await import /* gap */ (p);",
+    "export const reach = (a, b) => import /* gap */ (a + b);",
+  ]) {
+    assert.deepEqual(importSpecifiers(form), ["<computed import>"], form);
+    assert.notDeepEqual(computedImportCallSites(form), [], form);
+  }
+  // `require` had the same raw-text hole and is closed the same way.
+  assert.deepEqual(importSpecifiers("const m = require /* gap */ (name);"),
+    ["<computed require>"]);
+
+  // AND THE FORM BAN IS NOT SIMPLY ALWAYS-RED: a literal specifier, with or
+  // without the same comment, is not a computed call site.
+  assert.deepEqual(computedImportCallSites('await import /* gap */ ("./x.js");'), []);
+  assert.deepEqual(computedImportCallSites('await import("./x.js");'), []);
+  assert.deepEqual(importSpecifiers('await import /* gap */ ("./x.js");'), ["./x.js"]);
+});
+
+test("isolation: the gap form is caught on the REAL production module, not just a fixture", () => {
+  // The fixture is this slice's actual source plus the two lines a reviewer
+  // wrote to get past the previous guard. Nothing about the smuggle is a literal
+  // the offender filter could match, so only the form ban sees it.
+  const helperSpecifier = "../test/rollout-pilot-r01-classifiers.v5.testhelper.mjs";
+  const real = fs.readFileSync(path.join(SRC_DIR, "rollout-pilot-r01.v5.js"), "utf8");
+
+  // (a) The unedited module is clean under both readings, so the guard is not
+  // always-red and the failures below mean what they say.
+  assert.deepEqual(computedImportCallSites(real), []);
+  assert.equal(importSpecifiers(real).includes("<computed import>"), false);
+
+  // (b) The plain dynamic smuggle: caught as a resolved test-tree specifier.
+  const literal = `${real}\nexport async function reach() {\n  return await import("${helperSpecifier}");\n}\n`;
+  assert.ok(importSpecifiers(literal).includes(helperSpecifier),
+    "a dynamic import of the helper was invisible to the parser");
+
+  // (c) THE GAP FORM ON THE REAL MODULE. The specifier is never a literal at the
+  // call site, so the offender filter over RESOLVED specifiers reports nothing —
+  // that is measured here rather than assumed — and the form ban is what catches
+  // it.
+  const smuggled = `${real}\nconst HELPER = "${helperSpecifier}";\n`
+    + "export async function reach() {\n  return await import /* gap */ (HELPER);\n}\n";
+  assert.deepEqual(
+    importSpecifiers(smuggled).filter(one => one.includes("/test/") || one.includes(".testhelper.")),
+    [], "the premise has changed: the parser now folds a computed specifier to a path");
+  assert.ok(importSpecifiers(smuggled).includes("<computed import>"),
+    "THE HOLE IS OPEN: the parser did not even report the gap call site as computed");
+  assert.notDeepEqual(computedImportCallSites(smuggled), [],
+    "THE HOLE IS OPEN: a computed dynamic import was not caught by the form ban");
+
+  // (d) And with the specifier assembled from pieces, so no literal carries it
+  // and only the form ban can see it at all.
+  const piecewise = `${real}\nexport const reach = (a, b) => import /* gap */ (a + b);\n`;
+  assert.equal(piecewise.includes("testhelper"), true, "the real module quotes the helper name in prose");
+  assert.notDeepEqual(computedImportCallSites(piecewise), [],
+    "THE HOLE IS OPEN: an assembled dynamic import specifier was not caught");
+});
+
+test("isolation: no production module computes a dynamic import, anywhere in src", () => {
+  // Over EVERY module in src, not the three this slice owns: a specifier
+  // allow-list can only judge specifiers it can see, so the form is banned
+  // tree-wide and read twice — off the printed call site, and off the parser's
+  // own count of dynamic imports it could not fold to a path.
+  const files = fs.readdirSync(SRC_DIR).filter(name => name.endsWith(".js")).sort();
+  assert.ok(files.length > 100, "every module in src must be scanned");
+
+  const byForm = [];
+  const byParser = [];
+  for (const file of files) {
+    const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+    for (const site of computedImportCallSites(source)) byForm.push(`${file}: ${site}`);
+    const specifiers = importSpecifiers(source);
+    if (specifiers.includes("<computed import>")) byParser.push(file);
+    if (specifiers.includes("<computed require>")) byParser.push(`${file} (require)`);
+  }
+  assert.deepEqual(byForm, [],
+    "a production module builds a dynamic import specifier at runtime, which no lexical guard can follow");
+  assert.deepEqual(byParser, [],
+    "the parser could not fold a dynamic import or require to a literal path");
 });
 
 test("isolation: no module in src reaches the test tree, by any loading form", () => {
