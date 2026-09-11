@@ -1566,6 +1566,23 @@ def sources_public_surface_guard_checks(health) -> None:
           not echoed, json.dumps(sorted(set(echoed))[:4]))
     check("the guard actually attempted the shapes it claims to", attempted >= 40,
           str(attempted))
+    # THE BEHAVIOURAL TWIN OF THE SIGNATURE CHECK.  The check above reads the
+    # signature; this one proves the runtime agrees, so a public entry that grew
+    # an optional census parameter fails twice rather than once.
+    refused = []
+    for name in sorted(signatures):
+        member = getattr(sources, name)
+        for shape in forged_shapes:
+            for args, kwargs in (((shape,), {}), ((), {"workflows": shape})):
+                try:
+                    member(*args, **kwargs)
+                except TypeError:
+                    continue
+                except Exception:
+                    pass
+                refused.append(f"{name} accepted {args!r} {kwargs!r}")
+    check("every public adapter callable REFUSES an argument at runtime too",
+          not refused, json.dumps(sorted(set(refused))[:4]))
 
     # ---- (7) the public entry, called for real ------------------------------
     # This performs the F09 read. On a machine with no database tap it comes back
