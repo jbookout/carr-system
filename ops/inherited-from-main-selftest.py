@@ -114,17 +114,36 @@ def branch(repo, name, edits):
     git(repo, "commit", "-q", "-m", f"work on {name}", must=True)
 
 
-def ask(repo, *extra, timeout="180", env=None):
-    """Run the helper the way ops/ci.sh runs it: from inside the branch tree."""
+def ask(repo, *extra, timeout="180", env=None, check_path="check.py"):
+    """Run the helper the way ops/ci.sh runs it: from inside the branch tree.
+
+    check_path is the repo-relative check, defaulting to the one make_repo
+    seeds; the collection cases below put a second copy in a subdirectory the
+    fixture's own ci.sh globs do not reach.
+    """
     e = fixture_env()
     e.pop("CARR_CI_NO_INHERIT_CHECK", None)
     if env:
         e.update(env)
     p = subprocess.run(
-        [sys.executable, HELPER, "--check", "check.py", "--timeout", timeout,
-         *extra, "--", sys.executable, "check.py"],
+        [sys.executable, HELPER, "--check", check_path, "--timeout", timeout,
+         *extra, "--", sys.executable, check_path],
         cwd=repo, capture_output=True, text=True, env=e, timeout=300)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def commit_ci_sh(repo, loops, extra_files=None):
+    """Give the fixture an ops/ci.sh whose collection globs are `loops`.
+
+    Only the `for t in ...; do` shape matters — the helper reads ci.sh's
+    collection globs out of its source and never executes it.
+    """
+    body = "".join(f"for t in {loop}; do :; done\n" for loop in loops)
+    write(repo, "ops/ci.sh", "#!/usr/bin/env bash\n" + body)
+    for rel, text in (extra_files or {}).items():
+        write(repo, rel, text)
+    git(repo, "add", "-A", must=True)
+    git(repo, "commit", "-q", "-m", "ci.sh and its collected checks", must=True)
 
 
 # ---------------------------------------------------------------- the two seeds
@@ -268,6 +287,65 @@ subprocess.run([str(root / "runtime" / "tool")], check=True)
               "runtime prerequisite is absent from the merge-base worktree" in out, out)
 
 
+def test_a_check_this_branch_newly_collected_is_not_inherited():
+    """main never RAN it, so its failure at the merge base is not main's break.
+
+    2026-09-10, and this is the case that cost two full diagnoses. A branch
+    widened ops/ci.sh's collection globs to reach tools/<subdir>/test_*.py.
+    One of the suites that started running failed on the hosted runner, the
+    re-run at the merge base failed there too — truthfully, the suite really
+    does exit 1 in that environment — and the branch was told "INHERITED FROM
+    MAIN, wait for main to go green" about a file main's own globs had never
+    collected once. Main was green. The canary had nothing to name. No freeze
+    was going to lift, and the branch could not merge.
+
+    The check does NOT sit in the diff, so the pre-filter cannot see it, and it
+    DOES exist at the merge base, so the added-by-this-branch guard cannot
+    either. Only the collection globs tell the two situations apart.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="bad")            # the check is red
+        commit_ci_sh(repo, ["check-*.py"], {"sub/check.py": CHECK_PY})
+        # The branch widens collection and touches nothing else. sub/check.py is
+        # unchanged and present at the merge base; what changed is that anything
+        # runs it.
+        branch(repo, "widens-the-collector", {"unrelated.txt": "x\n"})
+        commit_ci_sh(repo, ["check-*.py sub/check*.py"])
+        rc, out = ask(repo, check_path="sub/check.py")
+        check("a check only this branch collects is never attributed to main",
+              rc == CANNOT_TELL, f"exit {rc}\n{out}")
+        check("the refusal says the branch is what makes the check run",
+              "this branch is what makes sub/check.py run" in out, out)
+        check("no attribution banner leaks into the newly-collected case",
+              "INHERITED FROM MAIN" not in out, out)
+
+
+def test_a_check_the_merge_base_already_collected_stays_inherited():
+    """The guard above must not become a blanket off-switch for ci.sh branches.
+
+    Two shapes it must leave exactly as they were: a check BOTH sides collect
+    (ci.sh changed for some unrelated reason), and a check NEITHER side collects
+    by glob — which is every check ci.sh invokes by name, hooks/gate-integrity.py
+    and the inventory checks among them.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="bad")
+        commit_ci_sh(repo, ["check*.py"])                    # the base collects it
+        branch(repo, "edits-ci-sh", {"unrelated.txt": "x\n"})
+        commit_ci_sh(repo, ["check*.py", "extra-*.py"])      # widened elsewhere
+        rc, out = ask(repo)
+        check("a check the merge base already collected keeps its verdict",
+              rc == INHERITED, f"exit {rc}\n{out}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="bad")
+        commit_ci_sh(repo, ["ops/*-selftest.py"])            # collects neither side
+        branch(repo, "victim", {"unrelated.txt": "x\n"})
+        rc, out = ask(repo)
+        check("a check ci.sh invokes by name rather than by glob keeps its verdict",
+              rc == INHERITED, f"exit {rc}\n{out}")
+
+
 def test_a_slow_base_run_times_out_into_cannot_tell():
     with tempfile.TemporaryDirectory() as tmp:
         repo = make_repo(tmp, base_subject="slow")
@@ -330,6 +408,8 @@ def main():
                test_committing_a_new_check_is_answered_by_the_pre_filter_first,
                test_exit_78_at_the_base_is_not_a_break,
                test_an_unmaterialised_runtime_prerequisite_is_not_a_break,
+               test_a_check_this_branch_newly_collected_is_not_inherited,
+               test_a_check_the_merge_base_already_collected_stays_inherited,
                test_a_slow_base_run_times_out_into_cannot_tell,
                test_on_main_itself_there_is_nothing_to_attribute,
                test_no_base_ref_refuses,
