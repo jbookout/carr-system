@@ -489,6 +489,47 @@ test("RULED: the predecessor reader admits only an accepted outcome whose receip
   assert.equal(badHash.invalid_field, "outcomeHash");
 });
 
+test("DERIVATION: the receipt's hash is the one consulted, not the proposal's", async () => {
+  // Found by mutation: in the fixture store an accepted row's proposal hash and
+  // its receipt hash are the same value, because in production
+  // ops.accept_sourced_work_request_outcome_feedback writes them equal. So
+  // swapping `accepted_feedback_hash` for `feedback_hash` changed nothing any
+  // store-level test could see, and the most load-bearing clause in the slice was
+  // unproved. These two rows separate the fields, which no production row does.
+  const asked = `sha256:${"4".repeat(64)}`;
+  const other = `sha256:${"7".repeat(64)}`;
+
+  // A row that CLAIMS acceptance and carries no receipt hash. Refuses, because
+  // the hash is taken from the receipt and there is none.
+  const noReceipt = evidence.wouldAdmitPredecessorOutcome([{
+    feedback_ref: "OUTCOME-claims-acceptance", status: "accepted",
+    feedback_hash: asked, accepted_feedback_hash: null, outcome: "criteria_met",
+  }], { outcomeHash: asked });
+  assert.equal(noReceipt.conditional_finding,
+    "predecessor_outcome_acceptance_receipt_hash_mismatch",
+    "a row matched on its proposal hash instead of its receipt hash");
+  assert.equal(noReceipt.would_admit_if_rows_were_authoritative, false);
+
+  // And the mirror: the receipt carries the asked-about hash while the proposal
+  // carries a different one. Admits, which proves WHICH field was consulted.
+  const receiptMatches = evidence.wouldAdmitPredecessorOutcome([{
+    feedback_ref: "OUTCOME-receipt-matches", status: "accepted",
+    feedback_hash: other, accepted_feedback_hash: asked, outcome: "criteria_met",
+  }], { outcomeHash: asked });
+  assert.equal(receiptMatches.conditional_finding,
+    "predecessor_outcome_accepted_with_matching_hash");
+  assert.equal(receiptMatches.hash_matches, true);
+
+  // The derivation answers in the conditional and never in the asserted form:
+  // only the reader, which knows where the rows came from, says `finding`.
+  for (const result of [noReceipt, receiptMatches]) {
+    assert.ok(Object.hasOwn(result, "would_admit_if_rows_were_authoritative"));
+    assert.ok(!Object.hasOwn(result, "finding"),
+      "the derivation asserted a finding without provenance");
+    assert.equal(result.evidence_basis, "rows_supplied_to_this_function");
+  }
+});
+
 test("RULED: the scheduler reader answers all three clauses from ledger rows, and refuses a missing row", async () => {
   const ruled = await stagedReaders({ substituteStores: true });
   const read = (canaryRunKey, serviceKey = "carr-fleet-sync") =>
