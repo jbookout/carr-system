@@ -63,21 +63,25 @@
 // parser proves the isolation, and a sweep over every caller-controlled shape
 // proves this surface never answers with a privileged word.
 //
-// NO PRIVILEGED WORD LEAVES THIS SLICE AT ALL, BY ANY ROUTE. Not as an answer,
-// not as a vocabulary, not inside a policy identity, and not inside a quoted
-// settled sentence. The second review of PR 987 found three routes still open
-// after the first correction — `V5_ADJUDICATION_OUTCOMES` carried the bare word
-// `pass`, and `v5A03PolicyPreimage` and `v5A03PolicyCanonicalBytes` returned and
-// serialized it — each defended as "only a vocabulary". A consumer reading the
-// bytes cannot tell a vocabulary from a verdict, so the defence is void and all
-// three routes are closed: the outcome vocabulary is opaque codes in the
-// vocabulary module and is not re-exported here, the preimage and its canonical
-// bytes are module-private, and the settled decision text is module-private with
-// only its evidence digests exported. The suite proves it per word, for `ok`,
-// `allow`, `pass`, `satisfied`, `complete` and `admitted`, over EVERY export of
-// BOTH src modules in this slice — every exported value, every nested value and
-// key, and every value returned for every caller-controlled shape — matching
-// whole strings and substrings, with no exemption for any export.
+// NO PRIVILEGED WORD AND NO OUTCOME WORD LEAVES THIS SLICE AT ALL, BY ANY
+// ROUTE. Not as an answer, not as a vocabulary, not inside a policy identity,
+// and not inside a quoted settled sentence. The second review of PR 987 found
+// three routes still open after the first correction — `V5_ADJUDICATION_OUTCOMES`
+// carried the bare word `pass`, and `v5A03PolicyPreimage` and
+// `v5A03PolicyCanonicalBytes` returned and serialized it — each defended as
+// "only a vocabulary". The third review found the replacement still publishing
+// the same three dispositions as `adverse`, `favorable` and `isolating`: a
+// consumer reading `favorable` reads "pass", so renaming was not opacity. All
+// four routes are closed. The outcome vocabulary is a module-private set of
+// three ordinal codes HERE, no src module exports it under any name, only its
+// canonical digest is public; the preimage and its canonical bytes are
+// module-private; and the settled decision text is module-private with only its
+// evidence digests exported. The suite proves it per word, for `ok`, `allow`,
+// `pass`, `satisfied`, `complete`, `admitted`, `favorable`, `unfavorable`,
+// `adverse`, `isolating`, `quarantine` and `fail`, over EVERY export of BOTH src
+// modules in this slice — every exported value, every nested value and key, and
+// every value returned for every caller-controlled shape — matching whole
+// strings and substrings, with no exemption for any export.
 //
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js:
 //   * A POLICY ANSWER is RETURNED — `decision` is "refuse" with a stable
@@ -103,7 +107,6 @@ import {
   V5_A03_SCHEMA_VERSION,
   V5_A03_SEAMS,
   V5_ADJUDICATION_CHECKS,
-  V5_ADJUDICATION_OUTCOME_CODE_SET,
   V5_ADJUDICATION_RECEIPT_KIND,
   V5_ADJUDICATION_RECEIPT_STORE_SEAM,
   V5_ADJUDICATOR_ROLE,
@@ -127,12 +130,12 @@ import {
   V5_SUBMISSION_STATES,
 } from "./complete-set-review-a03.vocabulary.v5.js";
 
-// RE-EXPORTED VOCABULARIES, minus one. `V5_ADJUDICATION_OUTCOME_CODES` and
-// `V5_ADJUDICATION_OUTCOME_CODE_SET` are deliberately NOT here: the outcome
-// vocabulary is the one a consumer could read as a disposition, this surface can
-// never produce a disposition, and a surface that hands out the words for an
-// answer it cannot give is handing out half an answer. A future receipt store
-// that really can resolve one imports them from the vocabulary module directly.
+// RE-EXPORTED VOCABULARIES, minus one. The adjudication outcome vocabulary is
+// deliberately absent, here and from the vocabulary module both: it is the one
+// vocabulary a consumer could read as a disposition, this surface can never
+// produce a disposition, and a surface that hands out the words for an answer it
+// cannot give is handing out half an answer. It is module-private below, and a
+// future receipt store binds to `v5A03AdjudicationOutcomeVocabularyDigest()`.
 export {
   V5_A03_POLICY_VERSION,
   V5_A03_SCHEMA_VERSION,
@@ -602,6 +605,44 @@ export function verifyAdjudicationReceipt(request) {
 }
 
 // ---------------------------------------------------------------------------
+// THE CLOSED ADJUDICATION OUTCOME VOCABULARY. Module-private, and nothing in
+// this slice ever produces one of these values.
+//
+// Q042.D1 closes adjudication to three dispositions. This module holds the fact
+// that there are exactly three and nothing else about them: the codes are
+// ORDINAL, they carry no disposition word and no mapping to one, and no comment
+// here records which ordinal means which — because a mapping written down is a
+// mapping a reader can apply, and the reader this slice is defending against is
+// a consumer pattern-matching bytes. Two earlier spellings failed that test: the
+// bare words "fail"/"pass"/"quarantine", and then `adverse`/`favorable`/
+// `isolating`, which published the same three dispositions in a thesaurus.
+//
+// The binding these codes are owed belongs to
+// `seam:bounded-adjudication-receipt-store`, which does not exist. When it does,
+// it — and only it — decides which stored disposition is which ordinal, and it
+// pins this vocabulary through `v5A03AdjudicationOutcomeVocabularyDigest()`
+// rather than by importing values that never leave this file.
+// ---------------------------------------------------------------------------
+
+const ADJUDICATION_OUTCOME_CODE_SET = Object.freeze([
+  "adjudication-outcome-code:1-if-authoritative",
+  "adjudication-outcome-code:2-if-authoritative",
+  "adjudication-outcome-code:3-if-authoritative",
+]);
+
+/**
+ * The identity of that closed set, and the only thing this module says about it
+ * out loud.
+ *
+ * A receipt store binds to this digest: it changes if a code changes or a fourth
+ * appears, and it recites nothing a consumer could act on. It is a sha256 ref,
+ * not a disposition and not a clearance.
+ */
+export function v5A03AdjudicationOutcomeVocabularyDigest() {
+  return digest(canonicalJson([...ADJUDICATION_OUTCOME_CODE_SET].sort()));
+}
+
+// ---------------------------------------------------------------------------
 // The closed, versioned policy preimage and its digest.
 //
 // Nothing situational is bound — no change, review, round, identity, finding or
@@ -639,7 +680,7 @@ function policyPreimage() {
     opposing_role_pairs: V5_OPPOSING_ROLE_PAIRS.map(pair => [...pair].sort())
       .sort((a, b) => a.join(",").localeCompare(b.join(","))),
     adjudicator_role: V5_ADJUDICATOR_ROLE,
-    adjudication_outcome_codes: [...V5_ADJUDICATION_OUTCOME_CODE_SET].sort(),
+    adjudication_outcome_codes: [...ADJUDICATION_OUTCOME_CODE_SET].sort(),
     adjudication_receipt_kind: V5_ADJUDICATION_RECEIPT_KIND,
     max_review_rounds: V5_MAX_REVIEW_ROUNDS,
     round_transitions: [...V5_ROUND_TRANSITIONS].sort(),

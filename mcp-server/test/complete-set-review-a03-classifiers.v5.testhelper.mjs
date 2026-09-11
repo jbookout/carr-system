@@ -107,14 +107,36 @@ import {
   V5_SUBMISSION_STATES,
 } from "../src/complete-set-review-a03.v5.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
-// The outcome vocabulary is NOT re-exported by the public module — that is the
-// second correction of PR 987 — so the test-only classifier reaches the opaque
-// codes where they live. Production cannot follow it here: nothing under
-// mcp-server/src imports this file, and the suite proves that with Node's own
-// module parser.
-import {
-  V5_ADJUDICATION_OUTCOME_CODE_SET,
-} from "../src/complete-set-review-a03.vocabulary.v5.js";
+
+// ---------------------------------------------------------------------------
+// THE ADJUDICATION OUTCOME CODE MIRROR.
+//
+// No src module exports this vocabulary under any name — that is the third
+// correction of PR 987 — so the test-only classifier holds the codes HERE,
+// where production cannot follow: nothing under mcp-server/src imports this
+// file, and the suite proves that with Node's own module parser.
+//
+// It is not a second source of truth. The suite asserts that these bytes digest
+// to `v5A03AdjudicationOutcomeVocabularyDigest()`, so a drift of one character
+// or one sort order between this mirror and the private original fails, exactly
+// as the policy preimage mirror below is bound to `v5A03PolicyDigest()`.
+//
+// Which ordinal carries which of Q042.D1's three dispositions is not recorded
+// here either. No classifier in this file needs to know: a receipt's outcome is
+// checked for MEMBERSHIP in the closed set and for nothing else, and the mapping
+// belongs to the receipt store that does not exist yet.
+// ---------------------------------------------------------------------------
+
+const V5_ADJUDICATION_OUTCOME_CODE_SET = Object.freeze([
+  "adjudication-outcome-code:1-if-authoritative",
+  "adjudication-outcome-code:2-if-authoritative",
+  "adjudication-outcome-code:3-if-authoritative",
+]);
+
+/** The readable copy, for fixtures and for the digest binding that pins it. */
+export function v5A03AdjudicationOutcomeCodeMirror() {
+  return [...V5_ADJUDICATION_OUTCOME_CODE_SET].sort();
+}
 
 /** Said on every result, so an escaped value still reads as "not authority". */
 export const V5_A03_CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_shapes_not_authority";

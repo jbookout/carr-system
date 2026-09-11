@@ -47,6 +47,7 @@ import {
   reviewDimensionGap,
   reviewRoundObligation,
   roleSeparationCollisions,
+  v5A03AdjudicationOutcomeCodeMirror,
   v5A03PolicyPreimageMirror,
 } from "./complete-set-review-a03-classifiers.v5.testhelper.mjs";
 
@@ -58,13 +59,14 @@ const {
   V5_ROUND_BOUND_CHECKS, V5_ROUND_REGRESSION_CLASSES, V5_ROUTING_CHECKS,
   assertA03DecisionBinding, readBoundedAdjudication, readFindingSetExhaustiveness,
   readReviewRoundAdmission, readReviewRoutingAdmission,
-  v5A03PolicyDigest, verifyAdjudicationReceipt,
+  v5A03AdjudicationOutcomeVocabularyDigest, v5A03PolicyDigest, verifyAdjudicationReceipt,
 } = a03;
 
-// The outcome vocabulary is no longer on the public surface. A fixture that
-// needs a well-formed receipt disposition takes it from the vocabulary module,
-// which is where the opaque codes live.
-const { V5_ADJUDICATION_OUTCOME_CODES, V5_ADJUDICATION_OUTCOME_CODE_SET } = a03Vocabulary;
+// The outcome vocabulary is on NEITHER src module's surface now — it is private
+// to the public module, which publishes only its digest. A fixture that needs a
+// well-formed receipt disposition takes it from the test-side mirror, which the
+// digest binding below pins to the private original.
+const V5_ADJUDICATION_OUTCOME_CODE_SET = v5A03AdjudicationOutcomeCodeMirror();
 
 /**
  * The five settled sentences, verbatim, held HERE rather than imported.
@@ -196,7 +198,7 @@ function receiptBody(overrides = {}) {
     adjudicator_identity_ref: "actor:adjudicator",
     disputed_finding_refs: ["finding:one"],
     rounds_completed: V5_MAX_REVIEW_ROUNDS,
-    outcome: V5_ADJUDICATION_OUTCOME_CODES.isolating,
+    outcome: V5_ADJUDICATION_OUTCOME_CODE_SET[2],
     ...overrides,
   };
 }
@@ -280,7 +282,7 @@ test("policy: only the digest is public, and the readable mirror is bound to it"
   // contains a privileged word — so the whole structure is swept, with no
   // vocabulary keys skipped, which is what the earlier version of this test did.
   assert.deepEqual(privilegedStrings(mirror), []);
-  assert.deepEqual([...mirror.adjudication_outcome_codes], [...V5_ADJUDICATION_OUTCOME_CODE_SET]);
+  assert.deepEqual([...mirror.adjudication_outcome_codes], v5A03AdjudicationOutcomeCodeMirror());
   assert.deepEqual([...mirror.review_states], ["changes_required", "no_changes_required"]);
 });
 
@@ -348,6 +350,7 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "readFindingSetExhaustiveness",
   "readReviewRoundAdmission",
   "readReviewRoutingAdmission",
+  "v5A03AdjudicationOutcomeVocabularyDigest",
   "v5A03PolicyDigest",
   "verifyAdjudicationReceipt",
 ];
@@ -358,8 +361,6 @@ const EXPECTED_VOCABULARY_EXPORTS = [
   "V5_A03_SCHEMA_VERSION",
   "V5_A03_SEAMS",
   "V5_ADJUDICATION_CHECKS",
-  "V5_ADJUDICATION_OUTCOME_CODES",
-  "V5_ADJUDICATION_OUTCOME_CODE_SET",
   "V5_ADJUDICATION_RECEIPT_KIND",
   "V5_ADJUDICATION_RECEIPT_STORE_SEAM",
   "V5_ADJUDICATOR_ROLE",
@@ -383,8 +384,14 @@ const EXPECTED_VOCABULARY_EXPORTS = [
   "V5_SUBMISSION_STATES",
 ];
 
+/** Every name this slice has retired from src, kept so none creeps back. */
+const RETIRED_EXPORT_NAMES = [
+  "V5_ADJUDICATION_OUTCOMES", "V5_ADJUDICATION_OUTCOME_CODES", "V5_ADJUDICATION_OUTCOME_CODE_SET",
+  "V5_A03_SETTLED_DECISIONS", "v5A03PolicyPreimage", "v5A03PolicyCanonicalBytes",
+];
+
 /**
- * THE SIX PRIVILEGED WORDS, and the sweep that may not exempt one export.
+ * THE TWELVE PRIVILEGED WORDS, and the sweep that may not exempt one export.
  *
  * The first correction of PR 987 swept five reader functions and deliberately
  * exempted the outcome vocabulary; the second review found the bare word `pass`
@@ -395,8 +402,16 @@ const EXPECTED_VOCABULARY_EXPORTS = [
  * substring, in the export's NAME, in its value walked to the leaves (object
  * keys included), and in every value it returns for every caller-controlled
  * shape. There is no exemption list, and adding one is the defect.
+ *
+ * The third review added the six OUTCOME words to the six privileged ones. The
+ * correction that answered the second review swapped `pass` for a code named
+ * `favorable` — a different spelling of the same disposition, exposed as an
+ * object key and inside a string value — so a consumer could still read an
+ * adjudication outcome off this slice's bytes. A word that names a disposition
+ * is caught here now whether or not it is one of Q042.D1's three.
  */
-const PRIVILEGED_WORDS = ["ok", "allow", "pass", "satisfied", "complete", "admitted"];
+const PRIVILEGED_WORDS = ["ok", "allow", "pass", "satisfied", "complete", "admitted",
+  "favorable", "unfavorable", "adverse", "isolating", "quarantine", "fail"];
 
 const SWEPT_SRC_MODULES = Object.freeze({
   "mcp-server/src/complete-set-review-a03.v5.js": a03,
@@ -544,10 +559,35 @@ test("surface: the public export list is exactly the unavailable surface", () =>
   // The outcome vocabulary and the policy preimage left the public surface in the
   // second correction. Naming them here means a re-export cannot come back
   // quietly under the general export-list assertion.
-  for (const gone of ["V5_ADJUDICATION_OUTCOMES", "V5_ADJUDICATION_OUTCOME_CODES",
-    "V5_ADJUDICATION_OUTCOME_CODE_SET", "V5_A03_SETTLED_DECISIONS", "v5A03PolicyPreimage",
-    "v5A03PolicyCanonicalBytes"])
+  for (const gone of RETIRED_EXPORT_NAMES)
     assert.equal(gone in a03, false, `${gone} is back on the public surface`);
+});
+
+test("surface: the outcome vocabulary is on no src surface, and only its digest is public", () => {
+  // The third review of PR 987: the codes were still published as an object
+  // keyed `adverse`/`favorable`/`isolating`, and `favorable` mapped to "pass".
+  // Renaming a disposition is not opacity, so the vocabulary left src entirely.
+  for (const gone of RETIRED_EXPORT_NAMES) {
+    assert.equal(gone in a03, false, `${gone} is back on the public surface`);
+    assert.equal(gone in a03Vocabulary, false, `${gone} is back on the vocabulary surface`);
+  }
+  for (const namespace of Object.values(SWEPT_SRC_MODULES))
+    for (const [name, value] of Object.entries(namespace))
+      assert.equal(/outcome/i.test(name) && typeof value !== "function", false,
+        `${name} publishes an outcome vocabulary from src`);
+
+  // A consumer that must bind to the closed set binds to its identity instead.
+  const digestOfVocabulary = v5A03AdjudicationOutcomeVocabularyDigest();
+  assert.match(digestOfVocabulary, /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual(privilegedStrings(digestOfVocabulary), []);
+
+  // And the test-side mirror is pinned to the private original by that digest,
+  // so the copy the classifiers read cannot quietly disagree with production.
+  const mirror = v5A03AdjudicationOutcomeCodeMirror();
+  assert.equal(digest([...mirror].sort()), digestOfVocabulary,
+    "the outcome-code mirror under test/ has drifted from the private production set");
+  assert.equal(mirror.length, 3, "Q042.D1 closes adjudication to three dispositions");
+  assert.deepEqual([...mirror], [...new Set(mirror)].sort());
 });
 
 test("surface: the vocabulary module's export list is exactly the vocabularies", () => {
@@ -1085,17 +1125,25 @@ test("receipt clause: every way a forged or mismatched receipt fails is named", 
     assert.deepEqual(blockedAt(result),
       { blocking_clause: clause, reason_id: V5_A03_CLAUSE_REASONS[clause] }, clause);
   }
-  // The closed outcome vocabulary is three OPAQUE codes. None of them is one of
-  // Q042.D1's three words, and none of them contains one: the settled words live
-  // in a comment in the vocabulary module, where no consumer reads them.
+  // The closed outcome vocabulary is three ORDINAL codes. None of them is one of
+  // Q042.D1's three words, none contains one, and none is a synonym for one:
+  // nothing in the codes, and nothing written beside them anywhere in the slice,
+  // says which ordinal is which disposition. That mapping is the receipt store's,
+  // and the receipt store does not exist.
   assert.deepEqual([...V5_ADJUDICATION_OUTCOME_CODE_SET], [
-    "adjudication-outcome:adverse-if-authoritative",
-    "adjudication-outcome:favorable-if-authoritative",
-    "adjudication-outcome:isolating-if-authoritative",
+    "adjudication-outcome-code:1-if-authoritative",
+    "adjudication-outcome-code:2-if-authoritative",
+    "adjudication-outcome-code:3-if-authoritative",
   ]);
-  assert.deepEqual(Object.keys(V5_ADJUDICATION_OUTCOME_CODES).sort(),
-    ["adverse", "favorable", "isolating"]);
-  assert.deepEqual(privilegedStrings(V5_ADJUDICATION_OUTCOME_CODES), []);
+  assert.deepEqual(privilegedStrings(V5_ADJUDICATION_OUTCOME_CODE_SET), []);
+  // Membership is the only thing any clause asks of an outcome: no classifier
+  // branches on WHICH code a receipt carries, so no classifier needs the mapping.
+  for (const code of V5_ADJUDICATION_OUTCOME_CODE_SET) {
+    const value = receiptBody({ outcome: code });
+    const result = classifyAdjudicationReceiptIfAuthoritative(V5_ADJUDICATION_RECEIPT_KIND,
+      receiptRefFor(value), value, binding);
+    assert.equal(result.classification, V5_A03_CLASSIFICATIONS.receipt, code);
+  }
 });
 
 // ---------------------------------------------------------------------------

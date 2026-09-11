@@ -17,15 +17,26 @@
 // Nothing in this file is an authorization. A vocabulary says which words the
 // module can read; it never says yes.
 //
-// AND NO VALUE IN THIS FILE IS A PRIVILEGED WORD, under any name. Neither the
-// exported values nor the export names contain `ok`, `allow`, `pass`,
-// `satisfied`, `complete` or `admitted` — as a whole string or as a substring —
-// because "it is only a vocabulary" is a distinction a consumer reading the
-// bytes cannot make, and the second review of PR 987 found the bare word `pass`
-// shipping out of this file behind exactly that defence. Where a settled
-// sentence uses one of those words, the word stays in a COMMENT, quoted, where
-// it belongs; the value beside it is spelled another way. The suite proves this
-// per word, over every export of both src modules, with no exemptions.
+// AND NO VALUE IN THIS FILE IS A PRIVILEGED OR OUTCOME WORD, under any name.
+// Neither the exported values nor the export names contain `ok`, `allow`,
+// `pass`, `satisfied`, `complete`, `admitted`, `favorable`, `unfavorable`,
+// `adverse`, `isolating`, `quarantine` or `fail` — as a whole string or as a
+// substring — because "it is only a vocabulary" is a distinction a consumer
+// reading the bytes cannot make. Where a settled sentence uses one of those
+// words, the word stays in a COMMENT, quoted, where it belongs. The suite
+// proves this per word, over every export of both src modules, with no
+// exemptions.
+//
+// THE ADJUDICATION OUTCOME VOCABULARY IS NOT HERE AT ALL, and that is the third
+// correction of PR 987. It lived here first as the bare words "fail", "pass" and
+// "quarantine", then as codes named `adverse`, `favorable` and `isolating` that
+// published the same three dispositions under new spelling — renaming is not
+// opacity, and an object key a consumer can read is a payload. A disposition is
+// the one thing in this slice only an authority may say, so the closed set of
+// three codes is module-private to the public module, no src module exports it,
+// and only its canonical digest is public, for a future receipt store to bind
+// to. The test side reaches the codes through the classifier test helper, which
+// production cannot import.
 
 function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
@@ -134,46 +145,6 @@ export const V5_ADJUDICATOR_ROLE = "stronger_adjudicator";
  * and pass, fail, or quarantine without endless spirals."
  */
 export const V5_MAX_REVIEW_ROUNDS = 2;
-
-/**
- * The closed adjudication outcomes, AS OPAQUE CODES.
- *
- * Q042.D1 closes the vocabulary to three dispositions — "pass, fail, or
- * quarantine". This slice never spells them that way, and the reason is the
- * defect the second review of PR 987 found: the bare word `pass` was reachable
- * from a public export and serialized into a public policy preimage, so a
- * consumer pattern-matching a payload could read an authorization out of a
- * vocabulary. A vocabulary is not an authorization, but a consumer cannot tell
- * the difference from the bytes, and the bytes are what ship.
- *
- * So each disposition is a code that is not the privileged word, does not
- * CONTAIN one as a substring, and is meaningless to a consumer that has not
- * resolved it against an authoritative receipt: the `-if-authoritative` suffix
- * is part of the string, not a comment about it. Nothing in this slice ever
- * produces one of these values — the outcome of an adjudication is read from
- * `seam:bounded-adjudication-receipt-store`, and that store does not exist —
- * and the public surface does not re-export this object at all.
- *
- * The mapping to Q042.D1's three words is recorded here, in a comment, where a
- * consumer cannot read it as a payload:
- *
- *   adverse    <- "fail"
- *   favorable  <- "pass"
- *   isolating  <- "quarantine"
- *
- * A future receipt store binds its stored disposition to one of these codes at
- * the seam. That translation is the store's job, and it is one more place a
- * privileged word has to pass through an authority to reach a consumer.
- */
-export const V5_ADJUDICATION_OUTCOME_CODES = deepFreeze({
-  adverse: "adjudication-outcome:adverse-if-authoritative",
-  favorable: "adjudication-outcome:favorable-if-authoritative",
-  isolating: "adjudication-outcome:isolating-if-authoritative",
-});
-
-/** The three codes, C-sorted: the closed set a receipt's disposition must be in. */
-export const V5_ADJUDICATION_OUTCOME_CODE_SET = deepFreeze(
-  Object.values(V5_ADJUDICATION_OUTCOME_CODES).sort());
 
 /** What a review round's ordinal obliges next. */
 export const V5_ROUND_TRANSITIONS = deepFreeze([
