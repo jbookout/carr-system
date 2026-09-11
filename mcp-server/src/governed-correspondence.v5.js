@@ -88,6 +88,22 @@
 // answers `unavailable` by name, exactly as F10 answers when a partner's device
 // is not deployed. Silence is never read as readiness.
 //
+// AND A CALLER'S WORD IS NEVER READINESS EITHER — the correction that shaped this
+// file's second version. Two facts here belong to owners that do not exist in
+// this repository: whether an authorized adapter is installed and reading, and
+// whether F01 ever emitted a given reconciliation item. Both were once taken from
+// the caller — an `availability: "available"` string, and a matching
+// `schema_version` — and a digest over either proves only that nobody edited the
+// caller's own object afterwards. So both are now looked up in stores that are
+// absent, both answer `unavailable` naming the seam that is owed, and the four
+// privileged outcomes downstream of them (`read`, `covered`, `drafted`,
+// `proposed`) plus `queued` are unreachable from caller input by construction.
+// The decision logic those outcomes guard is not deleted: it lives in the
+// `unwired*` predicates, which take fixture bindings, are unit-tested against
+// fixture shapes, and stamp `wired: false` on every result so a fixture answer
+// cannot be handed back into the wired interface. Honestly deferred means
+// unreachable, not reachable by saying the magic word.
+//
 // SUBJECT LINES AND MESSAGE BODIES ARE NOT IN THE SCHEMA, and their absence is
 // deliberate rather than unfinished. Q133 enumerates what DoctorCRE stores —
 // participants, account, provider IDs, time, attachments, related records, state
@@ -482,7 +498,7 @@ export const V5_J103_REFUSED_RESOLUTION_BASES = deepFreeze([
   "latest_observed_at", "latest_timestamp", "most_recent_write", "recency", "source_order",
 ]);
 
-export const V5_J103_CONFLICT_DECISIONS = deepFreeze(["queued", "refuse"]);
+export const V5_J103_CONFLICT_DECISIONS = deepFreeze(["queued", "refuse", "unavailable"]);
 
 /** Where external send authority lives. Not here, and not implied to be coming. */
 export const V5_J103_SEND_AUTHORITY_HOLDER = "human_partner_outside_carr";
@@ -721,6 +737,77 @@ function privacyClasses(value, path, { max = 16 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// THE TWO OWNER-ISSUED SEAMS THIS REPOSITORY DOES NOT HOLD.
+//
+// A label a caller types is not an observation, and freezing it is not an
+// attestation: a digest over a caller's object proves the object was not edited
+// afterwards, never that what it says is true. Two facts this module used to take
+// on a caller's word belong to owners that do not exist here yet — whether an
+// authorized adapter is installed and reading (the adapter's own read receipt),
+// and whether a reconciliation item was ever emitted (F01's store).
+//
+// Both lookups below therefore return null for every argument, and that is not a
+// stub waiting to be filled in with a default: it is the honest answer while the
+// store is absent. Everything privileged downstream of them — `read`, `covered`,
+// `drafted`, `proposed`, `queued` — is consequently UNREACHABLE from caller
+// input rather than discouraged by convention.
+//
+// The decision logic those outcomes used to guard is not deleted. It moves to the
+// `unwired*` predicates below, which take fixture shapes, are unit-tested against
+// them, and stamp `wired: false` on everything they return so a fixture result
+// can never be handed back into the wired interface.
+// ---------------------------------------------------------------------------
+
+/** Where an owner-issued adapter read receipt would come from. Nothing issues one. */
+export const V5_J103_ADAPTER_READ_RECEIPT_SEAM =
+  "step:journey-one-authorized-adapter-read-receipt";
+/** Where a store-issued F01 reconciliation item would come from. Nothing issues one. */
+export const V5_J103_RECONCILIATION_ITEM_SEAM =
+  "step:f01-store-issued-reconciliation-item";
+
+/**
+ * Look up the adapter read receipt for a binding.
+ *
+ * There is no receipt store in this repository, so there is no argument that
+ * makes this return one. The day a receipt store lands it is read HERE and
+ * nowhere else, which is what keeps availability a one-door fact.
+ */
+function issuedAdapterReadReceipt(_query) {
+  return null;
+}
+
+/**
+ * Look up the reconciliation item F01 issued for a caller-presented one.
+ *
+ * Same shape and same answer: F01 ships no store of emitted items, so an item
+ * handed in by a caller matches nothing, whatever its schema version says.
+ */
+function storeIssuedReconciliationItem(_item) {
+  return null;
+}
+
+/**
+ * The authoritative availability of an adapter binding, derived rather than read
+ * off the caller's config. Called at compile time AND again every time a compiled
+ * binding is used, so a hand-forged binding carrying a self-consistent digest
+ * cannot carry a self-issued `available`.
+ */
+export function resolveAdapterAvailability(query) {
+  const receipt = issuedAdapterReadReceipt(query);
+  return deepFreeze({
+    availability: receipt === null ? "unavailable" : receipt.availability,
+    availability_source: receipt === null
+      ? "no_adapter_read_receipt"
+      : "owner_issued_adapter_read_receipt",
+    availability_owed_seam: receipt === null ? V5_J103_ADAPTER_READ_RECEIPT_SEAM : null,
+  });
+}
+
+/** The two modes every evaluator runs in. Stamped on every result either produces. */
+const WIRED = Object.freeze({ wired: true, label: "wired" });
+const UNWIRED = Object.freeze({ wired: false, label: "unwired predicate" });
+
+// ---------------------------------------------------------------------------
 // The binding: one authorized adapter, one partner, one account.
 //
 // ONE PARTNER PER BINDING, STRUCTURALLY. There is no registry of bindings here
@@ -736,11 +823,35 @@ const BINDING_KEYS = Object.freeze([
 /**
  * Compile one adapter binding into a frozen, digest-bearing identity.
  *
- * The digest binds partner, account, source system, adapter kind and availability.
- * It is an identity for THIS binding and nothing else: not an enrollment, not an
- * attestation, and not evidence for any gate.
+ * THE CALLER'S `availability` IS RECORDED AS A CLAIM AND NEVER USED AS ONE. It is
+ * kept as `claimed_availability` because a claim worth refusing is worth writing
+ * down; the `availability` the rest of the module reads is derived from
+ * resolveAdapterAvailability, which has no receipt store to consult and therefore
+ * answers `unavailable` for every binding. A caller cannot type its way to a read.
+ *
+ * The digest binds partner, account, source system, adapter kind, BOTH the claim
+ * and the derived answer, and the mode. It is an identity for THIS binding and
+ * nothing else: not an enrollment, not an attestation, and not evidence for any
+ * gate — and, now, not a substitute for the receipt that is owed.
  */
 export function compileCorrespondenceBinding(config) {
+  return compileBinding(config, WIRED);
+}
+
+/**
+ * NOT WIRED. Compile a FIXTURE binding that carries the availability a test says
+ * it has, so the read/coverage/draft/proposal predicates can be exercised against
+ * fixture shapes while the wired interface stays honestly unavailable.
+ *
+ * A fixture binding is stamped `wired: false` inside its own digest preimage, so
+ * it is refused by every wired entry point — and the wired bindings are refused by
+ * the predicates, so neither path is a door into the other.
+ */
+export function compileCorrespondenceBindingFixture(config) {
+  return compileBinding(config, UNWIRED);
+}
+
+function compileBinding(config, mode) {
   assertObject(config, "config");
   assertNoCredentialFields(config, "config");
   assertNoDispatchFields(config, "config");
@@ -760,13 +871,22 @@ export function compileCorrespondenceBinding(config) {
     "config.adapter_kind", "unregistered_adapter_kind");
   const account = assertExternalIdent(config.account, "config.account", { maxLength: 255 });
   const source_system = assertExternalIdent(config.source_system, "config.source_system", { maxLength: 128 });
-  const availability = assertEnum(config.availability, V5_J103_AVAILABILITY_STATES,
+  const claimed_availability = assertEnum(config.availability, V5_J103_AVAILABILITY_STATES,
     "config.availability", "unknown_availability_state");
   const binding_version = assertSafeInteger(config.binding_version, "config.binding_version", { min: 1 });
+
+  // WIRED: the owner decides, and there is no owner here. UNWIRED: the fixture
+  // says what it says, and everything it produces is stamped as a fixture.
+  const resolved = mode.wired
+    ? resolveAdapterAvailability({ partner_slug, adapter_kind, account, source_system })
+    : { availability: claimed_availability,
+      availability_source: "fixture_declared_not_wired",
+      availability_owed_seam: V5_J103_ADAPTER_READ_RECEIPT_SEAM };
 
   const adapter = V5_J103_ADAPTERS[adapter_kind];
   const compiled = {
     compiled: true,
+    wired: mode.wired,
     schema_version: V5_J103_BINDING_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     partner_slug,
@@ -776,7 +896,10 @@ export function compileCorrespondenceBinding(config) {
     retrieval_class: adapter.retrieval_class,
     account,
     source_system,
-    availability,
+    claimed_availability,
+    availability: resolved.availability,
+    availability_source: resolved.availability_source,
+    availability_owed_seam: resolved.availability_owed_seam,
     binding_version,
   };
   const binding_digest = digest(bindingPreimage(compiled));
@@ -786,6 +909,7 @@ export function compileCorrespondenceBinding(config) {
 function bindingPreimage(binding) {
   return {
     schema_version: V5_J103_BINDING_SCHEMA_VERSION,
+    wired: binding.wired,
     tenant: binding.tenant,
     partner_slug: binding.partner_slug,
     adapter_kind: binding.adapter_kind,
@@ -794,36 +918,56 @@ function bindingPreimage(binding) {
     retrieval_class: binding.retrieval_class,
     account: binding.account,
     source_system: binding.source_system,
+    claimed_availability: binding.claimed_availability,
     availability: binding.availability,
+    availability_source: binding.availability_source,
+    availability_owed_seam: binding.availability_owed_seam,
     binding_version: binding.binding_version,
   };
 }
 
 /** The exact bytes a compiled binding hashes to, so a reviewer can check it by hand. */
 export function correspondenceBindingCanonicalBytes(binding) {
-  return canonicalJson(bindingPreimage(requireCompiledBinding(binding, "binding")));
+  assertObject(binding, "binding");
+  const mode = binding.wired === false ? UNWIRED : WIRED;
+  return canonicalJson(bindingPreimage(requireBinding(binding, "binding", mode)));
 }
 
 const COMPILED_BINDING_KEYS = Object.freeze([
-  "compiled", "schema_version", "tenant", "partner_slug", "adapter_kind", "adapter_mode",
-  "authoritative_home", "retrieval_class", "account", "source_system", "availability",
-  "binding_version", "binding_digest",
+  "compiled", "wired", "schema_version", "tenant", "partner_slug", "adapter_kind", "adapter_mode",
+  "authoritative_home", "retrieval_class", "account", "source_system", "claimed_availability",
+  "availability", "availability_source", "availability_owed_seam", "binding_version",
+  "binding_digest",
 ]);
 
 /**
- * Accept only a binding this module compiled and nobody has edited since.
+ * Accept only a binding this module compiled, in the mode the caller is in, that
+ * nobody has edited since — and whose availability the AUTHORITY still agrees with.
  *
- * The digest is RECOMPUTED rather than trusted, so a hand-forged object carrying
- * `compiled: true` and a copied digest is refused: the bytes have to hash to the
- * claim. This is what stops a caller routing around compile-time validation —
- * including the availability check — by fabricating the compiled shape directly.
+ * TWO CHECKS, AND THE SECOND IS THE ONE THAT MATTERS. The digest is recomputed
+ * rather than trusted, which refuses an object edited after compilation. But a
+ * digest is a consistency check and nothing more: a caller can hand-build the
+ * whole compiled shape with `availability: "available"` and hash it correctly, and
+ * the digest has no opinion about that at all. So availability is RE-DERIVED from
+ * resolveAdapterAvailability on every use and compared to what the binding
+ * carries. While no receipt store exists, that comparison refuses every binding
+ * claiming to be available, by name, and `read` has no path left to it.
+ *
+ * The mode check keeps the fixture predicates and the wired interface apart: a
+ * fixture binding cannot be spent on a wired call, and vice versa.
  */
-function requireCompiledBinding(binding, path) {
+function requireBinding(binding, path, mode) {
   assertObject(binding, path);
   assertClosedKeys(binding, COMPILED_BINDING_KEYS, path);
   assertRequiredKeys(binding, COMPILED_BINDING_KEYS, path);
   if (binding.compiled !== true || binding.schema_version !== V5_J103_BINDING_SCHEMA_VERSION) {
     fail("binding_not_compiled", `${path} must be the output of compileCorrespondenceBinding`, { path });
+  }
+  if (binding.wired !== mode.wired) {
+    fail("binding_mode_mismatch",
+      `${path} was compiled ${binding.wired === true ? "wired" : "as a fixture"} and this is the`
+      + ` ${mode.label} path; a fixture binding is not a binding`,
+      { path, binding_wired: binding.wired === true, expected_wired: mode.wired });
   }
   assertSha256Ref(binding.binding_digest, `${path}.binding_digest`);
   const recomputed = digest(bindingPreimage(binding));
@@ -832,7 +976,29 @@ function requireCompiledBinding(binding, path) {
       `${path} no longer hashes to its own digest; it was edited after compilation`,
       { path, expected: binding.binding_digest, actual: recomputed });
   }
+  if (mode.wired) {
+    const resolved = resolveAdapterAvailability({
+      partner_slug: binding.partner_slug,
+      adapter_kind: binding.adapter_kind,
+      account: binding.account,
+      source_system: binding.source_system,
+    });
+    if (binding.availability !== resolved.availability
+        || binding.availability_source !== resolved.availability_source) {
+      fail("binding_availability_not_owner_issued",
+        `${path} carries availability "${String(binding.availability)}", which no owner issued;`
+        + ` availability is ${resolved.availability} until ${V5_J103_ADAPTER_READ_RECEIPT_SEAM}`
+        + " produces a read receipt, and a digest over a caller's claim is not that receipt",
+        { path, claimed: binding.availability, authoritative: resolved.availability,
+          owed_seam: V5_J103_ADAPTER_READ_RECEIPT_SEAM });
+    }
+  }
   return binding;
+}
+
+/** The wired accessor, kept as its own name so call sites read as what they are. */
+function requireCompiledBinding(binding, path) {
+  return requireBinding(binding, path, WIRED);
 }
 
 // ---------------------------------------------------------------------------
@@ -977,12 +1143,52 @@ function assertRelatedRecords(value, path) {
  * AMBIGUITY RESOLVES TO PRIVATE. Q134's boundary holds ambiguity private, so
  * `ambiguous` is its own answer and never falls through to a read. There is no
  * default and no confidence threshold that could turn a maybe into a yes.
+ *
+ * WIRED, STEP 3 IS THE ONLY STEP THAT EVER ANSWERS. Availability is the owner's
+ * fact and no owner issues it here, so every wired call stops at `unavailable`
+ * naming the owed seam. Steps 4 to 6 are real logic and they are proved against
+ * fixtures through unwiredReadCorrespondenceThread, which is the same code in the
+ * same order — marked `wired: false` so its results go nowhere near the interface.
  */
 export function readCorrespondenceThread(request) {
+  return correspondenceReadCore(request, WIRED);
+}
+
+/**
+ * NOT WIRED. The read predicate over a FIXTURE binding, for unit tests only.
+ *
+ * It reaches `read` because the fixture says the adapter is available, and that
+ * is the whole difference: nothing it returns is a read of anything, every result
+ * carries `wired: false`, and the wired draft and proposal seams refuse a
+ * `wired: false` read outright.
+ */
+export function unwiredReadCorrespondenceThread(request) {
+  return correspondenceReadCore(request, UNWIRED);
+}
+
+/**
+ * The reads this module actually produced, by mode.
+ *
+ * A read result is a plain frozen object, so a caller can build one that looks
+ * exactly like it — `decision: "read"`, a real thread, the right binding digest —
+ * and hand it to the draft seam. Every field-by-field check would pass, because
+ * every field came from the caller. Membership of these sets cannot be forged: the
+ * only way an object gets in is for this module to have returned it, and the wired
+ * path never returns one carrying a thread.
+ */
+const PRODUCED_READS = Object.freeze({ wired: new WeakSet(), unwired: new WeakSet() });
+
+function correspondenceReadCore(request, mode) {
+  const result = readDecisionCore(request, mode);
+  PRODUCED_READS[mode.wired ? "wired" : "unwired"].add(result);
+  return result;
+}
+
+function readDecisionCore(request, mode) {
   assertObject(request, "request");
   assertClosedKeys(request, READ_REQUEST_KEYS, "request");
   assertRequiredKeys(request, READ_REQUEST_KEYS, "request");
-  const binding = requireCompiledBinding(request.binding, "request.binding");
+  const binding = requireBinding(request.binding, "request.binding", mode);
   const now = assertInstant(request.now, "request.now");
 
   const raw = assertObject(request.thread, "request.thread");
@@ -1029,6 +1235,9 @@ export function readCorrespondenceThread(request) {
   const base = {
     schema_version: V5_J103_THREAD_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
+    // Which of the two paths produced this. A `wired: false` answer is a predicate
+    // run against a fixture and is refused everywhere the wired interface is fed.
+    wired: mode.wired,
     binding_digest: binding.binding_digest,
     partner_slug: binding.partner_slug,
     provenance,
@@ -1045,11 +1254,16 @@ export function readCorrespondenceThread(request) {
     effects: V5_NO_EFFECTS,
   };
 
-  // Step 3. An adapter nobody has observed is not an adapter.
+  // Step 3. An adapter nobody has ISSUED A RECEIPT FOR is not an adapter. On the
+  // wired path this is unconditional, because the availability the binding carries
+  // was derived from an authority that has nothing to say yet.
   if (V5_J103_NON_READING_AVAILABILITY.includes(binding.availability)) {
     return deepFreeze({
       decision: "unavailable", reason_id: "authorized_adapter_unavailable", ...base,
       availability: binding.availability,
+      availability_source: binding.availability_source,
+      claimed_availability: binding.claimed_availability,
+      owed_seam: V5_J103_ADAPTER_READ_RECEIPT_SEAM,
       adapter_kinds_registered: [...V5_J103_ADAPTER_KINDS],
     });
   }
@@ -1145,12 +1359,25 @@ const COVERAGE_REQUEST_KEYS = Object.freeze(["binding", "requested_partner_slugs
  * Anything else — two partners, or the other partner — is `unavailable`, not
  * `refuse`: the coverage does not exist to be granted or denied, and calling it a
  * refusal would suggest a permission somewhere could change the answer.
+ *
+ * `covered` IS UNREACHABLE ON THE WIRED PATH for the same reason `read` is: it is
+ * coverage BY AN ADAPTER, and no adapter read receipt exists. The predicate below
+ * proves the single-partner rendering against fixtures.
  */
 export function projectCorrespondenceCoverage(request) {
+  return coverageCore(request, WIRED);
+}
+
+/** NOT WIRED. The coverage predicate over a fixture binding, for unit tests only. */
+export function unwiredProjectCorrespondenceCoverage(request) {
+  return coverageCore(request, UNWIRED);
+}
+
+function coverageCore(request, mode) {
   assertObject(request, "request");
   assertClosedKeys(request, COVERAGE_REQUEST_KEYS, "request");
   assertRequiredKeys(request, COVERAGE_REQUEST_KEYS, "request");
-  const binding = requireCompiledBinding(request.binding, "request.binding");
+  const binding = requireBinding(request.binding, "request.binding", mode);
   assertArray(request.requested_partner_slugs, "request.requested_partner_slugs", { min: 1, max: 8 });
   const requested = request.requested_partner_slugs.map((slug, index) =>
     assertInternalRef(slug, `request.requested_partner_slugs[${index}]`, { maxLength: 64 }));
@@ -1159,6 +1386,7 @@ export function projectCorrespondenceCoverage(request) {
   const base = {
     schema_version: V5_J103_COVERAGE_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
+    wired: mode.wired,
     binding_digest: binding.binding_digest,
     requested_partner_slugs: unique,
     ...coverageStatement(binding),
@@ -1181,6 +1409,9 @@ export function projectCorrespondenceCoverage(request) {
     return deepFreeze({
       decision: "unavailable", reason_id: "authorized_adapter_unavailable", ...base,
       availability: binding.availability,
+      availability_source: binding.availability_source,
+      claimed_availability: binding.claimed_availability,
+      owed_seam: V5_J103_ADAPTER_READ_RECEIPT_SEAM,
     });
   }
   return deepFreeze({
@@ -1205,11 +1436,20 @@ const DRAFT_KEYS = Object.freeze([
  * ignoring the answer it already has, the same way F10 throws on a candidate
  * built from a withheld classification.
  */
-function requireReadThread(value, binding, path) {
+function requireReadThread(value, binding, path, mode) {
   const read = assertObject(value, path);
   if (read.schema_version !== V5_J103_THREAD_SCHEMA_VERSION) {
     fail("uncompiled_thread_read", `${path} must be the result of readCorrespondenceThread`,
       { path, schema_version: typeof read.schema_version === "string" ? read.schema_version : null });
+  }
+  // A fixture read is not a read. The predicates reach `read` because a fixture
+  // told them the adapter was available; letting that result cross into the wired
+  // seam would put the caller's word back in charge by a longer route.
+  if (read.wired !== mode.wired) {
+    fail("thread_read_mode_mismatch",
+      `${path} came from the ${read.wired === true ? "wired" : "unwired predicate"} path and this`
+      + ` is the ${mode.label} path; a fixture result is not correspondence`,
+      { path, read_wired: read.wired === true, expected_wired: mode.wired });
   }
   if (read.decision !== "read" || read.thread === null || read.thread === undefined) {
     fail("work_from_non_readable_thread",
@@ -1220,6 +1460,15 @@ function requireReadThread(value, binding, path) {
   if (read.binding_digest !== binding.binding_digest) {
     fail("thread_outside_binding",
       `${path} was read through a different binding; one partner's thread is not another's to work from`,
+      { path });
+  }
+  // Last, and the check the others cannot make: this object has to BE one this
+  // module returned, not one shaped like it. Every field above is a field a caller
+  // could have typed.
+  if (!PRODUCED_READS[mode.wired ? "wired" : "unwired"].has(read)) {
+    fail("thread_read_not_produced_here",
+      `${path} is shaped like a read this module produced and is not one; a draft is built from`
+      + " correspondence that was actually read, never from an object describing one",
       { path });
   }
   return read;
@@ -1235,12 +1484,25 @@ function requireReadThread(value, binding, path) {
  * attempt to instruct otherwise. `requires_human_send` says who finishes the job.
  */
 export function draftCorrespondence(request) {
+  return draftCore(request, WIRED);
+}
+
+/**
+ * NOT WIRED. The draft predicate, which takes a FIXTURE read and is unit-tested
+ * against fixture shapes. The wired seam cannot be fed one: `drafted` is
+ * unreachable there because `read` is.
+ */
+export function unwiredDraftCorrespondence(request) {
+  return draftCore(request, UNWIRED);
+}
+
+function draftCore(request, mode) {
   assertObject(request, "request");
   assertClosedKeys(request, DRAFT_REQUEST_KEYS, "request");
   assertRequiredKeys(request, DRAFT_REQUEST_KEYS, "request");
-  const binding = requireCompiledBinding(request.binding, "request.binding");
+  const binding = requireBinding(request.binding, "request.binding", mode);
   const now = assertInstant(request.now, "request.now");
-  const read = requireReadThread(request.thread_read, binding, "request.thread_read");
+  const read = requireReadThread(request.thread_read, binding, "request.thread_read", mode);
 
   const raw = assertObject(request.draft, "request.draft");
   // The draft side runs the credential, dispatch and address scans — but NOT the
@@ -1274,6 +1536,7 @@ export function draftCorrespondence(request) {
   const base = {
     schema_version: V5_J103_DRAFT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
+    wired: mode.wired,
     binding_digest: binding.binding_digest,
     partner_slug: binding.partner_slug,
     thread_ref: read.thread.thread_ref,
@@ -1396,12 +1659,25 @@ function assertNoAuthorityClaimFields(object, path) {
  * names the one function that can change that.
  */
 export function evaluateProposedFact(request) {
+  return proposedFactCore(request, WIRED);
+}
+
+/**
+ * NOT WIRED. The proposed-fact predicate over a FIXTURE read. It builds the exact
+ * F01 observation shape and F01 still refuses it; what it cannot do is arrive from
+ * a caller's own say-so, because the fixture read it needs has no wired twin.
+ */
+export function unwiredEvaluateProposedFact(request) {
+  return proposedFactCore(request, UNWIRED);
+}
+
+function proposedFactCore(request, mode) {
   assertObject(request, "request");
   assertClosedKeys(request, PROPOSAL_REQUEST_KEYS, "request");
   assertRequiredKeys(request, PROPOSAL_REQUEST_KEYS, "request");
-  const binding = requireCompiledBinding(request.binding, "request.binding");
+  const binding = requireBinding(request.binding, "request.binding", mode);
   const now = assertInstant(request.now, "request.now");
-  const read = requireReadThread(request.thread_read, binding, "request.thread_read");
+  const read = requireReadThread(request.thread_read, binding, "request.thread_read", mode);
 
   const raw = assertObject(request.proposal, "request.proposal");
   assertNoCredentialFields(raw, "request.proposal");
@@ -1425,6 +1701,7 @@ export function evaluateProposedFact(request) {
   const base = {
     schema_version: V5_J103_PROPOSAL_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
+    wired: mode.wired,
     binding_digest: binding.binding_digest,
     partner_slug: binding.partner_slug,
     thread_ref: read.thread.thread_ref,
@@ -1547,8 +1824,31 @@ function assertPresentedSide(value, path) {
  * is field authority and evidence. A caller proposing recency is refused BY NAME
  * rather than quietly ignored, because Q076's prohibition is the point of the
  * clause and a silently-dropped argument teaches a caller nothing.
+ *
+ * WHY THE WIRED PATH NEVER QUEUES. A schema-version string is a shape, not a
+ * provenance: an item carrying it was not thereby emitted by F01, and its owner,
+ * home, conflict kind and sides were typed by whoever built the object. Queueing
+ * on that would put a caller-authored prompt in front of a partner and call it a
+ * conflict the system found — while this module's own gap list says F01 ships no
+ * field-authority registry for correspondence-derived entities at all. So the
+ * wired seam looks the item up in the store F01 would have issued it from, finds
+ * no store, and answers `unavailable` naming the seam that is owed.
  */
 export function buildSourceConflictQueueEntry(request) {
+  return conflictEntryCore(request, WIRED);
+}
+
+/**
+ * NOT WIRED. The conflict rendering predicate, over a FIXTURE item shaped like the
+ * one F01 emits. Everything Q076 asks a review surface to do — both values, the
+ * owning side computed from F01's own owner_source, the digest check, the refused
+ * resolution bases — is proved here against fixtures and reaches no partner.
+ */
+export function unwiredBuildSourceConflictQueueEntry(request) {
+  return conflictEntryCore(request, UNWIRED);
+}
+
+function conflictEntryCore(request, mode) {
   assertObject(request, "request");
   assertClosedKeys(request, CONFLICT_REQUEST_KEYS, "request");
   assertRequiredKeys(request, ["now", "presented_values", "reconciliation_item"], "request");
@@ -1561,6 +1861,34 @@ export function buildSourceConflictQueueEntry(request) {
       { expected: V5_F01_RECONCILIATION_SCHEMA_VERSION,
         schema_version: typeof item.schema_version === "string" ? item.schema_version : null });
   }
+
+  // The provenance check the schema version cannot do. It runs before any field of
+  // the item is read, so no caller-supplied owner, route or side reaches a queue
+  // entry by any path, well-formed or otherwise.
+  if (mode.wired && storeIssuedReconciliationItem(item) === null) {
+    return deepFreeze({
+      decision: "unavailable",
+      reason_id: "reconciliation_item_not_store_issued",
+      schema_version: V5_J103_CONFLICT_SCHEMA_VERSION,
+      tenant: ORGANIZATION_TENANT_ID,
+      wired: true,
+      owed_seam: V5_J103_RECONCILIATION_ITEM_SEAM,
+      field_authority_gap: "no_mailbox_field_authority_registry",
+      // Nothing is shown to anybody: an unavailable answer is not a review prompt.
+      visible: false,
+      queued_at: null,
+      sides: null,
+      applied: false,
+      resolved_by_machine: false,
+      resolution_basis: V5_J103_RESOLUTION_BASIS,
+      timestamp_alone_is_not_authority: true,
+      refused_resolution_bases: [...V5_J103_REFUSED_RESOLUTION_BASES],
+      dispatchable: false,
+      provider_operation: null,
+      effects: V5_NO_EFFECTS,
+    });
+  }
+
   const conflict_kind = assertEnum(item.conflict_kind, V5_J103_CONFLICT_KINDS,
     "request.reconciliation_item.conflict_kind", "unknown_conflict_kind");
 
@@ -1583,6 +1911,7 @@ export function buildSourceConflictQueueEntry(request) {
   const base = {
     schema_version: V5_J103_CONFLICT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
+    wired: mode.wired,
     entity: assertExternalIdent(item.entity, "request.reconciliation_item.entity", { maxLength: 128 }),
     field: assertExternalIdent(item.field, "request.reconciliation_item.field", { maxLength: 128 }),
     conflict_kind,
@@ -1727,6 +2056,14 @@ export function v5J103PolicyPreimage() {
       })),
       availability_states: [...V5_J103_AVAILABILITY_STATES],
       non_reading_availability: [...V5_J103_NON_READING_AVAILABILITY],
+      // The caller may state a claim; the claim decides nothing.
+      availability_caller_supplied: false,
+      availability_authority: V5_J103_ADAPTER_READ_RECEIPT_SEAM,
+      availability_authority_present: false,
+      read_reachable_from_caller_input: false,
+      covered_reachable_from_caller_input: false,
+      drafted_reachable_from_caller_input: false,
+      proposed_reachable_from_caller_input: false,
       decisions: [...V5_J103_THREAD_DECISIONS],
       relevance_states: [...V5_J103_RELEVANCE_STATES],
       correspondence_states: [...V5_J103_CORRESPONDENCE_STATES],
@@ -1785,6 +2122,10 @@ export function v5J103PolicyPreimage() {
       owner_computed_from_f01: true,
       resolved_by_machine: false,
       conflict_detection_authority: "record-source-authority.v5.js",
+      // A schema version is a shape. Issuance is the fact, and nothing issues one.
+      reconciliation_item_authority: V5_J103_RECONCILIATION_ITEM_SEAM,
+      reconciliation_item_authority_present: false,
+      queued_reachable_from_caller_input: false,
     },
     acceptance: {
       acceptance_hook: V5_J103_ACCEPTANCE_HOOK,
@@ -1837,6 +2178,15 @@ export function v5J103CorrespondenceProjection(options = {}) {
     journey_one_production_outcome_present: false,
     combined_partner_coverage_available: false,
     external_send_capability_present: false,
+    // The four privileged outcomes, and whether a caller can reach any of them.
+    // All four are owed to seams this repository does not hold.
+    adapter_read_receipt_present: false,
+    reconciliation_item_store_present: false,
+    read_reachable: false,
+    covered_reachable: false,
+    drafted_reachable: false,
+    proposed_reachable: false,
+    conflict_queue_reachable: false,
     accepts_anything: false,
     gaps: governedCorrespondenceGaps(),
     effects: V5_NO_EFFECTS,
@@ -1859,18 +2209,24 @@ export function governedCorrespondenceGaps() {
     },
     {
       gap: "no_mailbox_field_authority_registry",
-      where: "the future Neon-backed F01 field-authority registry",
-      what: "F01 ships no registry entry for a correspondence-derived entity, so the observation"
-        + " candidate evaluateProposedFact builds cannot yet be resolved against one. This"
-        + " module invents no entry to sit under and no owner_source for a field it reads about",
+      where: V5_J103_RECONCILIATION_ITEM_SEAM,
+      what: "F01 ships no registry entry for a correspondence-derived entity and no store of"
+        + " issued reconciliation items, so the observation candidate evaluateProposedFact builds"
+        + " cannot be resolved against one and a caller-presented item cannot be shown to have"
+        + " come from F01 at all. The wired queue seam therefore answers `unavailable` for every"
+        + " item: a queued review prompt is a partner's attention, and no caller buys that with a"
+        + " schema-version string. The rendering is kept as a predicate over fixtures",
       landed: false,
     },
     {
       gap: "no_available_adapter_receipt",
-      where: "the partner's own device",
-      what: "a binding's `availability` is a caller-supplied observation, not an attestation."
-        + " Nothing in this repository proves an authorized adapter is installed and reading, so"
-        + " an `available` binding is a claim the caller makes and this module answers under",
+      where: V5_J103_ADAPTER_READ_RECEIPT_SEAM,
+      what: "nothing in this repository proves an authorized adapter is installed and reading. A"
+        + " caller's `availability` is recorded as `claimed_availability` and decides nothing:"
+        + " availability is re-derived from the absent receipt store at compile time and again on"
+        + " every use, so it is `unavailable` for every binding and `read` is unreachable from any"
+        + " caller input. The read, coverage, draft and proposal logic is unit-tested as an"
+        + " explicitly unwired predicate against fixture shapes",
       landed: false,
     },
     {

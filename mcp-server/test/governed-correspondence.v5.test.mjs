@@ -27,6 +27,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+// Read by the dependency-boundary test at the bottom of this file, which reads
+// J103's own source and the rest of mcp-server/src the way a linter would. The
+// module under test still reaches no filesystem; this suite does.
+import { readFileSync, readdirSync } from "node:fs";
 
 import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
@@ -45,10 +49,14 @@ import {
   compilePartnerInstallation,
   evaluateConnectorOperation,
 } from "../src/partner-mail-calendar.v5.js";
+import * as F10_NAMESPACE from "../src/partner-mail-calendar.v5.js";
+import * as J103_NAMESPACE from "../src/governed-correspondence.v5.js";
 import {
   V5J103Error,
   V5_J103_ADAPTERS,
   V5_J103_ADAPTER_KINDS,
+  V5_J103_ADAPTER_READ_RECEIPT_SEAM,
+  V5_J103_RECONCILIATION_ITEM_SEAM,
   V5_J103_AVAILABILITY_STATES,
   V5_J103_BINDING_SCHEMA_VERSION,
   V5_J103_CONFLICT_KINDS,
@@ -72,12 +80,19 @@ import {
   assertJ103DecisionBinding,
   buildSourceConflictQueueEntry,
   compileCorrespondenceBinding,
+  compileCorrespondenceBindingFixture,
   correspondenceBindingCanonicalBytes,
   draftCorrespondence,
   evaluateProposedFact,
   governedCorrespondenceGaps,
   projectCorrespondenceCoverage,
   readCorrespondenceThread,
+  resolveAdapterAvailability,
+  unwiredBuildSourceConflictQueueEntry,
+  unwiredDraftCorrespondence,
+  unwiredEvaluateProposedFact,
+  unwiredProjectCorrespondenceCoverage,
+  unwiredReadCorrespondenceThread,
   v5J103AbsentWriteOperations,
   v5J103CorrespondenceProjection,
   v5J103DecisionSubsetDigest,
@@ -98,8 +113,8 @@ const DELL_ACCOUNT = "dell@carr-test.invalid";
 
 const sha = suffix => `sha256:${suffix.padEnd(64, "0").slice(0, 64)}`;
 
-function binding(overrides = {}) {
-  return compileCorrespondenceBinding({
+function bindingConfig(overrides = {}) {
+  return {
     partner_slug: "joe",
     adapter_kind: V5_F10_ADAPTER_KIND,
     account: JOE_ACCOUNT,
@@ -107,7 +122,25 @@ function binding(overrides = {}) {
     availability: "available",
     binding_version: 1,
     ...overrides,
-  });
+  };
+}
+
+/**
+ * THE FIXTURE BINDING, and it is the one nearly every rendering test below uses.
+ *
+ * It carries the availability the test says it does, which is exactly what the
+ * WIRED compiler refuses to do: no adapter read receipt exists in this
+ * repository, so compileCorrespondenceBinding derives `unavailable` for every
+ * binding and a caller cannot type its way to a read. Everything a fixture
+ * binding produces is stamped `wired: false` and is refused by the wired seams.
+ */
+function binding(overrides = {}) {
+  return compileCorrespondenceBindingFixture(bindingConfig(overrides));
+}
+
+/** The wired binding a real caller gets. Its availability is never the config's. */
+function wiredBinding(overrides = {}) {
+  return compileCorrespondenceBinding(bindingConfig(overrides));
 }
 
 function thread(overrides = {}) {
@@ -145,8 +178,9 @@ function thread(overrides = {}) {
   };
 }
 
+/** A FIXTURE read: the predicate, not the interface. Every result says so. */
 function read(overrides = {}, b = binding()) {
-  return readCorrespondenceThread({ binding: b, thread: thread(overrides), now: NOW });
+  return unwiredReadCorrespondenceThread({ binding: b, thread: thread(overrides), now: NOW });
 }
 
 function draft(overrides = {}) {
@@ -283,6 +317,7 @@ test("a compiled binding names one partner, one account and one read-only adapte
   assert.equal(correspondenceBindingCanonicalBytes(b), canonicalJson(JSON.parse(
     canonicalJson({
       schema_version: V5_J103_BINDING_SCHEMA_VERSION,
+      wired: b.wired,
       tenant: b.tenant,
       partner_slug: b.partner_slug,
       adapter_kind: b.adapter_kind,
@@ -291,9 +326,16 @@ test("a compiled binding names one partner, one account and one read-only adapte
       retrieval_class: b.retrieval_class,
       account: b.account,
       source_system: b.source_system,
+      claimed_availability: b.claimed_availability,
       availability: b.availability,
+      availability_source: b.availability_source,
+      availability_owed_seam: b.availability_owed_seam,
       binding_version: b.binding_version,
     }))));
+  // The preimage carries the claim AND the derived answer AND the mode, so the
+  // digest of a fixture binding can never collide with a wired one's.
+  assert.equal(b.wired, false);
+  assert.notEqual(b.binding_digest, wiredBinding().binding_digest);
 });
 
 test("a credential in the binding config is refused by field name, before any value is read", () => {
@@ -324,14 +366,14 @@ test("a partner slug is a CARR reference, cannot be an address, and must be a pa
 
 test("a binding edited after compilation no longer hashes to its own digest", () => {
   const forged = { ...binding(), account: DELL_ACCOUNT };
-  assert.throws(() => readCorrespondenceThread({ binding: forged, thread: thread(), now: NOW }),
+  assert.throws(() => unwiredReadCorrespondenceThread({ binding: forged, thread: thread(), now: NOW }),
     e => e.code === "binding_digest_mismatch");
 });
 
 test("a hand-built object claiming to be compiled is refused", () => {
   const b = binding();
   const forged = { ...b, compiled: false };
-  assert.throws(() => readCorrespondenceThread({ binding: forged, thread: thread(), now: NOW }),
+  assert.throws(() => unwiredReadCorrespondenceThread({ binding: forged, thread: thread(), now: NOW }),
     e => e.code === "binding_not_compiled");
 });
 
@@ -475,7 +517,7 @@ test("a thread observed after now refuses rather than being read", () => {
 test("raw correspondence never crosses the seam, refused by field name", () => {
   for (const field of ["body", "body_html", "message_text", "subject_line", "preview_snippet",
     "attachment_bytes"]) {
-    assert.throws(() => readCorrespondenceThread({
+    assert.throws(() => unwiredReadCorrespondenceThread({
       binding: binding(), thread: { ...thread(), [field]: "x" }, now: NOW,
     }), e => e instanceof V5J103Error && e.code === "source_content_must_not_cross_seam",
     `expected ${field} to be refused`);
@@ -492,7 +534,7 @@ test("the attachment descriptor holds no filename and no bytes", () => {
 test("a dispatch instruction is refused before any value is read", () => {
   for (const field of ["send_after", "dispatch_at", "deliver_to", "smtp_relay",
     "schedule_send_at", "recipient_address"]) {
-    assert.throws(() => readCorrespondenceThread({
+    assert.throws(() => unwiredReadCorrespondenceThread({
       binding: binding(), thread: { ...thread(), [field]: "x" }, now: NOW,
     }), e => e.code === "dispatch_instruction_refused", `expected ${field} to be refused`);
   }
@@ -523,10 +565,10 @@ test("a routable address anywhere but the partner's own account is refused", () 
 test("a draft body carrying an address or a phone number is refused", () => {
   const b = binding();
   const r = read({}, b);
-  assert.throws(() => draftCorrespondence({ binding: b, thread_read: r, now: NOW,
+  assert.throws(() => unwiredDraftCorrespondence({ binding: b, thread_read: r, now: NOW,
     draft: draft({ draft_body: "Reply to counterparty@elsewhere.invalid with the terms." }) }),
   e => e.code === "routable_address_refused");
-  assert.throws(() => draftCorrespondence({ binding: b, thread_read: r, now: NOW,
+  assert.throws(() => unwiredDraftCorrespondence({ binding: b, thread_read: r, now: NOW,
     draft: draft({ draft_body: "Call them on +1 555 010 4477 to confirm." }) }),
   e => e.code === "routable_address_refused");
 });
@@ -536,7 +578,7 @@ test("a guard can never refuse a field this module's own schemas require", () =>
   // asymmetry visible. `draft_body` contains "body" and is legitimate precisely
   // because the draft seam does not run the source-content scan.
   const b = binding();
-  const drafted = capture(draftCorrespondence({
+  const drafted = capture(unwiredDraftCorrespondence({
     binding: b, thread_read: read({}, b), now: NOW, draft: draft(),
   }));
   assert.equal(drafted.decision, "drafted");
@@ -549,19 +591,19 @@ test("a guard can never refuse a field this module's own schemas require", () =>
 
 test("both-partner coverage is unavailable from every input", () => {
   const b = binding();
-  const combined = capture(projectCorrespondenceCoverage({
+  const combined = capture(unwiredProjectCorrespondenceCoverage({
     binding: b, requested_partner_slugs: ["joe", "dell"],
   }));
   assert.equal(combined.decision, "unavailable");
   assert.equal(combined.reason_id, "combined_partner_coverage_unavailable");
 
-  const other = capture(projectCorrespondenceCoverage({
+  const other = capture(unwiredProjectCorrespondenceCoverage({
     binding: b, requested_partner_slugs: ["dell"],
   }));
   assert.equal(other.decision, "unavailable");
   assert.equal(other.reason_id, "partner_outside_binding_not_covered");
 
-  const own = capture(projectCorrespondenceCoverage({
+  const own = capture(unwiredProjectCorrespondenceCoverage({
     binding: b, requested_partner_slugs: ["joe"],
   }));
   assert.equal(own.decision, "covered");
@@ -571,7 +613,7 @@ test("both-partner coverage is unavailable from every input", () => {
 });
 
 test("an unavailable adapter cannot even cover its own partner", () => {
-  const result = capture(projectCorrespondenceCoverage({
+  const result = capture(unwiredProjectCorrespondenceCoverage({
     binding: binding({ availability: "unknown" }), requested_partner_slugs: ["joe"],
   }));
   assert.equal(result.decision, "unavailable");
@@ -592,7 +634,7 @@ test("every thread answer states single-partner coverage, including the refusals
 
 test("a draft is produced for a human to send and names no provider operation", () => {
   const b = binding();
-  const result = capture(draftCorrespondence({
+  const result = capture(unwiredDraftCorrespondence({
     binding: b, thread_read: read({}, b), now: NOW, draft: draft(),
   }));
   assert.equal(result.decision, "drafted");
@@ -646,9 +688,9 @@ test("a withheld or excluded thread cannot become a draft or a proposal", () => 
   for (const overrides of [{ relevance_state: "ambiguous" }, { relevance_state: "unrelated" },
     { declared_data_classes: ["phi"] }]) {
     const r = read(overrides, b);
-    assert.throws(() => draftCorrespondence({ binding: b, thread_read: r, now: NOW, draft: draft() }),
+    assert.throws(() => unwiredDraftCorrespondence({ binding: b, thread_read: r, now: NOW, draft: draft() }),
       e => e.code === "work_from_non_readable_thread");
-    assert.throws(() => evaluateProposedFact({ binding: b, thread_read: r, now: NOW,
+    assert.throws(() => unwiredEvaluateProposedFact({ binding: b, thread_read: r, now: NOW,
       proposal: proposal() }), e => e.code === "work_from_non_readable_thread");
   }
 });
@@ -660,10 +702,10 @@ test("a hand-built read result claiming a withheld thread is still refused", () 
   const b = binding();
   const genuine = read({}, b);
   const forged = { ...read({ relevance_state: "ambiguous" }, b), thread: genuine.thread };
-  assert.throws(() => draftCorrespondence({
+  assert.throws(() => unwiredDraftCorrespondence({
     binding: b, thread_read: forged, now: NOW, draft: draft(),
   }), e => e.code === "work_from_non_readable_thread");
-  assert.throws(() => evaluateProposedFact({
+  assert.throws(() => unwiredEvaluateProposedFact({
     binding: b, thread_read: forged, now: NOW, proposal: proposal(),
   }), e => e.code === "work_from_non_readable_thread");
 });
@@ -672,14 +714,14 @@ test("one partner's thread is not another partner's to draft from", () => {
   const joe = binding();
   const dell = binding({ partner_slug: "dell", account: DELL_ACCOUNT });
   const joeRead = read({}, joe);
-  assert.throws(() => draftCorrespondence({
+  assert.throws(() => unwiredDraftCorrespondence({
     binding: dell, thread_read: joeRead, now: NOW, draft: draft(),
   }), e => e.code === "thread_outside_binding");
 });
 
 test("a recipient who is not on the thread is refused rather than quietly added", () => {
   const b = binding();
-  const result = capture(draftCorrespondence({
+  const result = capture(unwiredDraftCorrespondence({
     binding: b, thread_read: read({}, b), now: NOW,
     draft: draft({ intended_participant_refs: ["party:someone-else-test"] }),
   }));
@@ -692,18 +734,18 @@ test("a recipient who is not on the thread is refused rather than quietly added"
 test("a reply into a resolved thread, and a draft dated before the read, both refuse", () => {
   const b = binding();
   const resolved = read({ correspondence_state: "resolved" }, b);
-  assert.equal(capture(draftCorrespondence({
+  assert.equal(capture(unwiredDraftCorrespondence({
     binding: b, thread_read: resolved, now: NOW, draft: draft(),
   })).reason_id, "reply_into_resolved_thread_refused");
 
-  assert.equal(capture(draftCorrespondence({
+  assert.equal(capture(unwiredDraftCorrespondence({
     binding: b, thread_read: read({}, b), now: "2026-09-10T17:59:00Z", draft: draft(),
   })).reason_id, "draft_precedes_thread_observation");
 });
 
 test("a draft carrying a prohibited class refuses on S01's answer", () => {
   const b = binding();
-  const result = capture(draftCorrespondence({
+  const result = capture(unwiredDraftCorrespondence({
     binding: b, thread_read: read({}, b), now: NOW,
     draft: draft({ declared_data_classes: ["patient_record"] }),
   }));
@@ -719,7 +761,7 @@ test("a draft carrying a prohibited class refuses on S01's answer", () => {
 
 test("a proposed fact cites the message it came from and establishes nothing", () => {
   const b = binding();
-  const result = capture(evaluateProposedFact({
+  const result = capture(unwiredEvaluateProposedFact({
     binding: b, thread_read: read({}, b), now: NOW, proposal: proposal(),
   }));
   assert.equal(result.decision, "proposed");
@@ -735,7 +777,7 @@ test("a proposed fact cites the message it came from and establishes nothing", (
 
 test("a proposal citing a message that is not on the thread is refused", () => {
   const b = binding();
-  const result = capture(evaluateProposedFact({
+  const result = capture(unwiredEvaluateProposedFact({
     binding: b, thread_read: read({}, b), now: NOW,
     proposal: proposal({ evidence_provider_message_id: "pm-99-test" }),
   }));
@@ -747,7 +789,7 @@ test("a proposal citing a message that is not on the thread is refused", () => {
 test("a proposal citing evidence from after now is refused, naming the evidence", () => {
   const b = binding();
   const r = read({}, b);
-  const result = capture(evaluateProposedFact({
+  const result = capture(unwiredEvaluateProposedFact({
     binding: b, thread_read: r, now: "2026-09-10T16:00:00Z", proposal: proposal(),
   }));
   assert.equal(result.reason_id, "evidence_message_occurs_after_now");
@@ -757,7 +799,7 @@ test("a proposal carrying a field that claims authority is refused", () => {
   const b = binding();
   const r = read({}, b);
   for (const field of ["authorized_by", "approved_by_partner", "owner_override", "acting_as"]) {
-    assert.throws(() => evaluateProposedFact({
+    assert.throws(() => unwiredEvaluateProposedFact({
       binding: b, thread_read: r, now: NOW, proposal: { ...proposal(), [field]: "joe" },
     }), e => e.code === "authority_claim_in_proposal", `expected ${field} to be refused`);
   }
@@ -765,7 +807,7 @@ test("a proposal carrying a field that claims authority is refused", () => {
 
 test("ordinary business prose is not an authority claim", () => {
   const b = binding();
-  const result = capture(evaluateProposedFact({
+  const result = capture(unwiredEvaluateProposedFact({
     binding: b, thread_read: read({}, b), now: NOW,
     proposal: proposal({
       rationale: "The landlord said they would grant an extension once the admin fee is approved.",
@@ -780,7 +822,7 @@ test("the observation candidate is one F01 itself accepts", () => {
   // can read the candidate and reach a decision about the FIELD rather than about
   // the request, the mapping is right. It is not graded by the code that built it.
   const b = binding();
-  const result = evaluateProposedFact({
+  const result = unwiredEvaluateProposedFact({
     binding: b, thread_read: read({}, b), now: NOW, proposal: proposal(),
   });
   const resolved = resolveObservation({
@@ -877,7 +919,7 @@ test("the four conflict kinds this module routes are exactly the four F01 emits"
 
 test("a queued conflict shows both values, each labelled with the source that owns it", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const entry = capture(buildSourceConflictQueueEntry({
+  const entry = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -906,7 +948,7 @@ test("a queued conflict shows both values, each labelled with the source that ow
 
 test("the owning side is computed from F01's owner_source, not asserted by the caller", () => {
   const item = f01Conflicts().forbidden_overwrite_by_non_owner;
-  const entry = capture(buildSourceConflictQueueEntry({
+  const entry = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "owner value", value_digest: item.established.value_digest,
@@ -923,7 +965,7 @@ test("the owning side is computed from F01's owner_source, not asserted by the c
 test("a conflict with no established side presents one value and says so", () => {
   const item = f01Conflicts().non_owner_establishment_attempt;
   assert.equal(item.established, null);
-  const entry = capture(buildSourceConflictQueueEntry({
+  const entry = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       observed: { value_text: "33.75", value_digest: item.observed.value_digest,
@@ -938,7 +980,7 @@ test("a conflict with no established side presents one value and says so", () =>
 
 test("a review surface may not invent a side of the conflict", () => {
   const item = f01Conflicts().non_owner_establishment_attempt;
-  assert.throws(() => buildSourceConflictQueueEntry({
+  assert.throws(() => unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "invented", value_digest: sha("ee"),
@@ -952,7 +994,7 @@ test("a review surface may not invent a side of the conflict", () => {
 
 test("a presented value that is not the value F01 conflicted on is refused", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const wrongObserved = capture(buildSourceConflictQueueEntry({
+  const wrongObserved = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -967,7 +1009,7 @@ test("a presented value that is not the value F01 conflicted on is refused", () 
   assert.equal(wrongObserved.side, "observed");
   assert.equal(wrongObserved.sides, null);
 
-  const wrongEstablished = capture(buildSourceConflictQueueEntry({
+  const wrongEstablished = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "a value nobody established", value_digest: sha("ef"),
@@ -990,7 +1032,7 @@ test("every way of saying whoever wrote last wins is refused by name", () => {
       declared_data_classes: ["lease_economics"] },
   };
   for (const basis of V5_J103_REFUSED_RESOLUTION_BASES) {
-    const entry = capture(buildSourceConflictQueueEntry({
+    const entry = capture(unwiredBuildSourceConflictQueueEntry({
       reconciliation_item: item, presented_values: sides,
       proposed_resolution_basis: basis, now: NOW,
     }));
@@ -998,13 +1040,13 @@ test("every way of saying whoever wrote last wins is refused by name", () => {
     assert.equal(entry.reason_id, "timestamp_alone_refused");
     assert.equal(entry.sides, null);
   }
-  const unregistered = capture(buildSourceConflictQueueEntry({
+  const unregistered = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item, presented_values: sides,
     proposed_resolution_basis: "whichever_looks_right", now: NOW,
   }));
   assert.equal(unregistered.reason_id, "unregistered_resolution_basis");
 
-  const accepted = capture(buildSourceConflictQueueEntry({
+  const accepted = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item, presented_values: sides,
     proposed_resolution_basis: V5_J103_RESOLUTION_BASIS, now: NOW,
   }));
@@ -1015,7 +1057,7 @@ test("every way of saying whoever wrote last wins is refused by name", () => {
 test("a queue entry is built only from an item F01 emitted", () => {
   const item = f01Conflicts().equal_version_contradiction;
   assert.equal(item.schema_version, V5_F01_RECONCILIATION_SCHEMA_VERSION);
-  assert.throws(() => buildSourceConflictQueueEntry({
+  assert.throws(() => unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: { ...item, schema_version: "something-else.v1" },
     presented_values: { observed: { value_text: "x", value_digest: item.observed.value_digest,
       declared_data_classes: ["lease_economics"] } },
@@ -1025,7 +1067,7 @@ test("a queue entry is built only from an item F01 emitted", () => {
 
 test("a conflict queued before the observation that caused it is refused", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const entry = capture(buildSourceConflictQueueEntry({
+  const entry = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -1040,7 +1082,7 @@ test("a conflict queued before the observation that caused it is refused", () =>
 
 test("a presented value carrying a prohibited class refuses on S01's answer", () => {
   const item = f01Conflicts().equal_version_contradiction;
-  const entry = capture(buildSourceConflictQueueEntry({
+  const entry = capture(unwiredBuildSourceConflictQueueEntry({
     reconciliation_item: item,
     presented_values: {
       established: { value_text: "32.50", value_digest: item.established.value_digest,
@@ -1113,8 +1155,8 @@ test("the module reaches no clock, network, database or filesystem", () => {
   const b = binding();
   assert.deepEqual(read({}, b), read({}, b));
   assert.deepEqual(
-    draftCorrespondence({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }),
-    draftCorrespondence({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }));
+    unwiredDraftCorrespondence({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }),
+    unwiredDraftCorrespondence({ binding: b, thread_read: read({}, b), now: NOW, draft: draft() }));
 });
 
 test("correspondence states and the module's own vocabulary stay closed", () => {
@@ -1122,7 +1164,517 @@ test("correspondence states and the module's own vocabulary stay closed", () => 
     ["awaiting_counterparty", "awaiting_us", "informational", "resolved"]);
   assert.throws(() => read({ relevance_state: "probably_relevant" }),
     e => e.code === "unknown_relevance_state");
-  assert.throws(() => readCorrespondenceThread({
+  assert.throws(() => unwiredReadCorrespondenceThread({
     binding: binding(), thread: { ...thread(), extra_field: 1 }, now: NOW,
   }), e => e.code === "unknown_field");
+});
+
+// ---------------------------------------------------------------------------
+// Review 983, defect 1 — `availability: "available"` was the CALLER'S word and it
+// unlocked the read and everything downstream of it.
+//
+// The rule these tests hold: while no owner issues an adapter read receipt, no
+// combination of caller inputs — an availability string, a hand-built binding, a
+// correctly recomputed digest, a forged read result — reaches `read`, `covered`,
+// `drafted` or `proposed`. Honestly deferred means unreachable, not reachable by
+// saying the magic word.
+// ---------------------------------------------------------------------------
+
+/** Run one attempt and report what came back, whether it answered or threw. */
+function attempt(fn) {
+  try {
+    const value = fn();
+    return { threw: false, value, decision: value.decision, code: null };
+  } catch (error) {
+    return { threw: true, value: null, decision: null, code: error.code ?? null, error };
+  }
+}
+
+/**
+ * Build a compiled-looking binding from whole cloth and hash it correctly.
+ *
+ * This is the forger's entire kit and it is not a lot: the compiled shape is
+ * public, the preimage is published by correspondenceBindingCanonicalBytes, and
+ * `digest` is an ordinary import. A self-consistent digest is therefore free to
+ * anyone — which is exactly why availability cannot rest on one.
+ */
+function forgeBinding(overrides = {}) {
+  const adapter = V5_J103_ADAPTERS[V5_F10_ADAPTER_KIND];
+  const forged = {
+    compiled: true,
+    wired: true,
+    schema_version: V5_J103_BINDING_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    partner_slug: "joe",
+    adapter_kind: V5_F10_ADAPTER_KIND,
+    adapter_mode: adapter.mode,
+    authoritative_home: adapter.authoritative_home,
+    retrieval_class: adapter.retrieval_class,
+    account: JOE_ACCOUNT,
+    source_system: SOURCE,
+    claimed_availability: "available",
+    availability: "available",
+    availability_source: "owner_issued_adapter_read_receipt",
+    availability_owed_seam: null,
+    binding_version: 1,
+    ...overrides,
+  };
+  const binding_digest = digest({
+    schema_version: forged.schema_version,
+    wired: forged.wired,
+    tenant: forged.tenant,
+    partner_slug: forged.partner_slug,
+    adapter_kind: forged.adapter_kind,
+    adapter_mode: forged.adapter_mode,
+    authoritative_home: forged.authoritative_home,
+    retrieval_class: forged.retrieval_class,
+    account: forged.account,
+    source_system: forged.source_system,
+    claimed_availability: forged.claimed_availability,
+    availability: forged.availability,
+    availability_source: forged.availability_source,
+    availability_owed_seam: forged.availability_owed_seam,
+    binding_version: forged.binding_version,
+  });
+  return { ...forged, binding_digest };
+}
+
+test("availability is asked of an authority that has nothing to issue, whatever it is asked", () => {
+  const queries = [
+    {},
+    { partner_slug: "joe", adapter_kind: V5_F10_ADAPTER_KIND },
+    { partner_slug: "joe", availability: "available" },
+    { receipt: { availability: "available", issued_by: "the caller" } },
+    { availability: "available", binding_digest: sha("ab"), attestation: sha("cd") },
+  ];
+  for (const query of queries) {
+    const resolved = resolveAdapterAvailability(query);
+    assert.equal(resolved.availability, "unavailable", JSON.stringify(query));
+    assert.equal(resolved.availability_source, "no_adapter_read_receipt");
+    assert.equal(resolved.availability_owed_seam, V5_J103_ADAPTER_READ_RECEIPT_SEAM);
+  }
+});
+
+test("the wired compiler records the caller's availability as a claim and derives its own", () => {
+  for (const claimed of V5_J103_AVAILABILITY_STATES) {
+    const b = wiredBinding({ availability: claimed });
+    assert.equal(b.claimed_availability, claimed);
+    assert.equal(b.availability, "unavailable", `claiming ${claimed} must not make it so`);
+    assert.equal(b.availability_source, "no_adapter_read_receipt");
+    assert.equal(b.availability_owed_seam, V5_J103_ADAPTER_READ_RECEIPT_SEAM);
+    assert.equal(b.wired, true);
+  }
+  // The unavailable answer names the seam that is owed rather than implying a
+  // permission somewhere could change it.
+  const answer = capture(readCorrespondenceThread({
+    binding: wiredBinding(), thread: thread(), now: NOW,
+  }));
+  assert.equal(answer.decision, "unavailable");
+  assert.equal(answer.reason_id, "authorized_adapter_unavailable");
+  assert.equal(answer.owed_seam, V5_J103_ADAPTER_READ_RECEIPT_SEAM);
+  assert.equal(answer.claimed_availability, "available");
+  assert.equal(answer.thread, null);
+  assert.equal(answer.wired, true);
+});
+
+test("no availability value, binding shape or digest trick reaches read, covered, drafted or proposed", () => {
+  const shapes = [
+    ["the wired compiler told the adapter is available",
+      () => wiredBinding({ availability: "available" })],
+    ["the wired compiler told unknown", () => wiredBinding({ availability: "unknown" })],
+    ["the wired compiler told unavailable", () => wiredBinding({ availability: "unavailable" })],
+    ["a fixture binding spent on the wired interface", () => binding()],
+    ["a forged compiled binding, digest recomputed to match", () => forgeBinding()],
+    ["a forged binding claiming an owner-issued receipt source",
+      () => forgeBinding({ availability_source: "owner_issued_adapter_read_receipt" })],
+    ["a forged binding whose claim and derivation disagree",
+      () => forgeBinding({ claimed_availability: "unknown" })],
+    ["a forged binding with a stale digest",
+      () => ({ ...forgeBinding(), binding_digest: sha("ff") })],
+    ["a compiled binding edited to available after the fact",
+      () => ({ ...wiredBinding(), availability: "available" })],
+    ["a compiled binding edited to claim the receipt source",
+      () => ({ ...wiredBinding(), availability_source: "owner_issued_adapter_read_receipt" })],
+    ["a fixture binding repainted as wired", () => ({ ...binding(), wired: true })],
+  ];
+
+  for (const [label, make] of shapes) {
+    const b = make();
+
+    const readAttempt = attempt(() => readCorrespondenceThread({
+      binding: b, thread: thread(), now: NOW,
+    }));
+    assert.notEqual(readAttempt.decision, "read", `${label}: reached a read`);
+    if (!readAttempt.threw) {
+      assert.equal(readAttempt.decision, "unavailable", label);
+      assert.equal(readAttempt.value.owed_seam, V5_J103_ADAPTER_READ_RECEIPT_SEAM, label);
+      assert.equal(readAttempt.value.thread, null, label);
+      capture(readAttempt.value);
+    }
+
+    for (const slugs of [["joe"], ["joe", "dell"], ["dell"]]) {
+      const coverage = attempt(() => projectCorrespondenceCoverage({
+        binding: b, requested_partner_slugs: slugs,
+      }));
+      assert.notEqual(coverage.decision, "covered", `${label}: covered ${slugs.join("+")}`);
+      if (!coverage.threw) capture(coverage.value);
+    }
+
+    // Every read result a caller can lay hands on, including ones shaped to pass
+    // each check the draft seam makes in turn.
+    const fixtureRead = read();
+    const candidates = [
+      ["the wired answer itself", readAttempt.value],
+      ["an unwired predicate result", fixtureRead],
+      ["an unwired result repainted as wired", { ...fixtureRead, wired: true }],
+      ["an unwired result repainted and re-bound",
+        { ...fixtureRead, wired: true, binding_digest: b.binding_digest }],
+      ["a wholly hand-built read", {
+        ...fixtureRead, wired: true, binding_digest: b.binding_digest,
+        decision: "read", reason_id: "relevant_business_context_within_boundary",
+      }],
+    ];
+    for (const [candidateLabel, thread_read] of candidates) {
+      if (thread_read === null) continue;
+      const drafted = attempt(() => draftCorrespondence({
+        binding: b, thread_read, now: NOW, draft: draft(),
+      }));
+      assert.notEqual(drafted.decision, "drafted", `${label} / ${candidateLabel}: drafted`);
+      if (!drafted.threw) capture(drafted.value);
+      const proposed = attempt(() => evaluateProposedFact({
+        binding: b, thread_read, now: NOW, proposal: proposal(),
+      }));
+      assert.notEqual(proposed.decision, "proposed", `${label} / ${candidateLabel}: proposed`);
+      if (!proposed.threw) capture(proposed.value);
+    }
+  }
+});
+
+test("a read result shaped like this module's own is refused, because it is not one", () => {
+  // The check the field-by-field ones cannot make. Every field on a read result is
+  // a field a caller could have typed, so the draft seam asks a question the caller
+  // cannot answer: did this object come out of this module?
+  const b = binding();
+  const genuine = read({}, b);
+  const copy = { ...genuine };
+  assert.deepEqual(copy, genuine, "the copy is identical field for field");
+  assert.throws(() => unwiredDraftCorrespondence({
+    binding: b, thread_read: copy, now: NOW, draft: draft(),
+  }), e => e instanceof V5J103Error && e.code === "thread_read_not_produced_here");
+  assert.throws(() => unwiredEvaluateProposedFact({
+    binding: b, thread_read: copy, now: NOW, proposal: proposal(),
+  }), e => e.code === "thread_read_not_produced_here");
+  // And the genuine one still works, so the check is not refusing everything.
+  assert.equal(unwiredDraftCorrespondence({
+    binding: b, thread_read: genuine, now: NOW, draft: draft(),
+  }).decision, "drafted");
+});
+
+test("the predicates are marked not wired, and neither path is a door into the other", () => {
+  assert.equal(read().wired, false);
+  assert.equal(binding().wired, false);
+  assert.equal(binding().availability_source, "fixture_declared_not_wired");
+  assert.equal(unwiredProjectCorrespondenceCoverage({
+    binding: binding(), requested_partner_slugs: ["joe"],
+  }).wired, false);
+
+  assert.throws(() => readCorrespondenceThread({ binding: binding(), thread: thread(), now: NOW }),
+    e => e.code === "binding_mode_mismatch", "a fixture binding is not a binding");
+  assert.throws(() => unwiredReadCorrespondenceThread({
+    binding: wiredBinding(), thread: thread(), now: NOW,
+  }), e => e.code === "binding_mode_mismatch", "a wired binding is not a fixture");
+  assert.throws(() => unwiredDraftCorrespondence({
+    binding: binding(),
+    thread_read: { ...read(), wired: true },
+    now: NOW,
+    draft: draft(),
+  }), e => e.code === "thread_read_mode_mismatch");
+});
+
+// ---------------------------------------------------------------------------
+// Review 983, defect 2 — a caller-provided reconciliation item was accepted on its
+// schema-version string alone, and its caller-provided owner, home, conflict kind
+// and sides could then put a visible `queued` review prompt in front of a partner.
+// That contradicted this module's own gap list, which says F01 ships no mailbox
+// field-authority registry at all.
+// ---------------------------------------------------------------------------
+
+/** The presented values that match an item's digests, so the fixture is queue-worthy. */
+function presentedFor(item) {
+  const side = digestValue => ({
+    value_text: "42.50", value_digest: digestValue, declared_data_classes: ["lease_economics"],
+  });
+  return item.established === null || item.established === undefined
+    ? { observed: side(item.observed.value_digest) }
+    : { observed: side(item.observed.value_digest),
+      established: side(item.established.value_digest) };
+}
+
+/**
+ * Well-formed items varying every field a caller controls: who owns the field,
+ * where the record lives, which conflict kind and therefore which review route,
+ * who resolves it, and which values are in conflict. Each one is built from an
+ * item F01 really emitted, so none of them can be dismissed as malformed.
+ */
+function forgedReconciliationItems() {
+  const emitted = f01Conflicts();
+  const genuine = emitted.equal_version_contradiction;
+  const variations = [
+    ["untouched, straight from F01", genuine],
+    ["the adapter named as the owner of the field",
+      { ...genuine, owner_source: SOURCE }],
+    ["the mailbox named as the authoritative home",
+      { ...genuine, authoritative_home: "outlook" }],
+    ["a resolver class nobody registered",
+      { ...genuine, human_resolver_class: "resolve_it_automatically" }],
+    ["a different entity and field entirely",
+      { ...genuine, entity: "partner_compensation", field: "commission_split" }],
+    ["no established side, so one value is presented alone",
+      { ...genuine, established: null }],
+    ["the observed side relabelled as the owner's own record",
+      { ...genuine, observed: { ...genuine.observed, source_system: genuine.owner_source } }],
+  ];
+  for (const kind of V5_J103_CONFLICT_KINDS) {
+    variations.push([`routed as ${kind}`, { ...emitted[kind] }]);
+  }
+  return variations;
+}
+
+test("a forged reconciliation item cannot queue a review prompt, however it is shaped", () => {
+  for (const [label, item] of forgedReconciliationItems()) {
+    const request = { reconciliation_item: item, presented_values: presentedFor(item), now: NOW };
+    const wired = attempt(() => buildSourceConflictQueueEntry(request));
+    assert.equal(wired.threw, false, `${label}: ${wired.code}`);
+    assert.notEqual(wired.decision, "queued", `${label}: queued a caller-supplied item`);
+    assert.equal(wired.decision, "unavailable", label);
+    assert.equal(wired.value.reason_id, "reconciliation_item_not_store_issued", label);
+    assert.equal(wired.value.owed_seam, V5_J103_RECONCILIATION_ITEM_SEAM, label);
+    assert.equal(wired.value.field_authority_gap, "no_mailbox_field_authority_registry", label);
+    // Nothing is shown to anybody and nothing is applied.
+    assert.equal(wired.value.visible, false, label);
+    assert.equal(wired.value.queued_at, null, label);
+    assert.equal(wired.value.sides, null, label);
+    assert.equal(wired.value.applied, false, label);
+    assert.equal(wired.value.resolved_by_machine, false, label);
+    capture(wired.value);
+  }
+});
+
+test("the items the wired seam refuses are ones the predicate would really have queued", () => {
+  // Without this the refusal above proves nothing: a seam that refuses malformed
+  // fixtures is not a seam that refuses valid ones.
+  let queued = 0;
+  for (const [label, item] of forgedReconciliationItems()) {
+    const rendered = capture(unwiredBuildSourceConflictQueueEntry({
+      reconciliation_item: item, presented_values: presentedFor(item), now: NOW,
+    }));
+    assert.equal(rendered.wired, false, label);
+    if (rendered.decision === "queued") {
+      queued += 1;
+      assert.equal(rendered.visible, true, label);
+      assert.ok(rendered.sides.observed.value_text.length > 0, label);
+    }
+  }
+  assert.ok(queued >= 6, `expected the fixtures to be queue-worthy, ${queued} were`);
+});
+
+test("even an item F01 itself emitted is unavailable, because no store issued it", () => {
+  // The point of the check is not that the item is fake. It is that nothing here
+  // can tell: F01 emits reconciliation items and keeps none, so provenance is the
+  // missing fact, and an item that really is F01's answers the same way.
+  for (const item of Object.values(f01Conflicts())) {
+    const entry = capture(buildSourceConflictQueueEntry({
+      reconciliation_item: item, presented_values: presentedFor(item), now: NOW,
+    }));
+    assert.equal(entry.decision, "unavailable");
+    assert.equal(entry.reason_id, "reconciliation_item_not_store_issued");
+  }
+  assert.ok(governedCorrespondenceGaps()
+    .some(g => g.gap === "no_mailbox_field_authority_registry" && g.landed === false));
+});
+
+// ---------------------------------------------------------------------------
+// Review 983, defect 3 — "no sending client is imported" was a clause with no
+// test behind it. The F10 oracle test above proves F10 REFUSES every write
+// operation, which is a different claim: a send-capable client could be imported
+// into THIS module tomorrow without moving a byte of F10's policy text, and that
+// test would stay green.
+//
+// So this one reads J103's own source the way a linter would, and asserts the
+// dependency boundary directly: a closed import set, none of it send-capable,
+// nothing callable taken from a provider module, and no export that names or
+// returns a provider operation.
+// ---------------------------------------------------------------------------
+
+const SRC_DIR = new URL("../src/", import.meta.url);
+const J103_FILE = "governed-correspondence.v5.js";
+const J103_SOURCE = readFileSync(new URL(J103_FILE, SRC_DIR), "utf8");
+
+/** Every module specifier a source file imports, by any of the forms that work. */
+function importSpecifiers(source) {
+  const found = new Set();
+  const patterns = [
+    /\bimport\s+[\s\S]*?\bfrom\s*["']([^"']+)["']/g,   // import x from "y"
+    /\bimport\s*["']([^"']+)["']/g,                      // import "y"
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,            // await import("y")
+    /\bexport\s+[\s\S]*?\bfrom\s*["']([^"']+)["']/g,     // export { x } from "y"
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,           // require("y")
+    /\bcreateRequire\b/g,                                 // the back door into require
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      found.add(match[1] ?? "createRequire");
+    }
+  }
+  return [...found].sort();
+}
+
+/** The names a source file binds from one specifier. */
+function importedBindings(source, specifier) {
+  const pattern = new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*["']${
+    specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`, "g");
+  const names = [];
+  for (const match of source.matchAll(pattern)) {
+    for (const raw of match[1].split(",")) {
+      const name = raw.trim().split(/\s+as\s+/).pop().trim();
+      if (name.length > 0) names.push(name);
+    }
+  }
+  return names.sort();
+}
+
+/**
+ * The modules in mcp-server/src that can actually reach the outside world, found
+ * by scanning rather than by typing a list that would rot. A module counts as
+ * send-capable if it opens a socket, fetches, shells out, or drives a mail
+ * transport — that is the capability J103 must not acquire by import, directly or
+ * by name.
+ */
+const OUTBOUND_CAPABILITY =
+  /\bfetch\s*\(|\bXMLHttpRequest\b|new\s+WebSocket\b|\bnodemailer\b|\.sendMail\s*\(|\bchild_process\b|["']node:https?["']|["']https?["']\s*\)|\bgoogleapis\b|@microsoft\/microsoft-graph-client|@azure\/msal|\bsendgrid\b|\bmailgun\b|\bpostmark\b/;
+
+function sendCapableModules() {
+  const capable = [];
+  for (const file of readdirSync(SRC_DIR)) {
+    if (!file.endsWith(".js")) continue;
+    // The module under test is the subject, not a candidate: its matches are the
+    // patterns it REFUSES ("smtp:", "mailto:"), not capabilities it holds. Its own
+    // purity is asserted separately below.
+    if (file === J103_FILE) continue;
+    if (OUTBOUND_CAPABILITY.test(readFileSync(new URL(file, SRC_DIR), "utf8"))) {
+      capable.push(`./${file}`);
+    }
+  }
+  return capable.sort();
+}
+
+/** Provider-write packages nothing in this repository depends on, and must not. */
+const FORBIDDEN_PACKAGES = [
+  "nodemailer", "@sendgrid/mail", "mailgun.js", "postmark", "emailjs", "smtp-client",
+  "@microsoft/microsoft-graph-client", "@azure/msal-node", "@azure/identity",
+  "googleapis", "google-auth-library", "gmail-api-parse-message",
+  "node-fetch", "axios", "undici", "got", "superagent",
+  "node:http", "node:https", "node:net", "node:tls", "node:dgram", "node:child_process",
+  "http", "https", "net", "tls", "dgram", "child_process",
+];
+
+test("J103 imports a closed set of modules, and no send-capable client is in it", () => {
+  const specifiers = importSpecifiers(J103_SOURCE);
+  assert.deepEqual(specifiers, [
+    "./artifact-trust.js",
+    "./global-boundaries.v5.js",
+    "./identity.js",
+    "./partner-mail-calendar.v5.js",
+    "./record-source-authority.v5.js",
+  ], "the import set is closed: a new dependency here is a review, not a detail");
+
+  const capable = sendCapableModules();
+  assert.ok(capable.length >= 3,
+    `the scan must actually find the repository's outbound modules; it found ${capable.length}`);
+  assert.ok(capable.includes("./google-oidc.js"), "the scan must recognise a fetching module");
+  for (const forbidden of [...capable, ...FORBIDDEN_PACKAGES]) {
+    assert.ok(!specifiers.includes(forbidden),
+      `J103 must not import ${forbidden}: it can reach a provider`);
+  }
+
+  // And J103 holds no outbound capability of its own, by the same scan that
+  // classified the others — minus the two refusal patterns it is allowed to name.
+  const withoutRefusals = J103_SOURCE
+    .replace(/mailto:\|smtp:\|tel:/g, "")
+    .replace(/"smtp"/g, "");
+  assert.ok(!OUTBOUND_CAPABILITY.test(withoutRefusals),
+    "J103 must hold no outbound capability of its own");
+});
+
+test("nothing callable crosses the seam from the one provider-named module J103 imports", () => {
+  // partner-mail-calendar.v5.js is the module that OWNS the mail operation
+  // registry, and J103 takes three constants from it so its claims are checked
+  // against the registry rather than against a literal. What it must never take is
+  // something it can CALL: a name is a fact, a function is a capability.
+  const bindings = importedBindings(J103_SOURCE, "./partner-mail-calendar.v5.js");
+  assert.deepEqual(bindings,
+    ["V5_F10_ADAPTER_KIND", "V5_F10_AUTHORITATIVE_HOME", "V5_F10_WRITE_OPERATIONS"]);
+  for (const name of bindings) {
+    assert.notEqual(typeof F10_NAMESPACE[name], "function",
+      `${name} is callable; J103 may import F10's vocabulary, never its behaviour`);
+  }
+  // The two evaluators that could act are not named anywhere in the source at all.
+  for (const executor of ["evaluateConnectorOperation", "reconcileOfflineQueue",
+    "toCorporateArtifactCandidate", "compilePartnerInstallation"]) {
+    assert.ok(!J103_SOURCE.includes(executor),
+      `J103 must not reach F10's ${executor}`);
+  }
+});
+
+test("no J103 export names a provider operation, and none returns one", () => {
+  const providerOperationFragments = [
+    ...V5_F10_WRITE_OPERATIONS,
+    "sendmail", "sendmessage", "dispatch", "deliver", "transmit", "submit", "postmessage",
+  ];
+  const exportedFunctions = Object.entries(J103_NAMESPACE)
+    .filter(([, value]) => typeof value === "function");
+  assert.ok(exportedFunctions.length >= 10, "there must be exports to check");
+  for (const [name] of exportedFunctions) {
+    const normalized = name.toLowerCase();
+    for (const fragment of providerOperationFragments) {
+      assert.ok(!normalized.includes(fragment.toLowerCase()),
+        `exported function ${name} names the provider operation ${fragment}`);
+    }
+  }
+
+  // The returned shapes, swept over every result this suite produced plus the
+  // projection. A provider operation may appear NOWHERE in them — not as a key,
+  // not as a value — and `provider_operation` is null wherever it is carried.
+  const operationNames = [...V5_F10_WRITE_OPERATIONS];
+  const seen = new Set();
+  const sweep = (value, path) => {
+    if (value === null || value === undefined) return;
+    if (typeof value === "string") {
+      for (const operation of operationNames) {
+        assert.ok(!value.includes(operation), `${path} carries the operation ${operation}`);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => sweep(entry, `${path}[${index}]`));
+      return;
+    }
+    if (typeof value !== "object") return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      for (const operation of operationNames) {
+        assert.ok(!key.toLowerCase().includes(operation), `${path}.${key} names ${operation}`);
+      }
+      if (key === "provider_operation") assert.equal(entry, null, `${path}.${key}`);
+      sweep(entry, `${path}.${key}`);
+    }
+  };
+  assert.ok(PRODUCED_RESULTS.length > 12, "the sweep needs results to sweep");
+  PRODUCED_RESULTS.forEach((result, index) => sweep(result, `result[${index}]`));
+  sweep(v5J103CorrespondenceProjection(), "projection");
+  sweep(v5J103PolicyPreimage(), "policy");
+  // The one place the operation names legitimately appear is the list of what this
+  // module deliberately does NOT hold, imported from F10 rather than retyped.
+  assert.deepEqual([...v5J103AbsentWriteOperations()], [...V5_F10_WRITE_OPERATIONS]);
 });
