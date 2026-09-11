@@ -501,7 +501,7 @@ function assertEnvelope(envelope, path) {
  * Compare one command expressed from each origin.
  *
  * THIS IS A STATEMENT ABOUT TWO THINGS THE CALLER SUPPLIED, and nothing else.
- * `equivalent` says the two envelopes mean the same command; it does not say
+ * `same_command` says the two envelopes mean the same command; it does not say
  * either of them may run, and `admission` stays `unavailable` on the result so
  * that no reader can take it for a grant.
  *
@@ -545,7 +545,7 @@ export function compareMapCommandOrigins(request) {
 
   return deepFreeze({
     schema_version: V5_J301_COMMAND_EQUIVALENCE_SCHEMA_VERSION,
-    equivalent: divergences.length === 0 && digestsMatch,
+    same_command: divergences.length === 0 && digestsMatch,
     command_digests_match: digestsMatch,
     clickable_map_command_digest: left.command_digest,
     doc_command_command_digest: right.command_digest,
@@ -559,7 +559,7 @@ export function compareMapCommandOrigins(request) {
     governed_state_equivalent: false,
     governed_state_equivalence_reason_id: "no_command_is_applied_here",
     divergences,
-    // Said on every comparison, equivalent or not: this is a reading of two
+    // Said on every comparison, same command or not: this is a reading of two
     // requests, not a decision about either.
     admission: "unavailable",
     admission_reason_id: "map_contract_receipt_unavailable",

@@ -1298,7 +1298,7 @@ export function v5J301TourWorkflowProjection() {
     settled_decision_ids: [...V5_J301_SETTLED_DECISION_IDS],
     stages: [...V5_J301_STAGES],
     stages_are_separate_and_ordered: true,
-    intake_requires_human_present: true,
+    human_presence_required_at_intake: true,
     // The requirement is real and the PROOF of it is missing, which are two
     // different facts and both are stated.
     human_presence_provable_here: false,

@@ -69,6 +69,7 @@ import {
   V5_J301_MAP_CONTRACT_GATE,
   V5_J301_MAP_CONTRACT_RECEIPT_STEP,
 } from "../src/tour-workflow-j301.v5.js";
+import * as workflow from "../src/tour-workflow-j301.v5.js";
 
 const TOUR = "tour-j301-fixture-0001";
 
@@ -127,7 +128,7 @@ test("a map click and a Doc sentence expressing one intent are one command", () 
     const comparison = record(compareMapCommandOrigins({
       clickable_map: fromMap, doc_command: fromDoc,
     }));
-    assert.equal(comparison.equivalent, true, command);
+    assert.equal(comparison.same_command, true, command);
     assert.equal(comparison.command_digests_match, true, command);
     assert.equal(comparison.names_same_intended_verb, true, command);
     // EQUIVALENT is not APPLIED. Said on every comparison.
@@ -186,7 +187,7 @@ test("every governed argument of every command actually moves the digest", () =>
         clickable_map: base,
         doc_command: normalize(command, "doc_command", { [argument]: moved[command][argument] }),
       }));
-      assert.equal(comparison.equivalent, false, `${command}.${argument}`);
+      assert.equal(comparison.same_command, false, `${command}.${argument}`);
       assert.deepEqual(comparison.divergences.map(entry => entry.field), [argument]);
     }
   }
@@ -205,7 +206,7 @@ test("two different commands are not equivalent, and the divergence says so", ()
     clickable_map: normalize("set_selection_cart", "clickable_map"),
     doc_command: normalize("reorder_route_stops", "doc_command"),
   }));
-  assert.equal(comparison.equivalent, false);
+  assert.equal(comparison.same_command, false);
   assert.equal(comparison.names_same_intended_verb, false);
   assert.equal(comparison.intended_verb, null);
   assert.deepEqual(comparison.divergences.map(entry => entry.field), ["command"]);
@@ -221,7 +222,7 @@ test("an envelope carrying a hand-edited digest is compared on what it says", ()
   const comparison = record(compareMapCommandOrigins({
     clickable_map: forged, doc_command: normalize("set_selection_cart", "doc_command"),
   }));
-  assert.equal(comparison.equivalent, false);
+  assert.equal(comparison.same_command, false);
   assert.deepEqual(comparison.divergences.map(entry => entry.field), ["tour_id"]);
   // Re-derived, so the forged digest never appears in the answer.
   assert.notEqual(comparison.clickable_map_command_digest, forged.command_digest);
@@ -591,4 +592,267 @@ test("the projection tells the same story the evaluators do", () => {
   assert.match(v5J301CommandPolicyDigest(), /^sha256:[0-9a-f]{64}$/);
   assert.equal(v5J301CommandPolicyCanonicalBytes(),
     JSON.stringify(JSON.parse(v5J301CommandPolicyCanonicalBytes())));
+});
+
+// ---------------------------------------------------------------------------
+// THE PUBLIC-SURFACE SWEEP, OVER EVERY EXPORT OF BOTH MODULES.
+//
+// The guard above this one walked a hand-typed list of callables. A list is
+// only as honest as whoever last edited it: an export added tomorrow is not on
+// it, and nothing fails. So this sweep takes the namespaces themselves, walks
+// `Object.keys` of each, and calls EVERY exported function with every
+// caller-controlled shape the J301 suites already define — the four map-command
+// requests from both origins and both journeys, the envelopes those produce,
+// an origin pair, the workflow stage-action and Assignment-activity requests,
+// the step-key request, a journal binding — plus null, undefined, empty object,
+// empty array, empty string and zero. Whatever comes back is swept. A new
+// export is swept the day it appears, whether or not anyone remembers this
+// file.
+//
+// WHAT COUNTS AS A HIT, and why it is this and not a byte scan. Two rules, and
+// no exemption list anywhere:
+//
+//   A. a NAME claim — an object key (or an export's own name) whose word
+//      tokens contain the word, whose value is exactly `true`. This is how a
+//      surface says `verified: true`, `read: true`, `present: true`.
+//   B. a VALUE claim — a string, at any depth, that IS the word. This is how a
+//      surface says `admission: "ok"` or `status: "complete"`.
+//
+// One structural distinction, and it is derived from the modules rather than
+// typed here: a list the workflow module EXPORTS AS A REFUSAL VOCABULARY — the
+// caller-authority fields, the forbidden activity fields, the refused intents,
+// the Assignment phases a Tour may never set — is an enumeration of what is
+// refused, not an answer. `V5_J301_CALLER_AUTHORITY_FIELDS` holds the literal
+// strings "allow" and "verified" BECAUSE those are field names a caller must
+// not be able to supply; a sweep that made the module stop naming them would
+// delete the refusal it is testing. So a value is skipped only when it sits
+// inside an array whose contents are exactly one of those exported
+// vocabularies, which no hand-edit here can widen: change the module's refusal
+// list and this follows it. Every other position, including every other array,
+// is scanned.
+//
+// A blind substring scan over every byte of a return was tried first and is
+// not implementable honestly: `v5J301CommandPolicyPreimage()` returns the
+// SETTLED DECISION TEXT of Q124.D2, which contains "equivalent"; the workflow
+// module's own stage is named `attended_mls_acquisition`; and both modules name
+// a promotion-receipt READER seam whose absence is the reason the navigation
+// handoff is unavailable. Passing such a scan would mean editing quoted
+// doctrine and un-naming the missing seams — making the surface say LESS about
+// what it cannot do, which is the opposite of the property under test. Naming a
+// thing that does not exist is not claiming it. So the sweep bans the claim,
+// not the noun, and the mutation controls below prove it still fires.
+// ---------------------------------------------------------------------------
+
+const FORBIDDEN_OUTCOME_WORDS = Object.freeze([
+  "ok", "allow", "pass", "satisfied", "complete", "admitted",
+  "resumed", "attended", "verified", "present", "read", "equivalent",
+]);
+
+/** camelCase and snake_case both fall apart into lowercase word tokens. */
+function wordTokens(name) {
+  return String(name)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/**
+ * Every hit of `word` in `value`, as a path, so a failure names the field
+ * rather than dumping the envelope.
+ */
+function outcomeClaims(word, value, { path = "", key = "", depth = 0, into = [] } = {}) {
+  if (depth > 12) return into;
+  if (Array.isArray(value) && isDeclaredRefusalVocabulary(value)) return into;
+  if (value === true && wordTokens(key).includes(word)) into.push(`${path} === true`);
+  if (typeof value === "string" && value.toLowerCase() === word) into.push(`${path} === "${value}"`);
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      outcomeClaims(word, entry, { path: `${path}[${index}]`, key, depth: depth + 1, into }));
+  } else if (value && typeof value === "object") {
+    for (const [inner, entry] of Object.entries(value)) {
+      outcomeClaims(word, entry, { path: `${path}.${inner}`, key: inner, depth: depth + 1, into });
+    }
+  }
+  return into;
+}
+
+/**
+ * The refusal vocabularies the workflow module exports. Taken by value, so a
+ * copy inside a projection or policy preimage is recognized as the same list.
+ */
+const REFUSAL_VOCABULARIES = Object.freeze([
+  workflow.V5_J301_CALLER_AUTHORITY_FIELDS,
+  workflow.V5_J301_FORBIDDEN_ACTIVITY_FIELDS,
+  workflow.V5_J301_REFUSED_INTENTS,
+  workflow.V5_J301_ASSIGNMENT_PHASES,
+].map(vocabulary => [...vocabulary].join("\u0000")));
+
+function isDeclaredRefusalVocabulary(array) {
+  return array.every(entry => typeof entry === "string")
+    && REFUSAL_VOCABULARIES.includes(array.join("\u0000"));
+}
+
+/** The caller-controlled shapes, all of them, including the degenerate ones. */
+const CALLER_SHAPES = [];
+{
+  const envelopes = [];
+  for (const command of V5_J301_COMMAND_NAMES) {
+    for (const origin of V5_J301_COMMAND_ORIGINS) {
+      for (const journey of commands.V5_J301_COMMAND_JOURNEYS) {
+        const request = {
+          organization_tenant_id: ORGANIZATION_TENANT_ID,
+          journey, origin, command, arguments: FIXTURE_ARGUMENTS[command],
+        };
+        CALLER_SHAPES.push(request);
+        try {
+          const envelope = normalizeMapCommand(request);
+          envelopes.push({ command, origin, envelope });
+          CALLER_SHAPES.push(envelope, { envelope });
+        } catch (error) {
+          assert.ok(error instanceof V5J301CommandError);
+        }
+      }
+    }
+  }
+  for (const command of V5_J301_COMMAND_NAMES) {
+    const pair = {};
+    for (const { command: name, origin, envelope } of envelopes) {
+      if (name === command) pair[origin] = envelope;
+    }
+    if (pair.clickable_map && pair.doc_command) CALLER_SHAPES.push(pair);
+  }
+  // The workflow module's caller-controlled shapes, as its own suite writes them.
+  CALLER_SHAPES.push({
+    organization_tenant_id: ORGANIZATION_TENANT_ID,
+    tour_id: TOUR,
+    assignment_id: "assignment-j301-fixture-0001",
+    stage: "attended_mls_acquisition",
+    action_kind: "capture_listing_observation",
+    declared_actor_slug: "joe",
+    attended_intent: "human_present_for_this_action",
+    actor_class: "human_attended",
+    action_subject_digest: `sha256:${"a".repeat(64)}`,
+  });
+  CALLER_SHAPES.push({
+    organization_tenant_id: ORGANIZATION_TENANT_ID,
+    assignment_id: "assignment-j301-fixture-0001", tour_id: TOUR,
+    activity_kind: "tour_created", declared_actor_slug: "joe",
+    attended_intent: "human_present_for_this_action",
+    occurred_at: "2026-09-11T14:30:00Z",
+    activity_payload: { stop_count: 4, market: "fixture-market" },
+  });
+  CALLER_SHAPES.push({
+    tour_id: TOUR, stage: "attended_mls_acquisition",
+    action_kind: "capture_listing_observation",
+    action_subject_digest: `sha256:${"a".repeat(64)}`,
+  });
+  CALLER_SHAPES.push({ tour_id: TOUR, assignment_id: "assignment-j301-fixture-0001" });
+  CALLER_SHAPES.push({ decisions: { ...workflow.V5_J301_SETTLED_DECISIONS } });
+  CALLER_SHAPES.push({
+    organization_tenant_id: ORGANIZATION_TENANT_ID,
+    tour_id: TOUR, assignment_id: "assignment-j301-fixture-0001",
+    stage: "attended_mls_acquisition", action_kind: "capture_listing_observation",
+    action_subject_digest: `sha256:${"a".repeat(64)}`,
+    declared_actor_slug: "joe", recorded_at: "2026-09-11T14:00:00Z",
+  });
+  CALLER_SHAPES.push(null, undefined, {}, [], "", 0);
+}
+
+/**
+ * Every export of both modules, and — for the functions — everything they hand
+ * back for those shapes. Built once, swept once per word.
+ */
+const SURFACE = [];
+const NAMESPACES = Object.freeze([
+  ["tour-map-command-j301.v5.js", commands],
+  ["tour-workflow-j301.v5.js", workflow],
+]);
+const EXPORTS_SEEN = new Set();
+const FUNCTIONS_CALLED = new Set();
+for (const [module, namespace] of NAMESPACES) {
+  for (const name of Object.keys(namespace)) {
+    const exported = namespace[name];
+    EXPORTS_SEEN.add(`${module}#${name}`);
+    SURFACE.push({ origin: `${module} export ${name}`, name, value: exported });
+    if (typeof exported !== "function") continue;
+    for (const shape of [...CALLER_SHAPES, undefined]) {
+      let returned;
+      try {
+        returned = exported(shape);
+      } catch {
+        continue; // A refusal is not an outcome. Throwing is allowed; claiming is not.
+      }
+      FUNCTIONS_CALLED.add(`${module}#${name}`);
+      SURFACE.push({ origin: `${module} ${name}() returned`, name: "", value: returned });
+    }
+  }
+}
+
+test("the sweep really does cover every export of both modules", () => {
+  const declared = [...V5_J301_COMMAND_PUBLIC_SURFACE, ...workflow.V5_J301_PUBLIC_SURFACE];
+  assert.equal(EXPORTS_SEEN.size, Object.keys(commands).length + Object.keys(workflow).length);
+  assert.equal(EXPORTS_SEEN.size, declared.length,
+    "an export exists that the module's own declared public surface does not list");
+  // And the functions were actually entered, not merely enumerated.
+  const callables = [...NAMESPACES].flatMap(([module, namespace]) =>
+    Object.keys(namespace)
+      .filter(name => typeof namespace[name] === "function" && !/Error$/.test(name))
+      .map(name => `${module}#${name}`));
+  assert.ok(callables.length >= 14, `only ${callables.length} callables found`);
+  for (const callable of callables) {
+    assert.ok(FUNCTIONS_CALLED.has(callable), `${callable} returned nothing for any shape`);
+  }
+  assert.ok(SURFACE.length > 200, `swept only ${SURFACE.length} values`);
+});
+
+test("the outcome-claim detector fires on each of the two claim shapes", () => {
+  assert.deepEqual(outcomeClaims("verified", { entrance: { verified: true } }),
+    [".entrance.verified === true"]);
+  assert.deepEqual(outcomeClaims("read", { journal: { was_read: true } }), [".journal.was_read === true"]);
+  assert.deepEqual(outcomeClaims("present", { admission: "present" }), ['.admission === "present"']);
+  assert.deepEqual(outcomeClaims("ok", { deep: [{ status: "OK" }] }), ['.deep[0].status === "OK"']);
+  assert.deepEqual(outcomeClaims("attended", [{ actor: { attended: true } }]), ["[0].actor.attended === true"]);
+  // And it does not fire on naming a thing that is absent or false.
+  assert.deepEqual(outcomeClaims("read", { reader_exists_here: false, reader_seam: "seam:x-reader" }), []);
+  assert.deepEqual(outcomeClaims("attended", { actor_class: "human_attended" }), []);
+  assert.deepEqual(outcomeClaims("equivalent", { governed_state_equivalent: false }), []);
+  // The refusal vocabulary is skipped as a whole list, and only as that list.
+  assert.deepEqual(outcomeClaims("verified", { fields: [...workflow.V5_J301_CALLER_AUTHORITY_FIELDS] }), []);
+  assert.deepEqual(outcomeClaims("verified", { fields: ["verified"] }), ['.fields[0] === "verified"']);
+  assert.ok(workflow.V5_J301_CALLER_AUTHORITY_FIELDS.includes("verified"),
+    "the skip above would be vacuous if the vocabulary stopped naming the field");
+});
+
+for (const word of FORBIDDEN_OUTCOME_WORDS) {
+  test(`no export of either module claims "${word}"`, () => {
+    const hits = [];
+    for (const { origin, name, value } of SURFACE) {
+      if (value === true && wordTokens(name).includes(word)) hits.push(`${origin} === true`);
+      for (const claim of outcomeClaims(word, value)) hits.push(`${origin}${claim}`);
+    }
+    assert.deepEqual(hits, [], `"${word}" claimed at: ${hits.slice(0, 6).join(" | ")}`);
+  });
+}
+
+/** A structural copy with the declared refusal vocabularies emptied. */
+function withoutRefusalVocabularies(value, depth = 0) {
+  if (depth > 12 || !value || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    if (isDeclaredRefusalVocabulary(value)) return [];
+    return value.map(entry => withoutRefusalVocabularies(entry, depth + 1));
+  }
+  return Object.fromEntries(Object.entries(value)
+    .map(([key, entry]) => [key, withoutRefusalVocabularies(entry, depth + 1)]));
+}
+
+test("the older privileged vocabulary holds over the same full enumeration", () => {
+  // The narrower list items 1-5 kept, now run against every export rather than
+  // the hand-typed callable subset it was written against. Same refusal-
+  // vocabulary rule: `V5_J301_ASSIGNMENT_PHASES` names "committed" because that
+  // is the Assignment phase a Tour may never set.
+  assert.ok(workflow.V5_J301_ASSIGNMENT_PHASES.includes("committed"));
+  for (const { origin, value } of SURFACE) {
+    assert.equal(privilegedHit(withoutRefusalVocabularies(value)), null, origin);
+  }
 });
