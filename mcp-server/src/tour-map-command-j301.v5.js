@@ -573,7 +573,10 @@ export function compareMapCommandOrigins(request) {
  * Ask whether a normalized command may be admitted against the map contract.
  *
  * The answer is always no, and there are exactly two shapes of no. A navigation
- * handoff is refused the promotion receipt it needs (the store does not exist);
+ * handoff is refused the promotion receipt it needs — the STORE exists
+ * (ops.tour_map_promotion_receipt, migration 0430, written by the humanOnly
+ * verb record-tour-map-promotion-receipt) and the READER this module would need
+ * to consult it does not, which is V5_J301_PROMOTION_RECEIPT_READER_SEAM;
  * everything else is unavailable because
  * step:tour-map-contract-1.2.0-independent-acceptance-receipt has no
  * implementation here and the live map-architecture verb reports the contract

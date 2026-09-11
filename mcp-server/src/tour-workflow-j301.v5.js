@@ -40,9 +40,10 @@
 //   same step key however many times a caller replays it.
 //
 //   AS DURABLE STATE — the stage journal itself. Which actions really happened,
-//   in which order, under which human. A journal a CALLER hands in is a VIEW,
-//   not the record: this module labels it that way on every result and never
-//   lets it produce an advance.
+//   in which order, under which human, AND THEREFORE every rule that reads a
+//   history: skip, backward move, replay, gap. A journal a CALLER hands in is
+//   not a weaker version of that record, it is a different thing entirely, so
+//   this module refuses one rather than labelling one.
 //
 // TWO KINDS OF NO, following the sibling v5 modules deliberately:
 //   * A POLICY ANSWER is returned — a frozen result whose `decision` is one of
@@ -58,14 +59,28 @@
 // this module returns an allow, a commit, an advance, a resume point, a
 // completion or any other privileged outcome, under any name, from any input a
 // caller controls. The module's real exports equal V5_J301_PUBLIC_SURFACE
-// EXACTLY — there is no test-only member on the list and none off it. The
-// resume CLASSIFICATION exists, because the staging rules could not be checked
-// without it, and it is a module-private function that never leaves this file:
-// its content reaches a reader only as the BODY OF A REFUSAL. A suite that
-// wants the classification derives it by probing the public refusals from
-// mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs, a file in the
-// test tree that no production module can import — proved by a parser-backed
-// scan of every module under src/, not by a promise.
+// EXACTLY — there is no test-only member on the list and none off it.
+//
+// AND THERE IS NO RESUME CLASSIFICATION HERE AT ALL. The previous shape of this
+// file read a caller-supplied journal for position and reported the reading in
+// the BODY of its refusals — `stages_seen`, `earliest_unstarted_stage`,
+// `missing_stage`, `furthest_stage_seen`. A reviewer was right that a refusal
+// whose body reconstructs the resume boundary IS the resume boundary, however
+// the envelope is labelled: a caller could write a journal, read the refusals,
+// and recover exactly the position no authority here can establish. Labelling
+// it `caller_supplied_view` did not make it less recoverable.
+//
+// So the public path now takes NO caller journal. `journal_view` is refused by
+// name, naming the owner and reader seams, and every remaining answer is
+// derived from the request's own fields and this module's frozen registries —
+// never from a history a caller wrote. The staging rules of Q060.D1 are real
+// and they are ORDERED CONSEQUENCES OF A JOURNAL, so they belong to the journal
+// owner; their reason ids are declared here, in
+// V5_J301_JOURNAL_OWNER_REASON_IDS, as the vocabulary that seam owes, and the
+// suite proves the classification behind them against
+// mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs — a file in the
+// test tree that no production module can import, proved by a parsed static AND
+// dynamic import scan of every module under src/, not by a promise.
 //
 // ATTENDANCE IS NOT A STRING. `declared_actor_slug` is exactly what its name
 // says: something a caller typed. This module runs no membership test on it,
@@ -551,6 +566,39 @@ export const V5_J301_WORKFLOW_JOURNAL_READER_SEAM =
   "seam:v5-j301-tour-workflow-stage-journal-reader";
 
 /**
+ * THE STAGING VOCABULARY THE JOURNAL OWNER OWES, and nothing this module emits.
+ *
+ * Q060.D1's staging rules are real and they are worth naming precisely, but
+ * each one is a statement about a HISTORY — which actions really happened, in
+ * which order — and the only thing that could make such a statement here is a
+ * caller. So these six reason ids are DECLARED and not PRODUCED: they are the
+ * answers `V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM` will give once something
+ * authoritative can read the journal, published now so a future implementation
+ * has one spelling to conform to and so a reader can see exactly which questions
+ * this module is not answering.
+ *
+ *   journal_entry_foreign_to_tour      an entry of another tenant, Tour or Assignment
+ *   journal_history_noncontiguous      a stage with no entry while a later stage has one
+ *   stage_skipped                      a stage past the one after the furthest with activity
+ *   backward_stage_requires_correction an earlier stage with no correction target named
+ *   correction_target_absent           a correction naming a step key the journal does not hold
+ *   duplicate_step_key_replay          a step key the journal already holds
+ *
+ * No exported function in this module returns any of them. The classification
+ * behind them is proved conditionally — `would_be_*`, never `is` — in
+ * mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs, which cites this
+ * list so the two cannot drift apart.
+ */
+export const V5_J301_JOURNAL_OWNER_REASON_IDS = deepFreeze([
+  "backward_stage_requires_correction",
+  "correction_target_absent",
+  "duplicate_step_key_replay",
+  "journal_entry_foreign_to_tour",
+  "journal_history_noncontiguous",
+  "stage_skipped",
+]);
+
+/**
  * The adapter that would turn a named `intended_verb` into a call the deployed
  * verb's own inputSchema accepts. It does not exist, and the gap is not
  * cosmetic: `prepare-tour-route-version` requires `idempotency_key` and
@@ -647,8 +695,14 @@ export function tourWorkflowStepKey(request) {
 }
 
 // ---------------------------------------------------------------------------
-// The journal view. A caller may hand one in; this module reads it as a VIEW
-// and says so on every result it touches.
+// The journal ENTRY schema. This is the shape the durable stage journal will
+// store and the shape its reader will return — declared here because it is part
+// of the contract the seam owes, and validated here so a future writer has one
+// spelling to conform to.
+//
+// WHAT THIS SECTION NO LONGER DOES: read a list of these as a HISTORY. Shape
+// validation of one entry says nothing about position; a sequence of them read
+// for position is a resume classification, and this module makes none.
 // ---------------------------------------------------------------------------
 
 const JOURNAL_ENTRY_KEYS = Object.freeze([
@@ -669,9 +723,9 @@ const JOURNAL_ENTRY_REQUIRED = Object.freeze([
  *
  * EVERY ENTRY NAMES ITS TENANT, TOUR AND ASSIGNMENT, and they are required
  * rather than optional, because an entry that does not say which Tour it
- * belongs to cannot be checked against the one being asked about — and an
- * unchecked entry from another Tour was able to change this Tour's answer.
- * `evaluateStageAction` refuses any entry whose binding is not the request's.
+ * belongs to cannot be checked against the one it claims to be part of. The
+ * check itself belongs to the journal owner: `evaluateStageAction` reads no
+ * journal at all, so there is no answer here for a foreign entry to move.
  */
 export function assertTourWorkflowJournalEntry(entry, path = "entry") {
   assertObject(entry, path);
@@ -711,62 +765,6 @@ export function assertTourWorkflowJournalEntry(entry, path = "entry") {
   return deepFreeze(normalized);
 }
 
-function normalizeJournalView(value, path) {
-  assertArray(value, path, { max: 512 });
-  return value.map((entry, index) => assertTourWorkflowJournalEntry(entry, `${path}[${index}]`));
-}
-
-/**
- * MODULE-PRIVATE, and it stays that way. Nothing re-exports it, no test entry
- * reaches it, and the suite proves the module's real exports equal
- * V5_J301_PUBLIC_SURFACE with NO exception.
- *
- * Given a journal view already bound to this Tour, work out which stage the
- * workflow would sit at. The answer is a real deterministic classification and
- * it is what makes the staging refusals below possible — but it is not a
- * decision that anything may proceed, so it never leaves this file except as
- * the CONTENT of a refusal. A test that wants the classification derives it by
- * probing the public refusals; see
- * mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs.
- *
- * `contiguity_gap` is the first stage that has no entry while a LATER stage
- * does. A journal holding only `client_facing_review` cannot be a history of
- * this Tour's ordered workflow — the four stages before it left no trace — and
- * a history that cannot be this Tour's is refused before it is read for
- * position, rather than quietly treated as "the workflow is at stage five".
- */
-function classifyResumePoint(entries) {
-  const seen = new Set();
-  const stepKeys = new Set();
-  for (const entry of entries) {
-    seen.add(entry.stage);
-    stepKeys.add(entry.step_key);
-  }
-  // THE FURTHEST STAGE WITH ANY ENTRY, AND WHY IT IS NOT "THE FURTHEST
-  // COMPLETED STAGE". Nothing in a journal entry says a stage FINISHED — a
-  // stage is a place work happened, not a box that got ticked — so a
-  // classification that claimed completion would be inventing a fact. The
-  // furthest stage with activity is the strongest honest reading, and it gives
-  // the two answers the staging rules actually need: an interrupted stage is
-  // resumed (same index), and the stage after it may begin (index + 1).
-  let highestSeenIndex = -1;
-  for (const stage of V5_J301_STAGES) {
-    if (seen.has(stage)) highestSeenIndex = V5_J301_STAGE_INDEX[stage];
-  }
-  let contiguityGap = null;
-  for (let index = 0; index < highestSeenIndex; index += 1) {
-    if (!seen.has(V5_J301_STAGES[index])) { contiguityGap = V5_J301_STAGES[index]; break; }
-  }
-  return {
-    open_stage: highestSeenIndex === -1 ? V5_J301_STAGES[0] : V5_J301_STAGES[highestSeenIndex],
-    next_stage: V5_J301_STAGES[highestSeenIndex + 1] ?? null,
-    highest_seen_index: highestSeenIndex,
-    stages_seen: V5_J301_STAGES.filter(stage => seen.has(stage)),
-    contiguity_gap: contiguityGap,
-    step_keys: stepKeys,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // The evaluators. Deny-only, every one of them.
 // ---------------------------------------------------------------------------
@@ -777,7 +775,8 @@ function refused(reason_id, detail) {
     decision: "refused",
     reason_id,
     ...detail,
-    journal_authority: "caller_supplied_view",
+    caller_journal_admitted: false,
+    journal_read: false,
     governed_state_applied: false,
     effects: V5_NO_EFFECTS,
   });
@@ -794,7 +793,8 @@ function unavailable(reason_id, owed_seams, detail) {
     map_contract_gate: V5_J301_MAP_CONTRACT_GATE,
     map_contract_production_status: V5_J301_MAP_CONTRACT_PRODUCTION_STATUS,
     ...detail,
-    journal_authority: "caller_supplied_view",
+    caller_journal_admitted: false,
+    journal_read: false,
     governed_state_applied: false,
     effects: V5_NO_EFFECTS,
   });
@@ -826,42 +826,53 @@ const STAGE_ACTION_KEYS = Object.freeze([
 ]);
 const STAGE_ACTION_REQUIRED = Object.freeze([
   "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
-  "declared_actor_slug", "attended_intent", "actor_class", "action_subject_digest", "journal_view",
+  "declared_actor_slug", "attended_intent", "actor_class", "action_subject_digest",
 ]);
 
 /**
- * Evaluate one intended stage action against the staging rules.
+ * Evaluate one intended stage action against the rules this module can check
+ * WITHOUT A JOURNAL.
  *
  * THE ORDERED QUESTIONS, in the order they are asked, because a classification
  * without its procedure cannot be checked:
  *
  *   1. Can the request be read at all?          -> throw V5J301Error
  *   2. Does it carry its own authority?          -> refused, caller_supplied_authority_field
- *   3. Does its Tour activity reach a lifecycle
+ *   3. Does it hand in its own journal?          -> refused, caller_supplied_journal_view_refused
+ *   4. Does its Tour activity reach a lifecycle
  *      phase or a Deal axis?                     -> refused, implicit_* (Q072.D2, Q080.D2)
- *   4. Is the intent unattended?                 -> refused, unattended_intake_refused (Q014.D2)
- *   5. Is a model speaking outside its stage?    -> refused, model_outside_declared_seam
- *   6. Does the actor class match the action?    -> refused, actor_class_mismatch
- *   7. Does any journal entry belong to another
- *      tenant, Tour or Assignment?               -> refused, journal_entry_foreign_to_tour
- *   8. Does the journal skip a stage that a later
- *      entry presupposes?                        -> refused, journal_history_noncontiguous
- *   9. Does the stage jump past the stage after
- *      the furthest one with any activity?       -> refused, stage_skipped (Q060.D1)
- *  10. Does it move backwards without being a
- *      correction against an existing entry?     -> refused, backward_stage_requires_correction
- *  11. Has this exact step key already been
- *      recorded in the view?                     -> refused, duplicate_step_key_replay
- *  12. Is this an attended action?               -> unavailable, attended_actor_source_unavailable
- *  13. Anything else                             -> unavailable, journal owner does not exist
+ *   5. Is the intent unattended?                 -> refused, unattended_intake_refused (Q014.D2)
+ *   6. Is a model speaking outside its stage?    -> refused, model_outside_declared_seam
+ *   7. Does the actor class match the action?    -> refused, actor_class_mismatch
+ *   8. Is this an attended action?               -> unavailable, attended_actor_source_unavailable
+ *   9. Anything else                             -> unavailable, journal owner does not exist
  *
- * THERE IS NO STEP THAT SAYS YES, and the two exits at 12 and 13 are why. A
+ * WHY QUESTION 3 EXISTS AND WHY IT COMES THIRD. Questions 4 to 7 read only the
+ * REQUEST — its intent, its actor class, its own payload — and their answers
+ * are facts about the request. The staging rules of Q060.D1 are different in
+ * kind: "this stage skips the one before it", "this is a backward move", "this
+ * step key was already recorded" are all facts about a HISTORY, and the only
+ * thing that can state a history here is a caller. An earlier shape of this
+ * function read that caller history and answered with `stages_seen`,
+ * `earliest_unstarted_stage`, `missing_stage` and `furthest_stage_seen`, which
+ * together reconstruct the resume boundary — the exact fact no authority in
+ * this repository can establish. So the journal is refused BEFORE any of it is
+ * read, and no answer below carries a field derived from one.
+ *
+ * WHERE THE STAGING RULES WENT. Nowhere: they are the journal owner's, and
+ * V5_J301_JOURNAL_OWNER_REASON_IDS declares the vocabulary that seam owes so a
+ * future implementation has one spelling to conform to. The classification
+ * itself is proved against
+ * mcp-server/test/tour-workflow-classifiers.v5.testhelper.mjs, in the test
+ * tree, conditionally — `would_be_*`, never `is`.
+ *
+ * THERE IS NO STEP THAT SAYS YES, and the two exits at 8 and 9 are why. A
  * refusal can always be given honestly, because denial needs no authority the
  * repository lacks. Permission does, twice over here: no authenticated actor
- * source can tell this module a human is present (step 12), and no durable
- * journal can tell it where the workflow actually stands (step 13).
+ * source can tell this module a human is present (step 8), and no durable
+ * journal can tell it where the workflow actually stands (step 9).
  *
- * WHY 12 COMES BEFORE 13. A caller writing `declared_actor_slug: "joe"` and
+ * WHY 8 COMES BEFORE 9. A caller writing `declared_actor_slug: "joe"` and
  * `attended_intent: "human_present_for_this_action"` used to reach the ordinary
  * journal-owner answer, which read as "attendance was satisfied, only the store
  * is missing". It was not satisfied and it cannot be here. The attended exit
@@ -880,6 +891,22 @@ export function evaluateStageAction(request) {
       field: authorityHit.key,
       field_path: authorityHit.path,
       owed_seams: [V5_J301_MAP_CONTRACT_RECEIPT_STEP],
+    });
+  }
+
+  // 3. A JOURNAL IS NOT AN ARGUMENT. Refused before a single entry is read, and
+  //    refused for being PRESENT rather than for being malformed — an empty
+  //    array is still a caller stating this Tour's history, and reading one to
+  //    say "no entries, so you are at stage one" is a resume classification.
+  //    Explicit `null` is the one accepted spelling because it states no
+  //    history at all; the field is kept in the closed key set on purpose, so
+  //    the answer is a nameable refusal rather than an unreadable request.
+  if (request.journal_view !== undefined && request.journal_view !== null) {
+    return refused("caller_supplied_journal_view_refused", {
+      field: "journal_view",
+      field_path: "request.journal_view",
+      owed_seams: [V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM, V5_J301_WORKFLOW_JOURNAL_READER_SEAM],
+      journal_owner_reason_ids: [...V5_J301_JOURNAL_OWNER_REASON_IDS],
     });
   }
 
@@ -902,18 +929,22 @@ export function evaluateStageAction(request) {
     "request.actor_class", "unknown_actor_class");
   const action_subject_digest =
     assertDigestRef(request.action_subject_digest, "request.action_subject_digest");
+  // SHAPE-CHECKED AND DELIBERATELY UNVERIFIED. Whether the step it names exists
+  // is a question about the journal, so it is the journal owner's to answer
+  // (`correction_target_absent`). Validating the spelling here keeps one
+  // spelling of a step key in the system; it establishes nothing else, and the
+  // value is echoed in no answer.
   const corrects_step_key = request.corrects_step_key === undefined || request.corrects_step_key === null
     ? null
     : assertDigestRef(request.corrects_step_key, "request.corrects_step_key");
   const tour_activity = request.tour_activity === undefined || request.tour_activity === null
     ? null
     : assertObject(request.tour_activity, "request.tour_activity");
-  const journal = normalizeJournalView(request.journal_view, "request.journal_view");
 
   const step_key = tourWorkflowStepKey({ tour_id, stage, action_kind: request.action_kind, action_subject_digest });
   const common = { tour_id, assignment_id, stage, action_kind: request.action_kind, step_key };
 
-  // 3. A Tour that carries a lifecycle phase is not recording activity; it is
+  // 4. A Tour that carries a lifecycle phase is not recording activity; it is
   //    moving the Assignment or the Deal, which Q072.D2 and Q080.D2 forbid.
   if (tour_activity) {
     const lifecycleHit = scanFieldNames(tour_activity, [...V5_J301_FORBIDDEN_ACTIVITY_FIELDS], "request.tour_activity");
@@ -928,14 +959,14 @@ export function evaluateStageAction(request) {
     }
   }
 
-  // 4. Attended means a human is present for THIS action.
+  // 5. Attended means a human is present for THIS action.
   if (intent !== V5_J301_ATTENDED_INTENT) {
     return refused("unattended_intake_refused", {
       ...common, attended_intent: intent, accepted_intent: V5_J301_ATTENDED_INTENT,
     });
   }
 
-  // 5. A model may occupy the assembly stage and nothing else. Asked BEFORE the
+  // 6. A model may occupy the assembly stage and nothing else. Asked BEFORE the
   //    actor-class match on purpose: "a model reached into the deterministic
   //    stage" and "this action wants a different kind of actor" are different
   //    facts, and the first one deserves its own answer rather than being
@@ -946,7 +977,7 @@ export function evaluateStageAction(request) {
     });
   }
 
-  // 6. The actor class the action declares is the one that may perform it. There
+  // 7. The actor class the action declares is the one that may perform it. There
   //    is deliberately no seventh question about WHO the actor is: a slug is a
   //    string, and a set lookup over a string is not an authentication.
   if (actor_class !== action.actor_class) {
@@ -955,54 +986,12 @@ export function evaluateStageAction(request) {
     });
   }
 
-  // 7. EVERY ENTRY MUST BE AN ENTRY OF THIS TOUR. Checked before the journal is
-  //    read for position, because an entry from another Tour was able to move
-  //    this Tour's answer — a cross-Tour entry at a later stage produced
-  //    backward_stage_requires_correction for a request that was not going
-  //    backwards at all.
-  for (let index = 0; index < journal.length; index += 1) {
-    const entry = journal[index];
-    if (entry.tour_id !== tour_id || entry.assignment_id !== assignment_id) {
-      return refused("journal_entry_foreign_to_tour", {
-        ...common,
-        entry_index: index,
-        entry_tour_id: entry.tour_id,
-        entry_assignment_id: entry.assignment_id,
-      });
-    }
-  }
-
-  // 8., 9., 10. and 11. The staging rules, read off the journal view.
-  const resume = classifyResumePoint(journal);
-  if (resume.contiguity_gap !== null) {
-    return refused("journal_history_noncontiguous", {
-      ...common,
-      stages_seen: [...resume.stages_seen],
-      missing_stage: resume.contiguity_gap,
-      furthest_stage_seen: resume.open_stage,
-    });
-  }
-  const requestedIndex = V5_J301_STAGE_INDEX[stage];
-  if (requestedIndex > resume.highest_seen_index + 1) {
-    return refused("stage_skipped", {
-      ...common,
-      stages_seen: [...resume.stages_seen],
-      earliest_unstarted_stage: resume.next_stage,
-    });
-  }
-  if (requestedIndex < resume.highest_seen_index) {
-    if (corrects_step_key === null) {
-      return refused("backward_stage_requires_correction", {
-        ...common, stages_seen: [...resume.stages_seen],
-      });
-    }
-    if (!resume.step_keys.has(corrects_step_key)) {
-      return refused("correction_target_absent", { ...common, corrects_step_key });
-    }
-  }
-  if (resume.step_keys.has(step_key)) {
-    return refused("duplicate_step_key_replay", { ...common, already_recorded_in_view: true });
-  }
+  // THE STAGING RULES OF Q060.D1 ARE NOT ASKED HERE, and their absence is the
+  // point rather than an omission. Every one of them — foreign entry, gap,
+  // skip, backward move without a correction, replayed step key — is a question
+  // about what really happened, and nothing in this repository can answer that.
+  // V5_J301_JOURNAL_OWNER_REASON_IDS is the vocabulary the owner owes; the
+  // classification behind it is proved conditionally in the test tree.
 
   const tail = {
     ...common,
@@ -1015,9 +1004,9 @@ export function evaluateStageAction(request) {
     declared_actor_slug_is_authority: false,
   };
 
-  // 12. An attended action, with no authenticated actor source to say a human
-  //     was here. This exit is reached by EVERY attended action, whatever slug
-  //     the caller declared, which is the property the suite sweeps.
+  // 8. An attended action, with no authenticated actor source to say a human
+  //    was here. This exit is reached by EVERY attended action, whatever slug
+  //    the caller declared, which is the property the suite sweeps.
   if (action.actor_class === "human_attended") {
     return unavailable("attended_actor_source_unavailable",
       [V5_J301_ATTENDED_ACTOR_SOURCE_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
@@ -1025,9 +1014,9 @@ export function evaluateStageAction(request) {
       { ...tail, identity_seam_module: "mcp-server/src/identity.js" });
   }
 
-  // 13. Well-formed, rule-abiding, and still not admissible: the durable journal
-  //     that owns workflow position does not exist in this repository, and the
-  //     map contract has no independent acceptance receipt.
+  // 9. Well-formed, rule-abiding, and still not admissible: the durable journal
+  //    that owns workflow position does not exist in this repository, and the
+  //    map contract has no independent acceptance receipt.
   return unavailable("workflow_journal_owner_unavailable",
     [V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM, V5_J301_MAP_CONTRACT_RECEIPT_STEP], tail);
 }
@@ -1217,6 +1206,9 @@ export function tourWorkflowGaps() {
     assignment_activity_owner_seam: V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
     journal_reader_exists_here: false,
     journal_reader_seam: V5_J301_WORKFLOW_JOURNAL_READER_SEAM,
+    caller_journal_accepted_here: false,
+    staging_rules_enforced_here: false,
+    journal_owner_reason_ids: [...V5_J301_JOURNAL_OWNER_REASON_IDS],
     attended_actor_source_exists_here: false,
     attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
     identity_seam_module: "mcp-server/src/identity.js",
@@ -1268,6 +1260,7 @@ export function v5J301PolicyPreimage() {
     caller_authority_fields: [...V5_J301_CALLER_AUTHORITY_FIELDS],
     workflow_journal_owner_seam: V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
     workflow_journal_reader_seam: V5_J301_WORKFLOW_JOURNAL_READER_SEAM,
+    journal_owner_reason_ids: [...V5_J301_JOURNAL_OWNER_REASON_IDS],
     attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
     verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
     assignment_activity_owner_seam: V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
@@ -1353,6 +1346,7 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_FORBIDDEN_ACTIVITY_FIELDS",
   "V5_J301_INTENTS",
   "V5_J301_JOURNAL_ENTRY_SCHEMA_VERSION",
+  "V5_J301_JOURNAL_OWNER_REASON_IDS",
   "V5_J301_MAP_CONTRACT",
   "V5_J301_MAP_CONTRACT_GATE",
   "V5_J301_MAP_CONTRACT_PRODUCTION_STATUS",

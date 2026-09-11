@@ -2,164 +2,248 @@
 //
 // READ THIS FIRST, BECAUSE THE FILE NAME IS THE CONTRACT. Nothing in this file
 // is part of the V5-J301 public surface. `tour-workflow-j301.v5.js` does not
-// import it, no production module imports it, and
-// tour-workflow-j301.v5.test.mjs proves that with a parser-backed scan of every
-// module under src/ rather than a promise. The only importer is the test file.
+// import it, no production module imports it — statically or dynamically — and
+// tour-workflow-j301.v5.test.mjs proves that with esbuild's parser over every
+// module under src/, reading both the static and the dynamic import set, rather
+// than with a promise. The only importer is the test file.
 //
-// WHY IT EXISTS. The staging rules of Q060.D1 rest on a resume CLASSIFICATION —
-// which stage a Tour's workflow would stand at — and a suite that could not
-// reach that classification could only prove the refusals, never the reading
-// underneath them. The previous shape of this slice reached it by exporting a
-// `__V5_J301_TEST_ONLY__` member from the production module. A reviewer was
-// right that excluding a name from a declared surface list does not make an
-// ESM export private: any consumer could import it and obtain a resume
-// classification derived from a journal it wrote itself. That export is gone.
+// WHY IT EXISTS, AND WHY THE PREVIOUS TWO SHAPES WERE BOTH WRONG. Q060.D1's
+// staging rules rest on a resume CLASSIFICATION — which stage a Tour's workflow
+// would stand at — and a suite that cannot reach that classification can prove
+// nothing about the ordering the decision settles.
 //
-// HOW THIS REACHES THE CLASSIFICATION INSTEAD — and this is the part worth
-// reading, because it is strictly stronger than a hidden hook. It does not
-// reach INTO the module at all. It PROBES the public deny-only surface: for a
-// given journal view it asks `evaluateStageAction` what would happen at each of
-// the five stages, and derives the position from which stages refuse and how.
+//   * The FIRST shape exported `__V5_J301_TEST_ONLY__` from the production
+//     module. Excluding a name from a declared surface list does not make an
+//     ESM export private: any consumer could import it.
+//   * The SECOND shape deleted that export and reached the classification by
+//     PROBING the public refusals — handing `evaluateStageAction` a journal and
+//     reading `stages_seen`, `earliest_unstarted_stage` and the reason pattern
+//     back out. That was worse in the way that matters: it worked, which is
+//     exactly the demonstration that the public surface still handed a caller
+//     the resume boundary. A refusal whose body reconstructs the position IS
+//     the position.
 //
-//   * a stage BELOW the furthest one with activity refuses
-//     `backward_stage_requires_correction`, so the LOWEST stage that does not
-//     refuse that way is the open stage — the furthest one with activity;
-//   * a stage more than one past it refuses `stage_skipped`, so the FURTHEST
-//     stage that does not refuse that way is where the next stage would begin,
-//     and the two readings are cross-checked against each other.
+// SO THE PRODUCTION MODULE NOW READS NO JOURNAL AT ALL — `journal_view` is
+// refused by name — and the classification lives HERE, in the test tree, where
+// production cannot reach it. This is the Gate Zero layout of
+// mcp-server/src/gate-zero-assurance.v5.js and
+// mcp-server/test/gate-zero-classifiers.v5.testhelper.mjs, followed
+// deliberately: the public module owns the closed vocabulary, the test-tree
+// helper owns the classification, and the helper answers in the conditional.
 //
-// So there is no second implementation to drift from the first, no private
-// member to quarantine, and nothing here that production could import even by
-// accident. If the module's classification changes, this derivation changes
-// with it, because it is reading the module's own answers.
+// THE ANSWERS ARE CONDITIONAL BY NAME, and there is no spelling in this file
+// that says a thing happened:
 //
-// THE ANSWERS ARE CONDITIONAL BY NAME. There is no durable stage journal in
-// this repository, so a position implied by a caller-supplied view is a
-// HYPOTHETICAL and nothing else:
-//
-//   would_resume_at_if_authoritative     — where the workflow WOULD stand IF an
-//   would_next_stage_be_if_authoritative   authoritative journal said this, which
-//                                          no authoritative journal did.
+//   would_be_open_stage_if_authoritative       where the workflow WOULD stand,
+//   would_be_next_stage_if_authoritative       what WOULD come next, and whether
+//   would_be_readable_history_if_authoritative the shape WOULD read as a history
+//   would_be_admissible_if_authoritative       — IF an authoritative journal had
+//                                              said this, which none did.
 //
 // Every result also carries `is_not_authority: true` and
-// `evidence_source: "caller_supplied_view_not_authority"`, so a value that
+// `evidence_source: "caller_supplied_shapes_not_authority"`, so a value that
 // escaped into a consumer would still refuse to read as a position.
+//
+// EVERY REASON ID THIS FILE EMITS IS CITED FROM THE PUBLIC MODULE'S
+// V5_J301_JOURNAL_OWNER_REASON_IDS. It invents none, so the vocabulary the
+// journal-owner seam owes and the vocabulary this classification uses cannot
+// drift apart — and an id this file misspells fails loudly instead of quietly
+// describing a rule nobody will implement.
 //
 // Every function here is PURE — no filesystem, no network, no database, no
 // clock, no environment.
 
-import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
-  V5_J301_ATTENDED_INTENT,
+  V5_J301_JOURNAL_OWNER_REASON_IDS,
   V5_J301_STAGES,
   V5_J301_STAGE_ACTIONS,
-  evaluateStageAction,
+  V5_J301_STAGE_INDEX,
+  assertTourWorkflowJournalEntry,
+  tourWorkflowStepKey,
 } from "../src/tour-workflow-j301.v5.js";
 
 /** Said on every result, so an escaped value still reads as "not authority". */
-export const V5_J301_CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_view_not_authority";
+export const V5_J301_CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_shapes_not_authority";
 
-/** A subject digest that is a real digest and means nothing in particular. */
-const PROBE_SUBJECT = `sha256:${"0".repeat(63)}1`;
+/** The public module owns the closed reason registry; this file only cites it. */
+function reason(id) {
+  if (!V5_J301_JOURNAL_OWNER_REASON_IDS.includes(id)) {
+    throw new Error(`${id} is not a reason the journal-owner seam declares`);
+  }
+  return id;
+}
 
-/**
- * The probe request for one stage. It deliberately uses that stage's FIRST
- * registered action and that action's own required actor class, so the probe is
- * never refused for a reason unrelated to position — an actor-class mismatch
- * would mask the staging answer this derivation is reading.
- */
-function probe(stage, { tour_id, assignment_id, journal_view }) {
-  const action_kind = Object.keys(V5_J301_STAGE_ACTIONS[stage])[0];
-  return {
-    organization_tenant_id: ORGANIZATION_TENANT_ID,
-    tour_id,
-    assignment_id,
-    stage,
-    action_kind,
-    declared_actor_slug: "probe-not-authority",
-    attended_intent: V5_J301_ATTENDED_INTENT,
-    actor_class: V5_J301_STAGE_ACTIONS[stage][action_kind].actor_class,
-    action_subject_digest: PROBE_SUBJECT,
-    journal_view,
-  };
+function frozen(value) {
+  return Object.freeze({
+    ...value,
+    is_not_authority: true,
+    evidence_source: V5_J301_CLASSIFIER_EVIDENCE_SOURCE,
+  });
+}
+
+function unreadable(reasonId, detail) {
+  return frozen({
+    would_be_readable_history_if_authoritative: false,
+    would_be_open_stage_if_authoritative: null,
+    would_be_next_stage_if_authoritative: null,
+    would_be_reason_id: reason(reasonId),
+    detail: Object.freeze({ ...detail }),
+  });
 }
 
 /**
- * Derive the hypothetical resume point of a journal view, by probing the public
- * surface stage by stage.
+ * Which stage a journal-shaped list WOULD say the workflow stands at.
  *
- * `binding` is `{ tour_id, assignment_id }` — the Tour the view is claimed to
- * be OF. It is required rather than inferred from the entries, because
- * inferring it from the entries is exactly how a journal belonging to another
- * Tour used to be read as this one's history.
+ * `binding` is `{ tour_id, assignment_id }` — the Tour the shapes are claimed to
+ * be OF. It is required rather than inferred from the entries, because inferring
+ * it from the entries is exactly how a list belonging to another Tour would be
+ * read as this one's history.
  *
- * When the view is not a readable history of that Tour at all — a foreign entry
- * or a stage gap — every probe refuses for that reason, and this returns the
- * refusal rather than a position. A view that cannot be this Tour's history has
- * no position to report.
+ * THE ORDERED QUESTIONS, so the classification can be checked rather than
+ * trusted:
+ *
+ *   1. Is every entry readable at all?            -> throws (V5J301Error, from the
+ *                                                    public module's own schema)
+ *   2. Is every entry an entry of THIS Tour and
+ *      Assignment?                                -> journal_entry_foreign_to_tour
+ *   3. Does a stage with no entry sit before a
+ *      stage that has one?                        -> journal_history_noncontiguous
+ *   4. Otherwise, the furthest stage with any
+ *      activity is the open stage, and the one
+ *      after it is where work would begin next.
+ *
+ * WHY THE FURTHEST STAGE WITH ACTIVITY, AND NOT "THE FURTHEST COMPLETED STAGE".
+ * Nothing in a journal entry says a stage FINISHED — a stage is a place work
+ * happened, not a box that got ticked — so a classification claiming completion
+ * would be inventing a fact. The furthest stage with activity is the strongest
+ * honest reading, and it gives the two answers the staging rules need: an
+ * interrupted stage is resumed (same index), and the stage after it may begin
+ * (index + 1).
  */
-export function wouldResumeAtIfAuthoritative(journal_view, binding) {
+export function wouldBeResumePointIfAuthoritative(entries, binding) {
   const { tour_id, assignment_id } = binding;
-  const answers = V5_J301_STAGES.map(stage =>
-    evaluateStageAction(probe(stage, { tour_id, assignment_id, journal_view })));
+  const normalized = entries.map((entry, index) =>
+    assertTourWorkflowJournalEntry(entry, `entries[${index}]`));
 
-  const unreadable = answers.find(answer =>
-    answer.reason_id === "journal_entry_foreign_to_tour" ||
-    answer.reason_id === "journal_history_noncontiguous");
-  if (unreadable) {
-    return Object.freeze({
-      would_resume_at_if_authoritative: null,
-      would_next_stage_be_if_authoritative: null,
-      view_is_a_readable_history: false,
-      refused_reason_id: unreadable.reason_id,
-      is_not_authority: true,
-      evidence_source: V5_J301_CLASSIFIER_EVIDENCE_SOURCE,
+  for (let index = 0; index < normalized.length; index += 1) {
+    const entry = normalized[index];
+    if (entry.tour_id !== tour_id || entry.assignment_id !== assignment_id) {
+      return unreadable("journal_entry_foreign_to_tour", {
+        entry_index: index,
+        entry_tour_id: entry.tour_id,
+        entry_assignment_id: entry.assignment_id,
+      });
+    }
+  }
+
+  const seen = new Set(normalized.map(entry => entry.stage));
+  let highestSeenIndex = -1;
+  for (const stage of V5_J301_STAGES) {
+    if (seen.has(stage)) highestSeenIndex = V5_J301_STAGE_INDEX[stage];
+  }
+  for (let index = 0; index < highestSeenIndex; index += 1) {
+    if (!seen.has(V5_J301_STAGES[index])) {
+      return unreadable("journal_history_noncontiguous", {
+        missing_stage: V5_J301_STAGES[index],
+        furthest_stage_seen: V5_J301_STAGES[highestSeenIndex],
+      });
+    }
+  }
+
+  return frozen({
+    would_be_readable_history_if_authoritative: true,
+    would_be_open_stage_if_authoritative:
+      highestSeenIndex === -1 ? V5_J301_STAGES[0] : V5_J301_STAGES[highestSeenIndex],
+    would_be_next_stage_if_authoritative: V5_J301_STAGES[highestSeenIndex + 1] ?? null,
+    would_be_reason_id: null,
+    detail: Object.freeze({
+      stages_seen: Object.freeze(V5_J301_STAGES.filter(stage => seen.has(stage))),
+      step_keys_cited: Object.freeze(normalized.map(entry => entry.step_key)),
+    }),
+  });
+}
+
+/**
+ * Whether one intended stage action WOULD satisfy Q060.D1's staging rules
+ * against a journal-shaped list.
+ *
+ * `action` is `{ stage, action_kind, action_subject_digest, corrects_step_key }`
+ * — the position-bearing half of a stage-action request, and nothing else. The
+ * attended, actor-class and lifecycle questions are the PUBLIC module's and are
+ * answered there; this file duplicates none of them, so there is no second copy
+ * of those rules to drift.
+ *
+ * THE ORDERED QUESTIONS, after the resume point above:
+ *
+ *   5. Does the stage jump past the stage after
+ *      the furthest one with activity?            -> stage_skipped
+ *   6. Does it move backwards naming no
+ *      correction target?                         -> backward_stage_requires_correction
+ *   7. Does it name a correction target the list
+ *      does not hold?                             -> correction_target_absent
+ *   8. Is this exact step key already in the
+ *      list?                                      -> duplicate_step_key_replay
+ *   9. Otherwise it WOULD satisfy the staging
+ *      rules — and would still not be admitted,
+ *      because attendance and the durable owner
+ *      are both missing.
+ */
+export function wouldSatisfyStagingRulesIfAuthoritative(action, entries, binding) {
+  const resume = wouldBeResumePointIfAuthoritative(entries, binding);
+  if (!resume.would_be_readable_history_if_authoritative) {
+    return frozen({
+      would_be_admissible_if_authoritative: false,
+      would_be_reason_id: resume.would_be_reason_id,
+      resume_point: resume,
     });
   }
 
-  // THE OPEN STAGE is the lowest one that is not refused as a backward move: a
-  // backward refusal means the journal already reaches further than that stage,
-  // so the first stage without one IS the furthest stage with activity. An
-  // empty view produces no backward refusals at all and lands on stage one,
-  // which is the right reading: a Tour nobody has touched resumes at the start.
-  let openIndex = V5_J301_STAGES.findIndex(
-    (_, index) => answers[index].reason_id !== "backward_stage_requires_correction");
-  if (openIndex === -1) openIndex = V5_J301_STAGES.length - 1;
-
-  // WHERE THE NEXT STAGE WOULD BEGIN, read independently off the SKIP refusals:
-  // the furthest stage that is not refused as a skip is the last one that may be
-  // acted in at all. For an empty view that is stage one itself — nothing has
-  // begun, so the next thing to begin IS the beginning — and for a view that
-  // reaches the final stage there is nothing after it.
-  let furthestActionable = -1;
-  for (let index = 0; index < V5_J301_STAGES.length; index += 1) {
-    if (answers[index].reason_id !== "stage_skipped") furthestActionable = index;
+  if (!Object.hasOwn(V5_J301_STAGE_ACTIONS, action.stage)) {
+    throw new Error(`${action.stage} is not a registered stage`);
+  }
+  if (!Object.hasOwn(V5_J301_STAGE_ACTIONS[action.stage], action.action_kind)) {
+    throw new Error(`${action.action_kind} is not an action of ${action.stage}`);
   }
 
-  // THE CROSS-CHECK. Two independent readings of the same journal — one off the
-  // backward refusals, one off the skip refusals — must agree that the workflow
-  // may act in the open stage and at most one stage past it. If they disagree,
-  // this derivation is wrong about the module and says so, rather than reporting
-  // a position it cannot stand behind.
-  if (furthestActionable < openIndex || furthestActionable > openIndex + 1) {
-    return Object.freeze({
-      would_resume_at_if_authoritative: null,
-      would_next_stage_be_if_authoritative: null,
-      view_is_a_readable_history: false,
-      refused_reason_id: "probe_readings_disagree",
-      is_not_authority: true,
-      evidence_source: V5_J301_CLASSIFIER_EVIDENCE_SOURCE,
+  const stepKey = tourWorkflowStepKey({
+    tour_id: binding.tour_id,
+    stage: action.stage,
+    action_kind: action.action_kind,
+    action_subject_digest: action.action_subject_digest,
+  });
+  const stepKeys = new Set(resume.detail.step_keys_cited);
+  const openIndex = resume.detail.stages_seen.length === 0
+    ? -1
+    : V5_J301_STAGE_INDEX[resume.would_be_open_stage_if_authoritative];
+  const requestedIndex = V5_J301_STAGE_INDEX[action.stage];
+  const correctsStepKey = action.corrects_step_key ?? null;
+
+  const refuse = (reasonId, detail) => frozen({
+    would_be_admissible_if_authoritative: false,
+    would_be_reason_id: reason(reasonId),
+    resume_point: resume,
+    detail: Object.freeze({ ...detail }),
+  });
+
+  if (requestedIndex > openIndex + 1) {
+    return refuse("stage_skipped", {
+      earliest_unstarted_stage: resume.would_be_next_stage_if_authoritative,
     });
   }
+  if (requestedIndex < openIndex) {
+    if (correctsStepKey === null) return refuse("backward_stage_requires_correction", {});
+    if (!stepKeys.has(correctsStepKey)) {
+      return refuse("correction_target_absent", { corrects_step_key: correctsStepKey });
+    }
+  }
+  if (stepKeys.has(stepKey)) {
+    return refuse("duplicate_step_key_replay", { step_key: stepKey });
+  }
 
-  return Object.freeze({
-    would_resume_at_if_authoritative: V5_J301_STAGES[openIndex],
-    would_next_stage_be_if_authoritative:
-      openIndex === V5_J301_STAGES.length - 1 ? null : V5_J301_STAGES[furthestActionable],
-    view_is_a_readable_history: true,
-    refused_reason_id: null,
-    probe_reason_ids: Object.freeze(answers.map(answer => answer.reason_id)),
-    is_not_authority: true,
-    evidence_source: V5_J301_CLASSIFIER_EVIDENCE_SOURCE,
+  return frozen({
+    would_be_admissible_if_authoritative: true,
+    would_be_reason_id: null,
+    resume_point: resume,
+    detail: Object.freeze({ step_key: stepKey }),
   });
 }

@@ -15,8 +15,16 @@
 // It also proves the refusals that keep the equivalence honest: no admission
 // without the map contract's independent receipt, no navigation handoff without
 // the human promotion receipt, no Journey 1 map command, no caller-supplied
-// verdict, and no second path to governed state — every command names a verb
-// that really exists in the deployed record-layer registry.
+// verdict, and no second path to governed state.
+//
+// AND IT PROVES THE VERB CLAIM AT ITS REAL STRENGTH, WHICH IS WEAKER THAN
+// "TRAVERSED". Every command NAMES a verb that exists in the deployed
+// record-layer registry — and naming is all it does. There is no bound adapter,
+// so for each command the suite reads the deployed verb's own inputSchema and
+// asserts the EXACT fields this slice cannot supply and the exact fields it
+// would supply that the verb does not accept, then asserts that the gap is
+// still open. A command that closed its gap would fail here rather than quietly
+// look like a call.
 //
 // Everything here is synthetic. No network, no provider, no database, no map.
 

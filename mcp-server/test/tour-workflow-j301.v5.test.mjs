@@ -18,14 +18,20 @@
 //     checked by sweeping every result the suite builds rather than by asserting
 //     it once — and that a lifecycle field NAME inside a Tour payload is refused
 //     however deeply it is buried,
-//   * that NO JOURNAL A CALLER CAN SUPPLY produces an advance, because the
-//     durable owner that would make "resume" true does not exist here and a
-//     list in a request is not that owner,
+//   * that NO JOURNAL A CALLER CAN SUPPLY REACHES THE CLASSIFICATION AT ALL:
+//     the public path refuses `journal_view` by name, and a probe that calls
+//     every public export with every shape this suite can build recovers no
+//     journal-derived field and no resume position from any of them,
+//   * that the staging classification itself is still proved, stage by stage,
+//     against the test-tree helper that owns it, in the conditional
+//     (`would_be_*`) and never as a statement that anything happened,
 //   * that NO PUBLIC EXPORT, over every caller-controlled input shape this
 //     suite can build, ever yields a privileged outcome string,
 //   * that the module's real export list is exactly its declared public surface
-//     plus the quarantined test-only member, checked through the loader and
-//     through a tokenizer over the source rather than by eye,
+//     — no test-only member on it or off it — checked through the loader and
+//     through esbuild's parser rather than by eye,
+//   * that no production module reaches the test tree by a STATIC OR A DYNAMIC
+//     import, read out of a real parser's import records,
 //   * and that every verb the stage registry names really exists in the
 //     deployed record-layer registry.
 //
@@ -34,10 +40,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import esbuild from "esbuild";
 
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { V5_J102_ASSIGNMENT_PHASES, V5_J102_DEAL_AXES } from "../src/cre-lifecycle.v5.js";
@@ -78,7 +86,8 @@ import {
 } from "../src/tour-workflow-j301.v5.js";
 import {
   V5_J301_CLASSIFIER_EVIDENCE_SOURCE,
-  wouldResumeAtIfAuthoritative,
+  wouldBeResumePointIfAuthoritative,
+  wouldSatisfyStagingRulesIfAuthoritative,
 } from "./tour-workflow-classifiers.v5.testhelper.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -114,9 +123,26 @@ function stageRequest(overrides = {}) {
     attended_intent: V5_J301_ATTENDED_INTENT,
     actor_class: "human_attended",
     action_subject_digest: SUBJECT_A,
-    journal_view: [],
     ...overrides,
   };
+}
+
+/** The binding every journal-shaped fixture below is claimed to be OF. */
+const BINDING = Object.freeze({ tour_id: TOUR, assignment_id: ASSIGNMENT });
+
+/** One intended action, in the position-bearing shape the helper classifies. */
+function stagingAction(overrides = {}) {
+  return {
+    stage: "attended_mls_acquisition",
+    action_kind: "capture_listing_observation",
+    action_subject_digest: SUBJECT_A,
+    corrects_step_key: null,
+    ...overrides,
+  };
+}
+
+function wouldStage(action, view) {
+  return record(wouldSatisfyStagingRulesIfAuthoritative(stagingAction(action), view, BINDING));
 }
 
 function journalEntry(stage, action_kind, subject = SUBJECT_A, extra = {}) {
@@ -339,10 +365,10 @@ test("no membership test on a slug survives anywhere in the module", () => {
   // The old shape asked `isKnownPartner(actor_slug)`. A set lookup over a string
   // answers "is this SPELLED like a partner", which is not the question.
   const source = readFileSync(path.join(SRC_DIR, "tour-workflow-j301.v5.js"), "utf8");
-  const identifiers = identifiersOutsideLiterals(source);
-  assert.equal(identifiers.has("isKnownPartner"), false,
+  const referenced = forbiddenIdentifiers(source);
+  assert.equal(referenced.includes("isKnownPartner"), false,
     "a partner membership test is back in the module");
-  assert.equal(identifiers.has("actor_slug"), false,
+  assert.equal(referenced.includes("actor_slug"), false,
     "an unqualified actor_slug is back; the field is declared_actor_slug");
 });
 
@@ -363,10 +389,6 @@ test("a model may occupy the assembly stage and no other", () => {
   const inside = evaluate({
     stage: "agent_assisted_assembly", action_kind: "rank_candidate_stops",
     actor_class: "model_assisted",
-    journal_view: [
-      journalEntry("attended_mls_acquisition", "capture_listing_observation"),
-      journalEntry("deterministic_normalization", "normalize_property_fact"),
-    ],
   });
   assert.equal(inside.decision, "unavailable");
   assert.equal(inside.intended_verb, null);
@@ -384,10 +406,6 @@ test("an actor class the action does not call for is refused", () => {
   const result = evaluate({
     stage: "agent_assisted_assembly", action_kind: "draft_stop_narrative",
     actor_class: "human_attended",
-    journal_view: [
-      journalEntry("attended_mls_acquisition", "capture_listing_observation"),
-      journalEntry("deterministic_normalization", "normalize_property_fact"),
-    ],
   });
   assert.equal(result.decision, "refused");
   assert.equal(result.reason_id, "actor_class_mismatch");
@@ -395,59 +413,125 @@ test("an actor class the action does not call for is refused", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Staging: separate, ordered, resumable. Q060.D1.
+// The journal a caller hands in: refused at the door, and refused for BEING
+// there rather than for being malformed.
+//
+// This is the hinge of the whole correction. The previous shape read the list,
+// applied the staging rules to it, and reported the reading in the body of its
+// refusals — at which point a caller who wrote the list could read back the
+// position of a workflow no authority here can place. So the list is now
+// refused before a single entry of it is read.
 // ---------------------------------------------------------------------------
+
+test("a caller-supplied journal is refused by name, and the seams are named with it", () => {
+  for (const view of [[], historyThrough("deterministic_normalization"),
+    [journalEntry("client_facing_review", "record_client_review_note")]]) {
+    const result = evaluate({ journal_view: view });
+    assert.equal(result.decision, "refused");
+    assert.equal(result.reason_id, "caller_supplied_journal_view_refused");
+    assert.equal(result.field, "journal_view");
+    assert.equal(result.field_path, "request.journal_view");
+    assert.ok(result.owed_seams.includes(V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
+    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_READER_SEAM));
+    assert.equal(result.caller_journal_admitted, false);
+    assert.equal(result.journal_read, false);
+  }
+
+  // AN EMPTY LIST IS STILL A CALLER STATING A HISTORY, and it is the case an
+  // exemption would most plausibly be written for. Reading it to answer "no
+  // entries, so you stand at stage one" is a resume classification with an
+  // easier-looking input, so it is refused exactly like the others — proved
+  // above by including [] in the sweep, and named here so the choice is not
+  // mistaken for an accident.
+  assert.equal(evaluate({ journal_view: [] }).reason_id, "caller_supplied_journal_view_refused");
+
+  // Explicit null states no history at all, so it is not a journal and the
+  // request proceeds to the answers it would have reached anyway.
+  const withNull = evaluate({ journal_view: null });
+  assert.equal(withNull.decision, "unavailable");
+  assert.equal(withNull.reason_id, "attended_actor_source_unavailable");
+
+  // The refusal comes BEFORE the entries are read: a list this module could not
+  // parse at all still produces the refusal rather than a throw.
+  const garbage = evaluate({ journal_view: [{ nonsense: true }, 7, "not an entry"] });
+  assert.equal(garbage.reason_id, "caller_supplied_journal_view_refused");
+});
+
+test("the refusal names the vocabulary the journal owner owes, and emits none of it", () => {
+  const declared = [...j301.V5_J301_JOURNAL_OWNER_REASON_IDS];
+  assert.deepEqual(declared, [
+    "backward_stage_requires_correction", "correction_target_absent",
+    "duplicate_step_key_replay", "journal_entry_foreign_to_tour",
+    "journal_history_noncontiguous", "stage_skipped",
+  ]);
+  const result = evaluate({ journal_view: historyThrough("deterministic_normalization") });
+  assert.deepEqual([...result.journal_owner_reason_ids], declared);
+  // Declared is not produced: no public answer this suite can provoke carries
+  // one of them as its own reason.
+  assert.equal(declared.includes(result.reason_id), false);
+});
+
+// ---------------------------------------------------------------------------
+// Staging: separate, ordered, resumable. Q060.D1.
+//
+// The rules are REAL and they are the journal owner's. They are proved here
+// against the test-tree classifier that owns them, conditionally — every answer
+// below is "what an authoritative journal saying this WOULD mean", and nothing
+// in this section asserts that anything happened.
+// ---------------------------------------------------------------------------
+
+test("the conditional classifier says only what it is entitled to say", () => {
+  const answer = wouldStage({}, []);
+  assert.equal(answer.is_not_authority, true);
+  assert.equal(answer.evidence_source, V5_J301_CLASSIFIER_EVIDENCE_SOURCE);
+  for (const forbidden of ["decision", "resume_at", "admitted", "allow", "resume_stage"]) {
+    assert.equal(Object.hasOwn(answer, forbidden), false, forbidden);
+  }
+  assert.ok(Object.isFrozen(answer));
+  // And it cannot invent a reason the public module does not declare.
+  assert.throws(() => wouldSatisfyStagingRulesIfAuthoritative(
+    stagingAction({ stage: "not_a_stage" }), [], BINDING));
+});
 
 test("a stage cannot skip the stage before it", () => {
   // The NEAREST illegal jump, which is the one an off-by-one would let through:
-  // the journal reaches stage 0, and stage 2 is asked for. Proving only the
+  // the history reaches stage 0, and stage 2 is asked for. Proving only the
   // distant jump (0 to 3) would pass a rule that permitted every skip of one.
-  const nearest = evaluate({
-    stage: "agent_assisted_assembly", action_kind: "rank_candidate_stops",
-    actor_class: "model_assisted",
-    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation")],
-  });
-  assert.equal(nearest.decision, "refused");
-  assert.equal(nearest.reason_id, "stage_skipped");
-  assert.equal(nearest.earliest_unstarted_stage, "deterministic_normalization");
-  assert.deepEqual([...nearest.stages_seen], ["attended_mls_acquisition"]);
+  const nearest = wouldStage(
+    { stage: "agent_assisted_assembly", action_kind: "rank_candidate_stops" },
+    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+  assert.equal(nearest.would_be_admissible_if_authoritative, false);
+  assert.equal(nearest.would_be_reason_id, "stage_skipped");
+  assert.equal(nearest.detail.earliest_unstarted_stage, "deterministic_normalization");
+  assert.deepEqual([...nearest.resume_point.detail.stages_seen], ["attended_mls_acquisition"]);
 
-  const distant = evaluate({
-    stage: "client_facing_review", action_kind: "record_client_review_note",
-    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation")],
-  });
-  assert.equal(distant.decision, "refused");
-  assert.equal(distant.reason_id, "stage_skipped");
+  const distant = wouldStage(
+    { stage: "client_facing_review", action_kind: "record_client_review_note" },
+    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+  assert.equal(distant.would_be_reason_id, "stage_skipped");
 
-  // And the boundary from an empty journal: intake is the only stage that may
+  // And the boundary from an empty history: intake is the only stage that may
   // begin, and the very next stage is already a skip.
-  const fromNothing = evaluate({ journal_view: [] });
-  assert.equal(fromNothing.decision, "unavailable");
-  const skipFromNothing = evaluate({
-    stage: "deterministic_normalization", action_kind: "normalize_property_fact",
-    actor_class: "deterministic", journal_view: [],
-  });
-  assert.equal(skipFromNothing.decision, "refused");
-  assert.equal(skipFromNothing.reason_id, "stage_skipped");
-  assert.deepEqual([...skipFromNothing.stages_seen], []);
+  assert.equal(wouldStage({}, []).would_be_admissible_if_authoritative, true);
+  const skipFromNothing = wouldStage(
+    { stage: "deterministic_normalization", action_kind: "normalize_property_fact" }, []);
+  assert.equal(skipFromNothing.would_be_reason_id, "stage_skipped");
+  assert.deepEqual([...skipFromNothing.resume_point.detail.stages_seen], []);
 });
 
 test("the next stage after an interruption is not a skip", () => {
-  const result = evaluate({
-    stage: "deterministic_normalization", action_kind: "normalize_property_fact",
-    actor_class: "deterministic",
-    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation")],
-  });
-  assert.equal(result.decision, "unavailable");
-  assert.equal(result.reason_id, "workflow_journal_owner_unavailable");
+  const answer = wouldStage(
+    { stage: "deterministic_normalization", action_kind: "normalize_property_fact" },
+    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+  assert.equal(answer.would_be_admissible_if_authoritative, true);
+  assert.equal(answer.would_be_reason_id, null);
 });
 
 test("continuing inside an interrupted stage is not a skip either", () => {
-  const result = evaluate({
-    action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B,
-    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation")],
-  });
-  assert.equal(result.decision, "unavailable");
+  const answer = wouldStage(
+    { action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B },
+    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+  assert.equal(answer.would_be_admissible_if_authoritative, true);
 });
 
 test("a backward stage move must be a correction against an entry that exists", () => {
@@ -455,41 +539,47 @@ test("a backward stage move must be a correction against an entry that exists", 
     journalEntry("attended_mls_acquisition", "capture_listing_observation"),
     journalEntry("deterministic_normalization", "normalize_property_fact", SUBJECT_B),
   ];
-  const bare = evaluate({
-    action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B, journal_view: view,
-  });
-  assert.equal(bare.decision, "refused");
-  assert.equal(bare.reason_id, "backward_stage_requires_correction");
+  const bare = wouldStage(
+    { action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B }, view);
+  assert.equal(bare.would_be_reason_id, "backward_stage_requires_correction");
 
-  const absent = evaluate({
+  const absent = wouldStage({
     action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B,
-    corrects_step_key: `sha256:${"e".repeat(64)}`, journal_view: view,
-  });
-  assert.equal(absent.decision, "refused");
-  assert.equal(absent.reason_id, "correction_target_absent");
+    corrects_step_key: `sha256:${"e".repeat(64)}`,
+  }, view);
+  assert.equal(absent.would_be_reason_id, "correction_target_absent");
 
   // The same step key with its algorithm stripped is not a near miss to be
-  // accepted helpfully; it is a different spelling, and it cannot be read.
+  // accepted helpfully; it is a different spelling, and the PUBLIC path — which
+  // still validates the field's shape — cannot read it.
   assert.throws(() => evaluateStageAction(stageRequest({
     action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B,
     corrects_step_key: assertTourWorkflowJournalEntry(view[0]).step_key.replace(/^sha256:/, ""),
-    journal_view: view,
   })), error => error.code === "invalid_digest");
 });
 
-test("a correction whose target is in the view passes the staging rules", () => {
+test("a correction whose target is in the history satisfies the staging rules", () => {
   const first = journalEntry("attended_mls_acquisition", "capture_listing_observation");
   const normalized = assertTourWorkflowJournalEntry(first);
   const view = [first, journalEntry("deterministic_normalization", "normalize_property_fact", SUBJECT_B)];
-  const result = evaluate({
-    action_kind: "capture_listing_observation", action_subject_digest: `sha256:${"c".repeat(64)}`,
-    corrects_step_key: normalized.step_key, journal_view: view,
+  const answer = wouldStage({
+    action_kind: "capture_listing_observation",
+    action_subject_digest: `sha256:${"c".repeat(64)}`,
+    corrects_step_key: normalized.step_key,
+  }, view);
+  assert.equal(answer.would_be_admissible_if_authoritative, true);
+
+  // And "would satisfy the staging rules" is where the conditional stops. The
+  // same action on the PUBLIC path — which reads no history at all — still ends
+  // at the missing authenticator, because a correction is an attended act.
+  const real = evaluate({
+    action_kind: "capture_listing_observation",
+    action_subject_digest: `sha256:${"c".repeat(64)}`,
+    corrects_step_key: normalized.step_key,
   });
-  // It passes the STAGING rules — no skip, no unbacked backward move — and then
-  // stops at the missing authenticator, because a correction is an attended act.
-  assert.equal(result.decision, "unavailable");
-  assert.equal(result.reason_id, "attended_actor_source_unavailable");
-  assert.ok(result.owed_seams.includes(V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
+  assert.equal(real.decision, "unavailable");
+  assert.equal(real.reason_id, "attended_actor_source_unavailable");
+  assert.ok(real.owed_seams.includes(V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
 });
 
 test("there is no field through which a correction can erase its target", () => {
@@ -499,23 +589,24 @@ test("there is no field through which a correction can erase its target", () => 
     error => error.code === "unknown_field");
 });
 
-test("a replayed action is refused as a duplicate rather than applied twice", () => {
+test("a replayed action would be refused as a duplicate rather than applied twice", () => {
   const view = [journalEntry("attended_mls_acquisition", "capture_listing_observation")];
-  const replay = evaluate({ journal_view: view });
-  assert.equal(replay.decision, "refused");
-  assert.equal(replay.reason_id, "duplicate_step_key_replay");
-  assert.equal(replay.already_recorded_in_view, true);
+  const replay = wouldStage({}, view);
+  assert.equal(replay.would_be_reason_id, "duplicate_step_key_replay");
+  assert.equal(replay.detail.step_key, tourWorkflowStepKey({
+    tour_id: TOUR, stage: "attended_mls_acquisition",
+    action_kind: "capture_listing_observation", action_subject_digest: SUBJECT_A,
+  }));
 
   // A DIFFERENT subject in the same stage is a different action, not a replay.
-  const fresh = evaluate({ action_subject_digest: SUBJECT_B, journal_view: view });
-  assert.equal(fresh.decision, "unavailable");
+  assert.equal(wouldStage({ action_subject_digest: SUBJECT_B }, view)
+    .would_be_admissible_if_authoritative, true);
 });
 
-test("the hypothetical resume point tracks the journal, stage by stage", () => {
+test("the hypothetical resume point tracks the history, stage by stage", () => {
   const view = [];
-  assert.equal(wouldResumeAtIfAuthoritative(view,
-    { tour_id: TOUR, assignment_id: ASSIGNMENT }).would_resume_at_if_authoritative,
-    "attended_mls_acquisition");
+  assert.equal(wouldBeResumePointIfAuthoritative(view, BINDING)
+    .would_be_open_stage_if_authoritative, "attended_mls_acquisition");
 
   // An interrupted stage is resumed IN that stage, and the stage after it is
   // the one that may begin next. Nothing in a journal says a stage finished, so
@@ -529,40 +620,36 @@ test("the hypothetical resume point tracks the journal, stage by stage", () => {
   ];
   for (const [stage, action_kind, expectedNext] of walk) {
     view.push(journalEntry(stage, action_kind));
-    const seen = record(wouldResumeAtIfAuthoritative(view,
-      { tour_id: TOUR, assignment_id: ASSIGNMENT }));
-    assert.equal(seen.would_resume_at_if_authoritative, stage, stage);
-    assert.equal(seen.would_next_stage_be_if_authoritative, expectedNext, stage);
-    assert.equal(seen.view_is_a_readable_history, true, stage);
+    const seen = record(wouldBeResumePointIfAuthoritative(view, BINDING));
+    assert.equal(seen.would_be_open_stage_if_authoritative, stage, stage);
+    assert.equal(seen.would_be_next_stage_if_authoritative, expectedNext, stage);
+    assert.equal(seen.would_be_readable_history_if_authoritative, true, stage);
     assert.equal(seen.is_not_authority, true);
     assert.equal(seen.evidence_source, V5_J301_CLASSIFIER_EVIDENCE_SOURCE);
   }
 });
 
 // ---------------------------------------------------------------------------
-// A journal that cannot be this Tour's history. The two shapes a reviewer found
+// A history that cannot be this Tour's. The two shapes a reviewer found
 // reaching an answer they had no business reaching.
 // ---------------------------------------------------------------------------
 
-test("a journal holding only the final stage is refused, not read as stage five", () => {
+test("a history holding only the final stage would be refused, not read as stage five", () => {
   // The four stages before client_facing_review left no trace, so this cannot be
-  // a history of an ordered five-stage workflow. It used to reach the ordinary
-  // journal-owner answer, which treated it as a workflow standing at stage five.
+  // a history of an ordered five-stage workflow, and it must not be read as a
+  // workflow standing at stage five.
   const view = [journalEntry("client_facing_review", "record_client_review_note")];
-  const result = evaluate({
-    stage: "client_facing_review", action_kind: "accept_route_for_client_review",
-    journal_view: view,
-  });
-  assert.equal(result.decision, "refused");
-  assert.equal(result.reason_id, "journal_history_noncontiguous");
-  assert.equal(result.missing_stage, "attended_mls_acquisition");
-  assert.equal(result.furthest_stage_seen, "client_facing_review");
+  const answer = wouldStage(
+    { stage: "client_facing_review", action_kind: "accept_route_for_client_review" }, view);
+  assert.equal(answer.would_be_admissible_if_authoritative, false);
+  assert.equal(answer.would_be_reason_id, "journal_history_noncontiguous");
 
-  const seen = record(wouldResumeAtIfAuthoritative(view,
-    { tour_id: TOUR, assignment_id: ASSIGNMENT }));
-  assert.equal(seen.view_is_a_readable_history, false);
-  assert.equal(seen.would_resume_at_if_authoritative, null);
-  assert.equal(seen.refused_reason_id, "journal_history_noncontiguous");
+  const seen = record(wouldBeResumePointIfAuthoritative(view, BINDING));
+  assert.equal(seen.would_be_readable_history_if_authoritative, false);
+  assert.equal(seen.would_be_open_stage_if_authoritative, null);
+  assert.equal(seen.would_be_reason_id, "journal_history_noncontiguous");
+  assert.equal(seen.detail.missing_stage, "attended_mls_acquisition");
+  assert.equal(seen.detail.furthest_stage_seen, "client_facing_review");
 });
 
 test("every interior gap in a history is caught, not just the first stage", () => {
@@ -572,43 +659,39 @@ test("every interior gap in a history is caught, not just the first stage", () =
     journalEntry("attended_mls_acquisition", "capture_listing_observation"),
     journalEntry("agent_assisted_assembly", "rank_candidate_stops"),
   ];
-  const result = evaluate({
-    stage: "agent_assisted_assembly", action_kind: "draft_stop_narrative",
-    actor_class: "model_assisted", journal_view: view,
-  });
-  assert.equal(result.decision, "refused");
-  assert.equal(result.reason_id, "journal_history_noncontiguous");
-  assert.equal(result.missing_stage, "deterministic_normalization");
+  const seen = record(wouldBeResumePointIfAuthoritative(view, BINDING));
+  assert.equal(seen.would_be_reason_id, "journal_history_noncontiguous");
+  assert.equal(seen.detail.missing_stage, "deterministic_normalization");
 });
 
-test("an entry belonging to another Tour cannot change this Tour's answer", () => {
-  // A cross-Tour entry at a later stage used to make a perfectly ordinary
-  // request look like a backward move.
+test("an entry belonging to another Tour cannot be read as this Tour's history", () => {
+  // A cross-Tour entry at a later stage would otherwise make a perfectly
+  // ordinary action look like a backward move.
   const foreign = journalEntry("client_facing_review", "record_client_review_note", SUBJECT_B,
     { tour_id: "tour-j301-fixture-9999" });
-  const result = evaluate({
-    journal_view: [journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B), foreign],
-  });
-  assert.equal(result.decision, "refused");
-  assert.equal(result.reason_id, "journal_entry_foreign_to_tour");
-  assert.equal(result.entry_tour_id, "tour-j301-fixture-9999");
-  assert.equal(result.entry_index, 1);
+  const seen = record(wouldBeResumePointIfAuthoritative(
+    [journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B), foreign],
+    BINDING));
+  assert.equal(seen.would_be_reason_id, "journal_entry_foreign_to_tour");
+  assert.equal(seen.detail.entry_tour_id, "tour-j301-fixture-9999");
+  assert.equal(seen.detail.entry_index, 1);
 });
 
 test("an entry belonging to another Assignment is refused the same way", () => {
   const foreign = journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B,
     { assignment_id: "assignment-j301-fixture-9999" });
-  const result = evaluate({ journal_view: [foreign] });
-  assert.equal(result.decision, "refused");
-  assert.equal(result.reason_id, "journal_entry_foreign_to_tour");
-  assert.equal(result.entry_assignment_id, "assignment-j301-fixture-9999");
+  const seen = record(wouldBeResumePointIfAuthoritative([foreign], BINDING));
+  assert.equal(seen.would_be_reason_id, "journal_entry_foreign_to_tour");
+  assert.equal(seen.detail.entry_assignment_id, "assignment-j301-fixture-9999");
 });
 
 test("a journal entry that does not say which Tour it belongs to cannot be read", () => {
   for (const missing of ["organization_tenant_id", "tour_id", "assignment_id"]) {
     const entry = journalEntry("attended_mls_acquisition", "capture_listing_observation");
     delete entry[missing];
-    assert.throws(() => evaluateStageAction(stageRequest({ journal_view: [entry] })),
+    assert.throws(() => assertTourWorkflowJournalEntry(entry),
+      error => error.code === "missing_field", missing);
+    assert.throws(() => wouldBeResumePointIfAuthoritative([entry], BINDING),
       error => error.code === "missing_field", missing);
   }
 });
@@ -779,7 +862,6 @@ test("a well-formed, rule-abiding DETERMINISTIC action is unavailable and says e
   const result = evaluate({
     stage: "deterministic_normalization", action_kind: "normalize_property_fact",
     actor_class: "deterministic",
-    journal_view: historyThrough("attended_mls_acquisition"),
   });
   assert.equal(result.decision, "unavailable");
   assert.equal(result.reason_id, "workflow_journal_owner_unavailable");
@@ -947,6 +1029,13 @@ function callerControlledShapes() {
             shapes.push(stageRequest({
               stage, action_kind: kind, actor_class, attended_intent: intent,
               declared_actor_slug,
+            }));
+            // The same shape WITH a journal, so the sweep covers the refusal
+            // path a caller reaches by handing one in as well as the path it
+            // reaches by not.
+            shapes.push(stageRequest({
+              stage, action_kind: kind, actor_class, attended_intent: intent,
+              declared_actor_slug,
               journal_view: V5_J301_STAGES.slice(0, V5_J301_STAGE_INDEX[stage]).map(earlier =>
                 journalEntry(earlier, Object.keys(V5_J301_STAGE_ACTIONS[earlier])[0])),
             }));
@@ -1019,80 +1108,196 @@ test("every result this suite produced reports no effect and no lifecycle move",
 });
 
 // ---------------------------------------------------------------------------
-// The export guard. Loader-enumerated, tokenizer-checked; no regex over source.
+// THE PARSER, AND WHY THIS FILE NO LONGER CONTAINS ONE.
+//
+// Two hand-written checks lived here and both were holes. A regex over the
+// source called an identifier inside a comment a reference. A hand tokenizer
+// that fixed that could not see a dynamic `import()` at all, and a scan built on
+// vm.SourceTextModule's `dependencySpecifiers` could not either — that list is
+// the module record's STATIC import list, so `await import("...")` is simply
+// absent from it, and this repository uses dynamic imports (see
+// mcp-server/src/tour-runtime.js). A guard that proves "production cannot reach
+// the test helper" while being blind to the one form that most plausibly would
+// reach it proves nothing.
+//
+// So the parse is done by esbuild, which is present in mcp-server/node_modules,
+// and which reports a module's imports — static, dynamic and require() — with
+// the kind of each. This is the pattern the correspondence slice already proves
+// on main (mcp-server/test/governed-correspondence.v5.test.mjs); it is copied
+// rather than reinvented.
+//
+// Two things esbuild cannot answer are answered CONSERVATIVELY, on purpose. A
+// call site whose specifier is not a literal (`import(name)`) resolves to no
+// path at all, and `createRequire` reaches CommonJS without the token
+// `require(` appearing. Both are found by counting names in the raw text, which
+// OVER-reports — a mention inside a comment counts — and that is the safe
+// direction: a false alarm is a review, a missed call site is a door.
 // ---------------------------------------------------------------------------
 
-/**
- * A small JavaScript tokenizer: it walks the source character by character and
- * skips string literals, template literals, regular-expression literals and
- * comments, so an identifier mentioned inside a comment or a string is not
- * mistaken for a reference. `node --check` runs first, so the source it walks
- * is known to parse.
- */
-function identifiersOutsideLiterals(source) {
-  const identifiers = new Set();
-  let index = 0;
-  let current = "";
-  let previousSignificant = "";
-  const flush = () => {
-    if (current) { identifiers.add(current); previousSignificant = current; current = ""; }
-  };
-  while (index < source.length) {
-    const char = source[index];
-    const next = source[index + 1];
-    if (/[A-Za-z0-9_$]/.test(char)) { current += char; index++; continue; }
-    flush();
-    if (char === "/" && next === "/") {
-      while (index < source.length && source[index] !== "\n") index++;
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      index += 2;
-      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index++;
-      index += 2;
-      continue;
-    }
-    if (char === '"' || char === "'" || char === "`") {
-      const quote = char;
-      index++;
-      while (index < source.length) {
-        if (source[index] === "\\") { index += 2; continue; }
-        if (source[index] === quote) { index++; break; }
-        index++;
-      }
-      continue;
-    }
-    if (char === "/" && !/[A-Za-z0-9_$)\]]/.test(previousSignificant.slice(-1) || "")) {
-      index++;
-      let inClass = false;
-      while (index < source.length) {
-        if (source[index] === "\\") { index += 2; continue; }
-        if (source[index] === "[") inClass = true;
-        else if (source[index] === "]") inClass = false;
-        else if (source[index] === "/" && !inClass) { index++; break; }
-        else if (source[index] === "\n") break;
-        index++;
-      }
-      continue;
-    }
-    if (!/\s/.test(char)) previousSignificant = char;
-    index++;
-  }
-  flush();
-  return identifiers;
+/** esbuild refuses to run at all if it is missing, rather than degrading quietly. */
+assert.equal(typeof esbuild.buildSync, "function",
+  "the isolation guard needs a real parser; esbuild is not loadable");
+
+/** Parse `source` and return esbuild's import records: `{ path, kind }` each. */
+function importRecords(source) {
+  const built = esbuild.buildSync({
+    stdin: { contents: source, loader: "js", sourcefile: "module-under-guard.js", resolveDir: SRC_DIR },
+    bundle: false, write: false, metafile: true,
+    format: "esm", platform: "neutral", logLevel: "silent", logLimit: 0,
+  });
+  const output = Object.values(built.metafile.outputs)[0];
+  return output === undefined ? [] : output.imports;
 }
 
-test("the tokenizer ignores identifiers that live inside comments and strings", () => {
-  const sample = [
-    "// isKnownPartner in a line comment",
-    "/* isKnownPartner in a block comment */",
-    'const a = "isKnownPartner";',
-    "const re = /isKnownPartner/;",
-    "const real = realIdentifier;",
-  ].join("\n");
-  const found = identifiersOutsideLiterals(sample);
-  assert.equal(found.has("isKnownPartner"), false);
-  assert.equal(found.has("realIdentifier"), true);
+/**
+ * How many times `callee(` appears in the raw text, as a whole word.
+ * Deliberately a SUPERSET, compared only against what the parser resolved.
+ */
+function callSiteCount(source, callee) {
+  return source.split(new RegExp(`(?<![\\w$.])${callee}\\s*\\(`)).length - 1;
+}
+
+/**
+ * Every module specifier a source loads, by any form that actually loads —
+ * static import, re-export, dynamic `import()`, and `require()`.
+ *
+ * A call site the parser could not resolve to a literal is reported as
+ * `<computed import>` / `<computed require>` rather than dropped, and a source
+ * that so much as names `createRequire` reports it, because a closed allow-list
+ * has to notice exactly the specifiers it cannot see.
+ */
+function importSpecifiers(source) {
+  const records = importRecords(source);
+  const specifiers = new Set(records.map(record => record.path));
+  const resolved = kind => records.filter(record => record.kind === kind).length;
+  if (callSiteCount(source, "import") > resolved("dynamic-import")) specifiers.add("<computed import>");
+  if (callSiteCount(source, "require") > resolved("require-call")) specifiers.add("<computed require>");
+  if (/(?<![\w$])createRequire(?![\w$])/.test(source)) specifiers.add("createRequire");
+  return [...specifiers].sort();
+}
+
+/**
+ * Identifiers this slice's production modules may not REFERENCE FREELY, each
+ * mapped to a token that cannot occur in source.
+ *
+ * The key is what esbuild's `define` rewrites and the value is what it rewrites
+ * it to, so finding the token in the printed output is proof that the source
+ * referenced the NAME. `define` substitutes identifier references only: never a
+ * string, a comment, or a property name. That is exactly the identifier-level
+ * question the hand tokenizer was written to answer, asked instead of the
+ * parser that already read the file.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CATCH, said plainly rather than assumed away:
+ * a name a LOCAL OR IMPORTED BINDING shadows is that binding, not a free
+ * reference, and `define` leaves it alone. The self-test below proves that
+ * behaviour rather than pretending otherwise, and the gap is closed from two
+ * other directions — `importedBindings` reads the names actually taken from
+ * identity.js out of the linker, and the slug-indifference sweep proves
+ * behaviourally that no answer varies with the slug, which is the property a
+ * membership test would have to break. `actor_slug` is not on this list for
+ * that reason: as a field spelling it would always arrive bound, so a define
+ * entry for it would have measured nothing.
+ */
+const FORBIDDEN_IDENTIFIER_DEFINES = {
+  isKnownPartner: "__J301_FORBIDDEN_IS_KNOWN_PARTNER__",
+  __V5_J301_TEST_ONLY__: "__J301_FORBIDDEN_TEST_ONLY__",
+  classifyResumePoint: "__J301_FORBIDDEN_CLASSIFY_RESUME_POINT__",
+};
+
+/**
+ * The names a source binds out of one specifier — the IMPORTED names, not the
+ * local aliases. Read out of the linker rather than off a token stream: the
+ * source is bundled against an EMPTY stub for each relative dependency, and
+ * esbuild reports one "No matching export" per name the source asked for.
+ * Copied from the correspondence slice's guard on main.
+ */
+function importedBindings(source, specifier) {
+  const directory = mkdtempSync(path.join(tmpdir(), "j301-import-guard-"));
+  try {
+    writeFileSync(path.join(directory, "entry.js"), source);
+    for (const record of importRecords(source)) {
+      if (record.path.startsWith(".")) writeFileSync(path.join(directory, record.path), "export {};\n");
+    }
+    let diagnostics = [];
+    try {
+      esbuild.buildSync({
+        entryPoints: [path.join(directory, "entry.js")],
+        bundle: true, write: false, format: "esm", platform: "node",
+        packages: "external", treeShaking: false, logLevel: "silent", logLimit: 0,
+      });
+    } catch (failure) {
+      diagnostics = failure.errors ?? [];
+    }
+    const wanted = path.basename(specifier);
+    const names = new Set();
+    for (const diagnostic of diagnostics) {
+      const match = /^No matching export in "(.+)" for import "(.+)"$/.exec(diagnostic.text);
+      if (match !== null && path.basename(match[1]) === wanted) names.add(match[2]);
+    }
+    return [...names].sort();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** Which forbidden identifiers a source actually REFERENCES, by name. */
+function forbiddenIdentifiers(source) {
+  const printed = esbuild.transformSync(source, {
+    loader: "js", format: "esm", platform: "neutral",
+    define: FORBIDDEN_IDENTIFIER_DEFINES,
+    minify: false, legalComments: "none", logLevel: "silent", logLimit: 0,
+  }).code;
+  return Object.entries(FORBIDDEN_IDENTIFIER_DEFINES)
+    .filter(([, token]) => printed.includes(token))
+    .map(([name]) => name)
+    .sort();
+}
+
+test("the import parser reads the forms the two hand-written guards missed", () => {
+  const cases = [
+    ['import "./plain.js";', ["./plain.js"]],
+    ['import /* x */ "./commented.js";', ["./commented.js"]],
+    ['import\u00a0"./nbsp.js";', ["./nbsp.js"]],
+    ['export * from "./star-export.js";', ["./star-export.js"]],
+    // THE FORM vm.SourceTextModule COULD NOT SEE. dependencySpecifiers returns
+    // the static list only, so this line was invisible to the previous guard.
+    ['await import("./dynamic.js");', ["./dynamic.js"]],
+    ['const p = import(\n  /* lazy */ "./dynamic-multiline.js"\n);', ["./dynamic-multiline.js"]],
+    ['const m = await import("./pre" + "fix.js");', ["./prefix.js"]],
+    // A specifier the parser cannot fold is NAMED rather than skipped.
+    ['const m = await import(name);', ["<computed import>"]],
+    ['const m = require(name);', ["<computed require>"]],
+    // And the shapes that only LOOK like imports.
+    ['// import "./commented-out.js";\nimport "./real.js";', ["./real.js"]],
+    ['const s = "import \\"./in-a-string.js\\";";', []],
+    ['const u = import.meta.url;', []],
+  ];
+  for (const [source, expected] of cases) {
+    assert.deepEqual(importSpecifiers(source), expected.sort(), source);
+  }
+});
+
+test("the identifier scan reads references and ignores comments, strings and properties", () => {
+  assert.deepEqual(forbiddenIdentifiers("const x = isKnownPartner(slug);"), ["isKnownPartner"]);
+  assert.deepEqual(forbiddenIdentifiers("const f = isKnownPartner;"), ["isKnownPartner"]);
+  assert.deepEqual(forbiddenIdentifiers("const r = classifyResumePoint(view);"), ["classifyResumePoint"]);
+  assert.deepEqual(forbiddenIdentifiers("// isKnownPartner in a line comment"), []);
+  assert.deepEqual(forbiddenIdentifiers("/* isKnownPartner */"), []);
+  assert.deepEqual(forbiddenIdentifiers('const a = "isKnownPartner";'), []);
+  assert.deepEqual(forbiddenIdentifiers("const re = /isKnownPartner/;"), []);
+  // A PROPERTY of that name is not a reference to the identifier — the case the
+  // hand tokenizer got wrong in the other direction.
+  assert.deepEqual(forbiddenIdentifiers("const o = { isKnownPartner: 1 }; o.isKnownPartner;"), []);
+
+  // AND THE LIMIT, MEASURED RATHER THAN ASSUMED. A name a binding shadows is
+  // that binding, so define leaves it alone. This test exists so nobody reads
+  // the guard as stronger than it is; `importedBindings` below is what closes
+  // the case that actually matters here.
+  assert.deepEqual(forbiddenIdentifiers("function isKnownPartner() {} isKnownPartner();"), []);
+  assert.deepEqual(forbiddenIdentifiers('import { isKnownPartner } from "./identity.js"; isKnownPartner(x);'), []);
+  assert.deepEqual(
+    importedBindings('import { isKnownPartner } from "./identity.js"; isKnownPartner(x);', "./identity.js"),
+    ["isKnownPartner"], "the linker must see a name the define scan cannot");
 });
 
 test("the module's real exports are EXACTLY its declared surface, with no exception", () => {
@@ -1112,84 +1317,224 @@ test("the module's real exports are EXACTLY its declared surface, with no except
 });
 
 // ---------------------------------------------------------------------------
-// ISOLATION, PARSED RATHER THAN GREPPED.
+// ISOLATION, PARSED — STATICALLY AND DYNAMICALLY.
 //
-// V8's own ESM parser, through vm.SourceTextModule in a child process — a real
-// parser, and the one Node itself uses. `dependencySpecifiers` is the module
-// record's own import list, so a dynamic or concatenated specifier cannot hide
-// from it the way it could from a regex.
+// The claim under test is exactly this: NO PRODUCTION MODULE CAN REACH THE
+// CLASSIFIER HELPER. The previous guard read vm.SourceTextModule's
+// `dependencySpecifiers`, which is the static import list, so a production
+// module could have written `await import("../test/...testhelper.mjs")` and the
+// guard would have stayed green. The control below proves the new guard catches
+// exactly that line.
 // ---------------------------------------------------------------------------
 
-function moduleImports(directory) {
-  const script = `
-    const { readdirSync, readFileSync } = require("node:fs");
-    const { join } = require("node:path");
-    const vm = require("node:vm");
-    const dir = process.argv[1];
-    const out = {};
-    for (const name of readdirSync(dir).sort()) {
-      if (!name.endsWith(".js")) continue;
-      const source = readFileSync(join(dir, name), "utf8");
-      out[name] = new vm.SourceTextModule(source, { identifier: name }).dependencySpecifiers;
-    }
-    process.stdout.write(JSON.stringify(out));
-  `;
-  const stdout = execFileSync(process.execPath,
-    ["--experimental-vm-modules", "-e", script, directory], { encoding: "utf8" });
-  return JSON.parse(stdout);
+const TEST_TREE_SPECIFIER = /\/test\/|^\.\.\/test|\.testonly\.|\.testhelper\.|\.test-entry\./;
+
+/** Every specifier each module under src/ loads, by any form that loads. */
+function srcImports() {
+  const out = {};
+  for (const name of readdirSync(SRC_DIR).sort()) {
+    if (!name.endsWith(".js")) continue;
+    out[name] = importSpecifiers(readFileSync(path.join(SRC_DIR, name), "utf8"));
+  }
+  return out;
 }
 
 test("ISOLATION: src holds no test-only entry, and none of it reaches the test tree", () => {
   const strays = readdirSync(SRC_DIR).filter(name => /\.(testonly|testhelper|test-entry)\./.test(name));
   assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");
 
-  const imports = moduleImports(SRC_DIR);
+  const imports = srcImports();
   // The parser must have seen this slice at all, or the scan proves nothing.
   assert.ok(Object.hasOwn(imports, "tour-workflow-j301.v5.js"));
   assert.ok(Object.hasOwn(imports, "tour-map-command-j301.v5.js"));
   assert.ok(Object.keys(imports).length > 50, "every module in src must have been parsed");
 
   const offenders = Object.entries(imports)
-    .filter(([, specifiers]) => specifiers.some(one =>
-      one.includes("/test/") || one.startsWith("../test") ||
-      one.includes(".testonly.") || one.includes(".testhelper.")))
+    .filter(([, specifiers]) => specifiers.some(one => TEST_TREE_SPECIFIER.test(one)))
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // And specifically: this slice's two modules import exactly these, none of
-  // them a classifier helper.
+  // And specifically: this slice's two modules load exactly these, none of them
+  // a classifier helper, and none of them computed.
   assert.deepEqual(imports["tour-workflow-j301.v5.js"],
-    ["./artifact-trust.js", "./identity.js", "./global-boundaries.v5.js", "./cre-lifecycle.v5.js"]);
+    ["./artifact-trust.js", "./cre-lifecycle.v5.js", "./global-boundaries.v5.js", "./identity.js"]);
   assert.deepEqual(imports["tour-map-command-j301.v5.js"],
-    ["./artifact-trust.js", "./identity.js", "./global-boundaries.v5.js",
+    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./tour-workflow-j301.v5.js"]);
+});
+
+test("ISOLATION: the guard catches a DYNAMIC import of the helper, which is the form that got past it", () => {
+  const helperSpecifier = "../test/tour-workflow-classifiers.v5.testhelper.mjs";
+
+  // (a) THE REAL MODULE, edited the way a future change plausibly would be: one
+  // dynamic import appended to the actual production source. The guard must
+  // report it, and it must report it for the RIGHT file.
+  const real = readFileSync(path.join(SRC_DIR, "tour-workflow-j301.v5.js"), "utf8");
+  const smuggled = `${real}\nexport async function reach() {\n  return await import("${helperSpecifier}");\n}\n`;
+  const found = importSpecifiers(smuggled);
+  assert.ok(found.includes(helperSpecifier), `the dynamic import was invisible: ${found.join(", ")}`);
+  assert.ok(found.some(one => TEST_TREE_SPECIFIER.test(one)),
+    "a dynamic import of the test tree did not trip the test-tree rule");
+
+  // (b) THE CONTROL THAT PROVES THE PREVIOUS GUARD WAS BLIND. V8's own module
+  // record lists static specifiers only, so the same source produces no mention
+  // of the helper at all. This is not a hypothetical: it is why this block was
+  // rewritten.
+  const viaModuleRecord = execFileSync(process.execPath,
+    ["--experimental-vm-modules", "-e", `
+      const vm = require("node:vm");
+      const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+      process.stdout.write(JSON.stringify(
+        new vm.SourceTextModule(source, { identifier: "probe.js" }).dependencySpecifiers));
+    `, "/dev/stdin"], { input: smuggled, encoding: "utf8" });
+  assert.equal(JSON.parse(viaModuleRecord).includes(helperSpecifier), false,
+    "dependencySpecifiers unexpectedly saw a dynamic import; the premise of this test has changed");
+
+  // (c) The static form is caught too, so the new guard is a superset and not a
+  // trade of one blind spot for another.
+  assert.ok(importSpecifiers(`import * as helper from "${helperSpecifier}";`)
+    .includes(helperSpecifier));
+
+  // (d) A specifier assembled at runtime cannot slip past as "nothing found":
+  // it is reported as computed, which fails the closed-set assertion above.
+  assert.ok(importSpecifiers("const h = await import(helperPath);").includes("<computed import>"));
+
+  // (e) And the repository really does use the form this guards against, which
+  // is why a static-only scan was not good enough here.
+  const runtime = readFileSync(path.join(SRC_DIR, "tour-runtime.js"), "utf8");
+  assert.ok(importRecords(runtime).some(record => record.kind === "dynamic-import"),
+    "tour-runtime.js was expected to carry a dynamic import");
 });
 
 test("ISOLATION: the classifier helper lives in the test tree and answers conditionally", () => {
   const helper = path.join(HERE, "tour-workflow-classifiers.v5.testhelper.mjs");
   execFileSync(process.execPath, ["--check", helper]);
   const source = readFileSync(helper, "utf8");
-  // It reaches the classification by PROBING the public surface; it holds no
-  // second copy of the staging rules to drift from the first.
-  assert.ok(source.includes("evaluateStageAction"));
+  // It cites the public module's own reason registry rather than inventing one.
+  assert.ok(source.includes("V5_J301_JOURNAL_OWNER_REASON_IDS"));
   for (const forbidden of ["resume_at:", "decision:", "admitted:", "allow:"]) {
     assert.equal(source.includes(`\n    ${forbidden}`), false, `${forbidden} is a privileged field`);
   }
-  const answer = wouldResumeAtIfAuthoritative([], { tour_id: TOUR, assignment_id: ASSIGNMENT });
+  const answer = wouldBeResumePointIfAuthoritative([], BINDING);
   assert.equal(answer.is_not_authority, true);
   assert.equal(answer.evidence_source, V5_J301_CLASSIFIER_EVIDENCE_SOURCE);
   assert.equal(Object.hasOwn(answer, "decision"), false);
   assert.equal(Object.hasOwn(answer, "resume_at"), false);
-  assert.equal(answer.would_resume_at_if_authoritative, "attended_mls_acquisition");
+  assert.equal(answer.would_be_open_stage_if_authoritative, "attended_mls_acquisition");
 });
 
 test("ISOLATION: no production module runs a partner membership test for this slice", () => {
   const files = readdirSync(SRC_DIR).filter(name => name.startsWith("tour-") && name.includes("j301"));
   assert.deepEqual(files.sort(), ["tour-map-command-j301.v5.js", "tour-workflow-j301.v5.js"]);
   for (const name of files) {
-    const identifiers = identifiersOutsideLiterals(readFileSync(path.join(SRC_DIR, name), "utf8"));
-    assert.equal(identifiers.has("isKnownPartner"), false, name);
-    assert.equal(identifiers.has("__V5_J301_TEST_ONLY__"), false, name);
+    const referenced = forbiddenIdentifiers(readFileSync(path.join(SRC_DIR, name), "utf8"));
+    // Nothing on the forbidden list at all: no membership test, no quarantined
+    // export, and no resume classifier left behind in production.
+    assert.deepEqual(referenced, [], name);
     execFileSync(process.execPath, ["--check", path.join(SRC_DIR, name)]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// THE PUBLIC-ONLY PROBE.
+//
+// Everything above about the classifier is an argument about where code lives.
+// This is the measurement: a caller holding NOTHING but the public module, with
+// every input it can construct, and the question asked directly — can any
+// journal-derived field, or any resume position, be recovered from what comes
+// back? The previous correction failed exactly here, so the check is the whole
+// answer rather than a spot check.
+// ---------------------------------------------------------------------------
+
+/** Field names that would only ever be derived by reading a journal. */
+const JOURNAL_DERIVED_FIELDS = Object.freeze([
+  "stages_seen", "earliest_unstarted_stage", "missing_stage", "furthest_stage_seen",
+  "open_stage", "next_stage", "resume_stage", "resume_at", "highest_seen_index",
+  "step_keys", "already_recorded_in_view", "entry_index", "entry_tour_id",
+  "entry_assignment_id", "journal_authority",
+]);
+
+/** Every value found under `name`, at any depth. */
+function valuesForField(value, name, into = [], depth = 0) {
+  if (depth > 12 || value === null || typeof value !== "object") return into;
+  if (Array.isArray(value)) {
+    for (const entry of value) valuesForField(entry, name, into, depth + 1);
+    return into;
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === name) into.push(entry);
+    valuesForField(entry, name, into, depth + 1);
+  }
+  return into;
+}
+
+test("PUBLIC-ONLY PROBE: no journal-derived field comes back from any public answer", () => {
+  const answers = [];
+  for (const request of callerControlledShapes()) {
+    try {
+      answers.push(evaluateStageAction(request));
+    } catch (error) {
+      assert.ok(error instanceof V5J301Error);
+    }
+  }
+  // Every public export that takes no request, swept alongside them.
+  for (const [, fn] of callablePublicExports()) {
+    try { answers.push(fn()); } catch (error) { assert.ok(error instanceof V5J301Error); }
+  }
+  assert.ok(answers.length > 200, `expected the full matrix, swept ${answers.length}`);
+
+  for (const answer of answers) {
+    for (const derived of JOURNAL_DERIVED_FIELDS) {
+      // A field that is PRESENT AND NULL is a statement that there is no such
+      // value — `readTourWorkflowResumePoint` says `resume_stage: null` and
+      // `next_stage: null` on purpose, and deleting those would make the answer
+      // less honest, not more. What must never appear is CONTENT.
+      for (const value of valuesForField(answer, derived)) {
+        assert.equal(value, null,
+          `${derived} came back carrying a value: ${JSON.stringify(answer).slice(0, 240)}`);
+      }
+    }
+  }
+});
+
+test("PUBLIC-ONLY PROBE: no resume classification is recoverable from the public refusals", () => {
+  // THE EXACT ATTACK THE REVIEWER RAN. Build a journal, hand it to the public
+  // path at every stage, and try to read the position back out of the answers.
+  // Under the previous shape this recovered "deterministic_normalization". The
+  // recovery now has nothing to work with: every stage answers identically,
+  // because the journal is refused before it is read.
+  const view = historyThrough("deterministic_normalization");
+  const perStage = V5_J301_STAGES.map(stage => {
+    const action_kind = Object.keys(V5_J301_STAGE_ACTIONS[stage])[0];
+    return record(evaluateStageAction(stageRequest({
+      stage, action_kind,
+      actor_class: V5_J301_STAGE_ACTIONS[stage][action_kind].actor_class,
+      journal_view: view,
+    })));
+  });
+
+  // Identical but for the request fields the caller itself supplied: strip
+  // those and the five answers are byte-identical, so the ANSWERS carry no
+  // information about the journal at all.
+  const stripped = perStage.map(answer => {
+    const copy = { ...answer };
+    delete copy.stage; delete copy.action_kind; delete copy.step_key;
+    return JSON.stringify(copy);
+  });
+  for (const one of stripped) assert.equal(one, stripped[0]);
+  for (const answer of perStage) {
+    assert.equal(answer.reason_id, "caller_supplied_journal_view_refused");
+  }
+
+  // A DIFFERENT journal gives the same answers too. If any position leaked, a
+  // history reaching stage four would have to differ from one reaching stage
+  // one somewhere in the result.
+  for (const other of [[], historyThrough("attended_mls_acquisition"),
+    historyThrough("deterministic_generation")]) {
+    const answer = evaluateStageAction(stageRequest({ journal_view: other }));
+    const copy = { ...answer };
+    delete copy.stage; delete copy.action_kind; delete copy.step_key;
+    assert.equal(JSON.stringify(copy), stripped[0],
+      "two different journals produced two different public answers");
   }
 });
