@@ -35877,6 +35877,29 @@
         "owner_package": "11",
         "implementation_state": "inventoried_not_atomically_mediated",
         "classification_authorizing": false
+      },
+      {
+        "ingress_key": "script-entrypoint:tools/room-bridge/kanban_adapter.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "tools/room-bridge/kanban_adapter.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "tools/room-bridge/kanban_adapter.py",
+        "schema_digest": "ac878eddae43e2814c9c4aba1d570add8183deb3e1055cae5011c25c51fa3cf2",
+        "handler_digest": "ac878eddae43e2814c9c4aba1d570add8183deb3e1055cae5011c25c51fa3cf2",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
       }
     ]
   }

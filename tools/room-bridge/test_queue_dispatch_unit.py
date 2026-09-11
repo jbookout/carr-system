@@ -178,6 +178,9 @@ class QueueDispatchTests(unittest.TestCase):
         ])
         self.assertTrue(all(call[:4] == ["hermes", "kanban", "--board", "carr-build"]
                             for call in mutation_calls))
+        self.assertEqual(mutation_calls[4][4:], [
+            "block", "--kind", "transient", "t_queue0001", "dispatch_failed",
+        ])
 
     def test_catalog_maps_native_profiles_without_dispatching_them_as_desks(self):
         queue_dispatch.validate_execution_catalog(CATALOG)
