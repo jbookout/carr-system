@@ -46,11 +46,17 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  generateF03SqlCorpus,
+  PLAN_OUTPUT_PATH,
+  SLICE_OUTPUT_PATH,
+} from "./f03-sql-corpus-generator.mjs";
 import {
   canonicalDigest,
   classifyDesignDepth,
@@ -634,4 +640,81 @@ test("engineering-slice-plan.v2 admits identifiers exactly as written, and names
   assert.throws(() => requirePlan(padded, EngineeringToolError), EngineeringToolError);
   assert.equal(JSON.stringify(padded), before, "a refused plan must come back exactly as it was handed in");
   assert.equal(padded.slices[0].slice_ref, " slice:short ");
+});
+
+// --- the SQL leg, bound to the same corpus ------------------------------------
+//
+// The design contract is stated three times -- JS, Python and SQL -- and until
+// now executed parity existed between two of them.  The SQL leg's two fixtures
+// were hand-written vectors that consumed none of this corpus, so on the day
+// someone ran them against a database they would have proved the SQL against a
+// DIFFERENT set of cases than the two validators it has to agree with, and a
+// vector added here would never have reached it.
+//
+// mcp-server/test/f03-sql-corpus-generator.mjs emits the SQL leg's cases FROM
+// this corpus instead, and the two hand-written fixtures include what it emits.
+// These tests are what make the generated files trustworthy without a database:
+// a generated fixture anyone can hand-edit is the same defect one level down,
+// so the bytes on disk are compared against a fresh generation, and the wiring
+// that carries them into the two fixtures is asserted rather than assumed.
+//
+// None of this runs SQL.  It reads files and compares strings.
+
+test("the generated SQL corpus parts are exactly what this corpus generates", () => {
+  const generated = generateF03SqlCorpus();
+  const targets = Object.keys(generated);
+  assert.equal(targets.length, 2, "one generated part per SQL seam");
+  for (const target of targets) {
+    const onDisk = readFileSync(target, "utf8");
+    assert.equal(onDisk, generated[target],
+      `${path.basename(target)} is not what the corpus generates -- regenerate it with `
+      + "`node mcp-server/test/f03-sql-corpus-generator.mjs --write` rather than editing it");
+  }
+});
+
+test("each generated part records the corpus digest it was generated from", () => {
+  const corpusDigest = createHash("sha256").update(readFileSync(CORPUS_PATH)).digest("hex");
+  for (const target of [PLAN_OUTPUT_PATH, SLICE_OUTPUT_PATH]) {
+    const text = readFileSync(target, "utf8");
+    assert.ok(text.includes(`-- corpus_sha256:  ${corpusDigest}`),
+      `${path.basename(target)} does not record this corpus's sha256`);
+    assert.ok(text.includes(`-- corpus_version: ${corpus.corpus_version}`),
+      `${path.basename(target)} does not record this corpus's version`);
+    assert.ok(text.includes("GENERATED FILE -- DO NOT EDIT"),
+      `${path.basename(target)} must say it is generated`);
+  }
+});
+
+test("every shared corpus vector reaches the SQL leg, and the excluded ones are named", () => {
+  const planPart = readFileSync(PLAN_OUTPUT_PATH, "utf8");
+  for (const vector of corpus.vectors)
+    assert.ok(planPart.includes(`('${vector.id}', '${vector.expect}', `),
+      `${vector.id} is not carried into the whole-plan SQL part with its corpus verdict`);
+  // Nothing may be quietly missing from the per-slice part either: every v2
+  // vector is either asserted there or listed with a reason.
+  const slicePart = readFileSync(SLICE_OUTPUT_PATH, "utf8");
+  for (const vector of corpus.vectors) {
+    const asserted = slicePart.includes(`  ('${vector.id}', `);
+    const excluded = slicePart.includes(`('${vector.id}', 'engineering-slice-plan.v1 base`)
+      || slicePart.includes(`('${vector.id}', 'a stale or literal`)
+      || slicePart.includes(`('${vector.id}', 'multi-slice base`)
+      || slicePart.includes(`('${vector.id}', 'no ops`)
+      || slicePart.includes(`('${vector.id}', 'an op lands outside`)
+      || slicePart.includes(`('${vector.id}', 'seam authority is a plan-level rule`)
+      || slicePart.includes(`('${vector.id}', 'ops span two slices`);
+    assert.ok(asserted || excluded,
+      `${vector.id} is neither asserted nor listed as excluded in the per-slice SQL part`);
+  }
+});
+
+test("both hand-written SQL fixtures actually include their generated part", () => {
+  const wiring = [
+    ["f03-plan-ownership-validator-postgres.sql", "f03-design-contract-corpus-plan-postgres.generated.sql"],
+    ["f03-receipt-validator-postgres.sql", "f03-design-contract-corpus-slice-postgres.generated.sql"],
+  ];
+  for (const [fixture, part] of wiring) {
+    const text = readFileSync(path.join(HERE, fixture), "utf8");
+    assert.ok(text.includes(`\\ir ${part}`),
+      `${fixture} no longer includes ${part}, so the shared corpus never reaches that seam`);
+  }
 });

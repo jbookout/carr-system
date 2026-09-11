@@ -15,6 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { digest } from "../src/artifact-trust.js";
+import { ENGINEERING_TYPED_UNCERTAINTY_CLASSES } from "../src/engineering-runtime.js";
 import { V5_CANONICAL_AUTHORITY } from "../src/global-boundaries.v5.js";
 import {
   V5_PUBLIC_PRODUCT_IDENTITY,
@@ -859,6 +860,46 @@ test("a replacement that changes a preserved binding is a divergence, not a warn
   assert.equal(error.detail.field, "envelope_binding_digest");
   refuses(() => assertAdapterContractEquivalence([first, first]), "invalid_shape");
   refuses(() => assertAdapterContractEquivalence([first]), "invalid_shape");
+});
+
+// The typed-uncertainty vocabulary used to exist twice: once privately in
+// engineering-runtime.js and once restated here, under a comment saying the two
+// were "deliberately the same vocabulary, not a second one" that nothing
+// checked. Object identity is the strongest form of that claim -- it cannot be
+// satisfied by a copy that happens to match today -- so this asserts identity
+// first and content second, and the projection is checked against the F03
+// authority directly rather than against the adapter's own re-export.
+test("the typed-uncertainty vocabulary is the F03 authority itself, not a copy", () => {
+  // Identity, not equality: a copy that happens to match today satisfies
+  // deepEqual and is exactly the thing that used to be here.
+  assert.equal(V5_MODEL_UNCERTAINTY_CLASSES, ENGINEERING_TYPED_UNCERTAINTY_CLASSES);
+  assert.ok(Object.isFrozen(ENGINEERING_TYPED_UNCERTAINTY_CLASSES));
+  // Identity alone cannot see a change to the shared content, because both
+  // names then move together. The closed set is pinned to its six members here
+  // so that widening or renaming the vocabulary is a decision someone has to
+  // make in the open, on both sides of the seam at once.
+  assert.deepEqual([...ENGINEERING_TYPED_UNCERTAINTY_CLASSES], [
+    "classification", "extraction", "summarization", "ranking", "drafting", "disambiguation",
+  ]);
+  // Every member has to be a class this boundary actually admits: the set is
+  // the adapter's accept list, not a label it carries.
+  for (const [index, uncertaintyClass] of [...ENGINEERING_TYPED_UNCERTAINTY_CLASSES].entries()) {
+    const adapter = localAdapter();
+    // A fresh invocation id per member: the ledger refuses a replayed one.
+    const proposal = proposalOn({ adapter, invocation_id: `invocation:uncertainty-${index}` });
+    const validated = validateBoundResponse({
+      adapter, proposal, now: OBSERVED_AT,
+      response: responseFor(proposal, {
+        typed_proposals: [
+          { proposal_id: "p:one", uncertainty_class: uncertaintyClass, label: "a label", note: "a note" },
+        ],
+      }),
+    });
+    assert.equal(validated.typed_proposals[0].uncertainty_class, uncertaintyClass);
+  }
+  assert.deepEqual(
+    [...v5ModelRoutingAdapterProjection().uncertainty_classes],
+    [...ENGINEERING_TYPED_UNCERTAINTY_CLASSES]);
 });
 
 test("the adapter projection names its gaps rather than filling them", () => {

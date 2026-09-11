@@ -61,6 +61,11 @@
 --               ... does not exist".  The pre-flight below names both sets
 --               before any case runs, so a half-installed database says so
 --               instead of failing case by case.
+--       Part E  needs exactly what Part A needs -- both candidates, no ledger,
+--               no admission source -- because it calls
+--               ops.engineering_slice_plan_refusal and nothing else.  It is
+--               generated from the shared corpus rather than written here; see
+--               the PART E banner above the \ir near the end of this file.
 --       Parts B and C  need both candidates and a scratch admission source (P2).
 --       Part D  needs both candidates and the full execution lane (P3): it
 --               appends a receipt through the REPLACED receipt seam, which for
@@ -122,19 +127,26 @@
 --   * A pass means the database refuses the plan shapes the JS and Python
 --     validators refuse, accepts the ones they accept, and that both
 --     canonical-ownership functions now read an engineering-slice-plan.v2 slice
---     instead of refusing it.
+--     instead of refusing it.  For Parts A..D that first clause is a claim about
+--     shapes chosen HERE; PART E is where it becomes a claim about the SAME
+--     inputs, because every case in it is generated from the shared corpus the
+--     JS and Python validators are themselves tested against.
 --   * A pass says nothing about plans that are ALREADY STORED.  This seam binds
 --     future registrations only, and neither candidate re-validates a stored
 --     row.  The boundary that refuses an already-stored malformed v2 plan is the
 --     receipt append, which calls the same ops.engineering_slice_plan_refusal;
 --     that is covered in mcp-server/test/f03-receipt-validator-postgres.sql
 --     Part B, cases B08..B10.
---   * It does NOT independently verify canonicalization parity with the JS and
---     Python producers: Parts B, C and D compute plan_digest with the same
+--   * PARTS B, C AND D do NOT independently verify canonicalization parity with
+--     the JS and Python producers: they compute plan_digest with the same
 --     ops.guidance_import_canonical_json expression the validator checks against,
---     so a divergence between the database and those producers is invisible
---     here.  See the digest note in the candidate for the one narrow case
---     (numeric spelling) the receipt path does not already prove.
+--     so a divergence between the database and those producers is invisible in
+--     them.  See the digest note in the candidate for the one narrow case
+--     (numeric spelling) the receipt path does not already prove.  PART E is the
+--     exception and the reason this sentence now names B, C and D rather than the
+--     whole file: its plan_digest values are literals the JavaScript producer
+--     computed over the corpus plans, so the database has to reach the same
+--     digest independently or a positive case refuses.
 --
 -- COVERAGE, STATED RATHER THAN IMPLIED.  Part A's case table names every refusal
 -- token ops.engineering_slice_plan_refusal can return, including the per-slice
@@ -1371,6 +1383,41 @@ begin
 end $$;
 
 -- ===========================================================================
+-- PART E -- the SHARED corpus, generated, not hand-written.
+--
+-- Parts A through D are this file's own cases, and they exist to discriminate
+-- the database's refusal TOKENS, which no other validator produces.  What they
+-- could never do is prove that this validator agrees with the two it must agree
+-- with, because they were written here: a hand-written case table can only be
+-- kept in step with the JS and Python corpus by somebody remembering to, and on
+-- the day this fixture is finally run it would have proved the database against
+-- a DIFFERENT set of cases than the validators it mirrors.
+--
+-- Part E is that missing binding.  Every case in the included file is derived
+-- from mcp-server/test/fixtures/f03-design-contract-parity.v1.json -- the same
+-- 218 vectors f03-design-contract-parity.test.mjs replays through requirePlan
+-- and validate_engineering_slice_plan -- by
+-- mcp-server/test/f03-sql-corpus-generator.mjs.  A vector added to the corpus
+-- for JS and Python is automatically a vector this leg must satisfy, and there
+-- is nothing here for anyone to keep up to date by hand.  The included file is
+-- GENERATED and byte-checked against the corpus by that same JS suite, so an
+-- edit to it, or a corpus change without a regenerate, is caught in CI long
+-- before anyone reaches a database.
+--
+-- It needs the same two candidates Part A needs and adds no prerequisite: it
+-- calls ops.engineering_slice_plan_refusal and nothing else.
+--
+-- The included header states the two things a pass here would and would not
+-- mean, including the ONE canonicalization claim this file's own "WHAT THIS
+-- FIXTURE DOES NOT COVER" note disclaims: Part E's plan_digest values are
+-- literals computed by the JavaScript producer, not recomputed with the same
+-- SQL expression the validator checks against, so a canonicalization divergence
+-- between the database and the JS/Python producers surfaces there as a refused
+-- positive instead of staying invisible.
+-- ===========================================================================
+\ir f03-design-contract-corpus-plan-postgres.generated.sql
+
+-- ===========================================================================
 -- Nothing here is kept.  This ROLLBACK is the point of the fixture.
 -- ===========================================================================
 rollback;
@@ -1379,14 +1426,18 @@ rollback;
 -- WHAT THIS FIXTURE DOES NOT COVER
 -- ===========================================================================
 --
---   * It does not verify canonicalization parity with the JS and Python
---     producers.  Every digest here is computed with the same
+--   * PARTS A THROUGH D do not verify canonicalization parity with the JS and
+--     Python producers.  Every digest in them is computed with the same
 --     ops.guidance_import_canonical_json expression the validator checks
 --     against, so a divergence between the database and those producers is
---     invisible here.  The one case the receipt path does not already prove --
+--     invisible there.  The one case the receipt path does not already prove --
 --     numeric spelling -- is discussed in the candidate; the three numeric
 --     plan fields are separately pinned to ^[1-9][0-9]*$ before the digest check
---     runs.
+--     runs.  PART E DOES cover it, and is the reason this bullet is now scoped
+--     to A..D: every plan_digest in the generated corpus part is a literal the
+--     JavaScript producer computed, so a divergence there refuses a positive
+--     rather than passing unseen.  That covers the shapes the corpus carries;
+--     it is still not a proof over arbitrary content.
 --   * It does not cover the malformed-v2 fail-closed path of
 --     ops.canonical_ownership_dependency_state end to end.  That function will
 --     not read the slice at all until a valid receipt exists, and a malformed v2
