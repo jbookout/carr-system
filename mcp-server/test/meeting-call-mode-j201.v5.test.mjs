@@ -9,7 +9,9 @@
 //   * that a duplicate Joe/Dell pair reconciles to ONE meeting, that two
 //     meetings overlapping in time stay TWO, and that a recycled native id
 //     refuses instead of merging,
-//   * that the prompt fires exactly once and that every later call suppresses,
+//   * that NO LEDGER A CALLER CAN SUPPLY reaches a prompt or a suppression,
+//     because the durable owner that would make "prompt once" true does not
+//     exist here and a label in a request is not that owner,
 //   * that NO PATH ANYWHERE IN THE MODULE produces a result whose `recording` is
 //     anything but "denied" — checked by sweeping every result the suite builds
 //     rather than by asserting it once,
@@ -52,7 +54,7 @@ import {
   V5_J201_CONSUMER_GATES,
   V5_J201_CORROBORATING_SIGNAL_KINDS,
   V5_J201_DEVICE_STATES,
-  V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
+  V5_J201_DISMISSAL_REOPEN_REQUIRES,
   V5_J201_EVIDENCE_CLASS,
   V5_J201_EXPLICIT_ACTIVATION_INTENT,
   V5_J201_KERNEL_PRODUCTION_OUTCOME_STEP,
@@ -84,6 +86,8 @@ import {
   V5_J201_SIGNAL_KINDS,
   V5_J201_SLICE_EVIDENCE_INPUTS,
   V5_J201_TAINT_CLASS,
+  V5_J201_TRUSTED_LEDGER_PROVENANCE_CLASSES,
+  V5_J201_UNWIRED_ONCE_ONLY_DECISIONS,
   activateMeetingMode,
   assertJ201DecisionBinding,
   bindMeetingSourceAdapter,
@@ -94,6 +98,7 @@ import {
   meetingModeGaps,
   reconcileMeetingObservations,
   toMeetingRecordLinkCandidate,
+  unwiredOnceOnlyPromptDecision,
   v5J201MeetingModeProjection,
   v5J201PolicyDigest,
   v5J201PolicyPreimage,
@@ -197,12 +202,13 @@ function observe(overrides = {}) {
   return keep(evaluateMeetingObservation(request));
 }
 
-// A ledger is only worth reading if the caller can say where it came from.
-// This fixture stands in for what a durable owner would hand the kernel; the
-// kernel itself owns no ledger, and the tests below say so out loud.
-const AUTHORITATIVE_PROVENANCE = Object.freeze({
-  class: V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
-  owner: "test-only-durable-prompt-ledger-owner",
+// THE STRONGEST CLAIM A CALLER CAN WRITE, pinned as a literal on purpose. This
+// fixture is not a durable ledger and cannot become one by being labelled: the
+// class below is the very string an earlier version of the module treated as
+// authority, and the tests that follow prove it now buys exactly nothing.
+const CLAIMED_PROVENANCE = Object.freeze({
+  class: "authoritative_durable_store",
+  owner: "test-only-prompt-ledger-that-nothing-can-vouch-for",
   read_at: "2026-09-11T15:09:00Z",
 });
 
@@ -210,13 +216,38 @@ const EMPTY_LEDGER = Object.freeze({
   prompted_meeting_keys: [],
   dismissed_meeting_keys: [],
   active_meeting_keys: [],
-  provenance: { ...AUTHORITATIVE_PROVENANCE },
+  provenance: { ...CLAIMED_PROVENANCE },
 });
 
 function prompt(observation, ledger = EMPTY_LEDGER) {
   return keep(evaluateActivationPrompt({
     tenant: TENANT, now: NOW, observation, prompt_ledger: { ...ledger },
   }));
+}
+
+// THE PROMPT ANSWER NO CALLER CAN GET TODAY, built by hand HERE IN THE TEST and
+// never by the module. evaluateActivationPrompt refuses every ledger it is
+// handed (the matrix test below), so there is no product path to a shown prompt
+// until the durable ledger owner exists — and no exported function may hand a
+// caller one, which is why this shape is assembled in the suite rather than
+// offered by the source. Activation's own rules still have to be provable, so
+// these tests state their premise instead of pretending it is reachable.
+function shownPrompt(observation = observe()) {
+  return Object.freeze({
+    schema_version: V5_J201_PROMPT_SCHEMA_VERSION,
+    meeting_key: observation.meeting_key,
+    records_audio: false,
+    recording: V5_J201_RECORDING_STATE,
+    recording_permitted: false,
+    detection_is_not_consent: true,
+    recording_policy_seam: V5_J201_RECORDING_POLICY_SEAM,
+    decision: "prompt_once",
+    reason_id: "first_prompt_for_this_meeting",
+    prompt_shown: true,
+    activation_required_from_human: true,
+    accepted_activation_intent: V5_J201_EXPLICIT_ACTIVATION_INTENT,
+    effects: V5_NO_EFFECTS,
+  });
 }
 
 function activate(promptResult, overrides = {}) {
@@ -756,81 +787,167 @@ test("the exported meeting key matches the one detection computes", () => {
 // checkable_done 2 — detection prompts once and never records.
 // ---------------------------------------------------------------------------
 
-test("the first prompt fires once against a given authoritative ledger", () => {
+test("NO LEDGER A CALLER CAN SUPPLY reaches a prompt or a suppression", () => {
+  // THE STANDING RULE AS A MATRIX RATHER THAN A SENTENCE. Every registered
+  // provenance class, crossed with owner strings a caller might write —
+  // including one that simply repeats the accepted class back — crossed with
+  // every ledger state that used to decide something. The privileged outcomes
+  // are prompt_once and the three suppressions; none is reachable, because the
+  // fact that would justify one (a durable owner that can vouch for this
+  // ledger) does not exist in this repository to be consulted.
   const observation = observe();
-  const first = prompt(observation);
-  assert.equal(first.decision, "prompt_once");
-  assert.equal(first.prompt_shown, true);
-  assert.equal(first.activation_required_from_human, true);
-
-  const second = prompt(observation, {
-    ...EMPTY_LEDGER, prompted_meeting_keys: [observation.meeting_key],
-  });
-  assert.equal(second.decision, "suppress_already_prompted");
-  assert.equal(second.prompt_shown, false);
+  const key = observation.meeting_key;
+  const owners = [
+    "test-only-prompt-ledger-that-nothing-can-vouch-for",
+    "authoritative_durable_store",
+    "carr-record-layer",
+    "joe",
+    "x",
+  ];
+  const states = [
+    {},
+    { prompted_meeting_keys: [key] },
+    { dismissed_meeting_keys: [key] },
+    { active_meeting_keys: [key] },
+    {
+      prompted_meeting_keys: [key], dismissed_meeting_keys: [key],
+      active_meeting_keys: [key],
+    },
+  ];
+  let cases = 0;
+  for (const cls of V5_J201_LEDGER_PROVENANCE_CLASSES) {
+    for (const owner of owners) {
+      for (const state of states) {
+        const where = `${cls} / ${owner} / ${JSON.stringify(state)}`;
+        const result = prompt(observation, {
+          ...EMPTY_LEDGER, ...state,
+          provenance: { ...CLAIMED_PROVENANCE, class: cls, owner },
+        });
+        assert.equal(result.decision, "refuse_unproven_prompt_ledger", where);
+        assert.equal(result.prompt_shown, false, where);
+        assert.ok(!V5_J201_UNWIRED_ONCE_ONLY_DECISIONS.includes(result.decision), where);
+        assert.equal(result.reason_id,
+          "no_durable_prompt_ledger_owner_exists_to_prove_this_ledger", where);
+        // What the caller claimed is RECORDED, so a transcript shows it...
+        assert.equal(result.claimed_ledger_provenance_class, cls, where);
+        // ...and credited with nothing.
+        assert.deepEqual(result.trusted_ledger_provenance_classes, [], where);
+        assert.equal(result.prompt_ledger_owner_seam, V5_J201_PROMPT_LEDGER_OWNER_SEAM, where);
+        cases += 1;
+      }
+    }
+  }
+  assert.equal(cases, V5_J201_LEDGER_PROVENANCE_CLASSES.length * owners.length * states.length);
+  assert.ok(cases >= 40, `only ${cases} ledger shapes were tried`);
 });
 
-test("once-only lives in the ledger owner, and this kernel says so", () => {
+test("the set of provenance classes this module acts on is EMPTY", () => {
+  assert.deepEqual([...V5_J201_TRUSTED_LEDGER_PROVENANCE_CLASSES], []);
+  // The vocabulary still registers the class an earlier version believed, so
+  // the claim can be recorded. Registering it is not trusting it.
+  assert.ok(V5_J201_LEDGER_PROVENANCE_CLASSES.includes("authoritative_durable_store"));
+  assert.ok(!V5_J201_TRUSTED_LEDGER_PROVENANCE_CLASSES.includes("authoritative_durable_store"));
+});
+
+test("the registered answer set of evaluateActivationPrompt holds only refusals", () => {
+  assert.deepEqual([...V5_J201_PROMPT_DECISIONS].sort(),
+    ["refuse_unproven_prompt_ledger", "suppress_not_observed"]);
+  for (const decision of V5_J201_PROMPT_DECISIONS) {
+    assert.ok(!V5_J201_UNWIRED_ONCE_ONLY_DECISIONS.includes(decision), decision);
+  }
+});
+
+test("this kernel raises no prompt at all, and the gaps projection says so", () => {
   // THE HONEST STATEMENT, and the reason the checkable_done item is partial:
-  // this kernel keeps no state. Handed a second FRESH ledger for the same
-  // meeting it prompts again, because nothing here remembers the first prompt.
-  // Once-only is therefore a property of whoever owns the ledger durably, and
-  // the gaps projection refuses to claim otherwise.
+  // once-only is a property of whoever owns the ledger durably. That owner does
+  // not exist, so this slice refuses rather than prompting on a caller's word.
   const observation = observe();
-  assert.equal(prompt(observation).decision, "prompt_once");
-  assert.equal(prompt(observation).decision, "prompt_once");
+  assert.equal(prompt(observation).decision, "refuse_unproven_prompt_ledger");
+  assert.equal(prompt(observation).prompt_shown, false);
 
   const gaps = meetingModeGaps();
   assert.equal(gaps.once_only_prompt_enforced_here, false);
   assert.equal(gaps.once_only_prompt_reason_id,
     "the_prompt_ledger_is_owned_by_a_durable_store_this_slice_does_not_contain");
-  assert.equal(gaps.required_prompt_ledger_provenance_class,
-    V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS);
+  assert.equal(gaps.prompt_reachable_here, false);
+  assert.equal(gaps.prompt_unreachable_reason_id,
+    "no_durable_prompt_ledger_owner_exists_to_prove_this_ledger");
+  assert.deepEqual(gaps.trusted_prompt_ledger_provenance_classes, []);
+  assert.equal(gaps.once_only_rule_written_down_at, "unwiredOnceOnlyPromptDecision");
   assert.equal(gaps.seams.prompt_ledger_owner, V5_J201_PROMPT_LEDGER_OWNER_SEAM);
   assert.ok(gaps.not_built_here.some(line => /durable.*prompt ledger|prompt ledger.*durable/.test(line)),
     JSON.stringify(gaps.not_built_here));
 });
 
-test("a ledger the caller cannot prove authoritative refuses instead of prompting", () => {
-  const observation = observe();
-  const result = prompt(observation, {
-    ...EMPTY_LEDGER,
-    provenance: { ...AUTHORITATIVE_PROVENANCE, class: "caller_supplied_unproven" },
-  });
-  assert.equal(result.decision, "refuse_unproven_prompt_ledger");
-  assert.equal(result.prompt_shown, false);
-  assert.equal(result.reason_id, "prompt_ledger_provenance_is_not_authoritative");
-  assert.equal(result.ledger_provenance_class, "caller_supplied_unproven");
-  assert.equal(result.required_ledger_provenance_class,
-    V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS);
-  assert.equal(result.prompt_ledger_owner_seam, V5_J201_PROMPT_LEDGER_OWNER_SEAM);
-});
+// ---------------------------------------------------------------------------
+// The once-only rule itself: written down, unit tested against fixture ledgers,
+// and NOT WIRED. It is a predicate returning a NAME — it decides nothing in the
+// product until a durable ledger owner calls it.
+// ---------------------------------------------------------------------------
 
-test("an unproven ledger refuses even when it would have suppressed anyway", () => {
-  // The refusal is about provenance, not about the answer it would have given:
-  // a ledger nobody can vouch for cannot suppress either.
-  const observation = observe();
-  const result = prompt(observation, {
-    ...EMPTY_LEDGER,
-    prompted_meeting_keys: [observation.meeting_key],
-    provenance: { ...AUTHORITATIVE_PROVENANCE, class: "caller_supplied_unproven" },
-  });
-  assert.equal(result.decision, "refuse_unproven_prompt_ledger");
-});
+function ledgerView(meeting_key, overrides = {}) {
+  return {
+    meeting_key,
+    prompted_meeting_keys: [], dismissed_meeting_keys: [], active_meeting_keys: [],
+    ...overrides,
+  };
+}
 
-test("every registered ledger provenance class is exercised and only one is authoritative", () => {
-  const seen = new Map();
-  const observation = observe();
-  for (const cls of V5_J201_LEDGER_PROVENANCE_CLASSES) {
-    const result = prompt(observation, {
-      ...EMPTY_LEDGER, provenance: { ...AUTHORITATIVE_PROVENANCE, class: cls },
-    });
-    seen.set(cls, result.decision !== "refuse_unproven_prompt_ledger");
+test("the unwired once-only rule answers every fixture ledger correctly", () => {
+  const key = observe().meeting_key;
+  const other = meetingKey({ platform: "zoom", native_identity: { ...ZOOM_IDENTITY } });
+  const reached = new Set();
+  const cases = [
+    [ledgerView(key), "prompt_once"],
+    [ledgerView(key, { prompted_meeting_keys: [key] }), "suppress_already_prompted"],
+    [ledgerView(key, { dismissed_meeting_keys: [key] }), "suppress_dismissed"],
+    [ledgerView(key, { active_meeting_keys: [key] }), "suppress_already_active"],
+    // Precedence, stated rather than left to the reading order: a running
+    // session beats a dismissal, and a dismissal beats an earlier prompt.
+    [ledgerView(key, { dismissed_meeting_keys: [key], active_meeting_keys: [key] }),
+      "suppress_already_active"],
+    [ledgerView(key, { prompted_meeting_keys: [key], dismissed_meeting_keys: [key] }),
+      "suppress_dismissed"],
+    // A DIFFERENT meeting's entry decides nothing about this one.
+    [ledgerView(key, { prompted_meeting_keys: [other], dismissed_meeting_keys: [other] }),
+      "prompt_once"],
+  ];
+  for (const [view, expected] of cases) {
+    const answer = unwiredOnceOnlyPromptDecision(view);
+    assert.equal(answer, expected, JSON.stringify(view));
+    reached.add(answer);
   }
-  assert.deepEqual([...seen.keys()].sort(), [...V5_J201_LEDGER_PROVENANCE_CLASSES].sort());
-  assert.deepEqual(
-    [...seen.entries()].filter(([, accepted]) => accepted).map(([cls]) => cls),
-    [V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS]);
+  // Every registered name is reached by a fixture, so none of them is a name
+  // the rule cannot actually produce.
+  assert.deepEqual([...reached].sort(), [...V5_J201_UNWIRED_ONCE_ONLY_DECISIONS].sort());
+  // The one way back from a dismissal is a person, and it is still said.
+  assert.equal(V5_J201_DISMISSAL_REOPEN_REQUIRES, "manual_human_reopen");
+  assert.equal(meetingModeGaps().dismissal_reopen_requires, V5_J201_DISMISSAL_REOPEN_REQUIRES);
+});
+
+test("the unwired rule returns a NAME that cannot be mistaken for a prompt", () => {
+  const observation = observe();
+  const answer = unwiredOnceOnlyPromptDecision(ledgerView(observation.meeting_key));
+  assert.equal(typeof answer, "string");
+  assert.equal(answer, "prompt_once");
+  // It is not a result: no schema version, so activation cannot be driven from
+  // it, and nothing this module exports will turn it into one.
+  throwsWithCode(
+    () => activateMeetingMode({
+      tenant: TENANT, now: NOW, actor: JOE,
+      prompt: { decision: answer, prompt_shown: true, meeting_key: observation.meeting_key },
+      activation_intent: V5_J201_EXPLICIT_ACTIVATION_INTENT,
+    }),
+    "invalid_prompt");
+});
+
+test("the unwired rule reads a closed ledger view and nothing else", () => {
+  const key = observe().meeting_key;
+  throwsWithCode(() => unwiredOnceOnlyPromptDecision({ ...ledgerView(key), also: 1 }), "unknown_field");
+  throwsWithCode(() => unwiredOnceOnlyPromptDecision({ meeting_key: key }), "missing_field");
+  throwsWithCode(
+    () => unwiredOnceOnlyPromptDecision({ ...ledgerView(key), transcript_ref: "x" }),
+    "recording_field_refused");
 });
 
 test("a ledger carrying no provenance cannot reach a prompt decision", () => {
@@ -848,7 +965,7 @@ test("a provenance missing any one of its fields cannot reach a prompt decision"
   // The whole provenance object being absent is one case; a half-filled one is
   // the case that would otherwise slip through as "close enough".
   for (const field of ["class", "owner", "read_at"]) {
-    const provenance = { ...AUTHORITATIVE_PROVENANCE };
+    const provenance = { ...CLAIMED_PROVENANCE };
     delete provenance[field];
     throwsWithCode(() => prompt(observe(), { ...EMPTY_LEDGER, provenance }), "missing_field");
   }
@@ -857,7 +974,7 @@ test("a provenance missing any one of its fields cannot reach a prompt decision"
 test("an unregistered ledger provenance class is refused by name", () => {
   throwsWithCode(
     () => prompt(observe(), {
-      ...EMPTY_LEDGER, provenance: { ...AUTHORITATIVE_PROVENANCE, class: "trust_me" },
+      ...EMPTY_LEDGER, provenance: { ...CLAIMED_PROVENANCE, class: "trust_me" },
     }),
     "unknown_ledger_provenance_class");
 });
@@ -866,35 +983,28 @@ test("a ledger read after now is refused", () => {
   throwsWithCode(
     () => prompt(observe(), {
       ...EMPTY_LEDGER,
-      provenance: { ...AUTHORITATIVE_PROVENANCE, read_at: "2026-09-11T15:11:00Z" },
+      provenance: { ...CLAIMED_PROVENANCE, read_at: "2026-09-11T15:11:00Z" },
     }),
     "ledger_read_after_now");
 });
 
-test("a dismissal suppresses further prompts and names the one way back", () => {
+test("a dismissal, a running session and a prior prompt all refuse alike here", () => {
+  // These three states used to be suppressions, and each of them was a decision
+  // taken on a caller's word. They are now the unwired rule's business; what
+  // this kernel does with any of them is refuse, identically.
   const observation = observe();
-  const result = prompt(observation, {
-    ...EMPTY_LEDGER, dismissed_meeting_keys: [observation.meeting_key],
-  });
-  assert.equal(result.decision, "suppress_dismissed");
-  assert.equal(result.prompt_shown, false);
-  assert.equal(result.reopen_requires, "manual_human_reopen");
-});
-
-test("an already-active session is not re-prompted", () => {
-  const observation = observe();
-  const result = prompt(observation, {
-    ...EMPTY_LEDGER, active_meeting_keys: [observation.meeting_key],
-  });
-  assert.equal(result.decision, "suppress_already_active");
-  assert.equal(result.prompt_shown, false);
-});
-
-test("a ledger entry for a DIFFERENT meeting does not suppress this one", () => {
-  const observation = observe();
-  const other = meetingKey({ platform: "zoom", native_identity: { ...ZOOM_IDENTITY } });
-  const result = prompt(observation, { ...EMPTY_LEDGER, prompted_meeting_keys: [other] });
-  assert.equal(result.decision, "prompt_once");
+  for (const state of [
+    { dismissed_meeting_keys: [observation.meeting_key] },
+    { active_meeting_keys: [observation.meeting_key] },
+    { prompted_meeting_keys: [observation.meeting_key] },
+  ]) {
+    const result = prompt(observation, { ...EMPTY_LEDGER, ...state });
+    const where = JSON.stringify(state);
+    assert.equal(result.decision, "refuse_unproven_prompt_ledger", where);
+    assert.equal(result.prompt_shown, false, where);
+    // The suppression fields those paths used to carry are gone with the paths.
+    assert.equal("reopen_requires" in result, false, where);
+  }
 });
 
 test("no withheld or refused observation can leak a prompt", () => {
@@ -923,24 +1033,24 @@ test("a prompt cannot be built from something that is not an observation result"
 });
 
 test("EVERY registered prompt decision reports prompt_shown truthfully", () => {
-  // Exactly one of the registered decisions may show a prompt. The others
-  // are suppressions, and a suppression that showed a prompt would be the bug.
+  // Both registered decisions are refusals and NEITHER shows a prompt. The
+  // earlier version of this test had one true in the list; that true is what
+  // the durable ledger owner owes and this slice does not have.
   const shown = new Map();
   const observation = observe();
-  shown.set("prompt_once", prompt(observation).prompt_shown);
-  shown.set("suppress_already_prompted",
-    prompt(observation, { ...EMPTY_LEDGER, prompted_meeting_keys: [observation.meeting_key] }).prompt_shown);
-  shown.set("suppress_dismissed",
-    prompt(observation, { ...EMPTY_LEDGER, dismissed_meeting_keys: [observation.meeting_key] }).prompt_shown);
-  shown.set("suppress_already_active",
-    prompt(observation, { ...EMPTY_LEDGER, active_meeting_keys: [observation.meeting_key] }).prompt_shown);
   shown.set("suppress_not_observed", prompt(observe({ corroborating_signals: [] })).prompt_shown);
   shown.set("refuse_unproven_prompt_ledger",
     prompt(observation, {
-      ...EMPTY_LEDGER, provenance: { ...AUTHORITATIVE_PROVENANCE, class: "caller_supplied_unproven" },
+      ...EMPTY_LEDGER, provenance: { ...CLAIMED_PROVENANCE, class: "caller_supplied_unproven" },
     }).prompt_shown);
   assert.deepEqual([...shown.keys()].sort(), [...V5_J201_PROMPT_DECISIONS].sort());
-  assert.deepEqual([...shown.values()], [true, false, false, false, false, false]);
+  assert.deepEqual([...shown.values()], [false, false]);
+  // Swept rather than spot-checked: nothing this suite ever built out of
+  // evaluateActivationPrompt showed a prompt.
+  assert.equal(
+    EVERY_RESULT.filter(r => r.schema_version === V5_J201_PROMPT_SCHEMA_VERSION)
+      .filter(r => r.prompt_shown !== false).length,
+    0);
 });
 
 test("no field naming audio can reach any entry point", () => {
@@ -986,7 +1096,7 @@ test("the metadata measurement fields do NOT trip the recording check", () => {
 // ---------------------------------------------------------------------------
 
 test("an explicit one-tap by a verified partner opens a non-recording session", () => {
-  const session = activate(prompt(observe()));
+  const session = activate(shownPrompt());
   assert.equal(session.decision, "activate");
   assert.equal(session.mode_state, "active_non_recording");
   assert.equal(session.records_audio, false);
@@ -997,7 +1107,7 @@ test("an explicit one-tap by a verified partner opens a non-recording session", 
 
 test("either partner may activate", () => {
   for (const actor of [JOE, DELL]) {
-    const session = activate(prompt(observe()), { actor });
+    const session = activate(shownPrompt(), { actor });
     assert.equal(session.decision, "activate", actor.slug);
     assert.equal(session.actor_slug, actor.slug);
   }
@@ -1005,7 +1115,7 @@ test("either partner may activate", () => {
 
 test("each silent activation intent refuses BY NAME", () => {
   for (const intent of V5_J201_REFUSED_ACTIVATION_INTENTS) {
-    const session = activate(prompt(observe()), { activation_intent: intent });
+    const session = activate(shownPrompt(), { activation_intent: intent });
     assert.equal(session.decision, "refuse", intent);
     assert.equal(session.reason_id, "silent_activation_refused", intent);
     assert.equal(session.attempted_activation_intent, intent);
@@ -1014,7 +1124,7 @@ test("each silent activation intent refuses BY NAME", () => {
 });
 
 test("an unregistered activation intent refuses too", () => {
-  const session = activate(prompt(observe()), { activation_intent: "seemed_like_a_meeting" });
+  const session = activate(shownPrompt(), { activation_intent: "seemed_like_a_meeting" });
   assert.equal(session.decision, "refuse");
   assert.equal(session.reason_id, "explicit_human_activation_required");
   assert.equal(session.mode_state, "off");
@@ -1022,7 +1132,7 @@ test("an unregistered activation intent refuses too", () => {
 
 test("an agent seat cannot activate Meeting Mode, sponsored or not", () => {
   for (const actor of [SPONSORED_AGENT, UNSPONSORED_AGENT]) {
-    const session = activate(prompt(observe()), { actor });
+    const session = activate(shownPrompt(), { actor });
     assert.equal(session.decision, "refuse", actor.slug);
     assert.equal(session.reason_id, "activation_requires_a_verified_partner", actor.slug);
     assert.equal(session.mode_state, "off", actor.slug);
@@ -1030,20 +1140,37 @@ test("an agent seat cannot activate Meeting Mode, sponsored or not", () => {
 });
 
 test("a partner slug without the human flag is not a verified partner", () => {
-  const session = activate(prompt(observe()), { actor: { slug: "joe", human: false } });
+  const session = activate(shownPrompt(), { actor: { slug: "joe", human: false } });
   assert.equal(session.decision, "refuse");
   assert.equal(session.reason_id, "activation_requires_a_verified_partner");
 });
 
 test("activation without a shown prompt refuses", () => {
   const observation = observe();
-  const suppressed = prompt(observation, {
+  // The ONLY prompt answer this product can actually produce today, fed
+  // straight into activation: a refusal, which activates nothing. Until the
+  // ledger owner exists there is no live path from a detection to a session.
+  const refused = prompt(observation, {
     ...EMPTY_LEDGER, dismissed_meeting_keys: [observation.meeting_key],
   });
-  const session = activate(suppressed);
+  assert.equal(refused.decision, "refuse_unproven_prompt_ledger");
+  const session = activate(refused);
   assert.equal(session.decision, "refuse");
   assert.equal(session.reason_id, "activation_without_a_shown_prompt");
   assert.equal(session.mode_state, "off");
+});
+
+test("no ledger reaches an activated session through the real prompt path", () => {
+  // The end-to-end statement of the same fact, swept over the matrix: whatever
+  // a caller says about its ledger, the session it can open is none.
+  const observation = observe();
+  for (const cls of V5_J201_LEDGER_PROVENANCE_CLASSES) {
+    const session = activate(prompt(observation, {
+      ...EMPTY_LEDGER, provenance: { ...CLAIMED_PROVENANCE, class: cls },
+    }));
+    assert.equal(session.decision, "refuse", cls);
+    assert.equal(session.mode_state, "off", cls);
+  }
 });
 
 test("activation cannot be built from a forged prompt object", () => {
@@ -1059,7 +1186,7 @@ test("activation cannot be built from a forged prompt object", () => {
 test("an activation intent that is an object rather than a string cannot be read", () => {
   throwsWithCode(
     () => activateMeetingMode({
-      tenant: TENANT, now: NOW, actor: JOE, prompt: prompt(observe()),
+      tenant: TENANT, now: NOW, actor: JOE, prompt: shownPrompt(),
       activation_intent: { intent: V5_J201_EXPLICIT_ACTIVATION_INTENT, also_record: true },
     }),
     "invalid_shape");
@@ -1067,8 +1194,8 @@ test("an activation intent that is an object rather than a string cannot be read
 
 test("no mode state this module can reach is a recording state", () => {
   const reached = new Set([
-    activate(prompt(observe())).mode_state,
-    activate(prompt(observe()), { activation_intent: "silent_activation" }).mode_state,
+    activate(shownPrompt()).mode_state,
+    activate(shownPrompt(), { activation_intent: "silent_activation" }).mode_state,
   ]);
   for (const state of reached) assert.ok(V5_J201_MODE_STATES.includes(state));
   // The only registered state that mentions recording at all is the one that
@@ -1084,7 +1211,7 @@ test("no mode state this module can reach is a recording state", () => {
 // ---------------------------------------------------------------------------
 
 test("a model proposal inside a declared seam is accepted after activation", () => {
-  const session = activate(prompt(observe()));
+  const session = activate(shownPrompt());
   const result = keep(evaluateModelProposal({
     tenant: TENANT, session,
     proposal: {
@@ -1100,7 +1227,7 @@ test("a model proposal inside a declared seam is accepted after activation", () 
 });
 
 test("a model may not speak before explicit activation", () => {
-  const refusedSession = activate(prompt(observe()), { activation_intent: "automatic_on_detection" });
+  const refusedSession = activate(shownPrompt(), { activation_intent: "automatic_on_detection" });
   const result = keep(evaluateModelProposal({
     tenant: TENANT, session: refusedSession,
     proposal: {
@@ -1113,7 +1240,7 @@ test("a model may not speak before explicit activation", () => {
 });
 
 test("every registered seam label is accepted, and an unregistered one is not", () => {
-  const session = activate(prompt(observe()));
+  const session = activate(shownPrompt());
   for (const [seam, labels] of Object.entries(V5_J201_MODEL_SEAMS)) {
     for (const label of labels) {
       const result = keep(evaluateModelProposal({
@@ -1138,7 +1265,7 @@ test("every registered seam label is accepted, and an unregistered one is not", 
 });
 
 test("a proposal reaching for authority, permission or state cannot be read", () => {
-  const session = activate(prompt(observe()));
+  const session = activate(shownPrompt());
   const reaches = {
     authority_class: "system_authority",
     granted_capability: "record.start",
@@ -1174,7 +1301,7 @@ test("a proposal reaching for authority, permission or state cannot be read", ()
 });
 
 test("a proposal carrying an audio field cannot be read either", () => {
-  const session = activate(prompt(observe()));
+  const session = activate(shownPrompt());
   throwsWithCode(
     () => evaluateModelProposal({
       tenant: TENANT, session,
@@ -1187,7 +1314,7 @@ test("a proposal carrying an audio field cannot be read either", () => {
 });
 
 test("a confidence outside zero-to-one is refused", () => {
-  const session = activate(prompt(observe()));
+  const session = activate(shownPrompt());
   for (const confidence of [-0.1, 1.1, Number.NaN, "0.5"]) {
     throwsWithCode(
       () => evaluateModelProposal({
@@ -1341,7 +1468,8 @@ test("the policy digest is stable and moves when a vocabulary moves", () => {
     "calendar_source_seam", "explicit_activation_intent",
     "refused_activation_intents", "model_seams", "recording_fragments",
     "model_widening_fragments", "required_read_operations",
-    "ledger_provenance_classes", "authoritative_ledger_provenance_class",
+    "ledger_provenance_classes", "trusted_ledger_provenance_classes",
+    "unwired_once_only_decisions", "dismissal_reopen_requires",
     "prompt_ledger_owner_seam",
     "min_required_corroborating_signals", "production_outcome_steps",
   ]) {
@@ -1352,13 +1480,34 @@ test("the policy digest is stable and moves when a vocabulary moves", () => {
 test("the projection says what the mode will and will not do", () => {
   const projection = keep(v5J201MeetingModeProjection());
   assert.equal(projection.policy_digest, v5J201PolicyDigest());
-  assert.equal(projection.prompts_once_per_meeting, true);
+  // FALSE, and it must stay false while the gaps block beneath it says nothing
+  // enforces once-only. This surface told an operator "prompts once per
+  // meeting" while admitting two lines lower that nothing made it true.
+  assert.equal(projection.prompts_once_per_meeting, false);
+  assert.equal(projection.prompt_reachable_today, false);
+  assert.equal(projection.prompts_once_per_meeting_reason_id,
+    "the_prompt_ledger_is_owned_by_a_durable_store_this_slice_does_not_contain");
+  assert.equal(projection.prompt_ledger_owner_seam, V5_J201_PROMPT_LEDGER_OWNER_SEAM);
   assert.equal(projection.reconciles_on, "platform_and_native_source_identity");
   assert.equal(projection.reconciles_on_time_overlap, false);
   assert.equal(projection.detection_requires.unknown_signal_corroborates, false);
   assert.equal(projection.activation.requires_verified_partner, true);
   assert.equal(projection.audio_retained, false);
   assert.equal(projection.gaps.full_v5_ready, false);
+});
+
+test("the projection cannot contradict the gaps block it carries", () => {
+  // The exact defect this pass was sent to fix, pinned as an invariant rather
+  // than as two literals that a later edit could move apart again.
+  const projection = v5J201MeetingModeProjection();
+  const gaps = meetingModeGaps();
+  assert.equal(projection.prompts_once_per_meeting, gaps.once_only_prompt_enforced_here);
+  assert.equal(projection.prompt_reachable_today, gaps.prompt_reachable_here);
+  assert.equal(projection.prompts_once_per_meeting_reason_id, gaps.once_only_prompt_reason_id);
+  assert.deepEqual(projection.gaps, gaps);
+  // And the claim is not true of the product: the reachable answers are both
+  // refusals, so no surface may advertise a prompt that fires.
+  assert.ok(!V5_J201_PROMPT_DECISIONS.includes("prompt_once"));
 });
 
 test("the registered vocabularies are the ones the module actually uses", () => {
@@ -1435,7 +1584,7 @@ test("the read contract schema version is what an adapter must answer to", () =>
   assert.equal(boundAdapter().schema_version, V5_J201_READ_CONTRACT_SCHEMA_VERSION);
   assert.equal(observe().schema_version, V5_J201_OBSERVATION_SCHEMA_VERSION);
   assert.equal(prompt(observe()).schema_version, V5_J201_PROMPT_SCHEMA_VERSION);
-  assert.equal(activate(prompt(observe())).schema_version, V5_J201_SESSION_SCHEMA_VERSION);
+  assert.equal(activate(shownPrompt()).schema_version, V5_J201_SESSION_SCHEMA_VERSION);
   assert.equal(
     toMeetingRecordLinkCandidate({
       tenant: TENANT, observation: observe(), evidence_ref: "evidence:test-only-0005",
