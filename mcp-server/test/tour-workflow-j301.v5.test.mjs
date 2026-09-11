@@ -52,14 +52,14 @@ import esbuild from "esbuild";
 
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { V5_J102_ASSIGNMENT_PHASES, V5_J102_DEAL_AXES } from "../src/cre-lifecycle.v5.js";
+import { digest } from "../src/artifact-trust.js";
 import { TOOLS } from "../src/tools.js";
 import * as j301 from "../src/tour-workflow-j301.v5.js";
 import * as command from "../src/tour-map-command-j301.v5.js";
 import {
   V5J301Error,
   V5_J301_ACTOR_CLASSES,
-  V5_J301_ATTENDED_INTENT,
-  V5_J301_CALLER_AUTHORITY_FIELDS,
+  V5_J301_STAFFED_INTENT,
   V5_J301_CONSUMER_GATES,
   V5_J301_DECISIONS,
   V5_J301_FORBIDDEN_ACTIVITY_FIELDS,
@@ -68,7 +68,7 @@ import {
   V5_J301_MODEL_PERMITTED_STAGES,
   V5_J301_PUBLIC_SURFACE,
   V5_J301_REFUSED_INTENTS,
-  V5_J301_SETTLED_DECISIONS,
+  V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS,
   V5_J301_SETTLED_DECISION_IDS,
   V5_J301_STAGES,
   V5_J301_STAGE_ACTIONS,
@@ -82,6 +82,8 @@ import {
   evaluateTourAssignmentActivity,
   tourWorkflowGaps,
   tourWorkflowStepKey,
+  v5J301CallerAuthorityFieldDigest,
+  v5J301SettledDecisionDigest,
   v5J301PolicyCanonicalBytes,
   v5J301PolicyDigest,
   v5J301PolicyPreimage,
@@ -120,11 +122,11 @@ function stageRequest(overrides = {}) {
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     tour_id: TOUR,
     assignment_id: ASSIGNMENT,
-    stage: "attended_mls_acquisition",
+    stage: "staffed_mls_acquisition",
     action_kind: "capture_listing_observation",
     declared_actor_slug: PARTNER,
-    attended_intent: V5_J301_ATTENDED_INTENT,
-    actor_class: "human_attended",
+    staffed_intent: V5_J301_STAFFED_INTENT,
+    actor_class: "human_staffed",
     action_subject_digest: SUBJECT_A,
     ...overrides,
   };
@@ -136,7 +138,7 @@ const BINDING = Object.freeze({ tour_id: TOUR, assignment_id: ASSIGNMENT });
 /** One intended action, in the position-bearing shape the helper classifies. */
 function stagingAction(overrides = {}) {
   return {
-    stage: "attended_mls_acquisition",
+    stage: "staffed_mls_acquisition",
     action_kind: "capture_listing_observation",
     action_subject_digest: SUBJECT_A,
     corrects_step_key: null,
@@ -175,19 +177,102 @@ function evaluate(overrides) {
 }
 
 // ---------------------------------------------------------------------------
+// TEST-SIDE MIRRORS, PINNED BY DIGEST.
+// ---------------------------------------------------------------------------
+
+/**
+ * TEST-SIDE MIRRORS OF WHAT THE WORKFLOW MODULE KEEPS PRIVATE.
+ *
+ * The reviewed decision text and the caller-authority field names both left the
+ * module's public surface in this correction — quoted doctrine and the words a
+ * caller uses to declare its own verdict are not strings a governed module
+ * should hand back. This suite still needs both: one to build the binding a
+ * caller really sends, the other to prove every verdict field is refused. So
+ * they live here, in the test tree, and each is PINNED to the private original
+ * by the digest the module publishes. A drifted mirror fails loudly instead of
+ * testing a copy nobody maintains.
+ */
+const REVIEWED_DECISIONS = Object.freeze({
+  "Q014.D2": {
+    settled_requirement:
+      "Tour packet generation is a high-priority later v5 journey, but it must not block the first daily release or depend on unattended MLS access.",
+    source_evidence_digest: "140451d506011d54abd49f86fc328655615daf815ab1f413d99a4171b65f30c3",
+  },
+  "Q059.D4": {
+    settled_requirement:
+      "Promote attended MLS acquisition and governed Tour generation after the core work and meeting rails.",
+    source_evidence_digest: "5c58f2233ea82aab0f66bd966467e24875504900bd96fa98be4fa300436fd513",
+  },
+  "Q060.D1": {
+    settled_requirement:
+      "Keep attended MLS acquisition, deterministic normalization, agent-assisted Tour assembly, deterministic generation, and client-facing review as separate resumable workflow stages.",
+    source_evidence_digest: "bfb7bc8249530da6d124cc8e88a75bc4103d841b2fc4cc40df90955ce8444a41",
+  },
+  "Q072.D2": {
+    settled_requirement:
+      "A formally created governed Tour records touring activity on its Assignment without necessarily replacing the Assignment's broader research, search, or negotiation phase; deterministic code validates the Tour and map-contract evidence and records any correction with preserved history.",
+    source_evidence_digest: "8e27b8e4a5e9c902be7f8529793ca0404cb5ce778adc48bbefa40f0deb8c96bc",
+  },
+  "Q080.D2": {
+    settled_requirement:
+      "In Journey 3, Assignment owns governed Tours as a distinct activity while retaining independent research, search, and negotiation state; each Tour is validated under carr-map-tour-v1 1.2.0 and cannot implicitly create or execute a Deal.",
+    source_evidence_digest: "8321243bef91e506dbc88fcf7b0627ac4393639e57a7f419545b3ce04c9d8147",
+  },
+  "Q123.D3": {
+    settled_requirement:
+      "Add governed Tour generation and sharing as the third current product journey without blocking the first launch.",
+    source_evidence_digest: "55457ebf6cdb2c1959eadcb5358db6bf67a7366d4f941c28be19a5ddaf397b35",
+  },
+  "Q124.D2": {
+    settled_requirement:
+      "In Journey 3, clickable Tour maps and Doc must invoke the same typed map commands and yield equivalent governed coordinate, route, selection, and navigation state under carr-map-tour-v1 1.2.0.",
+    source_evidence_digest: "716b12dab40c9f12f0b25cad565417871f028a27a0a2fe7ac0017d17b69ebfec",
+  },
+});
+
+const CALLER_AUTHORITY_FIELDS = Object.freeze([
+  "gate_receipt", "map_contract_receipt", "receipt", "approved", "admission",
+  "allow", "authority", "authorization_class", "actor_authority", "verified",
+  "gate_status", "override", "force",
+]);
+
+
+test("the test-side mirrors still match the originals the module keeps private", () => {
+  // The reviewed decision text and the caller-authority field names left the
+  // public surface: a governed module should not hand a consumer quoted
+  // doctrine or the words a caller uses to declare its own verdict. What it
+  // publishes instead is a digest, and these mirrors are pinned to it.
+  assert.match(v5J301SettledDecisionDigest(), /^sha256:[0-9a-f]{64}$/);
+  assert.equal(digest(REVIEWED_DECISIONS), v5J301SettledDecisionDigest(),
+    "the reviewed-decision mirror has drifted from the private original");
+  assert.equal(digest([...CALLER_AUTHORITY_FIELDS]), v5J301CallerAuthorityFieldDigest(),
+    "the caller-authority mirror has drifted from the private original");
+  assert.deepEqual(Object.keys(V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS).sort(),
+    [...V5_J301_SETTLED_DECISION_IDS]);
+  for (const id of V5_J301_SETTLED_DECISION_IDS) {
+    assert.equal(V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS[id],
+      REVIEWED_DECISIONS[id].source_evidence_digest, id);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // The settled decisions.
 // ---------------------------------------------------------------------------
 
 test("the slice binds exactly its seven settled decisions", () => {
   assert.deepEqual([...V5_J301_SETTLED_DECISION_IDS],
     ["Q014.D2", "Q059.D4", "Q060.D1", "Q072.D2", "Q080.D2", "Q123.D3", "Q124.D2"]);
-  const bound = assertJ301DecisionBinding({ decisions: { ...V5_J301_SETTLED_DECISIONS } });
+  const bound = assertJ301DecisionBinding({ decisions: { ...REVIEWED_DECISIONS } });
   assert.deepEqual([...bound.decisions_bound], [...V5_J301_SETTLED_DECISION_IDS]);
   assert.deepEqual(bound.effects, V5_NO_EFFECTS);
 });
 
 test("Q060.D1's own wording is what the five stages are named from", () => {
-  const settled = V5_J301_SETTLED_DECISIONS["Q060.D1"].settled_requirement;
+  // The wording says "attended MLS acquisition"; the stage identifier says
+  // `staffed_mls_acquisition`. That is the deliberate rename this correction
+  // made — see the ATTENDANCE note in the module — and the mapping is asserted
+  // here so the decision and the identifier cannot drift apart silently.
+  const settled = REVIEWED_DECISIONS["Q060.D1"].settled_requirement;
   assert.match(settled, /attended MLS acquisition/);
   assert.match(settled, /deterministic normalization/);
   assert.match(settled, /agent-assisted Tour assembly/);
@@ -195,13 +280,13 @@ test("Q060.D1's own wording is what the five stages are named from", () => {
   assert.match(settled, /client-facing review/);
   assert.match(settled, /separate resumable workflow stages/);
   assert.deepEqual([...V5_J301_STAGES], [
-    "attended_mls_acquisition", "deterministic_normalization",
+    "staffed_mls_acquisition", "deterministic_normalization",
     "agent_assisted_assembly", "deterministic_generation", "client_facing_review",
   ]);
 });
 
 test("a drifted decision subset is refused in both directions and on both fields", () => {
-  const good = { ...V5_J301_SETTLED_DECISIONS };
+  const good = { ...REVIEWED_DECISIONS };
   const missing = { ...good };
   delete missing["Q124.D2"];
   assert.throws(() => assertJ301DecisionBinding({ decisions: missing }),
@@ -226,12 +311,12 @@ test("a drifted decision subset is refused in both directions and on both fields
 
 test("the same logical action folds to the same key however often it is replayed", () => {
   const once = tourWorkflowStepKey({
-    tour_id: TOUR, stage: "attended_mls_acquisition",
+    tour_id: TOUR, stage: "staffed_mls_acquisition",
     action_kind: "capture_listing_observation", action_subject_digest: SUBJECT_A,
   });
   for (let attempt = 0; attempt < 5; attempt++) {
     assert.equal(tourWorkflowStepKey({
-      tour_id: TOUR, stage: "attended_mls_acquisition",
+      tour_id: TOUR, stage: "staffed_mls_acquisition",
       action_kind: "capture_listing_observation", action_subject_digest: SUBJECT_A,
     }), once);
   }
@@ -240,7 +325,7 @@ test("the same logical action folds to the same key however often it is replayed
 
 test("every part of the action moves the key, and nothing else can reach it", () => {
   const base = {
-    tour_id: TOUR, stage: "attended_mls_acquisition",
+    tour_id: TOUR, stage: "staffed_mls_acquisition",
     action_kind: "capture_listing_observation", action_subject_digest: SUBJECT_A,
   };
   const key = tourWorkflowStepKey(base);
@@ -267,11 +352,11 @@ test("every part of the action moves the key, and nothing else can reach it", ()
 // ---------------------------------------------------------------------------
 
 test("a journal entry normalizes to a view, never to a record", () => {
-  const entry = assertTourWorkflowJournalEntry(journalEntry("attended_mls_acquisition", "capture_listing_observation"));
+  const entry = assertTourWorkflowJournalEntry(journalEntry("staffed_mls_acquisition", "capture_listing_observation"));
   record(entry);
   assert.equal(entry.authority, "caller_supplied_view");
   assert.equal(entry.step_key, tourWorkflowStepKey({
-    tour_id: TOUR, stage: "attended_mls_acquisition",
+    tour_id: TOUR, stage: "staffed_mls_acquisition",
     action_kind: "capture_listing_observation", action_subject_digest: SUBJECT_A,
   }));
   assert.ok(Object.isFrozen(entry));
@@ -279,18 +364,18 @@ test("a journal entry normalizes to a view, never to a record", () => {
 
 test("an instant that does not exist on the calendar is refused, not normalized", () => {
   assert.throws(() => assertTourWorkflowJournalEntry(
-    journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_A,
+    journalEntry("staffed_mls_acquisition", "capture_listing_observation", SUBJECT_A,
       { recorded_at: "2026-02-31T00:00:00Z" })),
     error => error.code === "invalid_timestamp");
   assert.throws(() => assertTourWorkflowJournalEntry(
-    journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_A,
+    journalEntry("staffed_mls_acquisition", "capture_listing_observation", SUBJECT_A,
       { recorded_at: "2026-09-11 14:00:00" })),
     error => error.code === "invalid_timestamp");
 });
 
 test("an unknown field in a journal entry is refused rather than ignored", () => {
   assert.throws(() => assertTourWorkflowJournalEntry(
-    journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_A,
+    journalEntry("staffed_mls_acquisition", "capture_listing_observation", SUBJECT_A,
       { approved_by_me: true })),
     error => error.code === "unknown_field");
 });
@@ -302,16 +387,16 @@ test("an unknown field in a journal entry is refused rather than ignored", () =>
 test("all four unattended intents are refused by name", () => {
   assert.equal(V5_J301_REFUSED_INTENTS.length, 4);
   for (const intent of V5_J301_REFUSED_INTENTS) {
-    const result = evaluate({ attended_intent: intent });
+    const result = evaluate({ staffed_intent: intent });
     assert.equal(result.decision, "refused");
-    assert.equal(result.reason_id, "unattended_intake_refused");
-    assert.equal(result.attended_intent, intent);
-    assert.equal(result.accepted_intent, V5_J301_ATTENDED_INTENT);
+    assert.equal(result.reason_id, "unstaffed_intake_refused");
+    assert.equal(result.staffed_intent, intent);
+    assert.equal(result.accepted_intent, V5_J301_STAFFED_INTENT);
   }
 });
 
 test("an unregistered intent cannot be read at all", () => {
-  assert.throws(() => evaluateStageAction(stageRequest({ attended_intent: "probably_a_human" })),
+  assert.throws(() => evaluateStageAction(stageRequest({ staffed_intent: "probably_a_human" })),
     error => error.code === "unknown_intent");
 });
 
@@ -325,10 +410,10 @@ test("a caller writing \"joe\" does not thereby make a human present", () => {
   for (const declared_actor_slug of ["joe", "dell"]) {
     const result = evaluate({ declared_actor_slug });
     assert.equal(result.decision, "unavailable", declared_actor_slug);
-    assert.equal(result.reason_id, "attended_actor_source_unavailable", declared_actor_slug);
-    assert.equal(result.attended_actor_source_bound, false);
+    assert.equal(result.reason_id, "staffed_actor_source_unavailable", declared_actor_slug);
+    assert.equal(result.staffed_actor_source_bound, false);
     assert.equal(result.declared_actor_slug_is_authority, false);
-    assert.ok(result.owed_seams.includes(j301.V5_J301_ATTENDED_ACTOR_SOURCE_SEAM));
+    assert.ok(result.owed_seams.includes(j301.V5_J301_STAFFED_ACTOR_SOURCE_SEAM));
     assert.equal(result.identity_seam_module, "mcp-server/src/identity.js");
     // The journal hole is still named; one missing thing does not hide another.
     assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
@@ -354,14 +439,14 @@ test("the Assignment activity path refuses attendance the same way", () => {
       tour_id: TOUR,
       activity_kind: "tour_conducted",
       declared_actor_slug,
-      attended_intent: V5_J301_ATTENDED_INTENT,
+      staffed_intent: V5_J301_STAFFED_INTENT,
       occurred_at: "2026-09-11T15:00:00Z",
     }))));
   for (const answer of answers) assert.equal(answer, answers[0]);
   const first = JSON.parse(answers[0]);
   assert.equal(first.decision, "unavailable");
-  assert.equal(first.reason_id, "attended_actor_source_unavailable");
-  assert.ok(first.owed_seams.includes(j301.V5_J301_ATTENDED_ACTOR_SOURCE_SEAM));
+  assert.equal(first.reason_id, "staffed_actor_source_unavailable");
+  assert.ok(first.owed_seams.includes(j301.V5_J301_STAFFED_ACTOR_SOURCE_SEAM));
 });
 
 test("no membership test on a slug survives anywhere in the module", () => {
@@ -408,7 +493,7 @@ test("every model action produces a proposal rather than a record", () => {
 test("an actor class the action does not call for is refused", () => {
   const result = evaluate({
     stage: "agent_assisted_assembly", action_kind: "draft_stop_narrative",
-    actor_class: "human_attended",
+    actor_class: "human_staffed",
   });
   assert.equal(result.decision, "refused");
   assert.equal(result.reason_id, "actor_class_mismatch");
@@ -435,9 +520,9 @@ test("a caller-supplied journal is refused by name, and the seams are named with
     assert.equal(result.field, "journal_view");
     assert.equal(result.field_path, "request.journal_view");
     assert.ok(result.owed_seams.includes(V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
-    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_READER_SEAM));
-    assert.equal(result.caller_journal_admitted, false);
-    assert.equal(result.journal_read, false);
+    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM));
+    assert.equal(result.caller_journal_taken_as_authority, false);
+    assert.equal(result.journal_consulted, false);
   }
 
   // AN EMPTY LIST IS STILL A CALLER STATING A HISTORY, and it is the case an
@@ -452,7 +537,7 @@ test("a caller-supplied journal is refused by name, and the seams are named with
   // request proceeds to the answers it would have reached anyway.
   const withNull = evaluate({ journal_view: null });
   assert.equal(withNull.decision, "unavailable");
-  assert.equal(withNull.reason_id, "attended_actor_source_unavailable");
+  assert.equal(withNull.reason_id, "staffed_actor_source_unavailable");
 
   // The refusal comes BEFORE the entries are read: a list this module could not
   // parse at all still produces the refusal rather than a throw.
@@ -502,15 +587,15 @@ test("a stage cannot skip the stage before it", () => {
   // distant jump (0 to 3) would pass a rule that permitted every skip of one.
   const nearest = wouldStage(
     { stage: "agent_assisted_assembly", action_kind: "rank_candidate_stops" },
-    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+    [journalEntry("staffed_mls_acquisition", "capture_listing_observation")]);
   assert.equal(nearest.would_be_admissible_if_authoritative, false);
   assert.equal(nearest.would_be_reason_id, "stage_skipped");
   assert.equal(nearest.detail.earliest_unstarted_stage, "deterministic_normalization");
-  assert.deepEqual([...nearest.resume_point.detail.stages_seen], ["attended_mls_acquisition"]);
+  assert.deepEqual([...nearest.resume_point.detail.stages_seen], ["staffed_mls_acquisition"]);
 
   const distant = wouldStage(
     { stage: "client_facing_review", action_kind: "record_client_review_note" },
-    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+    [journalEntry("staffed_mls_acquisition", "capture_listing_observation")]);
   assert.equal(distant.would_be_reason_id, "stage_skipped");
 
   // And the boundary from an empty history: intake is the only stage that may
@@ -525,7 +610,7 @@ test("a stage cannot skip the stage before it", () => {
 test("the next stage after an interruption is not a skip", () => {
   const answer = wouldStage(
     { stage: "deterministic_normalization", action_kind: "normalize_property_fact" },
-    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+    [journalEntry("staffed_mls_acquisition", "capture_listing_observation")]);
   assert.equal(answer.would_be_admissible_if_authoritative, true);
   assert.equal(answer.would_be_reason_id, null);
 });
@@ -533,13 +618,13 @@ test("the next stage after an interruption is not a skip", () => {
 test("continuing inside an interrupted stage is not a skip either", () => {
   const answer = wouldStage(
     { action_kind: "attach_property_identifier", action_subject_digest: SUBJECT_B },
-    [journalEntry("attended_mls_acquisition", "capture_listing_observation")]);
+    [journalEntry("staffed_mls_acquisition", "capture_listing_observation")]);
   assert.equal(answer.would_be_admissible_if_authoritative, true);
 });
 
 test("a backward stage move must be a correction against an entry that exists", () => {
   const view = [
-    journalEntry("attended_mls_acquisition", "capture_listing_observation"),
+    journalEntry("staffed_mls_acquisition", "capture_listing_observation"),
     journalEntry("deterministic_normalization", "normalize_property_fact", SUBJECT_B),
   ];
   const bare = wouldStage(
@@ -562,7 +647,7 @@ test("a backward stage move must be a correction against an entry that exists", 
 });
 
 test("a correction whose target is in the history satisfies the staging rules", () => {
-  const first = journalEntry("attended_mls_acquisition", "capture_listing_observation");
+  const first = journalEntry("staffed_mls_acquisition", "capture_listing_observation");
   const normalized = assertTourWorkflowJournalEntry(first);
   const view = [first, journalEntry("deterministic_normalization", "normalize_property_fact", SUBJECT_B)];
   const answer = wouldStage({
@@ -581,7 +666,7 @@ test("a correction whose target is in the history satisfies the staging rules", 
     corrects_step_key: normalized.step_key,
   });
   assert.equal(real.decision, "unavailable");
-  assert.equal(real.reason_id, "attended_actor_source_unavailable");
+  assert.equal(real.reason_id, "staffed_actor_source_unavailable");
   assert.ok(real.owed_seams.includes(V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM));
 });
 
@@ -593,11 +678,11 @@ test("there is no field through which a correction can erase its target", () => 
 });
 
 test("a replayed action would be refused as a duplicate rather than applied twice", () => {
-  const view = [journalEntry("attended_mls_acquisition", "capture_listing_observation")];
+  const view = [journalEntry("staffed_mls_acquisition", "capture_listing_observation")];
   const replay = wouldStage({}, view);
   assert.equal(replay.would_be_reason_id, "duplicate_step_key_replay");
   assert.equal(replay.detail.step_key, tourWorkflowStepKey({
-    tour_id: TOUR, stage: "attended_mls_acquisition",
+    tour_id: TOUR, stage: "staffed_mls_acquisition",
     action_kind: "capture_listing_observation", action_subject_digest: SUBJECT_A,
   }));
 
@@ -609,13 +694,13 @@ test("a replayed action would be refused as a duplicate rather than applied twic
 test("the hypothetical resume point tracks the history, stage by stage", () => {
   const view = [];
   assert.equal(wouldBeResumePointIfAuthoritative(view, BINDING)
-    .would_be_open_stage_if_authoritative, "attended_mls_acquisition");
+    .would_be_open_stage_if_authoritative, "staffed_mls_acquisition");
 
   // An interrupted stage is resumed IN that stage, and the stage after it is
   // the one that may begin next. Nothing in a journal says a stage finished, so
   // neither answer claims one did.
   const walk = [
-    ["attended_mls_acquisition", "capture_listing_observation", "deterministic_normalization"],
+    ["staffed_mls_acquisition", "capture_listing_observation", "deterministic_normalization"],
     ["deterministic_normalization", "normalize_property_fact", "agent_assisted_assembly"],
     ["agent_assisted_assembly", "rank_candidate_stops", "deterministic_generation"],
     ["deterministic_generation", "generate_route_version", "client_facing_review"],
@@ -651,7 +736,7 @@ test("a history holding only the final stage would be refused, not read as stage
   assert.equal(seen.would_be_readable_history_if_authoritative, false);
   assert.equal(seen.would_be_open_stage_if_authoritative, null);
   assert.equal(seen.would_be_reason_id, "journal_history_noncontiguous");
-  assert.equal(seen.detail.missing_stage, "attended_mls_acquisition");
+  assert.equal(seen.detail.missing_stage, "staffed_mls_acquisition");
   assert.equal(seen.detail.furthest_stage_seen, "client_facing_review");
 });
 
@@ -659,7 +744,7 @@ test("every interior gap in a history is caught, not just the first stage", () =
   // Stages 0 and 2 present, stage 1 missing. Naming only the first stage would
   // have let this through.
   const view = [
-    journalEntry("attended_mls_acquisition", "capture_listing_observation"),
+    journalEntry("staffed_mls_acquisition", "capture_listing_observation"),
     journalEntry("agent_assisted_assembly", "rank_candidate_stops"),
   ];
   const seen = record(wouldBeResumePointIfAuthoritative(view, BINDING));
@@ -673,7 +758,7 @@ test("an entry belonging to another Tour cannot be read as this Tour's history",
   const foreign = journalEntry("client_facing_review", "record_client_review_note", SUBJECT_B,
     { tour_id: "tour-j301-fixture-9999" });
   const seen = record(wouldBeResumePointIfAuthoritative(
-    [journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B), foreign],
+    [journalEntry("staffed_mls_acquisition", "capture_listing_observation", SUBJECT_B), foreign],
     BINDING));
   assert.equal(seen.would_be_reason_id, "journal_entry_foreign_to_tour");
   assert.equal(seen.detail.entry_tour_id, "tour-j301-fixture-9999");
@@ -681,7 +766,7 @@ test("an entry belonging to another Tour cannot be read as this Tour's history",
 });
 
 test("an entry belonging to another Assignment is refused the same way", () => {
-  const foreign = journalEntry("attended_mls_acquisition", "capture_listing_observation", SUBJECT_B,
+  const foreign = journalEntry("staffed_mls_acquisition", "capture_listing_observation", SUBJECT_B,
     { assignment_id: "assignment-j301-fixture-9999" });
   const seen = record(wouldBeResumePointIfAuthoritative([foreign], BINDING));
   assert.equal(seen.would_be_reason_id, "journal_entry_foreign_to_tour");
@@ -690,7 +775,7 @@ test("an entry belonging to another Assignment is refused the same way", () => {
 
 test("a journal entry that does not say which Tour it belongs to cannot be read", () => {
   for (const missing of ["organization_tenant_id", "tour_id", "assignment_id"]) {
-    const entry = journalEntry("attended_mls_acquisition", "capture_listing_observation");
+    const entry = journalEntry("staffed_mls_acquisition", "capture_listing_observation");
     delete entry[missing];
     assert.throws(() => assertTourWorkflowJournalEntry(entry),
       error => error.code === "missing_field", missing);
@@ -710,18 +795,18 @@ test("the public resume path is unavailable and never reads its argument", () =>
     { resume_stage: "client_facing_review", verified: true },
     historyThrough("client_facing_review"),
   ];
-  const first = JSON.stringify(record(j301.readTourWorkflowResumePoint()));
+  const first = JSON.stringify(record(j301.tourWorkflowResumePoint()));
   for (const shape of shapes) {
-    const result = record(j301.readTourWorkflowResumePoint(shape));
+    const result = record(j301.tourWorkflowResumePoint(shape));
     assert.equal(JSON.stringify(result), first,
       `the resume path answered differently for ${JSON.stringify(shape) ?? "undefined"}`);
     assert.equal(result.decision, "unavailable");
-    assert.equal(result.reason_id, "workflow_journal_reader_unavailable");
-    assert.equal(result.request_read, false);
-    assert.equal(result.caller_journal_admitted, false);
+    assert.equal(result.reason_id, "workflow_journal_retrieval_unavailable");
+    assert.equal(result.request_consulted, false);
+    assert.equal(result.caller_journal_taken_as_authority, false);
     assert.equal(result.resume_stage, null);
     assert.equal(result.next_stage, null);
-    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_READER_SEAM));
+    assert.ok(result.owed_seams.includes(j301.V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM));
     assert.ok(Object.isFrozen(result));
   }
 });
@@ -774,12 +859,12 @@ test("an activity record on an Assignment never reports a phase change or a Deal
   const ok = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_created",
-    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, staffed_intent: V5_J301_STAFFED_INTENT,
     occurred_at: "2026-09-11T14:30:00Z",
     activity_payload: { stop_count: 4, market: "fixture-market" },
   }));
   assert.equal(ok.decision, "unavailable");
-  assert.equal(ok.reason_id, "attended_actor_source_unavailable");
+  assert.equal(ok.reason_id, "staffed_actor_source_unavailable");
   assert.ok(ok.owed_seams.includes(j301.V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM));
   assert.equal(ok.assignment_phase_changed, false);
   assert.equal(ok.deal_created, false);
@@ -789,7 +874,7 @@ test("an activity record on an Assignment never reports a phase change or a Deal
   const phase = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_conducted",
-    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, staffed_intent: V5_J301_STAFFED_INTENT,
     occurred_at: "2026-09-11T14:30:00Z",
     activity_payload: { assignment_phase: "negotiation" },
   }));
@@ -802,7 +887,7 @@ test("a correction names its target, and only a correction may", () => {
   const missing = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_corrected",
-    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, staffed_intent: V5_J301_STAFFED_INTENT,
     occurred_at: "2026-09-11T15:00:00Z",
   }));
   assert.equal(missing.reason_id, "correction_must_name_its_target");
@@ -810,7 +895,7 @@ test("a correction names its target, and only a correction may", () => {
   const wrong = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_created",
-    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, staffed_intent: V5_J301_STAFFED_INTENT,
     occurred_at: "2026-09-11T15:00:00Z", corrects_activity_id: "activity-fixture-1",
   }));
   assert.equal(wrong.reason_id, "only_a_correction_may_name_a_prior_activity");
@@ -818,7 +903,7 @@ test("a correction names its target, and only a correction may", () => {
   const good = record(evaluateTourAssignmentActivity({
     organization_tenant_id: ORGANIZATION_TENANT_ID,
     assignment_id: ASSIGNMENT, tour_id: TOUR, activity_kind: "tour_corrected",
-    declared_actor_slug: PARTNER, attended_intent: V5_J301_ATTENDED_INTENT,
+    declared_actor_slug: PARTNER, staffed_intent: V5_J301_STAFFED_INTENT,
     occurred_at: "2026-09-11T15:00:00Z", corrects_activity_id: "activity-fixture-1",
   }));
   assert.equal(good.decision, "unavailable");
@@ -834,7 +919,7 @@ test("a caller-supplied receipt, approval or override never reaches the request"
   // closed schema refuses the field outright — the module cannot read the
   // request at all. Inside the Tour activity, which is an open payload by
   // nature, the same names are refused as a policy answer the caller may record.
-  for (const field of V5_J301_CALLER_AUTHORITY_FIELDS) {
+  for (const field of CALLER_AUTHORITY_FIELDS) {
     const request = stageRequest();
     request[field] = { issued_by: "the caller", status: "pass" };
     assert.throws(() => evaluateStageAction(request),
@@ -887,21 +972,21 @@ test("the projection reads its claims off the gaps rather than beside them", () 
   assert.equal(projection.resume_reason_id, gaps.advance_reason_id);
   assert.equal(projection.map_contract_production_status, gaps.map_contract_production_status);
   assert.equal(gaps.stage_journal_owner_exists_here, false);
-  assert.equal(gaps.journal_reader_exists_here, false);
-  assert.equal(gaps.attended_actor_source_exists_here, false);
-  assert.equal(gaps.attended_actor_source_seam, j301.V5_J301_ATTENDED_ACTOR_SOURCE_SEAM);
+  assert.equal(gaps.journal_retrieval_exists_here, false);
+  assert.equal(gaps.staffed_actor_source_exists_here, false);
+  assert.equal(gaps.staffed_actor_source_seam, j301.V5_J301_STAFFED_ACTOR_SOURCE_SEAM);
   assert.equal(gaps.identity_seam_module, "mcp-server/src/identity.js");
   assert.equal(gaps.verb_adapter_exists_here, false);
   assert.equal(gaps.intended_verbs_are_named_not_traversed, true);
   assert.equal(projection.human_presence_provable_here, false);
-  assert.equal(projection.attended_actions_reachable_today, false);
-  assert.equal(projection.attended_actions_reason_id, "attended_actor_source_unavailable");
+  assert.equal(projection.staffed_actions_reachable_today, false);
+  assert.equal(projection.staffed_actions_reason_id, "staffed_actor_source_unavailable");
   assert.equal(projection.declared_actor_slug_is_authority, false);
   assert.equal(gaps.map_contract_receipt_exists_here, false);
   assert.equal(projection.tour_may_change_assignment_phase, false);
   assert.equal(projection.tour_may_create_or_execute_deal, false);
-  assert.equal(projection.resume_state_read_from, "durable_record_only");
-  assert.equal(projection.resume_state_read_from_session_memory, false);
+  assert.equal(projection.resume_state_source, "durable_record_only");
+  assert.equal(projection.resume_state_from_session_memory, false);
   // The three surfaces this slice was told to leave alone.
   assert.equal(gaps.public_projection_here, false);
   assert.equal(gaps.share_grant_issuance_here, false);
@@ -1027,17 +1112,17 @@ function callerControlledShapes() {
   for (const stage of V5_J301_STAGES) {
     for (const kind of Object.keys(V5_J301_STAGE_ACTIONS[stage])) {
       for (const actor_class of V5_J301_ACTOR_CLASSES) {
-        for (const intent of [V5_J301_ATTENDED_INTENT, ...V5_J301_REFUSED_INTENTS]) {
+        for (const intent of [V5_J301_STAFFED_INTENT, ...V5_J301_REFUSED_INTENTS]) {
           for (const declared_actor_slug of DECLARED_SLUGS) {
             shapes.push(stageRequest({
-              stage, action_kind: kind, actor_class, attended_intent: intent,
+              stage, action_kind: kind, actor_class, staffed_intent: intent,
               declared_actor_slug,
             }));
             // The same shape WITH a journal, so the sweep covers the refusal
             // path a caller reaches by handing one in as well as the path it
             // reaches by not.
             shapes.push(stageRequest({
-              stage, action_kind: kind, actor_class, attended_intent: intent,
+              stage, action_kind: kind, actor_class, staffed_intent: intent,
               declared_actor_slug,
               journal_view: V5_J301_STAGES.slice(0, V5_J301_STAGE_INDEX[stage]).map(earlier =>
                 journalEntry(earlier, Object.keys(V5_J301_STAGE_ACTIONS[earlier])[0])),
@@ -1062,7 +1147,7 @@ test("NO callable on the public surface yields a privileged outcome, from any in
   // empty set that would make this test vacuous.
   assert.ok(callables.length >= 9, `only ${callables.length} callables found`);
   for (const name of ["evaluateStageAction", "evaluateTourAssignmentActivity",
-    "readTourWorkflowResumePoint", "tourWorkflowStepKey", "assertTourWorkflowJournalEntry",
+    "tourWorkflowResumePoint", "tourWorkflowStepKey", "assertTourWorkflowJournalEntry",
     "assertJ301DecisionBinding", "tourWorkflowGaps", "v5J301TourWorkflowProjection",
     "v5J301PolicyPreimage", "v5J301PolicyDigest", "v5J301PolicyCanonicalBytes"]) {
     assert.ok(callables.some(([one]) => one === name), `${name} is not being swept`);
@@ -1601,7 +1686,7 @@ test("ISOLATION: the classifier helper lives in the test tree and answers condit
   assert.equal(answer.evidence_source, V5_J301_CLASSIFIER_EVIDENCE_SOURCE);
   assert.equal(Object.hasOwn(answer, "decision"), false);
   assert.equal(Object.hasOwn(answer, "resume_at"), false);
-  assert.equal(answer.would_be_open_stage_if_authoritative, "attended_mls_acquisition");
+  assert.equal(answer.would_be_open_stage_if_authoritative, "staffed_mls_acquisition");
 });
 
 test("ISOLATION: no production module runs a partner membership test for this slice", () => {
@@ -1667,7 +1752,7 @@ test("PUBLIC-ONLY PROBE: no journal-derived field comes back from any public ans
   for (const answer of answers) {
     for (const derived of JOURNAL_DERIVED_FIELDS) {
       // A field that is PRESENT AND NULL is a statement that there is no such
-      // value — `readTourWorkflowResumePoint` says `resume_stage: null` and
+      // value — `tourWorkflowResumePoint` says `resume_stage: null` and
       // `next_stage: null` on purpose, and deleting those would make the answer
       // less honest, not more. What must never appear is CONTENT.
       for (const value of valuesForField(answer, derived)) {
@@ -1710,7 +1795,7 @@ test("PUBLIC-ONLY PROBE: no resume classification is recoverable from the public
   // A DIFFERENT journal gives the same answers too. If any position leaked, a
   // history reaching stage four would have to differ from one reaching stage
   // one somewhere in the result.
-  for (const other of [[], historyThrough("attended_mls_acquisition"),
+  for (const other of [[], historyThrough("staffed_mls_acquisition"),
     historyThrough("deterministic_generation")]) {
     const answer = evaluateStageAction(stageRequest({ journal_view: other }));
     const copy = { ...answer };

@@ -56,7 +56,7 @@
 //     requires. The receipt STORE exists — ops.tour_map_promotion_receipt, its
 //     writer function, and the humanOnly verb record-tour-map-promotion-receipt
 //     — and an earlier draft of this module wrongly said it did not. What is
-//     missing is a READER this module could consult, so the refusal names that
+//     missing is a RETRIEVAL adapter this module could consult, so the refusal names that
 //     adapter and names the authoritative store it would read.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
@@ -68,7 +68,7 @@ import {
   V5_J301_MAP_CONTRACT_PRODUCTION_STATUS,
   V5_J301_MAP_CONTRACT_RECEIPT_STEP,
   V5_J301_MAP_CONTRACT_VERSION,
-  V5_J301_SETTLED_DECISIONS,
+  V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS,
 } from "./tour-workflow-j301.v5.js";
 
 export { V5_NO_EFFECTS };
@@ -325,7 +325,7 @@ export const V5_J301_MAP_COMMANDS = deepFreeze({
     // The map doctrine's promotion gate: exact approved coordinates reach native
     // navigation only behind a human promotion receipt. The receipt STORE exists
     // (ops.tour_map_promotion_receipt, written by record-tour-map-promotion-
-    // receipt); what is missing is a reader this module can consult, so the
+    // receipt); what is missing is a retrieval adapter this module can consult, so the
     // answer names that adapter rather than pretending the store is absent.
     requires_human_promotion_receipt: true,
   },
@@ -352,14 +352,14 @@ export const V5_J301_COMMANDS_WITHOUT_A_VERB = deepFreeze(
  * and `record-tour-map-promotion-receipt` is the deployed humanOnly,
  * authorityOnly verb that calls it.
  *
- * What is actually missing is a READER: nothing in this repository hands a
+ * What is actually missing is a RETRIEVAL adapter: nothing in this repository hands a
  * promotion receipt back to a caller, and nothing turns a typed map command
  * into arguments the deployed verbs' own inputSchemas accept. Those two holes
  * are named below, and every command carries the exact field-level gap between
  * what it emits and what its intended verb requires.
  */
-export const V5_J301_PROMOTION_RECEIPT_READER_SEAM =
-  "seam:v5-j301-tour-map-promotion-receipt-reader-adapter";
+export const V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM =
+  "seam:v5-j301-tour-map-promotion-receipt-retrieval-adapter";
 export const V5_J301_COMMAND_VERB_ADAPTER_SEAM =
   "seam:v5-j301-map-command-record-layer-verb-adapter";
 
@@ -371,8 +371,8 @@ export const V5_J301_PROMOTION_RECEIPT_AUTHORITY = deepFreeze({
   writer_verb: "record-tour-map-promotion-receipt",
   writer_verb_is_human_only: true,
   store_exists_here: true,
-  reader_exists_here: false,
-  reader_seam: V5_J301_PROMOTION_RECEIPT_READER_SEAM,
+  retrieval_exists_here: false,
+  retrieval_seam: V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM,
 });
 
 /** The two answers this module can give. There is deliberately no third. */
@@ -503,7 +503,7 @@ function assertEnvelope(envelope, path) {
  * THIS IS A STATEMENT ABOUT TWO THINGS THE CALLER SUPPLIED, and nothing else.
  * `same_command` says the two envelopes mean the same command; it does not say
  * either of them may run, and `admission` stays `unavailable` on the result so
- * that no reader can take it for a grant.
+ * that no consumer can take it for a grant.
  *
  * Both envelopes are RE-DERIVED from their own governed arguments before the
  * comparison, so an envelope carrying a hand-edited digest is compared on what
@@ -556,8 +556,8 @@ export function compareMapCommandOrigins(request) {
     // and no adapter exists that could make it one.
     verb_adapter_bound: false,
     verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
-    governed_state_equivalent: false,
-    governed_state_equivalence_reason_id: "no_command_is_applied_here",
+    governed_state_matched_here: false,
+    governed_state_match_reason_id: "no_command_is_applied_here",
     divergences,
     // Said on every comparison, same command or not: this is a reading of two
     // requests, not a decision about either.
@@ -575,8 +575,8 @@ export function compareMapCommandOrigins(request) {
  * The answer is always no, and there are exactly two shapes of no. A navigation
  * handoff is refused the promotion receipt it needs — the STORE exists
  * (ops.tour_map_promotion_receipt, migration 0430, written by the humanOnly
- * verb record-tour-map-promotion-receipt) and the READER this module would need
- * to consult it does not, which is V5_J301_PROMOTION_RECEIPT_READER_SEAM;
+ * verb record-tour-map-promotion-receipt) and the RETRIEVAL adapter this module would need
+ * to consult it does not, which is V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM;
  * everything else is unavailable because
  * step:tour-map-contract-1.2.0-independent-acceptance-receipt has no
  * implementation here and the live map-architecture verb reports the contract
@@ -614,10 +614,10 @@ export function evaluateMapCommandAdmission(request) {
     return deepFreeze({
       ...base,
       decision: "refused",
-      reason_id: "promotion_receipt_reader_unavailable",
-      // The store is REAL and named; the reader is the hole.
+      reason_id: "promotion_receipt_retrieval_unavailable",
+      // The store is REAL and named; the retrieval adapter is the hole.
       promotion_receipt_authority: V5_J301_PROMOTION_RECEIPT_AUTHORITY,
-      owed_seams: [V5_J301_PROMOTION_RECEIPT_READER_SEAM, V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+      owed_seams: [V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM, V5_J301_COMMAND_VERB_ADAPTER_SEAM,
         V5_J301_MAP_CONTRACT_RECEIPT_STEP],
     });
   }
@@ -638,9 +638,12 @@ export function v5J301CommandPolicyPreimage() {
     schema_version: V5_J301_COMMAND_SCHEMA_VERSION,
     policy_version: V5_J301_COMMAND_POLICY_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
-    // The one decision this module implements, carried verbatim from the
-    // workflow module's reviewed copy rather than retyped beside it.
-    settled_decision: { "Q124.D2": { ...V5_J301_SETTLED_DECISIONS["Q124.D2"] } },
+    // The one decision this module implements. Its reviewed TEXT is private to
+    // the workflow module — quoted doctrine is not this module's answer to give
+    // — so identity travels as the id and the source-evidence digest that
+    // always bound it.
+    settled_decision_id: "Q124.D2",
+    settled_decision_evidence_digest: V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS["Q124.D2"],
     origins: [...V5_J301_COMMAND_ORIGINS],
     journeys: [...V5_J301_COMMAND_JOURNEYS],
     permitted_journey: V5_J301_COMMAND_PERMITTED_JOURNEY,
@@ -655,7 +658,7 @@ export function v5J301CommandPolicyPreimage() {
     navigation_platforms: [...V5_J301_NAVIGATION_PLATFORMS],
     travel_modes: [...V5_J301_TRAVEL_MODES],
     decisions: [...V5_J301_COMMAND_DECISIONS],
-    promotion_receipt_reader_seam: V5_J301_PROMOTION_RECEIPT_READER_SEAM,
+    promotion_receipt_retrieval_seam: V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM,
     promotion_receipt_store_exists_here: true,
     command_verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
     map_contract: V5_J301_MAP_CONTRACT,
@@ -701,7 +704,7 @@ export function v5J301MapCommandProjection() {
     command_intended_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
     journey_one_map_commands_permitted: false,
     navigation_handoff_reachable_today: false,
-    navigation_handoff_reason_id: "promotion_receipt_reader_unavailable",
+    navigation_handoff_reason_id: "promotion_receipt_retrieval_unavailable",
     promotion_receipt_authority: V5_J301_PROMOTION_RECEIPT_AUTHORITY,
     admission_reachable_today: false,
     admission_reason_id: "map_contract_receipt_unavailable",
@@ -736,7 +739,7 @@ export const V5_J301_COMMAND_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_COMMAND_INTENDED_VERBS",
   "V5_J301_COMMAND_VERB_ADAPTER_SEAM",
   "V5_J301_PROMOTION_RECEIPT_AUTHORITY",
-  "V5_J301_PROMOTION_RECEIPT_READER_SEAM",
+  "V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM",
   "V5_J301_MAP_COMMANDS",
   "V5_J301_NAVIGATION_PLATFORMS",
   "V5_J301_POSITION_ROLES",

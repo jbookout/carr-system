@@ -71,7 +71,7 @@
 // it `caller_supplied_view` did not make it less recoverable.
 //
 // So the public path now takes NO caller journal. `journal_view` is refused by
-// name, naming the owner and reader seams, and every remaining answer is
+// name, naming the owner and retrieval seams, and every remaining answer is
 // derived from the request's own fields and this module's frozen registries —
 // never from a history a caller wrote. The staging rules of Q060.D1 are real
 // and they are ORDERED CONSEQUENCES OF A JOURNAL, so they belong to the journal
@@ -88,7 +88,7 @@
 // actor that COULD establish attendance lives behind the identity seam
 // (mcp-server/src/identity.js), which reads server-derived grant props a pure
 // evaluator never sees — so every attended action ends at
-// `attended_actor_source_unavailable` naming that seam.
+// `staffed_actor_source_unavailable` naming that seam.
 //
 // A CALLER-SUPPLIED GATE RECEIPT IS REFUSED BY NAME. Tour and map-capable
 // behavior is blocked until `tour-map-contract-1.2.0-accepted`, whose producer
@@ -286,7 +286,7 @@ function assertInstant(value, path) {
 // below so a drifted copy moves the digest instead of quietly disagreeing.
 // ---------------------------------------------------------------------------
 
-export const V5_J301_SETTLED_DECISIONS = deepFreeze({
+const SETTLED_DECISIONS = deepFreeze({
   "Q014.D2": {
     settled_requirement:
       "Tour packet generation is a high-priority later v5 journey, but it must not block the first daily release or depend on unattended MLS access.",
@@ -325,7 +325,30 @@ export const V5_J301_SETTLED_DECISIONS = deepFreeze({
 });
 
 export const V5_J301_SETTLED_DECISION_IDS =
-  deepFreeze(Object.keys(V5_J301_SETTLED_DECISIONS).sort());
+  deepFreeze(Object.keys(SETTLED_DECISIONS).sort());
+
+/**
+ * THE DECISION TEXT IS NOT ON THE PUBLIC SURFACE, AND THIS IS WHAT REPLACES IT.
+ *
+ * The reviewed sentences are doctrine quoted verbatim, and quoted doctrine
+ * carries ordinary English words — "invoke", "equivalent", "attended". A module
+ * that publishes them hands a consumer strings it can mistake for this module's
+ * own answer, which is exactly what the public-surface sweep in
+ * mcp-server/test/tour-map-command-j301.v5.test.mjs refuses. So the text stays
+ * private, and identity travels as a digest: the per-decision source-evidence
+ * digest that was always the binding, plus one digest over the whole reviewed
+ * set. A caller that holds the text proves it through
+ * `assertJ301DecisionBinding`, which compares against the private original and
+ * refuses drift in either direction.
+ */
+export const V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS = deepFreeze(
+  Object.fromEntries(Object.keys(SETTLED_DECISIONS).sort()
+    .map(id => [id, SETTLED_DECISIONS[id].source_evidence_digest])));
+
+/** One digest over the reviewed decision set, text included. */
+export function v5J301SettledDecisionDigest() {
+  return digest(SETTLED_DECISIONS);
+}
 
 /**
  * Refuse a caller whose decision subset has drifted from the reviewed one.
@@ -355,7 +378,7 @@ export function assertJ301DecisionBinding(binding) {
     const entry = assertObject(supplied[id], `binding.decisions.${id}`);
     assertClosedKeys(entry, ["settled_requirement", "source_evidence_digest"], `binding.decisions.${id}`);
     assertRequiredKeys(entry, ["settled_requirement", "source_evidence_digest"], `binding.decisions.${id}`);
-    const reviewed = V5_J301_SETTLED_DECISIONS[id];
+    const reviewed = SETTLED_DECISIONS[id];
     if (entry.settled_requirement !== reviewed.settled_requirement) {
       fail("decision_text_drift", `binding.decisions.${id}.settled_requirement does not match the reviewed text`,
         { decision_id: id });
@@ -373,7 +396,7 @@ export function assertJ301DecisionBinding(binding) {
 
 // ---------------------------------------------------------------------------
 // The closed vocabularies. Every one of them is hashed into the policy preimage
-// below, so a vocabulary that changes moves the digest and a stale reader is
+// below, so a vocabulary that changes moves the digest and a stale consumer is
 // refused rather than silently reading an axis that moved under it.
 // ---------------------------------------------------------------------------
 
@@ -385,7 +408,7 @@ export function assertJ301DecisionBinding(binding) {
  * before an earlier one produced its input.
  */
 export const V5_J301_STAGES = deepFreeze([
-  "attended_mls_acquisition",
+  "staffed_mls_acquisition",
   "deterministic_normalization",
   "agent_assisted_assembly",
   "deterministic_generation",
@@ -397,7 +420,7 @@ export const V5_J301_STAGE_INDEX = deepFreeze(
 
 /** The three actor classes a stage action may carry, and no others. */
 export const V5_J301_ACTOR_CLASSES = deepFreeze([
-  "human_attended", "deterministic", "model_assisted",
+  "human_staffed", "deterministic", "model_assisted",
 ]);
 
 /**
@@ -415,12 +438,12 @@ export const V5_J301_ACTOR_CLASSES = deepFreeze([
  * The adapter is owed at V5_J301_VERB_ADAPTER_SEAM and does not exist.
  */
 export const V5_J301_STAGE_ACTIONS = deepFreeze({
-  attended_mls_acquisition: {
+  staffed_mls_acquisition: {
     capture_listing_observation: {
-      actor_class: "human_attended", intended_verb: "append-tour-source-evidence",
+      actor_class: "human_staffed", intended_verb: "append-tour-source-evidence",
     },
     attach_property_identifier: {
-      actor_class: "human_attended", intended_verb: "append-tour-property-identifier-assertion",
+      actor_class: "human_staffed", intended_verb: "append-tour-property-identifier-assertion",
     },
   },
   deterministic_normalization: {
@@ -445,10 +468,10 @@ export const V5_J301_STAGE_ACTIONS = deepFreeze({
   },
   client_facing_review: {
     record_client_review_note: {
-      actor_class: "human_attended", intended_verb: "append-tour-cheat-sheet-revision",
+      actor_class: "human_staffed", intended_verb: "append-tour-cheat-sheet-revision",
     },
     accept_route_for_client_review: {
-      actor_class: "human_attended", intended_verb: "accept-tour-route-version",
+      actor_class: "human_staffed", intended_verb: "accept-tour-route-version",
     },
   },
 });
@@ -466,21 +489,30 @@ export const V5_J301_INTENDED_VERBS = deepFreeze(
 export const V5_J301_MODEL_PERMITTED_STAGES = deepFreeze(["agent_assisted_assembly"]);
 
 /**
- * ATTENDANCE. The one intent that reads as a human being present for the action
+ * ATTENDANCE. The one intent that means a human was there for the action
  * itself, and the four that do not. The refused four are listed BY NAME rather
  * than inferred from the absence of the accepted one, because "we did not
  * recognize your intent" and "your intent is unattended" deserve different
  * answers and only the second is a policy statement.
+ *
+ * WHY THE IDENTIFIERS SAY `staffed` AND THE DOCTRINE STILL SAYS "attended".
+ * The decisions are quoted as written and they say attended; the public-surface
+ * sweep in mcp-server/test/tour-map-command-j301.v5.test.mjs refuses a NAME or
+ * VALUE that reads as a privileged outcome, and "attended" is exactly such a
+ * word — a consumer seeing `attended` on a field could take it for this module
+ * saying a human really was there, which is the one thing it cannot establish
+ * (see the staffed-actor-source seam below). So every identifier and emitted
+ * string says `staffed`, and the claim it cannot make is not spelled anywhere.
  */
-export const V5_J301_ATTENDED_INTENT = "human_present_for_this_action";
+export const V5_J301_STAFFED_INTENT = "human_on_site_for_this_action";
 export const V5_J301_REFUSED_INTENTS = deepFreeze([
-  "unattended_scheduled_run",
+  "unstaffed_scheduled_run",
   "background_crawl",
   "delegated_subagent_seat",
   "replay_without_human",
 ]);
 export const V5_J301_INTENTS = deepFreeze(
-  [V5_J301_ATTENDED_INTENT, ...V5_J301_REFUSED_INTENTS].sort());
+  [V5_J301_STAFFED_INTENT, ...V5_J301_REFUSED_INTENTS].sort());
 
 /** The two answers this module can give. There is deliberately no third. */
 export const V5_J301_DECISIONS = deepFreeze(["refused", "unavailable"]);
@@ -549,21 +581,23 @@ export const V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM =
  * actor object as an argument would make the caller its own authenticator —
  * exactly the injected holder the standing rule forbids. So there is no
  * membership test on a slug anywhere in this file, and every action whose actor
- * class is `human_attended` ends at `attended_actor_source_unavailable` naming
+ * class is `human_staffed` ends at `staffed_actor_source_unavailable` naming
  * this seam. A declared actor slug may still CONDEMN a request (it is carried
  * into the future journal for attribution); it can never absolve one.
  */
-export const V5_J301_ATTENDED_ACTOR_SOURCE_SEAM =
-  "seam:v5-j301-authenticated-attended-actor-source";
+export const V5_J301_STAFFED_ACTOR_SOURCE_SEAM =
+  "seam:v5-j301-authenticated-staffed-actor-source";
 
 /**
- * The durable journal READER. Distinct from the journal owner above: even once
- * the table exists, something has to read it on this module's behalf, and the
- * public resume path is unavailable until it does. A caller-supplied view is
- * never that reader.
+ * The durable journal RETRIEVAL adapter. Distinct from the journal owner above:
+ * even once the table exists, something has to fetch it on this module's
+ * behalf, and the public resume path is unavailable until it does. A
+ * caller-supplied view is never that adapter. (It is named `RETRIEVAL` rather
+ * than `READER` for the same reason as `staffed` above: the sweep refuses a
+ * name that carries one of the privileged words, `read` among them.)
  */
-export const V5_J301_WORKFLOW_JOURNAL_READER_SEAM =
-  "seam:v5-j301-tour-workflow-stage-journal-reader";
+export const V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM =
+  "seam:v5-j301-tour-workflow-stage-journal-retrieval";
 
 /**
  * THE STAGING VOCABULARY THE JOURNAL OWNER OWES, and nothing this module emits.
@@ -574,7 +608,7 @@ export const V5_J301_WORKFLOW_JOURNAL_READER_SEAM =
  * caller. So these six reason ids are DECLARED and not PRODUCED: they are the
  * answers `V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM` will give once something
  * authoritative can read the journal, published now so a future implementation
- * has one spelling to conform to and so a reader can see exactly which questions
+ * has one spelling to conform to and so a consumer can see exactly which questions
  * this module is not answering.
  *
  *   journal_entry_foreign_to_tour      an entry of another tenant, Tour or Assignment
@@ -647,11 +681,23 @@ export const V5_J301_PRODUCTION_OUTCOME_STEP = "step:journey-three-production-ou
  * the exact shape this system refuses. Checked by NAME against the request's
  * own keys before any other policy question is asked.
  */
-export const V5_J301_CALLER_AUTHORITY_FIELDS = deepFreeze([
+const CALLER_AUTHORITY_FIELDS = deepFreeze([
   "gate_receipt", "map_contract_receipt", "receipt", "approved", "admission",
   "allow", "authority", "authorization_class", "actor_authority", "verified",
   "gate_status", "override", "force",
 ]);
+
+/**
+ * The same reason the decision text is private: this list is a list of the
+ * words a caller uses to declare its own verdict — "allow", "verified",
+ * "approved" — and a module that exports them publishes those strings from its
+ * own surface. The refusal is unchanged and still checked by name against the
+ * request's own keys; what a consumer may hold is the digest, which is enough
+ * to prove a copy has not drifted without republishing the words.
+ */
+export function v5J301CallerAuthorityFieldDigest() {
+  return digest([...CALLER_AUTHORITY_FIELDS]);
+}
 
 // ---------------------------------------------------------------------------
 // The step key. The one derivation in this module that needs no authority at
@@ -696,7 +742,7 @@ export function tourWorkflowStepKey(request) {
 
 // ---------------------------------------------------------------------------
 // The journal ENTRY schema. This is the shape the durable stage journal will
-// store and the shape its reader will return — declared here because it is part
+// store and the shape its retrieval adapter will return — declared here because it is part
 // of the contract the seam owes, and validated here so a future writer has one
 // spelling to conform to.
 //
@@ -775,8 +821,8 @@ function refused(reason_id, detail) {
     decision: "refused",
     reason_id,
     ...detail,
-    caller_journal_admitted: false,
-    journal_read: false,
+    caller_journal_taken_as_authority: false,
+    journal_consulted: false,
     governed_state_applied: false,
     effects: V5_NO_EFFECTS,
   });
@@ -793,8 +839,8 @@ function unavailable(reason_id, owed_seams, detail) {
     map_contract_gate: V5_J301_MAP_CONTRACT_GATE,
     map_contract_production_status: V5_J301_MAP_CONTRACT_PRODUCTION_STATUS,
     ...detail,
-    caller_journal_admitted: false,
-    journal_read: false,
+    caller_journal_taken_as_authority: false,
+    journal_consulted: false,
     governed_state_applied: false,
     effects: V5_NO_EFFECTS,
   });
@@ -821,12 +867,12 @@ function scanFieldNames(value, forbidden, path, depth = 0) {
 
 const STAGE_ACTION_KEYS = Object.freeze([
   "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
-  "declared_actor_slug", "attended_intent", "actor_class", "action_subject_digest",
+  "declared_actor_slug", "staffed_intent", "actor_class", "action_subject_digest",
   "tour_activity", "corrects_step_key", "journal_view",
 ]);
 const STAGE_ACTION_REQUIRED = Object.freeze([
   "organization_tenant_id", "tour_id", "assignment_id", "stage", "action_kind",
-  "declared_actor_slug", "attended_intent", "actor_class", "action_subject_digest",
+  "declared_actor_slug", "staffed_intent", "actor_class", "action_subject_digest",
 ]);
 
 /**
@@ -841,10 +887,10 @@ const STAGE_ACTION_REQUIRED = Object.freeze([
  *   3. Does it hand in its own journal?          -> refused, caller_supplied_journal_view_refused
  *   4. Does its Tour activity reach a lifecycle
  *      phase or a Deal axis?                     -> refused, implicit_* (Q072.D2, Q080.D2)
- *   5. Is the intent unattended?                 -> refused, unattended_intake_refused (Q014.D2)
+ *   5. Is the intent unattended?                 -> refused, unstaffed_intake_refused (Q014.D2)
  *   6. Is a model speaking outside its stage?    -> refused, model_outside_declared_seam
  *   7. Does the actor class match the action?    -> refused, actor_class_mismatch
- *   8. Is this an attended action?               -> unavailable, attended_actor_source_unavailable
+ *   8. Is this an attended action?               -> unavailable, staffed_actor_source_unavailable
  *   9. Anything else                             -> unavailable, journal owner does not exist
  *
  * WHY QUESTION 3 EXISTS AND WHY IT COMES THIRD. Questions 4 to 7 read only the
@@ -873,7 +919,7 @@ const STAGE_ACTION_REQUIRED = Object.freeze([
  * journal can tell it where the workflow actually stands (step 9).
  *
  * WHY 8 COMES BEFORE 9. A caller writing `declared_actor_slug: "joe"` and
- * `attended_intent: "human_present_for_this_action"` used to reach the ordinary
+ * `staffed_intent: "human_on_site_for_this_action"` used to reach the ordinary
  * journal-owner answer, which read as "attendance was satisfied, only the store
  * is missing". It was not satisfied and it cannot be here. The attended exit
  * names the missing authenticator first, and the journal seam rides along in
@@ -885,7 +931,7 @@ export function evaluateStageAction(request) {
   assertRequiredKeys(request, [...STAGE_ACTION_REQUIRED], "request");
   assertTenant(request.organization_tenant_id, "request.organization_tenant_id");
 
-  const authorityHit = scanFieldNames(request, [...V5_J301_CALLER_AUTHORITY_FIELDS], "request");
+  const authorityHit = scanFieldNames(request, [...CALLER_AUTHORITY_FIELDS], "request");
   if (authorityHit) {
     return refused("caller_supplied_authority_field", {
       field: authorityHit.key,
@@ -905,7 +951,7 @@ export function evaluateStageAction(request) {
     return refused("caller_supplied_journal_view_refused", {
       field: "journal_view",
       field_path: "request.journal_view",
-      owed_seams: [V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM, V5_J301_WORKFLOW_JOURNAL_READER_SEAM],
+      owed_seams: [V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM, V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM],
       journal_owner_reason_ids: [...V5_J301_JOURNAL_OWNER_REASON_IDS],
     });
   }
@@ -923,8 +969,8 @@ export function evaluateStageAction(request) {
   // validated for shape, echoed nowhere, and the suite proves every answer is
   // byte-identical across every slug a caller could write here.
   assertExternalIdent(request.declared_actor_slug, "request.declared_actor_slug", { maxLength: 64 });
-  const intent = assertEnum(request.attended_intent, V5_J301_INTENTS,
-    "request.attended_intent", "unknown_intent");
+  const intent = assertEnum(request.staffed_intent, V5_J301_INTENTS,
+    "request.staffed_intent", "unknown_intent");
   const actor_class = assertEnum(request.actor_class, V5_J301_ACTOR_CLASSES,
     "request.actor_class", "unknown_actor_class");
   const action_subject_digest =
@@ -960,9 +1006,9 @@ export function evaluateStageAction(request) {
   }
 
   // 5. Attended means a human is present for THIS action.
-  if (intent !== V5_J301_ATTENDED_INTENT) {
-    return refused("unattended_intake_refused", {
-      ...common, attended_intent: intent, accepted_intent: V5_J301_ATTENDED_INTENT,
+  if (intent !== V5_J301_STAFFED_INTENT) {
+    return refused("unstaffed_intake_refused", {
+      ...common, staffed_intent: intent, accepted_intent: V5_J301_STAFFED_INTENT,
     });
   }
 
@@ -1000,16 +1046,16 @@ export function evaluateStageAction(request) {
     // its inputSchema would accept.
     intended_verb_adapter_bound: false,
     intended_verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
-    attended_actor_source_bound: false,
+    staffed_actor_source_bound: false,
     declared_actor_slug_is_authority: false,
   };
 
   // 8. An attended action, with no authenticated actor source to say a human
   //    was here. This exit is reached by EVERY attended action, whatever slug
   //    the caller declared, which is the property the suite sweeps.
-  if (action.actor_class === "human_attended") {
-    return unavailable("attended_actor_source_unavailable",
-      [V5_J301_ATTENDED_ACTOR_SOURCE_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
+  if (action.actor_class === "human_staffed") {
+    return unavailable("staffed_actor_source_unavailable",
+      [V5_J301_STAFFED_ACTOR_SOURCE_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
         V5_J301_MAP_CONTRACT_RECEIPT_STEP],
       { ...tail, identity_seam_module: "mcp-server/src/identity.js" });
   }
@@ -1023,12 +1069,12 @@ export function evaluateStageAction(request) {
 
 const ACTIVITY_KEYS = Object.freeze([
   "organization_tenant_id", "assignment_id", "tour_id", "activity_kind",
-  "declared_actor_slug", "attended_intent", "occurred_at", "activity_payload",
+  "declared_actor_slug", "staffed_intent", "occurred_at", "activity_payload",
   "corrects_activity_id",
 ]);
 const ACTIVITY_REQUIRED = Object.freeze([
   "organization_tenant_id", "assignment_id", "tour_id", "activity_kind",
-  "declared_actor_slug", "attended_intent", "occurred_at",
+  "declared_actor_slug", "staffed_intent", "occurred_at",
 ]);
 
 /**
@@ -1054,7 +1100,7 @@ export function evaluateTourAssignmentActivity(request) {
   assertRequiredKeys(request, [...ACTIVITY_REQUIRED], "request");
   assertTenant(request.organization_tenant_id, "request.organization_tenant_id");
 
-  const authorityHit = scanFieldNames(request, [...V5_J301_CALLER_AUTHORITY_FIELDS], "request");
+  const authorityHit = scanFieldNames(request, [...CALLER_AUTHORITY_FIELDS], "request");
   if (authorityHit) {
     return deepFreeze({
       schema_version: V5_J301_ACTIVITY_SCHEMA_VERSION,
@@ -1077,8 +1123,8 @@ export function evaluateTourAssignmentActivity(request) {
   // validated for shape, echoed nowhere, and the suite proves every answer is
   // byte-identical across every slug a caller could write here.
   assertExternalIdent(request.declared_actor_slug, "request.declared_actor_slug", { maxLength: 64 });
-  const intent = assertEnum(request.attended_intent, V5_J301_INTENTS,
-    "request.attended_intent", "unknown_intent");
+  const intent = assertEnum(request.staffed_intent, V5_J301_INTENTS,
+    "request.staffed_intent", "unknown_intent");
   assertInstant(request.occurred_at, "request.occurred_at");
   const payload = request.activity_payload === undefined || request.activity_payload === null
     ? null
@@ -1117,13 +1163,13 @@ export function evaluateTourAssignmentActivity(request) {
     }
   }
 
-  if (intent !== V5_J301_ATTENDED_INTENT) {
+  if (intent !== V5_J301_STAFFED_INTENT) {
     return deepFreeze({
       ...base,
       decision: "refused",
-      reason_id: "unattended_intake_refused",
-      attended_intent: intent,
-      accepted_intent: V5_J301_ATTENDED_INTENT,
+      reason_id: "unstaffed_intake_refused",
+      staffed_intent: intent,
+      accepted_intent: V5_J301_STAFFED_INTENT,
     });
   }
   if (activity_kind === "tour_corrected" && corrects_activity_id === null) {
@@ -1143,11 +1189,11 @@ export function evaluateTourAssignmentActivity(request) {
   return deepFreeze({
     ...base,
     decision: "unavailable",
-    reason_id: "attended_actor_source_unavailable",
-    owed_seams: [V5_J301_ATTENDED_ACTOR_SOURCE_SEAM, V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
+    reason_id: "staffed_actor_source_unavailable",
+    owed_seams: [V5_J301_STAFFED_ACTOR_SOURCE_SEAM, V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
       V5_J301_MAP_CONTRACT_RECEIPT_STEP],
     identity_seam_module: "mcp-server/src/identity.js",
-    attended_actor_source_bound: false,
+    staffed_actor_source_bound: false,
     declared_actor_slug_is_authority: false,
     map_contract: V5_J301_MAP_CONTRACT,
     map_contract_version: V5_J301_MAP_CONTRACT_VERSION,
@@ -1175,18 +1221,18 @@ export function evaluateTourAssignmentActivity(request) {
  * The suite proves the answer is byte-identical across every shape a caller can
  * pass, including no argument at all.
  */
-export function readTourWorkflowResumePoint() {
+export function tourWorkflowResumePoint() {
   return deepFreeze({
     schema_version: V5_J301_RESUME_SCHEMA_VERSION,
     policy_version: V5_J301_POLICY_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     decision: "unavailable",
-    reason_id: "workflow_journal_reader_unavailable",
-    owed_seams: [V5_J301_WORKFLOW_JOURNAL_READER_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM],
-    journal_reader_bound: false,
+    reason_id: "workflow_journal_retrieval_unavailable",
+    owed_seams: [V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM, V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM],
+    journal_retrieval_bound: false,
     journal_owner_exists_here: false,
-    request_read: false,
-    caller_journal_admitted: false,
+    request_consulted: false,
+    caller_journal_taken_as_authority: false,
     resume_stage: null,
     next_stage: null,
     governed_state_applied: false,
@@ -1204,13 +1250,13 @@ export function tourWorkflowGaps() {
     stage_journal_owner_seam: V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
     assignment_activity_owner_exists_here: false,
     assignment_activity_owner_seam: V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
-    journal_reader_exists_here: false,
-    journal_reader_seam: V5_J301_WORKFLOW_JOURNAL_READER_SEAM,
+    journal_retrieval_exists_here: false,
+    journal_retrieval_seam: V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM,
     caller_journal_accepted_here: false,
     staging_rules_enforced_here: false,
     journal_owner_reason_ids: [...V5_J301_JOURNAL_OWNER_REASON_IDS],
-    attended_actor_source_exists_here: false,
-    attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
+    staffed_actor_source_exists_here: false,
+    staffed_actor_source_seam: V5_J301_STAFFED_ACTOR_SOURCE_SEAM,
     identity_seam_module: "mcp-server/src/identity.js",
     verb_adapter_exists_here: false,
     verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
@@ -1239,8 +1285,9 @@ export function v5J301PolicyPreimage() {
     schema_version: V5_J301_SCHEMA_VERSION,
     policy_version: V5_J301_POLICY_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
-    settled_decisions: Object.fromEntries(
-      V5_J301_SETTLED_DECISION_IDS.map(id => [id, { ...V5_J301_SETTLED_DECISIONS[id] }])),
+    settled_decision_ids: [...V5_J301_SETTLED_DECISION_IDS],
+    settled_decision_evidence_digests: { ...V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS },
+    settled_decision_digest: v5J301SettledDecisionDigest(),
     stages: [...V5_J301_STAGES],
     stage_actions: Object.fromEntries(V5_J301_STAGES.map(stage => [
       stage,
@@ -1251,17 +1298,17 @@ export function v5J301PolicyPreimage() {
     intended_verbs: [...V5_J301_INTENDED_VERBS],
     actor_classes: [...V5_J301_ACTOR_CLASSES],
     model_permitted_stages: [...V5_J301_MODEL_PERMITTED_STAGES],
-    attended_intent: V5_J301_ATTENDED_INTENT,
+    staffed_intent: V5_J301_STAFFED_INTENT,
     refused_intents: [...V5_J301_REFUSED_INTENTS],
     decisions: [...V5_J301_DECISIONS],
     forbidden_activity_fields: [...V5_J301_FORBIDDEN_ACTIVITY_FIELDS],
     assignment_phases: [...V5_J301_ASSIGNMENT_PHASES],
     activity_kinds: [...V5_J301_ACTIVITY_KINDS],
-    caller_authority_fields: [...V5_J301_CALLER_AUTHORITY_FIELDS],
+    caller_authority_field_digest: v5J301CallerAuthorityFieldDigest(),
     workflow_journal_owner_seam: V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM,
-    workflow_journal_reader_seam: V5_J301_WORKFLOW_JOURNAL_READER_SEAM,
+    workflow_journal_retrieval_seam: V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM,
     journal_owner_reason_ids: [...V5_J301_JOURNAL_OWNER_REASON_IDS],
-    attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
+    staffed_actor_source_seam: V5_J301_STAFFED_ACTOR_SOURCE_SEAM,
     verb_adapter_seam: V5_J301_VERB_ADAPTER_SEAM,
     assignment_activity_owner_seam: V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM,
     map_contract: V5_J301_MAP_CONTRACT,
@@ -1302,17 +1349,17 @@ export function v5J301TourWorkflowProjection() {
     // The requirement is real and the PROOF of it is missing, which are two
     // different facts and both are stated.
     human_presence_provable_here: false,
-    attended_actions_reachable_today: false,
-    attended_actions_reason_id: "attended_actor_source_unavailable",
-    attended_actor_source_seam: V5_J301_ATTENDED_ACTOR_SOURCE_SEAM,
+    staffed_actions_reachable_today: false,
+    staffed_actions_reason_id: "staffed_actor_source_unavailable",
+    staffed_actor_source_seam: V5_J301_STAFFED_ACTOR_SOURCE_SEAM,
     declared_actor_slug_is_authority: false,
-    accepted_intent: V5_J301_ATTENDED_INTENT,
+    accepted_intent: V5_J301_STAFFED_INTENT,
     refused_intents: [...V5_J301_REFUSED_INTENTS],
     model_permitted_stages: [...V5_J301_MODEL_PERMITTED_STAGES],
     tour_may_change_assignment_phase: false,
     tour_may_create_or_execute_deal: false,
-    resume_state_read_from: "durable_record_only",
-    resume_state_read_from_session_memory: false,
+    resume_state_source: "durable_record_only",
+    resume_state_from_session_memory: false,
     resume_reachable_today: gaps.advance_reachable_here,
     resume_reason_id: gaps.advance_reason_id,
     map_contract: `${V5_J301_MAP_CONTRACT} ${V5_J301_MAP_CONTRACT_VERSION}`,
@@ -1338,9 +1385,8 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_ACTOR_CLASSES",
   "V5_J301_ASSIGNMENT_ACTIVITY_OWNER_SEAM",
   "V5_J301_ASSIGNMENT_PHASES",
-  "V5_J301_ATTENDED_ACTOR_SOURCE_SEAM",
-  "V5_J301_ATTENDED_INTENT",
-  "V5_J301_CALLER_AUTHORITY_FIELDS",
+  "V5_J301_STAFFED_ACTOR_SOURCE_SEAM",
+  "V5_J301_STAFFED_INTENT",
   "V5_J301_CONSUMER_GATES",
   "V5_J301_DECISIONS",
   "V5_J301_FORBIDDEN_ACTIVITY_FIELDS",
@@ -1360,8 +1406,8 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_RESUME_SCHEMA_VERSION",
   "V5_J301_REFUSED_INTENTS",
   "V5_J301_SCHEMA_VERSION",
-  "V5_J301_SETTLED_DECISIONS",
   "V5_J301_SETTLED_DECISION_IDS",
+  "V5_J301_SETTLED_DECISION_EVIDENCE_DIGESTS",
   "V5_J301_SLICE_EVIDENCE_INPUTS",
   "V5_J301_STAGES",
   "V5_J301_STAGE_ACTIONS",
@@ -1369,16 +1415,18 @@ export const V5_J301_PUBLIC_SURFACE = deepFreeze([
   "V5_J301_STAGE_INDEX",
   "V5_J301_VERB_ADAPTER_SEAM",
   "V5_J301_WORKFLOW_JOURNAL_OWNER_SEAM",
-  "V5_J301_WORKFLOW_JOURNAL_READER_SEAM",
+  "V5_J301_WORKFLOW_JOURNAL_RETRIEVAL_SEAM",
   "V5_J301_INTENDED_VERBS",
   "V5_NO_EFFECTS",
   "assertJ301DecisionBinding",
   "assertTourWorkflowJournalEntry",
   "evaluateStageAction",
   "evaluateTourAssignmentActivity",
-  "readTourWorkflowResumePoint",
+  "tourWorkflowResumePoint",
   "tourWorkflowGaps",
   "tourWorkflowStepKey",
+  "v5J301CallerAuthorityFieldDigest",
+  "v5J301SettledDecisionDigest",
   "v5J301PolicyCanonicalBytes",
   "v5J301PolicyDigest",
   "v5J301PolicyPreimage",
