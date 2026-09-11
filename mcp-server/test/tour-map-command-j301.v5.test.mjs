@@ -18,9 +18,14 @@
 // verdict, and no second path to governed state.
 //
 // AND IT PROVES THE VERB CLAIM AT ITS REAL STRENGTH, WHICH IS WEAKER THAN
-// "TRAVERSED". Every command NAMES a verb that exists in the deployed
-// record-layer registry — and naming is all it does. There is no bound adapter,
-// so for each command the suite reads the deployed verb's own inputSchema and
+// "TRAVERSED" AND NARROWER THAN "EVERY COMMAND". THREE of the four commands
+// name a verb that exists in the deployed record-layer registry — and naming is
+// all they do. The fourth, `hand_off_native_navigation`, names NO verb at all,
+// because the nearest deployed verb writes a human promotion decision rather
+// than performing a handoff, and naming it would have made a receipt write look
+// like navigation. The suite asserts that count (three, not four) rather than a
+// universal. There is no bound adapter either,
+// so for each command that does name one the suite reads the verb's inputSchema and
 // asserts the EXACT fields this slice cannot supply and the exact fields it
 // would supply that the verb does not accept, then asserts that the gap is
 // still open. A command that closed its gap would fail here rather than quietly
@@ -390,7 +395,7 @@ test("there is exactly one command family per axis Q124.D2 names", () => {
   assert.deepEqual(axes, [...V5_J301_COMMAND_AXES].sort());
 });
 
-test("every verb a command NAMES resolves in the deployed registry", () => {
+test("every verb a command NAMES resolves in the deployed registry, and navigation names none", () => {
   // Three commands name a verb; navigation names none, because the nearest
   // deployed verb writes a human promotion decision rather than performing a
   // handoff. Naming that one would have made a receipt write look like

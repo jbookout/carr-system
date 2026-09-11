@@ -31,7 +31,10 @@
 //     — no test-only member on it or off it — checked through the loader and
 //     through esbuild's parser rather than by eye,
 //   * that no production module reaches the test tree by a STATIC OR A DYNAMIC
-//     import, read out of a real parser's import records,
+//     import, read out of a real parser's import records — and, because a
+//     COMPUTED specifier resolves to no path a guard could filter, that no
+//     module anywhere under src computes a dynamic import at all or carries a
+//     test-tree path in its code,
 //   * and that every verb the stage registry names really exists in the
 //     deployed record-layer registry.
 //
@@ -1177,6 +1180,58 @@ function importSpecifiers(source) {
 }
 
 /**
+ * A module's CODE, with every comment removed — esbuild's own printer, not a
+ * strip-the-comments regex. String literals, identifiers and property names all
+ * survive; prose does not. Every text question below is asked of this, so a
+ * sentence in a comment can never answer one.
+ */
+const CODE_TEXT_CACHE = new Map();
+function codeText(source) {
+  let code = CODE_TEXT_CACHE.get(source);
+  if (code === undefined) {
+    code = esbuild.transformSync(source, {
+      loader: "js", format: "esm", platform: "neutral",
+      minify: false, legalComments: "none", logLevel: "silent", logLimit: 0,
+    }).code;
+    CODE_TEXT_CACHE.set(source, code);
+  }
+  return code;
+}
+
+/** Whole-word `import(` call sites in already-printed code. */
+const DYNAMIC_IMPORT_CALL = /(?<![\w$.])import\s*\(/g;
+
+/**
+ * Dynamic-import call sites whose ARGUMENT IS NOT A STRING LITERAL — the form
+ * that cannot be resolved lexically by anything, this guard included.
+ *
+ * This is the check that closes the hole a specifier allow-list structurally
+ * cannot: `const p = "../test/x.mjs"; import(p)` resolves to no path, so it
+ * matches no offender filter, and a filter over resolved specifiers reports a
+ * clean tree. So the FORM is banned instead of the destination. Read off the
+ * comment-free print, which OVER-reports (an `import(` inside a string literal
+ * counts) — the safe direction, because a false alarm is a review and a missed
+ * call site is a door.
+ */
+function computedImportCallSites(source) {
+  const code = codeText(source);
+  const sites = [];
+  for (const match of code.matchAll(DYNAMIC_IMPORT_CALL)) {
+    const rest = code.slice(match.index + match[0].length).replace(/^\s+/, "");
+    if (!/^["'`]/.test(rest)) sites.push(code.slice(match.index, match.index + 72).split("\n")[0]);
+  }
+  return sites;
+}
+
+/** How many times `needle` occurs in a module's comment-free code. */
+function codeMentions(source, needle) {
+  const code = codeText(source);
+  let count = 0;
+  for (let at = code.indexOf(needle); at !== -1; at = code.indexOf(needle, at + 1)) count += 1;
+  return count;
+}
+
+/**
  * Identifiers this slice's production modules may not REFERENCE FREELY, each
  * mapped to a token that cannot occur in source.
  *
@@ -1329,11 +1384,37 @@ test("the module's real exports are EXACTLY its declared surface, with no except
 
 const TEST_TREE_SPECIFIER = /\/test\/|^\.\.\/test|\.testonly\.|\.testhelper\.|\.test-entry\./;
 
+/**
+ * Text that would only ever appear in a production module as a step toward the
+ * test tree. Checked against comment-free CODE, over every module in src, so a
+ * computed specifier has no literal to be computed FROM.
+ */
+const TEST_TREE_CODE_TEXT = Object.freeze([
+  "testhelper", ".testonly.", ".test-entry.", "../test/", "./test/",
+]);
+
+/**
+ * The one shape of `/test/` that exists in production today and is not a step
+ * toward anything: a coverage-gap DOCUMENTATION string naming a directory in
+ * prose. It is not a resolvable specifier from src (no leading `./` or `../`),
+ * and it is pinned by file and by count below, so a third occurrence anywhere
+ * in src — in any file, of any spelling — fails this suite.
+ */
+const DOCUMENTED_TEST_DIRECTORY = /["'`]mcp-server\/test\/["'`]/g;
+const DOCUMENTED_TEST_DIRECTORY_SITES = Object.freeze({
+  "context-assembly-source.v5.js": 1,
+  "context-assembly.v5.js": 1,
+});
+
+/** Every module under src/, in name order. */
+function srcModules() {
+  return readdirSync(SRC_DIR).filter(name => name.endsWith(".js")).sort();
+}
+
 /** Every specifier each module under src/ loads, by any form that loads. */
 function srcImports() {
   const out = {};
-  for (const name of readdirSync(SRC_DIR).sort()) {
-    if (!name.endsWith(".js")) continue;
+  for (const name of srcModules()) {
     out[name] = importSpecifiers(readFileSync(path.join(SRC_DIR, name), "utf8"));
   }
   return out;
@@ -1363,6 +1444,63 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
       "./tour-workflow-j301.v5.js"]);
 });
 
+// ---------------------------------------------------------------------------
+// THE FORM BAN — WHY THE SPECIFIER LIST ABOVE IS NOT ENOUGH ON ITS OWN.
+//
+// A specifier allow-list can only judge specifiers it can see. `const p =
+// "../test/x.testhelper.mjs"; import(p)` gives the parser no path at all: it is
+// reported as `<computed import>`, which matches no test-tree pattern, so the
+// offender filter above stays empty on a module that reaches the helper every
+// time it runs. That is not a tighter pattern's problem to solve — no lexical
+// pattern can resolve a runtime value — so this test bans THE FORM, over EVERY
+// module in src rather than the two this slice happens to own, and bans the
+// literals such a form would be built from.
+// ---------------------------------------------------------------------------
+
+test("ISOLATION: no production module computes a dynamic import, anywhere in src", () => {
+  const modules = srcModules();
+  assert.ok(modules.length > 50, "every module in src must have been scanned");
+
+  const byForm = [];
+  const byParser = [];
+  for (const name of modules) {
+    const source = readFileSync(path.join(SRC_DIR, name), "utf8");
+    for (const site of computedImportCallSites(source)) byForm.push(`${name}: ${site}`);
+    if (importSpecifiers(source).includes("<computed import>")) byParser.push(name);
+    if (importSpecifiers(source).includes("<computed require>")) byParser.push(`${name} (require)`);
+  }
+  // Two independent readings of the same question: the printed call site, and
+  // the parser's own count of dynamic imports it could not fold to a path.
+  assert.deepEqual(byForm, [],
+    "a production module builds a dynamic import specifier at runtime, which no lexical guard can follow");
+  assert.deepEqual(byParser, [],
+    "the parser could not fold a dynamic import or require to a literal path");
+});
+
+test("ISOLATION: no production module names the test tree in CODE, anywhere in src", () => {
+  const modules = srcModules();
+  assert.ok(modules.length > 50, "every module in src must have been scanned");
+
+  const named = [];
+  const documented = {};
+  for (const name of modules) {
+    const source = readFileSync(path.join(SRC_DIR, name), "utf8");
+    for (const needle of TEST_TREE_CODE_TEXT) {
+      const count = codeMentions(source, needle);
+      if (count > 0) named.push(`${name}: ${needle} x${count}`);
+    }
+    // Every remaining `/test/` must be the documentation string, and only that.
+    const total = codeMentions(source, "/test/");
+    const allowed = (codeText(source).match(DOCUMENTED_TEST_DIRECTORY) ?? []).length;
+    if (total !== allowed) named.push(`${name}: /test/ in an undocumented form`);
+    if (total > 0) documented[name] = total;
+  }
+  assert.deepEqual(named, [],
+    "a production module carries a test-tree path in code — the raw material a computed import needs");
+  // Pinned, not tolerated: the exact two prose strings that exist today.
+  assert.deepEqual(documented, { ...DOCUMENTED_TEST_DIRECTORY_SITES });
+});
+
 test("ISOLATION: the guard catches a DYNAMIC import of the helper, which is the form that got past it", () => {
   const helperSpecifier = "../test/tour-workflow-classifiers.v5.testhelper.mjs";
 
@@ -1380,13 +1518,25 @@ test("ISOLATION: the guard catches a DYNAMIC import of the helper, which is the 
   // record lists static specifiers only, so the same source produces no mention
   // of the helper at all. This is not a hypothetical: it is why this block was
   // rewritten.
-  const viaModuleRecord = execFileSync(process.execPath,
-    ["--experimental-vm-modules", "-e", `
-      const vm = require("node:vm");
-      const source = require("node:fs").readFileSync(process.argv[1], "utf8");
-      process.stdout.write(JSON.stringify(
-        new vm.SourceTextModule(source, { identifier: "probe.js" }).dependencySpecifiers));
-    `, "/dev/stdin"], { input: smuggled, encoding: "utf8" });
+  //
+  // The child reads the source from a REAL FILE it is handed by path. It used
+  // to read `/dev/stdin`, which is a pipe on a CI runner and made readFileSync
+  // fail with ENXIO — a suite failure that said nothing about the claim.
+  const probeDirectory = mkdtempSync(path.join(tmpdir(), "j301-module-record-"));
+  let viaModuleRecord;
+  try {
+    const probeFile = path.join(probeDirectory, "smuggled.js");
+    writeFileSync(probeFile, smuggled);
+    viaModuleRecord = execFileSync(process.execPath,
+      ["--experimental-vm-modules", "-e", `
+        const vm = require("node:vm");
+        const source = require("node:fs").readFileSync(process.argv[1], "utf8");
+        process.stdout.write(JSON.stringify(
+          new vm.SourceTextModule(source, { identifier: "probe.js" }).dependencySpecifiers));
+      `, probeFile], { encoding: "utf8" });
+  } finally {
+    rmSync(probeDirectory, { recursive: true, force: true });
+  }
   assert.equal(JSON.parse(viaModuleRecord).includes(helperSpecifier), false,
     "dependencySpecifiers unexpectedly saw a dynamic import; the premise of this test has changed");
 
@@ -1404,6 +1554,37 @@ test("ISOLATION: the guard catches a DYNAMIC import of the helper, which is the 
   const runtime = readFileSync(path.join(SRC_DIR, "tour-runtime.js"), "utf8");
   assert.ok(importRecords(runtime).some(record => record.kind === "dynamic-import"),
     "tour-runtime.js was expected to carry a dynamic import");
+
+  // (f) THE COMPUTED FORM, WHICH IS WHY THE FORM BAN EXISTS. The fixture is the
+  // real production module plus the two lines a reviewer actually wrote to get
+  // past the previous guard. The specifier is never a literal at the call site,
+  // so the offender filter over RESOLVED specifiers reports nothing — that is
+  // measured here, not assumed — and the form ban is what catches it.
+  const computedSmuggle =
+    `${real}\nconst helperPath = "${helperSpecifier}";\n`
+    + "export async function reach() {\n  return await import(helperPath);\n}\n";
+  assert.deepEqual(
+    importSpecifiers(computedSmuggle).filter(one => TEST_TREE_SPECIFIER.test(one)), [],
+    "the premise has changed: the parser now folds a computed specifier to a path");
+  assert.ok(importSpecifiers(computedSmuggle).includes("<computed import>"),
+    "the parser did not even report the call site as computed");
+  assert.notDeepEqual(computedImportCallSites(computedSmuggle), [],
+    "THE HOLE IS OPEN: a computed dynamic import was not caught by the form ban");
+  // The literal half of the same smuggle is caught independently.
+  assert.ok(codeMentions(computedSmuggle, "testhelper") > 0);
+  assert.ok(codeMentions(computedSmuggle, "../test/") > 0);
+
+  // (g) And the same smuggle with the path assembled from pieces, so NO literal
+  // carries it. Only the form ban can see this one.
+  const piecewise = `${real}\nexport const reach = (a, b) => import(a + b);\n`;
+  assert.equal(codeMentions(piecewise, "testhelper"), 0);
+  assert.notDeepEqual(computedImportCallSites(piecewise), [],
+    "THE HOLE IS OPEN: an assembled dynamic import specifier was not caught");
+
+  // (h) And the guard is not simply always-red: the real module, unedited, is
+  // clean under both halves.
+  assert.deepEqual(computedImportCallSites(real), []);
+  assert.equal(codeMentions(real, "testhelper"), 0);
 });
 
 test("ISOLATION: the classifier helper lives in the test tree and answers conditionally", () => {
