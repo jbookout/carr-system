@@ -16,16 +16,23 @@
 // registration's own `r7_entry_witness` is NULL, because the packet's bytes are
 // not in this repository and neither a yes nor a no may be asserted without them.
 //
-// NOTHING ELSE MOVED, and the list of what did not is longer than the list of
-// what did. NO SEAT HOLDS THE ORACLE — card 9 named the reviewer charter, and
-// naming a charter is not staffing a desk. The three evidence readers —
-// gate-zero-seam-readers.v5.js cards 11, 12 and 13, the predecessor-outcome,
-// scheduler-canary and gate-conclusion readers — ARE bound to this surface's
-// seams as of 2026-09-12, which is what section (2) below is about. The producer
-// SEAM is still unbound, `producer_bound` is still false, `passable` is still
-// false for every caller on every input, and there is still no join. A
-// registered role is not a signature, and deciding who should sign is not
-// somebody signing.
+// THE ORACLE SEAT IS STAFFED, AND STAFFING IT MOVED NOTHING BELOW. Card 9 named
+// the reviewer charter on 2026-09-11 and then staffed the desk that charter
+// describes on 2026-09-13 — the independent Codex reviewer lane, under decision
+// `359784f1-5d9e-4e11-bcce-af8b0dfcc5e0` — so `oracle_seat_bound` is true here,
+// nothing is owed on the seat, and no governance question about it is open. The
+// three evidence readers — gate-zero-seam-readers.v5.js cards 11, 12 and 13, the
+// predecessor-outcome, scheduler-canary and gate-conclusion readers — ARE bound
+// to this surface's seams as of 2026-09-12, which is what section (2) below is
+// about.
+//
+// SO WHAT STILL REFUSES IS THE PRODUCER SEAM, and it is the only thing left.
+// Nothing implements `seam:gate-zero-read-only-outcome-producer`: no code aims
+// the three bound readers at particular rows and signs the result. The producer
+// seam is therefore still unbound, `producer_bound` is still false, `passable`
+// is still false for every caller on every input, and there is still no join. A
+// staffed seat is WHO MAY SIGN; it is not a signature, and naming who may sign
+// is not somebody signing.
 //
 // (2) THE EVIDENCE, AND THIS HALF MOVED ON 2026-09-12. A caller object
 // describing four accepted outcomes, a canary, a readback and a green gate graph
@@ -47,8 +54,9 @@
 // WHAT DID NOT CHANGE is the answer. Every function below still returns
 // `unavailable`, because a bound reader is a surface and not a subject: which
 // accepted outcome, which canary row, which commit and which declared check a
-// Gate Zero run stands on are the PRODUCER's bindings, and cards 9 and 10 left
-// the producer seam deliberately unbuilt. The refusal therefore moved forward
+// Gate Zero run stands on are the PRODUCER's bindings, and the producer seam is
+// still unbuilt — cards 9 and 10 staffed the seat and amended the packet, and
+// neither of them writes the code that does the aiming. The refusal moved forward
 // rather than lifting — from "nothing exists to read with" to "nothing has the
 // authority to aim it" — which is the more advanced and more honest of the two.
 //
@@ -287,19 +295,30 @@ function reason(id) {
 // module exports no way to bind one.
 // ---------------------------------------------------------------------------
 
-/** Who or what could issue a Gate Zero outcome. r7 registers a role; nobody holds it. */
+/**
+ * Who or what could issue a Gate Zero outcome. r7 registers the role and a
+ * staffed seat holds it; NOTHING IMPLEMENTS IT, which is why this seam is the
+ * one still unbound below.
+ */
 export const V5_A02_GATE_ZERO_PRODUCER_SEAM = "seam:gate-zero-read-only-outcome-producer";
 
-/** Where an ACCEPTED predecessor outcome could be read from. Nothing today. */
+/** Where an ACCEPTED predecessor outcome is read from. Card 11's reader, since 2026-09-12. */
 export const V5_A02_PREDECESSOR_OUTCOME_READER_SEAM = "seam:gate-zero-predecessor-outcome-reader";
 
-/** Where a scheduler dispatch and its readback could be read from. Nothing today. */
+/** Where a scheduler dispatch and its readback are read from. Card 12's reader, since 2026-09-12. */
 export const V5_A02_SCHEDULER_READER_SEAM = "seam:scheduler-canary-reader";
 
-/** Where a gate's own conclusion could be read from. Nothing today. */
+/** Where a gate's own conclusion is read from. Card 13's reader, since 2026-09-12. */
 export const V5_A02_GATE_CONCLUSION_READER_SEAM = "seam:gate-conclusion-reader";
 
-/** Everything this half is owed before any of its answers could be yes. */
+/**
+ * THE FOUR SEAMS THIS HALF NAMES, which is every seam an answer may stand on.
+ * The name is the one main gave it, when all four were in fact owed; three now
+ * have a ruled reader behind them, so what is STILL owed is derived per answer by
+ * filtering this list through `seamBound` — see `owed_seams` below. The policy
+ * preimage keeps reporting the whole list under this name because renaming a
+ * pinned preimage field would move the policy digest for a comment's sake.
+ */
 export const V5_A02_GATE_ZERO_OWED_SEAMS = deepFreeze([
   V5_A02_GATE_CONCLUSION_READER_SEAM,
   V5_A02_GATE_ZERO_PRODUCER_SEAM,
@@ -339,14 +358,14 @@ export const V5_A02_GATE_ZERO_OWED_SEAMS = deepFreeze([
  * condition is a decision id committed to a file, which is what a ruling is.
  *
  * AND THE PRODUCER SEAM IS STILL NULL — the one that decides everything below.
- * Cards 9 and 10 name the reviewer charter as the oracle's holder and amend r7
- * to carry the registration; naming a charter staffs no desk and an unapplied
- * amendment is not an entry. So `passable` is still false, `producer_bound` is
- * still false, and the join is still unavailable — now for the reason that is
- * actually true. These readers answer truthfully about whatever row they are
- * pointed at, and NOTHING IN THIS REPOSITORY HAS THE AUTHORITY TO POINT THEM:
- * which canary row, which accepted outcome, which commit and which check a Gate
- * Zero run stands on are the producer's bindings, and no seat holds it.
+ * Cards 9 and 10 are both answered: the oracle seat is staffed and r7 carries
+ * the registration. Neither of them builds a producer. So `passable` is still
+ * false, `producer_bound` is still false, and the join is still unavailable —
+ * now for the reason that is actually true. These readers answer truthfully
+ * about whatever row they are pointed at, and NOTHING IN THIS REPOSITORY
+ * IMPLEMENTS THE POINTING: which canary row, which accepted outcome, which
+ * commit and which check a Gate Zero run stands on are the producer's bindings,
+ * and no code writes them down.
  *
  * `holder` IS A THUNK, NOT A VALUE, and that is load-order and not style.
  * gate-zero-seam-readers.v5.js imports this module for its unruled answer, so
@@ -508,21 +527,55 @@ function withdrawn() {
  */
 const PRODUCER_SEAT_UNSTAFFED = "evidence_seams_bound_producer_unstaffed";
 
+/**
+ * THE SAME REFUSAL, ONE STEP FURTHER ALONG. Card 9's seat is staffed as of
+ * 2026-09-13, so "no seat staffs the role" stopped being true — and the seam is
+ * still unavailable, because nothing implements the producer behind it. A
+ * staffed seat is who may sign; the code that aims the three bound readers at
+ * particular rows and signs the result is not written. Two facts, two words.
+ */
+const PRODUCER_SEAM_UNBUILT = "evidence_seams_bound_producer_seam_unbuilt";
+
+/** Whether card 9's seat has a holder. Read off the registration, never typed twice. */
+const oracleSeatBound = () => V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound === true;
+
+/** Which of the two producer facts decided a refusal that got past the readers. */
+const producerDecidedBy = () => (oracleSeatBound() ? PRODUCER_SEAM_UNBUILT : PRODUCER_SEAT_UNSTAFFED);
+
+/**
+ * The clause that says why nothing may aim the bound readers at particular rows,
+ * over the thing that would be named. It blames the empty seat while the seat is
+ * empty and the unbuilt seam once it is not, so the sentence a consumer reads is
+ * the one that is true at the time it reads it.
+ */
+const noProducerBecause = (wouldName) => (oracleSeatBound()
+  ? `the producer seam that would name ${wouldName} is unbuilt`
+  : `no seat holds the producer that would name ${wouldName}`);
+
 // ---------------------------------------------------------------------------
 // checkable_done 1 — "WR prerequisites and scheduler canary/readback join
 // exactly". The clause is implemented and proved; the READING is not available.
 // ---------------------------------------------------------------------------
 
 /**
- * What a Gate Zero predecessor join would need and cannot get.
+ * What a Gate Zero predecessor join would need and still cannot get.
  *
  * The four predecessors would have to be read from an accepted-outcome store,
- * and the canary and its readback from the scheduler that dispatched them.
- * gate-zero-seam-readers.v5.js on main HAS both readers (cards 11 and 12), and
- * neither is bound to this surface — V5_A02_GATE_ZERO_BINDINGS is null for
- * every seam, and binding them to Gate Zero is PR 1004's subject. So this
- * answers `unavailable` and names both seams — for every caller, on every
- * input, with or without one.
+ * and the canary and its readback from the scheduler that dispatched them. Both
+ * of those readers exist and BOTH ARE BOUND to this surface: cards 11 and 12 in
+ * gate-zero-seam-readers.v5.js, bound through V5_A02_GATE_ZERO_SEAM_BINDINGS on
+ * exactly the condition their rulings are open. The oracle seat is staffed too
+ * — card 9, decision `359784f1-5d9e-4e11-bcce-af8b0dfcc5e0`, 2026-09-13 — so
+ * neither a missing reader nor an empty seat is what stands here any more.
+ *
+ * WHAT IS NOT BUILT IS THE PRODUCER BEHIND THE PRODUCER SEAM. A bound reader
+ * answers truthfully about whatever row it is pointed at, and no code in this
+ * repository does the pointing: which accepted outcome and which canary row a
+ * Gate Zero run stands on are the producer's bindings. So the answer is still
+ * `unavailable` for every caller on every input — now naming that ONE owed
+ * seam alongside the two bound ones it stands on, and `decided_by` says the
+ * seam is unbuilt rather than the seat empty. Put either ruling line back to
+ * null and the earlier per-card refusals below answer again.
  */
 export const readGateZeroPredecessorJoin = closedCallable(() => {
   const predecessorReader = boundSeam(V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, "readOutcome");
@@ -566,17 +619,17 @@ export const readGateZeroPredecessorJoin = closedCallable(() => {
       stood);
   // AND THE RULED ONE, which refuses for a different and more advanced reason.
   // Both readers are bound and either would answer about a row. Nothing here can
-  // say WHICH row, because that is the producer's binding and no seat holds it —
-  // so the refusal moves from "there is nothing to read with" to "there is
-  // nobody to aim it", and the producer seam joins the seams this answer stands
-  // on rather than the join being reported as available.
+  // say WHICH row, because that is the producer's binding and the producer seam
+  // is unbuilt — so the refusal moves from "there is nothing to read with" to
+  // "nothing is written that would aim it", and the producer seam joins the seams
+  // this answer stands on rather than the join being reported as available.
   return unavailable(
     "gate_zero_predecessor_join",
     "gate_zero_producer_seam_unavailable",
-    "the ruled evidence seams for the four predecessors and for the scheduler canary are bound, and no seat holds the producer that would name which accepted outcome and which canary row a Gate Zero run stands on",
+    `the ruled evidence seams for the four predecessors and for the scheduler canary are bound, and ${noProducerBecause("which accepted outcome and which canary row a Gate Zero run stands on")}`,
     [...seams, V5_A02_GATE_ZERO_PRODUCER_SEAM],
     stood,
-    PRODUCER_SEAT_UNSTAFFED);
+    producerDecidedBy());
 });
 
 // ---------------------------------------------------------------------------
@@ -614,10 +667,10 @@ export const readGateGraphAssurance = closedCallable(() => {
   return unavailable(
     "gate_graph_assurance",
     "gate_zero_producer_seam_unavailable",
-    "the ruled evidence seam for gate conclusions is bound, and no seat holds the producer that would name which head revision and which declared check a Gate Zero run stands on",
+    `the ruled evidence seam for gate conclusions is bound, and ${noProducerBecause("which head revision and which declared check a Gate Zero run stands on")}`,
     [V5_A02_GATE_CONCLUSION_READER_SEAM, V5_A02_GATE_ZERO_PRODUCER_SEAM],
     stood,
-    PRODUCER_SEAT_UNSTAFFED);
+    producerDecidedBy());
 });
 
 // ---------------------------------------------------------------------------
@@ -663,10 +716,16 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
     "gate_zero_outcome_emission",
     "gate_zero_producer_seam_unavailable",
     readersBound
-      ? "the three ruled evidence seams are bound, and the registered producer role is held by a charter that no seat staffs"
+      ? (oracleSeatBound()
+        ? "the three ruled evidence seams are bound and the registered producer role is held by a staffed seat, and the producer seam that seat would work through is unbuilt"
+        : "the three ruled evidence seams are bound, and the registered producer role is held by a charter that no seat staffs")
       : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
-        ? "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
-        : "not every ruled evidence seam is bound, and the registered producer role is held by a charter that no seat staffs",
+        ? (oracleSeatBound()
+          ? "the producer seam is unbuilt and no evidence seam is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
+          : "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome")
+        : (oracleSeatBound()
+          ? "not every ruled evidence seam is bound, and the producer seam the staffed seat would work through is unbuilt"
+          : "not every ruled evidence seam is bound, and the registered producer role is held by a charter that no seat staffs"),
     [...V5_A02_GATE_ZERO_OWED_SEAMS],
     {
       decision_ids: [...V5_A02_DECISION_IDS],
@@ -675,11 +734,21 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
       // a ruled role is not a signature. Binding three readers does not move it
       // one step: a reading is evidence, and this field is a signature.
       passable: false,
+      // THE SEAT MOVED AND `passable` DID NOT, which is the whole of card 9 and
+      // is why this sentence is derived rather than reworded. A staffed seat is
+      // an answer to WHO; the producer seam is the answer to WHAT SIGNS, and it
+      // is still empty.
       not_passable_because: readersBound
-        ? "the registered producer role is unstaffed, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on"
+        ? (oracleSeatBound()
+          ? "the producer seam is unbuilt, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on, whoever holds the seat"
+          : "the registered producer role is unstaffed, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on")
         : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
-          ? "the registered producer role is unstaffed, and no predecessor, scheduler or gate-conclusion reader is bound to this surface"
-          : "the registered producer role is unstaffed, and not every ruled evidence seam is bound",
+          ? (oracleSeatBound()
+            ? "the producer seam is unbuilt, and no predecessor, scheduler or gate-conclusion evidence seam is bound to this surface"
+            : "the registered producer role is unstaffed, and no predecessor, scheduler or gate-conclusion reader is bound to this surface")
+          : (oracleSeatBound()
+            ? "the producer seam is unbuilt, and not every ruled evidence seam is bound"
+            : "the registered producer role is unstaffed, and not every ruled evidence seam is bound"),
       producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
       // EACH CARD, ON ITS OWN LINE. `seams_bound` above carries all four seams
       // with their live state; these three say the same thing under the names
@@ -710,16 +779,24 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
       r7_entry_witness: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
       r7_entry_witness_decided_by: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
       // Cards 9 and 10, reported as ruled. The charter is named by decision
-      // 8a1dad08; naming a charter staffs no desk, so the seat is still unbound.
-      // The r7 amendment is ruled by decision 311a9af5 and was applied to the
-      // packet on 2026-09-12 — which is why the field beside it is a witness
-      // over bytes rather than a flag anybody here can set.
+      // 8a1dad08 and the desk behind it by the staffing ruling beside it; the
+      // r7 amendment is ruled by decision 311a9af5 and was applied to the packet
+      // on 2026-09-12 — which is why the field beside it is a witness over bytes
+      // rather than a flag anybody here can set.
+      //
+      // EVERY ONE OF THESE IS READ OFF THE REGISTRATION, including the boolean:
+      // a second derivation of "is the seat staffed" in this file would be a
+      // second authority over card 9, which is the defect the shared ruling
+      // predicate was extracted to stop.
       oracle_seat_bound: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound,
+      oracle_seat_holder_ref: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_holder_ref,
       oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
       oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
+      oracle_seat_staffing_decision_ref:
+        V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_staffing_decision_ref,
       r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
       // The outcome fields a consumer would need. Null because no run has
-      // happened and no seat could have run it.
+      // happened and no producer exists that could have run one.
       outcome_digest: null,
       observed_at: null,
       // AND the join fields. Null because there is no join to report, not
@@ -735,29 +812,36 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
           ? "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against"
           : owed.includes("scheduler")
             ? "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against"
-            : "the two ruled evidence seams are bound and no seat holds the producer that would name the rows to join",
+            : `the two ruled evidence seams are bound and ${noProducerBecause("the rows to join")}`,
       predecessor_evidence_read: null,
-      // The four the ruling answered are gone from this list and reported
-      // above instead. What is left is what is still genuinely open, plus the
-      // two the ruling created by deciding a role nothing holds.
-      // The last three left this list on 2026-09-11: Joe ruled cards 11, 12 and
-      // 13, and the readers those rulings switched on are bound above. They are
-      // listed again the moment a ruling line goes back to null, because this
-      // list is derived from the bindings rather than maintained beside them.
-      // The two cards 9 and 10 left open, plus ONE ENTRY PER WITHDRAWN CARD in
-      // card order — so withdrawing card 12 reopens the scheduler question and
-      // not the other two, which is the defect this list carried until now. With
-      // all three ruled the list is the two producer questions and nothing else.
+      // WHAT IS STILL UNDECIDED, and as this module ships the answer is NOTHING:
+      // the list is EMPTY, and it is empty by derivation rather than by anyone
+      // having trimmed it.
+      // The three reader questions left on 2026-09-11, when Joe ruled cards 11,
+      // 12 and 13 and the readers those rulings switched on became bound above.
+      // Each is listed again the moment its own ruling line goes back to null,
+      // ONE ENTRY PER WITHDRAWN CARD in card order — so withdrawing card 12
+      // reopens the scheduler question and not the other two, which is the defect
+      // this list carried until the 2026-09-12 review.
+      // CARD 9'S QUESTION IS DERIVED FROM THE SEAT, not carried as a literal: it
+      // was listed while nobody held the oracle, it is gone now that the Codex
+      // reviewer lane holds it, and it comes back the moment the declaration goes
+      // back to unstaffed. Card 10's left on 2026-09-12 with the amendment.
+      // AN EMPTY LIST IS NOT AN ALLOW. Every governance question being answered
+      // is exactly why the refusal beside it names the unbuilt producer seam and
+      // nothing else — there is no question left to hide behind.
       undecided_governance_questions: deepFreeze([
-        "which independent seat holds oracle:gate-producer:gate-zero-read-only",
+        ...(oracleSeatBound()
+          ? [] : ["which independent seat holds oracle:gate-producer:gate-zero-read-only"]),
         ...owed.map(key => V5_A02_GATE_ZERO_READER_QUESTIONS[key]),
       ]),
     },
     // WHO DECIDED THIS REFUSAL. While no reader is bound it is decided by there
-    // being nothing authoritative to read; once the three ruled readers are
-    // bound it is decided by the producer seat nobody holds, which is a
-    // different fact and deserves a different word.
-    readersBound ? PRODUCER_SEAT_UNSTAFFED : "no_authoritative_reader");
+    // being nothing authoritative to read; once the three ruled readers are bound
+    // it is decided by the producer — the unbuilt seam while the seat is staffed,
+    // which is what this module ships, and the empty seat while it is not. Two
+    // facts, two words, and `producerDecidedBy` picks between them.
+    readersBound ? producerDecidedBy() : "no_authoritative_reader");
 });
 
 // ---------------------------------------------------------------------------
