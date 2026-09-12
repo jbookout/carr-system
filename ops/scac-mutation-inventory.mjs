@@ -58,6 +58,18 @@ export const REGISTRY_V21_VERSION = "scac-mutation-registry.v21";
 export const REGISTRY_V22_VERSION = "scac-mutation-registry.v22";
 export const REGISTRY_V23_VERSION = "scac-mutation-registry.v23";
 export const REGISTRY_V24_VERSION = "scac-mutation-registry.v24";
+// v25 admits the WR-000040 AC-FRESH canonical-freshness agents, the Gate Zero
+// scheduler canary and the files that prove the canary runs. Every successor
+// since v20 has been registry-only because its source change re-digested
+// ingresses the frozen inventory already named; this is the first whose whole
+// purpose is to ADMIT new ones, which current_source_review is structurally
+// unable to express. WHICH ingresses, how many, and of what kinds is NOT
+// restated in prose anywhere in this file: v5ScheduledJobAdmissionProvenance()
+// derives it from the two frozen row sets, and every provenance layer -- the
+// migration comment and the review reason in the fixture -- is rendered from
+// that derivation. A count that is typed is a count that drifts, which is
+// exactly what PR #1006 review 2 caught.
+export const REGISTRY_V25_VERSION = "scac-mutation-registry.v25";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -101,6 +113,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v21: Object.freeze({ version: REGISTRY_V21_VERSION, digest: "sha256:d9100082d444f090e062a2fb9ac55043d0c9790c2fbd9b68672987e3ed12927b", entryCount: 1528, sourceEntryCount: 828 }),
   v22: Object.freeze({ version: REGISTRY_V22_VERSION, digest: "sha256:5bbe68942f2652523b52c024c07615b1718b59c7de4c0e41524a955566ba5f75", entryCount: 1590, sourceEntryCount: 833 }),
   v23: Object.freeze({ version: REGISTRY_V23_VERSION, digest: "sha256:d6633db96266ebd54bf6ade83cd35b587ee9f128f0f9db35ea557861e66f743b", entryCount: 1596, sourceEntryCount: 835 }),
+  v24: Object.freeze({ version: REGISTRY_V24_VERSION, digest: "sha256:d280236b45e706ba6e2c642a526ffc827afdc0a1e2220331fb0424ea16758c23", entryCount: 1600, sourceEntryCount: 835 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -148,6 +161,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql": "b8de4ce8bfa23c5ac06c4a1729456da4cfc301ec6b82e54b336ab072c3d6dca7",
   "migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql": "88a9f228116f9814bc32d4d26663ec5e2885557ea8f985f4468300894ff4ad1b",
   "mcp-server/src/scac-mutation-registry.v23.generated.js": "0dec1d570e18816106f22401dfcf32a78179c265f7b2a48e3e1ebe04f87d0ccb",
+  "migrations/0498_f09_workflow_truth_and_scac_successor.sql": "2c4d52031e1150e31459df5c96b49a4de54324e28abca45d15350ac2332c2923",
+  "mcp-server/src/scac-mutation-registry.v24.generated.js": "6278c2bfadc10c532e18a105d589efabe61d84b3920279606da4c6137fb1a0db",
   "mcp-server/src/scac-mutation-registry.v22.generated.js": "58e37870d1aba7750b841468ef0c4bea76cb75f18ee2a978eb4b3ce567302c20",
 });
 // WR-000068 rebases four Production-applied consumers of the sourced shape
@@ -447,6 +462,24 @@ export const V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   // still moves, because the two replaced bodies are part of the projection --
   // which is the whole reason a domain change owes a registry successor.
   secdef_execute: { count: 458, digest: "sha256:3b9472c743e1ab3cff189e370e4a785c0483391adacbb85b495842f5c4e2b7b0" },
+});
+
+export const V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE =
+  V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE;
+export const V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v25",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. This successor is registry-only and its source
+  // change ADMITS new ingresses rather than re-digesting existing ones -- the
+  // composition is derived by v5ScheduledJobAdmissionProvenance() and stated
+  // only where it can be computed, never typed in a comment. It creates no
+  // table, no role and no domain function, so the entire security-definer delta
+  // from v24's 458 is the four seal-and-catalog functions it installs for
+  // itself, exactly as the v20, v21 and v23 registry-only successors before it.
+  // relation_dml, column_dml, role_authority and runtime_dml_grants are
+  // unchanged for the same reason.
+  secdef_execute: { count: 462, digest: "sha256:e401b63f9bfe2808be4f09ce454e34c5a07c6656bd49997a10f268daba0b247a" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -1118,6 +1151,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V22_VERSION]: "v22",
   [REGISTRY_V23_VERSION]: "v23",
   [REGISTRY_V24_VERSION]: "v24",
+  [REGISTRY_V25_VERSION]: "v25",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1173,7 +1207,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V24_VERSION) {
+  version = REGISTRY_V25_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1195,6 +1229,25 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
     const reviewedDigest = sourceInventoryFixtureDigest(reviewed);
     if (reviewed.length !== review.expected_count || reviewedDigest !== review.expected_sha256)
       throw new Error(`current source-inventory review drifted: count ${reviewed.length}/${review.expected_count}, sha256 ${reviewedDigest}/${review.expected_sha256}`);
+    // THE REASON IS PROVENANCE, AND PROVENANCE IS CHECKED. Its accreted
+    // history is prose a reviewer reads, but its claim about THIS frontier is
+    // a measurement: the reason has to end with the paragraph
+    // v5ScheduledJobAdmissionProvenanceFrozen() renders from the row sets, and
+    // no sentence in it may state a frontier transition other than the
+    // measured one. PR #1006 review 2 found a reason claiming "835 to 839",
+    // "four new rows" and 131 reviewed ingresses over an 840-row overlay with
+    // 132 reviewed rows; every one of those three numbers is now computed, and
+    // a typed one fails here rather than surviving to a reviewer.
+    if (version === REGISTRY_V25_VERSION) {
+      const provenance = v5ScheduledJobAdmissionProvenanceFrozen();
+      if (!review.reason.endsWith(provenance.review_reason_paragraph))
+        throw new Error("current source-inventory review reason does not end with the measured v25 admission provenance paragraph");
+      const expectedTransition =
+        `${provenance.previous_frontier_count} to ${provenance.frontier_count}`;
+      for (const match of review.reason.matchAll(/\b\d{3} to \d{3}\b/g))
+        if (match[0] !== expectedTransition)
+          throw new Error(`current source-inventory review reason states a superseded frontier transition: ${match[0]} rather than ${expectedTransition}`);
+    }
     frozen = reviewed;
   }
   const currentDigest = sourceInventoryFixtureDigest(current);
@@ -1212,7 +1265,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
     REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
     REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
-    REGISTRY_V23_VERSION, REGISTRY_V24_VERSION].includes(version))
+    REGISTRY_V23_VERSION, REGISTRY_V24_VERSION,
+    REGISTRY_V25_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -7823,6 +7877,541 @@ ${preflightBody}end $v5_f09_workflow_truth_preflight$;
 }
 
 
+const V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH =
+  "migrations/0498_f09_workflow_truth_and_scac_successor.sql";
+const V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v24.generated.js";
+
+/**
+ * THE CLOSED SHAPE FOR A v25 EXPORT. The exports below that carry it are the
+ * only ones in this file that do — deliberately, because they are the only
+ * ones this branch adds. They are named, not counted, at their definitions
+ * further down: a numeral here is a claim nothing re-derives, and this comment
+ * said "the two exports" for a whole review round after the provenance export
+ * made it three (PR #1006 review 4).
+ *
+ * Amendment 2 of the 2026-09-11 standing rule (orchestrator ruling 2026-09-12
+ * 00:20Z) names it: an exported callable is an arrow or a bound function, never
+ * a class or a plain function, and it owns a `Symbol.hasInstance` data property
+ * that answers false WITHOUT TOUCHING THE LEFT OPERAND. Without that own hook
+ * the intrinsic one walks the caller's prototype chain, so
+ * `hostile instanceof someExport` runs the caller's own getPrototypeOf trap and
+ * can carry the caller's thrown text back out through an export of this module.
+ *
+ * Bound rather than bare, for the reason
+ * mcp-server/src/gate-zero-seam-readers.v5.js states at its own `closedCallable`:
+ * the engine's refusal for `new` on a bare arrow quotes the function's SOURCE
+ * TEXT back at the caller, and a bound arrow's refusal names
+ * `function () { [native code] }` and no line of this file. The property is
+ * non-writable and non-configurable, so it cannot be replaced or redefined as
+ * an accessor.
+ */
+function closedExport(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return closed;
+}
+
+/**
+ * THE v25 ADMISSION PROVENANCE, DERIVED — the fix for PR #1006 review 2.
+ *
+ * The first revision of this successor stated its own delta in prose, three
+ * times over, in three files: the migration's preflight comment, this module's
+ * catalog-baseline comment, and the `reason` on `current_source_review`. The
+ * frontier then moved from four admitted ingresses to five, the row sets and
+ * the migration followed, and two of the three prose statements did not — the
+ * fixture still said "835 to 839", "four new rows" and "131 reviewed
+ * ingresses" against an 840-row overlay carrying 132 reviewed rows. Nothing was
+ * red, because nothing compared the sentence to the rows.
+ *
+ * So no provenance layer types a count any more. This function MEASURES the
+ * delta between the two frozen row sets and renders the sentences the other
+ * layers use; `assertCurrentSourceInventoryMatchesFixture` then refuses a
+ * fixture whose reason is not the rendered one, which makes a typed count a
+ * failure of the frontier check rather than a thing a reviewer has to notice.
+ *
+ * Every input is frozen: the v24 and v25 row sets replayed from the fixture's
+ * own base and patches, and the overlay's own row list. No caller reaches it.
+ */
+const ADMITTED_INGRESS_NOUNS = Object.freeze([
+  Object.freeze({
+    match: row => row.ingress_kind === "workflow_entrypoint" &&
+      row.source_locator.startsWith("ops/launchd/"),
+    one: "LaunchAgent definition", many: "LaunchAgent definitions",
+  }),
+  Object.freeze({
+    match: row => row.ingress_kind === "workflow_entrypoint" &&
+      row.source_locator.startsWith(".github/workflows/"),
+    one: "GitHub workflow", many: "GitHub workflows",
+  }),
+  Object.freeze({
+    match: row => row.ingress_kind === "script_entrypoint",
+    one: "script entrypoint", many: "script entrypoints",
+  }),
+  Object.freeze({
+    match: row => row.ingress_kind === "mcp_tool",
+    one: "MCP tool", many: "MCP tools",
+  }),
+]);
+// Words rather than digits for the small composition counts, because that is
+// how the sentences read; the mapping is a lookup, so the WORD is derived from
+// the measured count exactly as the digits are.
+const COUNT_WORDS = Object.freeze([
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+  "nine", "ten", "eleven", "twelve",
+]);
+
+function countWord(count) {
+  if (!Number.isInteger(count) || count < 0)
+    throw new Error(`admission provenance count is not a whole number: ${count}`);
+  return COUNT_WORDS[count] ?? String(count);
+}
+
+function capitalize(word) {
+  return word.slice(0, 1).toUpperCase() + word.slice(1);
+}
+
+function joinWithAnd(parts) {
+  if (parts.length === 0) return "no new ingress";
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+}
+
+function wrapSqlComment(text, width = 76) {
+  const lines = [];
+  let line = "--";
+  for (const word of text.split(" ")) {
+    if (line === "--") line = `-- ${word}`;
+    else if (`${line} ${word}`.length <= width) line = `${line} ${word}`;
+    else { lines.push(line); line = `-- ${word}`; }
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
+
+function v5ScheduledJobAdmissionProvenanceFrozen() {
+  const previous = frozenInventory(REGISTRY_V24_VERSION);
+  const frontier = frozenInventory(REGISTRY_V25_VERSION);
+  const previousKeys = new Set(previous.map(row => row.ingress_key));
+  const frontierKeys = new Set(frontier.map(row => row.ingress_key));
+  const admittedRows = frontier.filter(row => !previousKeys.has(row.ingress_key))
+    .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
+  const removedKeys = previous.filter(row => !frontierKeys.has(row.ingress_key))
+    .map(row => row.ingress_key).sort((left, right) => left.localeCompare(right));
+  const composition = [];
+  for (const noun of ADMITTED_INGRESS_NOUNS) {
+    const count = admittedRows.filter(row => noun.match(row)).length;
+    if (count > 0) composition.push(`${countWord(count)} ${count === 1 ? noun.one : noun.many}`);
+  }
+  // Every admitted row must fall in exactly one noun bucket, or the
+  // description would silently under-report the delta -- the same failure in a
+  // new costume.
+  const classified = admittedRows
+    .filter(row => ADMITTED_INGRESS_NOUNS.filter(noun => noun.match(row)).length === 1).length;
+  if (classified !== admittedRows.length)
+    throw new Error("v25 admission provenance cannot name the kind of every admitted ingress exactly once");
+  const patch = SOURCE_INVENTORY_FIXTURES.patches
+    .find(entry => entry.version === REGISTRY_V25_VERSION.split(".").at(-1));
+  if (!patch || !Array.isArray(patch.upsert))
+    throw new Error("v25 admission provenance cannot read the v25 fixture patch");
+  const redigested = patch.upsert
+    .filter(row => previousKeys.has(row.ingress_key)).length;
+  const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
+  if (!review || !Array.isArray(review.upsert))
+    throw new Error("v25 admission provenance cannot read the current source review");
+  const admittedKeys = admittedRows.map(row => row.ingress_key);
+  // THE ROWS THIS BRANCH MOVED AFTER ITS OWN PATCH WAS CUT, derived rather than
+  // listed. PR #1006 review 4 found the reason naming three files as the
+  // branch-moved reviewed rows -- a hand-typed list written at correction 3
+  // that correction 4 then falsified by re-digesting the canary gate into the
+  // overlay and leaving the sentence alone. Comparing the overlay against the
+  // v25 patch answers the same question without anyone typing a filename: a
+  // key the patch seals whose overlay row carries different bytes is exactly a
+  // row a later correction moved past the seal.
+  const patchByKey = new Map(patch.upsert.map(row => [row.ingress_key, row]));
+  const resealedKeys = review.upsert
+    .filter(row => {
+      const sealed = patchByKey.get(row.ingress_key);
+      return sealed !== undefined &&
+        JSON.stringify(canonicalize(sealed)) !== JSON.stringify(canonicalize(row));
+    })
+    .map(row => row.ingress_key)
+    .sort((left, right) => left.localeCompare(right));
+  const description = joinWithAnd(composition);
+  const resealedSentence = resealedKeys.length === 0
+    ? " No reviewed row supersedes a row the v25 patch seals: every ingress " +
+      "the patch carries still holds the bytes it was sealed with."
+    : ` ${capitalize(countWord(resealedKeys.length))} of those reviewed ` +
+      `${resealedKeys.length === 1 ? "rows supersedes a row" : "rows supersede rows"} ` +
+      `the v25 patch itself seals -- ${resealedKeys.join(", ")} -- because a ` +
+      "later correction on this branch moved those bytes after the patch was " +
+      "cut, so the overlay rather than the seal carries their live digest; " +
+      "that list is derived by comparing the overlay against the patch rather " +
+      "than named by hand.";
+  const transition = `${previous.length} to ${frontier.length}`;
+  const migrationSentence = "What it DOES change is the sealed source inventory " +
+    `itself, which grows from ${transition} rows: ${description} ` +
+    "are admitted as new ingresses, which is the one shape " +
+    "current_source_review cannot carry.";
+  const reviewReasonParagraph = " v25 admission provenance, measured from the " +
+    "sealed row sets rather than typed: the frozen source inventory grows from " +
+    `${transition} rows, admitting ${countWord(admittedKeys.length)} new ` +
+    `${admittedKeys.length === 1 ? "ingress" : "ingresses"} -- ${description} ` +
+    `-- namely ${admittedKeys.join(", ")}, and removing ` +
+    `${removedKeys.length === 0 ? "none" : removedKeys.join(", ")}. The v25 ` +
+    `patch carries those ${countWord(admittedKeys.length)} additions plus ` +
+    `${countWord(redigested)} already-known rows whose bytes the same change ` +
+    `moved, and this overlay re-derives ${review.upsert.length} reviewed ` +
+    "ingresses from the live inventory of this tree rather than hand-merging " +
+    "them, so the reviewed digest reproduces the live digest exactly." +
+    resealedSentence + " Every count and every ingress key in this paragraph " +
+    "is computed by v5ScheduledJobAdmissionProvenance() from frozenInventory(\"" +
+    `${REGISTRY_V24_VERSION}"), frozenInventory("${REGISTRY_V25_VERSION}") and ` +
+    "the fixture's own v25 patch and overlay, and the frontier check refuses a " +
+    "reason that does not end with the rendered text.";
+  return Object.freeze({
+    previous_version: REGISTRY_V24_VERSION,
+    version: REGISTRY_V25_VERSION,
+    previous_frontier_count: previous.length,
+    frontier_count: frontier.length,
+    admitted_count: admittedKeys.length,
+    admitted_ingress_keys: Object.freeze([...admittedKeys]),
+    removed_ingress_keys: Object.freeze([...removedKeys]),
+    admitted_description: description,
+    patch_redigested_count: redigested,
+    reviewed_ingress_count: review.upsert.length,
+    overlay_resealed_ingress_keys: Object.freeze([...resealedKeys]),
+    migration_comment: wrapSqlComment(migrationSentence),
+    review_reason_paragraph: reviewReasonParagraph,
+  });
+}
+
+// Shared v25 trust root. Every entry path that renders or writes a v25
+// artifact calls this before doing any work, so an unbound predecessor seal,
+// catalog baseline or artifact pin refuses here rather than producing a
+// plausible-looking successor from a broken chain.
+function assertV5ScheduledJobAdmissionV25TrustRootFrozen() {
+  assertV5F09WorkflowTruthV24TrustRoot();
+  const { v24: v24Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v24Seal?.version !== REGISTRY_V24_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v24Seal?.digest ?? "") ||
+      !Number.isInteger(v24Seal?.entryCount) || v24Seal.entryCount < 1 ||
+      !Number.isInteger(v24Seal?.sourceEntryCount) || v24Seal.sourceEntryCount < 1)
+    throw new Error("V5 scheduled job admission v25 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v24",
+    V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v24");
+  assertR06HooksCorrectnessCatalogBaseline("successor v25",
+    V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v25");
+  for (const path of [
+    V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH, V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`V5 scheduled job admission v25 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor that ADMITS new source ingresses. Every predecessor
+// from v20 on was registry-only because its source change re-digested existing
+// entrypoints; this one exists because the agents and scripts that
+// v5ScheduledJobAdmissionProvenance() enumerates from the row sets are NEW
+// ingresses, which current_source_review cannot express at all
+// (assertCurrentSourceInventoryMatchesFixture refuses an unknown
+// ingress_key). It creates no table, no role and no domain function: it seals
+// the widened source inventory and installs the v25 catalog/policy projection
+// after the immutable v24 frontier. The v24 predecessor was NOT registry-only,
+// so the header-marker slice below is also what drops the V5-F09 domain SQL.
+//
+// MODULE-PRIVATE, and that is the second finding of PR #1006 review 1. Every
+// parameter here is a lever over what the rendered SQL says: `rows` becomes the
+// seeded registry entries, and `predecessorArtifacts` was READ as an object —
+// `?.migration`, `?.runtime` — so a Proxy whose get trap threw carried the
+// caller's own thrown value out through an export, and a caller-supplied row
+// carrying a privileged word landed in the returned SQL. The 2026-09-11
+// standing rule closes exactly that: no exported function takes a caller's
+// object or a caller's rows and speaks from them. The public surface below
+// takes NOTHING and renders the one artifact this branch seals; this function
+// is reachable only from inside this module, where every argument is a frozen
+// fixture or an artifact this file just rendered itself.
+function renderV5ScheduledJobAdmissionRegistrySqlFrozen(rows,
+  dbCatalogBaseline = V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  assertV5ScheduledJobAdmissionV25TrustRootFrozen();
+  const { v24: v24Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  assertR06HooksCorrectnessCatalogBaseline("successor v25", dbCatalogBaseline,
+    "scac-db-catalog-projection.v25");
+
+  const v25Digest = registryDigestFor(REGISTRY_V25_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v24MigrationPath = V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH;
+  const v24RuntimePath = V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH;
+  const v24Rows = frozenInventory(REGISTRY_V24_VERSION);
+  const v24Migration = predecessorArtifacts?.migration ??
+    renderV5F09WorkflowTruthForwardRegistrySql(v24Rows, predecessorDbCatalogBaseline);
+  const v24Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v24Rows, {
+    version: REGISTRY_V24_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v24MigrationPath, v24Migration], [v24RuntimePath, v24Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`V5 scheduled job admission v25 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v24 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: mutation registry v24 after the V5-F09 workflow truth enforcement.";
+  const coreStart = v24Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v24Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v24 migration has no exact successor core boundary");
+  const v24Core = v24Migration.slice(coreStart);
+  const currentV24Marker = "create or replace function ops.scac_mutation_catalog_v24_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v23;";
+  const currentV24Start = v24Core.indexOf(currentV24Marker);
+  const secondCurrentV24 = v24Core.indexOf(
+    currentV24Marker, currentV24Start + currentV24Marker.length);
+  const v23HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v23_current() rename to scac_mutation_catalog_v23_live_at_seal;";
+  const v23HistoryStart = v24Core.indexOf(v23HistoryMarker);
+  const secondV23History = v24Core.indexOf(
+    v23HistoryMarker, v23HistoryStart + v23HistoryMarker.length);
+  const policyStart = v24Core.indexOf(policyMarker);
+  const secondPolicy = v24Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v23HistoryStart < 0 || secondV23History >= 0 || currentV24Start <= v23HistoryStart ||
+      secondCurrentV24 >= 0 || policyStart <= currentV24Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v24 migration has no exact catalog successor boundary");
+  const installedV23History = v24Core.slice(v23HistoryStart, currentV24Start);
+  const v24Current = v24Core.slice(currentV24Start, policyStart);
+  const v24History =
+`alter function ops.scac_mutation_catalog_v24_current() rename to scac_mutation_catalog_v24_live_at_seal;
+create or replace function ops.scac_mutation_registry_v24_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v24')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v24_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v24_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v24_seal_available() is 'Exact immutable v24 registry seal; separate from whether the live catalog still equals v24.';
+comment on function ops.scac_mutation_catalog_v24_current() is 'Historical v24 live-catalog validator; expected to become false after the v25 authority surface is installed.';
+
+`;
+  const renderV25Current = baseline => {
+    let current = v24Current
+      .replaceAll("scac_mutation_catalog_v24_current", "scac_mutation_catalog_v25_current")
+      .replaceAll("scac-mutation-registry.v24", "scac-mutation-registry.v25");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `V5 scheduled job admission v25 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "V5 scheduled job admission v25 role-authority baseline");
+  };
+  const v25Current = renderV25Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v24Core, v24Current,
+    "__V5_F09_V24_CATALOG_SUCCESSOR__",
+    "V5 scheduled job admission v24 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV23History, "",
+    "V5 scheduled job admission already-installed v23 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v25 after the scheduled freshness and canary job definitions.",
+    "V5 scheduled job admission migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v24", "scac-mutation-registry.v25")
+    .replaceAll("_v24", "_v25")
+    .replaceAll(" v24", " v25");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "V5 scheduled job admission v25 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v24Seal.digest}',${v24Seal.entryCount},${v24Seal.sourceEntryCount},`,
+    `'sha256:${v25Digest}',${entryCount},${rows.length},`,
+    "V5 scheduled job admission v25 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v25('${v24Seal.digest}',`,
+    `ops.scac_mutation_registration_v25('sha256:${v25Digest}',`,
+    "V5 scheduled job admission v25 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v23;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v24;",
+    "V5 scheduled job admission policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__V5_F09_V24_CATALOG_SUCCESSOR__",
+    `${v24History}${v25Current}`, "V5 scheduled job admission v24 catalog history insertion");
+
+  const versionsThrough24 = Array.from({ length: 24 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough23 = Array.from({ length: 23 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough23},'scac-mutation-registry.v25'))`,
+    `check (registry_version in (${versionsThrough24},'scac-mutation-registry.v25'))`,
+    "V5 scheduled job admission registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough23}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough24}) then return false; end if;`,
+    "V5 scheduled job admission historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when '${REGISTRY_V23_VERSION}' then '${HISTORICAL_REGISTRY_SEALS.v23.digest}' end;`,
+    `    when '${REGISTRY_V23_VERSION}' then '${HISTORICAL_REGISTRY_SEALS.v23.digest}'\n    when '${v24Seal.version}' then '${v24Seal.digest}' end;`,
+    "V5 scheduled job admission historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when '${REGISTRY_V23_VERSION}' then '${JSON.stringify(R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when '${REGISTRY_V23_VERSION}' then '${JSON.stringify(R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v24Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "V5 scheduled job admission historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('${REGISTRY_V23_VERSION}','${HISTORICAL_REGISTRY_SEALS.v23.digest}',${HISTORICAL_REGISTRY_SEALS.v23.entryCount},${HISTORICAL_REGISTRY_SEALS.v23.sourceEntryCount})\n`,
+    `    ('${REGISTRY_V23_VERSION}','${HISTORICAL_REGISTRY_SEALS.v23.digest}',${HISTORICAL_REGISTRY_SEALS.v23.entryCount},${HISTORICAL_REGISTRY_SEALS.v23.sourceEntryCount}),\n    ('${v24Seal.version}','${v24Seal.digest}',${v24Seal.entryCount},${v24Seal.sourceEntryCount})\n`,
+    "V5 scheduled job admission historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v23_seal_available()) then",
+    "    ops.scac_mutation_registry_v23_seal_available() and\n    ops.scac_mutation_registry_v24_seal_available()) then",
+    "V5 scheduled job admission snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v25' and r.registry_digest='${v24Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v24' and r.registry_digest='${v24Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v25' and r.registry_digest='sha256:${v25Digest}')`,
+    "V5 scheduled job admission epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v25' and registry_digest='${v24Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v24' and registry_digest='${v24Seal.digest}') or\n  (registry_version='scac-mutation-registry.v25' and registry_digest='sha256:${v25Digest}')`,
+    "V5 scheduled job admission epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v24Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v25Digest}'::text)`,
+    "V5 scheduled job admission snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v23_seal_available(),ops.scac_mutation_catalog_v25_current()",
+    "ops.scac_mutation_registry_v23_seal_available(),ops.scac_mutation_catalog_v24_live_at_seal(),ops.scac_mutation_catalog_v24_current(),ops.scac_mutation_registry_v24_seal_available(),ops.scac_mutation_catalog_v25_current()",
+    "V5 scheduled job admission historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "V5-F09 workflow truth successor snapshot: current policy epochs bind mutation registry v25 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23 epochs remain immutable.",
+    "V5 scheduled job admission successor snapshot: current policy epochs bind mutation registry v25 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24 epochs remain immutable.",
+    "V5 scheduled job admission policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v25')<>${v24Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v25')<>${entryCount}`,
+    "V5 scheduled job admission v25 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V23_VERSION}')<>'${HISTORICAL_REGISTRY_SEALS.v23.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${REGISTRY_V23_VERSION}')<>${HISTORICAL_REGISTRY_SEALS.v23.entryCount} then raise exception 'sealed SCAC mutation registry v23 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v24Seal.version}')<>'${v24Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v24Seal.version}')<>${v24Seal.entryCount} then raise exception 'sealed SCAC mutation registry v24 changed during successor creation'; end if;`,
+    "V5 scheduled job admission predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),ops.scac_policy_epoch_snapshot_v24(),",
+    "V5 scheduled job admission historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v24 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV25Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v25 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'V5 scheduled job admission pre-v25 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'V5 scheduled job admission pre-v25 role-authority receipt drifted'; end if;`,
+    "V5 scheduled job admission pre-v25 role receipt");
+  const predecessorHash = sha256(v24Migration);
+  // The third sentence is MEASURED, not written: it is the composition of the
+  // admitted rows as v5ScheduledJobAdmissionProvenanceFrozen() reads them off
+  // the two frozen row sets. PR #1006 review 2 caught this file and the fixture
+  // disagreeing about the delta because both had it typed.
+  const admissionComment = v5ScheduledJobAdmissionProvenanceFrozen().migration_comment;
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0498 receipt. Refuse before any v25 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+${admissionComment}
+do $v5_scheduled_job_admission_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0498_f09_workflow_truth_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0498_f09_workflow_truth_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'V5 scheduled job admission pre-v25 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'V5 scheduled job admission pre-v25 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $v5_scheduled_job_admission_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+/**
+ * THE v25 PUBLIC ENTRY POINTS — every one this module exports, and not one of
+ * them reads a caller. They are, exactly:
+ * `assertV5ScheduledJobAdmissionV25TrustRoot`,
+ * `renderV5ScheduledJobAdmissionForwardRegistrySql`, and
+ * `v5ScheduledJobAdmissionProvenance`. Naming them rather than counting them is
+ * deliberate: a numeral in a comment is a claim nothing re-derives, and this
+ * block already went stale once when the third export arrived (PR #1006
+ * correction 2, which added the provenance export so the admission delta is
+ * measured from the rows instead of typed into three files by hand).
+ *
+ * `renderV5ScheduledJobAdmissionForwardRegistrySql()` renders migration 0501
+ * from the FROZEN v25 inventory and this module's own catalog baseline. It
+ * declares no parameters and consults none: `arguments` is not read, so a
+ * caller's rows, a caller's baseline and a caller's predecessor-artifact holder
+ * are not merely validated away — there is no path by which they could arrive.
+ * Every call, from any caller, with any argument, returns the same bytes as the
+ * committed artifact, which is what the public-surface sweep in
+ * mcp-server/test/siep-11-mutation-registry.test.mjs asserts input by input —
+ * and that sweep, not this prose, is what an added export has to satisfy.
+ *
+ * The trust root is the same story in one line: it takes nothing, answers
+ * nothing, and either returns or throws this module's own Error. The provenance
+ * export is the same shape again, documented at its own definition below.
+ */
+export const assertV5ScheduledJobAdmissionV25TrustRoot =
+  closedExport(() => assertV5ScheduledJobAdmissionV25TrustRootFrozen());
+export const renderV5ScheduledJobAdmissionForwardRegistrySql =
+  closedExport(() => renderV5ScheduledJobAdmissionRegistrySqlFrozen(
+    frozenInventory(REGISTRY_V25_VERSION),
+    V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE));
+/**
+ * The measured v25 admission delta and the prose every provenance layer uses.
+ * Same closed shape and same closed inputs: it reads the two frozen row sets
+ * and the fixture's own overlay, answers with a frozen object, and takes
+ * nothing from a caller — so no consumer can talk it into describing a delta
+ * the rows do not have.
+ */
+export const v5ScheduledJobAdmissionProvenance =
+  closedExport(() => v5ScheduledJobAdmissionProvenanceFrozen());
+
 
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
@@ -8121,9 +8710,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v23.generated.js"],
       });
 
+  const v25Rows = frozenInventory(REGISTRY_V25_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v25.generated.js"] =
+    renderRuntimeProjection(v25Rows, {
+      version: REGISTRY_V25_VERSION,
+      dbCatalogBaseline: V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0501_scheduled_job_admission_and_scac_successor.sql"] =
+    renderV5ScheduledJobAdmissionRegistrySqlFrozen(v25Rows,
+      V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0498_f09_workflow_truth_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v24.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 32 || runtimeCount !== 23 || Object.keys(artifacts).length !== 55)
+  if (migrationCount !== 33 || runtimeCount !== 24 || Object.keys(artifacts).length !== 57)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -8580,9 +9182,25 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V24_VERSION);
     await writeFile(target, renderV5F09WorkflowTruthForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v25") {
+    assertV5ScheduledJobAdmissionV25TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v25.generated.js");
+    const rows = frozenInventory(REGISTRY_V25_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V25_VERSION,
+      dbCatalogBaseline: V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-v5-scheduled-job-admission-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0501_scheduled_job_admission_and_scac_successor.sql");
+    // No rows argument: the public entry point renders the frozen v25 frontier
+    // and nothing else, so the CLI cannot pick what gets sealed either.
+    await writeFile(target, renderV5ScheduledJobAdmissionForwardRegistrySql());
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V24_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V25_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

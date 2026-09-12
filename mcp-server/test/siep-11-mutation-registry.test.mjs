@@ -9,6 +9,7 @@ import {
   assertCurrentSourceInventoryMatchesFixture,
   assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
+  canonicalize,
   DB_CATALOG_BASELINE,
   discoverScriptEntrypoints,
   frozenInventory,
@@ -40,7 +41,11 @@ import {
   REGISTRY_V22_VERSION,
   REGISTRY_V23_VERSION,
   REGISTRY_V24_VERSION,
+  REGISTRY_V25_VERSION,
   renderV5F09WorkflowTruthForwardRegistrySql,
+  renderV5ScheduledJobAdmissionForwardRegistrySql,
+  assertV5ScheduledJobAdmissionV25TrustRoot,
+  v5ScheduledJobAdmissionProvenance,
   R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
   renderR07RepoHygieneJanitorForwardRegistrySql,
   isDefinitionOnlyLaunchd,
@@ -205,6 +210,9 @@ const v22Migration = fs.readFileSync(
     import.meta.url), "utf8");
 const v24Migration = fs.readFileSync(
   new URL("../../migrations/0498_f09_workflow_truth_and_scac_successor.sql",
+    import.meta.url), "utf8");
+const v25Migration = fs.readFileSync(
+  new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
 const v23Migration = fs.readFileSync(
   new URL("../../migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql",
@@ -1070,7 +1078,7 @@ test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predece
   // tuple through v20 and not its own. v22 is a LATER seal and is likewise
   // absent, which is why the set is filtered rather than taken whole.
   for (const [key, seal] of Object.entries(HISTORICAL_REGISTRY_SEALS)) {
-    if (key === "v21" || key === "v22" || key === "v23") continue;
+    if (key === "v21" || key === "v22" || key === "v23" || key === "v24") continue;
     assert.ok(v21Migration.includes(
       `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
   }
@@ -1176,6 +1184,328 @@ test("v24 seals the V5-F09 workflow-truth frontier and preserves the v23 predece
   }
 });
 
+test("v25 admits the scheduled freshness and canary ingresses and preserves the v24 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V25_VERSION);
+  // NO ARGUMENT, and that is the shape rather than a convenience: the public
+  // renderer takes no caller input at all, so what it emits is decided by the
+  // frozen fixture and this module's own baseline. The hostile-input sweep
+  // below proves the absence rather than assuming it.
+  assert.equal(v25Migration, renderV5ScheduledJobAdmissionForwardRegistrySql());
+
+  // THE POINT OF THIS SUCCESSOR, and the only thing that separates it from
+  // every registry-only predecessor since v20: the frozen inventory GROWS.
+  // A re-digest could have ridden current_source_review; a new ingress cannot.
+  assert.equal(rows.length, 840);
+  assert.equal(frozenInventory(REGISTRY_V24_VERSION).length, 835);
+  for (const key of [
+    "launchd-workflow:com.carr.canonical-fast-forward",
+    "launchd-workflow:com.carr.canonical-dirty-watchdog",
+    "launchd-workflow:com.carr.gate-zero-canary",
+    "script-entrypoint:bin/gate-zero-canary.sh",
+    "script-entrypoint:ops/gate-zero-scheduler-canary-gate.py",
+  ]) {
+    assert.ok(rows.some(row => row.ingress_key === key), key);
+    assert.ok(!frozenInventory(REGISTRY_V24_VERSION).some(row => row.ingress_key === key), key);
+  }
+
+  // Registry-only: no table, no role, no domain function, and none of the
+  // predecessor's domain DDL dragged forward by the core slice.
+  assert.doesNotMatch(v25Migration, /create table (?!if not exists ops[.]scac_)/);
+  assert.doesNotMatch(v25Migration, /create or replace function ops\.enqueue_job\(/);
+  assert.doesNotMatch(v25Migration, /create or replace function ops\.current_sourced_work_requests\(/);
+  assert.doesNotMatch(v25Migration, /pg_advisory_xact_lock/);
+
+  assert.match(v25Migration,
+    /-- SCAC-12: registry-only mutation registry v25 after the scheduled freshness and canary job definitions\./);
+  assert.match(v25Migration, /scac_mutation_registry_v24_seal_available\(\)/);
+  assert.match(v25Migration, /scac_mutation_catalog_v24_live_at_seal/);
+  assert.match(v25Migration, /scac_mutation_catalog_v25_current\(\)/);
+  assert.match(v25Migration, /scac_policy_epoch_snapshot_v24/);
+  assert.doesNotMatch(v25Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  assert.doesNotMatch(v25Migration, /__V24_|__V25_|__V5_F09_V24_CATALOG_SUCCESSOR__|UNBOUND/);
+  assert.match(v25Migration, /do \$v5_scheduled_job_admission_preflight\$/);
+  // The migration states its own delta in MEASURED words, so this reads the
+  // measurement rather than a sentence someone typed. De-wrapped because the
+  // comment is hard-wrapped at 76 columns by the renderer, and a wrap that
+  // moves is not a defect.
+  const provenance = v5ScheduledJobAdmissionProvenance();
+  const dewrapped = v25Migration.replaceAll("\n-- ", " ");
+  assert.ok(dewrapped.includes(
+    `which grows from ${provenance.previous_frontier_count} to ${provenance.frontier_count} rows: ` +
+    `${provenance.admitted_description} are admitted as new ingresses`), dewrapped.slice(0, 400));
+
+  // v25 is the seal this migration CREATES, so it carries every predecessor
+  // seal tuple and none of its own.
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
+    const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
+    assert.ok(v25Migration.includes(tuple), seal.version);
+  }
+});
+
+test("the v25 admission provenance is measured from the row sets and binds every prose layer", () => {
+  // THE DEFECT THIS EXISTS FOR (PR #1006 review 2). The frontier moved from
+  // four admitted ingresses to five; the row sets, the migration and the tests
+  // followed; two prose layers did not. The fixture's reason still said
+  // "835 to 839", "four new rows" and "131 reviewed ingresses" against an
+  // 840-row overlay carrying 132 reviewed rows, and the generator's
+  // catalog-baseline comment still said one script where the migration said
+  // two. Nothing was red because nothing compared a sentence to the rows.
+  //
+  // So this test recomputes the delta from the two frozen row sets ITSELF --
+  // deliberately not by reading the provenance object's own numbers back to
+  // it -- and then requires every layer to say what the recomputation says.
+  const before = frozenInventory(REGISTRY_V24_VERSION);
+  const after = frozenInventory(REGISTRY_V25_VERSION);
+  const beforeKeys = new Set(before.map(row => row.ingress_key));
+  const afterKeys = new Set(after.map(row => row.ingress_key));
+  const admitted = after.filter(row => !beforeKeys.has(row.ingress_key));
+  const removed = before.filter(row => !afterKeys.has(row.ingress_key));
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven"];
+  const launchAgents = admitted.filter(row => row.ingress_kind === "workflow_entrypoint" &&
+    row.source_locator.startsWith("ops/launchd/")).length;
+  const scripts = admitted.filter(row => row.ingress_kind === "script_entrypoint").length;
+  assert.equal(launchAgents + scripts, admitted.length);
+
+  const provenance = v5ScheduledJobAdmissionProvenance();
+  assert.equal(provenance.previous_frontier_count, before.length);
+  assert.equal(provenance.frontier_count, after.length);
+  assert.equal(provenance.admitted_count, admitted.length);
+  assert.deepEqual([...provenance.admitted_ingress_keys],
+    admitted.map(row => row.ingress_key).sort((left, right) => left.localeCompare(right)));
+  assert.deepEqual([...provenance.removed_ingress_keys], removed.map(row => row.ingress_key));
+  assert.equal(provenance.admitted_description,
+    `${words[launchAgents]} LaunchAgent definitions and ${words[scripts]} script entrypoints`);
+
+  // The fixture is read as bytes here, not through the module that also
+  // renders the paragraph: the file on disk is the artifact a reviewer reads.
+  const fixture = JSON.parse(fs.readFileSync(
+    new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json",
+      import.meta.url), "utf8"));
+  const review = fixture.current_source_review;
+  const patch = fixture.patches.find(entry => entry.version === "v25");
+  assert.equal(provenance.reviewed_ingress_count, review.upsert.length);
+
+  // THE REVIEWED NUMBER IS THE EFFECTIVE OVERLAY'S NUMBER, derived twice here.
+  // PR #1006 review 4 found the successor report claiming 132 reviewed
+  // ingresses in one paragraph and 138 in another, because both were typed.
+  // The count is only honest if every overlay row actually supersedes the
+  // frozen row it names -- a redundant row identical to the frontier would
+  // raise the number without moving a single digest -- so the effective
+  // overlay is recomputed against the frozen rows and asserted to be the whole
+  // overlay.
+  const frozenByKey = new Map(after.map(row => [row.ingress_key, row]));
+  const canonicalJson = value => JSON.stringify(canonicalize(value));
+  const effectiveOverlay = review.upsert.filter(row =>
+    canonicalJson(row) !== canonicalJson(frozenByKey.get(row.ingress_key)));
+  assert.equal(effectiveOverlay.length, review.upsert.length);
+  assert.equal(provenance.reviewed_ingress_count, effectiveOverlay.length);
+
+  assert.equal(provenance.patch_redigested_count,
+    patch.upsert.filter(row => beforeKeys.has(row.ingress_key)).length);
+  assert.equal(patch.upsert.length, admitted.length + provenance.patch_redigested_count);
+
+  // THE COUNTS IN THE REASON ARE THE OVERLAY'S REAL COUNTS. Every number in
+  // the closing paragraph is asserted against the recomputation above, and the
+  // paragraph is asserted to be the end of the reason, so a count typed into
+  // the fixture by hand cannot survive either check.
+  const paragraph = provenance.review_reason_paragraph;
+  assert.ok(review.reason.endsWith(paragraph), review.reason.slice(-600));
+  assert.ok(paragraph.includes(`grows from ${before.length} to ${after.length} rows`), paragraph);
+  assert.ok(paragraph.includes(`admitting ${words[admitted.length]} new ingresses`), paragraph);
+  assert.ok(paragraph.includes(
+    `${words[launchAgents]} LaunchAgent definitions and ${words[scripts]} script entrypoints`), paragraph);
+  assert.ok(paragraph.includes(`plus ${words[provenance.patch_redigested_count] ??
+    provenance.patch_redigested_count} already-known rows`), paragraph);
+  assert.ok(paragraph.includes(`${review.upsert.length} reviewed ingresses`), paragraph);
+  assert.ok(paragraph.includes("and removing none"), paragraph);
+  for (const key of provenance.admitted_ingress_keys) assert.ok(paragraph.includes(key), key);
+
+  // THE BRANCH-MOVED LIST IS DERIVED, NOT TYPED (PR #1006 review 4, finding 3).
+  // A row this branch re-digested after the v25 patch was cut shows up as an
+  // overlay row whose bytes differ from the patch row of the same key -- which
+  // is how correction 3's canary-gate re-digest went unnamed for a whole round
+  // while a hand-written sentence listed three other files. Recomputed from the
+  // fixture bytes and asserted against both the provenance object and the
+  // paragraph a reviewer reads.
+  const patchByKey = new Map(patch.upsert.map(row => [row.ingress_key, row]));
+  const resealed = review.upsert
+    .filter(row => patchByKey.has(row.ingress_key) &&
+      canonicalJson(patchByKey.get(row.ingress_key)) !== canonicalJson(row))
+    .map(row => row.ingress_key)
+    .sort((left, right) => left.localeCompare(right));
+  assert.deepEqual([...provenance.overlay_resealed_ingress_keys], resealed);
+  for (const key of resealed) assert.ok(paragraph.includes(key), key);
+
+  // And no OTHER sentence in the accreted reason may claim a frontier
+  // transition: the superseded "835 to 839" was exactly that shape, sitting in
+  // a paragraph nobody re-read. The frontier check enforces the same rule, so
+  // this fails in ops/ci.sh --only gates as well as here.
+  assert.deepEqual([...review.reason.matchAll(/\b\d{3} to \d{3}\b/g)].map(match => match[0]),
+    [`${before.length} to ${after.length}`]);
+
+  // The migration says the same measured thing, and the generator states no
+  // count of its own in prose any more -- a comment cannot be derived, so it
+  // must not carry the number that drifted.
+  const generator = fs.readFileSync(
+    new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
+  const comments = generator.split("\n").filter(line => line.trim().startsWith("//"));
+  for (const line of comments)
+    assert.doesNotMatch(line, /(three|four|five) LaunchAgent definitions/, line.trim());
+  assert.ok(v25Migration.replaceAll("\n-- ", " ").includes(
+    `${provenance.admitted_description} are admitted as new ingresses`));
+});
+
+test("the Gate Zero canary agent passes only arguments the wrapper's own parser accepts", () => {
+  // THE DEFECT THIS EXISTS FOR (PR #1006 review 1): the plist passed a retired
+  // `evidence ref file` option, and bin/run-scheduled.sh treats an unrecognised
+  // flag as the FIRST POSITIONAL argument rather than refusing it. The service
+  // key would have been the flag, the run key the path, and the command the
+  // word after it. Nothing was red, because nothing ran the two files together.
+  //
+  // The recognised options are read OUT OF THE WRAPPER, not restated here: a
+  // future option added there is covered without editing this test, and an
+  // option removed there turns a plist that still passes it red.
+  const wrapper = fs.readFileSync(
+    new URL("../../bin/run-scheduled.sh", import.meta.url), "utf8");
+  const loop = wrapper.slice(wrapper.indexOf('while [ "$#" -gt 0 ]; do'),
+    wrapper.indexOf("done", wrapper.indexOf('while [ "$#" -gt 0 ]; do')));
+  const recognised = [...loop.matchAll(/^\s{4}(-{1,2}[a-z-]*)\)/gm)].map(match => match[1]);
+  assert.deepEqual(recognised.sort(), ["--", "--also-heartbeat", "--heartbeat-interval"]);
+
+  const plist = fs.readFileSync(
+    new URL("../../ops/launchd/com.carr.gate-zero-canary.plist", import.meta.url), "utf8");
+  const start = plist.indexOf("<key>ProgramArguments</key>");
+  assert.ok(start > 0);
+  const array = plist.slice(plist.indexOf("<array>", start), plist.indexOf("</array>", start));
+  const argv = [...array.matchAll(/<string>([^<]*)<\/string>/g)].map(match => match[1]);
+  assert.deepEqual(argv, [
+    "/bin/zsh",
+    "{{REPO}}/bin/run-scheduled.sh",
+    "gate-zero-canary",
+    "gatezero.canary",
+    "/bin/zsh",
+    "{{REPO}}/bin/gate-zero-canary.sh",
+  ]);
+  // Anything option-shaped after the wrapper has to be one the loop above
+  // recognises. Today there is none, and that is the assertion: a positional
+  // shape cannot be misread as an option, and an option cannot be misread as a
+  // positional.
+  for (const argument of argv.slice(2)) {
+    if (argument.startsWith("-")) assert.ok(recognised.includes(argument), argument);
+  }
+  assert.equal(plist.includes("evidence-ref-file"), false);
+
+  // And the child is a no-op: one statement, no file, no output. A canary that
+  // writes something can fail at writing it, and a failed canary row says the
+  // scheduler is broken about a scheduler that just proved it works.
+  const canary = fs.readFileSync(
+    new URL("../../bin/gate-zero-canary.sh", import.meta.url), "utf8");
+  const statements = canary.split("\n")
+    .filter(line => line.trim() && !line.startsWith("#"));
+  assert.deepEqual(statements, ["exit 0"]);
+
+  // The end-to-end proof that all of this actually produces the row card 12
+  // reads lives where a database exists: ops/gate-zero-scheduler-canary-gate.py,
+  // which the migration class runs on its disposable Postgres. Its `# ci:
+  // db-gate` marker is what wires it, so the marker is asserted here.
+  const gate = fs.readFileSync(
+    new URL("../../ops/gate-zero-scheduler-canary-gate.py", import.meta.url), "utf8");
+  assert.match(gate, /^# ci: db-gate$/m);
+  assert.match(gate, /readSchedulerCanaryEvidence/);
+  assert.match(gate, /receipt_binding/);
+  assert.match(gate, /observation_after_dispatch/);
+});
+
+test("the v25 public surface admits no caller input under any shape", () => {
+  // THE MANDATORY SWEEP of the 2026-09-11 standing rule, for every export this
+  // branch adds -- the renderer, the trust root and the provenance, each named
+  // in the loop at the end of this test rather than counted here, because the
+  // count in this comment went stale the moment the third one arrived (PR
+  // #1006 review 4). The renderer and the trust root were plain functions
+  // reading caller-supplied values until PR #1006 review 1: the renderer took
+  // `rows` and a `predecessorArtifacts`
+  // holder, so a Proxy get trap threw the caller's own value back out and a
+  // caller-supplied row carrying a privileged word landed in the returned SQL.
+  const canonical = renderV5ScheduledJobAdmissionForwardRegistrySql();
+  const canonicalProvenance = v5ScheduledJobAdmissionProvenance();
+  const marker = "HOSTILEMARKERTEXT";
+  const privileged = [
+    "allow", "commit", "prompt", "suppress", "release", "read", "covered",
+    "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
+    "satisfied", "complete", "admitted", "resumed", "attended", "verified",
+    "present", "equivalent", "operational", "active", "green", "joins_exactly",
+    "coverage_complete", "favorable", "would_", "_if_authoritative",
+  ];
+  const hostileRow = {
+    ingress_key: `mcp-tool:${marker}`, source_locator: `${marker}/allow.js`,
+    source_digest: "0".repeat(64), implementation_state: "passing",
+    entry_digest: `sha256:${"f".repeat(64)}`,
+  };
+  const throwingProxy = new Proxy({}, {
+    get() { throw marker; },
+    has() { throw marker; },
+    getPrototypeOf() { throw marker; },
+  });
+  const inputs = [
+    [], [undefined], [null], [[hostileRow]], [[hostileRow], { secdef_execute: { count: 1, digest: marker } }],
+    [[hostileRow], undefined, { migration: marker, runtime: marker }],
+    [[hostileRow], undefined, throwingProxy],
+    [throwingProxy], [throwingProxy, throwingProxy, throwingProxy],
+    [{ length: 1, 0: hostileRow }], ["allow"], [Symbol.iterator], [() => [hostileRow]],
+  ];
+  for (const argv of inputs) {
+    const label = `input ${JSON.stringify(argv.map(value => typeof value))}`;
+    const rendered = renderV5ScheduledJobAdmissionForwardRegistrySql(...argv);
+    assert.equal(rendered, canonical, label);
+    assert.equal(rendered.includes(marker), false, label);
+    assert.equal(assertV5ScheduledJobAdmissionV25TrustRoot(...argv), undefined, label);
+    // The provenance export is on this sweep too: it MEASURES a delta and
+    // renders the sentences three other files carry, so a caller that could
+    // steer it could steer the provenance of the seal itself.
+    assert.deepEqual(v5ScheduledJobAdmissionProvenance(...argv), canonicalProvenance, label);
+  }
+  // The canonical artifact carries no privileged word of its own as a bare
+  // token either, beyond the SQL vocabulary the migration is written in. This
+  // asserts the narrower thing the sweep is actually for: nothing a CALLER can
+  // name reaches the output, so the only occurrences are this repository's own.
+  assert.equal(privileged.some(word => canonical.includes(`${marker}${word}`)), false);
+
+  // Amendment 2's closed shape for an exported callable, on each export the
+  // loop below names -- the list, not a count, is what has to stay true: not
+  // constructable, no prototype, and an own Symbol.hasInstance data property
+  // that answers without touching the left operand.
+  const closedSurface = [
+    ["renderV5ScheduledJobAdmissionForwardRegistrySql", renderV5ScheduledJobAdmissionForwardRegistrySql],
+    ["assertV5ScheduledJobAdmissionV25TrustRoot", assertV5ScheduledJobAdmissionV25TrustRoot],
+    ["v5ScheduledJobAdmissionProvenance", v5ScheduledJobAdmissionProvenance],
+  ];
+
+  // A FOURTH CLOSED EXPORT CANNOT ARRIVE UNSWEPT. Two comments counted this
+  // surface instead of naming it and both went stale when the provenance
+  // export landed; the durable fix is that the LIST is now checked against the
+  // module's own text, so an export added without a line in this sweep fails
+  // here rather than in a reviewer's diff.
+  const generatorSource = fs.readFileSync(
+    new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
+  assert.deepEqual(
+    [...generatorSource.matchAll(/^export const (\w+) =\s*\n\s*closedExport\(/gm)]
+      .map(match => match[1]).sort(),
+    closedSurface.map(([name]) => name).sort());
+
+  for (const [name, exported] of closedSurface) {
+    assert.equal(typeof exported, "function", name);
+    assert.equal(Object.hasOwn(exported, "prototype"), false, name);
+    assert.throws(() => Reflect.construct(exported, []), TypeError, name);
+    const descriptor = Object.getOwnPropertyDescriptor(exported, Symbol.hasInstance);
+    assert.equal(descriptor.writable, false, name);
+    assert.equal(descriptor.configurable, false, name);
+    assert.equal(typeof descriptor.value, "function", name);
+    // The left operand is never touched: a Proxy whose getPrototypeOf throws
+    // would otherwise carry its own thrown value out of an export.
+    assert.equal(throwingProxy instanceof exported, false, name);
+  }
+});
+
 test("v23 seals the R07 repo-hygiene janitor frontier and preserves the v22 predecessor", () => {
   const rows = frozenInventory(REGISTRY_V23_VERSION);
   assert.equal(v23Migration, renderR07RepoHygieneJanitorForwardRegistrySql(rows));
@@ -1201,10 +1531,12 @@ test("v23 seals the R07 repo-hygiene janitor frontier and preserves the v22 pred
   assert.match(v23Migration, /do \$r07_repo_hygiene_janitor_preflight\$/);
 
   // v23 is the seal this migration CREATES, so it carries every predecessor
-  // seal tuple and none of its own.
+  // seal tuple and none of its own -- nor any of its SUCCESSORS', which is what
+  // the ordinal comparison below says rather than naming v23 alone.
   for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
     const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
-    assert.equal(v23Migration.includes(tuple), seal.version !== REGISTRY_V23_VERSION, seal.version);
+    const ordinal = Number(seal.version.split(".v").at(-1));
+    assert.equal(v23Migration.includes(tuple), ordinal < 23, seal.version);
   }
   // Every earlier generated artifact is untouched byte-for-byte.
   assert.equal(v22Migration, renderDoctorcrePortfolioForwardRegistrySql(
@@ -1461,11 +1793,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 32);
+  assert.equal(migrations.length, 33);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 23);
-  assert.equal(paths.length, 55);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 24);
+  assert.equal(paths.length, 57);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -1598,7 +1930,12 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // TRACKED: the inventory enumerates git, so an untracked new gate is
   // invisible to this assertion and the count shifts at `git add`, not at
   // save.
-  assert.equal(rows.length, 545);
+  // 545 before the v25 registry successor; admitting the Gate Zero canary adds
+  // two reviewed non-MCP sources, bin/gate-zero-canary.sh and the acceptance
+  // gate that runs it end to end, ops/gate-zero-scheduler-canary-gate.py. The
+  // three new LaunchAgents are workflow_entrypoint rows and are filtered out
+  // above.
+  assert.equal(rows.length, 547);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -1606,8 +1943,9 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  // 534 before this branch; same single new executable gate.
-  assert.equal(scripts.length, 536);
+  // 534 before the portfolio tail, 536 before v25; two new executables,
+  // bin/gate-zero-canary.sh and ops/gate-zero-scheduler-canary-gate.py.
+  assert.equal(scripts.length, 538);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -1695,7 +2033,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 32);
+  assert.equal(workflows.length, 35);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -1707,7 +2045,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  assert.equal(launchd.length, 25);
+  assert.equal(launchd.length, 28);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -1721,7 +2059,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 25);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, 28);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in
@@ -1732,6 +2070,28 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     .map(row => row.launchd_label), ["com.carr.repo-hygiene-janitor"]);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.repo-hygiene-janitor")
     .physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")), false);
+  // The three agents the v25 registry successor admitted. THE CANARY IS NOT
+  // DEFINITION-ONLY BY THIS PREDICATE and must not be pinned as if it were:
+  // isDefinitionOnlyLaunchd asks whether the plist carries any trigger at all,
+  // and the canary carries a real hourly StartInterval. What keeps it
+  // uninstalled is ops/config-as-code.py's DEFINITION_ONLY list, which is a
+  // different mechanism in a different file, so that is where this asserts it.
+  for (const label of ["com.carr.canonical-fast-forward", "com.carr.canonical-dirty-watchdog",
+    "com.carr.gate-zero-canary"]) {
+    const row = launchd.find(entry => entry.launchd_label === label);
+    assert.ok(row, label);
+    assert.ok(row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")), label);
+    assert.ok(Object.keys(row.trigger_contract || {}).length > 0 ||
+      row.trigger_contract_digest, label);
+  }
+  const configAsCode = fs.readFileSync(
+    new URL("../../ops/config-as-code.py", import.meta.url), "utf8");
+  const definitionOnlyBlock = configAsCode.slice(
+    configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
+    configAsCode.indexOf("\n}\n", configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
+  assert.match(definitionOnlyBlock, /"com\.carr\.gate-zero-canary\.plist"/);
+  assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.canonical-fast-forward\.plist"/);
+  assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.canonical-dirty-watchdog\.plist"/);
   assert.deepEqual(launchd.flatMap(row => row.physical_authority_refs)
     .filter(ref => ref.startsWith("ops.legacy_schedule_launchd_contract:")).sort(), [
       "ops.legacy_schedule_launchd_contract:calendar-fetch-daily.launchd.v1",

@@ -413,6 +413,66 @@
     },
 
     {
+      "key": "canonical-fast-forward",
+      "name": "Canonical checkout fast-forward",
+      "purpose": "WR-000040 AC-FRESH. Keeps the shared checkout at ~/carr-system within one day of origin/main, and never buys that with somebody's edit: it refuses on tracked modifications, refuses off main, refuses when canonical is ahead, and its only branch-moving command is `git merge --ff-only`. No reset, no checkout of a path, no clean, no stash. See lib/canonical_freshness.py, reached through tools/repo-hygiene-janitor.py --canonical-freshness fast-forward.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "lib/canonical_freshness.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.canonical-fast-forward.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 108000,
+          "notes": "Daily at 03:20 local, per Joe's AC-FRESH cadence ruling (decision fa8ae14b-e6fe-4e1b-ae98-0b6eb5a255f8, 2026-09-11). Grace is 1.25x the cadence because a succeeded row rides the local spool (tools/ops-spool.py) and lands at the next run-spool-flush, up to ~1800s after the fire. A REFUSAL IS NOT A FAILURE OF THIS SERVICE: exit 3 (tracked dirt), 4 (ahead of origin) and 7 (wrong branch) mean the job correctly declined to move somebody's tree, and com.carr.canonical-dirty-watchdog is the surface that pages about the condition. This service going quiet is what matters here, which is why it has a cadence at all."
+        }
+      ]
+    },
+
+    {
+      "key": "canonical-dirty-watchdog",
+      "name": "Canonical checkout dirty/staleness watchdog",
+      "purpose": "WR-000040 AC-FRESH, the alarm half. Observes the canonical checkout ALONE — it never calls the fast-forward and never reads anything the fast-forward wrote — so it still pages when that agent is unloaded, its program is missing, or the machine slept through every window. Pages on an unobservable repository, tracked dirt, a branch other than main, staleness past the 24h bar, canonical holding commits origin/main does not have, and an unverifiable fetch. Untracked paths are counted and named, never alarmed: AC-CLEAN routes those to Joe per path.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "lib/canonical_freshness.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.canonical-dirty-watchdog.plist",
+          "expected_cadence_seconds": 3600,
+          "cadence_grace_seconds": 5400,
+          "notes": "Hourly, per the same AC-FRESH cadence ruling. Criticality HIGH although the job only reads: it is the only surface that reports the fast-forward never having fired, and launchd says nothing when it drops an agent. It pages by two independent routes — a report-problem record through run.sh, and a nonzero exit that this wrapper turns into a failed run row — so an unreachable store cannot silence it. Grace is 1.5x the cadence for the same spool delay as its sibling."
+        }
+      ]
+    },
+
+    {
+      "key": "gate-zero-canary",
+      "name": "Gate Zero scheduler canary",
+      "purpose": "The no-op job whose only product is proof that the scheduler ran it. Gate Zero's fourth predecessor step, step:scheduler-active-receipt, needs an ops.run row bound to a receipt — non-null evidence_ref, written by bin/run-scheduled.sh with source_kind wrapper — plus an observation strictly after that dispatch; mcp-server/src/gate-zero-seam-readers.v5.js is the reader that judges it. Measured 2026-09-11 against production: 28,309 runs, 21,894 of them from the wrapper, and ZERO carrying an evidence_ref, so the clause was unsatisfiable by any row in the ledger's history rather than merely unmet. WHY A DEDICATED JOB: a real job's row conflates 'the scheduler fired' with 'the work succeeded', and a red row cannot be read for the first without knowing the second. This job has no work to fail at, so its row is a clean statement about the scheduler alone.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "bin/gate-zero-canary.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.gate-zero-canary.plist",
+          "expected_cadence_seconds": 3600,
+          "cadence_grace_seconds": 5400,
+          "notes": "NOT YET ACTIVATED, deliberately: the plist is held in DEFINITION_ONLY in ops/config-as-code.py, so installing it is Joe's own act and its presence in ~/Library/LaunchAgents is a drift finding until he takes it off that list. Until then this service has no runs and reads unknown — the honest answer for a job nobody has started, and the same posture carr-mcp already takes. CRITICALITY IS LOW because nothing depends on the canary's own work: it has none. What depends on it is one gate's ability to ask a question, and that gate reads a missing canary correctly today. Grace 5400s against a 3600s cadence covers the 30-minute run-spool flush (tools/ops-spool.py) exactly as notes-sweep's and run-spool-flush's graces do: a succeeded row queues locally and lands at the next flush, so the worst honest gap is one interval plus one flush."
+        }
+      ]
+    },
+
+    {
       "key": "npi-sweep-weekly",
       "name": "Weekly NPI new-provider sweep",
       "purpose": "NPPES weekly file to territory lead digest and hot-leads dashboard.",

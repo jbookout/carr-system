@@ -280,6 +280,18 @@ DEFINITION_ONLY: dict[str, str] = {
         "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
         "gate is a separately reviewed live-effect packet, so the definition is "
         "written down and left uninstalled until that packet is approved",
+    # Added 2026-09-11 with the canary itself. The job is a no-op and its only
+    # product is an ops.run row bound to a receipt, so nothing it does is
+    # dangerous -- what is gated is the ACT OF STARTING A SCHEDULE, which is a
+    # human's to take. It is held here rather than simply left out of the repo
+    # because the alternative is a schedule that exists only as a command
+    # somebody has to remember to type, which is the two-homes disease this
+    # whole file exists to cure.
+    "com.carr.gate-zero-canary.plist":
+        "the Gate Zero scheduler canary would begin producing scheduled run "
+        "rows the moment it loads; starting a schedule is Joe's act, so the "
+        "definition is written down and left uninstalled until he takes it off "
+        "this list deliberately",
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
