@@ -73,10 +73,60 @@ function own(target, key, value, enumerable) {
   Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
 }
 
+/**
+ * A GUARDED FIELD READ, the real store module's `cell` under its own name, and
+ * it is here for the reason that module has one: the three fetchers below are
+ * EXPORTS, the sweep calls every export with a revoked Proxy and with an object
+ * whose getters throw, and a plain `query?.canaryRunKey` answers those with the
+ * CALLER'S own text out of an exported callable.
+ */
+function cell(holder, key) {
+  try {
+    return holder === null || holder === undefined ? undefined : Reflect.get(Object(holder), key);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A CASE IS ADDRESSED BY AN OWN STRING KEY OR IT IS NOT ADDRESSED AT ALL.
+ * `TABLE[key]` with a caller's value reaches `constructor` and `__proto__` as
+ * readily as it reaches a canary name, and coerces an object key through a
+ * `toString` the caller wrote. Neither is a row this fixture holds.
+ */
+function rowsFor(table, key) {
+  return typeof key === "string" && Object.hasOwn(table, key) ? table[key] : [];
+}
+
+/**
+ * THE CLOSED SHAPE FOR AN EXPORTED CALLABLE — amendment 2 of 2026-09-12, clauses
+ * (a) and (b) — and it belongs in a FIXTURE for a concrete reason rather than
+ * for symmetry: this file is copied OVER src/gate-zero-seam-stores.v5.js, so
+ * what the staged reader imports is THIS surface. A fixture whose exports carry
+ * a `prototype`, answer `instanceof` with the intrinsic — which walks the LEFT
+ * operand's chain and runs a caller's getPrototypeOf trap — or hand the raw
+ * class back through `.constructor` is a weaker surface than the one production
+ * ships, and every clause proved across the staged module would be proved over a
+ * shape that never runs.
+ *
+ * Bound rather than bare, for the reason the real module gives: the engine's
+ * refusal of a construction quotes a BARE arrow's own SOURCE TEXT back, and this
+ * file's source is no more shippable than the real one's. A bound arrow is still
+ * not a constructor and still has no `prototype`; the refusal names
+ * `function () { [native code] }` and nothing of this file.
+ */
+function closedCallable(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return closed;
+}
+
 function causeKind(cause) {
   try {
     if (cause === undefined || cause === null) return "none";
-    if (isSeamStoreUnreachable(cause)) return "a-seam-store-that-was-unreachable";
+    if (seamStoreInstance(cause)) return "a-seam-store-that-was-unreachable";
     if (cause instanceof Error) return "an-error";
     return "not-an-error";
   } catch {
@@ -107,16 +157,51 @@ class SeamStoreUnreachableType extends Error {
   }
 }
 
-export const seamStoreUnreachable =
-  (storeRef, because, cause) => new SeamStoreUnreachableType(storeRef, because, cause);
+export const seamStoreUnreachable = closedCallable(
+  (storeRef, because, cause) => new SeamStoreUnreachableType(storeRef, because, cause));
 
-export const isSeamStoreUnreachable = value => {
+/**
+ * AND THE WALK IS BOUNDED, which the intrinsic `instanceof` is not: a Proxy
+ * whose getPrototypeOf trap answers with ITSELF makes an unbounded walk never
+ * return, and a hang is a refusal the caller chose. A chain longer than this is
+ * not a chain that reaches this type.
+ */
+const PROTOTYPE_WALK_LIMIT = 100;
+
+function seamStoreInstance(value) {
   try {
-    return value instanceof SeamStoreUnreachableType;
+    if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
+    let walked = Reflect.getPrototypeOf(value);
+    for (let step = 0; step < PROTOTYPE_WALK_LIMIT; step += 1) {
+      if (walked === null || walked === undefined) return false;
+      if (walked === SeamStoreUnreachableType.prototype) return true;
+      walked = Reflect.getPrototypeOf(walked);
+    }
+    return false;
   } catch {
     return false;
   }
-};
+}
+
+export const isSeamStoreUnreachable = closedCallable(value => seamStoreInstance(value));
+
+/**
+ * AND AN INSTANCE IS NOT A ROUTE BACK TO THE CLASS EITHER. Every class installs
+ * its own unwrapped self on `prototype.constructor`, so a refusal this file
+ * returns WAS a route to a constructable class — the sixth review round's first
+ * finding, and `Reflect.construct(error.constructor, [])` succeeded on it. It is
+ * redefined as the arrow factory, non-writable and non-configurable, and the
+ * prototype is frozen afterwards so it cannot be redefined back. The private
+ * `Symbol.hasInstance` beside it keeps this file's OWN membership questions from
+ * walking a hostile operand's chain with the intrinsic.
+ */
+Object.defineProperty(SeamStoreUnreachableType.prototype, "constructor", {
+  value: seamStoreUnreachable, writable: false, enumerable: false, configurable: false,
+});
+Object.defineProperty(SeamStoreUnreachableType, Symbol.hasInstance, {
+  value: seamStoreInstance, writable: false, enumerable: false, configurable: false,
+});
+Object.freeze(SeamStoreUnreachableType.prototype);
 
 /**
  * The same reductions the real store applies, spelled the same way. `digest` is
@@ -367,33 +452,47 @@ const HOSTILE_ANSWER = {
   get rows() { throw new Error("HOSTILEMARKERTEXT-from-a-store-answer"); },
 };
 
-export async function fetchPredecessorOutcomeRows(query) {
-  const workRequestRef = query?.workRequestRef;
+// ---------------------------------------------------------------------------
+// THE PUBLIC SURFACE, in the closed shape of amendment 2: three bound arrows,
+// each reading its query through the guarded `cell` and addressing its case by
+// an own string key.
+//
+// THE TWO UNGUARDED DOORS BELOW ARE ADDRESSED, NOT OPEN, and that is the whole
+// distinction this file rests on. `throw "allow"` and the hostile answer are
+// what make the READER'S own boundary reachable, so they cannot be removed — but
+// neither is reachable by a hostile value: each fires only for a caller who
+// already holds the exact FIXTURE_ constant this file exports for it. Every
+// other input, hostile ones included, leaves by a conforming door, and the sweep
+// in gate-zero-seam-readers.v5.test.mjs asserts both halves of that.
+// ---------------------------------------------------------------------------
+
+export const fetchPredecessorOutcomeRows = closedCallable(async query => {
+  const workRequestRef = cell(query, "workRequestRef");
   const storeRef = "record-layer:work-request-outcome-feedback";
   if (workRequestRef === FIXTURE_UNREACHABLE)
     throw seamStoreUnreachable(storeRef, "the query did not finish");
-  return { store_ref: storeRef, rows: PREDECESSOR_ROWS[workRequestRef] ?? [] };
-}
+  return { store_ref: storeRef, rows: rowsFor(PREDECESSOR_ROWS, workRequestRef) };
+});
 
-export async function fetchSchedulerLedgerRows(query) {
-  const serviceKey = query?.serviceKey;
-  const canaryRunKey = query?.canaryRunKey;
+export const fetchSchedulerLedgerRows = closedCallable(async query => {
+  const serviceKey = cell(query, "serviceKey");
+  const canaryRunKey = cell(query, "canaryRunKey");
   const storeRef = "control-plane:ops.service+ops.run";
   if (canaryRunKey === FIXTURE_UNREACHABLE)
     throw seamStoreUnreachable(storeRef, "the query did not finish");
   if (canaryRunKey === FIXTURE_RAW_THROW) throw "allow";
   if (canaryRunKey === FIXTURE_HOSTILE_ANSWER) return HOSTILE_ANSWER;
   if (canaryRunKey === FIXTURE_WRONG_STORE)
-    return { store_ref: "github:checks", rows: SCHEDULER_ROWS["canary-join"] };
+    return { store_ref: "github:checks", rows: rowsFor(SCHEDULER_ROWS, "canary-join") };
   if (serviceKey !== "carr-fleet-sync" && serviceKey !== "release-canary")
     return { store_ref: storeRef, rows: [] };
-  return { store_ref: storeRef, rows: SCHEDULER_ROWS[canaryRunKey] ?? [] };
-}
+  return { store_ref: storeRef, rows: rowsFor(SCHEDULER_ROWS, canaryRunKey) };
+});
 
-export async function fetchCheckConclusionRows(query) {
-  const checkName = query?.checkName;
+export const fetchCheckConclusionRows = closedCallable(async query => {
+  const checkName = cell(query, "checkName");
   const storeRef = "github:checks";
   if (checkName === FIXTURE_UNREACHABLE)
     throw seamStoreUnreachable(storeRef, "the checks source was not reachable");
-  return { store_ref: storeRef, rows: CHECK_ROWS[checkName] ?? [] };
-}
+  return { store_ref: storeRef, rows: rowsFor(CHECK_ROWS, checkName) };
+});

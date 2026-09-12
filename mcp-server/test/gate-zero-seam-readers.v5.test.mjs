@@ -1729,6 +1729,198 @@ test("STAGING: both fixture store modules cover every export the real one has", 
   }
 });
 
+// ---------------------------------------------------------------------------
+// AND EXPORT NAMES ARE NOT THE WHOLE CONTRACT — the shape is the other half.
+//
+// FINDINGS 1 AND 2 OF THE SIXTH RE-REVIEW. The parity check above asks that the
+// fixtures carry the real module's export NAMES, and it stops there; the
+// exhaustive sweep asked the shape question of the three production namespaces
+// and never of a fixture. So both fixtures shipped the pre-amendment shape —
+// plain `export async function` fetchers with no `Symbol.hasInstance`, and error
+// instances whose `.constructor` was the constructable private class — under
+// names the parity check was happy with.
+//
+// That gap is not cosmetic, because of what these two files ARE: each is copied
+// OVER src/gate-zero-seam-stores.v5.js, and the staged reader imports whichever
+// is in place. Every RULED clause below this line is therefore proved against a
+// store surface that, until this test existed, was weaker than the one
+// production runs. The sweep now asks both fixtures the same questions in the
+// same words, through the same two functions the production sweep uses.
+// ---------------------------------------------------------------------------
+
+const SWEPT_FIXTURE_NAMESPACES = () => [
+  ["fixtureStores", fixtureStores], ["receiptStores", receiptStores]];
+
+/**
+ * One fixture namespace, against the whole closed shape:
+ *
+ *   sweepEveryInvocation  every export — `assertClosedCallable` on each callable
+ *                         (no `.prototype`, non-constructable, a non-writable
+ *                         non-configurable `Symbol.hasInstance` DATA property
+ *                         that never reads the operand) and then every hostile
+ *                         argument from every privileged-named caller, with
+ *                         whatever returns or throws swept whole.
+ *   sweepErrorFactory     the error factory, with every hostile value in every
+ *                         argument position, and every produced error walked for
+ *                         a `.constructor` that reaches a constructable class.
+ */
+async function assertFixtureSurfaceClosed(label, namespace) {
+  await sweepEveryInvocation(label, namespace);
+  sweepErrorFactory(`${label}.seamStoreUnreachable`, namespace.seamStoreUnreachable);
+}
+
+test("STAGING: both fixture namespaces hold the closed shape the real module does", async () => {
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    let callables = 0;
+    for (const [label, namespace] of SWEPT_FIXTURE_NAMESPACES()) {
+      for (const value of Object.values(namespace))
+        if (typeof value === "function") callables += 1;
+      await assertFixtureSurfaceClosed(label, namespace);
+    }
+    // Two factories, two predicates and six fetchers. A fixture that grows a
+    // callable fails here rather than quietly skipping the loop above.
+    assert.equal(callables, 10,
+      "a fixture's callable surface moved without this count following it");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("STAGING: the fixture's two unguarded doors are reachable only by their own address", async () => {
+  // THE ONE THING THE SWEEP ABOVE CANNOT SAY, said here instead. The store
+  // fixture DELIBERATELY throws a bare `"allow"` and DELIBERATELY returns an
+  // answer whose getters throw — they are what make the reader's own guarded
+  // boundary reachable, and removing them would quietly unprove it. So the
+  // honest claim is not that this surface never misbehaves; it is that each
+  // misbehaviour is behind an EXACT address only this file's own exported
+  // constant opens, which is why no hostile input in the sweep can reach one.
+  //
+  // Both halves are asserted: the doors are still live, and nothing near them
+  // opens them.
+  const rawThrow = await fixtureStores.fetchSchedulerLedgerRows({
+    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_RAW_THROW })
+    .then(() => null, thrown => thrown);
+  assert.equal(rawThrow, "allow", "the raw-throw canary stopped throwing, so the reader's boundary is unproved");
+
+  const hostile = await fixtureStores.fetchSchedulerLedgerRows({
+    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_HOSTILE_ANSWER });
+  assert.throws(() => hostile.store_ref,
+    "the hostile-answer canary stopped throwing, so the reader's boundary is unproved");
+
+  // NEAR MISSES. A key that merely looks like the address — cased differently,
+  // padded, wrapped in an object whose toString returns it, or carried in an
+  // array — addresses nothing, so no caller reaches a door by coercion.
+  const near = [
+    `${fixtureStores.FIXTURE_RAW_THROW} `,
+    fixtureStores.FIXTURE_RAW_THROW.toUpperCase(),
+    { toString: () => fixtureStores.FIXTURE_RAW_THROW },
+    [fixtureStores.FIXTURE_RAW_THROW],
+    { toString: () => fixtureStores.FIXTURE_HOSTILE_ANSWER },
+  ];
+  for (const canaryRunKey of near) {
+    const answer = await fixtureStores.fetchSchedulerLedgerRows({
+      serviceKey: "carr-fleet-sync", canaryRunKey });
+    assert.deepEqual(answer, { store_ref: "control-plane:ops.service+ops.run", rows: [] },
+      `${safeLabel(canaryRunKey)} reached a door it does not address`);
+  }
+
+  // AND A CASE IS ADDRESSED BY AN OWN KEY, not by anything on Object.prototype:
+  // `TABLE["constructor"]` used to answer with a function, which is a row no
+  // fixture holds and a value no reader could read.
+  for (const inherited of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    const ledger = await fixtureStores.fetchSchedulerLedgerRows({
+      serviceKey: "carr-fleet-sync", canaryRunKey: inherited });
+    assert.deepEqual(ledger.rows, [], `${inherited} reached Object.prototype through the row table`);
+    const checks = await fixtureStores.fetchCheckConclusionRows({ checkName: inherited });
+    assert.deepEqual(checks.rows, [], `${inherited} reached Object.prototype through the row table`);
+    const receipt = await receiptStores.fetchPredecessorOutcomeRows({ workRequestRef: inherited });
+    assert.deepEqual(receipt.rows, [], `${inherited} reached Object.prototype through the row table`);
+  }
+});
+
+test("STAGING CONTROL: each door the fixture-surface sweep closes has been seen to fail", async () => {
+  // A check nobody has seen fail is a check nobody has tested, and this whole
+  // test is new. ONE PLANT PER CLAUSE, each a namespace identical to the shipped
+  // fixture in every way but one, so a failure is attributable to that one.
+  const closed = callable => {
+    const bound = callable.bind(null);
+    Object.defineProperty(bound, Symbol.hasInstance,
+      { value: () => false, writable: false, enumerable: false, configurable: false });
+    return bound;
+  };
+  const answer = { store_ref: "github:checks", rows: [] };
+
+  const plants = [
+    // 1 — the shape BEFORE this correction on the fetchers' side, spelled as an
+    //     ordinary function: constructable, and carrying the `prototype` a
+    //     foreign new.target is read against.
+    ["a-plain-function-fetcher", { ...fixtureStores,
+      fetchCheckConclusionRows: function fetchCheckConclusionRows() { return answer; } }],
+    // 2 — bound and non-constructable, and answering `instanceof` with the
+    //     intrinsic: the exact miss finding 1 of the sixth round names, which
+    //     walks the LEFT operand's chain and runs a caller's own trap.
+    ["a-fetcher-without-hasInstance", { ...fixtureStores,
+      fetchCheckConclusionRows: (async () => answer).bind(null) }],
+    // 3 — closed in shape and naive in its reads: `query?.checkName` on a
+    //     revoked Proxy or a throwing getter answers with the caller's own text.
+    ["a-fetcher-that-reads-the-query-naively", { ...fixtureStores,
+      fetchCheckConclusionRows: closed(async query => ({ ...answer, asked: query?.checkName ?? null })) }],
+    // 4 — a constant that is not a callable at all: the non-function branch of
+    //     the sweep is live too.
+    ["a-constant-carrying-a-privileged-word", { ...fixtureStores, FIXTURE_UNREACHABLE: "green" }],
+  ];
+  for (const [label, plant] of plants) {
+    let failed = false;
+    try {
+      await assertFixtureSurfaceClosed(`control.${label}`, plant);
+    } catch {
+      failed = true;
+    }
+    assert.ok(failed,
+      `the sweep passed the ${label} plant, so the clause it is planted against proves nothing`);
+  }
+
+  // 5 — THE RAW CLASS REACHED THROUGH `.constructor`, which is the other half of
+  //     finding 1 and the one clause no shape check above can see. The refusal
+  //     below conforms in every way the sweep inspects — fixed stack, registered
+  //     reason, no retained cause, frozen, non-writable non-configurable data
+  //     properties — and differs from the shipped one in exactly one way: its
+  //     prototype still carries the constructable class the engine installed.
+  const REGISTERED = "the query did not finish";
+  class ReachableType extends Error {
+    constructor() {
+      const message = `github:checks: ${REGISTERED}`;
+      super(message);
+      for (const [key, value, enumerable] of [
+        ["name", "SeamStoreUnreachable", false], ["message", message, false],
+        ["stack", `SeamStoreUnreachable: ${message}`, false],
+        ["store_ref", "github:checks", true], ["because", REGISTERED, true],
+        ["cause_kind", "none", true]])
+        Object.defineProperty(this, key, { value, writable: false, enumerable, configurable: false });
+      Object.freeze(this);
+    }
+  }
+  const reachableFactory = closed(() => new ReachableType());
+  assert.equal(Reflect.get(reachableFactory(), "constructor"), ReachableType,
+    "the plant does not reach a class, so it stands in for nothing");
+  assert.equal(isConstructor(ReachableType), true);
+  assert.throws(() => sweepErrorFactory("control.reachable-class", reachableFactory), undefined,
+    "an instance whose .constructor is a constructable class passed the sweep");
+
+  // AND THE CALIBRATION, which is what makes the failure attributable: redefine
+  // that ONE property the way both fixtures now do, change nothing else, and the
+  // same value goes through the same sweep untouched.
+  Object.defineProperty(ReachableType.prototype, "constructor",
+    { value: reachableFactory, writable: false, enumerable: false, configurable: false });
+  Object.freeze(ReachableType.prototype);
+  assert.doesNotThrow(() => sweepErrorFactory("control.redefined-constructor", reachableFactory));
+
+  // And the shipped fixtures go through the whole check untouched.
+  for (const [label, namespace] of SWEPT_FIXTURE_NAMESPACES())
+    await assertFixtureSurfaceClosed(`calibration.${label}`, namespace);
+});
+
 test("RULED: a pasted decision id is what opens the seam, and nothing else", async () => {
   const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const opened = await ruled.readPredecessorOutcomeEvidence({
