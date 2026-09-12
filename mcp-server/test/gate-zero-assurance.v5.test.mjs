@@ -544,7 +544,7 @@ test("SURFACE: the producer contract is reported as REGISTERED, and registered i
     "the privileged spelling must not come back under any value");
   assert.equal(result.r7_entry_witness_decided_by,
     "v5A02GateZeroR7Presence(<r7 design packet bytes>).witness_conjunction");
-  assert.equal(result.producer_registration.oracle_seat_bound, false);
+  assert.equal(result.producer_registration.oracle_seat_bound, true);
   // No run has happened, so no outcome exists to report.
   for (const field of ["outcome_digest", "observed_at"])
     assert.equal(result[field], null, `${field} must be null, not invented`);
@@ -566,24 +566,35 @@ test("SURFACE: the producer contract is reported as REGISTERED, and registered i
   ])
     assert.equal(result.undecided_governance_questions.includes(answered), false,
       `${answered} is ruled and must not still be listed as undecided`);
-  // AND THE ONE THAT DID NOT: card 9's seat. Card 10 left this list on
-  // 2026-09-12, when the loop-589 amendment was applied to the frozen packet —
-  // so the ONLY question left open on this surface is who holds the oracle.
-  assert.deepEqual([...result.undecided_governance_questions], [
-    "which independent seat holds oracle:gate-producer:gate-zero-read-only",
-  ]);
+  // AND CARD 9 LEFT IT ON 2026-09-13, when the seat was staffed. Card 10 left
+  // on 2026-09-12 with the loop-589 amendment. With all five cards answered and
+  // all three rulings live, this list is EMPTY — and the gate still refuses,
+  // which is the point: an answered governance question is not a signature.
+  assert.deepEqual([...result.undecided_governance_questions], []);
   assert.ok(!result.undecided_governance_questions.some(
     question => question.includes("whether r7 itself carries the registration")),
   "r7 carries it; the question must not still be listed as open");
-  // CARD 9 names a charter and staffs nobody, so the seat stays unbound. CARD
-  // 10's amendment landed, and the surface reports it the only honest way: the
-  // ruling's decision ref, and a witness that is NULL because deciding it needs
-  // the packet's bytes. `r7_entry_present` — the flag this surface used to
-  // carry — must be gone entirely, not merely false.
+  // CARD 9 NAMED A CHARTER AND THEN A DESK. The charter ruling says WHICH KIND
+  // of seat may hold the oracle; the staffing ruling says WHO, and the holder is
+  // reported beside both refs so a reader can check the boolean against its
+  // authority rather than trusting it. CARD 10's amendment landed, and the
+  // surface reports it the only honest way: the ruling's decision ref, and a
+  // witness that is NULL because deciding it needs the packet's bytes.
+  // `r7_entry_present` — the flag this surface used to carry — must be gone
+  // entirely, not merely false.
   assert.equal(result.oracle_seat_charter_ref, "charter:reviewer");
   assert.equal(result.oracle_seat_charter_decision_ref,
     "8a1dad08-8707-4bb0-a159-c2831a00cea2");
-  assert.equal(result.oracle_seat_bound, false);
+  assert.equal(result.oracle_seat_bound, true);
+  assert.equal(result.oracle_seat_holder_ref, "seat:codex-reviewer:gpt-5.6-sol");
+  assert.equal(result.oracle_seat_staffing_decision_ref,
+    "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84");
+  assert.equal(result.producer_registration.oracle_seat_owed, null,
+    "a seat that is held may not still be reported as owed");
+  // AND THE SEAT MOVED NOTHING ELSE. This is the confusion card 9 could
+  // introduce and the reason the two fields below are asserted right here.
+  assert.equal(result.passable, false);
+  assert.equal(result.producer_bound, false);
   assert.equal(result.r7_amendment_decision_ref,
     "311a9af5-3685-4c47-a158-f8dd70870ca1");
   assert.equal(result.r7_entry_witness, null);
@@ -758,7 +769,7 @@ test("SURFACE: the three ruled readers are bound, and the producer never is", ()
   assert.equal(join.predecessor_outcome_reader_bound, true);
   assert.equal(join.scheduler_reader_bound, true);
   assert.equal(join.reason_id, "gate_zero_producer_seam_unavailable");
-  assert.equal(join.decided_by, "evidence_seams_bound_producer_unstaffed");
+  assert.equal(join.decided_by, "evidence_seams_bound_producer_seam_unbuilt");
   assert.deepEqual(join.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
 
   const graph = readGateGraphAssurance();
@@ -832,6 +843,12 @@ const CARD_9_ANSWER_FIELDS = Object.freeze([
   "oracle_seat_bound",
   "oracle_seat_charter_ref",
   "oracle_seat_charter_decision_ref",
+  // The staffing half, added 2026-09-13. Both are NULL in every staged tree the
+  // pin is taken against, because those trees stage the seat unstaffed the way
+  // main shipped it — so they are stripped for being fields main does not have,
+  // not for carrying a value the comparison would otherwise catch.
+  "oracle_seat_holder_ref",
+  "oracle_seat_staffing_decision_ref",
   // Card 10's ref, which main carries on the registration and this branch also
   // reports at the top of the answer.
   "r7_amendment_decision_ref",
@@ -839,6 +856,8 @@ const CARD_9_ANSWER_FIELDS = Object.freeze([
 const CARD_9_REGISTRATION_FIELDS = Object.freeze([
   "oracle_seat_charter_ref",
   "oracle_seat_charter_decision_ref",
+  "oracle_seat_holder_ref",
+  "oracle_seat_staffing_decision_ref",
 ]);
 
 /**
@@ -931,6 +950,29 @@ const STORE_LINE = ref => `    store_ref: "${ref}",\n`;
 
 /** The file the mutation control rewrites, and the line it rewrites in it. */
 const GATE_MODULE_FILE = "gate-zero-assurance.v5.js";
+
+/**
+ * CARD 9'S SWITCH, AND IT IS ONE LINE, exactly like the three ruling lines
+ * above. `holder_ref` is where the staffing ruling goes; null is the unstaffed
+ * state main shipped.
+ *
+ * EVERY STAGED TREE UNSTAFFS IT BY DEFAULT, and that is deliberate rather than
+ * convenient: the trees below exist to answer "what did main answer", and main
+ * had no seat. Staging a staffed seat into a tree pinned against main's bytes
+ * would put this branch's own card-9 value inside the baseline it is measured
+ * against, which is the same defect the moving-ref baseline had.
+ */
+const REGISTRATION_MODULE_FILE = "gate-zero-producer-registration.v5.js";
+const STAFFED_SEAT_LINE = '  holder_ref: "seat:codex-reviewer:gpt-5.6-sol",\n';
+const UNSTAFFED_SEAT_LINE = "  holder_ref: null,\n";
+
+/**
+ * The other two lines of the declaration, so the seat's falsifiers can move ONE
+ * of them at a time. A seat that bound on a holder alone would be a seat anybody
+ * could claim; these are how that is proved false rather than asserted.
+ */
+const SEAT_CHARTER_LINE = "  charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,\n";
+const SEAT_STAFFING_LINE = '  staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",\n';
 const BOUND_PREDICATE_LINE =
   "  if (ruledCardBinding(binding.card_ref) === null) return null;\n";
 const DIVERGENT_PREDICATE_LINE =
@@ -956,7 +998,8 @@ after(() => {
  * environment variable points at it: the copy is reached by importing it.
  */
 function stageTree(withdrawnCards = [0, 1, 2],
-  { mismatchedCards = [], divergentGate = false } = {}) {
+  { mismatchedCards = [], divergentGate = false, staffedSeat = false,
+    seatEdit = [] } = {}) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
   const base = mkdtempSync(join(cache, "gate-zero-unruled-"));
@@ -984,6 +1027,22 @@ function stageTree(withdrawnCards = [0, 1, 2],
   assert.equal(rulings.split(NULL_DECISION_LINE).length - 1, withdrawnCards.length,
     "the staging left the wrong number of unruled lines");
   writeFileSync(rulingsPath, rulings);
+
+  // CARD 9'S LINE, AND IT TURNS BOTH WAYS FROM HERE. Unstaffed unless a test
+  // asks otherwise, so every pin taken against main is taken over main's seat;
+  // `seatEdit` is how the falsifiers move one line of the declaration instead.
+  const seatEdits = [...(staffedSeat ? [] : [[STAFFED_SEAT_LINE, UNSTAFFED_SEAT_LINE]]),
+    ...seatEdit];
+  if (seatEdits.length > 0) {
+    const registrationPath = join(target, REGISTRATION_MODULE_FILE);
+    let registration = readFileSync(registrationPath, "utf8");
+    for (const [anchor, replacement] of seatEdits) {
+      assert.equal(registration.split(anchor).length - 1, 1,
+        "a staging anchor no longer matches a line of the seat declaration in src");
+      registration = registration.replace(anchor, replacement);
+    }
+    writeFileSync(registrationPath, registration);
+  }
 
   // THE MUTATION CONTROL'S TREE, and it is a source rewrite rather than a flag
   // in src: the gate goes back to asking the ruling table itself and reading any
@@ -1133,14 +1192,217 @@ const JOIN_SENTENCES = Object.freeze({
   both: "no authoritative predecessor-outcome or scheduler reader exists to join",
   predecessor: "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against",
   scheduler: "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against",
-  neither: "the two ruled evidence seams are bound and no seat holds the producer that would name the rows to join",
+  neither: "the two ruled evidence seams are bound and the producer seam that would name the rows to join is unbuilt",
+  // The same clause with card 9's line back to null: the sentence names the
+  // empty seat again, which is what main said and what the seat's own mutation
+  // control below asserts.
+  neither_unstaffed: "the two ruled evidence seams are bound and no seat holds the producer that would name the rows to join",
+});
+
+/**
+ * CARD 9 — THE SEAT, AND ITS MUTATION CONTROL.
+ *
+ * `oracle_seat_bound` is not a record-layer row, a doctrine section, a config
+ * file or a field any caller can set. It is derived from a declaration committed
+ * to gate-zero-producer-registration.v5.js, exactly as the three seam rulings
+ * are one committed line each — so the only way to prove the derivation is to
+ * stage a copy of src with that line moved and read what the whole module then
+ * answers.
+ *
+ * THREE THINGS ARE PROVED HERE AND THEY ARE DIFFERENT THINGS.
+ *
+ *   (1) THE SWITCH TURNS. Unstaffed, the surface answers what main answered:
+ *       the seat is unbound, card 9's governance question is back on the list,
+ *       the refusal is decided by the empty seat, and both staffing fields are
+ *       null. Staffed, all four move together. Without this a `true` typed into
+ *       the source would pass every other test in this file.
+ *
+ *   (2) IT DOES NOT TURN ON A CLAIM. A holder alone does not staff the seat:
+ *       each falsifier moves ONE line of the declaration — the charter away from
+ *       the one Joe's card-9 ruling names, the staffing ruling to something that
+ *       is not a decision id, the holder to something that is not a seat ref —
+ *       and the seat is unbound for each. Fail-closed is the default answer,
+ *       which is the same "no" this surface gave before any seat was named.
+ *
+ *   (3) STAFFING THE SEAT DOES NOT MAKE THE GATE PASS, and this is the clause
+ *       that matters most. `passable`, `producer_bound` and the producer seam's
+ *       own binding are IDENTICAL either way. A seat is who may sign; the
+ *       producer behind the seam is what signs, and it is not built. A staffed
+ *       seat that moved `passable` would be exactly the authority this whole
+ *       slice exists to refuse.
+ */
+const SEAT_STAFFED_FIELDS = Object.freeze({
+  oracle_seat_bound: true,
+  oracle_seat_holder_ref: "seat:codex-reviewer:gpt-5.6-sol",
+  oracle_seat_staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",
+});
+const SEAT_UNSTAFFED_FIELDS = Object.freeze({
+  oracle_seat_bound: false,
+  oracle_seat_holder_ref: null,
+  oracle_seat_staffing_decision_ref: null,
+});
+
+/** A staged tree with all three rulings live and the seat as the case asks. */
+function stageSeatTree(options) {
+  return stageTree([], options);
+}
+
+/**
+ * Every path at which two answers differ, one level into `producer_registration`
+ * and by canonical bytes below that. It reports paths rather than a boolean so
+ * the assertion names what moved instead of only that something did.
+ */
+function movedFields(left, right) {
+  const moved = [];
+  const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
+  for (const key of keys) {
+    if (key === "producer_registration") continue;
+    if (canonicalJsonOf(left[key]) !== canonicalJsonOf(right[key])) moved.push(`$.${key}`);
+  }
+  const leftRegistration = left.producer_registration ?? {};
+  const rightRegistration = right.producer_registration ?? {};
+  const registrationKeys = [...new Set([...Object.keys(leftRegistration),
+    ...Object.keys(rightRegistration)])].sort();
+  for (const key of registrationKeys)
+    if (canonicalJsonOf(leftRegistration[key]) !== canonicalJsonOf(rightRegistration[key]))
+      moved.push(`$.producer_registration.${key}`);
+  return moved.sort();
+}
+
+const canonicalJsonOf = value => JSON.stringify(value ?? null);
+
+test("SEAT: an unstaffed seat refuses on the seat, and a staffed one binds", async () => {
+  const unstaffed = await gateOfTree(stageSeatTree({ staffedSeat: false }));
+  const emittedUnstaffed = unstaffed.emitGateZeroOutcome();
+  for (const [field, value] of Object.entries(SEAT_UNSTAFFED_FIELDS))
+    assert.equal(emittedUnstaffed[field], value, `${field} with the seat unstaffed`);
+  assert.equal(emittedUnstaffed.producer_registration.oracle_seat_bound, false);
+  assert.equal(emittedUnstaffed.producer_registration.oracle_seat_owed,
+    "an independent seat, distinct from the V5-A02 builder, holding oracle:gate-producer:gate-zero-read-only");
+  // The question comes back, and it comes back alone: the three reader cards
+  // stay ruled in this tree, so nothing else reopens with it.
+  assert.deepEqual([...emittedUnstaffed.undecided_governance_questions],
+    [...PRODUCER_QUESTIONS]);
+  assert.equal(emittedUnstaffed.decided_by, "evidence_seams_bound_producer_unstaffed");
+  assert.equal(emittedUnstaffed.join_unavailable_because, JOIN_SENTENCES.neither_unstaffed);
+  assert.ok(emittedUnstaffed.unavailable_because.includes("no seat staffs"),
+    "the unstaffed refusal must say the seat is empty");
+  assert.equal(unstaffed.readGateZeroPredecessorJoin().decided_by,
+    "evidence_seams_bound_producer_unstaffed");
+  assert.equal(unstaffed.readGateGraphAssurance().decided_by,
+    "evidence_seams_bound_producer_unstaffed");
+
+  // AND STAFFED, which is what src ships. Read off the shipped module rather
+  // than a second staged tree: the thing a consumer gets is the subject.
+  const emittedStaffed = emitGateZeroOutcome();
+  for (const [field, value] of Object.entries(SEAT_STAFFED_FIELDS))
+    assert.equal(emittedStaffed[field], value, `${field} with the seat staffed`);
+  assert.equal(emittedStaffed.producer_registration.oracle_seat_owed, null);
+  assert.deepEqual([...emittedStaffed.undecided_governance_questions], []);
+  assert.equal(emittedStaffed.decided_by, "evidence_seams_bound_producer_seam_unbuilt");
+  assert.equal(emittedStaffed.join_unavailable_because, JOIN_SENTENCES.neither);
+  assert.equal(emittedStaffed.unavailable_because.includes("no seat staffs"), false);
+
+  // THE CONTROL IS A CONTROL: the two answers differ, so a derivation that had
+  // been hard-coded either way would be red here rather than quietly agreeing.
+  assert.notEqual(digest(emittedUnstaffed), digest(emittedStaffed),
+    "moving the seat declaration changed nothing, so the switch is not the switch");
+
+  // AND THE CEILING, NAMED RATHER THAN STRIPPED. Every field whose value moves
+  // when the seat does is listed, and the list is asserted to be EXACTLY what
+  // moved — so a sixth field that started following the seat is red here, and so
+  // is one of these quietly ceasing to.
+  assert.deepEqual(movedFields(emittedUnstaffed, emittedStaffed), [
+    "$.decided_by",
+    "$.join_unavailable_because",
+    "$.not_passable_because",
+    "$.oracle_seat_bound",
+    "$.oracle_seat_holder_ref",
+    "$.oracle_seat_staffing_decision_ref",
+    "$.producer_registration.oracle_seat_bound",
+    "$.producer_registration.oracle_seat_holder_ref",
+    "$.producer_registration.oracle_seat_owed",
+    "$.producer_registration.oracle_seat_staffing_decision_ref",
+    "$.unavailable_because",
+    "$.undecided_governance_questions",
+  ], "staffing the seat moved a field that is not card 9's");
+});
+
+test("SEAT: staffing the seat does not bind the producer or make the gate passable", async () => {
+  const unstaffed = await gateOfTree(stageSeatTree({ staffedSeat: false }));
+  for (const [label, module] of [["unstaffed", unstaffed], ["staffed", surface]]) {
+    const emitted = module.emitGateZeroOutcome();
+    assert.equal(emitted.passable, false, `passable while ${label}`);
+    assert.equal(emitted.producer_bound, false, `producer_bound while ${label}`);
+    assert.equal(emitted.status, "unavailable", `status while ${label}`);
+    assert.equal(emitted.decision, "refuse", `decision while ${label}`);
+    assert.equal(emitted.reason_id, "gate_zero_producer_seam_unavailable", label);
+    assert.equal(emitted.outcome_digest, null, `outcome_digest while ${label}`);
+    assert.equal(emitted.observed_at, null, `observed_at while ${label}`);
+    assert.equal(emitted.join, null, `join while ${label}`);
+    assert.deepEqual(emitted.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM], label);
+    const producer = emitted.seams_bound
+      .find(entry => entry.seam === V5_A02_GATE_ZERO_PRODUCER_SEAM);
+    assert.equal(producer.bound, false, `the producer seam reported bound while ${label}`);
+    assert.equal(module.v5A02GateZeroPolicyPreimage().gate_zero_passable, false, label);
+    assert.equal(module.v5A02GateZeroPolicyPreimage().producer_bound, false, label);
+  }
+});
+
+/**
+ * ONE LINE MOVED PER CASE, and each is a declaration a seat might plausibly
+ * carry — not a garbage value. The charter case is the one that matters most: a
+ * later seat that claimed the oracle without holding the charter card 9 named
+ * would be checkable against a named authority, and this is that check.
+ */
+const SEAT_FALSIFIERS = Object.freeze([
+  {
+    name: "a holder under a charter card 9 did not name",
+    edit: [SEAT_CHARTER_LINE, '  charter_ref: "charter:builder",\n'],
+  },
+  {
+    name: "a staffing ruling that is not a decision id",
+    edit: [SEAT_STAFFING_LINE, '  staffing_decision_ref: "approved-by-the-orchestrator",\n'],
+  },
+  {
+    name: "a staffing ruling that is a near miss for one",
+    edit: [SEAT_STAFFING_LINE, '  staffing_decision_ref: "5E2B8C1A-9F47-4D63-B0E5-7A3D1C9F2E84",\n'],
+  },
+  {
+    name: "a holder that is not a seat ref",
+    edit: [STAFFED_SEAT_LINE, '  holder_ref: "gpt-5.6-sol",\n'],
+  },
+  {
+    name: "a holder that is a charter rather than a desk",
+    edit: [STAFFED_SEAT_LINE, '  holder_ref: "charter:reviewer",\n'],
+  },
+]);
+
+test("SEAT: the seat binds on the whole declaration, and fails closed on any of it", async () => {
+  for (const falsifier of SEAT_FALSIFIERS) {
+    const tree = await gateOfTree(
+      stageSeatTree({ staffedSeat: true, seatEdit: [falsifier.edit] }));
+    const emitted = tree.emitGateZeroOutcome();
+    assert.equal(emitted.oracle_seat_bound, false, falsifier.name);
+    assert.equal(emitted.oracle_seat_holder_ref, null, falsifier.name);
+    assert.equal(emitted.oracle_seat_staffing_decision_ref, null, falsifier.name);
+    assert.deepEqual([...emitted.undecided_governance_questions],
+      [...PRODUCER_QUESTIONS], falsifier.name);
+    assert.equal(emitted.passable, false, falsifier.name);
+  }
+  // AND THE FALSIFIERS ARE FALSIFIERS: the unmodified declaration, staged the
+  // same way through the same machinery, binds. Without this the five cases
+  // above would pass just as well against a staging step that broke the file.
+  const intact = await gateOfTree(stageSeatTree({ staffedSeat: true }));
+  assert.equal(intact.emitGateZeroOutcome().oracle_seat_bound, true,
+    "the staging itself unstaffs the seat, so the falsifiers prove nothing");
 });
 
 test("PER READER: with all three ruled, nothing reports a reader as missing", () => {
   const emitted = emitGateZeroOutcome();
-  // The list the review found wrong: with three live rulings it is cards 9 and
-  // 10 and nothing else.
-  assert.deepEqual([...emitted.undecided_governance_questions], [...PRODUCER_QUESTIONS]);
+  // The list the review found wrong: with three live rulings and card 9's seat
+  // staffed it is EMPTY, and the gate refuses anyway.
+  assert.deepEqual([...emitted.undecided_governance_questions], []);
   for (const card of READER_CARDS) {
     assert.equal(emitted.undecided_governance_questions.includes(card.question), false, card.card);
     assert.equal(emitted[card.bound], true, card.bound);
@@ -1206,7 +1468,10 @@ test("PER READER: withdrawing one ruling reopens that card's question and no oth
     if (card.key === "conclusion") {
       assert.equal(joined.reason_id, "gate_zero_producer_seam_unavailable");
       assert.equal(graph.reason_id, "gate_conclusion_reader_unavailable");
-      assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.neither);
+      // The UNSTAFFED spelling, because a staged tree stages main's seat. The
+      // staffed one is what src answers, asserted where JOIN_SENTENCES is used
+      // against the shipped module.
+      assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.neither_unstaffed);
     }
     // A withdrawal is neither the shipped answer nor the all-three-null one.
     assert.notEqual(digest(emitted), digest(emitGateZeroOutcome()),
@@ -1532,6 +1797,14 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "charter:reviewer",
   "oracle_seat_charter_decision_ref",
   "oracle_seat_charter_ref",
+  // Card 9's staffing half, added 2026-09-13. TWO FIELD NAMES AND NO VALUES,
+  // which is the whole shape of this addition on the unruled surface: the staged
+  // tree unstaffs the seat the way main shipped it, so both fields are null
+  // there and neither the holder ref nor the staffing decision id reaches the
+  // vocabulary. They reach it on the SHIPPED surface, and the seat's own
+  // mutation control is where that is asserted.
+  "oracle_seat_holder_ref",
+  "oracle_seat_staffing_decision_ref",
   "scheduler_canary_seam_unavailable",
 ]);
 

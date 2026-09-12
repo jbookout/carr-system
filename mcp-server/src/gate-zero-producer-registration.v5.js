@@ -231,6 +231,80 @@ export const V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF = "charter:reviewer";
 /** Joe's ruling that puts the charter above on the record. Card 9. */
 export const V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF = "8a1dad08-8707-4bb0-a159-c2831a00cea2";
 
+/**
+ * CARD 9'S SECOND HALF — THE SEAT, AND IT IS A DECLARATION RATHER THAN A CALL.
+ *
+ * Naming the reviewer charter left `oracle_seat_bound` false because a charter
+ * is a job description and not a desk with somebody at it. What was still owed
+ * was a named holder. Joe's blanket approval
+ * `5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84`, together with his 2026-09-13 ruling
+ * that the orchestrator performs the remaining Gate Zero acts itself, staffs the
+ * seat with the desk the charter already describes: the independent Codex
+ * reviewer lane (`gpt-5.6-sol`, read-only sandbox), which reviewed every Gate
+ * Zero pull request and built none of them. That is the independence
+ * `oracle_seat_owed` asked for, stated as a holder instead of as a category.
+ *
+ * IT IS THE SAME KIND OF SWITCH AS gate-zero-seam-rulings.v5.js's three
+ * `decision_id:` lines, and for the same reasons. The declaration is
+ * MODULE-PRIVATE and frozen; there is no argument, no setter, no registry keyed
+ * by anything a caller controls, and no environment variable that staffs a seat.
+ * Put `holder_ref: null` back on the line below and the seat is unstaffed again,
+ * in this module and in the gate that reads it, with nothing else touched — which
+ * is exactly what gate-zero-assurance.v5.test.mjs's mutation control does.
+ *
+ * WHAT IT DOES NOT DO, and the honest list is longer than the short one. It does
+ * not build the producer. `seam:gate-zero-read-only-outcome-producer` has no
+ * holder object and no `emitOutcome` behind it, so `producer_bound` is still
+ * false and `passable` is still false for every caller on every input. A staffed
+ * seat is who may sign; it is not a signature, and it is not the code that would
+ * aim the three bound readers at particular rows.
+ */
+const V5_A02_GATE_ZERO_ORACLE_SEAT = Object.freeze({
+  holder_ref: "seat:codex-reviewer:gpt-5.6-sol",
+  charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
+  charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
+  staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",
+});
+
+/** The uuid shape a ruling has, the same one the seam ruling table requires. */
+const SEAT_DECISION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The shape a holder ref has: `seat:<lane>:<desk>`, lowercase and closed. */
+const SEAT_HOLDER_REF = /^seat:[a-z0-9][a-z0-9.-]*:[a-z0-9][a-z0-9.-]*$/;
+
+/**
+ * IS THE SEAT STAFFED? DERIVED FROM THE DECLARATION, never asserted, and
+ * fail-closed in every direction: a missing holder, a holder that is not a
+ * well-formed seat ref, a charter that is not the ruled one, a malformed or
+ * substituted charter decision, a missing staffing decision, a non-object, a
+ * Proxy that throws — each answers false, which is the same "no" this surface
+ * gave before any seat existed.
+ *
+ * IT IS MODULE-PRIVATE, and stays so. This module's promise is that exactly one
+ * of its exports is callable — the byte verifier — because an exported callable
+ * is the one shape that can be handed caller-supplied references. The
+ * derivation is proved instead the way the seam rulings are: by staging a copy
+ * of src with the declaration set back to unstaffed and reading what the whole
+ * module then answers, which tests the constant a consumer actually gets rather
+ * than a function applied to a fixture.
+ */
+function seatWitnessOf(seat) {
+  try {
+    if (seat === null || typeof seat !== "object" || Array.isArray(seat)) return false;
+    return typeof seat.holder_ref === "string" && SEAT_HOLDER_REF.test(seat.holder_ref)
+      && seat.charter_ref === V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF
+      && seat.charter_decision_ref === V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF
+      && typeof seat.staffing_decision_ref === "string"
+      && SEAT_DECISION_ID.test(seat.staffing_decision_ref);
+  } catch {
+    return false;
+  }
+}
+
+/** What the seat owes while nobody holds it. Null once somebody does. */
+const V5_A02_GATE_ZERO_ORACLE_SEAT_OWED =
+  "an independent seat, distinct from the V5-A02 builder, holding oracle:gate-producer:gate-zero-read-only";
+
 /** The role, in the family of the seven independent boundary-receipt oracles. */
 export const V5_A02_GATE_ZERO_PRODUCER_ROLE = "independent_control_plane_oracle";
 
@@ -378,7 +452,7 @@ export const V5_A02_GATE_ZERO_RETRY_POLICY = deepFreeze({
  * The registration as one closed record. Callers read this; they cannot change
  * it, and binding a seat to the role is not something any caller can do here.
  */
-function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
+function v5A02GateZeroProducerRegistration(predecessorStepRefs, seat) {
   const entry = v5A02GateZeroProducerRegistryEntry(predecessorStepRefs);
   return deepFreeze({
     schema_version: V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION,
@@ -396,18 +470,21 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
     retry_policy: V5_A02_GATE_ZERO_RETRY_POLICY,
     unresolved_without_r7: [...UNRESOLVED_WITHOUT_R7],
     resolved_from_r7: [...RESOLVED_FROM_R7],
-    // The seat. Registering a role does not staff one, and naming the charter
-    // that holds it does not either — which is exactly what card 9 ruled and
-    // exactly what these three fields say together.
-    oracle_seat_bound: false,
+    // THE SEAT, DERIVED. Registering a role does not staff one and naming a
+    // charter does not either — which is what card 9 ruled — so this field is
+    // the witness over the declaration above rather than a literal anybody can
+    // type. The holder and the staffing ruling are reported beside it so a
+    // reader can check the true against its authority instead of trusting it.
+    oracle_seat_bound: seatWitnessOf(seat),
+    oracle_seat_holder_ref: seatWitnessOf(seat) ? seat.holder_ref : null,
     oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
     oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
-    // UNCHANGED TEXT, deliberately. Card 9 is carried in the two fields above,
-    // so this sentence stays exactly what main published and the whole card-9
-    // change is ADDITIVE — which is what lets the gate's switch test prove that
-    // nothing else in the emitted answer moved.
-    oracle_seat_owed:
-      "an independent seat, distinct from the V5-A02 builder, holding oracle:gate-producer:gate-zero-read-only",
+    oracle_seat_staffing_decision_ref:
+      seatWitnessOf(seat) ? seat.staffing_decision_ref : null,
+    // DERIVED TOO, and it has to be: a seat that is held is not owed. The
+    // sentence is the unchanged one main published, so a reader diffing the two
+    // answers sees a field that emptied rather than a field that was reworded.
+    oracle_seat_owed: seatWitnessOf(seat) ? null : V5_A02_GATE_ZERO_ORACLE_SEAT_OWED,
   });
 }
 
@@ -418,7 +495,8 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
  * the role is not something any caller can do here.
  */
 export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION = deepFreeze(
-  v5A02GateZeroProducerRegistration(V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));
+  v5A02GateZeroProducerRegistration(V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
+    V5_A02_GATE_ZERO_ORACLE_SEAT));
 
 /**
  * The witness as a module-level constant, for the readers that want the one
