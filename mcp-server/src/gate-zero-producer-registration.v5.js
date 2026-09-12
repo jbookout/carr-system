@@ -18,9 +18,9 @@
 // same KIND of artifact as MINIMUM_REQUIRED_MEMBERS in benchmark-minimum.v5.js,
 // which is likewise a hand-copied constant table of r7 registrations.
 //
-// WHAT CHANGED ON 2026-09-12, and it is the reason nothing below says "null"
-// any more. Joe ruled loop 589 and the amendment was applied to the frozen
-// packet itself: r7 now carries the `gate-zero-read-only-accepted` gate, the
+// WHAT CHANGED ON 2026-09-12, and it is the reason no field of the registry
+// entry says "null" any more. Joe ruled loop 589 and the amendment was applied
+// to the frozen packet itself: r7 carries the `gate-zero-read-only-accepted` gate, the
 // `step:gate-zero-read-only-outcome` producer row, and the
 // `independent_control_plane_oracle` role its row resolves through. Re-freezing
 // moved the packet's digest from `ef34aa54…` to `ea40f61a…` and the doctrine pin
@@ -38,16 +38,32 @@
 //     not staffing a desk. gate-zero-assurance.v5.js's producer seam stays
 //     unbound and its answer stays `passable: false`.
 //   * It is NOT a Gate Zero receipt, and nothing here can become one.
-//   * `r7_entry_present` is NOT a flag a caller can set and NOT a boolean typed
-//     in by hand. It is derived, in `r7EntryPresence()` below, from the pinned
-//     packet digest and the completeness of the registry entry: pin the
-//     superseded digest, or leave any field of the entry null, and it reads
-//     false again. `v5A02GateZeroR7Presence()` in gate-zero-assurance.v5.js is
-//     the stronger check a reader or a test runs against the real packet bytes;
-//     it lives there because THIS module exports nothing callable, deliberately
-//     — an exported function is the shape that could hand back an authority-
-//     stamped record over references a caller chose (the PR 990 defect).
+//   * `r7_entry_witness` IS NOT TRUE HERE, and it is not a flag a caller can
+//     set. The earlier revision of this file derived it by comparing one pinned
+//     literal against another pinned literal, which is an assertion wearing a
+//     derivation's clothes: it could only have read false if somebody had typed
+//     the superseded digest in by hand. It is now derived the only way the fact
+//     can honestly be derived — by handing the r7 design packet's BYTES to
+//     `r7PacketWitness()` below, which recomputes sha256 over them and agrees
+//     with nothing but the pinned `normalized_r7_sha256`.
+//
+//     THIS REPOSITORY DOES NOT HOLD THOSE BYTES. r7 is 62 base64 chunk sections
+//     behind manifest section 6ac54e7b-0965-41f6-88c3-da187a8b5d23 in doctrine
+//     document `doctorcre-v5-design-basis`, 740KB reassembled, and it is not
+//     vendored here — exactly as tools/doctorcre-v5-review.cjs is handed the
+//     packet by path rather than carrying it. So at import there are no bytes
+//     to witness and the registration carries `null`: UNDETERMINED, which is
+//     neither the claim that the amendment landed nor the claim that it did
+//     not. A reader who wants the answer runs `v5A02GateZeroR7Presence(bytes)`.
+//   * `v5A02GateZeroR7Presence` is the module's ONE callable export, and its
+//     only argument is bytes. That is deliberately not the PR 990 defect: the
+//     defect was an exported BUILDER that stamped an authority-bearing record
+//     over step references a caller chose. Nothing here takes a reference, a
+//     predecessor set, a producer or a flag, and a non-bytes argument throws
+//     rather than being interpreted.
 
+import { canonicalJson, digest } from "./artifact-trust.js";
+import { V5BoundaryError } from "./global-boundaries.v5.js";
 import { CONSUMER_GATE_RECEIPT_SCHEMA, GATE_ZERO_STEP_REF } from "./benchmark-minimum.v5.js";
 
 export { GATE_ZERO_STEP_REF };
@@ -85,20 +101,106 @@ export const V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256 =
 export const V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF = "311a9af5-3685-4c47-a158-f8dd70870ca1";
 
 /**
- * Is the entry in r7? Derived, never asserted. Three ways this returns false,
- * and each is a real failure mode rather than a formality:
+ * THE ONE BYTE VERIFIER, and the only thing in this repository that may answer
+ * whether r7 carries the registration. Hand it the r7 design packet's BYTES —
+ * reconstructed from the 62 chunk sections behind manifest
+ * 6ac54e7b-0965-41f6-88c3-da187a8b5d23 in doctrine document
+ * `doctorcre-v5-design-basis` — and it recomputes sha256 over exactly those
+ * bytes. There is no flag, no digest string and no row argument: a packet whose
+ * recomputed digest is not the pinned `normalized_r7_sha256` cannot reach a
+ * true conjunction no matter what it says inside, and a non-bytes argument
+ * throws rather than being interpreted.
  *
- *   1. the pinned digest is the superseded packet — the amendment did not land;
- *   2. the pinned digest is not a digest at all — someone typed a label;
- *   3. any field of the registry entry is still null — the entry exists in
- *      name but carries one of the four facts only r7 could supply as a hole,
- *      and a row with a null closed-registry field is refused by
- *      tools/doctorcre-v5-review.cjs anyway.
+ * Four findings, reported separately rather than collapsed, because a packet
+ * that hashes right and says something else is a different failure from a
+ * packet that says the right thing and is not the pinned one:
+ *
+ *   digest_matches   the bytes hash to the pinned `normalized_r7_sha256`
+ *   entry_matches    the packet's producer row for step:gate-zero-read-only-outcome
+ *                    is field-for-field the registration's registry entry
+ *   gate_registered  `gate-zero-read-only-accepted` is in consumer_gate_registry
+ *                    and names this producer
+ *   role_registered  `independent_control_plane_oracle` is in producer_role_registry
+ *
+ * `witness_conjunction` is all four. It is deliberately NOT called `present`:
+ * `present` is a word in the closed privileged union the standing rule sweeps
+ * for, and a field named from that union reads as an authority claim even when
+ * it was honestly derived. The name is opaque on purpose; the four findings
+ * beside it are what a reader should act on.
+ *
+ * It reads; it produces no receipt, stamps no authority and changes no seam.
  */
-function r7EntryPresence(entry, pinnedPacketSha256) {
-  if (pinnedPacketSha256 === V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256) return false;
-  if (!/^[0-9a-f]{64}$/.test(pinnedPacketSha256 || "")) return false;
-  return Object.values(entry).every((value) => value !== null);
+function r7PacketWitness(entry, r7DesignPacketBytes) {
+  if (typeof r7DesignPacketBytes !== "string" && !Buffer.isBuffer(r7DesignPacketBytes))
+    throw new V5BoundaryError("r7_packet_bytes_required",
+      "the r7 design packet bytes are required; there is no flag to pass instead",
+      { pinned_sha256: V5_A02_GATE_ZERO_R7_PACKET_SHA256 });
+  const observed = digest(r7DesignPacketBytes).replace("sha256:", "");
+  const finding = {
+    observed_sha256: observed,
+    expected_sha256: V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    superseded_sha256: V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
+    digest_matches: observed === V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    is_superseded_packet: observed === V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
+    parsed: false,
+    entry_matches: false,
+    gate_registered: false,
+    role_registered: false,
+    witness_conjunction: false,
+  };
+  let packet;
+  try {
+    packet = JSON.parse(r7DesignPacketBytes.toString("utf8"));
+  } catch {
+    return deepFreeze(finding);
+  }
+  finding.parsed = true;
+  // Every registry is read as an array or as nothing. A packet is caller bytes,
+  // so `receipt_producer_step_registry: "everything"` is a shape it may arrive
+  // in, and it must deny rather than throw.
+  const rows = Array.isArray(packet?.receipt_producer_step_registry)
+    ? packet.receipt_producer_step_registry : [];
+  const row = rows.find(item => item && item.step_ref === GATE_ZERO_STEP_REF) || null;
+  finding.entry_matches = row !== null && canonicalJson(row) === canonicalJson(entry);
+  const gates = Array.isArray(packet?.consumer_gate_registry) ? packet.consumer_gate_registry : [];
+  const gate = gates.find(item => item && item.gate_id === entry.produces_gate_ids[0]) || null;
+  finding.gate_registered = gate !== null && Array.isArray(gate.receipt_producer_step_refs)
+    && gate.receipt_producer_step_refs.includes(GATE_ZERO_STEP_REF);
+  finding.role_registered = Array.isArray(packet?.producer_role_registry)
+    && packet.producer_role_registry.includes(entry.producer_role);
+  finding.witness_conjunction = finding.digest_matches && finding.entry_matches
+    && finding.gate_registered && finding.role_registered;
+  return deepFreeze(finding);
+}
+
+/**
+ * THE BYTES THIS REPOSITORY HOLDS: none, and that is the whole reason the
+ * registration's witness reads `null`. r7 is not vendored here, exactly as
+ * tools/doctorcre-v5-review.cjs is handed the packet by path rather than
+ * carrying it. This constant is module-private and is not reachable, settable
+ * or overridable from outside; the day the packet is vendored or a doctrine
+ * reader is bound, the line below answers without changing.
+ */
+const R7_DESIGN_PACKET_BYTES = null;
+
+/**
+ * Is the entry in r7? DERIVED FROM THE PACKET BYTES, routed through the one
+ * byte verifier above, and never asserted. Three answers, and the third is the
+ * one this repository gives today:
+ *
+ *   true   the supplied bytes hash to the pinned `normalized_r7_sha256` AND
+ *          carry the row, the gate and the role;
+ *   false  the supplied bytes are some other packet — the superseded one, say,
+ *          whose sha256 is `ef34aa54…` — or are the pinned packet with
+ *          something else inside it;
+ *   null   no bytes were supplied, so the question is UNDETERMINED here. Null
+ *          is not a soft false: reading false would assert that the amendment
+ *          did not land, which is a claim this repository equally cannot make.
+ */
+function r7EntryWitness(entry, r7DesignPacketBytes) {
+  if (typeof r7DesignPacketBytes !== "string" && !Buffer.isBuffer(r7DesignPacketBytes))
+    return null;
+  return r7PacketWitness(entry, r7DesignPacketBytes).witness_conjunction;
 }
 
 /** The role, in the family of the seven independent boundary-receipt oracles. */
@@ -249,15 +351,20 @@ export const V5_A02_GATE_ZERO_RETRY_POLICY = deepFreeze({
  * it, and binding a seat to the role is not something any caller can do here.
  */
 function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
+  const entry = v5A02GateZeroProducerRegistryEntry(predecessorStepRefs);
   return deepFreeze({
     schema_version: V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION,
     registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
     decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
-    r7_entry_present: r7EntryPresence(
-      v5A02GateZeroProducerRegistryEntry(predecessorStepRefs), V5_A02_GATE_ZERO_R7_PACKET_SHA256),
+    // Null, and null is the honest answer: the packet's bytes are not in this
+    // repository, so nothing here may say the amendment landed OR that it did
+    // not. `v5A02GateZeroR7Presence(<bytes>)` is the only thing that decides it.
+    r7_entry_witness: r7EntryWitness(entry, R7_DESIGN_PACKET_BYTES),
+    r7_entry_witness_decided_by:
+      "v5A02GateZeroR7Presence(<r7 design packet bytes>).witness_conjunction",
     r7_packet_sha256: V5_A02_GATE_ZERO_R7_PACKET_SHA256,
     r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
-    registry_entry: v5A02GateZeroProducerRegistryEntry(predecessorStepRefs),
+    registry_entry: entry,
     combiner: V5_A02_GATE_ZERO_COMBINER,
     retry_policy: V5_A02_GATE_ZERO_RETRY_POLICY,
     unresolved_without_r7: [...UNRESOLVED_WITHOUT_R7],
@@ -279,9 +386,34 @@ export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION = deepFreeze(
   v5A02GateZeroProducerRegistration(V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));
 
 /**
- * `r7_entry_present` as a module-level constant, for the readers that want the
- * one boolean. It is the SAME derivation the registration carries — read off
- * the registration rather than re-derived, so the two can never disagree.
+ * The witness as a module-level constant, for the readers that want the one
+ * value. It is the SAME derivation the registration carries — read off the
+ * registration rather than re-derived, so the two can never disagree — and it
+ * is `null` here for the reason the registration's own field is.
  */
-export const V5_A02_GATE_ZERO_R7_ENTRY_PRESENT =
-  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.r7_entry_present;
+export const V5_A02_GATE_ZERO_R7_ENTRY_WITNESS =
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.r7_entry_witness;
+
+/**
+ * THE BYTE VERIFIER, AS THE MODULE'S ONE CALLABLE EXPORT.
+ *
+ * An ARROW, so it is not constructable and carries no `.prototype`, with
+ * `Symbol.hasInstance` defined as a data property that answers false without
+ * touching its left operand — the closed shape amendment 2 of the standing rule
+ * requires of an exported callable.
+ *
+ * Its only argument is bytes. It takes no predecessor set, no producer, no
+ * reference and no flag, which is what separates it from the PR 990 defect: a
+ * caller cannot obtain an authority-stamped record over references of their own
+ * choosing, because there is nothing to hand in but the packet itself, and only
+ * one byte-string in the world hashes to the pinned digest.
+ *
+ * gate-zero-assurance.v5.js re-exports this rather than keeping a second copy:
+ * two implementations of one digest comparison would be two authorities.
+ */
+export const v5A02GateZeroR7Presence = (r7DesignPacketBytes) =>
+  r7PacketWitness(V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry, r7DesignPacketBytes);
+
+Object.defineProperty(v5A02GateZeroR7Presence, Symbol.hasInstance, {
+  value: () => false, writable: false, enumerable: false, configurable: false,
+});
