@@ -8,11 +8,21 @@ import io
 import json
 import os
 import plistlib
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# THE ONE SCRUBBER, not a local copy (rule a8c55a47). The hooksPath fixture below
+# runs `git init`, and ops/selftest-git-isolation-check.py requires every selftest
+# that builds a git repository to reach git through ops/git_env.py: an inherited
+# GIT_DIR outranks both cwd and -C, which is how a fixture destroyed local main on
+# 2026-08-14. fixture_env() additionally hides system and global config, so the
+# core.hooksPath this fixture reads back can only be the one it set itself.
+sys.path.insert(0, os.path.join(REPO, "ops"))
+from git_env import fixture_env  # noqa: E402
 spec = importlib.util.spec_from_file_location(
     "config_as_code", os.path.join(REPO, "ops", "config-as-code.py")
 )
@@ -561,6 +571,133 @@ def main():
             and str(absent_script) in json.dumps(restored_settings.get("hooks", {}))
         )
         mod.IS_PRIMARY = original_primary
+
+        # THE GATE ZERO SCHEDULER CANARY IS EXPECTED INSTALLED, and the point of
+        # asserting it is that the opposite was true yesterday. The plist was
+        # held in DEFINITION_ONLY from 2026-09-11 so that STARTING A SCHEDULE
+        # stayed a human act; Joe's activation approval took that act on
+        # 2026-09-12, and `step:scheduler-active-receipt` — the Gate Zero
+        # predecessor the canary exists for — can only be answered by launchd
+        # firing on its own, never by a hand dispatch through the wrapper. So a
+        # revert that quietly put the canary back on the hold list would leave
+        # that predecessor permanently unanswerable while every check stayed
+        # green. This pins the release the way tick_released pins the 2026-08-26
+        # control-plane cutover.
+        #
+        # TWO HALVES, because the flag alone proves nothing about the installer:
+        # the plist must also be PLANNED as an ordinary write. The plan is taken
+        # from a DRY RUN deliberately — the fixtures above record twice over what
+        # happens when a selftest lets `launchctl load` really run against a temp
+        # HOME that is deleted moments later, and the question here is what the
+        # reconciler INTENDS, which the dry run answers in full.
+        canary_plist = "com.carr.gate-zero-canary.plist"
+        canary_released = canary_plist not in mod.DEFINITION_ONLY
+        (launchd / canary_plist).write_text(
+            (Path(REPO) / "ops" / "launchd" / canary_plist).read_text(encoding="utf-8"),
+            encoding="utf-8")
+        # The wrapper and the canary script itself: missing_targets() skips any
+        # agent whose program was never built, so without these the plan would
+        # read SKIP for a reason that has nothing to do with the hold.
+        for program in ("bin/run-scheduled.sh", "bin/gate-zero-canary.sh"):
+            built = repo / program
+            built.parent.mkdir(parents=True, exist_ok=True)
+            built.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mod.IS_PRIMARY = True
+        with contextlib.redirect_stdout(io.StringIO()) as canary_out:
+            canary_plan_rc = mod.cmd_install(False)
+        canary_output = canary_out.getvalue()
+        # AND THE MIRROR OF THE JANITOR CASE BELOW: an installed copy of a HELD
+        # agent is a refusal ("DEFINITION ONLY, MUST NOT BE INSTALLED") however
+        # exactly its bytes match the repo, because the gate on it had not
+        # passed. A released agent's installed copy is ordinary configuration,
+        # so the same fixture — the concrete render sitting in LaunchAgents —
+        # must now be an ordinary tracked pair and no refusal at all. Nothing is
+        # loaded to prove this: cmd_check only reads.
+        live_canary = Path(mod.LAUNCHD_SRC) / canary_plist
+        live_canary.write_text(
+            mod.concrete((launchd / canary_plist).read_text(encoding="utf-8")),
+            encoding="utf-8")
+        canary_labels = [label for label, _live, _repo in mod.pairs()]
+        canary_installed_allowed = mod.definition_only_installed_plists()
+        with contextlib.redirect_stdout(io.StringIO()) as canary_check_out:
+            mod.cmd_check()
+        canary_check_output = canary_check_out.getvalue()
+        mod.IS_PRIMARY = original_primary
+        canary_planned = (
+            canary_plan_rc == 0
+            and f"would write  {live_canary}" in canary_output
+            and f"SKIP  {canary_plist}" not in canary_output
+            and canary_installed_allowed == []
+            and f"launchd {canary_plist}" in canary_labels
+            and "DEFINITION ONLY, MUST NOT BE INSTALLED" not in canary_check_output
+        )
+        live_canary.unlink()
+        (launchd / canary_plist).unlink()
+
+        # AN ABSOLUTE core.hooksPath SURVIVES APPLY, and this is the one setting
+        # in this file whose blast radius is the whole machine rather than the
+        # repository it is read from. core.hooksPath lives in the single
+        # .git/config every worktree shares. Install used to write the relative
+        # "ops/githooks" unconditionally, so an apply run for two plists silently
+        # re-pointed hook resolution in ~50 worktrees from canonical's hooks to
+        # each worktree's own — the state ops/prepush-floor-selftest.py relies on
+        # being canonical's. Found and undone by hand during the 2026-09-12 Gate
+        # Zero activation, which is exactly the kind of repair that is not
+        # performed by whoever runs the installer next.
+        #
+        # THE PAIR IS THE TEST. Leaving the value alone is trivially achievable
+        # by not writing it at all, which would silently stop installing the
+        # guard on a fresh machine — the whole reason this block exists. So the
+        # unset case is asserted in the same fixture: unset gets the default,
+        # an absolute path that already resolves here is left untouched.
+        subprocess.run(["git", "init", "-q", str(repo)],
+                       env=fixture_env(), check=True, capture_output=True)
+        fixture_hooks = repo / "ops" / "githooks"
+        fixture_hooks.mkdir(parents=True, exist_ok=True)
+        (fixture_hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+        def fixture_hooks_path() -> str:
+            return subprocess.run(
+                ["git", "-C", str(repo), "config", "--local", "--get", "core.hooksPath"],
+                env=fixture_env(), capture_output=True, text=True).stdout.strip()
+
+        mod.IS_PRIMARY = True
+        with contextlib.redirect_stdout(io.StringIO()) as unset_hooks_out:
+            unset_hooks_rc = mod.cmd_install(True)
+        unset_hooks_output = unset_hooks_out.getvalue()
+        hooks_path_set_when_unset = (
+            unset_hooks_rc == 0
+            and fixture_hooks_path() == mod.GIT_HOOKS_RELATIVE
+            and "git hooksPath: (unset) -> ops/githooks" in unset_hooks_output
+        )
+        absolute_hooks_path = str(fixture_hooks)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "--local",
+             "core.hooksPath", absolute_hooks_path],
+            env=fixture_env(), check=True, capture_output=True)
+        with contextlib.redirect_stdout(io.StringIO()) as absolute_hooks_out:
+            absolute_hooks_rc = mod.cmd_install(True)
+        absolute_hooks_output = absolute_hooks_out.getvalue()
+        mod.IS_PRIMARY = original_primary
+        absolute_hooks_survived = (
+            absolute_hooks_rc == 0
+            and fixture_hooks_path() == absolute_hooks_path
+            and f"git hooksPath left at {absolute_hooks_path}" in absolute_hooks_output
+            and "-> ops/githooks" not in absolute_hooks_output
+            and os.access(fixture_hooks / "pre-push", os.X_OK)
+        )
+        # The predicate's own boundary, so the cases above cannot pass through a
+        # helper that says yes to everything: a relative value that is NOT the
+        # default names no single directory (git resolves it per worktree), and
+        # an absolute path somewhere else is genuine drift.
+        conformance_boundary = (
+            mod.git_hooks_path_conformant(mod.GIT_HOOKS_RELATIVE, str(fixture_hooks))
+            and mod.git_hooks_path_conformant(absolute_hooks_path, str(fixture_hooks))
+            and not mod.git_hooks_path_conformant("", str(fixture_hooks))
+            and not mod.git_hooks_path_conformant("ops/other-hooks", str(fixture_hooks))
+            and not mod.git_hooks_path_conformant(
+                str(repo / "ops" / "not-githooks"), str(fixture_hooks))
+        )
     cases = [
         ("ephemeral marker is honoured inside frontmatter",
          ephemeral_marker_honoured),
@@ -665,6 +802,16 @@ def main():
          and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
         ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
          tick_released),
+        ("the Gate Zero scheduler canary is released from the definition-only "
+         "hold (Joe's activation approval, 2026-09-12)", canary_released),
+        ("the installer plans the canary as an ordinary launchd write, and "
+         "reports it neither skipped nor wrongly installed", canary_planned),
+        ("apply still installs hooksPath on a machine that has none",
+         hooks_path_set_when_unset),
+        ("a pre-set ABSOLUTE hooksPath resolving to these hooks survives apply "
+         "untouched, and the hooks stay executable", absolute_hooks_survived),
+        ("the hooksPath conformance test accepts only the default and an "
+         "absolute path that resolves here", conformance_boundary),
         ("the repo-hygiene janitor agent is held as a definition only",
          janitor_held),
         ("check accepts the janitor agent's intended absence in silence",

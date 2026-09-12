@@ -280,18 +280,22 @@ DEFINITION_ONLY: dict[str, str] = {
         "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
         "gate is a separately reviewed live-effect packet, so the definition is "
         "written down and left uninstalled until that packet is approved",
-    # Added 2026-09-11 with the canary itself. The job is a no-op and its only
-    # product is an ops.run row bound to a receipt, so nothing it does is
-    # dangerous -- what is gated is the ACT OF STARTING A SCHEDULE, which is a
-    # human's to take. It is held here rather than simply left out of the repo
-    # because the alternative is a schedule that exists only as a command
-    # somebody has to remember to type, which is the two-homes disease this
-    # whole file exists to cure.
-    "com.carr.gate-zero-canary.plist":
-        "the Gate Zero scheduler canary would begin producing scheduled run "
-        "rows the moment it loads; starting a schedule is Joe's act, so the "
-        "definition is written down and left uninstalled until he takes it off "
-        "this list deliberately",
+    # com.carr.gate-zero-canary.plist was held here from 2026-09-11 to
+    # 2026-09-12 with the reason "starting a schedule is Joe's act, so the
+    # definition is written down and left uninstalled until he takes it off this
+    # list deliberately". THAT ACT IS TAKEN. Joe's blanket approval (decision
+    # idempotency 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84, "I approve everything")
+    # together with his 2026-09-13 ruling that the orchestrator runs release and
+    # activation commands itself is the deliberate removal the reason asked for,
+    # so the canary reconciles like any other agent and the next `install
+    # --apply` loads it. What this buys is the only question Gate Zero's fourth
+    # predecessor actually asks: a hand dispatch through bin/run-scheduled.sh
+    # proves the WRAPPER mints a receipt, and only launchd firing on its own
+    # proves the SCHEDULER does -- which is what `step:scheduler-active-receipt`
+    # reads. ops/config-as-code-selftest.py now asserts this release, the way it
+    # already asserts the 2026-08-26 control-plane tick cutover, so putting the
+    # canary back on the list is a change a test refuses rather than a silent
+    # revert.
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
@@ -1670,6 +1674,46 @@ def write_claude_settings(path, document, before, sink=None):
     return event
 
 
+# The value install writes when core.hooksPath has to be set at all. It is
+# relative because that is what a fresh clone on a second machine needs.
+GIT_HOOKS_RELATIVE = "ops/githooks"
+
+
+def git_hooks_path_conformant(configured: str, hooks_dir: str) -> bool:
+    """Is an ALREADY-CONFIGURED core.hooksPath pointing at these same hooks?
+
+    RECONCILIATION OWES NOTHING TO A SETTING THAT IS ALREADY RIGHT, and this one
+    is shared far wider than the repository it is read from. core.hooksPath lives
+    in the single .git/config that every worktree on this machine reads. Install
+    used to write the relative "ops/githooks" unconditionally, which turned the
+    ABSOLUTE canonical path — the designed state, as ops/prepush-floor-selftest.py
+    says in as many words ("always canonical's — core.hooksPath is one shared
+    path for every worktree") — into a value git resolves against whichever
+    worktree is running the hook. On a Mac carrying ~50 worktrees that silently
+    changes WHICH pre-push runs in every one of them, as a side effect of a job
+    about plists. Found and undone by hand during the 2026-09-12 Gate Zero
+    activation; this is the fix, so the next caller does not have to know.
+
+    The test is RESOLUTION, not string equality, so the absolute canonical path
+    and the relative default both count as already-installed:
+
+      * the literal relative default — the value install itself writes;
+      * an absolute path whose realpath is this repo's ops/githooks.
+
+    A relative value that is NOT the default is deliberately non-conformant: git
+    resolves it per worktree, so it names no single directory this function could
+    honestly compare. Unset is non-conformant too — that is the fresh-machine
+    case install exists for. Both are still reconciled to the default.
+    """
+    if not configured:
+        return False
+    if configured == GIT_HOOKS_RELATIVE:
+        return True
+    if not os.path.isabs(configured):
+        return False
+    return os.path.realpath(configured) == os.path.realpath(hooks_dir)
+
+
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     settings_existed = os.path.exists(SETTINGS)
@@ -1876,15 +1920,21 @@ def cmd_install(apply):
     if os.path.isdir(hooks_dir):
         current = subprocess.run(
             ["git", "-C", REPO, "config", "--get", "core.hooksPath"],
-            capture_output=True, text=True).stdout.strip()
-        if current == "ops/githooks":
+            capture_output=True, text=True, env=_git_env()).stdout.strip()
+        conformant = git_hooks_path_conformant(current, hooks_dir)
+        if current == GIT_HOOKS_RELATIVE:
             print("  git hooksPath already points at ops/githooks")
+        elif conformant:
+            print(f"  git hooksPath left at {current} "
+                  f"(already resolves to {hooks_dir})")
         else:
             print(f"  git hooksPath: {current or '(unset)'} -> ops/githooks"
                   + ("" if apply else "   [would set]"))
         if apply:
-            subprocess.run(["git", "-C", REPO, "config", "core.hooksPath", "ops/githooks"],
-                           check=False, env=_git_env())
+            if not conformant:
+                subprocess.run(
+                    ["git", "-C", REPO, "config", "core.hooksPath", GIT_HOOKS_RELATIVE],
+                    check=False, env=_git_env())
             for h in sorted(os.listdir(hooks_dir)):
                 p = os.path.join(hooks_dir, h)
                 if os.path.isfile(p):
