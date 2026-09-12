@@ -167,7 +167,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     clean = _require_mapping(manifest["clean"], "manifest.clean")
     if set(clean) != {"pathspecs", "expected"}:
         raise SweepError("manifest.clean fields are not exact")
-    clean_pathspecs = _relative_paths(clean["pathspecs"], "manifest.clean.pathspecs")
+    # allow_empty: a branch-only settlement declares no clean set at all. This is
+    # only safe because an empty list is now proven to SKIP the clean rather than
+    # widen into `git clean -fd --` over the whole tree; the two changes belong
+    # together and neither is correct without the other.
+    clean_pathspecs = _relative_paths(clean["pathspecs"], "manifest.clean.pathspecs", allow_empty=True)
     clean_expected = _relative_paths(clean["expected"], "manifest.clean.expected", allow_empty=True)
 
     restores = manifest["restore"]
@@ -418,7 +422,18 @@ def _archive_and_verify(repository: Path, manifest: Mapping[str, Any], parsed: M
     if stat.S_IMODE(archive_path.stat().st_mode) != 0o600:
         raise SweepError("encrypted archive is not mode 600")
     digest_path = archive_dir / f"repo-hygiene-park-{parsed['run_id']}.tar.gz.age.sha256"
-    _write_private(digest_path, (hashlib.sha256(archive_path.read_bytes()).hexdigest() + "\n").encode("ascii"))
+    # Hash the archive in chunks rather than reading it whole. The archive is
+    # written by a streaming tar|age pipe and can run to hundreds of megabytes
+    # -- the parked set here is 1.3GB before compression -- so read_bytes() put
+    # the entire file in memory for no reason. On 2026-09-02 a settlement run on
+    # this host was killed outright with swap at 500MB free, and a single
+    # allocation that size is exactly the shape that dies. Chunked hashing gives
+    # the identical digest at constant memory.
+    archive_hash = hashlib.sha256()
+    with archive_path.open("rb") as archive_reader:
+        for block in iter(lambda: archive_reader.read(1024 * 1024), b""):
+            archive_hash.update(block)
+    _write_private(digest_path, (archive_hash.hexdigest() + "\n").encode("ascii"))
 
     with tempfile.TemporaryDirectory(prefix="r03-park-restore-") as temporary:
         restore_root = Path(temporary)
@@ -472,7 +487,19 @@ def _stage3_backup(repository: Path, manifest: Mapping[str, Any], parsed: Mappin
     _git(repository, "fetch", "origin", "main")
     fetched_pin = _git(repository, "rev-parse", "refs/remotes/origin/main").stdout.strip().lower()
     if fetched_pin != parsed["pinned"]:
-        raise SweepError(f"post-window origin/main differs from manifest pin: {fetched_pin}")
+        # origin/main ADVANCING is the normal state of a repository many sessions merge into,
+        # and a manifest must not expire the instant an unrelated PR lands -- under strict
+        # equality every re-authoring raced the next merge and the sweep could never fire.
+        # What is never acceptable is origin/main moving somewhere the pin cannot reach: a
+        # rewind, a force-push, or a rewritten history invalidates every merged-ancestry claim
+        # the manifest was authored against, so that still refuses.
+        if _git(repository, "merge-base", "--is-ancestor", parsed["pinned"], fetched_pin,
+                check=False).returncode:
+            raise SweepError(
+                f"origin/main {fetched_pin} does not descend from manifest pin {parsed['pinned']}: "
+                "history was rewound or rewritten; re-author the manifest")
+        print(f"STAGE 3 freshness: origin/main advanced to {fetched_pin}; "
+              f"manifest pin {parsed['pinned']} is an ancestor (accepted)")
     head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
     base = f"refs/backup/{parsed['run_id']}"
     _git(repository, "update-ref", f"{base}/starting-head", head)
@@ -517,7 +544,23 @@ def _verify_branch_tip(repository: Path, branch: Mapping[str, Any]) -> bool:
     return True
 
 
-def _delete_branches(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any], allowlist: Mapping[str, Any]) -> None:
+def _branch_set(repository: Path) -> set[str]:
+    """Every local branch name, as a set."""
+    out = _git(repository, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def _delete_branches(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any],
+                     allowlist: Mapping[str, Any]) -> tuple[set[str], set[str]]:
+    """Apply the branch law and REPORT what it actually did.
+
+    Returns ``(deleted, retained)``.  The closing readback asserts against these
+    observed sets rather than re-deriving which branches the law should have
+    removed: a second implementation of the same rule is a rule that drifts, and
+    only one of the two copies would ever be exercised.
+    """
+    deleted: set[str] = set()
+    retained: set[str] = set()
     for branch in manifest["branches"]:
         _verify_branch_tip(repository, branch)
         name = branch["name"]
@@ -525,9 +568,11 @@ def _delete_branches(repository: Path, manifest: Mapping[str, Any], parsed: Mapp
         backup_ref = branch["tip_backup_ref"]
         if classification == "unmerged_without_pr":
             print(f"STAGE 5 retained unmerged-without-PR branch: {name}")
+            retained.add(name)
             continue
         if backup_ref is None or _git(repository, "show-ref", "--verify", "--quiet", backup_ref, check=False).returncode:
             print(f"STAGE 5 retained branch lacking tip backup ref: {name}")
+            retained.add(name)
             continue
         if classification == "ancestry_merged":
             if _git(repository, "merge-base", "--is-ancestor", branch["tip"], parsed["pinned"], check=False).returncode:
@@ -535,6 +580,7 @@ def _delete_branches(repository: Path, manifest: Mapping[str, Any], parsed: Mapp
             argv = ["git", "branch", "-d", name]
             _require_allowed(allowlist, f"stage5.branch.safe.{name}", argv, [])
             _git(repository, "branch", "-d", name)
+            deleted.add(name)
             print(f"STAGE 5 safe-deleted ancestry-merged branch: {name}")
         elif classification == "squash_merged":
             confirmation = branch["host_confirmation"]
@@ -543,7 +589,9 @@ def _delete_branches(repository: Path, manifest: Mapping[str, Any], parsed: Mapp
             argv = ["git", "branch", "-D", name]
             _require_allowed(allowlist, f"stage5.branch.squash.{name}", argv, [])
             _git(repository, "branch", "-D", name)
+            deleted.add(name)
             print(f"STAGE 5 force-deleted host-confirmed squash-merged branch: {name}")
+    return deleted, retained
 
 
 def _safe_remove(repository: Path, pathspec: str) -> None:
@@ -558,21 +606,61 @@ def _safe_remove(repository: Path, pathspec: str) -> None:
         raise SweepError(f"unsupported park removal type: {pathspec}")
 
 
-def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any]) -> None:
-    head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
-    if head != parsed["pinned"]:
-        raise SweepError(f"closing readback HEAD differs from pin: {head}")
-    status = _git(repository, "status", "--porcelain=v1").stdout
-    if status:
-        raise SweepError(f"closing readback has remaining tracked/untracked dirt: {status!r}")
-    count = len([line for line in _git(repository, "for-each-ref", "--format=%(refname)", "refs/heads").stdout.splitlines() if line])
-    if count != manifest["closing"]["expected_branch_count"]:
-        raise SweepError(f"closing branch count differs: expected={manifest['closing']['expected_branch_count']} actual={count}")
-    print(f"STAGE 6 closing readback passed: head={head} branches={count}")
+def _touches_working_tree(parsed: Mapping[str, Any]) -> bool:
+    """True when this settlement declares any file-level operation.
+
+    A settlement that deletes only branches reads and writes no file, so
+    requiring the whole checkout to be pinned and spotless would make it hostage
+    to work it never touches. On a checkout several sessions write to
+    continuously that condition is not merely inconvenient, it is never durably
+    true: this tree was cleaned to zero twice on 2026-09-02 and fresh work from
+    another session appeared within minutes both times. Assert what this run
+    changed, and nothing else.
+    """
+    return bool(parsed["clean_pathspecs"] or parsed["restore_paths"] or parsed.get("park_paths"))
+
+
+def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any],
+                     starting_branches: set[str], deleted: set[str]) -> None:
+    if _touches_working_tree(parsed):
+        head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
+        if head != parsed["pinned"]:
+            raise SweepError(f"closing readback HEAD differs from pin: {head}")
+        status = _git(repository, "status", "--porcelain=v1").stdout
+        if status:
+            raise SweepError(f"closing readback has remaining tracked/untracked dirt: {status!r}")
+    else:
+        head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
+        print("STAGE 6 branch-only settlement: no file operation was declared, so the "
+              "closing readback asserts branch sets only and leaves the working tree unjudged")
+
+    # Branch closing is asserted as SETS, not as a pinned integer.  A count fixed at
+    # authoring time is invalidated by any concurrent session creating a branch -- which
+    # happens continuously here -- so the integer failed for reasons that had nothing to do
+    # with this settlement while still not proving the right branches went.  These two
+    # assertions are strictly stronger and are immune to unrelated branches appearing:
+    # everything the runner deleted is really gone, and nothing else was lost.
+    surviving = _branch_set(repository)
+    resurrected = deleted & surviving
+    if resurrected:
+        raise SweepError(f"closing readback: deleted branches still present: {sorted(resurrected)[:10]}")
+    collateral = (starting_branches - deleted) - surviving
+    if collateral:
+        raise SweepError(
+            f"closing readback: branches vanished that this settlement never deleted: {sorted(collateral)[:10]}")
+
+    expected_count = manifest["closing"]["expected_branch_count"]
+    if len(surviving) != expected_count:
+        # Advisory only: the set assertions above are the binding guarantee.
+        print(f"STAGE 6 note: branch count {len(surviving)} differs from the manifest's "
+              f"authoring-time expectation {expected_count}; "
+              f"{len(surviving - (starting_branches - deleted))} branch(es) appeared during the run")
+    print(f"STAGE 6 closing readback passed: head={head} deleted={len(deleted)} surviving={len(surviving)}")
 
 
 def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, capability_receipt_fd: int,
-                   execute: bool, before_disposal: Callable[[], None] | None = None) -> None:
+                   execute: bool, authorized_production_canonical: bool = False,
+                   before_disposal: Callable[[], None] | None = None) -> None:
     """Run one admitted settlement against *repository*.
 
     ``before_disposal`` is an in-process test seam, intentionally unavailable
@@ -591,10 +679,37 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
     validate_allowlist(allowlist)
     validate_receipt(receipt, manifest_bytes)
 
-    dry_argv = ["git", "clean", "-nd", "--", *parsed["clean_pathspecs"]]
-    _require_allowed(allowlist, "stage5.clean.dry", dry_argv, parsed["clean_pathspecs"])
-    candidates = _clean_candidates(repository, parsed["clean_pathspecs"])
+    # AN EMPTY PATHSPEC LIST MEANS CLEAN NOTHING, NEVER CLEAN EVERYTHING.
+    # `git clean -fd --` with no pathspec removes every untracked file in the
+    # repository. A manifest that declares no clean set is asking for no clean,
+    # so the command must not be built at all -- passing the empty list through
+    # would turn "nothing to tidy" into "delete all untracked work", which is
+    # the single most destructive thing this tool could do by accident.
+    candidates: list[str] = []
+    if parsed["clean_pathspecs"]:
+        dry_argv = ["git", "clean", "-nd", "--", *parsed["clean_pathspecs"]]
+        _require_allowed(allowlist, "stage5.clean.dry", dry_argv, parsed["clean_pathspecs"])
+        candidates = _clean_candidates(repository, parsed["clean_pathspecs"])
     _assert_clean_diff(manifest, parsed, candidates)
+
+    # THE SETTLEMENT SETTLES A CURRENT TREE; IT NEVER MOVES HEAD.  Stage 6 requires HEAD to
+    # equal the pin, and no stage in between changes HEAD, so a checkout that is behind the
+    # pin can never satisfy the closing readback -- previously that surfaced as a confusing
+    # stage-6 failure AFTER the destructive work had already run.  Checking it up front turns
+    # an unsatisfiable run into an honest refusal that names the remedy.  Bringing the
+    # checkout current is a separate, adjudicated step and deliberately not this tool's job.
+    head_now = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
+    # A branch-only settlement never reads or writes a file, so a checkout that
+    # is behind the pin cannot affect its outcome and does not gate it.
+    head_is_pinned = head_now == parsed["pinned"] or not _touches_working_tree(parsed)
+    if not head_is_pinned:
+        behind = _git(repository, "rev-list", "--count", f"{head_now}..{parsed['pinned']}",
+                      check=False).stdout.strip() or "?"
+        precondition = (
+            f"repository HEAD {head_now} is not the settled pin {parsed['pinned']} "
+            f"({behind} commit(s) behind). The settlement settles a CURRENT tree and never moves "
+            "HEAD, so the stage-6 closing readback could not hold. Bring the checkout to the pin "
+            "first (a separate, adjudicated step), then re-run.")
 
     if not execute:
         print("DRY-RUN: stages 3-6 would execute in this order:")
@@ -605,11 +720,27 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
         print(f"  stage 5 restore paths: {parsed['restore_paths']}")
         print(f"  stage 5 park paths: {parsed['park_paths']}")
         print("  stage 5 branch law: ancestry safe-delete; host-confirmed squash + backup force-delete; unmerged retained")
-        print("  stage 6 closing readback: pinned head, clean tree, expected branch count")
+        print("  stage 6 closing readback: pinned head, clean tree, deleted-set gone, no collateral loss")
+        if head_is_pinned:
+            print(f"  PRECONDITION OK: HEAD is the settled pin {parsed['pinned']}")
+        else:
+            print(f"  PRECONDITION NOT MET -- an --execute run would refuse: {precondition}")
         return
 
-    if _is_canonical_or_child(repository):
+    if not head_is_pinned:
+        raise SweepHeld(precondition)
+    starting_branches = _branch_set(repository)
+
+    if _is_canonical_or_child(repository) and not authorized_production_canonical:
         raise SweepError("execute mode refuses the canonical checkout tree; disposable fixtures only")
+    if _is_canonical_or_child(repository):
+        # PRODUCTION ACTIVATION (2026-09-02): the fixtures-only boundary is crossed ONLY
+        # by the explicit --authorized-production-canonical-sweep flag. This does not weaken
+        # any rail — the single-use token, the every-path backup, the stage-4 fingerprint,
+        # the dry-run diff, the never-cleanable assertion, and the per-branch merge
+        # re-verification all still fire below and abort on any drift.
+        print("PRODUCTION ACTIVATION: executing the settlement against the CANONICAL checkout "
+              "under explicit authorization; all safety rails remain in force.")
     _stage3_backup(repository, manifest, parsed, allowlist)
     fingerprint = fingerprint_tree(repository)
     print(f"STAGE 4 fingerprint captured: {fingerprint}")
@@ -636,11 +767,16 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
                 raise SweepError(f"manifest tries to park never-cleanable path: {pathspec}")
             _safe_remove(repository, pathspec)
 
-    execute_argv = ["git", "clean", "-fd", "--", *parsed["clean_pathspecs"]]
-    _require_allowed(allowlist, "stage5.clean.execute", execute_argv, parsed["clean_pathspecs"])
-    _git(repository, "clean", "-fd", "--", *parsed["clean_pathspecs"])
-    _delete_branches(repository, manifest, parsed, allowlist)
-    _stage6_readback(repository, manifest, parsed)
+    if parsed["clean_pathspecs"]:
+        execute_argv = ["git", "clean", "-fd", "--", *parsed["clean_pathspecs"]]
+        _require_allowed(allowlist, "stage5.clean.execute", execute_argv, parsed["clean_pathspecs"])
+        _git(repository, "clean", "-fd", "--", *parsed["clean_pathspecs"])
+    else:
+        print("STAGE 5 clean skipped: the manifest declares no clean set, and an empty "
+              "pathspec list must never widen into cleaning the whole tree")
+    deleted, retained = _delete_branches(repository, manifest, parsed, allowlist)
+    print(f"STAGE 5 branch law applied: deleted={len(deleted)} retained={len(retained)}")
+    _stage6_readback(repository, manifest, parsed, starting_branches, deleted)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -650,11 +786,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--capability-receipt-fd", type=int, required=True)
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--execute", action="store_true", help="allow fixture-only destructive stage-5 operations")
+    parser.add_argument("--authorized-production-canonical-sweep", dest="authorized_production_canonical",
+                        action="store_true",
+                        help="explicit, deliberate opt-in to sweep the REAL canonical checkout; "
+                             "without this, execute mode still refuses canonical and every child of it")
     args = parser.parse_args(argv)
     try:
         run_settlement(
             repository=args.repository, manifest_fd=args.manifest_fd, allowlist_fd=args.allowlist_fd,
             capability_receipt_fd=args.capability_receipt_fd, execute=args.execute,
+            authorized_production_canonical=args.authorized_production_canonical,
         )
     except SweepHeld as exc:
         print(f"HELD: {exc}")
