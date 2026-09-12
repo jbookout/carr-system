@@ -1964,14 +1964,20 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   // THE PRODUCER'S EIGHT REASON IDS, added by this slice. They reach the UNRULED
   // surface because the closed reason registry is an exported constant — the
   // vocabulary a consumer can be handed is the whole registry, whether or not a
-  // given tree can reach a given member. Seven of them are the producer's own
+  // given tree can reach a given member. Nine of them are the producer's own
   // closed list, re-registered here so the gate can express a refusal the
-  // producer can reach; the eighth is the gate's, for the two synchronous reads
+  // producer can reach; the tenth is the gate's, for the two synchronous reads
   // once a join is something the emission produces rather than something a query
   // returns. Every one of them is swept for the union like any other addition —
   // being declared buys exemption from NOTHING, which is why "unpasted" and
   // "non_green" are not among them: both carried a union word, and both were
   // renamed rather than declared.
+  // THE TWO ADDED 2026-09-12 split the producer's absence vocabulary: git
+  // metadata it cannot resolve, and a sealed file that is not on disk, stop
+  // sharing an id with a ruled row that is genuinely absent. Both were checked
+  // against the union like every other addition, which is why HEAD's commit
+  // object is named `head_revision_object` inside them.
+  "gate_zero_candidate_metadata_absent",
   "gate_zero_evidence_unavailable",
   "gate_zero_gate_graph_clause_failed",
   "gate_zero_join_is_produced_not_queried",
@@ -1980,6 +1986,7 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "gate_zero_producer_identity_refused",
   "gate_zero_run_binding_unnamed",
   "gate_zero_scheduler_clause_failed",
+  "gate_zero_sealed_artifact_absent",
 ]);
 
 /**
@@ -2410,12 +2417,16 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   // and the registration and nothing test-shaped, and it does NOT import the
   // gate — a producer that imported the surface it answers for would be able to
   // read its own verdict back.
-  // The three `node:` builtins are the producer's own derivation: it reads the
+  // The four `node:` builtins are the producer's own derivation: it reads the
   // candidate tree's bytes, the environment manifest and the sealed fixture set
   // rather than hashing a description of them, and it reads the repository's own
-  // .git for the revision the running module was built from.
+  // .git for the revision the running module was built from — `node:zlib` since
+  // 2026-09-12, because it now reads HEAD's own commit and tree OBJECTS, which
+  // are zlib-deflated, rather than the reflog line the first draft took the
+  // subject maker from. There is no `node:child_process`: this oracle does not
+  // execute a program to learn what it is standing on.
   assert.deepEqual(imports["gate-zero-producer.v5.js"],
-    ["node:fs", "node:path", "node:url",
+    ["node:fs", "node:path", "node:url", "node:zlib",
       "./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
       "./gate-zero-seam-readers.v5.js"]);

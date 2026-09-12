@@ -32,7 +32,7 @@ import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
-         personalScopeForActor, runInAuthenticatedCall } from "./identity.js";
+         personalScopeForActor, dispatchAuthenticatedCall } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
@@ -7616,10 +7616,14 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
     // to the async context here and nowhere else. A surface that must derive
     // its own identity — r7's receipt identities, which deny anything a caller
     // supplied — reads it with no argument through identity.js's
-    // authenticatedCallIdentity(); outside a verb call there is nothing to read
-    // and that surface refuses. See identity.js's own note for why the derived
-    // three-field identity travels rather than the actor object.
-    return await runInAuthenticatedCall(actor, () => tool.handler(client, actor, args));
+    // authenticatedCallReceiptIdentity(); outside a verb call there is nothing
+    // to read and that surface refuses.
+    //
+    // THIS IS NOT AN IDENTITY SETTER, and identity.js's own note says why at
+    // length: what gets stored is DERIVED there from an actor that file minted
+    // from a credential and stamped with a Symbol nothing else can name. An
+    // object assembled anywhere else enters the scope as null.
+    return await dispatchAuthenticatedCall(actor, () => tool.handler(client, actor, args));
   } catch (e) {
     if (e instanceof ToolError) throw e;
     throw pgConstraintError(e) || e;

@@ -81,7 +81,7 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { actorFromProps, agentActorForToken, continuityActorForTokenMaps, hermesActorForTokenMaps,
-         hermesCosActorForToken } from "./identity.js";
+         hermesCosActorForToken, reviewActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
@@ -351,19 +351,16 @@ function probeActorFor(request, env) {
 // maps (it never will in practice — they are separate secrets) resolves
 // deterministically to probe first; in practice a caller only ever holds one
 // of the two tokens.
+//
+// THE MATCHING LOGIC MOVED TO identity.js ON 2026-09-12 (PR 1013, second
+// correction round) and this is now a two-line delegation. Nothing about the
+// door changed — same secret, same map shape, same returned fields — but the
+// actor is now minted inside identity.js, which is the only file that can stamp
+// an actor as authenticated. A receipt identity is derived from that stamp, so
+// the door that mints the reviewer seat has to be a door identity.js owns. See
+// the brand's note there.
 function reviewActorFor(request, env) {
-  const auth = request.headers.get("authorization") || "";
-  const token = auth.replace(/^Bearer\s+/i, "");
-  if (!token) return null;
-  let tokens;
-  try {
-    tokens = JSON.parse(env.REVIEW_TOKENS || "{}");
-  } catch {
-    tokens = {};
-  }
-  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
-  if (!slug) return null;
-  return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
+  return reviewActorForToken(request.headers.get("authorization") || "", env.REVIEW_TOKENS);
 }
 
 // ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------

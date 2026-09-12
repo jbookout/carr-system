@@ -190,7 +190,7 @@ export function actorFromProps(props, currentNativeAgentBindings = null) {
   // uses the separately provisioned local credential.
   const continuity_surface = native_agent_verified && props.slug === "codex"
     ? "codex" : null;
-  return { slug: props.slug, display: DISPLAY[props.slug], human,
+  return minted({ slug: props.slug, display: DISPLAY[props.slug], human,
            via: props.via || null, client_id: props.client_id || null,
            sponsoring_human_slug,
            ...(native_agent_verified ? { native_agent_verified: true } : {}),
@@ -198,7 +198,7 @@ export function actorFromProps(props, currentNativeAgentBindings = null) {
            // Compatibility alias for existing internal readers. New code must
            // use sponsoring_human_slug so runtime and sponsor never blur.
            human_slug: sponsoring_human_slug,
-           sponsor_required: props.sponsor_required === true };
+           sponsor_required: props.sponsor_required === true });
 }
 
 /**
@@ -347,10 +347,10 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
   // codex/grok (absent from that map) stay unsponsored exactly as before.
   const sponsoring_human_slug = LOCAL_SPONSOR[slug] || null;
   const native_agent_verified = viaLabel === "local-token" && sponsoring_human_slug !== null;
-  return { slug, display: `Agent (${slug})`, human: false, agent: true,
+  return minted({ slug, display: `Agent (${slug})`, human: false, agent: true,
            via: viaLabel, client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false,
-           ...(native_agent_verified ? { native_agent_verified: true } : {}) };
+           ...(native_agent_verified ? { native_agent_verified: true } : {}) });
 }
 
 /**
@@ -383,12 +383,12 @@ export function continuityActorForTokenMaps(
   }
   if (candidates.length !== 1) return null;
   const { surface, sponsor } = candidates[0];
-  return {
+  return minted({
     slug: surface, display: DISPLAY[surface], human: false, agent: true,
     via: `${surface}-continuity-token`, client_id: null,
     sponsoring_human_slug: sponsor, human_slug: sponsor, sponsor_required: false,
     native_agent_verified: true, continuity_surface: surface,
-  };
+  });
 }
 
 /**
@@ -464,9 +464,9 @@ export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!slug) return null;
   const sponsoring_human_slug = HERMES_SPONSOR[slug] || null;
-  return { slug, display: `Hermes (${slug})`, human: false, hermes: true,
+  return minted({ slug, display: `Hermes (${slug})`, human: false, hermes: true,
            via: "hermes-token", client_id: null,
-           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false });
 }
 
 /** Try additive Hermes token maps without replacing or reading back the
@@ -503,13 +503,13 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
   if (!tokens[slug] || tokens[slug] !== token) return null;
   const sponsoring_human_slug = HERMES_SPONSOR[slug];
   if (sponsoring_human_slug !== "joe") return null;
-  return { slug, display: `Hermes CoS (${slug})`, human: false,
+  return minted({ slug, display: `Hermes CoS (${slug})`, human: false,
            hermes: true, hermesCos: true, via: "hermes-cos-token", client_id: null,
-           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false });
 }
 
 // ---------------------------------------------------------------------------
-// THE AUTHENTICATED CALL CONTEXT (2026-09-12, PR 1013 correction round).
+// THE AUTHENTICATED CALL (2026-09-12, PR 1013, SECOND correction round).
 //
 // WHY IT EXISTS. r7's identity rule says every receipt identity is DERIVED from
 // authenticated execution context, and caller-supplied identity denies. A module
@@ -520,12 +520,38 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
 // out of a static declaration instead, so ANY process that imported it received
 // a receipt signed `codex-reviewer` without ever authenticating.
 //
-// WHAT THIS IS. One AsyncLocalStorage, entered ONCE, at tools.js's single verb
-// dispatch — the same choke point every verb already funnels through. Inside a
-// verb call the derived identity is readable with no argument; outside one there
-// is nothing to read and `authenticatedCallIdentity()` answers null. A test, a
-// CLI probe or an unauthenticated import therefore CANNOT obtain an identity,
-// which is the property the producer's refusal stands on.
+// WHAT THE FIRST CORRECTION GOT WRONG, and this one closes. It shipped
+// `runInAuthenticatedCall(actor, fn)` as a public export that took an ORDINARY
+// OBJECT. Anything that could type `{ slug: "codex-reviewer", review: true,
+// via: "review-token", correlation_id: <a uuid> }` could enter the context and
+// be signed for — which is caller-supplied identity wearing a context's
+// clothes, and the reviewer proved it by producing `authority_class:
+// "review_agent"` from a literal. Both names are gone.
+//
+// WHAT MAKES THIS ONE DIFFERENT: THE BRAND, and it is the whole control. Every
+// actor this file mints from a real credential — an OAuth grant's props, an
+// agent bearer, a continuity bearer, a Hermes bearer, the review-token door
+// below — is stamped with `MINTED_HERE`, a module-private Symbol carrying a
+// module-private sentinel. Nothing outside this file can name that Symbol and
+// nothing outside this file can reach that sentinel, so nothing outside this
+// file can produce an object the derivation will speak for. The stamp is a
+// non-writable, non-configurable ENUMERABLE property, which is the one shape
+// that survives the four places the server legitimately re-spreads an actor
+// (`{ ...actor, authorization_class }` in mcp.js and its three siblings) while
+// still being impossible to write over.
+//
+// SO THE ENTRY POINT IS NOT A SETTER. `dispatchAuthenticatedCall` stores nothing
+// a caller supplies: it stores what `deriveCallIdentity` COMPUTES from an actor
+// this file minted, and an unbranded object — however perfectly shaped — derives
+// null and is signed for by nothing. The only identity a caller can "set" is the
+// one they already authenticated as, which is not a setter, it is a scope.
+//
+// WHERE IT IS ENTERED: once, at tools.js's single verb dispatch, the same choke
+// point every verb already funnels through. Inside a verb call the derived
+// identity is readable with no argument; outside one there is nothing to read
+// and `authenticatedCallReceiptIdentity()` answers null. A test, a CLI probe or
+// an unauthenticated import therefore cannot obtain an identity, which is the
+// property the producer's refusal stands on.
 //
 // WHAT TRAVELS IS THE DERIVATION, NOT THE ACTOR. The store holds a frozen
 // three-field `authenticated-receipt-identity.v1` — actor_id, session_ref,
@@ -552,6 +578,46 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
 
 const AUTHENTICATED_CALL = new AsyncLocalStorage();
 
+/**
+ * THE BRAND. A module-private Symbol and a module-private sentinel: an object
+ * carries an authentic stamp only if this file put it there, because neither
+ * half of the pair has a name anything else can write down.
+ */
+const MINTED_HERE = Symbol("carr.identity.minted-from-a-credential");
+const MINT = Object.freeze({ minted_by: "mcp-server/src/identity.js" });
+
+/**
+ * Stamp one freshly minted actor. Applied at every return in this file that
+ * turns a CREDENTIAL into an actor, and nowhere else — there is no exported
+ * brander, because an exported brander is the forger this brand exists to stop.
+ */
+function minted(actor) {
+  if (actor === null || typeof actor !== "object") return actor;
+  Object.defineProperty(actor, MINTED_HERE, {
+    value: MINT, enumerable: true, writable: false, configurable: false,
+  });
+  return actor;
+}
+
+/** Did this file mint it? Asked of the sentinel, not of the Symbol's presence. */
+function mintedHere(actor) {
+  return actor !== null && typeof actor === "object" && actor[MINTED_HERE] === MINT;
+}
+
+/**
+ * Amendment 2's closed callable shape, for the exports added below: bound (so
+ * it carries no prototype and is not constructable), with an own
+ * `Symbol.hasInstance` data property answering false without reading the left
+ * operand, and frozen.
+ */
+function closedCallable(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return Object.freeze(closed);
+}
+
 /** The shapes a derived session ref is built from. Server-written, both of them. */
 const CALL_VIA = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CALL_CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -560,13 +626,18 @@ const CALL_CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
  * The `authenticated-receipt-identity.v1` for one server-established actor, or
  * null when this actor cannot be spoken for.
  *
- * Every field is computed here and now: the slug is the one identity.js already
- * accepted, the class is what authorizationClassForActor derives for it, and the
- * session is the server's correlation id. Nothing is read from a tool argument
- * and nothing is read from a stored row.
+ * THE FIRST QUESTION IS THE BRAND. An object this file did not mint from a
+ * credential answers null here whatever else is written on it, which is what
+ * makes the entry below a scope rather than a setter.
+ *
+ * Every field is then computed here and now: the slug is the one identity.js
+ * already accepted, the class is what authorizationClassForActor derives for it,
+ * and the session is the server's correlation id. Nothing is read from a tool
+ * argument and nothing is read from a stored row.
  */
 function deriveCallIdentity(actor) {
-  if (!actor || typeof actor.slug !== "string") return null;
+  if (!mintedHere(actor)) return null;
+  if (typeof actor.slug !== "string") return null;
   if (personalScopeForActor(actor).status === "error") return null;
   const via = typeof actor.via === "string" ? actor.via.toLowerCase() : "";
   const correlationId = typeof actor.correlation_id === "string"
@@ -580,19 +651,64 @@ function deriveCallIdentity(actor) {
 }
 
 /**
- * Run `fn` as the authenticated call this actor established. The one caller is
- * tools.js's verb dispatch; adding a second is a security-relevant change, not a
- * convenience, because whatever enters here is what a receipt will be signed by.
+ * REVIEW_TOKENS bearer -> the review council's machine actor, or null.
+ *
+ * MOVED HERE FROM index.js IN THIS CORRECTION, for the reason agentActorForToken
+ * and hermesActorForToken were moved before it, plus one that is new. The old
+ * ones: the Worker entrypoint imports from `cloudflare:` and cannot be loaded by
+ * `node --test`, so a door that only exists there is a door nobody can prove.
+ * The new one: a receipt identity may only be derived from an actor this file
+ * minted, so the door that mints the ONE class r7's registry admits for an
+ * independent control-plane oracle has to be a door this file owns. index.js's
+ * reviewActorFor now reads its secret and delegates here; the fields it returns
+ * are unchanged, byte for byte, including `review: true` — still the only thing
+ * that can put mcp.js's dispatch into the locked `reviewer` profile.
+ *
+ * Fails closed on every path: no header, unparseable JSON, a non-object or empty
+ * map, or a token that matches nothing.
  */
-export function runInAuthenticatedCall(actor, fn) {
-  return AUTHENTICATED_CALL.run(deriveCallIdentity(actor), fn);
-}
+export const reviewActorForToken = closedCallable((authorizationHeader, reviewTokensRaw) => {
+  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  let tokens;
+  try {
+    tokens = JSON.parse(reviewTokensRaw || "{}");
+  } catch {
+    return null;
+  }
+  if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return null;
+  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
+  if (!slug) return null;
+  // personalScopeForActor refuses any slug that is neither a DISPLAY actor nor a
+  // registered SERVER_MACHINE_IDENTITIES entry with this exact marker and
+  // provenance, so registration is enforced one layer down exactly as it was
+  // when this door lived in index.js.
+  return minted({ slug, display: `Reviewer (${slug})`, human: false, review: true,
+                  via: "review-token", client_id: null });
+});
 
 /**
- * The identity of the authenticated call this code is running inside, or null
- * when there is no such call. Takes no argument, so there is nothing to supply.
+ * Run `fn` inside the authenticated call this actor established.
+ *
+ * NOT A SETTER, and the difference is `deriveCallIdentity` above: what is stored
+ * is computed here from an actor THIS FILE minted from a credential. Hand it an
+ * object assembled anywhere else and the context is entered with null, so the
+ * surfaces that read it refuse — a caller cannot name an identity, only occupy
+ * the one they already hold.
+ *
+ * The one caller is tools.js's verb dispatch. Adding a second is a
+ * security-relevant change, not a convenience.
  */
-export function authenticatedCallIdentity() {
+export const dispatchAuthenticatedCall = closedCallable((actor, fn) =>
+  AUTHENTICATED_CALL.run(deriveCallIdentity(actor), fn));
+
+/**
+ * The `authenticated-receipt-identity.v1` of the call this code is running
+ * inside, or null when there is no such call. Takes no argument, so there is
+ * nothing to supply, and returns a frozen three-field value rather than the
+ * actor, so there is nothing to read back out of it either.
+ */
+export const authenticatedCallReceiptIdentity = closedCallable(() => {
   const identity = AUTHENTICATED_CALL.getStore();
   return identity === undefined ? null : identity;
-}
+});

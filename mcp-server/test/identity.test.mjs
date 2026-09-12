@@ -23,7 +23,22 @@ import {
   isKnownPartner,
   agentActorForToken,
   continuityActorForTokenMaps,
+  reviewActorForToken,
 } from "../src/identity.js";
+
+/**
+ * THE FIELDS AN ACTOR CARRIES, without the authentication brand.
+ *
+ * Since 2026-09-12 (PR 1013) every actor identity.js mints from a credential
+ * also carries one module-private Symbol stamping it as minted THERE, which is
+ * what lets a receipt identity be derived only from a real credential — see that
+ * file's note. The stamp is enumerable so it survives the `{ ...actor }` spreads
+ * the server does legitimately, and it is therefore visible to a strict deep
+ * comparison, which is what this helper strips. The assertions below are about
+ * the FIELDS a door returns; the stamp has its own assertions at the bottom.
+ */
+const fieldsOf = actor => (actor === null ? null : Object.fromEntries(Object.entries(actor)));
+
 
 test("continuity bearer maps derive one exact surface and sponsor", () => {
   const codex = continuityActorForTokenMaps(
@@ -31,7 +46,7 @@ test("continuity bearer maps derive one exact surface and sponsor", () => {
     JSON.stringify({ joe: "codex-secret" }),
     JSON.stringify({ joe: "claude-secret" }),
   );
-  assert.deepEqual(codex, {
+  assert.deepEqual(fieldsOf(codex), {
     slug: "codex", display: "Codex", human: false, agent: true,
     via: "codex-continuity-token", client_id: null,
     sponsoring_human_slug: "joe", human_slug: "joe", sponsor_required: false,
@@ -236,7 +251,7 @@ const AGENT_TOKENS = JSON.stringify({ grok: "grok-secret-fixture", codex: "codex
 
 test("agent token resolves to the tool's own actor, never a human", () => {
   const actor = agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
-  assert.deepEqual(actor, {
+  assert.deepEqual(fieldsOf(actor), {
     slug: "grok", display: "Agent (grok)", human: false, agent: true,
     via: "agent-token", client_id: null, sponsoring_human_slug: null,
     human_slug: null, sponsor_required: false,
@@ -297,7 +312,7 @@ const LOCAL_TOKENS = JSON.stringify({ "joe-local": "local-secret-fixture" });
 
 test("local token resolves to joe-local, human:false, sponsored to joe", () => {
   const actor = agentActorForToken("Bearer local-secret-fixture", LOCAL_TOKENS, "local-token");
-  assert.deepEqual(actor, {
+  assert.deepEqual(fieldsOf(actor), {
     slug: "joe-local", display: "Agent (joe-local)", human: false, agent: true,
     via: "local-token", client_id: null, sponsoring_human_slug: "joe",
     human_slug: "joe", sponsor_required: false, native_agent_verified: true,
@@ -332,7 +347,7 @@ const DELL_LOCAL_TOKENS = JSON.stringify({ "dell-local": "dell-local-secret-fixt
 
 test("dell-local resolves to Dell's personal scope, human:false", () => {
   const actor = agentActorForToken("Bearer dell-local-secret-fixture", DELL_LOCAL_TOKENS, "local-token");
-  assert.deepEqual(actor, {
+  assert.deepEqual(fieldsOf(actor), {
     slug: "dell-local", display: "Agent (dell-local)", human: false, agent: true,
     via: "local-token", client_id: null, sponsoring_human_slug: "dell",
     human_slug: "dell", sponsor_required: false, native_agent_verified: true,
@@ -366,4 +381,53 @@ test("local token is per-slug like every other agent token: a stray key does not
   const mixed = JSON.stringify({ "joe-local": "local-secret-fixture", grok: "grok-secret-fixture" });
   assert.equal(agentActorForToken("Bearer grok-secret-fixture", mixed, "local-token").sponsoring_human_slug, null);
   assert.equal(agentActorForToken("Bearer local-secret-fixture", mixed, "local-token").sponsoring_human_slug, "joe");
+});
+
+// ---------------------------------------------------------------------------
+// THE AUTHENTICATION BRAND (2026-09-12, PR 1013's second correction round).
+// ---------------------------------------------------------------------------
+
+test("every door that mints an actor from a credential stamps it, and nothing else can", () => {
+  const doors = [
+    ["agent token", agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS)],
+    ["continuity token", continuityActorForTokenMaps("Bearer codex-secret",
+      JSON.stringify({ joe: "codex-secret" }), JSON.stringify({ dell: "claude-secret" }))],
+    ["review token", reviewActorForToken("Bearer review-secret-fixture",
+      JSON.stringify({ "codex-reviewer": "review-secret-fixture" }))],
+    ["oauth props", actorFromProps(propsForSlug("joe", { via: "oauth-google" }))],
+  ];
+  for (const [where, actor] of doors) {
+    assert.notEqual(actor, null, where);
+    const stamps = Object.getOwnPropertySymbols(actor);
+    assert.equal(stamps.length, 1, `${where} carries no stamp`);
+    const descriptor = Object.getOwnPropertyDescriptor(actor, stamps[0]);
+    // ENUMERABLE so `{ ...actor }` carries it — mcp.js spreads the actor to add
+    // the authority class and the correlation id, and an actor that lost its
+    // stamp there would reach the verb dispatch unauthenticated.
+    assert.equal(descriptor.enumerable, true, where);
+    // AND NON-WRITABLE, NON-CONFIGURABLE, so it cannot be forged onto an object
+    // by writing over it either.
+    assert.equal(descriptor.writable, false, where);
+    assert.equal(descriptor.configurable, false, where);
+    assert.ok(Object.isFrozen(descriptor.value), where);
+    // The spread a server path performs carries the stamp through unchanged.
+    const scoped = { ...actor, correlation_id: "00000000-0000-4000-8000-000000000000" };
+    assert.equal(scoped[stamps[0]], actor[stamps[0]], `${where} lost its stamp to a spread`);
+  }
+
+  // The four doors share ONE stamp, so a single check answers for all of them.
+  const symbols = doors.map(([, actor]) => Object.getOwnPropertySymbols(actor)[0]);
+  assert.equal(new Set(symbols).size, 1);
+  // And the Symbol is module-private: it is not in the global registry, so no
+  // other file can name it even knowing its description.
+  assert.equal(Symbol.keyFor(symbols[0]), undefined);
+});
+
+test("a refused credential mints nothing to stamp", () => {
+  assert.equal(agentActorForToken("Bearer wrong", AGENT_TOKENS), null);
+  assert.equal(reviewActorForToken("Bearer wrong",
+    JSON.stringify({ "codex-reviewer": "review-secret-fixture" })), null);
+  assert.equal(reviewActorForToken("", "{}"), null);
+  assert.equal(reviewActorForToken("Bearer x", "not json"), null);
+  assert.equal(reviewActorForToken("Bearer x", JSON.stringify(["x"])), null);
 });
