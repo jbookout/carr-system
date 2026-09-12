@@ -320,14 +320,9 @@ const TRUSTED_SHAPE = {
 // The amendment admits `gate-zero-read-only-accepted`, the
 // `step:gate-zero-read-only-outcome` producer row and its
 // `independent_control_plane_oracle` role. `requirements` is unchanged: the
-// amendment touches no source row. The superseded digests are kept beside the
-// current ones because the recorded semantic review — PASS, 0 P0 / 0 P1 — was
-// bound to those bytes and a fresh semantic review of the amended packet is
-// owed.
-const SUPERSEDED = Object.freeze({
-  "design": "9bbdc2f5124fc3939c883e572f5c9077b347804b030f313e60756c28dfab07a6",
-  "constitution": "925f501cc155fd48f320ea7a7cf66cc5d4a90738838a93a3506010199c6ad505"
-});
+// amendment touches no source row. The recorded semantic review — PASS,
+// 0 P0 / 0 P1 — was bound to the pre-amendment design and constitution bytes,
+// so a fresh semantic review of the amended packet is owed.
 const FROZEN = Object.freeze({
   "design": "10df2a65e598011335abeeb09f6bc794b326e696717e080db0806f2efbc68413",
   "constitution": "63114d726d9ea54fb8159e324351bf6e578df7280ca337632fea83d1d3a43c73",

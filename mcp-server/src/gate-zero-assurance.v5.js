@@ -103,6 +103,7 @@ import {
   V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
   V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
   V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
+  V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
   V5_A02_GATE_ZERO_R7_PACKET_SHA256,
   V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
   V5_A02_SCHEDULER_STEP_REF,
@@ -413,8 +414,7 @@ export function emitGateZeroOutcome(request) {
       producer_registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
       producer_registration_decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
       r7_entry_witness: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
-      r7_entry_witness_decided_by:
-        "v5A02GateZeroR7Presence(<r7 design packet bytes>).witness_conjunction",
+      r7_entry_witness_decided_by: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
       // The outcome fields a consumer would need. Null because no run has
       // happened and no seat could have run it.
       outcome_digest: null,

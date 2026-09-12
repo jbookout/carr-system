@@ -101,6 +101,15 @@ export const V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256 =
 export const V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF = "311a9af5-3685-4c47-a158-f8dd70870ca1";
 
 /**
+ * The one sentence that names what decides `r7_entry_witness`. Every surface
+ * that reports the witness reports this beside it, so it lives here once:
+ * a second spelling of it in another module would be a second answer to the
+ * question of who decides.
+ */
+export const V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY =
+  "v5A02GateZeroR7Presence(<r7 design packet bytes>).witness_conjunction";
+
+/**
  * THE ONE BYTE VERIFIER, and the only thing in this repository that may answer
  * whether r7 carries the registration. Hand it the r7 design packet's BYTES —
  * reconstructed from the 62 chunk sections behind manifest
@@ -360,8 +369,7 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
     // repository, so nothing here may say the amendment landed OR that it did
     // not. `v5A02GateZeroR7Presence(<bytes>)` is the only thing that decides it.
     r7_entry_witness: r7EntryWitness(entry, R7_DESIGN_PACKET_BYTES),
-    r7_entry_witness_decided_by:
-      "v5A02GateZeroR7Presence(<r7 design packet bytes>).witness_conjunction",
+    r7_entry_witness_decided_by: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
     r7_packet_sha256: V5_A02_GATE_ZERO_R7_PACKET_SHA256,
     r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
     registry_entry: entry,
