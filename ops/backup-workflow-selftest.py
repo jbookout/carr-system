@@ -121,6 +121,17 @@ elif '/actions/workflows/' in url and url.endswith('/dispatches') and method == 
     if state.get('dispatch_error'):
         print('synthetic dispatch failure', file=sys.stderr); raise SystemExit(1)
     answer({{}})
+elif '/actions/workflows/' in url and url.endswith('/runs'):
+    if state.get('workflow_run_list_error'):
+        print('synthetic workflow run listing failure', file=sys.stderr); raise SystemExit(1)
+    # ANSWERS LOOSELY ON PURPOSE: every seeded run comes back whatever the
+    # caller asked for. A stub that applied the head and workflow scoping
+    # itself would make the door's own re-reads of workflow_run.path and
+    # workflow_run.head_sha unobservable -- they would be dead code that no
+    # control could distinguish from a door that trusted the URL it asked.
+    # The scoping the door DOES send is asserted from the call log instead.
+    rows = state.get('workflow_runs', [])
+    answer({{'total_count': len(rows), 'workflow_runs': rows}})
 elif '/actions/runs/' in url:
     answer(state.get('run', {{}}))
 elif '/commits/' in url:
@@ -619,17 +630,64 @@ _CHECK_PRODUCERS: dict[str, dict[str, object] | None] = {
     "foreign_app": {"id": 99001, "slug": "impostor-checks"},
     "unattributed": None,
 }
+# The envelope is no longer AUTHORITY -- the door ignores it entirely -- so the
+# only registered shape left is the forgery: the exact bytes this seam writes
+# into external_id, which any creator may copy, and which the controls below
+# attach to rows the seam did not write.
 _CHECK_ENVELOPES: dict[str, dict[str, object] | None] = {
     "absent": None,
     "seam_this_head": {
         "repository": "jbookout/carr-system", "run_id": 99,
         "run_attempt": 1, "head_sha": _PROOF_HEAD,
     },
-    "seam_other_head": {
-        "repository": "jbookout/carr-system", "run_id": 99,
-        "run_attempt": 1, "head_sha": "d" * 40,
-    },
 }
+# THE PROVIDER-BACKED HALF, and the one the door now decides on. A check-run's
+# ``check_suite`` is assigned by GitHub, not by whoever posted the Check, and
+# the door resolves which suites belong to this seam from the workflow-run
+# listing below rather than believing any row about itself.
+_SEAM_WORKFLOW_PATH = ".github/workflows/backup-nightly.yml"
+_CHECK_SUITES: dict[str, dict[str, object] | None] = {
+    "absent": None,
+    # The suite of a backup-nightly.yml run on the proof head: the seam's own.
+    "seam_run": {"id": 4200},
+    # A run of a DIFFERENT workflow file in the same repository. Same Actions
+    # app, same head, real suite -- and not this seam.
+    "other_workflow": {"id": 4300},
+    # A run of the SEAM'S OWN workflow file bound to another head. Authentic
+    # elsewhere, worthless here.
+    "other_head_run": {"id": 4400},
+}
+
+
+def _workflow_runs() -> list[dict[str, object]]:
+    """What the provider answers when asked for backup-nightly.yml's runs.
+
+    Every row comes back on every call, because the fake provider deliberately
+    ignores the scoping the caller sent. Two of these three rows are therefore
+    the door's OWN job to discard: run 4002 is this seam's workflow file on
+    ANOTHER head, and run 4003 is another workflow file on this one. If either
+    re-read is dropped from the resolver, that run's suite joins the seam's set
+    and the matching control below dispatches on a red head.
+    """
+    return [
+        {
+            "id": 4001, "path": _SEAM_WORKFLOW_PATH, "head_sha": _PROOF_HEAD,
+            "check_suite_id": 4200, "status": "completed", "conclusion": "failure",
+        },
+        {
+            "id": 4002, "path": _SEAM_WORKFLOW_PATH, "head_sha": "d" * 40,
+            "check_suite_id": 4400, "status": "completed", "conclusion": "failure",
+        },
+        # A RUN OF ANOTHER WORKFLOW FILE, deliberately left in an answer the
+        # real endpoint scopes to one workflow. The door re-reads
+        # ``workflow_run.path`` on every row rather than trusting the URL it
+        # asked, and this row is what makes that re-read load-bearing: drop it
+        # from the fixture and a door that skipped the check would still pass.
+        {
+            "id": 4003, "path": ".github/workflows/gates.yml", "head_sha": _PROOF_HEAD,
+            "check_suite_id": 4300, "status": "completed", "conclusion": "success",
+        },
+    ]
 _CHECK_SUMMARIES: dict[str, dict[str, object] | None] = {
     "absent": None,
     "earlier_proof": {
@@ -642,12 +700,16 @@ _CHECK_SUMMARIES: dict[str, dict[str, object] | None] = {
 # one would silently collapse into a single Check and a control would pass
 # while proving nothing.
 _CHECK_IDS = {
-    ("actions_app", "ordinary_ci"): 7300,
-    ("actions_app", "seam_label"): 7301,
-    ("foreign_app", "ordinary_ci"): 7400,
-    ("foreign_app", "seam_label"): 7401,
-    ("unattributed", "ordinary_ci"): 7500,
-    ("unattributed", "seam_label"): 7501,
+    ("actions_app", "ordinary_ci", "other_workflow"): 7300,
+    ("actions_app", "ordinary_ci", "absent"): 7310,
+    ("actions_app", "seam_label", "seam_run"): 7301,
+    ("actions_app", "seam_label", "other_workflow"): 7302,
+    ("actions_app", "seam_label", "other_head_run"): 7303,
+    ("actions_app", "seam_label", "absent"): 7304,
+    ("foreign_app", "ordinary_ci", "absent"): 7400,
+    ("foreign_app", "seam_label", "seam_run"): 7401,
+    ("unattributed", "ordinary_ci", "absent"): 7500,
+    ("unattributed", "seam_label", "seam_run"): 7501,
 }
 
 
@@ -658,17 +720,20 @@ def _ci_check(
     producer: str = "actions_app",
     envelope: str = "absent",
     summary: str = "absent",
+    suite: str = "other_workflow",
 ) -> dict[str, object]:
     """One check-run on the proof head, assembled only from registered values.
 
     The default is the ordinary case the door must be able to stand on: a
-    concluded, clean CI Check stamped by the Actions app and carrying no seam
-    envelope -- which is what every real gates run on the head looks like.
+    concluded, clean CI Check stamped by the Actions app, carrying no seam
+    envelope, sitting in the check-suite of some OTHER workflow file in this
+    repository -- which is what every real gates run on the head looks like.
     """
-    key = (producer, label)
+    key = (producer, label, suite)
     if (state not in _CHECK_STATES or label not in _CHECK_LABELS
             or producer not in _CHECK_PRODUCERS or envelope not in _CHECK_ENVELOPES
-            or summary not in _CHECK_SUMMARIES or key not in _CHECK_IDS):
+            or summary not in _CHECK_SUMMARIES or suite not in _CHECK_SUITES
+            or key not in _CHECK_IDS):
         raise ValueError("unregistered check-run fixture shape")
     row: dict[str, object] = {
         "id": _CHECK_IDS[key],
@@ -676,6 +741,9 @@ def _ci_check(
         "head_sha": _PROOF_HEAD,
         **_CHECK_STATES[state],
     }
+    assigned = _CHECK_SUITES[suite]
+    if assigned is not None:
+        row["check_suite"] = dict(assigned)
     stamp = _CHECK_PRODUCERS[producer]
     if stamp is not None:
         row["app"] = dict(stamp)
@@ -719,6 +787,10 @@ def _spent_proof_check(proof_id: str = _PROOF_ID) -> dict[str, object]:
         # spelling of it. Without it this fixture would be an impostor row, and
         # the refusal it proves would be the wrong refusal.
         "app": dict(_CHECK_PRODUCERS["actions_app"] or {}),
+        # And the provider-assigned suite of a real backup-nightly run on this
+        # head. Without it this row is not the seam's own under the door's own
+        # test, and the refusal it proves would be the wrong refusal.
+        "check_suite": dict(_CHECK_SUITES["seam_run"] or {}),
         "external_id": json.dumps(earlier, sort_keys=True, separators=(",", ":")),
         "output": {"title": "Backup artifact", "summary": json.dumps(summary, sort_keys=True)},
     }
@@ -1244,6 +1316,45 @@ def _privileged_hits(value: object, path: str = "") -> list[str]:
     return hits
 
 
+_PROVIDER_BINDING = """    suite = item.get("check_suite")
+    if not isinstance(suite, dict):
+        return False
+    suite_id = suite.get("id")
+    if isinstance(suite_id, bool) or not isinstance(suite_id, int) or suite_id <= 0:
+        return False
+    return suite_id in seam_suites"""
+# What the predicate decided on BEFORE the re-review forged it: the envelope the
+# Check's own creator wrote. The control below puts exactly this back.
+_FORGEABLE_BINDING = "    return check_identity(item) is not None"
+
+
+def _unbound_predicate_tree() -> Path | None:
+    """A copy of the door's tree with the PROVIDER BINDING taken back out.
+
+    THE CONTROL THIS EXISTS FOR. Every refusal above is consistent with a door
+    that refuses everything -- a predicate hard-wired to ``return False`` would
+    pass all of them and fail only the positive control. What has to be shown is
+    that one specific line is what refuses a same-app row from another workflow
+    file. So this tree restores the forgeable rule the re-review broke, changing
+    nothing else, and the caller watches that same fixture DISPATCH.
+
+    Returns None if the binding is not found verbatim, and the caller reports a
+    FAIL rather than skipping: a control that silently stops controlling is
+    worse than no control.
+    """
+    source = _STATUS_HELPER.read_text(encoding="utf-8")
+    if source.count(_PROVIDER_BINDING) != 1:
+        return None
+    root = Path(tempfile.mkdtemp(prefix="carr-dispatch-unbound-"))
+    (root / "ops" / "config").mkdir(parents=True)
+    (root / "lib").mkdir()
+    (root / "ops" / _STATUS_HELPER.name).write_text(
+        source.replace(_PROVIDER_BINDING, _FORGEABLE_BINDING, 1), encoding="utf-8")
+    shutil.copy2(_ROOT / "lib" / "platform_metering.py", root / "lib" / "platform_metering.py")
+    shutil.copy2(_METERING_POLICY, root / "ops" / "config" / _METERING_POLICY.name)
+    return root
+
+
 def _paused_policy_tree() -> Path:
     """A copy of the door's own tree whose metering policy re-imposes the pause.
 
@@ -1263,6 +1374,20 @@ def _paused_policy_tree() -> Path:
     (root / "ops" / "config" / "platform-metering.v1.json").write_text(
         json.dumps(policy, indent=2), encoding="utf-8")
     return root
+
+
+def _code_only(body: str) -> str:
+    """A function body with its leading docstring removed.
+
+    The checks below assert that a decision never CONSULTS something -- the
+    Check's name, its output, the envelope its creator wrote. Those same words
+    have to appear in the docstrings, because a reader who does not know what
+    was retired cannot tell a hardening from an omission. Searching the raw body
+    therefore reports a violation for the prose that explains the rule, so the
+    prose is stripped and only the statements are searched.
+    """
+    parts = body.split('"""')
+    return parts[2] if len(parts) >= 3 else body
 
 
 def _dispatch_door_contract() -> None:
@@ -1323,28 +1448,67 @@ def _dispatch_door_contract() -> None:
     clean_signature = "def _require_head_checks_clean(identity: Identity) -> None:"
     clean_body = (status_source.split(clean_signature, 1)[-1].split("\ndef ", 1)[0]
                   if clean_signature in status_source else "")
+    # The predicate's exact signature, and the suite set is part of it: a
+    # predicate that still took only (item, identity) could not consult the
+    # provider at all, and this read reports FAIL rather than matching a
+    # renamed or narrowed one.
     predicate_signature = (
-        "def _is_seam_producer_check(item: dict[str, Any], identity: Identity) -> bool:"
+        "def _is_seam_producer_check(\n"
+        "    item: dict[str, Any],\n"
+        "    identity: Identity,\n"
+        "    seam_suites: frozenset[int],\n"
+        ") -> bool:"
     )
     predicate_body = (status_source.split(predicate_signature, 1)[-1].split("\ndef ", 1)[0]
                       if predicate_signature in status_source else "")
+    clean_code = _code_only(clean_body)
+    predicate_code = _code_only(predicate_body)
     _check(
         "the head-evidence scan excludes by authenticated producer, not by Check name",
-        "_is_seam_producer_check(item, identity)" in clean_body
-        and "CHECK_NAME" not in clean_body,
+        "_is_seam_producer_check(item, identity, seam_suites)" in clean_code
+        and "CHECK_NAME" not in clean_code,
         "excluding by name lets anyone who can attach that label hide a red Check "
         "from the evidence the budget admission stands on",
     )
+    resolver_signature = "def _seam_run_check_suites(identity: Identity) -> frozenset[int]:"
+    resolver_body = (status_source.split(resolver_signature, 1)[-1].split("\ndef ", 1)[0]
+                     if resolver_signature in status_source else "")
     _check(
-        "the producer predicate reads the provider's stamp and the seam's envelope, never the name",
-        "BACKUP_CHECK_APP_ID" in predicate_body
-        and "BACKUP_CHECK_APP_SLUG" in predicate_body
-        and "check_identity(item)" in predicate_body
-        and "BACKUP_CHECK_ENVELOPE_KEYS" in predicate_body
-        and "CHECK_NAME" not in predicate_body
-        and '.get("name")' not in predicate_body,
-        "both halves are required: external_id is text any creator can copy, and the "
-        "app stamp is shared with every other Actions Check on the head",
+        "the producer predicate decides on provider facts only, never on creator text",
+        "BACKUP_CHECK_APP_ID" in predicate_code
+        and "BACKUP_CHECK_APP_SLUG" in predicate_code
+        and 'item.get("check_suite")' in predicate_code
+        and "seam_suites" in predicate_code
+        and "check_identity(" not in predicate_code
+        and "external_id" not in predicate_code
+        and "BACKUP_CHECK_ENVELOPE_KEYS" not in status_source
+        and "CHECK_NAME" not in predicate_code
+        and '.get("name")' not in predicate_code,
+        "the app stamp is shared with every other Actions Check on the head and "
+        "external_id is text any creator can copy, so the pair authenticated nothing: "
+        "only the provider's own check-suite binding does",
+    )
+    resolver_code = _code_only(resolver_body)
+    _check(
+        "the seam's check-suites are resolved from the provider's own run listing",
+        "BACKUP_WORKFLOW_FILE" in resolver_code
+        and "BACKUP_WORKFLOW_PATH" in resolver_code
+        and '"head_sha": identity.head_sha' in resolver_code
+        and '"check_suite_id"' in resolver_code
+        and "external_id" not in resolver_code
+        and 'BACKUP_WORKFLOW_PATH = ".github/workflows/" + BACKUP_WORKFLOW_FILE'
+        in status_source,
+        "a suite set built from anything the Check itself carries would hand the "
+        "exclusion straight back to the creator",
+    )
+    _check(
+        "the head-evidence scan resolves the seam's suites before it scans",
+        "_seam_run_check_suites(identity)" in clean_code
+        and "_is_seam_producer_check(item, identity, seam_suites)" in clean_code
+        and clean_code.index("_seam_run_check_suites(identity)")
+        < clean_code.index("_is_seam_producer_check(item, identity, seam_suites)"),
+        "a predicate asked without the provider's suite set could only fall back on "
+        "what the row says about itself",
     )
     _check(
         "the registered producer identity is a literal pair, not a caller argument",
@@ -1367,6 +1531,10 @@ def _dispatch_door_contract() -> None:
             "run": _run_state(), "artifacts": [],
             "check_runs": [_ci_check("concluded_clean")],
             "branch_head": {"sha": _PROOF_HEAD},
+            # What the provider answers about backup-nightly.yml's own runs.
+            # The door reads this to learn which check-suites are the seam's;
+            # a state that omitted it would exclude nothing at all.
+            "workflow_runs": _workflow_runs(),
         }
         state.update(state_extra or {})
         return _fixture_env(root, state)
@@ -1392,6 +1560,26 @@ def _dispatch_door_contract() -> None:
         and inputs.get("wr54_failure_proof_expected_head") == _PROOF_HEAD,
         f"expected one dispatch carrying both proof inputs, got rc={result.returncode} "
         f"{result.stderr.strip()} {dispatched!r}",
+    )
+    listings = [
+        row for row in _calls(log_path)
+        if str(row.get("url", "")).endswith("/actions/workflows/backup-nightly.yml/runs")
+    ]
+    def scoped_to_this_head(row: dict[str, object]) -> bool:
+        """Did this recorded call carry the head as a query parameter?
+
+        The logged ``args`` is read back as ``object``, so it is narrowed to a
+        list before being iterated rather than trusted to be one.
+        """
+        raw = row.get("args")
+        return f"head_sha={_PROOF_HEAD}" in (
+            [str(item) for item in raw] if isinstance(raw, list) else [])
+
+    _check(
+        f"{dispatch}: the seam's suites are asked of one workflow file on this head",
+        bool(listings) and all(scoped_to_this_head(row) for row in listings),
+        "the door must scope its own question even though it re-reads every answer: "
+        f"got {listings!r}",
     )
     receipt = _parsed_output(result)
     digest = receipt.get("metering_gate_digest")
@@ -1452,43 +1640,79 @@ def _dispatch_door_contract() -> None:
          _proof_args()),
         ("a head carrying a failed Check refuses",
          {"check_runs": [_ci_check("concluded_red")]}, _proof_args()),
-        # ── THE MUTATION CONTROL for the producer-identity exclusion ────────
-        # Each of these four seeds a CONCLUDED-RED row carrying the seam's own
-        # label "Backup artifact" -- the exact label the retired name-only
-        # exclusion trusted -- beside one ordinary green Check. None of them is
-        # the seam's own row: they miss the provider stamp, or the envelope, or
-        # bind the envelope to another head. Under the old exclusion all four
-        # dispatched on a red head; every one of them must refuse now.
+        # ── THE MUTATION CONTROLS for the producer-identity exclusion ──────
+        # Each seeds a CONCLUDED-RED row carrying the seam's own label "Backup
+        # artifact" beside one ordinary green Check, and none of them is the
+        # seam's own row. The first shape retired here was the name-only
+        # exclusion; the second was the app stamp PLUS the seam's external_id
+        # envelope, which review forged -- the envelope is creator text and the
+        # stamp is shared with every Actions Check on the head. So every row
+        # below carries the forged envelope under the genuine Actions stamp,
+        # and differs from the seam only in what the PROVIDER says about it.
         ("a failed Check merely NAMED like the seam's own still counts as red",
          {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label")]},
+                         _ci_check("concluded_red", label="seam_label",
+                                   suite="absent")]},
          _proof_args()),
-        ("a failed seam-labelled Check from a foreign app counts as red even with a "
-         "copied envelope",
+        # THE FORGERY THE RE-REVIEW PERFORMED: the shared Actions app stamp and
+        # a byte-perfect copy of this seam's envelope for this very head, on a
+        # row the seam never wrote. It was excluded before; it is red now.
+        ("a copied seam envelope under the shared Actions stamp counts as red",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label",
+                                   envelope="seam_this_head", suite="absent")]},
+         _proof_args()),
+        # (1) SAME APP, ANOTHER WORKFLOW FILE. A real Actions run in this
+        # repository, with a real provider-assigned suite -- and the suite set
+        # is scoped by workflow_run.path, so it is not this seam's.
+        ("a failed seam-labelled Check from another workflow file counts as red",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label",
+                                   envelope="seam_this_head",
+                                   suite="other_workflow")]},
+         _proof_args()),
+        # (2) SAME WORKFLOW FILE, ANOTHER HEAD. backup-nightly.yml really did
+        # produce suite 4400 -- on commit d…d. The suite set is resolved from a
+        # listing filtered to THIS head, so it carries no authority here.
+        ("a seam-workflow suite bound to another head counts as red on this one",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label",
+                                   envelope="seam_this_head",
+                                   suite="other_head_run")]},
+         _proof_args()),
+        ("a failed seam-labelled Check from a foreign app counts as red even when it "
+         "claims the seam's own suite",
          {"check_runs": [_ci_check("concluded_clean"),
                          _ci_check("concluded_red", label="seam_label",
                                    producer="foreign_app",
-                                   envelope="seam_this_head")]},
+                                   suite="seam_run")]},
          _proof_args()),
         ("a failed seam-labelled Check with no producer stamp at all counts as red",
          {"check_runs": [_ci_check("concluded_clean"),
                          _ci_check("concluded_red", label="seam_label",
                                    producer="unattributed",
-                                   envelope="seam_this_head")]},
+                                   suite="seam_run")]},
          _proof_args()),
-        ("a seam envelope bound to another head counts as red on this one",
-         {"check_runs": [_ci_check("concluded_clean"),
+        # (3, second half) The authentic seam failure IS excluded -- and being
+        # excluded buys the head nothing while any OTHER Check is red.
+        ("an excluded seam failure cannot carry a head whose other Check is red",
+         {"check_runs": [_ci_check("concluded_red"),
                          _ci_check("concluded_red", label="seam_label",
-                                   envelope="seam_other_head")]},
+                                   envelope="seam_this_head", suite="seam_run",
+                                   summary="earlier_proof")]},
          _proof_args()),
         # The excluded row is not evidence, so a head carrying ONLY the seam's
         # own authentic failure has nothing left to stand on and refuses rather
         # than reading as clean.
         ("an authentic seam failure alone leaves no evidence to stand on",
          {"check_runs": [_ci_check("concluded_red", label="seam_label",
-                                   envelope="seam_this_head",
+                                   envelope="seam_this_head", suite="seam_run",
                                    summary="earlier_proof")]},
          _proof_args()),
+        # The suite set is read from the provider, so an unreadable listing
+        # refuses rather than scanning with an empty one.
+        ("an unreadable workflow-run listing refuses rather than dispatching blind",
+         {"workflow_run_list_error": True}, _proof_args()),
     ]
     for label, extra, args in refusals:
         env, state_path, log_path = fixture(extra)
@@ -1514,7 +1738,7 @@ def _dispatch_door_contract() -> None:
     env, state_path, log_path = fixture({"check_runs": [
         _ci_check("concluded_clean"),
         _ci_check("concluded_red", label="seam_label", envelope="seam_this_head",
-                  summary="earlier_proof"),
+                  suite="seam_run", summary="earlier_proof"),
     ]})
     seeded = _invoke(env, dispatch, *_proof_args())
     raw_after_seed = _read_json(state_path).get("dispatches")
@@ -1527,6 +1751,45 @@ def _dispatch_door_contract() -> None:
         "poisons every later one: "
         f"rc={seeded.returncode} {seeded.stderr.strip()} {after_seed!r}",
     )
+
+    # MUTATION CONTROL (4): WITHOUT THE PROVIDER BINDING, (1) GOES GREEN.
+    # The same fixture as "another workflow file" above -- a red seam-labelled
+    # row carrying a copied envelope under the shared Actions stamp, sitting in
+    # some other workflow's suite -- run against a tree whose predicate decides
+    # on the envelope again. It dispatches, which is what makes the refusal
+    # above attributable to the binding rather than to a door that refuses
+    # everything.
+    unbound_root = _unbound_predicate_tree()
+    forged: dict[str, object] = {"check_runs": [
+        _ci_check("concluded_clean"),
+        _ci_check("concluded_red", label="seam_label", envelope="seam_this_head",
+                  suite="other_workflow"),
+    ]}
+    if unbound_root is None:
+        _check(
+            f"{dispatch}: the provider binding is present to be mutated",
+            False,
+            "the control could not find the suite-membership decision verbatim, so it "
+            "proves nothing about the refusal above",
+        )
+    else:
+        env, state_path, log_path = fixture(forged)
+        unbound = subprocess.run(
+            [sys.executable, str(unbound_root / "ops" / _STATUS_HELPER.name),
+             dispatch, *_proof_args()],
+            cwd=unbound_root, env=env, text=True, capture_output=True,
+            timeout=8, check=False,
+        )
+        raw_unbound = _read_json(state_path).get("dispatches")
+        unbound_posted = [row for row in raw_unbound if isinstance(row, dict)] \
+            if isinstance(raw_unbound, list) else []
+        _check(
+            f"{dispatch}: removing the provider binding lets the forged row through",
+            unbound.returncode == 0 and len(unbound_posted) == 1,
+            "if the envelope-only predicate ALSO refuses this fixture, the refusal "
+            "above is not evidence that the provider binding does anything: "
+            f"rc={unbound.returncode} {unbound.stderr.strip()} {unbound_posted!r}",
+        )
 
     # THE ONE REFUSAL THE SOURCE SEARCHES ABOVE CANNOT PROVE: the BUDGET GATE
     # itself saying no. Run the door's own bytes from a tree whose sealed policy
