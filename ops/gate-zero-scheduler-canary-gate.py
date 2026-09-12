@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: doctorcre-v5-astra-integration-review
 """The Gate Zero scheduler canary, end to end, against a disposable ledger.
 
 WHAT THIS PROVES, and why a text assertion could not. Gate Zero's fourth
