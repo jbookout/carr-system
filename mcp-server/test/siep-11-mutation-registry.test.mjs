@@ -43,6 +43,7 @@ import {
   REGISTRY_V25_VERSION,
   renderV5F09WorkflowTruthForwardRegistrySql,
   renderV5ScheduledJobAdmissionForwardRegistrySql,
+  assertV5ScheduledJobAdmissionV25TrustRoot,
   R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
   renderR07RepoHygieneJanitorForwardRegistrySql,
   isDefinitionOnlyLaunchd,
@@ -1183,18 +1184,23 @@ test("v24 seals the V5-F09 workflow-truth frontier and preserves the v23 predece
 
 test("v25 admits the scheduled freshness and canary ingresses and preserves the v24 predecessor", () => {
   const rows = frozenInventory(REGISTRY_V25_VERSION);
-  assert.equal(v25Migration, renderV5ScheduledJobAdmissionForwardRegistrySql(rows));
+  // NO ARGUMENT, and that is the shape rather than a convenience: the public
+  // renderer takes no caller input at all, so what it emits is decided by the
+  // frozen fixture and this module's own baseline. The hostile-input sweep
+  // below proves the absence rather than assuming it.
+  assert.equal(v25Migration, renderV5ScheduledJobAdmissionForwardRegistrySql());
 
   // THE POINT OF THIS SUCCESSOR, and the only thing that separates it from
   // every registry-only predecessor since v20: the frozen inventory GROWS.
   // A re-digest could have ridden current_source_review; a new ingress cannot.
-  assert.equal(rows.length, 839);
+  assert.equal(rows.length, 840);
   assert.equal(frozenInventory(REGISTRY_V24_VERSION).length, 835);
   for (const key of [
     "launchd-workflow:com.carr.canonical-fast-forward",
     "launchd-workflow:com.carr.canonical-dirty-watchdog",
     "launchd-workflow:com.carr.gate-zero-canary",
     "script-entrypoint:bin/gate-zero-canary.sh",
+    "script-entrypoint:ops/gate-zero-scheduler-canary-gate.py",
   ]) {
     assert.ok(rows.some(row => row.ingress_key === key), key);
     assert.ok(!frozenInventory(REGISTRY_V24_VERSION).some(row => row.ingress_key === key), key);
@@ -1216,12 +1222,139 @@ test("v25 admits the scheduled freshness and canary ingresses and preserves the 
   assert.doesNotMatch(v25Migration, /^\s*(begin|commit)\s*;\s*$/im);
   assert.doesNotMatch(v25Migration, /__V24_|__V25_|__V5_F09_V24_CATALOG_SUCCESSOR__|UNBOUND/);
   assert.match(v25Migration, /do \$v5_scheduled_job_admission_preflight\$/);
+  assert.match(v25Migration, /two script entrypoints are admitted as new ingresses/);
 
   // v25 is the seal this migration CREATES, so it carries every predecessor
   // seal tuple and none of its own.
   for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
     const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
     assert.ok(v25Migration.includes(tuple), seal.version);
+  }
+});
+
+test("the Gate Zero canary agent passes only arguments the wrapper's own parser accepts", () => {
+  // THE DEFECT THIS EXISTS FOR (PR #1006 review 1): the plist passed a retired
+  // `evidence ref file` option, and bin/run-scheduled.sh treats an unrecognised
+  // flag as the FIRST POSITIONAL argument rather than refusing it. The service
+  // key would have been the flag, the run key the path, and the command the
+  // word after it. Nothing was red, because nothing ran the two files together.
+  //
+  // The recognised options are read OUT OF THE WRAPPER, not restated here: a
+  // future option added there is covered without editing this test, and an
+  // option removed there turns a plist that still passes it red.
+  const wrapper = fs.readFileSync(
+    new URL("../../bin/run-scheduled.sh", import.meta.url), "utf8");
+  const loop = wrapper.slice(wrapper.indexOf('while [ "$#" -gt 0 ]; do'),
+    wrapper.indexOf("done", wrapper.indexOf('while [ "$#" -gt 0 ]; do')));
+  const recognised = [...loop.matchAll(/^\s{4}(-{1,2}[a-z-]*)\)/gm)].map(match => match[1]);
+  assert.deepEqual(recognised.sort(), ["--", "--also-heartbeat", "--heartbeat-interval"]);
+
+  const plist = fs.readFileSync(
+    new URL("../../ops/launchd/com.carr.gate-zero-canary.plist", import.meta.url), "utf8");
+  const start = plist.indexOf("<key>ProgramArguments</key>");
+  assert.ok(start > 0);
+  const array = plist.slice(plist.indexOf("<array>", start), plist.indexOf("</array>", start));
+  const argv = [...array.matchAll(/<string>([^<]*)<\/string>/g)].map(match => match[1]);
+  assert.deepEqual(argv, [
+    "/bin/zsh",
+    "{{REPO}}/bin/run-scheduled.sh",
+    "gate-zero-canary",
+    "gatezero.canary",
+    "/bin/zsh",
+    "{{REPO}}/bin/gate-zero-canary.sh",
+  ]);
+  // Anything option-shaped after the wrapper has to be one the loop above
+  // recognises. Today there is none, and that is the assertion: a positional
+  // shape cannot be misread as an option, and an option cannot be misread as a
+  // positional.
+  for (const argument of argv.slice(2)) {
+    if (argument.startsWith("-")) assert.ok(recognised.includes(argument), argument);
+  }
+  assert.equal(plist.includes("evidence-ref-file"), false);
+
+  // And the child is a no-op: one statement, no file, no output. A canary that
+  // writes something can fail at writing it, and a failed canary row says the
+  // scheduler is broken about a scheduler that just proved it works.
+  const canary = fs.readFileSync(
+    new URL("../../bin/gate-zero-canary.sh", import.meta.url), "utf8");
+  const statements = canary.split("\n")
+    .filter(line => line.trim() && !line.startsWith("#"));
+  assert.deepEqual(statements, ["exit 0"]);
+
+  // The end-to-end proof that all of this actually produces the row card 12
+  // reads lives where a database exists: ops/gate-zero-scheduler-canary-gate.py,
+  // which the migration class runs on its disposable Postgres. Its `# ci:
+  // db-gate` marker is what wires it, so the marker is asserted here.
+  const gate = fs.readFileSync(
+    new URL("../../ops/gate-zero-scheduler-canary-gate.py", import.meta.url), "utf8");
+  assert.match(gate, /^# ci: db-gate$/m);
+  assert.match(gate, /readSchedulerCanaryEvidence/);
+  assert.match(gate, /receipt_binding/);
+  assert.match(gate, /observation_after_dispatch/);
+});
+
+test("the v25 public surface admits no caller input under any shape", () => {
+  // THE MANDATORY SWEEP of the 2026-09-11 standing rule, for the two exports
+  // this branch adds. Both were plain functions reading caller-supplied values
+  // until PR #1006 review 1: the renderer took `rows` and a `predecessorArtifacts`
+  // holder, so a Proxy get trap threw the caller's own value back out and a
+  // caller-supplied row carrying a privileged word landed in the returned SQL.
+  const canonical = renderV5ScheduledJobAdmissionForwardRegistrySql();
+  const marker = "HOSTILEMARKERTEXT";
+  const privileged = [
+    "allow", "commit", "prompt", "suppress", "release", "read", "covered",
+    "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
+    "satisfied", "complete", "admitted", "resumed", "attended", "verified",
+    "present", "equivalent", "operational", "active", "green", "joins_exactly",
+    "coverage_complete", "favorable", "would_", "_if_authoritative",
+  ];
+  const hostileRow = {
+    ingress_key: `mcp-tool:${marker}`, source_locator: `${marker}/allow.js`,
+    source_digest: "0".repeat(64), implementation_state: "passing",
+    entry_digest: `sha256:${"f".repeat(64)}`,
+  };
+  const throwingProxy = new Proxy({}, {
+    get() { throw marker; },
+    has() { throw marker; },
+    getPrototypeOf() { throw marker; },
+  });
+  const inputs = [
+    [], [undefined], [null], [[hostileRow]], [[hostileRow], { secdef_execute: { count: 1, digest: marker } }],
+    [[hostileRow], undefined, { migration: marker, runtime: marker }],
+    [[hostileRow], undefined, throwingProxy],
+    [throwingProxy], [throwingProxy, throwingProxy, throwingProxy],
+    [{ length: 1, 0: hostileRow }], ["allow"], [Symbol.iterator], [() => [hostileRow]],
+  ];
+  for (const argv of inputs) {
+    const label = `input ${JSON.stringify(argv.map(value => typeof value))}`;
+    const rendered = renderV5ScheduledJobAdmissionForwardRegistrySql(...argv);
+    assert.equal(rendered, canonical, label);
+    assert.equal(rendered.includes(marker), false, label);
+    assert.equal(assertV5ScheduledJobAdmissionV25TrustRoot(...argv), undefined, label);
+  }
+  // The canonical artifact carries no privileged word of its own as a bare
+  // token either, beyond the SQL vocabulary the migration is written in. This
+  // asserts the narrower thing the sweep is actually for: nothing a CALLER can
+  // name reaches the output, so the only occurrences are this repository's own.
+  assert.equal(privileged.some(word => canonical.includes(`${marker}${word}`)), false);
+
+  // Amendment 2's closed shape for an exported callable, on both exports: not
+  // constructable, no prototype, and an own Symbol.hasInstance data property
+  // that answers without touching the left operand.
+  for (const [name, exported] of [
+    ["renderV5ScheduledJobAdmissionForwardRegistrySql", renderV5ScheduledJobAdmissionForwardRegistrySql],
+    ["assertV5ScheduledJobAdmissionV25TrustRoot", assertV5ScheduledJobAdmissionV25TrustRoot],
+  ]) {
+    assert.equal(typeof exported, "function", name);
+    assert.equal(Object.hasOwn(exported, "prototype"), false, name);
+    assert.throws(() => Reflect.construct(exported, []), TypeError, name);
+    const descriptor = Object.getOwnPropertyDescriptor(exported, Symbol.hasInstance);
+    assert.equal(descriptor.writable, false, name);
+    assert.equal(descriptor.configurable, false, name);
+    assert.equal(typeof descriptor.value, "function", name);
+    // The left operand is never touched: a Proxy whose getPrototypeOf throws
+    // would otherwise carry its own thrown value out of an export.
+    assert.equal(throwingProxy instanceof exported, false, name);
   }
 });
 
@@ -1650,9 +1783,11 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // invisible to this assertion and the count shifts at `git add`, not at
   // save.
   // 545 before the v25 registry successor; admitting the Gate Zero canary adds
-  // exactly one reviewed non-MCP source, bin/gate-zero-canary.sh. The three new
-  // LaunchAgents are workflow_entrypoint rows and are filtered out above.
-  assert.equal(rows.length, 546);
+  // two reviewed non-MCP sources, bin/gate-zero-canary.sh and the acceptance
+  // gate that runs it end to end, ops/gate-zero-scheduler-canary-gate.py. The
+  // three new LaunchAgents are workflow_entrypoint rows and are filtered out
+  // above.
+  assert.equal(rows.length, 547);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -1660,9 +1795,9 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  // 534 before the portfolio tail, 536 before v25; same single new executable,
-  // bin/gate-zero-canary.sh.
-  assert.equal(scripts.length, 537);
+  // 534 before the portfolio tail, 536 before v25; two new executables,
+  // bin/gate-zero-canary.sh and ops/gate-zero-scheduler-canary-gate.py.
+  assert.equal(scripts.length, 538);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

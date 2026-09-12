@@ -7855,11 +7855,40 @@ const V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH =
 const V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH =
   "mcp-server/src/scac-mutation-registry.v24.generated.js";
 
+/**
+ * THE CLOSED SHAPE FOR A v25 EXPORT, and the two exports below are the only
+ * ones in this file that carry it — deliberately, because they are the only
+ * ones this branch adds.
+ *
+ * Amendment 2 of the 2026-09-11 standing rule (orchestrator ruling 2026-09-12
+ * 00:20Z) names it: an exported callable is an arrow or a bound function, never
+ * a class or a plain function, and it owns a `Symbol.hasInstance` data property
+ * that answers false WITHOUT TOUCHING THE LEFT OPERAND. Without that own hook
+ * the intrinsic one walks the caller's prototype chain, so
+ * `hostile instanceof someExport` runs the caller's own getPrototypeOf trap and
+ * can carry the caller's thrown text back out through an export of this module.
+ *
+ * Bound rather than bare, for the reason
+ * mcp-server/src/gate-zero-seam-readers.v5.js states at its own `closedCallable`:
+ * the engine's refusal for `new` on a bare arrow quotes the function's SOURCE
+ * TEXT back at the caller, and a bound arrow's refusal names
+ * `function () { [native code] }` and no line of this file. The property is
+ * non-writable and non-configurable, so it cannot be replaced or redefined as
+ * an accessor.
+ */
+function closedExport(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return closed;
+}
+
 // Shared v25 trust root. Every entry path that renders or writes a v25
 // artifact calls this before doing any work, so an unbound predecessor seal,
 // catalog baseline or artifact pin refuses here rather than producing a
 // plausible-looking successor from a broken chain.
-export function assertV5ScheduledJobAdmissionV25TrustRoot() {
+function assertV5ScheduledJobAdmissionV25TrustRootFrozen() {
   assertV5F09WorkflowTruthV24TrustRoot();
   const { v24: v24Seal } = HISTORICAL_REGISTRY_SEALS;
   if (v24Seal?.version !== REGISTRY_V24_VERSION ||
@@ -7882,17 +7911,29 @@ export function assertV5ScheduledJobAdmissionV25TrustRoot() {
 
 // Registry-only successor that ADMITS new source ingresses. Every predecessor
 // from v20 on was registry-only because its source change re-digested existing
-// entrypoints; this one exists because three LaunchAgent definitions and one
-// script are NEW ingresses, which current_source_review cannot express at all
-// (assertCurrentSourceInventoryMatchesFixture refuses an unknown ingress_key).
-// It creates no table, no role and no domain function: it seals the widened
-// source inventory and installs the v25 catalog/policy projection after the
-// immutable v24 frontier. The v24 predecessor was NOT registry-only, so the
-// header-marker slice below is also what drops the V5-F09 domain SQL.
-export function renderV5ScheduledJobAdmissionForwardRegistrySql(rows = fullInventory(),
+// entrypoints; this one exists because three LaunchAgent definitions and two
+// script entrypoints are NEW ingresses, which current_source_review cannot
+// express at all (assertCurrentSourceInventoryMatchesFixture refuses an unknown
+// ingress_key). It creates no table, no role and no domain function: it seals
+// the widened source inventory and installs the v25 catalog/policy projection
+// after the immutable v24 frontier. The v24 predecessor was NOT registry-only,
+// so the header-marker slice below is also what drops the V5-F09 domain SQL.
+//
+// MODULE-PRIVATE, and that is the second finding of PR #1006 review 1. Every
+// parameter here is a lever over what the rendered SQL says: `rows` becomes the
+// seeded registry entries, and `predecessorArtifacts` was READ as an object —
+// `?.migration`, `?.runtime` — so a Proxy whose get trap threw carried the
+// caller's own thrown value out through an export, and a caller-supplied row
+// carrying a privileged word landed in the returned SQL. The 2026-09-11
+// standing rule closes exactly that: no exported function takes a caller's
+// object or a caller's rows and speaks from them. The public surface below
+// takes NOTHING and renders the one artifact this branch seals; this function
+// is reachable only from inside this module, where every argument is a frozen
+// fixture or an artifact this file just rendered itself.
+function renderV5ScheduledJobAdmissionRegistrySqlFrozen(rows,
   dbCatalogBaseline = V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
   predecessorArtifacts = undefined) {
-  assertV5ScheduledJobAdmissionV25TrustRoot();
+  assertV5ScheduledJobAdmissionV25TrustRootFrozen();
   const { v24: v24Seal } = HISTORICAL_REGISTRY_SEALS;
   const predecessorDbCatalogBaseline = V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE;
   const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
@@ -8101,8 +8142,8 @@ comment on function ops.scac_mutation_catalog_v24_current() is 'Historical v24 l
 `-- Exact disposable-Postgres post-0498 receipt. Refuse before any v25 function
 -- exists; this registry-only successor changes no domain DDL or business rows.
 -- What it DOES change is the sealed source inventory itself: three LaunchAgent
--- definitions and one script entrypoint are admitted as new ingresses, which is
--- the one shape current_source_review cannot carry.
+-- definitions and two script entrypoints are admitted as new ingresses, which
+-- is the one shape current_source_review cannot carry.
 do $v5_scheduled_job_admission_preflight$
 declare observed_count integer; observed_digest text; grant_snapshot jsonb;
 begin
@@ -8121,6 +8162,28 @@ ${preflightBody}end $v5_scheduled_job_admission_preflight$;
 `;
   return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
 }
+
+/**
+ * THE TWO v25 PUBLIC ENTRY POINTS, and neither one reads a caller.
+ *
+ * `renderV5ScheduledJobAdmissionForwardRegistrySql()` renders migration 0501
+ * from the FROZEN v25 inventory and this module's own catalog baseline. It
+ * declares no parameters and consults none: `arguments` is not read, so a
+ * caller's rows, a caller's baseline and a caller's predecessor-artifact holder
+ * are not merely validated away — there is no path by which they could arrive.
+ * Every call, from any caller, with any argument, returns the same bytes as the
+ * committed artifact, which is what the public-surface sweep in
+ * mcp-server/test/siep-11-mutation-registry.test.mjs asserts input by input.
+ *
+ * The trust root is the same story in one line: it takes nothing, answers
+ * nothing, and either returns or throws this module's own Error.
+ */
+export const assertV5ScheduledJobAdmissionV25TrustRoot =
+  closedExport(() => assertV5ScheduledJobAdmissionV25TrustRootFrozen());
+export const renderV5ScheduledJobAdmissionForwardRegistrySql =
+  closedExport(() => renderV5ScheduledJobAdmissionRegistrySqlFrozen(
+    frozenInventory(REGISTRY_V25_VERSION),
+    V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE));
 
 
 export function renderGeneratedFrontier() {
@@ -8427,7 +8490,7 @@ export function renderGeneratedFrontier() {
       dbCatalogBaseline: V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
     });
   artifacts["migrations/0501_scheduled_job_admission_and_scac_successor.sql"] =
-    renderV5ScheduledJobAdmissionForwardRegistrySql(v25Rows,
+    renderV5ScheduledJobAdmissionRegistrySqlFrozen(v25Rows,
       V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE, {
         migration: artifacts["migrations/0498_f09_workflow_truth_and_scac_successor.sql"],
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v24.generated.js"],
@@ -8904,8 +8967,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   } else if (process.argv[2] === "--write-v5-scheduled-job-admission-registry-migration") {
     const target = resolve(process.argv[3] ||
       "migrations/0501_scheduled_job_admission_and_scac_successor.sql");
-    const rows = frozenInventory(REGISTRY_V25_VERSION);
-    await writeFile(target, renderV5ScheduledJobAdmissionForwardRegistrySql(rows));
+    // No rows argument: the public entry point renders the frozen v25 frontier
+    // and nothing else, so the CLI cannot pick what gets sealed either.
+    await writeFile(target, renderV5ScheduledJobAdmissionForwardRegistrySql());
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());

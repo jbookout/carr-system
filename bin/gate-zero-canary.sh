@@ -10,10 +10,26 @@
 #
 #   receipt_binding             the dispatch row carries a non-null
 #                               ops.run.evidence_ref AND was written by
-#                               bin/run-scheduled.sh with source_kind wrapper
+#                               bin/run-scheduled.sh with source_kind wrapper,
+#                               and that receipt names THIS run key and was
+#                               minted after this row's started_at
 #   canary_match                the observation is of THIS run — same run_key,
 #                               same evidence_ref
 #   observation_after_dispatch  observed_at is STRICTLY after started_at
+#
+# THIS SCRIPT SUPPLIES NONE OF THAT, AND THAT IS THE WHOLE DESIGN. The receipt
+# is minted by bin/run-scheduled.sh, out of the wrapper's own clock and the
+# machine's own entropy, AFTER this child exits — there is no flag that hands
+# the wrapper a path and no file this job could write that would reach
+# ops.run.evidence_ref. An earlier draft of this file took a receipt path as
+# $1 and wrote a token into it, against the `--evidence-ref-file` interface the
+# wrapper carried before PR #1002. That interface is gone: the wrapper's option
+# loop recognises `--heartbeat-interval` and `--also-heartbeat` and treats
+# anything else as the START OF THE POSITIONAL ARGUMENTS, so a retired flag is
+# not rejected — it is silently read as the service key, and the job the
+# scheduler then tries to execute is whatever word followed the run key. A
+# canary wired that way misfires quietly, which is the one failure mode a
+# canary must not have.
 #
 # WHY A DEDICATED JOB RATHER THAN WATCHING A REAL ONE. A real job's row mixes
 # two facts — "the scheduler fired" and "the work succeeded" — and a red row
@@ -21,67 +37,33 @@
 # work to fail at, so its row is a clean statement about the scheduler alone.
 #
 # WHY IT IS THE SMALLEST THING THAT CAN BE WRITTEN. It touches no database, no
-# network, no record layer, no file outside the receipt path it is handed. It
-# mints a receipt token and exits 0. Anything else it did would be something
-# else that could break, and a canary that can fail for its own reasons is a
-# second job to debug rather than a signal.
+# network, no record layer and no file. It takes no arguments and it prints
+# nothing: the wrapper's own log line and the ops.run row it records are the
+# only trace this job's existence is supposed to leave. Anything else it did
+# would be something else that could break, and a canary that can fail for its
+# own reasons is a second job to debug rather than a signal.
 #
 # MEASURED 2026-09-11, against production, and it is why this file exists:
 # 28,309 rows in ops.run, 21,894 of them written by the wrapper, and ZERO
 # carrying an evidence_ref. Not one run in the ledger's history could have
 # satisfied `receipt_binding`, canary or otherwise.
 #
-#   usage: bin/gate-zero-canary.sh <receipt-file>
+#   usage: bin/gate-zero-canary.sh
 #
-# It is invoked through the wrapper, which reads that same path back:
+# It is invoked through the wrapper, with no options at all — the wrapper mints
+# the receipt for itself, so there is nothing to pass it:
 #
-#   bin/run-scheduled.sh --evidence-ref-file /tmp/gate-zero-canary.receipt \
-#     gate-zero-canary gatezero.canary \
-#     /bin/zsh {{REPO}}/bin/gate-zero-canary.sh /tmp/gate-zero-canary.receipt
+#   bin/run-scheduled.sh gate-zero-canary gatezero.canary \
+#     /bin/zsh {{REPO}}/bin/gate-zero-canary.sh
 #
-# THE RECEIPT IS FRESH EVERY RUN, on purpose. A constant token would satisfy
-# `receipt_binding` and `canary_match` forever, including on a run that never
-# happened, because yesterday's row would match today's query just as well.
-# The token carries the UTC instant and 16 random hex characters, so a row
-# names the dispatch it belongs to and nothing else.
+# ARGUMENTS ARE IGNORED RATHER THAN REFUSED, deliberately. A canary that exits
+# nonzero because somebody typed an extra word records a FAILED run, and a
+# failed canary row says "the scheduler is broken" about a scheduler that just
+# demonstrated it works. There is nothing here for an argument to change.
 #
-# EXIT CODES. 0 when the receipt was written; 64 (EX_USAGE) when no path was
-# given; 74 (EX_IOERR) when the path could not be written. The last two are
-# real failures and the wrapper will record them as such: a canary that could
-# not mint its receipt has not proven anything, and must not read as a run
-# that did.
+# EXIT CODE. Always 0. ops/gate-zero-scheduler-canary-gate.py runs this file
+# through the real wrapper against a disposable Control Plane ledger and reads
+# the resulting row back through the real card-12 reader, so the contract above
+# is proven end to end on every push rather than asserted in this comment.
 
-set -u
-
-EX_USAGE=64
-EX_IOERR=74
-
-if [ "$#" -ne 1 ] || [ -z "$1" ]; then
-  print -ru2 -- "usage: bin/gate-zero-canary.sh <receipt-file>"
-  exit $EX_USAGE
-fi
-
-RECEIPT_FILE="$1"
-
-# [A-Za-z0-9:._-] only, which is exactly what the wrapper's whitelist accepts
-# and what the reader's run-key pattern allows. `date` supplies the ordering,
-# the hex supplies the uniqueness, and neither can contain a character that
-# would be dropped on the way to ops.run.evidence_ref.
-stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
-nonce="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-if [ -z "$nonce" ]; then
-  print -ru2 -- "gate-zero-canary: no entropy source; refusing to mint a guessable receipt"
-  exit $EX_IOERR
-fi
-token="gatezero.canary:${stamp}:${nonce}"
-
-mkdir -p -- "${RECEIPT_FILE:h}" 2>/dev/null
-if ! print -r -- "$token" > "$RECEIPT_FILE" 2>/dev/null; then
-  print -ru2 -- "gate-zero-canary: could not write receipt to $RECEIPT_FILE"
-  exit $EX_IOERR
-fi
-
-# The one line this job prints. It goes to whatever StandardOutPath the plist
-# already names; the wrapper never reads it.
-print -r -- "gate-zero-canary receipt=$token"
 exit 0

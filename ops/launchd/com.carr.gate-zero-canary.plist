@@ -26,15 +26,37 @@
     by key alone. This one passes `gatezero.canary`, which is the key the gate
     is pointed at and which nothing else writes.
 
-    WHY A RECEIPT FILE AND NOT A CONSTANT. The receipt path is handed to the
-    job AND to the wrapper (the wrapper's receipt flag is spelled out in
-    ProgramArguments below rather than here: a double hyphen is illegal inside
-    an XML comment, and writing one is what made notes-sweep the single plist
-    in this directory no strict XML parser could read, found 2026-08-14 by
-    tools/scheduler-truth.py). The job mints a fresh token per run and writes
-    it there; the wrapper reads it back after the child exits and binds the row
-    to it. A constant receipt would let a row from last month answer a question
-    about today, which is the exact failure this canary exists to rule out.
+    WHY NO OPTIONS AT ALL, and this is the correction PR #1006 review 1 forced.
+    ProgramArguments below is exactly the wrapper's documented positional
+    shape: the wrapper, the service key, the run key, and the command. THE
+    WRAPPER MINTS THE RECEIPT ITSELF (PR #1002), from its own clock and the
+    machine's own entropy, after the child exits; there is no receipt path to
+    hand it and no variable that moves one. An earlier revision of this file
+    passed a retired `evidence ref file` flag and a path, which the wrapper's
+    option loop (bin/run-scheduled.sh lines 183 to 200) does NOT recognise:
+
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            [heartbeat interval]) ... shift 2 ;;
+            [also heartbeat])     ... shift 2 ;;
+            [bare double hyphen]) shift; break ;;
+            *) break ;;
+          esac
+        done
+
+    An unknown flag hits the `*) break` arm, so it is not refused — it becomes
+    $1, which the next two lines read as the SERVICE KEY, making the run key
+    the receipt path and the command the word after it. The agent would have
+    tried to execute `gate-zero-canary` as a program and recorded a failed run
+    under a service nothing registers. The flag names are written in words
+    rather than typed here because a double hyphen is illegal inside an XML
+    comment, and writing one is what made notes-sweep the single plist in this
+    directory no strict XML parser could read, found 2026-08-14 by
+    tools/scheduler-truth.py.
+
+    WHAT THE JOB ITSELF DOES: nothing, and exits 0. bin/gate-zero-canary.sh is
+    a comment block and one `exit 0`, so the row this schedule produces is a
+    statement about the scheduler and about nothing else.
 
     THE CADENCE IS HOURLY because the gate wants a recent dispatch, not a
     frequent one, and because every fire costs one spooled row. The service's
@@ -47,13 +69,10 @@
   <array>
     <string>/bin/zsh</string>
     <string>{{REPO}}/bin/run-scheduled.sh</string>
-    <string>--evidence-ref-file</string>
-    <string>{{REPO}}/out/gate-zero-canary.receipt</string>
     <string>gate-zero-canary</string>
     <string>gatezero.canary</string>
     <string>/bin/zsh</string>
     <string>{{REPO}}/bin/gate-zero-canary.sh</string>
-    <string>{{REPO}}/out/gate-zero-canary.receipt</string>
   </array>
 
   <key>StartInterval</key><integer>3600</integer>
