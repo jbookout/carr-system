@@ -82,17 +82,17 @@ const SEAM_RULINGS = Object.freeze({
   "card:11": Object.freeze({
     question: "which store an accepted predecessor outcome comes from",
     store_ref: "record-layer:work-request-outcome-feedback",
-    decision_id: null,
+    decision_id: "16c7cdfb-b675-4b6a-bbff-4bbdab46baf8",
   }),
   "card:12": Object.freeze({
     question: "which scheduler surface supplies a canary and the observation after it",
     store_ref: "control-plane:ops.service+ops.run",
-    decision_id: null,
+    decision_id: "f7c486d6-5bee-4c4c-a76f-c0f162f66db8",
   }),
   "card:13": Object.freeze({
     question: "which surface reports a gate's own conclusion",
     store_ref: "github:checks",
-    decision_id: null,
+    decision_id: "87e9e11e-64b2-49b3-a6aa-4901c24eaa91",
   }),
 });
 

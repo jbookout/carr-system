@@ -1,11 +1,27 @@
 // V5-A02, the seam half — the three evidence readers Gate Zero is owed, proved
 // in four parts that must not be confused with each other.
 //
-// PART A, THE RULING GATE IS SHUT. Each reader returns the gate's OWN answer,
-// pinned by the repository's canonical digest rather than by a field-by-field
-// comparison against a shape that happens to match today. No store is touched:
-// the real store module throws without a DSN, and Part A passes with no DSN set,
-// which is the observable proof that nothing was opened.
+// PART A, THE RULING GATE, WHICH JOE OPENED ON 2026-09-11. Cards 11, 12 and 13
+// are ruled: three decision ids are pasted onto the three `decision_id:` lines,
+// and this part asks both halves of what that means.
+//
+//   RULED, of the SHIPPED modules. Each reader names its OWN card's decision id
+//   and its own card's store — three distinct ids, so a reader that read another
+//   card's line fails on the id rather than on the row it went on to read — and
+//   each one STILL REFUSES, because a ruling says where to read and nothing more.
+//   No store is reachable in this suite: no credential is set, so the real store
+//   module refuses, and the refusal it gives is the observable proof that the
+//   only thing the paste changed is that the reader now goes and looks.
+//
+//   UNRULED, on a staged copy whose three lines are back to null. That copy is
+//   the test-only override described on `stageTree` — an edit to a file under
+//   node_modules/.cache, imported by path. Nothing in src reaches it, no argument
+//   selects it and no environment variable points at it. Against it, the clause
+//   this part used to make of production still stands: each reader returns the
+//   gate's OWN answer, pinned by the repository's canonical digest rather than by
+//   a field-by-field comparison against a shape that happens to match today, for
+//   every query shape including hostile ones. That is the behaviour Gate Zero
+//   falls back to if a ruling is ever withdrawn.
 //
 // PART B, THE PUBLIC SURFACE, AND THE SWEEP HAS NO EXEMPTIONS. The export list
 // of all three modules is exactly enumerated. EVERY export is swept — constants
@@ -42,10 +58,12 @@
 // a word sweep permits any new string that dodges the union, and identity
 // permits no new string at all.
 //
-// PART C, THE RULED PATH, ON A STAGED TREE. mcp-server/src is copied into a
-// scratch directory, a fixture decision id is pasted onto each of the three
-// `decision_id:` lines — the exact lines Joe will paste onto — and the copied
-// reader is imported. Four stagings:
+// PART C, THE RULED PATH OVER ROWS, ON A STAGED TREE. mcp-server/src is copied
+// into a scratch directory, a DISTINCT FIXTURE decision id is put on each of the
+// three `decision_id:` lines in place of the id Joe pasted there, and the copied
+// reader is imported. The fixture ids stay because they are what makes the
+// per-card claim falsifiable: the three ids differ, so a reader that looked up
+// another card's line is caught by the id before it reads a row. Four stagings:
 //
 //   * with the store module REPLACED by ./gate-zero-seam-stores.v5.fixture.mjs,
 //     whose rows are shaped exactly as production writes them, which proves
@@ -67,10 +85,11 @@
 //     the unreachable refusals are the real code's, not a fixture's.
 //
 // What runs in all four is the real reader, the real ruling gate and the real
-// derivation. The staging is how a ruling is simulated without a ruling, and it
-// doubles as proof that the paste procedure in the seams report actually works:
-// if the three lines ever stop being three lines of that exact shape, Part C
-// fails on the anchor count rather than silently proving nothing.
+// derivation. The staging is how a store is stood in for without standing in for
+// the reader, and it doubles as the check on the ruling table's own shape: each
+// staging asserts it found Joe's three lines exactly once apiece before it
+// touches them, so a line that drifted fails Part C on its anchor rather than
+// silently proving nothing.
 //
 // PART D, THE PRODUCER SEAM IS NOT BUILT, AND IS NOT COPIED. Cards 9 and 10 have
 // no ruling line, no reader and no restatement of their refusal anywhere in this
@@ -86,6 +105,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { digest } from "../src/artifact-trust.js";
+import { V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import {
   V5_A02_GATE_ZERO_OWED_SEAMS,
   V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
@@ -158,8 +178,44 @@ function restoreEnv(saved) {
   }
 }
 
-/** The line the ruling goes on. If this string stops matching, nothing is proved. */
-const DECISION_ID_LINE = "    decision_id: null,\n";
+/**
+ * THE THREE RULINGS, ON THE RECORD. Joe ruled cards 11, 12 and 13 on
+ * 2026-09-11, and these are the ids `log-decision` returned, in the order the
+ * `decision_id:` lines appear in the ruling table — card 11, card 12, card 13.
+ * They are restated here rather than read out of src, so a paste that changed a
+ * character is red rather than self-confirming.
+ */
+const PASTED_DECISION_IDS = Object.freeze([
+  "16c7cdfb-b675-4b6a-bbff-4bbdab46baf8",
+  "f7c486d6-5bee-4c4c-a76f-c0f162f66db8",
+  "87e9e11e-64b2-49b3-a6aa-4901c24eaa91",
+]);
+
+/** The card tokens, in the same order as the ids and the lines above. */
+const CARD_REFS = Object.freeze(["card:11", "card:12", "card:13"]);
+
+/** The store each card's ruling names, in the same order. */
+const CARD_STORE_REFS = Object.freeze([
+  "record-layer:work-request-outcome-feedback",
+  "control-plane:ops.service+ops.run",
+  "github:checks",
+]);
+
+/** A `decision_id:` line, ruled or not, in the exact shape the table holds. */
+const decisionLine = id => id === null
+  ? "    decision_id: null,\n"
+  : `    decision_id: "${id}",\n`;
+
+/**
+ * The three lines as they stand in src today. They are the staging anchors now:
+ * before the ruling the staging pasted OVER a null, and it now pastes over a
+ * ruling — either a fixture id, or the null that proves the unruled path.
+ * If any of these stops matching, nothing below is proved.
+ */
+const RULED_DECISION_LINES = Object.freeze(PASTED_DECISION_IDS.map(decisionLine));
+
+/** The unruled line. Reachable only in a staged copy; never in src. */
+const NULL_DECISION_LINE = decisionLine(null);
 
 /** Card 11's store line, the anchor for the wrong-store staging. */
 const CARD_11_STORE_LINE = `    store_ref: "record-layer:work-request-outcome-feedback",\n`;
@@ -192,12 +248,29 @@ const GATE_ANSWER_DIGESTS = new Set([
   digest(readGateGraphAssurance()),
 ]);
 
-test("RULING: no card is ruled, and the lookup is the only way to ask", () => {
-  // The table is not exported: `seamRulingRef` is the whole surface, and today
-  // it answers null for every card because every decision id is null.
+test("RULING: all three cards are ruled, and the lookup is still the only way to ask", () => {
+  // THE PASTE OF 2026-09-11. The table is not exported: `seamRulingRef` is the
+  // whole surface, and it now answers each card with the pair Joe's ruling put
+  // on that card's two lines — the decision id he logged, and the store he ruled
+  // authoritative for it. Both halves are asserted, because both halves are the
+  // ruling: an id pasted beside the wrong store is not the decision he made.
   assert.deepEqual(Object.keys(rulings).sort(), ["seamRulingRef"]);
-  for (const card of ["card:11", "card:12", "card:13"])
-    assert.equal(rulings.seamRulingRef(card), null, card);
+  CARD_REFS.forEach((card, index) => {
+    const ref = rulings.seamRulingRef(card);
+    assert.deepEqual(ref,
+      { decision_ref: PASTED_DECISION_IDS[index], store_ref: CARD_STORE_REFS[index] }, card);
+    assert.ok(Object.isFrozen(ref), card);
+    // And the lookup builds a fresh pair per call, so no caller can hold the
+    // table's own object and no two callers share one.
+    assert.notEqual(ref, rulings.seamRulingRef(card), card);
+  });
+  // The three ids are distinct, so a reader that read another card's line is
+  // caught by the id rather than by whichever store it went on to open.
+  assert.equal(new Set(PASTED_DECISION_IDS).size, 3);
+  // Nothing else is ruled. The producer seam, and anything else a caller might
+  // name, still answers null.
+  for (const card of ["card:9", "card:10", "card:14", V5_A02_GATE_ZERO_PRODUCER_SEAM])
+    assert.equal(rulings.seamRulingRef(card), null, String(card));
 });
 
 test("RULING: the lookup takes a card token and never a decision id", () => {
@@ -207,56 +280,140 @@ test("RULING: the lookup takes a card token and never a decision id", () => {
   assert.equal(rulings.seamRulingRef.length, 1);
   const hostiles = [undefined, null, {}, [], 0, true, Symbol("x"),
     FIXTURE_DECISION_IDS[0], "card:14", "__proto__", "constructor", "toString",
-    { decision_id: FIXTURE_DECISION_IDS[0] }, ...hostileQueries()];
+    { decision_id: FIXTURE_DECISION_IDS[0] },
+    // And the ids that ARE on the record: a real ruling handed in as the card
+    // token is still not a card token, which is what makes a ruling a commit.
+    ...PASTED_DECISION_IDS, ...PASTED_DECISION_IDS.map(id => ({ decision_id: id })),
+    ...hostileQueries()];
   // Indexed, not stringified: one of these throws from its own toString.
   hostiles.forEach((hostile, index) =>
     assert.equal(rulings.seamRulingRef(hostile), null, `hostile argument ${index}`));
 });
 
-test("RULING: the three decision_id lines are exactly three lines of the pasted shape", () => {
-  // The seams report tells Joe to paste onto these lines. If the file's shape
-  // drifts, that instruction is wrong, and this is where it becomes visible.
+test("RULING: the three decision_id lines carry the three ids Joe ruled, and no null", () => {
+  // The seams report told Joe to paste onto these three lines, and the paste has
+  // happened. What is checked now is that the file holds exactly those three
+  // rulings, in card order, in the shape the lookup's pattern admits — and that
+  // no line went back to null. The ids are restated in this file rather than
+  // read out of src, so a paste that dropped or transposed a character is red
+  // here instead of quietly ruling something Joe did not rule.
   const source = readFileSync(join(SRC, RULINGS_FILE), "utf8");
-  assert.equal(source.split(DECISION_ID_LINE).length - 1, 3,
-    "the ruling table no longer holds exactly three `decision_id: null,` lines");
+  const found = [...source.matchAll(/^ {4}decision_id: (.+),$/gm)].map(one => one[1]);
+  assert.deepEqual(found, PASTED_DECISION_IDS.map(id => `"${id}"`),
+    "the ruling table no longer holds Joe's three ids, in card order, and nothing else");
+  assert.equal(source.includes(NULL_DECISION_LINE), false,
+    "a decision_id line went back to null, which would shut a ruled seam");
+  RULED_DECISION_LINES.forEach((line, card) =>
+    assert.equal(source.split(line).length - 1, 1,
+      `card ${11 + card}'s ruling is not the single line the staging edits`));
   assert.equal(source.split(CARD_11_STORE_LINE).length - 1, 1,
     "card 11's store_ref line is no longer the single line the staging edits");
+  // Each ruling sits BESIDE its own store line, in that order, because the two
+  // lines are one ruling and the lookup reads them together.
+  CARD_STORE_REFS.forEach((storeRef, card) =>
+    assert.ok(source.includes(`    store_ref: "${storeRef}",\n${RULED_DECISION_LINES[card]}`),
+      `card ${11 + card}'s ruling is not on the line below the store it names`));
 });
 
-test("RULING SHUT: each reader returns the gate's own answer, byte for byte", async () => {
+test("RULING SHUT: an unruled reader returns the gate's own answer, byte for byte", async () => {
+  // WHAT MOVED WITH THE PASTE, AND WHAT DID NOT. Before 2026-09-11 this clause
+  // was asked of the production readers, because src carried three nulls. It is
+  // now asked of a STAGED TREE whose three lines are back to null — the test-only
+  // override described on `stageTree`, an edit to a copy under
+  // node_modules/.cache that production has no route to. The clause itself is
+  // unchanged and it still matters: it is the behaviour Gate Zero falls back to
+  // if a ruling is ever withdrawn, and the proof that the readers own no refusal
+  // text of their own.
+  //
   // The gate builds a fresh frozen object per call, so identity is not available
   // to assert. What IS available is stronger than deep-equality on its own: the
   // answer is byte-identical under the repository's own canonical digest, AND
   // the reader's source returns the gate function's result directly rather than
-  // assembling a shape that happens to match today.
+  // assembling a shape that happens to match today. The source half is asserted
+  // against REAL src, not the copy.
   const source = readFileSync(join(SRC, READERS_FILE), "utf8");
   assert.equal((source.match(/return readGateZeroPredecessorJoin\(\);/g) ?? []).length, 2,
     "a reader stopped delegating its refusal to the gate");
   assert.equal((source.match(/return readGateGraphAssurance\(\);/g) ?? []).length, 1,
     "the conclusion reader stopped delegating its refusal to the gate");
 
-  for (const [name, reader, gateFn] of READERS_UNDER_TEST) {
-    const expected = gateFn();
-    const got = await reader({ stepRef: "step:wr46-dissolution-outcome" });
-    assert.deepEqual(got, expected, `${name} returned a different refusal than the gate's`);
-    assert.ok(Object.isFrozen(got), name);
-    assert.equal(digest(got), digest(expected), name);
-    assert.equal(got.status, "unavailable", name);
-    assert.equal(got.decision, "refuse", name);
-    assert.equal(got.caller_evidence_admitted, false, name);
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    const unruled = await stagedReaders({ unruled: true });
+    for (const [name, , gateFn] of READERS_UNDER_TEST) {
+      const expected = gateFn();
+      const got = await unruled[name]({ stepRef: "step:wr46-dissolution-outcome" });
+      assert.deepEqual(got, expected, `${name} returned a different refusal than the gate's`);
+      assert.ok(Object.isFrozen(got), name);
+      assert.equal(digest(got), digest(expected), name);
+      assert.equal(got.status, "unavailable", name);
+      assert.equal(got.decision, "refuse", name);
+      assert.equal(got.caller_evidence_admitted, false, name);
+      // And it says nothing about a ruling, because there is none to say.
+      assert.equal(Object.hasOwn(got, "ruling_decision_ref"), false, name);
+    }
+  } finally {
+    restoreEnv(saved);
   }
   // And the reason ids are the ones the gate refuses with today, not new words.
   assert.equal(readGateZeroPredecessorJoin().reason_id, "predecessor_outcome_reader_unavailable");
   assert.equal(readGateGraphAssurance().reason_id, "gate_conclusion_reader_unavailable");
 });
 
+test("RULED: each production reader now names its own card's ruling, and refuses anyway", async () => {
+  // THE OTHER SIDE OF THE PASTE, asked of the SHIPPED modules with nothing
+  // configured — which is what every caller in this repository gets today, and
+  // will get until a connection target and a checks credential exist in the
+  // process that runs Gate Zero.
+  //
+  // Three things are asserted, and the third is the one that matters most:
+  //
+  //   * the answer carries THIS card's decision ref and THIS card's store ref,
+  //     so a reader that read the wrong line is caught here;
+  //   * it is decided by the ruled store's rows and by nothing else;
+  //   * IT STILL REFUSES. A ruling says where to read, not what the answer is.
+  //     No caller's evidence and no model's judgment is admitted, no finding is
+  //     reported, and no effect is created — the ruled path's refusal is as
+  //     closed as the unruled one, and the seam is open only in the sense that
+  //     the reader would now go and look.
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    for (const [index, [name, reader]] of READERS_UNDER_TEST.entries()) {
+      const got = await reader({ stepRef: "step:wr46-dissolution-outcome" });
+      assert.ok(Object.isFrozen(got), name);
+      assert.equal(got.card_ref, CARD_REFS[index], name);
+      assert.equal(got.ruling_decision_ref, PASTED_DECISION_IDS[index], name);
+      assert.equal(got.store_ref, CARD_STORE_REFS[index], name);
+      assert.equal(got.decided_by, "ruled_store_rows", name);
+      assert.equal(got.status, "unavailable", name);
+      assert.equal(got.decision, "refuse", name);
+      assert.equal(got.finding, null, name);
+      assert.equal(got.caller_evidence_admitted, false, name);
+      assert.equal(got.model_judgment_admitted, false, name);
+      assert.deepEqual(got.effects, V5_NO_EFFECTS, name);
+      // And it is NOT the gate's answer any more, which is the whole observable
+      // difference the paste made.
+      assert.equal(GATE_ANSWER_DIGESTS.has(digest(got)), false,
+        `${name} still answers as though it were unruled`);
+    }
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
 /**
- * REQUIREMENT (4), AND IT IS THE WHOLE POINT OF SHIPPING THIS UNRULED: with the
+ * REQUIREMENT (4), WHICH WAS THE WHOLE POINT OF SHIPPING THIS UNRULED: with the
  * three decision ids null, every caller of every reader gets, byte for byte, the
  * JSON main's Gate Zero already returns. There is no input — well formed,
  * malformed, hostile or absent — for which that is not true.
+ *
+ * Joe's paste of 2026-09-11 is exactly what that requirement was waiting for, so
+ * this is no longer a claim about the shipped modules. It is asked of the staged
+ * unruled tree, where it remains the falsifiable form of "a reader with no ruling
+ * reads nothing and invents nothing": one input shape that moved the answer would
+ * mean the query was looked at before the ruling was.
  */
-test("BYTE-IDENTICAL TO MAIN: the answer does not move for any query, valid or not", async () => {
+test("BYTE-IDENTICAL TO MAIN: an unruled answer does not move for any query, valid or not", async () => {
   const queries = [
     undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
     { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
@@ -267,14 +424,67 @@ test("BYTE-IDENTICAL TO MAIN: the answer does not move for any query, valid or n
     { card_ref: "card:11", store_ref: "github:checks", finding: "gate_conclusion_observed" },
     ...hostileQueries(),
   ];
-  for (const [name, reader, gateFn] of READERS_UNDER_TEST) {
-    const baseline = digest(gateFn());
-    for (const query of queries) {
-      const got = await reader(query);
-      assert.equal(digest(got), baseline,
-        `${name} answered differently for ${safeLabel(query)}`);
-      assert.ok(GATE_ANSWER_DIGESTS.has(digest(got)), name);
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    const unruled = await stagedReaders({ unruled: true });
+    for (const [name, , gateFn] of READERS_UNDER_TEST) {
+      const baseline = digest(gateFn());
+      for (const query of queries) {
+        const got = await unruled[name](query);
+        assert.equal(digest(got), baseline,
+          `${name} answered differently for ${safeLabel(query)}`);
+        assert.ok(GATE_ANSWER_DIGESTS.has(digest(got)), name);
+      }
     }
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+/**
+ * THE RULED COUNTERPART, and it is the clause that replaces the one above for
+ * the modules this repository actually ships. A ruling says WHERE to read. It
+ * does not say what was found, and it does not make a query that addresses no
+ * row into one that does. So the shipped readers' answer may now differ between
+ * queries — a malformed field is named, an unreachable store is reported — and
+ * across every one of those shapes the closed half must not move: refuse,
+ * nothing admitted, no finding, no effect, and none of the caller's bytes.
+ */
+test("RULED: no query, valid or not, moves the closed half of a ruled answer", async () => {
+  const queries = [
+    undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
+    { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
+    { serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" },
+    { headSha: "a".repeat(40), checkName: "db-acceptance" },
+    { decision_id: FIXTURE_DECISION_IDS[0], stepRef: "step:wr46-dissolution-outcome" },
+    { ruling_decision_ref: FIXTURE_DECISION_IDS[0] },
+    // The real ruling handed back in as a query field, which is the one shape a
+    // caller might hope a ruled reader would accept as evidence of a ruling.
+    ...PASTED_DECISION_IDS.map(id => ({ ruling_decision_ref: id, decision_id: id })),
+    { card_ref: "card:11", store_ref: "github:checks", finding: "gate_conclusion_observed" },
+    ...hostileQueries(),
+  ];
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    for (const [index, [name, reader]] of READERS_UNDER_TEST.entries())
+      for (const query of queries) {
+        const got = await reader(query);
+        const label = `${name} for ${safeLabel(query)}`;
+        assert.equal(got.decision, "refuse", label);
+        assert.equal(got.status, "unavailable", label);
+        assert.equal(got.finding, null, label);
+        assert.equal(got.caller_evidence_admitted, false, label);
+        assert.equal(got.model_judgment_admitted, false, label);
+        assert.deepEqual(got.effects, V5_NO_EFFECTS, label);
+        // The ruling it names is its own card's, whatever the caller said about
+        // one, and the store is the one that card ruled.
+        assert.equal(got.ruling_decision_ref, PASTED_DECISION_IDS[index], label);
+        assert.equal(got.card_ref, CARD_REFS[index], label);
+        assert.equal(got.store_ref, CARD_STORE_REFS[index], label);
+        assert.ok(!JSON.stringify(got).includes(HOSTILE_MARKER), label);
+      }
+  } finally {
+    restoreEnv(saved);
   }
 });
 
@@ -1295,10 +1505,18 @@ test("SURFACE: no export can be constructed, and none reads a caller's newTarget
     assert.equal(callables, 9, "the callable surface moved without this count following it");
 
     // AND THE CALLING DOOR STILL ANSWERS, which is the thing the construction
-    // door must not have cost: every reader returns the gate's own object and
-    // every fetcher still refuses with its own registered reason.
-    for (const [name, reader, gateAnswer] of READERS_UNDER_TEST)
-      assert.equal(digest(await reader({ headSha: HOSTILE_MARKER })), digest(gateAnswer()), name);
+    // door must not have cost. Before Joe's paste this was pinned to the gate's
+    // own digest; the readers are ruled now, so what is pinned is the closed
+    // half — a refusal that admits nothing, names its own card's ruling, and
+    // carries none of the caller's bytes.
+    for (const [index, [name, reader]] of READERS_UNDER_TEST.entries()) {
+      const answered = await reader({ headSha: HOSTILE_MARKER });
+      assert.equal(answered.decision, "refuse", name);
+      assert.equal(answered.finding, null, name);
+      assert.equal(answered.caller_evidence_admitted, false, name);
+      assert.equal(answered.ruling_decision_ref, PASTED_DECISION_IDS[index], name);
+      assert.ok(!JSON.stringify(answered).includes(HOSTILE_MARKER), name);
+    }
   } finally {
     restoreEnv(saved);
   }
@@ -1616,15 +1834,33 @@ test("GUARD CONTROL: each clause of the thrown-value sweep has been seen to fail
 });
 
 test("HOSTILE: no hostile query throws out of a reader, and none of its bytes come back", async () => {
-  for (const [name, reader] of READERS_UNDER_TEST)
-    for (const query of hostileQueries()) {
-      const result = await reader(query);
-      const serialized = JSON.stringify(result);
-      assert.ok(!serialized.includes(HOSTILE_MARKER),
-        `${name} leaked caller text: ${serialized.slice(0, 200)}`);
-      assert.equal(result.decision, "refuse", name);
-      assert.ok(GATE_ANSWER_DIGESTS.has(digest(result)), name);
-    }
+  // Asked of the SHIPPED readers, which are ruled, and of a staged UNRULED copy,
+  // because a reader's boundary has to hold on both sides of the ruling gate: an
+  // unruled reader must give back the gate's answer and nothing else, and a ruled
+  // one must refuse without echoing a byte of what it was handed.
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    const unruled = await stagedReaders({ unruled: true });
+    for (const [name, reader] of READERS_UNDER_TEST)
+      for (const query of hostileQueries()) {
+        for (const [side, answered] of [["ruled", await reader(query)],
+          ["unruled", await unruled[name](query)]]) {
+          const serialized = JSON.stringify(answered);
+          assert.ok(!serialized.includes(HOSTILE_MARKER),
+            `${name} (${side}) leaked caller text: ${serialized.slice(0, 200)}`);
+          assert.equal(answered.decision, "refuse", `${name} (${side})`);
+          assert.equal(answered.caller_evidence_admitted, false, `${name} (${side})`);
+          // A ruled refusal carries `finding: null`; the gate's own answer has no
+          // `finding` key at all. Absent and null are the same claim — nothing
+          // was found — and neither side may report anything else.
+          assert.equal(answered.finding ?? null, null, `${name} (${side})`);
+        }
+        // And the unruled half is still the gate's own answer, whole.
+        assert.ok(GATE_ANSWER_DIGESTS.has(digest(await unruled[name](query))), name);
+      }
+  } finally {
+    restoreEnv(saved);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1634,12 +1870,28 @@ test("HOSTILE: no hostile query throws out of a reader, and none of its bytes co
 const staged = [];
 
 /**
- * A copy of mcp-server/src with a fixture decision id pasted onto each of the
- * three `decision_id:` lines. Lives under node_modules/.cache so `pg` and every
- * other dependency still resolve by walking up, and so nothing untracked lands
- * in the working tree.
+ * A copy of mcp-server/src with a DIFFERENT ruling on each of the three
+ * `decision_id:` lines than the one src carries. Lives under node_modules/.cache
+ * so `pg` and every other dependency still resolve by walking up, and so nothing
+ * untracked lands in the working tree.
+ *
+ * TWO STAGINGS, AND THE SECOND ONE IS WHY THIS FUNCTION STILL EXISTS NOW THAT
+ * THE RULINGS ARE REAL.
+ *
+ *   default          each of Joe's three ids is replaced by a DISTINCT fixture
+ *                    id, so every ruled clause below still proves that each
+ *                    reader looked up ITS OWN card. A reader that read card 12's
+ *                    line for card 11 fails on the id, before it reads a row.
+ *   `unruled: true`  each line goes back to `decision_id: null,` — the shape src
+ *                    carried before 2026-09-11 — which is how the null path is
+ *                    still proved after the paste. It is a TEST-ONLY OVERRIDE
+ *                    THAT PRODUCTION CANNOT REACH: it is an edit to a copy of
+ *                    the file under node_modules/.cache, reached by importing
+ *                    that copy's own reader. Nothing in src imports it, no
+ *                    argument selects it, and no environment variable points at
+ *                    it — the same property the ruling gate itself rests on.
  */
-function stageTree({ storeFile = null, card11StoreRef = null } = {}) {
+function stageTree({ storeFile = null, card11StoreRef = null, unruled = false } = {}) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
   const base = mkdtempSync(join(cache, "gate-zero-seam-"));
@@ -1649,13 +1901,17 @@ function stageTree({ storeFile = null, card11StoreRef = null } = {}) {
 
   const path = join(target, RULINGS_FILE);
   const source = readFileSync(path, "utf8");
-  assert.equal(source.split(DECISION_ID_LINE).length - 1, 3,
-    "the staging anchor no longer matches the ruling table");
-  let pasted = 0;
-  let ruled = source.replaceAll(DECISION_ID_LINE,
-    () => `    decision_id: "${FIXTURE_DECISION_IDS[pasted++]}",\n`);
-  assert.equal(pasted, 3, "the staging pasted the wrong number of rulings");
-  assert.ok(!ruled.includes(DECISION_ID_LINE), "a null decision id survived the staging");
+  let ruled = source;
+  RULED_DECISION_LINES.forEach((anchor, card) => {
+    assert.equal(ruled.split(anchor).length - 1, 1,
+      `the staging anchor no longer matches card ${11 + card}'s ruling line`);
+    ruled = ruled.replace(anchor,
+      unruled ? NULL_DECISION_LINE : decisionLine(FIXTURE_DECISION_IDS[card]));
+  });
+  for (const anchor of RULED_DECISION_LINES)
+    assert.ok(!ruled.includes(anchor), "a production ruling survived the staging");
+  assert.equal(ruled.split(NULL_DECISION_LINE).length - 1, unruled ? 3 : 0,
+    "the staging left the wrong number of unruled lines");
   if (card11StoreRef !== null) {
     assert.ok(ruled.includes(CARD_11_STORE_LINE), "card 11's store line moved");
     ruled = ruled.replace(CARD_11_STORE_LINE, `    store_ref: "${card11StoreRef}",\n`);
@@ -2443,10 +2699,39 @@ test("RULED: a pasted decision id is what opens the seam, and nothing else", asy
   const opened = await ruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
   assert.ok(!GATE_ANSWER_DIGESTS.has(digest(opened)), "the staged ruling did not open the seam");
-  // The unruled module in this same process is untouched by the staging.
-  const shut = await readers.readPredecessorOutcomeEvidence({
+  assert.equal(opened.ruling_decision_ref, FIXTURE_DECISION_IDS[0]);
+
+  // AND THE SHIPPED MODULE IN THIS SAME PROCESS IS UNTOUCHED BY THE STAGING,
+  // which is the clause that makes every ruled result above attributable to the
+  // staged copy rather than to something the staging did to the real one. Before
+  // Joe's paste that was shown by the shipped reader still giving the gate's
+  // answer; it is ruled now, so what is shown is that it still names HIS
+  // decision id — not the fixture one — and still has no store to read, while
+  // the staged copy beside it just read a row.
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    const shipped = await readers.readPredecessorOutcomeEvidence({
+      stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
+    assert.equal(shipped.ruling_decision_ref, PASTED_DECISION_IDS[0],
+      "the staging reached the shipped ruling table");
+    assert.equal(shipped.decision, "refuse");
+    assert.equal(shipped.finding, null);
+    assert.equal(shipped.unavailable_because,
+      "the connection target for this store is not configured in this process");
+    // And the two answers came from the same real reader code over different
+    // ruling tables and different stores, so neither is the other's.
+    assert.notEqual(digest(shipped), digest(opened));
+  } finally {
+    restoreEnv(saved);
+  }
+
+  // And a staged copy whose lines went back to null is shut again, which is the
+  // only direction this test can prove the gate closes in.
+  const unruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE, unruled: true });
+  const shut = await unruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
-  assert.equal(digest(shut), digest(readGateZeroPredecessorJoin()));
+  assert.equal(digest(shut), digest(readGateZeroPredecessorJoin()),
+    "an unruled reader read the fixture store anyway");
 });
 
 test("RULED: the predecessor reader admits only an accepted outcome whose receipt hash matches", async () => {
