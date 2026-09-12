@@ -36993,8 +36993,8 @@
           "operation": "bin/schema-snapshot.sh",
           "effect_class": "administrative_mutation",
           "source_locator": "bin/schema-snapshot.sh",
-          "schema_digest": "6329c656b2b6e29608fa4ca5356d8d227d89aab8ea673f134ecaf12ea49e4196",
-          "handler_digest": "6329c656b2b6e29608fa4ca5356d8d227d89aab8ea673f134ecaf12ea49e4196",
+          "schema_digest": "1b7979af6b75cd33c86f3d82813253c48bdba8665a81f749675c8f47412f6707",
+          "handler_digest": "1b7979af6b75cd33c86f3d82813253c48bdba8665a81f749675c8f47412f6707",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -37495,14 +37495,14 @@
         }
       ],
       "expected_count": 841,
-      "expected_sha256": "52bfb8331f873cc6d9b3532f83b94694229c50d6ffadeb871458927448246fe4"
+      "expected_sha256": "83f2a9f26adcaa66e3f01727b267e9a54950784b34c0f81e1ccf999d56ebebc3"
     }
   ],
   "current_source_review": {
     "base_version": "v26",
     "upsert": [],
     "expected_count": 841,
-    "expected_sha256": "52bfb8331f873cc6d9b3532f83b94694229c50d6ffadeb871458927448246fe4",
+    "expected_sha256": "83f2a9f26adcaa66e3f01727b267e9a54950784b34c0f81e1ccf999d56ebebc3",
     "reason": "Rebased onto the v26 frontier by the Gate Zero outcome slice (DoctorCRE v5 slice V5-A02, Step B). The v26 patch seals the whole delta this branch carries, so the overlay is empty rather than accreted: every reviewed row moved into the patch, and the patch is what a later reader has to read. The v25 overlay's accreted history is not carried forward, because every sentence in it described a frontier transition that this seal supersedes. v26 admission provenance, measured from the sealed row sets rather than typed: the frozen source inventory grows from 840 to 841 rows, admitting one new ingress -- one MCP tool -- namely mcp-tool:record-gate-zero-read-only-outcome, and removing none. The v26 patch carries those one additions plus 144 already-known rows whose bytes the same change moved, and this overlay re-derives 0 reviewed ingresses from the live inventory of this tree rather than hand-merging them, so the reviewed digest reproduces the live digest exactly. No reviewed row supersedes a row the v26 patch seals: every ingress the patch carries still holds the bytes it was sealed with. Every count and every ingress key in this paragraph is computed by gateZeroOutcomeAdmissionProvenance() from frozenInventory(\"scac-mutation-registry.v25\"), frozenInventory(\"scac-mutation-registry.v26\") and the fixture's own v26 patch and overlay, and the frontier check refuses a reason that does not end with the rendered text."
   }
 }
