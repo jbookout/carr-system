@@ -813,6 +813,14 @@ function assertClosedCallable(at, exported) {
       built = Reflect.construct(exported, [HOSTILE_MARKER, "green", { ok: true }], newTarget);
     } catch (thrown) {
       assertNoModuleCodeRan(`${at}.${label}.threw`, thrown);
+      // AND THE ENGINE'S OWN REFUSAL CARRIES NO LINE OF THE MODULE. The
+      // amendment puts the engine's TypeError out of scope, and it is still
+      // worth choosing which one the engine builds: its refusal of a BARE arrow
+      // quotes that arrow's SOURCE TEXT back — the module's own body, privileged
+      // substrings and all — while its refusal of a BOUND one names
+      // `function () { [native code] }`. That is why every export is bound.
+      assert.ok(!String(safeRead(thrown, "message") ?? "").includes("=>"),
+        `${at}.${label}: the engine's refusal quotes the module's own source back`);
       continue;
     }
     assertNoModuleCodeRan(`${at}.${label}.returned`, built);
@@ -1309,6 +1317,9 @@ test("SURFACE CONTROL: each clause of the closed-callable check has been seen to
     // 4 — bound and non-constructable, and it answers instanceof with the
     //     intrinsic, which walks the caller's own prototype chain.
     ["no-hasInstance", (() => {}).bind(null)],
+    // 5 — closed in every other way, and BARE rather than bound: the engine's
+    //     refusal of it quotes the function's own source text back.
+    ["a-bare-arrow", deny(query => query, flat)],
     // 5 — a guard that is an accessor: it runs code on every read of the slot.
     ["hasInstance-accessor", deny((() => {}).bind(null), { get: () => () => false, configurable: true })],
     // 6 — a guard that can be replaced.
