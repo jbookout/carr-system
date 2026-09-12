@@ -8337,7 +8337,15 @@ ${preflightBody}end $v5_scheduled_job_admission_preflight$;
 }
 
 /**
- * THE TWO v25 PUBLIC ENTRY POINTS, and neither one reads a caller.
+ * THE v25 PUBLIC ENTRY POINTS — every one this module exports, and not one of
+ * them reads a caller. They are, exactly:
+ * `assertV5ScheduledJobAdmissionV25TrustRoot`,
+ * `renderV5ScheduledJobAdmissionForwardRegistrySql`, and
+ * `v5ScheduledJobAdmissionProvenance`. Naming them rather than counting them is
+ * deliberate: a numeral in a comment is a claim nothing re-derives, and this
+ * block already went stale once when the third export arrived (PR #1006
+ * correction 2, which added the provenance export so the admission delta is
+ * measured from the rows instead of typed into three files by hand).
  *
  * `renderV5ScheduledJobAdmissionForwardRegistrySql()` renders migration 0501
  * from the FROZEN v25 inventory and this module's own catalog baseline. It
@@ -8346,10 +8354,12 @@ ${preflightBody}end $v5_scheduled_job_admission_preflight$;
  * are not merely validated away — there is no path by which they could arrive.
  * Every call, from any caller, with any argument, returns the same bytes as the
  * committed artifact, which is what the public-surface sweep in
- * mcp-server/test/siep-11-mutation-registry.test.mjs asserts input by input.
+ * mcp-server/test/siep-11-mutation-registry.test.mjs asserts input by input —
+ * and that sweep, not this prose, is what an added export has to satisfy.
  *
  * The trust root is the same story in one line: it takes nothing, answers
- * nothing, and either returns or throws this module's own Error.
+ * nothing, and either returns or throws this module's own Error. The provenance
+ * export is the same shape again, documented at its own definition below.
  */
 export const assertV5ScheduledJobAdmissionV25TrustRoot =
   closedExport(() => assertV5ScheduledJobAdmissionV25TrustRootFrozen());

@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import secrets
 import shutil
 import subprocess
 import sys
@@ -52,9 +53,10 @@ import tempfile
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import psycopg
+from psycopg import sql
 
 REPO = Path(__file__).resolve().parents[1]
 WRAPPER = REPO / "bin" / "run-scheduled.sh"
@@ -120,8 +122,8 @@ def assert_disposable(cur: psycopg.Cursor[Any]) -> None:
                            "carr_ci database")
 
 
-def jobs_dsn(dsn: str) -> str:
-    """The same disposable database, addressed as carr_jobs.
+def jobs_dsn(dsn: str, password: str) -> str:
+    """The same disposable database, addressed as carr_jobs with a throwaway password.
 
     tools/ops-record.py's `run` is connect("routine"), which reads ONLY
     CARR_DB_JOBS_URL and refuses a connection whose session_user is not
@@ -129,15 +131,31 @@ def jobs_dsn(dsn: str) -> str:
     ~/.config/carr/db.env with setdefault, so a test that merely UNSETS the
     variable gets production's jobs DSN handed back to it -- the exact shape
     that recorded 46 fabricated rows into production in August.
+
+    THE PASSWORD IS NOT DECORATION, and its absence is what turned this gate red
+    on the hosted runner while it stayed green on this Mac (run 34690610990).
+    The local disposable cluster ops/local-pg-ci.py builds authenticates
+    loopback connections by trust, so a passwordless DSN connects; the runner's
+    postgres service container requires a password on every host connection, so
+    the same DSN dies at `fe_sendauth: no password supplied` inside ops-record,
+    AFTER the wrapper has already spooled its row. Minting one here, the way
+    ops/p1-integration-gate.py does, makes the gate carry its own credential
+    into whichever cluster it was pointed at. It is generated per run, never
+    printed and never written down.
     """
     parsed = urlparse(dsn)
     if parsed.port is None:
         raise RuntimeError("the disposable DSN names no port, so the jobs DSN cannot be derived")
-    rebuilt = urlunparse(parsed._replace(netloc=f"carr_jobs@{parsed.hostname}:{parsed.port}"))
+    if not password:
+        raise RuntimeError("the jobs DSN needs the throwaway password this gate just set")
+    encoded = quote(password, safe="")
+    rebuilt = urlunparse(parsed._replace(
+        netloc=f"carr_jobs:{encoded}@{parsed.hostname}:{parsed.port}"))
     check = urlparse(rebuilt)
-    if check.username != "carr_jobs" or check.hostname not in {"127.0.0.1", "localhost", "::1"} \
+    if check.username != "carr_jobs" or check.password != encoded \
+            or check.hostname not in {"127.0.0.1", "localhost", "::1"} \
             or check.port != parsed.port:
-        raise RuntimeError(f"derived jobs DSN is not the loopback disposable database: {rebuilt}")
+        raise RuntimeError("derived jobs DSN is not the loopback disposable database")
     return rebuilt
 
 
@@ -236,7 +254,6 @@ def read_card_twelve(dsn: str) -> dict[str, Any]:
 
 def main() -> int:
     dsn = disposable_dsn()
-    jobs = jobs_dsn(dsn)
     checks = 0
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
@@ -257,8 +274,13 @@ def main() -> int:
         if role is None:
             return fail("this database has no carr_jobs role, so the recorder's own identity "
                         "check cannot be exercised")
-        if role[0] is not True:
-            cur.execute("alter role carr_jobs login")
+        # LOGIN and a password, not LOGIN alone: the hosted runner's postgres
+        # container authenticates host connections by password, so a jobs DSN
+        # without one never reaches the recorder's identity check at all.
+        secret = secrets.token_urlsafe(32)
+        cur.execute(sql.SQL("alter role {} login password {}").format(
+            sql.Identifier("carr_jobs"), sql.Literal(secret)))
+        jobs = jobs_dsn(dsn, secret)
         # Any leftover from an earlier run of this gate, so the assertions below
         # are about the row this run produced.
         cur.execute("delete from ops.run where run_key=%s and service_id=%s",
