@@ -49,11 +49,15 @@
 //
 // FIVE PLACES WHERE r7 IS SILENT, stated rather than papered over:
 //
-//   * step:gate-zero-read-only-outcome HAS NO ENTRY in r7's
-//     receipt_producer_step_registry. Eight producers depend on it and the item
-//     catalog lists it as an evidence input, but it declares no producer role,
-//     oracle, output schema, evidence scope or produced gate id. This file
-//     therefore refuses to invent a Gate Zero receipt schema. It requires the
+//   * step:gate-zero-read-only-outcome HAD NO ENTRY in r7's
+//     receipt_producer_step_registry until the 2026-09-12 amendment, which
+//     registered the producer row, the gate-zero-read-only-accepted gate and the
+//     independent_control_plane_oracle role and re-froze r7 to
+//     ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6. WHAT
+//     THAT DID NOT SUPPLY, and the reason nothing below changes: the row reuses
+//     consumer-gate-receipt.v1 rather than declaring a Gate Zero receipt schema,
+//     and no seat holds the oracle, so there is still no Gate Zero receipt to
+//     read. This file still refuses to invent one. It requires the
 //     authenticated projection to carry the Gate Zero outcome as an
 //     authenticated fact — an outcome digest and an observed instant — and it
 //     enforces the one ordering the catalog does settle: every member, the
