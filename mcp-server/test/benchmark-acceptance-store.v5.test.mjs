@@ -31,6 +31,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { digest } from "../src/artifact-trust.js";
 import {
   BENCHMARK_COST_VARIANCE_THRESHOLDS, BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_GATE_ID,
@@ -153,7 +154,13 @@ class ToolError extends Error {
 // not about the envelope, and a mock that pretended to be transactional would
 // be claiming durability this file explicitly does not claim.
 const withEnvelope = async (_c, _actor, _verb, _args, fn) => fn();
-const writeEvent = async (c, event) => { c.events.push(event); };
+// The audit helper is POSITIONAL — writeEvent(client, actor, verb, subjectType,
+// subjectId, fields) — and this double records every argument so a handler that
+// passes an options object fails here instead of at the event.actor_id NOT NULL
+// constraint in production. Defect 65ed5e3e-db28-498a-a0e7-84ae53658dea.
+const writeEvent = async (c, actor, verb, subjectType, subjectId, fields) => {
+  c.events.push({ actor, verb, subjectType, subjectId, fields });
+};
 
 const tools = benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolError });
 
@@ -570,7 +577,17 @@ test("propose sends the decomposed rows and the digest it computed itself", asyn
   assert.equal(result.effects.creates_effect, false);
   assert.equal(result.effects.clock_started, false);
   assert.equal(c.events.length, 1);
-  assert.equal(c.events[0].verb, "propose-benchmark-manifest-draft");
+  // THE FOUR VALUES THE OBJECT CALL SHAPE LOST, each NOT NULL in event.
+  const [proposed] = c.events;
+  assert.equal(proposed.actor, PARTNER, "the actor must be forwarded, not replaced by an options object");
+  assert.equal(proposed.verb, "propose-benchmark-manifest-draft");
+  assert.equal(proposed.subjectType, "benchmark");
+  assert.equal(proposed.subjectId, DRAFT_ID);
+  assert.equal(proposed.fields.idempotency_key, KEY);
+  assert.equal(proposed.fields.new.benchmark_ref, "BENCH-A00");
+  assert.equal(proposed.fields.new.draft_version, 1);
+  // The digest audited is the one this module computed, never the caller's.
+  assert.equal(proposed.fields.new.payload_digest, expected);
 });
 
 test("propose refuses a supplied digest that is not the one the payload produces", async () => {
@@ -933,6 +950,27 @@ test("a failing review needs no measurement set, no attestation, and reads none 
   assert.equal(c.calls.length, 2, "a failing review read a coverage attestation back");
 });
 
+test("a review writes its audit event with a real actor, verb and subject", async () => {
+  // The review call site carried the same options object as propose. An audit
+  // insert that died here would roll the review back, so a pass verdict the
+  // reviewer watched succeed would simply not exist.
+  const body = payload();
+  const [c, pending] = passingReview(body);
+  await pending;
+
+  assert.equal(c.events.length, 1);
+  const [reviewed] = c.events;
+  assert.equal(reviewed.actor, PARTNER, "the actor must be forwarded, not replaced by an options object");
+  assert.equal(reviewed.verb, "review-benchmark-manifest-draft");
+  assert.equal(reviewed.subjectType, "benchmark");
+  assert.equal(reviewed.subjectId, DRAFT_ID);
+  assert.equal(reviewed.fields.idempotency_key, KEY);
+  assert.equal(reviewed.fields.new.verdict, "pass");
+  // The digest audited is the one read back from the stored rows.
+  assert.equal(reviewed.fields.new.reviewed_payload_digest, benchmarkPayloadDigest(body));
+  assert.equal(reviewed.fields.new.measurement_set_digest, digest(measurements(body)));
+});
+
 // --- acceptance, which fails closed -----------------------------------------
 
 test("acceptance fails closed on the unresolved Gate Zero binding, before any statement", async () => {
@@ -949,6 +987,27 @@ test("acceptance fails closed on the unresolved Gate Zero binding, before any st
   // as an acceptance that nearly succeeded.
   assert.equal(c.calls.length, 0, "the acceptance path reached the database");
   assert.equal(c.events.length, 0, "the acceptance path recorded an event");
+});
+
+test("the acceptance audit call is positional, checked at the source because it is unreachable", () => {
+  // THE ONE SITE OF THE FIVE THAT NO HANDLER TEST CAN REACH. readGateZeroOutcome
+  // is a private parameterless stub that always throws, so everything below it —
+  // including this writeEvent call — is unreachable by construction until Gate
+  // Zero is bound. The test above proves that: zero statements, zero events.
+  //
+  // A call nothing can drive is exactly where the object-form shape survived for
+  // months in the first place, so it is pinned at the source instead. When Gate
+  // Zero lands and this path becomes reachable, replace this with a recording-
+  // double test like the two above; until then this is the honest check.
+  const source = readFileSync(new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
+  const call = source.match(/writeEvent\([^;]*"accept-benchmark-manifest-draft"[^;]*;/);
+  assert.ok(call, "the acceptance path no longer writes an audit event");
+  // The actor is the second argument, not an options object, and the verb and
+  // subject are the third, fourth and fifth.
+  assert.match(call[0],
+    /^writeEvent\(c, actor, "accept-benchmark-manifest-draft", "benchmark", args\.draft_id,/);
+  assert.match(call[0], /idempotency_key: args\.idempotency_key/);
+  assert.equal(/writeEvent\(\s*c\s*,\s*\{/.test(call[0]), false);
 });
 
 test("the acceptance verb names its one remaining refusal and oversells the other's retirement not at all", () => {

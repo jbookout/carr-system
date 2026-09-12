@@ -956,12 +956,11 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
             JSON.stringify(rows.concurrency), JSON.stringify(rows.browsers),
             JSON.stringify(rows.evaluators)])).rows[0].id;
 
-        await writeEvent(c, {
-          subject_type: "benchmark", subject_id: draftId,
-          verb: "propose-benchmark-manifest-draft",
-          payload: { benchmark_ref: args.benchmark_ref, draft_version: args.draft_version,
-            payload_digest: rows.payload_digest },
-        });
+        await writeEvent(c, actor, "propose-benchmark-manifest-draft", "benchmark", draftId,
+          { field: "draft_proposed",
+            new: { benchmark_ref: args.benchmark_ref, draft_version: args.draft_version,
+              payload_digest: rows.payload_digest },
+            idempotency_key: args.idempotency_key });
 
         return {
           ok: true, draft_id: draftId, benchmark_ref: args.benchmark_ref,
@@ -1077,12 +1076,11 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
             .catch(error => asToolError(error));
         }
 
-        await writeEvent(c, {
-          subject_type: "benchmark", subject_id: args.draft_id,
-          verb: "review-benchmark-manifest-draft",
-          payload: { verdict: args.verdict, reviewed_payload_digest: live.payload_digest,
-            measurement_set_digest: measurementSetDigest },
-        });
+        await writeEvent(c, actor, "review-benchmark-manifest-draft", "benchmark", args.draft_id,
+          { field: "draft_reviewed",
+            new: { verdict: args.verdict, reviewed_payload_digest: live.payload_digest,
+              measurement_set_digest: measurementSetDigest },
+            idempotency_key: args.idempotency_key });
 
         return {
           ok: true, review_id: reviewId, draft_id: args.draft_id, verdict: args.verdict,
@@ -1190,11 +1188,11 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           [args.draft_id, args.idempotency_key, live.payload_digest, args.review_id,
             args.portfolio_ref])).rows[0].id;
 
-        await writeEvent(c, {
-          subject_type: "benchmark", subject_id: args.draft_id,
-          verb: "accept-benchmark-manifest-draft",
-          payload: { accepted_payload_digest: live.payload_digest, portfolio_ref: args.portfolio_ref },
-        });
+        await writeEvent(c, actor, "accept-benchmark-manifest-draft", "benchmark", args.draft_id,
+          { field: "draft_accepted",
+            new: { accepted_payload_digest: live.payload_digest,
+              portfolio_ref: args.portfolio_ref },
+            idempotency_key: args.idempotency_key });
 
         return {
           ok: true, receipt_id: receiptId, draft_id: args.draft_id,

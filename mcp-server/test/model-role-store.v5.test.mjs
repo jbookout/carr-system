@@ -240,7 +240,13 @@ class ToolError extends Error {
 // and a mock pretending to be transactional would be claiming durability this
 // file explicitly does not claim.
 const withEnvelope = async (_c, _actor, _verb, _args, fn) => fn();
-const writeEvent = async (c, event) => { c.events.push(event); };
+// The audit helper is POSITIONAL — writeEvent(client, actor, verb, subjectType,
+// subjectId, fields) — and this double records every argument so a handler that
+// passes an options object fails here instead of at the event.actor_id NOT NULL
+// constraint in production. Defect 65ed5e3e-db28-498a-a0e7-84ae53658dea.
+const writeEvent = async (c, actor, verb, subjectType, subjectId, fields) => {
+  c.events.push({ actor, verb, subjectType, subjectId, fields });
+};
 
 const tools = modelRoleStoreTools({ withEnvelope, writeEvent, ToolError });
 
@@ -800,7 +806,17 @@ test("recording a revision sends the rows, then revalidates the readback", async
   assert.equal(write.params.some(p => typeof p === "string" && p.includes("joe")), false);
   assert.ok(readbackCall.sql.includes("ops.model_role_revision_readback"));
   assert.equal(db.events.length, 1);
-  assert.equal(db.events[0].verb, "record-model-role-revision");
+  // THE FOUR VALUES THE OBJECT CALL SHAPE LOST, each NOT NULL in event.
+  const [recorded] = db.events;
+  assert.equal(recorded.actor, JOE, "the actor must be forwarded, not replaced by an options object");
+  assert.equal(recorded.verb, "record-model-role-revision");
+  assert.equal(recorded.subjectType, "model_role");
+  assert.equal(recorded.subjectId, REVISION_ID);
+  assert.equal(recorded.fields.idempotency_key, KEY);
+  assert.equal(recorded.fields.new.role_key, "reviewer");
+  assert.equal(recorded.fields.new.revision_no, 1);
+  // The digest audited is the one this module computed, never the caller's.
+  assert.equal(recorded.fields.new.role_digest, SEALED.role_digest);
 });
 
 test("a caller's digest is compared, never used, and a mismatch never reaches the database", async () => {
@@ -1090,6 +1106,30 @@ test("a creation states its expectation as an explicit null and its shape as a p
   // "create" from a null somebody may simply have omitted.
   assert.equal(write.params[4], true);
   assert.equal(write.params[5], null);
+});
+
+test("the current-pointer move writes its audit event with a real actor, verb and subject", async () => {
+  // The second half of the class fix: this call site carried the same options
+  // object as record-model-role-revision, and a pointer move that rolled back
+  // on the audit insert would leave the role with no current revision while
+  // reporting one. Driven through the same recording double.
+  const db = pointerDatabase();
+  await tools["set-current-model-role-revision"].handler(db, JOE, {
+    idempotency_key: KEY, role_key: "reviewer", revision_no: 1,
+    role_digest: SEALED.role_digest, expected_current_revision_no: null,
+  });
+
+  assert.equal(db.events.length, 1);
+  const [moved] = db.events;
+  assert.equal(moved.actor, JOE, "the actor must be forwarded, not replaced by an options object");
+  assert.equal(moved.verb, "set-current-model-role-revision");
+  assert.equal(moved.subjectType, "model_role");
+  assert.equal(moved.subjectId, POINTER_ID);
+  assert.equal(moved.fields.idempotency_key, KEY);
+  assert.equal(moved.fields.new.role_key, "reviewer");
+  assert.equal(moved.fields.new.revision_no, 1);
+  assert.equal(moved.fields.new.role_digest, SEALED.role_digest);
+  assert.equal(moved.fields.new.expected_current_revision_no, null);
 });
 
 test("the two record-layer principals are reported as two facts, not one", async () => {
