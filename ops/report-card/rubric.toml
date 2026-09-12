@@ -595,7 +595,7 @@ dimension      = "staleness"
 question       = "Did every registered export target succeed inside its dead-man window?"
 source_command = "grep -cE '⚠︎ (STALE|NEVER RAN|NEVER OK|LATEST FAILED) ' \"$HEALTH\" || true"
 measured_from  = "health's export dead-man lines, which it emits one per failing target from the record layer's per-target last-success timestamps"
-independent_command = "grep -cE '^  OK [0-9]+ registered target\\(s\\)' \"$HEALTH\" | sed 's/1/0/' || true"
+independent_command = "grep -cE 'CANONICAL_FINDING export_receipt.*(STALE|NEVER RAN|NEVER OK|LATEST FAILED)' \"$HEALTH\" || true"
 note = """
 THIRD REWRITE, AND THE BUG CLASS IS THE LESSON. This row has now been wrong in
 three distinct ways inside one session, every one of them a mismatch between
