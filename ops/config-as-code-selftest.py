@@ -634,65 +634,155 @@ def main():
         live_canary.unlink()
         (launchd / canary_plist).unlink()
 
-        # AN ABSOLUTE core.hooksPath SURVIVES APPLY, and this is the one setting
-        # in this file whose blast radius is the whole machine rather than the
-        # repository it is read from. core.hooksPath lives in the single
-        # .git/config every worktree shares. Install used to write the relative
-        # "ops/githooks" unconditionally, so an apply run for two plists silently
+        # core.hooksPath IS NO-TOUCH, and this is the one setting in this file
+        # whose blast radius is the whole machine rather than the repository it
+        # is read from: it lives in the single .git/config every worktree shares.
+        # Install used to write the relative "ops/githooks" whenever the value
+        # was unset or non-default, so an apply run for two plists silently
         # re-pointed hook resolution in ~50 worktrees from canonical's hooks to
         # each worktree's own — the state ops/prepush-floor-selftest.py relies on
-        # being canonical's. Found and undone by hand during the 2026-09-12 Gate
-        # Zero activation, which is exactly the kind of repair that is not
-        # performed by whoever runs the installer next.
+        # being canonical's. It had to be undone by hand during the 2026-09-12
+        # Gate Zero activation, which is not a repair whoever runs the installer
+        # next will know to perform.
         #
-        # THE PAIR IS THE TEST. Leaving the value alone is trivially achievable
-        # by not writing it at all, which would silently stop installing the
-        # guard on a fresh machine — the whole reason this block exists. So the
-        # unset case is asserted in the same fixture: unset gets the default,
-        # an absolute path that already resolves here is left untouched.
+        # THE CONTRACT IS UNCONDITIONAL, so the fixture is a sweep rather than a
+        # pair: whatever the value is when apply starts — unset, a relative
+        # value that is not the default, the absolute canonical path, an
+        # absolute path pointing at some other hooks directory — .git/config is
+        # byte-identical when apply finishes. Three of these four the old code
+        # would have rewritten, so this is not a restatement of what already
+        # passed. What install may still do is make the hooks executable, and
+        # what it may NOT do instead is left to `check` to report.
         subprocess.run(["git", "init", "-q", str(repo)],
                        env=fixture_env(), check=True, capture_output=True)
         fixture_hooks = repo / "ops" / "githooks"
         fixture_hooks.mkdir(parents=True, exist_ok=True)
         (fixture_hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        foreign_hooks = repo / "ops" / "not-githooks"
+        foreign_hooks.mkdir(parents=True, exist_ok=True)
+        local_git_config = repo / ".git" / "config"
+
+        def preset_hooks_path(value: str | None) -> None:
+            """Set the fixture's starting value through the REAL subprocess."""
+            if value is None:
+                subprocess.run(
+                    ["git", "-C", str(repo), "config", "--local",
+                     "--unset-all", "core.hooksPath"],
+                    env=fixture_env(), capture_output=True)
+            else:
+                subprocess.run(
+                    ["git", "-C", str(repo), "config", "--local",
+                     "core.hooksPath", value],
+                    env=fixture_env(), check=True, capture_output=True)
 
         def fixture_hooks_path() -> str:
             return subprocess.run(
                 ["git", "-C", str(repo), "config", "--local", "--get", "core.hooksPath"],
                 env=fixture_env(), capture_output=True, text=True).stdout.strip()
 
+        # EVERY git ARGV THE INSTALLER USES, teed off as it runs. A final-value
+        # assertion cannot tell "did not write" from "wrote the same string
+        # back", and the second is a defect under a contract that forbids the
+        # write itself — under an inherited GIT_DIR a write aimed at REPO lands
+        # in another repository entirely, where this fixture would never see it.
+        installer_argv: list[list[str]] = []
+
+        class RecordingSubprocess:
+            """subprocess for the module under test, with argv recorded.
+
+            __getattr__ delegates everything else (SubprocessError, DEVNULL,
+            CalledProcessError, …) so swapping this in changes what is OBSERVED
+            and nothing about what runs.
+            """
+
+            def run(self, args, *positional, **keyword):
+                if isinstance(args, (list, tuple)):
+                    installer_argv.append([str(part) for part in args])
+                return subprocess.run(args, *positional, **keyword)
+
+            def __getattr__(self, name):
+                return getattr(subprocess, name)
+
         mod.IS_PRIMARY = True
-        with contextlib.redirect_stdout(io.StringIO()) as unset_hooks_out:
-            unset_hooks_rc = mod.cmd_install(True)
-        unset_hooks_output = unset_hooks_out.getvalue()
-        hooks_path_set_when_unset = (
-            unset_hooks_rc == 0
-            and fixture_hooks_path() == mod.GIT_HOOKS_RELATIVE
-            and "git hooksPath: (unset) -> ops/githooks" in unset_hooks_output
+        original_module_subprocess = mod.subprocess
+        mod.subprocess = RecordingSubprocess()
+        hooks_path_untouched: dict[str, bool] = {}
+        try:
+            for label, preset in (
+                ("unset", None),
+                ("relative", "ops/other-hooks"),
+                ("absolute", str(fixture_hooks)),
+                ("foreign", str(foreign_hooks)),
+            ):
+                preset_hooks_path(preset)
+                config_before = local_git_config.read_bytes()
+                value_before = fixture_hooks_path()
+                with contextlib.redirect_stdout(io.StringIO()) as hooks_out:
+                    hooks_rc = mod.cmd_install(True)
+                hooks_output = hooks_out.getvalue()
+                hooks_path_untouched[label] = (
+                    hooks_rc == 0
+                    and local_git_config.read_bytes() == config_before
+                    and fixture_hooks_path() == value_before
+                    and "core.hooksPath untouched" in hooks_output
+                    and "-> ops/githooks" not in hooks_output
+                )
+            install_argv = list(installer_argv)
+            # LIVENESS, because the assertion below is that a list is EMPTY and
+            # an empty list is also what a recorder wired to nothing produces.
+            # `check` reads core.hooksPath through the very module attribute a
+            # write would go out through, so this proves a core.hooksPath argv
+            # reaches the recorder whenever one is issued — and therefore that
+            # the installer's silence is the installer's, not the spy's.
+            with contextlib.redirect_stdout(io.StringIO()):
+                mod.cmd_check()
+            reporter_argv = installer_argv[len(install_argv):]
+        finally:
+            mod.subprocess = original_module_subprocess
+        # The executable bit is the half install may still do, and dropping the
+        # whole block would satisfy every assertion above.
+        hooks_stay_executable = os.access(fixture_hooks / "pre-push", os.X_OK)
+
+        def names_hooks_path(argv: list[str]) -> bool:
+            return (argv[:1] == ["git"] and "config" in argv
+                    and any("core.hooksPath" in part for part in argv))
+
+        installer_never_names_hooks_path = (
+            [argv for argv in install_argv if names_hooks_path(argv)] == []
+            and [argv for argv in reporter_argv if names_hooks_path(argv)] != []
         )
-        absolute_hooks_path = str(fixture_hooks)
-        subprocess.run(
-            ["git", "-C", str(repo), "config", "--local",
-             "core.hooksPath", absolute_hooks_path],
-            env=fixture_env(), check=True, capture_output=True)
-        with contextlib.redirect_stdout(io.StringIO()) as absolute_hooks_out:
-            absolute_hooks_rc = mod.cmd_install(True)
-        absolute_hooks_output = absolute_hooks_out.getvalue()
+
+        # WHAT INSTALL MAY NOT REPAIR, `check` REPORTS. The report is
+        # informational in both directions: it names the observed value, and it
+        # moves neither the exit code nor the first line the health row reads,
+        # so a machine whose hooks are off is visible without this tool ever
+        # touching the setting or going chronically red over it.
+        preset_hooks_path(str(foreign_hooks))
+        with contextlib.redirect_stdout(io.StringIO()) as foreign_check_out:
+            foreign_check_rc = mod.cmd_check()
+        foreign_check_output = foreign_check_out.getvalue()
+        preset_hooks_path(str(fixture_hooks))
+        with contextlib.redirect_stdout(io.StringIO()) as resolving_check_out:
+            resolving_check_rc = mod.cmd_check()
+        resolving_check_output = resolving_check_out.getvalue()
         mod.IS_PRIMARY = original_primary
-        absolute_hooks_survived = (
-            absolute_hooks_rc == 0
-            and fixture_hooks_path() == absolute_hooks_path
-            and f"git hooksPath left at {absolute_hooks_path}" in absolute_hooks_output
-            and "-> ops/githooks" not in absolute_hooks_output
-            and os.access(fixture_hooks / "pre-push", os.X_OK)
+        hooks_path_reported_informationally = (
+            f"git core.hooksPath: {foreign_hooks} —" in foreign_check_output
+            and "[informational]" in foreign_check_output
+            and f"git core.hooksPath: {fixture_hooks} —" in resolving_check_output
+            # Same verdict either way: the value is reported, never judged.
+            and foreign_check_rc == resolving_check_rc
+            # And it is never the headline the health row prints.
+            and "core.hooksPath" not in foreign_check_output.splitlines()[0]
+            and fixture_hooks_path() == str(fixture_hooks)
         )
-        # The predicate's own boundary, so the cases above cannot pass through a
+        # The predicate's own boundary, so the report above cannot be reading a
         # helper that says yes to everything: a relative value that is NOT the
         # default names no single directory (git resolves it per worktree), and
-        # an absolute path somewhere else is genuine drift.
+        # an absolute path somewhere else is a different hooks directory.
         conformance_boundary = (
             mod.git_hooks_path_conformant(mod.GIT_HOOKS_RELATIVE, str(fixture_hooks))
-            and mod.git_hooks_path_conformant(absolute_hooks_path, str(fixture_hooks))
+            and mod.git_hooks_path_conformant(str(fixture_hooks), str(fixture_hooks))
             and not mod.git_hooks_path_conformant("", str(fixture_hooks))
             and not mod.git_hooks_path_conformant("ops/other-hooks", str(fixture_hooks))
             and not mod.git_hooks_path_conformant(
@@ -806,10 +896,20 @@ def main():
          "hold (Joe's activation approval, 2026-09-12)", canary_released),
         ("the installer plans the canary as an ordinary launchd write, and "
          "reports it neither skipped nor wrongly installed", canary_planned),
-        ("apply still installs hooksPath on a machine that has none",
-         hooks_path_set_when_unset),
-        ("a pre-set ABSOLUTE hooksPath resolving to these hooks survives apply "
-         "untouched, and the hooks stay executable", absolute_hooks_survived),
+        ("apply leaves an UNSET core.hooksPath byte-identical",
+         hooks_path_untouched["unset"]),
+        ("apply leaves a non-default RELATIVE core.hooksPath byte-identical",
+         hooks_path_untouched["relative"]),
+        ("apply leaves an ABSOLUTE core.hooksPath that resolves to these hooks "
+         "byte-identical", hooks_path_untouched["absolute"]),
+        ("apply leaves a FOREIGN core.hooksPath byte-identical",
+         hooks_path_untouched["foreign"]),
+        ("apply still makes the hooks executable", hooks_stay_executable),
+        ("the installer issues no `git config core.hooksPath` call at all, "
+         "under any starting value", installer_never_names_hooks_path),
+        ("check reports the observed core.hooksPath without changing it, "
+         "without moving the exit code, and never as the headline",
+         hooks_path_reported_informationally),
         ("the hooksPath conformance test accepts only the default and an "
          "absolute path that resolves here", conformance_boundary),
         ("the repo-hygiene janitor agent is held as a definition only",
