@@ -106,6 +106,9 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import esbuild from "esbuild";
 
+import { WHOLE_WALK, pathToValue, topLevelIdentityOnly }
+  from "./gate-zero-reachability-walk.testhelper.mjs";
+
 import { digest } from "../src/artifact-trust.js";
 import { V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import {
@@ -3320,13 +3323,24 @@ test("STORES: a query that addresses no row says so, and does not say it broke",
   try {
     for (const [name, fetcher, query] of [
       ["predecessor", stores.fetchPredecessorOutcomeRows, {}],
-      ["ledger", stores.fetchSchedulerLedgerRows, { serviceKey: "carr-fleet-sync" }],
+      // THE SERVICE IS THE LEDGER'S REQUIRED ADDRESS, and since 2026-09-12 it
+      // is the only one: an omitted `canaryRunKey` asks for the latest run this
+      // service's wrapper minted a receipt for, which is a row the ledger can
+      // find on its own. A NAMED-BUT-EMPTY one is still no address at all, and
+      // the last shape below proves it.
+      ["ledger", stores.fetchSchedulerLedgerRows, { canaryRunKey: "gate-zero-run-1" }],
       ["checks", stores.fetchCheckConclusionRows, { headSha: "a".repeat(40) }],
     ])
       for (const shape of [undefined, null, query, { ...query, extra: 1 }])
         await assert.rejects(() => fetcher(shape),
           error => stores.isSeamStoreUnreachable(error) && error.because === notAddressed,
           `${name} answered a query that addressed no row with something else`);
+    // The ledger's optional address is optional, not unchecked: present and
+    // unusable is refused exactly the way an absent service key is.
+    await assert.rejects(
+      () => stores.fetchSchedulerLedgerRows({ serviceKey: "carr-fleet-sync", canaryRunKey: "" }),
+      error => stores.isSeamStoreUnreachable(error) && error.because === notAddressed,
+      "a named-but-empty canary run key was treated as an omitted one");
   } finally {
     restoreEnv(saved);
   }
@@ -3966,135 +3980,12 @@ function exportGraph(directory) {
   return { modules, namesOf, namespacesExposedBy, namedReexportsOf };
 }
 
-/**
- * THE PROPERTY PATH BY WHICH A VALUE IS REACHABLE FROM A NAMESPACE, or null.
- *
- * This is the half that answers "by any path", and after the sixth review it
- * answers it literally. The walk is UNBOUNDED — a cycle-safe visited set is what
- * makes it terminate, in place of the six-edge budget a seven-edge container
- * walked straight past. It enumerates `Reflect.ownKeys`, so a SYMBOL-keyed
- * property is read exactly like a string-named one. And it follows the
- * [[Prototype]] chain, because a value held on a prototype is handed to a caller
- * as readily as one held on the object itself. It returns the route it found the
- * value by, so a failure names `seam.ruledCardBinding` rather than just the
- * module.
- *
- * AND ACCESSORS ARE READ, which is what the seventh review corrected. The sixth
- * correction stepped over a getter unread and said so as a deliberate boundary;
- * that boundary was wrong, because `export const api = { get seam() { return
- * predicate; } }` hands a consumer the predicate at `api.seam` exactly as a data
- * property would, and a guard that answers "by any path" cannot decline to look
- * down the path a consumer actually uses. Every accessor's `get` is invoked
- * INSIDE try/catch and its return value is walked like any other edge. A getter
- * that THROWS is an opaque leaf — a consumer could not have taken a value
- * through it either — and the walk continues with the next key rather than
- * failing.
- *
- * AND THE EIGHTH REVIEW CLOSED THE TWO ROUTES THE SEVENTH LEFT, which are the
- * last two members of the closed set amendment 6 names.
- *
- *   THE ACCESSOR FUNCTIONS ARE THEMSELVES EDGES. `Object.getOwnPropertyDescriptor
- *   (api, "seam").get` is public, retrievable by any consumer, and can BE the
- *   predicate — `Object.defineProperty(api, "seam", { get: predicate })` hands it
- *   over without the getter ever returning it. Both `get` and `set` are walked as
- *   objects, at the route `.seam<get>` / `.seam<set>`, before the value the
- *   getter returns.
- *
- *   AND AN INHERITED GETTER IS INVOKED WITH THE EXPORTED CHILD AS RECEIVER, via
- *   `Reflect.get(proto, key, child)`. The seventh correction invoked it with the
- *   object it was found ON, which for a prototype is not the object a consumer
- *   holds: `Object.create({ get seam() { return this === shape ? null : predicate;
- *   } })` answers the predicate at `api.seam` and answers null to a walk standing
- *   on the prototype. The receiver is threaded down the [[Prototype]] chain and
- *   reset at every ordinary edge, and the visited set is keyed by (value,
- *   receiver) rather than by value, because the same prototype reached under two
- *   receivers is two different answers.
- *
- * The one shape this cannot terminate on is a getter that mints a fresh object
- * on every read, forever; no reachability scan terminates on that, and neither
- * does a consumer reach anything through it.
- *
- * `parts` exists so the mutation controls can revert ONE part of the walk at a
- * time against THIS code rather than against a retyped imitation of it.
- */
-const WHOLE_WALK = Object.freeze({
-  bounded: Infinity, symbols: true, prototypes: true, accessors: true,
-  accessorFunctions: true, inheritedReceiver: true });
-
-/** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
-const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
-
-function pathToValue(root, target, parts = WHOLE_WALK) {
-  // Keyed by the PAIR (value, receiver): the same prototype reached while a
-  // consumer holds two different children can answer two different values, so a
-  // set keyed by the object alone would skip the second answer unread.
-  const seen = new Map();
-  const walk = (value, path, left, receiver) => {
-    if (value === target) return path === "" ? "<the namespace itself>" : path;
-    if (left === 0 || value === null) return null;
-    const kind = typeof value;
-    if (kind !== "object" && kind !== "function") return null;
-    // The visited map is what replaces the depth budget: a value whose whole
-    // subtree has already been searched under THIS receiver cannot hide the
-    // target on a second visit, so revisiting is redundant rather than unsound
-    // once the walk is unbounded.
-    const held = receiver === undefined ? value : receiver;
-    const under = seen.get(value);
-    if (under === undefined) seen.set(value, new Set([held]));
-    else if (under.has(held)) return null;
-    else under.add(held);
-    const keys = parts.symbols ? Reflect.ownKeys(value) : Object.getOwnPropertyNames(value);
-    for (const key of keys) {
-      let descriptor;
-      try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { continue; }
-      // A property whose descriptor cannot be taken at all is the only key
-      // stepped over unread.
-      if (descriptor === undefined) continue;
-      const step = `${path}${stepFor(key)}`;
-      if (Object.hasOwn(descriptor, "value")) {
-        // An ordinary edge: the value is a new object in the consumer's hand, so
-        // the receiver does not travel with it.
-        const found = walk(descriptor.value, step, left - 1, undefined);
-        if (found !== null) return found;
-        continue;
-      }
-      // THE ACCESSOR FUNCTIONS FIRST, because `descriptor.get` is public and can
-      // be the target itself even when calling it returns something harmless.
-      if (parts.accessorFunctions)
-        for (const role of ["get", "set"]) {
-          if (typeof descriptor[role] !== "function") continue;
-          const found = walk(descriptor[role], `${step}<${role}>`, left - 1, undefined);
-          if (found !== null) return found;
-        }
-      if (!parts.accessors || typeof descriptor.get !== "function") continue;
-      // THEN THE VALUE, taken the way a consumer takes it: with the exported
-      // child as the receiver, not the prototype the descriptor was found on. A
-      // throw makes the key an opaque leaf rather than an error in this walk.
-      let edge;
-      try {
-        edge = parts.inheritedReceiver
-          ? Reflect.get(value, key, held)
-          : descriptor.get.call(value);
-      } catch { continue; }
-      const found = walk(edge, step, left - 1, undefined);
-      if (found !== null) return found;
-    }
-    if (!parts.prototypes) return null;
-    let proto;
-    try { proto = Object.getPrototypeOf(value); } catch { return null; }
-    // The receiver travels UP the prototype chain unchanged: the object a
-    // consumer holds is the child, however far up the property lives.
-    return walk(proto, `${path}.[[Prototype]]`, left - 1, held);
-  };
-  return walk(root, "", parts.bounded, undefined);
-}
-
-/** The identity check the fourth correction shipped, kept so the self-test can measure it. */
-function topLevelIdentityOnly(namespace, target) {
-  for (const [exportedAs, value] of Object.entries(namespace))
-    if (value === target) return exportedAs;
-  return null;
-}
+// THE RUNTIME REACHABILITY WALK LIVES IN ITS OWN FILE NOW
+// (./gate-zero-reachability-walk.testhelper.mjs, 2026-09-12). The producer suite
+// needs the same walk applied to its own callable, and the one thing that must
+// not happen is a second copy written from memory: `parts` still lets the
+// mutation controls below revert ONE part of the walk at a time against THAT
+// code, which is the same code the producer suite runs.
 
 /**
  * ONE MODULE PER RE-EXPOSING FORM, plus the private one that must stay legal.

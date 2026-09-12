@@ -246,15 +246,48 @@ const CHECK_ROWS = Object.freeze({
 // THE PUBLIC SURFACE. Three bound arrows that serve rows and decide nothing.
 // ---------------------------------------------------------------------------
 
-export const fetchPredecessorOutcomeRows = closedCallable(async query => ({
-  store_ref: "record-layer:work-request-outcome-feedback",
-  rows: rowsFor(PREDECESSOR_ROWS, cell(query, "workRequestRef")),
-}));
+// ---------------------------------------------------------------------------
+// THE TWO STAGED VARIANT LINES (2026-09-12, PR 1013 correction round).
+//
+// The producer no longer takes an address for either of these: it reads the
+// acceptance receipt by the step ref and the canary by the service key, because
+// the review required the run binding to be DERIVED and not pasted. So a test
+// that needs a broken world can no longer steer by writing a different address
+// into the producer — it rewrites one of the two lines below in the staged copy
+// of this file, which is the same throwaway-tree source edit the rest of the
+// staging already does, moved to the store that serves the row.
+// ---------------------------------------------------------------------------
+
+/** Which canary run the ledger holds for this service. */
+const LEDGER_CANARY = CANARY_JOINING;
+/** Which predecessor world the record layer holds: clean | receipt-card-mismatch. */
+const PREDECESSOR_WORLD = "clean";
+
+/**
+ * The receipt hash and the card's own proposal hash DISAGREE, which is the
+ * falsifier the derived read still has to catch: the acceptance receipt signed
+ * one thing and the card carries another, so no accepted row joins.
+ */
+function mismatchedRows(rows) {
+  return rows.map(row => Object.freeze({ ...row, feedback_hash: FORGED_HASH }));
+}
+
+export const fetchPredecessorOutcomeRows = closedCallable(async query => {
+  const rows = rowsFor(PREDECESSOR_ROWS, cell(query, "workRequestRef"));
+  return {
+    store_ref: "record-layer:work-request-outcome-feedback",
+    rows: PREDECESSOR_WORLD === "receipt-card-mismatch" ? mismatchedRows(rows) : rows,
+  };
+});
 
 export const fetchSchedulerLedgerRows = closedCallable(async query => {
   const storeRef = "control-plane:ops.service+ops.run";
   if (cell(query, "serviceKey") !== SERVICE_KEY) return { store_ref: storeRef, rows: [] };
-  return { store_ref: storeRef, rows: rowsFor(SCHEDULER_ROWS, cell(query, "canaryRunKey")) };
+  // AN OMITTED RUN KEY IS THE DERIVED ADDRESS — the latest run this service's
+  // wrapper minted a receipt for, which in this fixture is whichever one
+  // LEDGER_CANARY names. A named key still addresses that key alone.
+  const named = cell(query, "canaryRunKey");
+  return { store_ref: storeRef, rows: rowsFor(SCHEDULER_ROWS, named ?? LEDGER_CANARY) };
 });
 
 export const fetchCheckConclusionRows = closedCallable(async query => ({

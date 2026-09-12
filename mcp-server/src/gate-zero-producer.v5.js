@@ -28,36 +28,37 @@
 //     not for a switch. The ONE thing the environment supplies is where a ruled
 //     store lives, and that is `gate-zero-seam-stores.v5.js`'s business, reached
 //     only through a reader whose ruling already said it may look.
-//   * IT EXPORTS NO SETTER AND NO REGISTRY. Every binding below is a frozen
-//     module-private constant. The way a binding changes is the way a ruling
-//     changes: somebody edits this file and commits it.
+//   * IT EXPORTS NO SETTER AND NO REGISTRY. Every binding below is either a
+//     frozen module-private constant or DERIVED at call time from the candidate
+//     tree, the ruled stores and the authenticated call. There is no line a
+//     human pastes, so there is no human step inside this slice at all.
 //   * IT WRITES NOTHING. No database, no file, no verb. Step A emits a VALUE.
 //     Recording that value as a row is Step B, it is the heavy path, and it is
 //     waiting on Joe's ruling about which authority may write it.
 //
 // ---------------------------------------------------------------------------
-// THE RUN BINDING, AND WHY IT SHIPS UNPASTED.
+// THE RUN BINDING, AND WHY NOBODY PASTES IT.
 //
-// Four of the addresses a Gate Zero run stands on are facts about THAT RUN: the
-// candidate's head revision, the scheduler service and canary run key the
-// wrapper dispatched, the actor that built the candidate, and the acceptance-
-// receipt hash of each of the three Work-Request predecessors. None of them can
-// be a caller argument, and none of them can be invented here — an invented hash
-// is the exact "digest derived from a synthetic test fixture" that
-// benchmark-acceptance-store.v5.js lists as explicitly refused.
+// The addresses a Gate Zero run stands on are facts about THAT RUN: the
+// candidate's head revision, the scheduler service and the canary the wrapper
+// dispatched, the actor that built the candidate, and each Work-Request
+// predecessor's acceptance receipt. None of them can be a caller argument, and
+// none of them can be invented here — an invented hash is the exact "digest
+// derived from a synthetic test fixture" that benchmark-acceptance-store.v5.js
+// lists as explicitly refused.
 //
-// So they are pasted, on their own lines, exactly the way Joe pastes a decision
-// id onto `gate-zero-seam-rulings.v5.js`'s `decision_id:` lines. Until they are,
-// every line reads `null`, `V5_A02_GATE_ZERO_RUN_BINDING_STATUS` says
-// `unpasted`, and this producer refuses with `gate_zero_run_binding_unnamed`
-// having opened no store. That is a refusal on a MISSING ROW, which is what the
-// seam is owed, and it is the honest state of a repository that has not had a
-// Gate Zero run yet.
+// THE FIRST DRAFT SHIPPED THEM AS PASTED LINES, on the theory that a human
+// editing a constant is how a ruling changes. The review was right to refuse it:
+// the seam study says in its own words that there is NO human step in the middle
+// of this slice, and a file whose comment says "somebody edits this and commits
+// it" names no owner and never acquires one.
 //
-// THE SWITCH TURNS BOTH WAYS and the tests drive it from both ends: a staged
-// copy of src with the lines pasted and the fixture store substituted answers
-// `passable: true` with a real digest and a real observed instant; src itself,
-// unpasted, answers the refusal.
+// SO EVERY ONE OF THEM IS DERIVED, and the table beside SCHEDULER_SERVICE_KEY
+// below says from what. `gate_zero_run_binding_unnamed` now fires on exactly one
+// condition — a row the derivation asked for is genuinely absent — and its
+// reason text names which one. In a repository with no Gate Zero run yet that is
+// still the answer, and it is now an answer ABOUT MISSING ROWS rather than about
+// missing typing.
 //
 // ---------------------------------------------------------------------------
 // THE DIGEST RECIPE, AND THE ONE GAP THE SEAM STUDY NAMED.
@@ -85,18 +86,39 @@
 // not one of them.
 //
 // ---------------------------------------------------------------------------
-// WHO SIGNS. r7's identity rule: all identities derive from authenticated
-// execution context, `producer_role` binds to the registry entry, and the
-// subject maker's actor/session must differ from the evaluator's. Caller-
-// supplied identity, unauthorized role, or same-actor self-review denies.
+// WHO SIGNS, AND IT IS NOT A CONSTANT.
 //
-// The producer and the evaluator are THE STAFFED SEAT — card 9's declaration in
-// gate-zero-producer-registration.v5.js, whose holder is the independent Codex
-// reviewer lane. Its actor slug is read off that holder ref, checked against the
-// registered machine identities in identity.js, and its authority class is
-// DERIVED by `authorizationClassForActor` rather than typed here. The subject
-// maker is the pasted run binding's actor, derived the same way. If the two
-// collide on either the actor or the session, production refuses.
+// r7's identity rule: all identities derive from authenticated execution
+// context, `producer_role` binds to the registry entry, and the subject maker's
+// actor and session must differ from the evaluator's. Caller-supplied identity,
+// unauthorized role, or same-actor self-review denies.
+//
+// THE FIRST DRAFT RECONSTRUCTED THEM instead. It read card 9's holder ref, took
+// the actor slug out of it, and built each session ref out of that slug plus a
+// digest of the evidence — so any process that imported this module got a
+// receipt signed `codex-reviewer` without authenticating anything, and two runs
+// over the same rows shared a session. That is the defect the review named
+// first, and it is closed here rather than patched.
+//
+// THE PRODUCER AND THE EVALUATOR ARE THE AUTHENTICATED CALLER.
+// `authenticatedCallIdentity()` answers with the identity tools.js's one verb
+// dispatch bound to the async context for this call — the actor the server
+// established, the authority class identity.js derives for it, and the session
+// ref built from correlation.js's per-request correlation id. Outside an
+// authenticated call it answers null and this producer refuses. A test, a CLI
+// probe and a bare import all take that path.
+//
+// THE SUBJECT MAKER IS THE CANDIDATE'S OWN COMMITTER, read from the repository
+// the running module was built from and resolved to an actor THROUGH
+// identity.js. An address identity.js does not map is not an actor a receipt may
+// name, and the derivation refuses rather than inventing one. Its authority
+// class is stated as `candidate_builder` rather than derived, because identity
+// .js derives classes for authenticated actors and a committer is not one — the
+// field says what this identity is, and it grants nothing.
+//
+// CARD 9 IS STILL WHAT BINDS THE SEAM. An unstaffed seat still turns the whole
+// slice dark. What the seat no longer does is sign: naming who may sign and
+// being the signer are different acts.
 //
 // ---------------------------------------------------------------------------
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js:
@@ -105,10 +127,14 @@
 //   * A CONTRACT VIOLATION THROWS V5BoundaryError. Handing this module an
 //     argument is not a policy question.
 
-import { canonicalJson, digest } from "./artifact-trust.js";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { artifactManifestDigest, canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
-  ORGANIZATION_TENANT_ID, authorizationClassForActor, personalScopeForActor,
+  ORGANIZATION_TENANT_ID, authenticatedCallIdentity, slugForEmail,
 } from "./identity.js";
 import {
   CONSUMER_GATE_RECEIPT_FIELDS,
@@ -291,142 +317,219 @@ const RECEIPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const COMPARATOR =
   "each of the three ruled evidence seams is compared against the clause it answers, and the three clauses are conjoined with inherited-refusal propagation across the declared gate graph";
 
-/**
- * THE RUN BINDING — THE PASTED LINES. See the header. Every value is `null`
- * until somebody edits this file and commits it, which is the only way any of
- * them can ever change. There is no argument, no setter, no registry keyed by
- * anything a caller controls, and no environment variable that fills one in.
- */
-const V5_A02_GATE_ZERO_RUN_BINDING = deepFreeze({
-  // The 40-hex candidate revision a Gate Zero run stands on.
-  head_revision: null,
-  // The scheduler service and the canary run key the wrapper dispatched.
-  scheduler_service_key: null,
-  scheduler_canary_run_key: null,
-  // Who BUILT the candidate. It must differ from the seat that reviews it.
-  subject_maker_actor_id: null,
-  // Each Work-Request predecessor's ACCEPTANCE RECEIPT hash — the row a human's
-  // acceptance wrote, not the proposal a machine wrote. Card 11 compares each
-  // against the store and never echoes it, so a wrong value fails to match a
-  // signature rather than merely failing to match a proposal.
-  acceptance_receipt_hashes: {
-    "step:wr40-repository-outcome": null,
-    "step:wr46-dissolution-outcome": null,
-    "step:wr54-backup-recovery-outcome": null,
-  },
-});
-
-const HEAD_REVISION = /^[0-9a-f]{40}$/;
-const SERVICE_KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const RUN_KEY = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
-const OUTCOME_HASH = /^sha256:[0-9a-f]{64}$/;
-const ACTOR_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const SEAT_HOLDER_REF = /^seat:([a-z0-9][a-z0-9.-]*):([a-z0-9][a-z0-9.-]*)$/;
+// ---------------------------------------------------------------------------
+// THE RUN BINDING, DERIVED — there is no line anybody pastes.
+//
+// Four addresses a Gate Zero run stands on, and each one is now READ from
+// something that already exists rather than looked up by a human and typed here:
+//
+//   the four predecessor step refs  frozen literals already
+//                                   (gate-zero-producer-registration.v5.js)
+//   each predecessor's acceptance   read from the ruled record-layer store BY
+//     receipt                       that step ref; card 11's reader takes the
+//                                   step and no hash, and reads the receipt
+//   the scheduler service           a module-private constant naming this
+//                                   wrapper's own service, the way the reader's
+//                                   own bin/run-scheduled.sh constant is
+//   the canary run                  the LATEST scheduler-minted row for that
+//                                   service, which the ledger answers itself
+//   the head revision               the revision the running module was built
+//                                   from, read from the repository this file
+//                                   lives in — the same 40-hex value
+//                                   bin/deploy-worker.sh stamps as GIT_SHA and
+//                                   /release reports back
+//   the subject maker               the committer of that revision, resolved to
+//                                   an actor THROUGH identity.js, never typed
+//
+// So `gate_zero_run_binding_unnamed` now fires on ONE condition only: a row this
+// derivation asked for is genuinely absent. Its reason text names which.
+// ---------------------------------------------------------------------------
 
 /**
- * IS THE RUN BINDING PASTED? DERIVED from the constant above, fail-closed on
- * every line: a null, a malformed revision, a service key the ledger could not
- * hold, a hash that is not a sha256 ref, a missing predecessor — each answers
- * false, and false means this producer opens no store at all.
+ * THE SERVICE THIS PRODUCER'S CANARY RUNS UNDER. A module-private constant, and
+ * the only one of the four addresses that is: the scheduler cannot be asked
+ * which of its services is Gate Zero's, so this file names it, the same way
+ * card 12's reader names `bin/run-scheduled.sh`. ops/config/services.json
+ * carries the row; ops/launchd/com.carr.gate-zero-canary.plist runs it.
  */
-function runBindingNamed(binding) {
-  try {
-    if (!isPlainObject(binding)) return false;
-    if (typeof binding.head_revision !== "string" || !HEAD_REVISION.test(binding.head_revision)) return false;
-    if (typeof binding.scheduler_service_key !== "string"
-      || !SERVICE_KEY.test(binding.scheduler_service_key)) return false;
-    if (typeof binding.scheduler_canary_run_key !== "string"
-      || !RUN_KEY.test(binding.scheduler_canary_run_key)) return false;
-    if (typeof binding.subject_maker_actor_id !== "string"
-      || !ACTOR_ID.test(binding.subject_maker_actor_id)) return false;
-    if (!isPlainObject(binding.acceptance_receipt_hashes)) return false;
-    for (const step of OUTCOME_BACKED_PREDECESSORS) {
-      const hash = binding.acceptance_receipt_hashes[step];
-      if (typeof hash !== "string" || !OUTCOME_HASH.test(hash)) return false;
-    }
-    return Object.keys(binding.acceptance_receipt_hashes).length === OUTCOME_BACKED_PREDECESSORS.length;
-  } catch {
-    return false;
+const SCHEDULER_SERVICE_KEY = "gate-zero-canary";
+
+/** Where the running module's own repository begins, walking up from this file. */
+function repositoryRoot() {
+  let at = dirname(fileURLToPath(import.meta.url));
+  for (let step = 0; step < 32; step += 1) {
+    try {
+      statSync(join(at, ".git"));
+      return at;
+    } catch { /* keep walking */ }
+    const up = dirname(at);
+    if (up === at) return null;
+    at = up;
   }
+  return null;
 }
 
-/**
- * What the run binding is, as a word a reader can check. `unpasted` is not a
- * failure — it is a repository that has not had a Gate Zero run yet, and it is
- * the state this file ships in.
- */
-export const V5_A02_GATE_ZERO_RUN_BINDING_STATUS =
-  runBindingNamed(V5_A02_GATE_ZERO_RUN_BINDING) ? "named" : "unnamed";
-
-// ---------------------------------------------------------------------------
-// THE IDENTITIES, DERIVED.
-// ---------------------------------------------------------------------------
-
-/**
- * The actor slug behind the staffed seat's holder ref. Read off card 9's
- * declaration through the registration's own derived field — never typed here,
- * so a seat that goes back to unstaffed takes this with it — and then CHECKED
- * against identity.js's registered actors. A holder ref naming an actor this
- * system does not register answers null, and null refuses.
- */
-function seatActorId() {
+function readText(path) {
   try {
-    const holder = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_holder_ref;
-    if (V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound !== true) return null;
-    if (typeof holder !== "string") return null;
-    const match = SEAT_HOLDER_REF.exec(holder);
-    return match === null ? null : match[1];
+    return readFileSync(path, "utf8");
   } catch {
     return null;
   }
 }
 
 /**
- * THE REVIEWING SEAT AS AN ACTOR, in the shape identity.js registered it.
- *
- * `codex-reviewer` is a SERVER MACHINE IDENTITY there, not a DISPLAY actor, and
- * identity.js accepts one only with its exact marker and token provenance —
- * "adding another reviewer is an explicit security-relevant registration update,
- * never an arbitrary token claim". Those two values are restated here because
- * they are what the lane card 9 staffed authenticates with; if identity.js ever
- * changes them, `personalScopeForActor` answers `invalid_runtime_principal` and
- * this producer refuses rather than signing under a provenance that moved.
+ * The git directory for the candidate tree, and the common directory its refs
+ * and reflog live in. A worktree's `.git` is a FILE naming its own directory,
+ * which is the shape this repository's sessions actually run in.
  */
-const REVIEW_SEAT_MARKER = Object.freeze({ review: true, via: "review-token" });
-
-/**
- * Whether identity.js will speak for this actor at all. It is the narrowest
- * registered question available — `isKnownActor` covers only DISPLAY slugs and
- * would refuse the reviewer seat itself — and it is asked rather than answered
- * here: a slug this system does not register is not one this producer may name
- * in a receipt.
- */
-function registeredPrincipal(actor) {
-  try {
-    return personalScopeForActor(actor).status !== "error";
-  } catch {
-    return false;
+function gitDirectories(root) {
+  if (root === null) return null;
+  const dotGit = join(root, ".git");
+  let gitDir = dotGit;
+  const asFile = readText(dotGit);
+  if (asFile !== null) {
+    const named = /^gitdir:\s*(.+?)\s*$/m.exec(asFile);
+    if (named === null) return null;
+    gitDir = named[1].startsWith(sep) ? named[1] : join(root, named[1]);
   }
+  const common = readText(join(gitDir, "commondir"));
+  return {
+    gitDir,
+    commonDir: common === null ? gitDir
+      : (common.trim().startsWith(sep) ? common.trim() : join(gitDir, common.trim())),
+  };
+}
+
+const HEAD_REVISION = /^[0-9a-f]{40}$/;
+const SERVICE_KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const ACTOR_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * THE REVISION THE RUNNING MODULE WAS BUILT FROM. Loose ref, packed ref or a
+ * detached HEAD — all three are read, none is guessed, and anything else answers
+ * null, which refuses.
+ */
+function headRevisionOf(git) {
+  if (git === null) return null;
+  const head = readText(join(git.gitDir, "HEAD"));
+  if (head === null) return null;
+  const direct = head.trim();
+  if (HEAD_REVISION.test(direct)) return direct;
+  const symbolic = /^ref:\s*(refs\/\S+)\s*$/m.exec(head);
+  if (symbolic === null) return null;
+  const ref = symbolic[1];
+  for (const base of [git.gitDir, git.commonDir]) {
+    const loose = readText(join(base, ...ref.split("/")));
+    if (loose !== null && HEAD_REVISION.test(loose.trim())) return loose.trim();
+  }
+  for (const base of [git.gitDir, git.commonDir]) {
+    const packed = readText(join(base, "packed-refs"));
+    if (packed === null) continue;
+    for (const line of packed.split("\n")) {
+      const entry = /^([0-9a-f]{40})\s+(\S+)$/.exec(line.trim());
+      if (entry !== null && entry[2] === ref) return entry[1];
+    }
+  }
+  return null;
 }
 
 /**
- * An `authenticated-receipt-identity.v1` for one actor, with the authority class
- * DERIVED by identity.js rather than asserted here — the seat resolves through
- * the same `authorizationClassForActor` every other surface in this system asks,
- * so a class this producer is not entitled to is not a class it can type.
+ * WHO BUILT THE CANDIDATE, as an actor this system registers.
  *
- * The session ref is derived too: it is this producer's schema, the actor, and
- * the digest of the evidence the run was aimed at. It is deterministic, it
- * carries no caller byte, and two runs over different evidence never share one.
+ * The reflog is the one place a repository records the identity behind the
+ * revision it is standing on without an object walk, and its email is resolved
+ * THROUGH identity.js: an address `slugForEmail` does not map is not an actor a
+ * receipt may name, and this answers null rather than inventing one.
  */
-function identityFor(actor, evidenceDigest) {
-  const actorId = actor.slug;
-  return deepFreeze({
-    actor_id: actorId,
-    session_ref: `session:gate-zero:${actorId}:${evidenceDigest.slice("sha256:".length)}`,
-    authority_class: authorizationClassForActor(actor),
-  });
+function subjectMakerActorOf(git) {
+  if (git === null) return null;
+  for (const base of [git.gitDir, git.commonDir]) {
+    const log = readText(join(base, "logs", "HEAD"));
+    if (log === null) continue;
+    const lines = log.split("\n").filter(one => one.trim().length > 0);
+    if (lines.length === 0) continue;
+    const email = /<([^<>]+)>/.exec(lines[lines.length - 1]);
+    if (email === null) continue;
+    const slug = slugForEmail(email[1]);
+    if (typeof slug === "string" && ACTOR_ID.test(slug)) return slug;
+  }
+  return null;
 }
+
+/**
+ * THE TWO SEALED ARTIFACTS THIS RECEIPT'S DIGESTS STAND ON, as repository paths.
+ *
+ * NEITHER IS A DESCRIPTION. The environment manifest is the declaration
+ * ops/environment-matrix-selftest.py checks the repository against; the fixture
+ * set is the sealed gate-zero fixture bytes, which `evidence_scope:
+ * candidate-and-test` puts inside this receipt's scope by name. They are READ as
+ * bytes and hashed. Nothing here imports or executes either one.
+ */
+const ENVIRONMENT_MANIFEST_PATH = ["ops", "config", "environments.json"];
+const SEALED_FIXTURE_SET_PATHS = Object.freeze([
+  ["mcp-server", "test", "gate-zero-producer-stores.v5.fixture.mjs"],
+  ["mcp-server", "test", "gate-zero-seam-stores.v5.fixture.mjs"],
+  ["mcp-server", "test", "gate-zero-seam-stores.v5.receipt-fixture.mjs"],
+]);
+
+/** The candidate tree: every module the running producer was built alongside. */
+function candidateTreeFiles(root) {
+  const base = dirname(fileURLToPath(import.meta.url));
+  const found = [];
+  const walk = (at) => {
+    let names;
+    try { names = readdirSync(at).sort(); } catch { return; }
+    for (const name of names) {
+      const full = join(at, name);
+      let stat;
+      try { stat = statSync(full); } catch { continue; }
+      if (stat.isDirectory()) { walk(full); continue; }
+      if (!name.endsWith(".js")) continue;
+      const bytes = readFileSync(full);
+      found.push({ path: relative(root ?? base, full).split(sep).join("/"), bytes });
+    }
+  };
+  walk(base);
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// THE IDENTITIES, DERIVED FROM THE AUTHENTICATED CALL.
+//
+// r7's identity rule: the gateway derives all identities from authenticated
+// execution context, binds `producer_role` to the registry entry, and requires
+// the subject maker's actor and session to differ from the evaluator's.
+//
+// THE FIRST REVIEW ROUND FOUND THIS FILE RECONSTRUCTING THEM. It read card 9's
+// holder ref, took the actor slug out of it, and manufactured a session ref from
+// that slug and a digest of what it had just read — so any process that imported
+// this module received a receipt signed `codex-reviewer` without authenticating
+// anything, and two runs over the same evidence shared a "session".
+//
+// WHAT IT DOES NOW. `authenticatedCallIdentity()` answers with the identity
+// tools.js's verb dispatch bound to the async context for THIS call — actor,
+// session and authority class, each derived in identity.js from the actor the
+// server established, with the session ref being correlation.js's per-request
+// correlation id. Outside an authenticated call it answers null and this
+// producer refuses. A test, a CLI probe and an unauthenticated import all take
+// that path, which is the point: nothing that cannot authenticate can obtain a
+// receipt.
+//
+// CARD 9 IS STILL LOAD-BEARING and is unchanged by this: the seat declaration is
+// what BINDS the producer seam at all, so an unstaffed seat still turns the whole
+// slice dark. What the seat no longer does is supply an identity. Naming who may
+// sign and being the signer are different acts, which is the distinction the
+// first round collapsed.
+// ---------------------------------------------------------------------------
+
+/**
+ * The authority classes r7's registry admits for an independent control-plane
+ * oracle. DERIVED classes only — identity.js computes the class, this module
+ * checks membership, and a class outside the set refuses rather than signs.
+ */
+const PRODUCER_AUTHORITY_CLASSES = Object.freeze(["review_agent"]);
+
+const SESSION_REF = /^session:[a-z0-9][a-z0-9:._/-]{8,199}$/;
 
 /** Two seats collide when they share EITHER the actor or the session. */
 function sameSeat(a, b) {
@@ -696,15 +799,14 @@ function proveNegativeAdmission(predecessorReadings, schedulerReading, conclusio
 async function aim(binding) {
   const predecessors = {};
   for (const step of OUTCOME_BACKED_PREDECESSORS) {
-    predecessors[step] = await readPredecessorOutcomeEvidence({
-      stepRef: step,
-      outcomeHash: binding.acceptance_receipt_hashes[step],
-    });
+    // THE STEP REF AND NOTHING ELSE. Card 11 reads the acceptance receipt the
+    // ruled store holds for this step's Work Request; no hash goes in, so no
+    // hash had to be looked up by a human first.
+    predecessors[step] = await readPredecessorOutcomeEvidence({ stepRef: step });
   }
-  const scheduler = await readSchedulerCanaryEvidence({
-    serviceKey: binding.scheduler_service_key,
-    canaryRunKey: binding.scheduler_canary_run_key,
-  });
+  // THE SERVICE AND NOTHING ELSE. Card 12 reads the latest run its own wrapper
+  // minted a receipt for, which is the canary a Gate Zero run stands on.
+  const scheduler = await readSchedulerCanaryEvidence({ serviceKey: binding.scheduler_service_key });
   const conclusions = {};
   for (const node of V5_A02_GATE_ZERO_GATE_GRAPH) {
     conclusions[node.gate_id] = await readGateConclusionEvidence({
@@ -733,13 +835,44 @@ function evidenceDigestOf(read) {
 }
 
 // ---------------------------------------------------------------------------
-// THE FIVE DIGESTS THE RECEIPT STANDS ON.
+// THE FIVE DIGESTS THE RECEIPT STANDS ON — AND THREE OF THEM ARE OVER BYTES.
 //
-// Each is a JCS SHA-256 over a preimage assembled from THIS MODULE'S OWN
-// material — the registry entry, the frozen predecessor set, the gate graph, the
-// sealed vocabularies, the pasted binding. Nothing a caller can reach
-// contributes a byte, and each preimage is small enough to be read as a
-// specification rather than trusted as a number.
+// THE FIRST REVIEW ROUND FOUND THREE OF THESE HASHING A DESCRIPTION. The
+// candidate digest hashed a revision string beside a list of check names; the
+// environment digest hashed registration metadata; the fixture digest hashed the
+// addresses the readers were aimed at. Every one of them had the right shape and
+// bound nothing: change the artifact, and the digest did not move.
+//
+// WHAT EACH IS NOW:
+//
+//   subject_digest      the GATE's identity — the one that is legitimately a
+//                       constant, because the subject of a Gate Zero receipt is
+//                       Gate Zero and does not move with the candidate.
+//   candidate_digest    the SEALED ARTIFACT MANIFEST for the head revision, by
+//                       artifact-trust.js's own artifactManifestDigest: JCS
+//                       SHA-256 over `scac-artifact-manifest.v1`'s eleven
+//                       fields, which is byte-for-byte the recipe
+//                       ops.scac_artifact_manifest_digest recomputes in the
+//                       database and the recipe the release manifest binds. Its
+//                       artifact and source digests are taken over the CANDIDATE
+//                       TREE'S ACTUAL BYTES, so one byte changed in one module
+//                       moves this digest.
+//   policy_digest       this module's own sealed policy — the clause states, the
+//                       reason registry, the gate graph, the required denials,
+//                       the TTL and the stated digest recipe.
+//   environment_        JCS SHA-256 over ops/config/environments.json, READ AS
+//     manifest_digest   BYTES and parsed. That file is the environment matrix
+//                       ops/environment-matrix-selftest.py holds the repository
+//                       to; one byte changed in it moves this digest.
+//   fixture_set_digest  SHA-256 over the SEALED FIXTURE SET'S BYTES, file by
+//                       file, under their repository-relative paths. The
+//                       receipt's own `evidence_scope` is `candidate-and-test`,
+//                       so the test material is inside its scope by r7's own
+//                       registration rather than by this module's choice.
+//
+// AN ARTIFACT THIS DERIVATION CANNOT READ IS AN ABSENT ROW, not a zero and not a
+// default: every one of these answers null upward and the producer refuses
+// naming which artifact it could not reach.
 // ---------------------------------------------------------------------------
 
 function subjectDigestOf() {
@@ -753,11 +886,28 @@ function subjectDigestOf() {
   });
 }
 
-function candidateDigestOf(binding) {
-  return digest({
-    head_revision: binding.head_revision,
-    declared_checks: V5_A02_GATE_ZERO_GATE_GRAPH.map(node => node.check_name).sort(),
-  });
+/**
+ * The sealed source-bundle manifest for the candidate, assembled from the tree's
+ * own bytes. Its digest is the candidate digest; nothing about it is a
+ * description of the candidate, and every field is computed here.
+ */
+function candidateManifestOf(root, headRevision, policyDigest) {
+  const files = candidateTreeFiles(root);
+  if (files.length === 0) return null;
+  const bundle = digest(canonicalJson(Object.fromEntries(
+    files.map(file => [file.path, digest(file.bytes)]))));
+  return {
+    artifact_digest: bundle,
+    artifact_kind: "source_bundle",
+    media_type: "application/vnd.carr.source-bundle+json",
+    byte_length: files.reduce((total, file) => total + file.bytes.length, 0),
+    source_ref: headRevision,
+    source_digest: bundle,
+    sbom_digest: null,
+    provenance_digest: digest({ head_revision: headRevision, file_count: files.length }),
+    policy_epoch: 1,
+    policy_epoch_digest: policyDigest,
+  };
 }
 
 function policyDigestOf() {
@@ -773,32 +923,28 @@ function policyDigestOf() {
   });
 }
 
-function environmentManifestDigestOf() {
-  return digest({
-    tenant: ORGANIZATION_TENANT_ID,
-    subject_environment: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry.subject_environment,
-    evidence_scope: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry.evidence_scope,
-    producer_role: V5_A02_GATE_ZERO_PRODUCER_ROLE,
-    r7_packet_sha256: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.r7_packet_sha256,
-  });
+/** JCS SHA-256 over the environment manifest's own parsed bytes, or null. */
+function environmentManifestDigestOf(root) {
+  if (root === null) return null;
+  const bytes = readText(join(root, ...ENVIRONMENT_MANIFEST_PATH));
+  if (bytes === null) return null;
+  try {
+    return digest(canonicalJson(JSON.parse(bytes)));
+  } catch {
+    return null;
+  }
 }
 
-/**
- * The FIXTURE SET is the set of addresses this run aimed the readers at — which
- * is exactly what a fixture set is for a producer that reads rather than
- * simulates. It hashes the addresses, never the answers.
- */
-function fixtureSetDigestOf(binding) {
-  return digest({
-    predecessor_addresses: OUTCOME_BACKED_PREDECESSORS.map(step =>
-      ({ step_ref: step, acceptance_receipt_hash: binding.acceptance_receipt_hashes[step] })),
-    scheduler_address: {
-      service_key: binding.scheduler_service_key,
-      canary_run_key: binding.scheduler_canary_run_key,
-    },
-    conclusion_addresses: V5_A02_GATE_ZERO_GATE_GRAPH.map(node =>
-      ({ gate_id: node.gate_id, check_name: node.check_name, head_revision: binding.head_revision })),
-  });
+/** SHA-256 over the sealed fixture set's bytes, under their own paths, or null. */
+function fixtureSetDigestOf(root) {
+  if (root === null) return null;
+  const sealed = {};
+  for (const parts of SEALED_FIXTURE_SET_PATHS) {
+    let bytes;
+    try { bytes = readFileSync(join(root, ...parts)); } catch { return null; }
+    sealed[parts.join("/")] = digest(bytes);
+  }
+  return digest(canonicalJson(sealed));
 }
 
 // ---------------------------------------------------------------------------
@@ -810,7 +956,7 @@ function refusal(reasonId, because, extra) {
     schema_version: V5_A02_GATE_ZERO_PRODUCER_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     gate_zero_step_ref: GATE_ZERO_STEP_REF,
-    run_binding_status: V5_A02_GATE_ZERO_RUN_BINDING_STATUS,
+    run_binding_status: "derived",
     status: "unavailable",
     decision: "refuse",
     reason_id: reason(reasonId),
@@ -837,42 +983,69 @@ function refusal(reasonId, because, extra) {
  * `consumer-gate-receipt.v1` with its digest and the instant it was observed.
  */
 async function produce() {
-  const binding = V5_A02_GATE_ZERO_RUN_BINDING;
-  if (V5_A02_GATE_ZERO_RUN_BINDING_STATUS !== "named")
+  // (1) WHO IS CALLING, and it is the first question because an unauthenticated
+  // invocation must not reach a store, let alone a receipt.
+  const caller = authenticatedCallIdentity();
+  if (caller === null
+      || typeof caller.actor_id !== "string" || !ACTOR_ID.test(caller.actor_id)
+      || typeof caller.session_ref !== "string" || !SESSION_REF.test(caller.session_ref))
+    return refusal("gate_zero_producer_identity_refused",
+      "this module was not called inside an authenticated call, so there is no execution context to derive a producer identity from",
+      { clauses: null, negative_admission: null });
+  if (!PRODUCER_AUTHORITY_CLASSES.includes(caller.authority_class))
+    return refusal("gate_zero_producer_identity_refused",
+      "the authenticated call's derived authority class is not one r7's registry admits for this independent oracle",
+      { clauses: null, negative_admission: null });
+
+  // (2) WHAT THIS RUN STANDS ON, derived. Each absence names itself.
+  const root = repositoryRoot();
+  const git = gitDirectories(root);
+  const headRevision = headRevisionOf(git);
+  const subjectMakerActorId = subjectMakerActorOf(git);
+  const policyDigest = policyDigestOf();
+  const candidateManifest = headRevision === null
+    ? null : candidateManifestOf(root, headRevision, policyDigest);
+  const environmentDigest = environmentManifestDigestOf(root);
+  const fixtureDigest = fixtureSetDigestOf(root);
+
+  const unnamed = [
+    ["head_revision", headRevision !== null && HEAD_REVISION.test(headRevision)],
+    ["subject_maker", subjectMakerActorId !== null],
+    ["scheduler_service_key", SERVICE_KEY.test(SCHEDULER_SERVICE_KEY)],
+    ["candidate_artifact_manifest", candidateManifest !== null],
+    ["environment_manifest", environmentDigest !== null],
+    ["sealed_fixture_set", fixtureDigest !== null],
+  ].filter(([, held]) => !held).map(([name]) => name);
+  if (unnamed.length > 0)
     return refusal("gate_zero_run_binding_unnamed",
-      "the rows a Gate Zero run stands on are not named in this module's run binding, so no ruled evidence seam was aimed at anything",
-      { clauses: null, negative_admission: null });
+      `a row this run's binding derives from is absent: ${unnamed.join(", ")}`,
+      { clauses: null, negative_admission: null, unnamed_bindings: unnamed });
 
-  const seatSlug = seatActorId();
-  const seatActor = seatSlug === null ? null : { slug: seatSlug, ...REVIEW_SEAT_MARKER };
-  const makerActor = { slug: binding.subject_maker_actor_id };
-  // BOTH SEATS MUST BE PRINCIPALS THIS SYSTEM REGISTERS. The producer and the
-  // evaluator are card 9's seat, read off the declaration; the subject maker is
-  // the run binding's. Neither is a caller argument, and a slug identity.js will
-  // not speak for is not one a receipt may name.
-  if (seatActor === null || !registeredPrincipal(seatActor))
-    return refusal("gate_zero_producer_identity_refused",
-      "card 9's seat does not resolve to a principal this system registers, so no identity can be derived for the producer or the evaluator",
-      { clauses: null, negative_admission: null });
-  if (!registeredPrincipal(makerActor))
-    return refusal("gate_zero_producer_identity_refused",
-      "the run binding names a subject maker this system does not register",
-      { clauses: null, negative_admission: null });
+  const binding = deepFreeze({
+    head_revision: headRevision,
+    scheduler_service_key: SCHEDULER_SERVICE_KEY,
+    subject_maker_actor_id: subjectMakerActorId,
+  });
 
-  const read = await aim(binding);
-  const evidenceDigest = evidenceDigestOf(read);
-
-  const producerIdentity = identityFor(seatActor, evidenceDigest);
+  // (3) THE THREE IDENTITIES. Producer and evaluator are the authenticated
+  // call; the subject maker is the candidate's own committer, resolved through
+  // identity.js. r7's rule is checked on BOTH, because a producer that is the
+  // maker attests to its own work exactly as much as an evaluator that is.
+  const producerIdentity = deepFreeze({ ...caller });
   const evaluatorIdentity = producerIdentity;
-  const subjectMakerIdentity = identityFor(makerActor, evidenceDigest);
-  // r7's identity rule, and BOTH other seats are checked against the maker: a
-  // producer that is the maker attests to its own work exactly as much as an
-  // evaluator that is.
+  const subjectMakerIdentity = deepFreeze({
+    actor_id: subjectMakerActorId,
+    session_ref: `session:candidate-build:${binding.head_revision}`,
+    authority_class: "candidate_builder",
+  });
   for (const other of [producerIdentity, evaluatorIdentity])
     if (sameSeat(subjectMakerIdentity, other))
       return refusal("gate_zero_producer_identity_refused",
         "the seat that built the candidate and the seat that reviews it are the same seat",
         { clauses: null, negative_admission: null });
+
+  const read = await aim(binding);
+  const evidenceDigest = evidenceDigestOf(read);
 
   const clauses = deepFreeze({
     predecessor_join: predecessorClause(read.predecessors),
@@ -889,7 +1062,7 @@ async function produce() {
   const unknown = ordered.find(one => one.state === UNKNOWN) ?? null;
   if (unknown !== null)
     return refusal("gate_zero_evidence_unavailable",
-      "a ruled evidence seam returned no row for the address this run named",
+      "a ruled evidence seam returned no row for the address this run derived",
       { clauses, negative_admission: null });
 
   // The negative admission is proved over the readings this run actually took,
@@ -920,9 +1093,9 @@ async function produce() {
     gate_id: V5_A02_GATE_ZERO_GATE_ID,
     receipt_producer_step_ref: GATE_ZERO_STEP_REF,
     subject_digest: subjectDigestOf(),
-    candidate_digest: candidateDigestOf(binding),
-    policy_digest: policyDigestOf(),
-    environment_manifest_digest: environmentManifestDigestOf(),
+    candidate_digest: artifactManifestDigest(candidateManifest),
+    policy_digest: policyDigest,
+    environment_manifest_digest: environmentDigest,
     subject_environment: entry.subject_environment,
     evidence_scope: entry.evidence_scope,
     subject_maker_identity: subjectMakerIdentity,
@@ -932,7 +1105,7 @@ async function produce() {
     independent_oracle_ref: entry.oracle_ref,
     oracle_version: entry.oracle_version,
     evidence_ref: `safe:gate-zero/evidence/${evidenceDigest.slice("sha256:".length)}`,
-    fixture_set_digest: fixtureSetDigestOf(binding),
+    fixture_set_digest: fixtureDigest,
     observed_at: observedAt,
     ttl_expires_at: expiresAt,
     // THE VERDICT, AND IT IS THE RECEIPT'S RATHER THAN THE GATE'S. r7's closed
@@ -957,7 +1130,7 @@ async function produce() {
     schema_version: V5_A02_GATE_ZERO_PRODUCER_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     gate_zero_step_ref: GATE_ZERO_STEP_REF,
-    run_binding_status: V5_A02_GATE_ZERO_RUN_BINDING_STATUS,
+    run_binding_status: "derived",
     status: "outcome_produced",
     decision: "report",
     reason_id: failed === null ? null : failed.reason_id,

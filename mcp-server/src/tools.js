@@ -32,7 +32,7 @@ import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
-         personalScopeForActor } from "./identity.js";
+         personalScopeForActor, runInAuthenticatedCall } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
@@ -7611,7 +7611,15 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // connection or driver fault) still surfaces as-is for the transport's own
   // generic handling.
   try {
-    return await tool.handler(client, actor, args);
+    // THE ONE PLACE AN AUTHENTICATED CALL IS ESTABLISHED (2026-09-12). Every
+    // verb funnels through this dispatch, so the server-derived actor is bound
+    // to the async context here and nowhere else. A surface that must derive
+    // its own identity — r7's receipt identities, which deny anything a caller
+    // supplied — reads it with no argument through identity.js's
+    // authenticatedCallIdentity(); outside a verb call there is nothing to read
+    // and that surface refuses. See identity.js's own note for why the derived
+    // three-field identity travels rather than the actor object.
+    return await runInAuthenticatedCall(actor, () => tool.handler(client, actor, args));
   } catch (e) {
     if (e instanceof ToolError) throw e;
     throw pgConstraintError(e) || e;

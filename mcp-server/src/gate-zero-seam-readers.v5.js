@@ -435,6 +435,24 @@ function field(query, key) {
   }
 }
 
+/**
+ * Whether a caller NAMED a field at all, as opposed to naming it badly.
+ *
+ * The distinction exists for exactly one reason (2026-09-12, PR 1013 correction
+ * round): two of this module's addresses are now DERIVABLE, and an omitted
+ * address asks for the derivation while a malformed one is still refused. A
+ * throwing trap counts as named and then fails validation, so a hostile query
+ * cannot reach the derivation by making a getter explode.
+ */
+function named(query, key) {
+  try {
+    if (query === null || query === undefined) return false;
+    return Reflect.get(Object(query), key) !== undefined;
+  } catch {
+    return true;
+  }
+}
+
 /** A validated field, or null. Validation is total: no partial credit. */
 function matched(query, key, pattern) {
   const value = field(query, key);
@@ -586,6 +604,20 @@ function derived(id, facts) {
 // None of the three can be satisfied by the `outcomeHash` argument: it is
 // compared against a stored value and never returned, so a caller who supplies
 // a hash learns only whether the store agrees with it.
+/**
+ * The acceptance-receipt hash this reader compares against when the caller named
+ * none: the PROPOSAL hash the card carries for the accepted row. Null when the
+ * rows do not hold exactly one accepted row with its detail, which fails the
+ * comparison below rather than inventing a value that would pass it.
+ */
+function derivedAcceptanceHash(rows) {
+  const accepted = (Array.isArray(rows) ? rows : [])
+    .filter(row => text(row?.status) === "accepted" && row?.detail_row_count === 1);
+  if (accepted.length !== 1) return null;
+  const proposal = text(accepted[0]?.feedback_hash);
+  return proposal !== null && OUTCOME_HASH.test(proposal) ? proposal : null;
+}
+
 function derivePredecessorOutcome(rows, outcomeHash) {
   const all = Array.isArray(rows) ? rows : [];
   const counts = { outcome_rows_seen: all.length, accepted_rows_seen: 0, hash_match: UNKNOWN };
@@ -751,8 +783,25 @@ async function predecessorOutcomeEvidence(query) {
   const stepRef = field(query, "stepRef");
   const known = typeof stepRef === "string"
     && V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS.includes(stepRef) ? stepRef : null;
-  const outcomeHash = matched(query, "outcomeHash", OUTCOME_HASH);
-  const queryDigest = queryDigestOf({ step_ref: known, outcome_hash: outcomeHash });
+  // THE ACCEPTANCE-RECEIPT HASH IS NOW OPTIONAL (2026-09-12, PR 1013 correction
+  // round), and omitting it is the honest address rather than a shortcut. A
+  // caller that names one still has it COMPARED against the receipt row and
+  // never echoed, exactly as before. A caller that names none is asking this
+  // reader to read the acceptance receipt the ruled store holds for this step's
+  // Work Request — which is what "read the receipt by its step ref" means, and
+  // it is what removes the human who used to look a hash up and paste it.
+  //
+  // AND THE DERIVED READING IS WEAKER THAN THE NAMED ONE, said here rather than
+  // discovered later: when the hash is derived, `hash_match` reports the
+  // receipt-to-card join the STORE performed, not a comparison against a value
+  // that arrived from somewhere else. What still stands on its own is the fact
+  // Gate Zero actually needs — an accepted acceptance receipt exists for this
+  // predecessor and its card detail is present — and an absent or unaccepted
+  // row still refuses by its own name.
+  const askedNamed = named(query, "outcomeHash");
+  const outcomeHash = askedNamed ? matched(query, "outcomeHash", OUTCOME_HASH) : null;
+  const queryDigest = queryDigestOf({
+    step_ref: known, outcome_hash: outcomeHash, hash_derived: !askedNamed });
 
   if (known === null)
     return refuse(CARD_11, ruling, queryDigest, "unknown_predecessor_step", {});
@@ -761,7 +810,7 @@ async function predecessorOutcomeEvidence(query) {
   const workRequestRef = PREDECESSOR_WORK_REQUEST_REFS[known];
   if (workRequestRef === null)
     return refuse(CARD_11, ruling, queryDigest, "scheduler_predecessor_not_outcome_backed", {});
-  if (outcomeHash === null)
+  if (askedNamed && outcomeHash === null)
     return refuse(CARD_11, ruling, queryDigest, "predecessor_query_invalid",
       { invalid_field: "outcomeHash" });
 
@@ -769,8 +818,12 @@ async function predecessorOutcomeEvidence(query) {
     "predecessor_outcome_store_unreachable", "the store did not answer",
     { work_request_ref: workRequestRef });
   if (got.refusal !== undefined) return got.refusal;
-  return report(CARD_11, ruling, queryDigest, derivePredecessorOutcome(got.rows, outcomeHash),
-    { work_request_ref: workRequestRef });
+  // The derived value comes off the CARD side of the store's own join — the
+  // proposal hash — and is compared against the RECEIPT side below. It is this
+  // module's read of a ruled row, never a value that entered from a caller.
+  const asked = outcomeHash ?? derivedAcceptanceHash(got.rows);
+  return report(CARD_11, ruling, queryDigest, derivePredecessorOutcome(got.rows, asked),
+    { work_request_ref: workRequestRef, acceptance_hash_derived: !askedNamed });
 }
 
 // ---------------------------------------------------------------------------
@@ -791,17 +844,28 @@ async function schedulerCanaryEvidence(query) {
   if (ruling === null) return readGateZeroPredecessorJoin();
 
   const serviceKey = matched(query, "serviceKey", SERVICE_KEY);
-  const canaryRunKey = matched(query, "canaryRunKey", RUN_KEY);
-  const queryDigest = queryDigestOf({ service_key: serviceKey, canary_run_key: canaryRunKey });
+  // OPTIONAL for the same reason the acceptance hash is (2026-09-12): a run key
+  // nobody has run yet cannot be pasted, and the ledger already knows which run
+  // this service's wrapper last minted a receipt for. Omitting it addresses THAT
+  // row; naming a malformed one is still refused.
+  const canaryNamed = named(query, "canaryRunKey");
+  const canaryRunKey = canaryNamed ? matched(query, "canaryRunKey", RUN_KEY) : null;
+  const queryDigest = queryDigestOf({
+    service_key: serviceKey, canary_run_key: canaryRunKey, run_key_derived: !canaryNamed });
 
-  if (serviceKey === null || canaryRunKey === null)
+  if (serviceKey === null || (canaryNamed && canaryRunKey === null))
     return refuse(CARD_12, ruling, queryDigest, "scheduler_query_invalid",
       { invalid_field: serviceKey === null ? "serviceKey" : "canaryRunKey" });
 
-  const got = await fetchOrRefuse(CARD_12, ruling, queryDigest, { serviceKey, canaryRunKey },
+  // The key is OMITTED from the store query rather than passed as null, because
+  // absent is what asks the ledger for its own latest minted run; a null would
+  // be a named address the store cannot serve.
+  const got = await fetchOrRefuse(CARD_12, ruling, queryDigest,
+    canaryRunKey === null ? { serviceKey } : { serviceKey, canaryRunKey },
     "scheduler_ledger_unreachable", "the ledger did not answer", {});
   if (got.refusal !== undefined) return got.refusal;
-  return report(CARD_12, ruling, queryDigest, deriveSchedulerCanary(got.rows), {});
+  return report(CARD_12, ruling, queryDigest, deriveSchedulerCanary(got.rows),
+    { run_key_derived: !canaryNamed });
 }
 
 // ---------------------------------------------------------------------------

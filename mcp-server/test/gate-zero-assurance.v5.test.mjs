@@ -526,12 +526,14 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", async
     const result = await emitGateZeroOutcome(shape);
     assert.equal(result.passable, false);
     // THE REFUSAL MOVED ONE STEP FURTHER ALONG, which is this slice. The
-    // producer seam is BOUND — a module implements it — and the refusal is now
-    // the producer's own, over a run binding that names no rows. Not passable,
-    // still, and for a reason that is a missing row rather than a missing seam.
-    assert.equal(result.reason_id, "gate_zero_run_binding_unnamed");
+    // producer seam is BOUND — a module implements it — and the refusal is the
+    // producer's own. In a test there is no authenticated call, so what it
+    // refuses on is the identity it cannot derive: a receipt signed by nobody is
+    // the defect the PR 1013 review named, and this is the surface half of the
+    // control that proves it cannot happen.
+    assert.equal(result.reason_id, "gate_zero_producer_identity_refused");
     assert.equal(result.producer_bound, true);
-    assert.equal(result.producer_answer.run_binding_status, "unnamed");
+    assert.equal(result.producer_answer.run_binding_status, "derived");
     assert.equal(result.producer_seam, V5_A02_GATE_ZERO_PRODUCER_SEAM);
     assert.equal(result.gate_zero_step_ref, GATE_ZERO_STEP_REF);
     // The defect the reviewer named: a successful join inside a refusal.
@@ -1444,10 +1446,11 @@ test("SEAT: an unstaffed seat closes the built producer seam, and neither state 
   assert.equal(unstaffed.v5A02GateZeroPolicyPreimage().producer_bound, false);
 
   // AND STAFFED, which is what src ships: the seam is bound and the refusal is
-  // the producer's own, over a run binding that names no rows.
+  // the producer's own. In a test nothing established an authenticated call, so
+  // what it refuses on is the identity it will not manufacture.
   const emittedStaffed = await emitGateZeroOutcome();
   assert.equal(emittedStaffed.producer_bound, true);
-  assert.equal(emittedStaffed.reason_id, "gate_zero_run_binding_unnamed");
+  assert.equal(emittedStaffed.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emittedStaffed.producer_answer.decision, "refuse");
   assert.deepEqual(emittedStaffed.owed_seams, []);
   assert.equal(v5A02GateZeroPolicyPreimage().producer_bound, true);
@@ -1997,7 +2000,7 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
  */
 const STAFFED_WITHDRAWN_SENTENCES = Object.freeze([
   "the bound producer refused over the rows the three ruled evidence seams returned, so there is nothing to sign",
-  "the rows a Gate Zero run stands on are not named in this module's run binding, so no ruled evidence seam was aimed at anything",
+  "this module was not called inside an authenticated call, so there is no execution context to derive a producer identity from",
 ]);
 
 test("SWEEP: the closed union, over every branch-owned string the surface hands back", async () => {
@@ -2407,8 +2410,13 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   // and the registration and nothing test-shaped, and it does NOT import the
   // gate — a producer that imported the surface it answers for would be able to
   // read its own verdict back.
+  // The three `node:` builtins are the producer's own derivation: it reads the
+  // candidate tree's bytes, the environment manifest and the sealed fixture set
+  // rather than hashing a description of them, and it reads the repository's own
+  // .git for the revision the running module was built from.
   assert.deepEqual(imports["gate-zero-producer.v5.js"],
-    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
+    ["node:fs", "node:path", "node:url",
+      "./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
       "./gate-zero-seam-readers.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],

@@ -1,5 +1,5 @@
-// DoctorCRE v5 slice V5-A02, half one: THE GATE ZERO PUBLIC SURFACE — and it is
-// a surface that cannot say yes about anything.
+// DoctorCRE v5 slice V5-A02, half one: THE GATE ZERO PUBLIC SURFACE — and every
+// yes it can carry is one it was handed by a bound seam, never one it computed.
 //
 // WHAT THIS FILE MAY NOT DECIDE, said first because it is the whole point.
 //
@@ -26,13 +26,18 @@
 // to this surface's seams as of 2026-09-12, which is what section (2) below is
 // about.
 //
-// SO WHAT STILL REFUSES IS THE PRODUCER SEAM, and it is the only thing left.
-// Nothing implements `seam:gate-zero-read-only-outcome-producer`: no code aims
-// the three bound readers at particular rows and signs the result. The producer
-// seam is therefore still unbound, `producer_bound` is still false, `passable`
-// is still false for every caller on every input, and there is still no join. A
-// staffed seat is WHO MAY SIGN; it is not a signature, and naming who may sign
-// is not somebody signing.
+// AND THE PRODUCER SEAM IS NOW BOUND, which is what PR 1013 built.
+// `seam:gate-zero-read-only-outcome-producer` is implemented by
+// gate-zero-producer.v5.js: it derives the rows a Gate Zero run stands on, aims
+// the three bound readers at them, applies the three clauses over the readings
+// and assembles one `consumer-gate-receipt.v1`. So `producer_bound` is derived
+// true while card 9's seat is staffed, and `passable` follows the producer's own
+// answer rather than being false by construction.
+//
+// WHAT THAT DID NOT CHANGE. This file still computes nothing. It holds no
+// clause, reads no store and signs nothing; it asks the bound seam and reports
+// what came back, and every seam is fail-closed in every direction. Put card 9's
+// `holder_ref` back to null and this surface refuses again, byte for byte.
 //
 // (2) THE EVIDENCE, AND THIS HALF MOVED ON 2026-09-12. A caller object
 // describing four accepted outcomes, a canary, a readback and a green gate graph
@@ -51,40 +56,43 @@
 // report BOUND here on exactly the condition they are open there — and report
 // unbound again the moment a `decision_id:` line goes back to null.
 //
-// WHAT DID NOT CHANGE is the answer. Every function below still returns
-// `unavailable`, because a bound reader is a surface and not a subject: which
-// accepted outcome, which canary row, which commit and which declared check a
-// Gate Zero run stands on are the PRODUCER's bindings, and the producer seam is
-// still unbuilt — cards 9 and 10 staffed the seat and amended the packet, and
-// neither of them writes the code that does the aiming. The refusal moved forward
-// rather than lifting — from "nothing exists to read with" to "nothing has the
-// authority to aim it" — which is the more advanced and more honest of the two.
+// WHAT THE TWO READ SURFACES STILL ANSWER. A bound reader is a surface and not a
+// subject: which accepted outcome, which canary row, which commit and which
+// declared check a run stands on are the PRODUCER's derivation, not a question
+// either read surface can put to a caller. So both of them still refuse, and
+// they refuse for that reason rather than for a missing reader.
 //
 // SO THE PUBLIC SURFACE IS THIS, and it is the whole of it:
 //
 //   readGateZeroPredecessorJoin  -> status "unavailable"; the two ruled readers
-//                                   report bound, the producer seam is named owed
+//                                   report bound, the aiming is the producer's
 //   readGateGraphAssurance       -> status "unavailable"; the ruled conclusion
-//                                   reader reports bound, the producer seam owed
-//   emitGateZeroOutcome          -> passable false, for every caller on every
-//                                   input, and it embeds NO join — a successful
-//                                   join inside a refusal is still a successful
-//                                   join, and there is none to be had.
+//                                   reader reports bound, the aiming is the
+//                                   producer's
+//   emitGateZeroOutcome          -> asks the bound producer seam and reports its
+//                                   answer, which is a receipt and a digest when
+//                                   every derived row is there and a refusal
+//                                   naming the absent one when it is not. It
+//                                   still embeds no join of its own.
 //
 // NONE OF THE THREE READS ITS REQUEST. That is not laziness, it is the boundary:
 // if no field of the request can change the answer, then no caller can smuggle
 // authority in through one. `request_read: false` says so in every result.
 //
 // WHERE THE REAL DECISION LOGIC LIVES. The three deterministic clauses V5-A02's
-// checkable_done names are implemented, proved clause by clause, and kept
-// MODULE-PRIVATE to the public surface: they live in
-// gate-zero-classifiers.v5.testonly.js, which this file does not import, which
-// no production module imports, and which answers only in the conditional
-// (`would_satisfy_if_authoritative`, `would_be_green_if_authoritative`,
-// `would_join_exactly_if_authoritative`). gate-zero-assurance.v5.test.mjs proves
-// the isolation with a parser-backed import scan of every module in
-// mcp-server/src, and proves this surface with a sweep over every
-// caller-controlled shape — including the reviewer's one-gate construction.
+// checkable_done names are implemented in PRODUCTION, in
+// gate-zero-producer.v5.js, module-private to it, applied to readings taken by
+// ruled readers from ruled stores. They answer held, failed or unknown about a
+// row — no clause on this side of the line is written in the conditional, in any
+// spelling, and the producer's own suite asserts that.
+//
+// A test-side helper still evaluates the same clause shapes over a CALLER'S
+// object, and it has to answer conditionally because a caller's object is not
+// evidence. It lives in test/, this file does not import it, and no production
+// module does; gate-zero-assurance.v5.test.mjs proves the isolation with a
+// parser-backed import scan of every module in mcp-server/src, and proves this
+// surface with a sweep over every caller-controlled shape — including the
+// reviewer's one-gate construction.
 //
 // THE FOUR PREDECESSORS ARE NOT THIS FILE'S CHOICE. They are the frozen plan's,
 // enforced today at tools/doctorcre-v5-review.cjs:1234-1244, which asserts that
@@ -375,15 +383,13 @@ export const V5_A02_GATE_ZERO_OWED_SEAMS = deepFreeze([
  * controls, and no environment variable that binds a seam: the binding
  * condition is a decision id committed to a file, which is what a ruling is.
  *
- * AND THE PRODUCER SEAM IS STILL NULL — the one that decides everything below.
- * Cards 9 and 10 are both answered: the oracle seat is staffed and r7 carries
- * the registration. Neither of them builds a producer. So `passable` is still
- * false, `producer_bound` is still false, and the join is still unavailable —
- * now for the reason that is actually true. These readers answer truthfully
- * about whatever row they are pointed at, and NOTHING IN THIS REPOSITORY
- * IMPLEMENTS THE POINTING: which canary row, which accepted outcome, which
- * commit and which check a Gate Zero run stands on are the producer's bindings,
- * and no code writes them down.
+ * AND THE PRODUCER SEAM IS BOUND (PR 1013). gate-zero-producer.v5.js implements
+ * the pointing these readers were built for: it derives the head revision, the
+ * scheduler service and the acceptance receipts from the candidate tree and the
+ * ruled stores, aims all three readers at them, and signs the result with the
+ * identity of the authenticated call it is running inside. `producer_bound` is
+ * derived from card 9's seat exactly as before, so an unstaffed seat still
+ * closes this seam and takes `passable` down with it.
  *
  * `holder` IS A THUNK, NOT A VALUE, and that is load-order and not style.
  * gate-zero-seam-readers.v5.js imports this module for its unruled answer, so
