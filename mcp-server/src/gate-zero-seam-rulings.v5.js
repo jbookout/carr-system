@@ -1,23 +1,36 @@
 // DoctorCRE v5 slice V5-A02, the seam half: THE RULING TABLE, and it is the
 // only switch in this build.
 //
-// WHAT THIS FILE IS. Three seams that Gate Zero is owed have a store proposed
-// behind each of them — cards 11, 12 and 13 of JOE-GATE-ZERO-CARDS.md. The
-// readers for all three are built and tested. None of them reads anything,
-// because a proposal is not a ruling: each card's `decision_id` below is null,
-// and while it is null its reader returns the identical refusal Gate Zero
-// returns today, without touching its store.
+// WHAT THIS FILE IS. Three seams that Gate Zero is owed have a store behind
+// each of them — cards 11, 12 and 13 of JOE-GATE-ZERO-CARDS.md. The readers for
+// all three are built and tested, and ALL THREE RULINGS ARE LIVE: Joe ruled the
+// three cards, and his decision ids sit on the three `decision_id:` lines below.
 //
-// WHAT THE CARDS PROPOSE, said here in a comment and NOT in an exported value,
-// because a proposal is not a fact about the world and no consumer should be
-// able to read one off this module's surface:
+//   card 11  16c7cdfb-b675-4b6a-bbff-4bbdab46baf8
+//            seam: which store an accepted predecessor outcome comes from —
+//            the record layer's own Work Request outcome feedback, status
+//            accepted
+//   card 12  f7c486d6-5bee-4c4c-a76f-c0f162f66db8
+//            seam: which scheduler surface supplies a canary and the
+//            observation after it — ops.service / the Control Plane ledger,
+//            with bin/run-scheduled.sh's ops.run rows as the observation after
+//            dispatch
+//   card 13  87e9e11e-64b2-49b3-a6aa-4901c24eaa91
+//            seam: which surface reports a gate's own conclusion — hosted CI
+//            check conclusions via the GitHub checks API, which is the merge
+//            gate today
 //
-//   card 11  the record layer's own Work Request outcome feedback, status
-//            accepted, as the store an accepted predecessor outcome comes from
-//   card 12  ops.service / the Control Plane ledger, with bin/run-scheduled.sh's
-//            ops.run rows as the observation after dispatch
-//   card 13  hosted CI check conclusions via the GitHub checks API, which is the
-//            merge gate today
+// So all three readers read. The switch is still one line per card, and it
+// turns both ways: put `null` back on a card's `decision_id:` line — or any
+// value that is not a well-formed decision uuid — and that card's reader
+// switches back OFF, returning the identical refusal Gate Zero returns without
+// touching its store. The seams are open because of those three lines and
+// nothing else.
+//
+// WHAT EACH RULING NAMES IS SAID IN A COMMENT AND NOT IN AN EXPORTED VALUE:
+// the only thing a consumer can reach is the frozen pair `seamRulingRef`
+// returns for a card token it already holds. There is no route from this
+// module's surface to the table, ruled or not.
 //
 // WHAT MAKES THIS THE ONLY SWITCH, said plainly because the whole slice exists
 // to refuse the alternatives:
@@ -37,13 +50,14 @@
 //     found. Half an answer read from an unruled store is still an unruled
 //     read.
 //
-// HOW A RULING LANDS. Joe pastes the decision id — the uuid `log-decision`
-// returns — in place of the `null` on the `decision_id:` line of the card he
-// ruled, and nothing else in this repository changes. The reader then reads the
-// store named on the `store_ref:` line beside it. If he rules a DIFFERENT store
-// than the one proposed, the `store_ref` line changes too, and it must name a
-// member of STORE_REFS below — an unknown store ref makes the lookup answer
-// "not ruled", so the reader keeps refusing rather than guessing.
+// HOW THESE RULINGS LANDED, and how any later one would. Joe pasted each
+// decision id — the uuid `log-decision` returns — in place of the `null` on
+// that card's `decision_id:` line, and no production logic changed with them.
+// Each reader now reads the store named on the `store_ref:` line beside its id.
+// Had he ruled a DIFFERENT store than the one the card named, the `store_ref`
+// line would have changed too, and it must name a member of STORE_REFS below —
+// an unknown store ref makes the lookup answer "not ruled", so that card's
+// reader would keep refusing rather than guessing.
 //
 // WHY THE STORE REF IS HERE AND NOT IN THE READER. Cards 11-13 each ask two
 // questions at once: is this store authoritative for this purpose, and is it
@@ -75,8 +89,8 @@ const DECISION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 /**
  * THE THREE LINES. One entry per card; `decision_id` is the line Joe's ruling
- * goes on. Module-private and frozen: nothing can write one at runtime and
- * nothing outside this file can hold one.
+ * goes on, and all three now carry one. Module-private and frozen: nothing can
+ * write one at runtime and nothing outside this file can hold one.
  */
 const SEAM_RULINGS = Object.freeze({
   "card:11": Object.freeze({
@@ -105,7 +119,12 @@ const SEAM_RULINGS = Object.freeze({
  * argument, of every type, answers null: an unknown token, a Proxy, a number, a
  * decision id someone hoped would be accepted as one.
  *
- * Today it returns null for all three, because all three decision ids are null.
+ * Today it returns a frozen pair for all three cards, because all three carry a
+ * live decision id: card 11 is ruled by 16c7cdfb-b675-4b6a-bbff-4bbdab46baf8,
+ * card 12 by f7c486d6-5bee-4c4c-a76f-c0f162f66db8, and card 13 by
+ * 87e9e11e-64b2-49b3-a6aa-4901c24eaa91. Put a `null` back on one of those lines
+ * and this lookup answers null for that card again, which is what switches its
+ * reader off.
  */
 function seamRulingRefOf(cardRef) {
   if (typeof cardRef !== "string") return null;

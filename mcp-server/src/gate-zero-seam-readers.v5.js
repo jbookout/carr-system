@@ -1,21 +1,35 @@
 // DoctorCRE v5 slice V5-A02, the seam half: THE THREE READERS GATE ZERO IS
-// OWED — built, tested, and reading nothing.
+// OWED — built, tested, and ON.
 //
-// WHAT THIS IS FOR. Gate Zero refuses today with
+// WHAT THIS IS FOR. Gate Zero's own path refuses with
 // `predecessor_outcome_reader_unavailable`, and it refuses BEFORE it looks at
-// any Work Request, because nothing in this system can read the evidence it
-// would join. Four seams are owed. Cards 11, 12 and 13 of
-// JOE-GATE-ZERO-CARDS.md propose a store for three of them. Joe has not ruled.
+// any Work Request, because nothing on that path can read the evidence it would
+// join. Four seams are owed. Cards 11, 12 and 13 of JOE-GATE-ZERO-CARDS.md
+// named a store for three of them, and JOE HAS RULED all three. The decision
+// ids are live on the three `decision_id:` lines of
+// gate-zero-seam-rulings.v5.js:
 //
-// So the readers are built and the switch is left off. The moment a ruling
-// lands, the only thing that changes in this repository is one `null` on one
-// line of gate-zero-seam-rulings.v5.js. Nothing here is written that day.
+//   card 11  16c7cdfb-b675-4b6a-bbff-4bbdab46baf8 — which store an accepted
+//            predecessor outcome comes from (record layer Work Request outcome
+//            feedback)
+//   card 12  f7c486d6-5bee-4c4c-a76f-c0f162f66db8 — which scheduler surface
+//            supplies a canary and the observation after it (ops.service and
+//            ops.run)
+//   card 13  87e9e11e-64b2-49b3-a6aa-4901c24eaa91 — which surface reports a
+//            gate's own conclusion (the GitHub checks API)
+//
+// So all three readers read, and not one line of this file was written the day
+// those rulings landed: the whole switch is those three lines in the ruling
+// table. It turns both ways — put `null` back on a card's `decision_id:` line
+// and that card's reader goes back to handing over the gate's own refusal,
+// without opening its store.
 //
 // THE RULING GATE, and it is the first thing every reader does.
 //
 //   1. Ask the ruling table whether THIS CARD is ruled, by card token.
-//   2. If it is not — which today it is not, because all three decision ids are
-//      null — RETURN THE GATE'S OWN REFUSAL, by calling
+//   2. If it is not — which for these three cards means a `null` or a
+//      malformed id put back on its ruling line — RETURN THE GATE'S OWN
+//      REFUSAL, by calling
 //      `readGateZeroPredecessorJoin()` or `readGateGraphAssurance()` and
 //      returning what they return, unmodified. Not a copy, not a lookalike: the
 //      gate's own function's own answer, so the two cannot drift.
