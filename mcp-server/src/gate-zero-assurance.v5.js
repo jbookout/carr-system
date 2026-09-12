@@ -124,8 +124,8 @@ import {
   readGateConclusionEvidence,
   readPredecessorOutcomeEvidence,
   readSchedulerCanaryEvidence,
+  ruledCardBinding,
 } from "./gate-zero-seam-readers.v5.js";
-import { seamRulingRef } from "./gate-zero-seam-rulings.v5.js";
 
 export { GATE_ZERO_STEP_REF, V5_NO_EFFECTS };
 
@@ -299,10 +299,20 @@ export const V5_A02_GATE_ZERO_OWED_SEAMS = deepFreeze([
  * only way it honestly could: no reader exists. Three of the four seams now have
  * a reader behind them — cards 11, 12 and 13, ruled by Joe on 2026-09-11 and
  * switched on by the three `decision_id:` lines of gate-zero-seam-rulings.v5.js.
- * This module IMPORTS those readers and asks that SAME ruling table, so a seam
- * is bound here on exactly the condition it is open there, and the two cannot
- * drift. Put `null` back on a card's ruling line and the seam closes in both
- * files at once.
+ * This module IMPORTS those readers and asks THE READER'S OWN BINDING PREDICATE
+ * — `ruledCardBinding`, the one function that decides whether a card is ruled
+ * for its reader — so a seam is bound here on exactly the condition it is open
+ * there, and the two cannot drift. Put `null` back on a card's ruling line and
+ * the seam closes in both files at once.
+ *
+ * AND ASKING THE TABLE DIRECTLY IS THE DEFECT THAT COST THIS SENTENCE ITS FIRST
+ * VERSION. Until the PR 1004 re-review this module imported the ruling table and
+ * read any non-null ruling as a bound seam — half of the reader's test, which
+ * also requires the ruling to name the store that card's reader actually serves.
+ * A ruling naming another registered store made this file report BOUND while the
+ * reader refused it and fell back. Two predicates for one question is the bug;
+ * there is now one, it lives with the store table it has to agree with, and this
+ * module no longer imports the ruling table at all.
  *
  * WHAT IS STILL NOT A DOOR. The readers arrive as a module-private import.
  * There is no argument, no setter, no registry keyed by anything a caller
@@ -349,17 +359,24 @@ const V5_A02_GATE_ZERO_SEAM_BINDINGS = Object.freeze({
 /**
  * The bound holder for a seam, or null when it is unavailable. Takes no caller
  * input: the seam and the method are this module's own constants, and the only
- * question asked of anything outside is whether that seam's CARD is ruled.
+ * question asked of anything outside is whether that seam's CARD is ruled FOR
+ * ITS READER, which is the reader's question and is answered by the reader.
  *
  * FAIL-CLOSED IN EVERY DIRECTION. An unknown seam, a seam with no card, a card
- * with no live ruling, a thunk that throws, a holder that is not an object or
- * does not carry the method — each answers null, which is the same "no" this
- * surface gave before any ruling existed.
+ * with no live ruling, a card whose ruling names a store its reader does not
+ * serve, a thunk that throws, a holder that is not an object or does not carry
+ * the method — each answers null, which is the same "no" this surface gave
+ * before any ruling existed.
+ *
+ * THE RULING QUESTION IS NOT ASKED HERE. `ruledCardBinding` is the reader's own
+ * predicate, imported from the reader module: this file cannot answer "bound"
+ * for a ruling the reader would refuse, because it is no longer able to form its
+ * own opinion about what a ruling means.
  */
 function boundSeam(seam, method) {
   const binding = V5_A02_GATE_ZERO_SEAM_BINDINGS[seam];
   if (!isPlainObject(binding) || binding.method !== method) return null;
-  if (seamRulingRef(binding.card_ref) === null) return null;
+  if (ruledCardBinding(binding.card_ref) === null) return null;
   let holder;
   try {
     holder = binding.holder();

@@ -559,6 +559,9 @@ const EXPECTED_EXPORTS = Object.freeze({
     "readGateConclusionEvidence",
     "readPredecessorOutcomeEvidence",
     "readSchedulerCanaryEvidence",
+    // The ruling predicate, on the surface since the PR 1004 re-review so that
+    // the gate binds a seam on the reader's own test rather than half of it.
+    "ruledCardBinding",
   ],
   rulings: ["seamRulingRef"],
   stores: [
@@ -839,6 +842,22 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
     "the store's error type is no longer the module-private class it must be");
   assert.equal(/^export (const|class) SeamStoreUnreachable\b/m.test(stores_), false,
     "the store's error type is exported again");
+});
+
+test("SURFACE: the shared ruling predicate answers for the three cards and nothing else", () => {
+  // The gate's bound-ness is this function's answer, so what it says for a card
+  // token is asserted here once rather than inferred from a gate answer.
+  for (const card of ["card:11", "card:12", "card:13"]) {
+    const bound = readers.ruledCardBinding(card);
+    assert.notEqual(bound, null, `${card} is ruled in src but the predicate refuses it`);
+    // It is the ruling table's own pair, narrowed — never a value of its own.
+    assert.deepEqual(bound, rulings.seamRulingRef(card), card);
+  }
+  // FAIL-CLOSED, and these are the tokens a caller could reach for: the producer
+  // seam, a card with no store behind it, and anything that is not a card token.
+  for (const other of ["card:9", "card:10", "card:14", "seam:gate-zero-read-only-outcome-producer",
+    "", "16c7cdfb-b675-4b6a-bbff-4bbdab46baf8", 11, null, undefined, {}, Symbol("card:11")])
+    assert.equal(readers.ruledCardBinding(other), null, `${String(other)} answered as a ruled card`);
 });
 
 test("SURFACE: the export list of all three modules is exactly enumerated", () => {
@@ -1552,10 +1571,11 @@ test("SURFACE: no export can be constructed, and none reads a caller's newTarget
         callables += 1;
         assertClosedCallable(`${label}.${name}`, value);
       }
-    // The six readers and fetchers, the factory, the predicate and the lookup:
-    // an export that stopped being one of them fails here rather than quietly
-    // skipping the loop above.
-    assert.equal(callables, 9, "the callable surface moved without this count following it");
+    // The six readers and fetchers, the factory, the store predicate, the lookup
+    // and — since the PR 1004 re-review — the ruling predicate the gate binds
+    // its seams on: an export that stopped being one of them fails here rather
+    // than quietly skipping the loop above.
+    assert.equal(callables, 10, "the callable surface moved without this count following it");
 
     // AND THE CALLING DOOR STILL ANSWERS, which is the thing the construction
     // door must not have cost. Before Joe's paste this was pinned to the gate's
@@ -3078,8 +3098,23 @@ test("RULED: a ruling naming a store this reader does not serve opens nothing", 
   try {
     const result = await ruled.readPredecessorOutcomeEvidence({
       stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"4".repeat(64)}` });
-    assert.equal(digest(result), digest(readGateZeroPredecessorJoin()),
+    // THE SAME TREE'S GATE, and that is the PR 1004 re-review's finding rather
+    // than a nicety. This clause used to compare against the SHIPPED gate's
+    // answer, and it passed for the wrong reason: the gate read any non-null
+    // ruling as a bound seam, so a staged tree whose card 11 named another store
+    // produced a gate answer identical to the shipped one — the gate calling the
+    // seam bound while this reader refused it. The gate now asks the reader's own
+    // predicate, so the staged gate reports card 11 UNBOUND and its answer is no
+    // longer the shipped bytes. Both halves are asserted.
+    const stagedGate = gateOf(ruled);
+    assert.equal(digest(result), digest(stagedGate.readGateZeroPredecessorJoin()),
       "a ruling naming the wrong store opened the seam anyway");
+    assert.equal(stagedGate.readGateZeroPredecessorJoin().predecessor_outcome_reader_bound, false,
+      "the gate reports card 11 bound while this reader refuses its ruling");
+    assert.equal(stagedGate.emitGateZeroOutcome().predecessor_outcome_reader_bound, false,
+      "the emitted answer reports card 11 bound while this reader refuses its ruling");
+    assert.notEqual(digest(result), digest(readGateZeroPredecessorJoin()),
+      "the staged answer is the shipped one, so the gate still reads a mismatched ruling as bound");
     // The other two cards are ruled normally in this same staging and do open.
     const scheduler = await ruled.readSchedulerCanaryEvidence({
       serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" });
@@ -3520,13 +3555,18 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   assert.deepEqual(importersOf(STORES_FILE), [READERS_FILE],
     "the stores module has an importer other than the reader");
 
-  // THE RULING TABLE HAS EXACTLY TWO, and the second one is the wiring of
-  // 2026-09-12. The gate asks the same table the readers ask, so a seam is bound
-  // in the gate on exactly the condition its reader is open — one switch, read
-  // by both, rather than the gate carrying a second copy of the ruling that
-  // could drift from this one. A THIRD importer is the thing to be red about.
-  assert.deepEqual(importersOf(RULINGS_FILE), [GATE_FILE, READERS_FILE].sort(),
-    "the ruling table has an importer other than the reader and the gate");
+  // THE RULING TABLE HAS EXACTLY ONE IMPORTER, and that is the PR 1004
+  // re-review's finding turned into a structural invariant. The gate used to
+  // import the table too and formed its own opinion about what a ruling means —
+  // any non-null ruling was a bound seam — which is half of the test the reader
+  // applies, so a ruling naming another registered store made the gate say bound
+  // while the reader refused. The table is read in ONE place, by the ONE
+  // predicate that also holds the store half, and the gate imports that
+  // predicate. A SECOND importer of this table is the drift itself.
+  assert.deepEqual(importersOf(RULINGS_FILE), [READERS_FILE],
+    "the ruling table has an importer other than the reader, which is how the two predicates drifted");
+  assert.equal(imports[GATE_FILE].includes(`./${RULINGS_FILE}`), false,
+    "the gate reads the ruling table directly again instead of the reader's predicate");
   // And the gate reaches the readers directly, which is what "no caller-supplied
   // reader" costs: a module-private import and nothing else.
   assert.ok(imports[GATE_FILE].includes(`./${READERS_FILE}`),

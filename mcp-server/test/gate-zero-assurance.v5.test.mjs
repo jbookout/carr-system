@@ -619,6 +619,37 @@ const RULED_DECISION_LINES = Object.freeze([
 ]);
 const NULL_DECISION_LINE = "    decision_id: null,\n";
 
+/**
+ * THE STORE HALF OF EACH RULING, which is the half the PR 1004 re-review found
+ * the gate was not asking about. Each anchor is the card's `store_ref:` line
+ * together with the `decision_id:` line beneath it — the decision id is what
+ * makes the pair unique, since the store refs themselves also appear in the
+ * table's closed list and in its comments.
+ *
+ * A card's store is rotated to THE NEXT CARD'S, which is the probe the review
+ * ran: a store ref the table registers and a reader in this same file serves, so
+ * the ruling is valid, well-formed and live — and not the store the rotated
+ * card's own reader opens. The only thing wrong with it is the disagreement, and
+ * the disagreement is the whole question.
+ */
+const RULED_STORE_REFS = Object.freeze([
+  "record-layer:work-request-outcome-feedback",
+  "control-plane:ops.service+ops.run",
+  "github:checks",
+]);
+const ROTATED_STORE_REF = index => RULED_STORE_REFS[(index + 1) % RULED_STORE_REFS.length];
+const STORE_LINE = ref => `    store_ref: "${ref}",\n`;
+
+/** The file the mutation control rewrites, and the line it rewrites in it. */
+const GATE_MODULE_FILE = "gate-zero-assurance.v5.js";
+const BOUND_PREDICATE_LINE =
+  "  if (ruledCardBinding(binding.card_ref) === null) return null;\n";
+const DIVERGENT_PREDICATE_LINE =
+  "  if (looseRulingRef(binding.card_ref) === null) return null;\n";
+const READERS_IMPORT_TAIL = '} from "./gate-zero-seam-readers.v5.js";\n';
+const DIVERGENT_IMPORT =
+  'import { seamRulingRef as looseRulingRef } from "./gate-zero-seam-rulings.v5.js";\n';
+
 const stagedTrees = [];
 
 after(() => {
@@ -634,7 +665,8 @@ after(() => {
  * Nothing in src is edited, no argument of any export selects the copy, and no
  * environment variable points at it: the copy is reached by importing it.
  */
-function stageTree(withdrawnCards = [0, 1, 2]) {
+function stageTree(withdrawnCards = [0, 1, 2],
+  { mismatchedCards = [], divergentGate = false } = {}) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
   const base = mkdtempSync(join(cache, "gate-zero-unruled-"));
@@ -644,6 +676,16 @@ function stageTree(withdrawnCards = [0, 1, 2]) {
 
   const rulingsPath = join(target, "gate-zero-seam-rulings.v5.js");
   let rulings = readFileSync(rulingsPath, "utf8");
+  // THE STORE ROTATION FIRST, because its anchor includes the decision line that
+  // the withdrawal below replaces. Rotating after a withdrawal would look for a
+  // pair that no longer exists.
+  RULED_DECISION_LINES.forEach((decisionLine, index) => {
+    const anchor = STORE_LINE(RULED_STORE_REFS[index]) + decisionLine;
+    assert.equal(rulings.split(anchor).length - 1, 1,
+      "a staging anchor no longer matches a store-and-ruling pair in src");
+    if (mismatchedCards.includes(index))
+      rulings = rulings.replace(anchor, STORE_LINE(ROTATED_STORE_REF(index)) + decisionLine);
+  });
   RULED_DECISION_LINES.forEach((anchor, index) => {
     assert.equal(rulings.split(anchor).length - 1, 1,
       "a staging anchor no longer matches a ruling line in src");
@@ -652,6 +694,22 @@ function stageTree(withdrawnCards = [0, 1, 2]) {
   assert.equal(rulings.split(NULL_DECISION_LINE).length - 1, withdrawnCards.length,
     "the staging left the wrong number of unruled lines");
   writeFileSync(rulingsPath, rulings);
+
+  // THE MUTATION CONTROL'S TREE, and it is a source rewrite rather than a flag
+  // in src: the gate goes back to asking the ruling table itself and reading any
+  // non-null ruling as a bound seam, which is exactly the predicate this
+  // correction deleted. Nothing in src carries it.
+  if (divergentGate) {
+    const gatePath = join(target, GATE_MODULE_FILE);
+    let gate = readFileSync(gatePath, "utf8");
+    assert.equal(gate.split(BOUND_PREDICATE_LINE).length - 1, 1,
+      "the gate's binding predicate is no longer the line this control replaces");
+    assert.equal(gate.split(READERS_IMPORT_TAIL).length - 1, 1,
+      "the gate's reader import is no longer where this control adds the old one");
+    gate = gate.replace(BOUND_PREDICATE_LINE, DIVERGENT_PREDICATE_LINE);
+    gate = gate.replace(READERS_IMPORT_TAIL, READERS_IMPORT_TAIL + DIVERGENT_IMPORT);
+    writeFileSync(gatePath, gate);
+  }
   return target;
 }
 
@@ -662,7 +720,27 @@ function stageUnruledTree() {
 
 /** One staged tree's gate module, imported from the copy. */
 function gateOfTree(target) {
-  return import(pathToFileURL(join(target, "gate-zero-assurance.v5.js")).href);
+  return import(pathToFileURL(join(target, GATE_MODULE_FILE)).href);
+}
+
+/** The same tree's readers and its ruling table, so all three answer together. */
+function readersOfTree(target) {
+  return import(pathToFileURL(join(target, "gate-zero-seam-readers.v5.js")).href);
+}
+
+function rulingsOfTree(target) {
+  return import(pathToFileURL(join(target, "gate-zero-seam-rulings.v5.js")).href);
+}
+
+/**
+ * Whether a reader's answer is its OWN — that is, whether the ruling let it open
+ * its store at all. A reader that refuses on its ruling hands back the gate's
+ * refusal verbatim, and that object has no card, no store and no query digest on
+ * it. This is the reader half of "bound", asked without importing anything
+ * private.
+ */
+function readerReachedItsStore(answered) {
+  return Object.hasOwn(answered, "card_ref");
 }
 
 test("SWITCH: with the three rulings back to null, the answers are main's bytes", async () => {
@@ -726,16 +804,27 @@ const READER_CARDS = Object.freeze([
     key: "predecessor", card: "card:11", bound: "predecessor_outcome_reader_bound",
     seam: V5_A02_PREDECESSOR_OUTCOME_READER_SEAM,
     question: "which store an accepted predecessor outcome is read from",
+    // The reader behind this card, the gate answer it falls back to when its
+    // ruling does not hold, and a well-formed query — well-formed so that a
+    // refusal below is never attributable to the query. No call in the
+    // store-mismatch test reaches a store: every one of them is refused on the
+    // ruling before the query is read at all.
+    reader: "readPredecessorOutcomeEvidence", fallback: "readGateZeroPredecessorJoin",
+    query: { stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
   }),
   Object.freeze({
     key: "scheduler", card: "card:12", bound: "scheduler_reader_bound",
     seam: V5_A02_SCHEDULER_READER_SEAM,
     question: "which scheduler surface a canary and its readback are read from",
+    reader: "readSchedulerCanaryEvidence", fallback: "readGateZeroPredecessorJoin",
+    query: { serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" },
   }),
   Object.freeze({
     key: "conclusion", card: "card:13", bound: "gate_conclusion_reader_bound",
     seam: V5_A02_GATE_CONCLUSION_READER_SEAM,
     question: "which surface a gate's own conclusion is read from",
+    reader: "readGateConclusionEvidence", fallback: "readGateGraphAssurance",
+    query: { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" },
   }),
 ]);
 
@@ -849,6 +938,101 @@ test("PER READER: withdrawing one ruling reopens that card's question and no oth
   const allWithdrawn = digest((await gateOfTree(stageTree())).emitGateZeroOutcome());
   for (const [key, one] of digests)
     assert.notEqual(one, allWithdrawn, `withdrawing ${key} alone answered as three withdrawals`);
+});
+
+// ---------------------------------------------------------------------------
+// THE STORE HALF OF EVERY RULING — the PR 1004 re-review's finding, and the
+// defect was a DISAGREEMENT rather than a missing check.
+//
+// `boundSeam()` read any non-null ruling as a bound seam. The reader requires
+// more: the ruling must also name the one store that card's reader serves. So a
+// ruling that kept its decision id and named ANOTHER REGISTERED STORE made the
+// gate report the seam bound while the reader refused that same ruling and fell
+// back without a ruling reference — the gate promising evidence no reader would
+// ever produce. The permutation above could not see it, because withdrawing a
+// decision id fails both predicates at once.
+//
+// So each card is probed with a valid, live, registered ruling that names the
+// NEXT card's store, and the two halves of the system are asked the same
+// question: is this seam bound. They must answer the same way, for the same
+// reason, and the answer must be no.
+// ---------------------------------------------------------------------------
+
+test("PER READER: a ruling naming another registered store leaves the card unbound, in the gate and in the reader alike", async () => {
+  for (const [index, card] of READER_CARDS.entries()) {
+    const target = stageTree([], { mismatchedCards: [index] });
+
+    // THE PROBE IS A RULING, NOT A WITHDRAWAL — proved in the staged table
+    // itself. The decision id is intact, the store it names is registered, it is
+    // the store another card's reader in this same table serves, and it is not
+    // this card's. A fixture that nulled a line instead would pass every clause
+    // below for the wrong reason.
+    const rulings = await rulingsOfTree(target);
+    const ruled = rulings.seamRulingRef(card.card);
+    assert.notEqual(ruled, null, `${card.card} lost its ruling, so this probe is a withdrawal`);
+    assert.equal(ruled.store_ref, ROTATED_STORE_REF(index), card.card);
+    assert.notEqual(ruled.store_ref, RULED_STORE_REFS[index],
+      `${card.card} still names its own store, so nothing is mismatched`);
+    const rotatedOnto = READER_CARDS[(index + 1) % READER_CARDS.length];
+    assert.equal(ruled.store_ref, rulings.seamRulingRef(rotatedOnto.card).store_ref,
+      "the probe names a store no card in this table rules, so it is not a valid ruling");
+
+    // THE GATE. This card is unbound, the other two are not, and the answer is
+    // the one a withdrawal produces: same reason, same sentence, same bytes.
+    const tree = await gateOfTree(target);
+    const emitted = tree.emitGateZeroOutcome();
+    const bound = new Map(emitted.seams_bound.map(entry => [entry.seam, entry.bound]));
+    for (const one of READER_CARDS) {
+      assert.equal(emitted[one.bound], one !== card, `${one.bound} with ${card.card} mismatched`);
+      assert.equal(bound.get(one.seam), one !== card, `${one.seam} with ${card.card} mismatched`);
+      assert.equal(emitted.owed_seams.includes(one.seam), one === card, one.seam);
+    }
+    assert.deepEqual([...emitted.undecided_governance_questions],
+      [...PRODUCER_QUESTIONS, card.question], card.card);
+    assert.equal(digest(emitted),
+      digest((await gateOfTree(stageTree([index]))).emitGateZeroOutcome()),
+      `a mismatched store answered differently from withdrawing ${card.card}`);
+
+    // THE READER, asked with a well-formed query. It refuses, it never opens its
+    // store, and what it hands back IS the gate's refusal — so the reason the
+    // reader gives and the reason the gate gives are the same string, because
+    // they are the same object.
+    const readers = await readersOfTree(target);
+    const answered = await readers[card.reader](card.query);
+    const refusal = tree[card.fallback]();
+    assert.equal(answered.reason_id, refusal.reason_id,
+      `${card.card}: the reader and the gate name different reasons for one unbound card`);
+    assert.equal(digest(answered), digest(refusal),
+      `${card.card}: the reader answered something other than the gate's own refusal`);
+    for (const field of ["card_ref", "store_ref", "ruling_decision_ref", "query_digest"])
+      assert.equal(Object.hasOwn(answered, field), false,
+        `${card.card}: the reader answered with ${field}, so it acted on the ruling`);
+    assert.equal(answered.decision, "refuse");
+    assert.equal(answered.status, "unavailable");
+
+    // THE AGREEMENT, in one line: what the gate says about this seam is what the
+    // reader did about it.
+    assert.equal(emitted[card.bound], readerReachedItsStore(answered),
+      `${card.card}: the gate and the reader disagree about whether the seam is bound`);
+
+    // MUTATION CONTROL. The same mismatched ruling against a tree whose gate
+    // asks the ruling table directly again — the predicate this correction
+    // deleted. The gate reports the seam BOUND, the reader still never reaches
+    // its store, and the line above is what catches that: with the divergence
+    // back, the two sides no longer agree.
+    const control = stageTree([], { mismatchedCards: [index], divergentGate: true });
+    assert.ok(readFileSync(join(control, GATE_MODULE_FILE), "utf8")
+      .includes(DIVERGENT_PREDICATE_LINE.trim()),
+      "the control did not reintroduce the old predicate, so it proves nothing");
+    const controlEmitted = (await gateOfTree(control)).emitGateZeroOutcome();
+    const controlAnswered = await (await readersOfTree(control))[card.reader](card.query);
+    assert.equal(controlEmitted[card.bound], true,
+      `${card.card}: the control's gate did not report the mismatched ruling as bound`);
+    assert.equal(readerReachedItsStore(controlAnswered), false,
+      `${card.card}: the control's reader acted on a ruling naming another store`);
+    assert.notEqual(controlEmitted[card.bound], readerReachedItsStore(controlAnswered),
+      `${card.card}: the control reproduced no disagreement, so the clause above cannot fail`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1158,8 +1342,8 @@ test("SURFACE: the readers are imported, never handed in", () => {
   const specifiers = moduleImports(directory)["gate-zero-assurance.v5.js"];
   assert.ok(specifiers.includes("./gate-zero-seam-readers.v5.js"),
     "the readers are not imported by this module");
-  assert.ok(specifiers.includes("./gate-zero-seam-rulings.v5.js"),
-    "the binding condition is not the ruling table");
+  assert.equal(specifiers.includes("./gate-zero-seam-rulings.v5.js"), false,
+    "the gate imports the ruling table again, which is how its predicate drifted from the reader's");
   for (const name of Object.keys(surface))
     assert.equal(/bind/i.test(name), false, `${name} is a binding door on the surface`);
   // Every exported callable still takes at most one argument, and none of them
@@ -1257,10 +1441,13 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // And specifically: the public surface imports seven modules, none of them
-  // this slice's classifiers. The fifth is the producer registration, a frozen
-  // constant table that reaches nothing; the sixth and seventh are the ruled
-  // readers and the ruling table they are bound behind, added on 2026-09-12.
+  // And specifically: the public surface imports six modules, none of them this
+  // slice's classifiers. The fifth is the producer registration, a frozen
+  // constant table that reaches nothing; the sixth is the ruled readers, added
+  // on 2026-09-12 — and the ruling table is NOT among them, which is the PR 1004
+  // re-review's finding: the binding condition reaches this module through the
+  // reader's own predicate, so there is one predicate over that table instead of
+  // two that can disagree.
   // THE ORDER MATTERS AND IS ASSERTED: the producer registration must be
   // instantiated before the readers, because the readers read one of its
   // constants through this module's re-export at their own module scope, and
@@ -1269,7 +1456,7 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
-      "./gate-zero-seam-readers.v5.js", "./gate-zero-seam-rulings.v5.js"]);
+      "./gate-zero-seam-readers.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
     ["./benchmark-minimum.v5.js"]);
 });

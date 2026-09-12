@@ -511,24 +511,50 @@ function queryDigestOf(normalized) {
 }
 
 /**
- * THE RULING GATE. Both halves must agree: the table must carry a well-formed
- * decision id for this card, AND the store that ruling names must be the one
- * this card's reader actually serves. Anything else is null, and a null here is
- * answered by the gate's own refusal.
+ * THE RULING GATE, AND IT IS ON THE SURFACE BECAUSE THE GATE ASKS IT TOO. Both
+ * halves must agree: the table must carry a well-formed decision id for this
+ * card, AND the store that ruling names must be the one this card's reader
+ * actually serves. Anything else is null, and a null here is answered by the
+ * gate's own refusal.
+ *
+ * WHY IT IS EXPORTED — the PR 1004 re-review's finding, and it is a class rather
+ * than a line. gate-zero-assurance.v5.js asked the ruling table ITSELF and read
+ * any non-null ruling as a bound seam, which is only the first of the two halves
+ * above. A ruling that named another registered store therefore made the gate
+ * report the seam BOUND while the reader refused that same ruling and fell back
+ * without a ruling reference: two predicates for one question, disagreeing. One
+ * predicate, imported by the gate, is the only shape in which they cannot — a
+ * second copy of these three lines is the defect again, whichever file holds it.
+ *
+ * IT IS STILL NOT A DOOR. It takes a CARD TOKEN and nothing else, every value it
+ * returns is built from this module's frozen table and the ruling table's own
+ * constants, and it is strictly NARROWER than `seamRulingRef`, which is already
+ * public: a caller learns nothing here that it could not already ask the ruling
+ * table for, and learns less for every ruling this reader would refuse. An
+ * unknown token, a Proxy, a number, a card with no entry in the store table —
+ * each is null, which is the fail-closed answer and shuts the seam in both files
+ * at once.
  */
-function ruledCard(cardRef) {
-  const ruling = seamRulingRef(cardRef);
-  if (ruling === null) return null;
-  if (ruling.store_ref !== CARD_STORE[cardRef].store_ref) return null;
-  return ruling;
-}
+const ruledCardBindingOf = (cardRef) => {
+  try {
+    const ruling = seamRulingRef(cardRef);
+    if (ruling === null) return null;
+    if (!Object.hasOwn(CARD_STORE, cardRef)) return null;
+    if (ruling.store_ref !== CARD_STORE[cardRef].store_ref) return null;
+    return ruling;
+  } catch {
+    return null;
+  }
+};
+
+export const ruledCardBinding = closedCallable(ruledCardBindingOf);
 
 /**
  * Fetch, or hand back the finished refusal. ONE function, not one per reader,
  * so both ways a fetch can fail are written once and every reader gets the same
  * answer shape for them.
  *
- *   * The fetcher is the ONE this card serves, and `ruledCard` has already
+ *   * The fetcher is the ONE this card serves, and `ruledCardBinding` has already
  *     refused unless the ruling names exactly that store — so the ruling, not
  *     the reader, is what decided a query would happen at all.
  *   * `store_ref` coming back is the store's own statement of which store
@@ -744,7 +770,7 @@ function deriveGateConclusion(rows, headSha) {
  * fails to match a signature, not merely a proposal — and it fails closed.
  */
 async function predecessorOutcomeEvidence(query) {
-  const ruling = ruledCard(CARD_11);
+  const ruling = ruledCardBinding(CARD_11);
   if (ruling === null) return readGateZeroPredecessorJoin();
 
   const stepRef = field(query, "stepRef");
@@ -786,7 +812,7 @@ async function predecessorOutcomeEvidence(query) {
  * contain, and it cannot make a row exist: no row, no answer.
  */
 async function schedulerCanaryEvidence(query) {
-  const ruling = ruledCard(CARD_12);
+  const ruling = ruledCardBinding(CARD_12);
   if (ruling === null) return readGateZeroPredecessorJoin();
 
   const serviceKey = matched(query, "serviceKey", SERVICE_KEY);
@@ -816,7 +842,7 @@ async function schedulerCanaryEvidence(query) {
  * the consuming gate's job, and a reader that did it would be that gate.
  */
 async function gateConclusionEvidence(query) {
-  const ruling = ruledCard(CARD_13);
+  const ruling = ruledCardBinding(CARD_13);
   if (ruling === null) return readGateGraphAssurance();
 
   const headSha = matched(query, "headSha", HEAD_SHA);
