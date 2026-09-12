@@ -54,6 +54,13 @@
 //   * with ./gate-zero-seam-stores.v5.receipt-fixture.mjs, which pulls the
 //     acceptance receipt's hash apart from the proposal's — the one thing no
 //     production row can do, and the clause mutation testing found unproved;
+//   * with ./gate-zero-seam-fault-injection.testhelper.mjs, a DISTINCT store
+//     instance whose three fetchers misbehave — one throws a value that is not
+//     an Error, one returns an answer whose getters throw, one answers about
+//     another store — with every fault wired in by closure at construction and
+//     none of them reachable through a label, an argument or an exported
+//     constant. It is what makes the reader's own boundary reachable, and it is
+//     a SEPARATE module precisely so no fixture surface answers a caller's label;
 //   * with card 11's `store_ref:` line changed to a store its reader does not
 //     serve, which must refuse with the gate's own answer and must NOT fetch;
 //   * with the REAL store module kept and no connection configured, which proves
@@ -94,10 +101,13 @@ import * as rulings from "../src/gate-zero-seam-rulings.v5.js";
 import * as stores from "../src/gate-zero-seam-stores.v5.js";
 import * as fixtureStores from "./gate-zero-seam-stores.v5.fixture.mjs";
 import * as receiptStores from "./gate-zero-seam-stores.v5.receipt-fixture.mjs";
+import * as faultedStores from "./gate-zero-seam-fault-injection.testhelper.mjs";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const FIXTURE_STORE_FILE = fileURLToPath(new URL("./gate-zero-seam-stores.v5.fixture.mjs", import.meta.url));
 const RECEIPT_STORE_FILE = fileURLToPath(new URL("./gate-zero-seam-stores.v5.receipt-fixture.mjs", import.meta.url));
+const FAULT_STORE_FILE =
+  fileURLToPath(new URL("./gate-zero-seam-fault-injection.testhelper.mjs", import.meta.url));
 const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 const READERS_FILE = "gate-zero-seam-readers.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
@@ -1767,6 +1777,78 @@ const SWEPT_FIXTURE_NAMESPACES = () => [
 async function assertFixtureSurfaceClosed(label, namespace) {
   await sweepEveryInvocation(label, namespace);
   sweepErrorFactory(`${label}.seamStoreUnreachable`, namespace.seamStoreUnreachable);
+  await assertNoExportAnswersALabel(label, namespace);
+}
+
+// ---------------------------------------------------------------------------
+// AND THE SWEEP NO LONGER HAS AN ARGUMENT IT DECLINES TO PASS — the finding of
+// the seventh re-review, and the one clause `hostileArguments()` structurally
+// could not carry.
+//
+// A hostile argument list is built out of values a sweep's AUTHOR chose. The
+// store fixture exported four trigger strings and misbehaved on an exact match
+// against one, and no value in that list was ever equal to one — so the sweep
+// asked its question honestly and got a clean answer, while the surface it swept
+// answered a caller's label two functions further down. The file argued the door
+// was addressed rather than open. The standing rule of 2026-09-11 does not admit
+// that distinction: an exported constant used as an exact caller-supplied label
+// is the exception it forbids.
+//
+// So the sweep now derives its arguments from THE NAMESPACE ITSELF. Every string
+// a fixture exports, and every name it exports one under, is handed to every
+// fetcher under every query key the readers use — plus the four retired trigger
+// strings by name, so those exact doors cannot be reopened quietly. The claim
+// this makes is not "no hostile value got through"; it is the stronger one the
+// PR body now states: NO EXPORT ANSWERS A LABEL AT ALL. Every one of them
+// answers with the same empty reading it gives any other string.
+// ---------------------------------------------------------------------------
+
+/**
+ * The four addresses the fixtures used to answer, kept by their exact text. A
+ * correction that re-introduced any of them — under any export name, or under
+ * none — is red here rather than red in a review round.
+ */
+const RETIRED_FIXTURE_TRIGGERS = Object.freeze([
+  "unreachable",
+  "canary-from-another-store",
+  "canary-that-throws-a-raw-value",
+  "canary-whose-answer-is-hostile",
+]);
+
+/** What each fetcher must say it is, whatever it was asked. */
+const FETCHER_STORE_REFS = Object.freeze({
+  fetchPredecessorOutcomeRows: "record-layer:work-request-outcome-feedback",
+  fetchSchedulerLedgerRows: "control-plane:ops.service+ops.run",
+  fetchCheckConclusionRows: "github:checks",
+});
+
+/** Every query field the three readers put in front of a store. */
+const READER_QUERY_KEYS = Object.freeze([
+  "stepRef", "outcomeHash", "serviceKey", "canaryRunKey",
+  "headSha", "checkName", "workRequestRef", "commitSha",
+]);
+
+async function assertNoExportAnswersALabel(label, namespace) {
+  const labels = [
+    ...RETIRED_FIXTURE_TRIGGERS,
+    ...Object.keys(namespace),
+    ...Object.values(namespace).filter(value => typeof value === "string"),
+  ];
+  for (const [name, storeRef] of Object.entries(FETCHER_STORE_REFS)) {
+    const fetcher = namespace[name];
+    assert.equal(typeof fetcher, "function", `${label}.${name} is not a callable`);
+    const reading = { store_ref: storeRef, rows: [] };
+    for (const word of labels)
+      for (const key of READER_QUERY_KEYS)
+        // Once with the label alone, and once beside a service key the fixture
+        // does serve — because a door behind two conditions is still a door.
+        for (const query of [{ [key]: word }, { serviceKey: "carr-fleet-sync", [key]: word }]) {
+          const answered = await fetcher(query)
+            .then(one => one, thrown => ({ threw: safeLabel(thrown) }));
+          assert.deepEqual(answered, reading,
+            `${label}.${name} answered the label ${safeLabel(word)} under ${key}`);
+        }
+  }
 }
 
 test("STAGING: both fixture namespaces hold the closed shape the real module does", async () => {
@@ -1787,43 +1869,47 @@ test("STAGING: both fixture namespaces hold the closed shape the real module doe
   }
 });
 
-test("STAGING: the fixture's two unguarded doors are reachable only by their own address", async () => {
-  // THE ONE THING THE SWEEP ABOVE CANNOT SAY, said here instead. The store
-  // fixture DELIBERATELY throws a bare `"allow"` and DELIBERATELY returns an
-  // answer whose getters throw — they are what make the reader's own guarded
-  // boundary reachable, and removing them would quietly unprove it. So the
-  // honest claim is not that this surface never misbehaves; it is that each
-  // misbehaviour is behind an EXACT address only this file's own exported
-  // constant opens, which is why no hostile input in the sweep can reach one.
+test("STAGING: no fixture export answers a label, and the four retired doors stay shut", async () => {
+  // WHAT THIS REPLACES, said plainly, because the claim has changed rather than
+  // been tightened. The test that stood here asserted that the store fixture's
+  // two deliberate misbehaviours — `throw "allow"` and an answer whose getters
+  // throw — were reachable ONLY by a caller holding the exact exported constant
+  // for each, and it asserted the doors were still live. That is an exported
+  // constant used as an exact caller-supplied label, which the standing rule of
+  // 2026-09-11 forbids outright; "only by its own address" is a description of
+  // the exception, not a defence against it.
   //
-  // Both halves are asserted: the doors are still live, and nothing near them
-  // opens them.
-  const rawThrow = await fixtureStores.fetchSchedulerLedgerRows({
-    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_RAW_THROW })
-    .then(() => null, thrown => thrown);
-  assert.equal(rawThrow, "allow", "the raw-throw canary stopped throwing, so the reader's boundary is unproved");
+  // Both faults still exist, because the reader's own boundary is unproved
+  // without them. They live in ./gate-zero-seam-fault-injection.testhelper.mjs,
+  // in a DISTINCT store instance whose fetchers take no query at all and whose
+  // faults were closed over at construction. Nothing a caller passes selects
+  // one, because there is nothing to select.
+  //
+  // So what is asserted here is the opposite of what used to be: that no export
+  // of either fixture answers a label of any kind.
+  for (const [label, namespace] of SWEPT_FIXTURE_NAMESPACES())
+    await assertNoExportAnswersALabel(label, namespace);
 
-  const hostile = await fixtureStores.fetchSchedulerLedgerRows({
-    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_HOSTILE_ANSWER });
-  assert.throws(() => hostile.store_ref,
-    "the hostile-answer canary stopped throwing, so the reader's boundary is unproved");
-
-  // NEAR MISSES. A key that merely looks like the address — cased differently,
-  // padded, wrapped in an object whose toString returns it, or carried in an
-  // array — addresses nothing, so no caller reaches a door by coercion.
-  const near = [
-    `${fixtureStores.FIXTURE_RAW_THROW} `,
-    fixtureStores.FIXTURE_RAW_THROW.toUpperCase(),
-    { toString: () => fixtureStores.FIXTURE_RAW_THROW },
-    [fixtureStores.FIXTURE_RAW_THROW],
-    { toString: () => fixtureStores.FIXTURE_HOSTILE_ANSWER },
-  ];
-  for (const canaryRunKey of near) {
-    const answer = await fixtureStores.fetchSchedulerLedgerRows({
-      serviceKey: "carr-fleet-sync", canaryRunKey });
-    assert.deepEqual(answer, { store_ref: "control-plane:ops.service+ops.run", rows: [] },
-      `${safeLabel(canaryRunKey)} reached a door it does not address`);
+  // AND THE FOUR RETIRED ADDRESSES BY NAME, against the fetcher each used to
+  // open a door on, with the service key that used to be its other half.
+  for (const word of RETIRED_FIXTURE_TRIGGERS) {
+    const ledger = await fixtureStores.fetchSchedulerLedgerRows({
+      serviceKey: "carr-fleet-sync", canaryRunKey: word });
+    assert.deepEqual(ledger, { store_ref: "control-plane:ops.service+ops.run", rows: [] },
+      `${word} still opens a door on the store fixture`);
+    const receipt = await receiptStores.fetchPredecessorOutcomeRows({ workRequestRef: word });
+    assert.deepEqual(receipt,
+      { store_ref: "record-layer:work-request-outcome-feedback", rows: [] },
+      `${word} still opens a door on the receipt fixture`);
   }
+
+  // AND NEITHER FIXTURE EXPORTS ONE OF THOSE ADDRESSES ANY MORE, under any name.
+  // A constant nothing answers is harmless, but it is also a loaded gun left on
+  // the table, and the finding was about the export as much as the branch.
+  for (const [label, namespace] of SWEPT_FIXTURE_NAMESPACES())
+    for (const [name, value] of Object.entries(namespace))
+      assert.ok(!RETIRED_FIXTURE_TRIGGERS.includes(value),
+        `${label}.${name} is a retired trigger string, exported again`);
 
   // AND A CASE IS ADDRESSED BY AN OWN KEY, not by anything on Object.prototype:
   // `TABLE["constructor"]` used to answer with a function, which is a row no
@@ -1837,6 +1923,52 @@ test("STAGING: the fixture's two unguarded doors are reachable only by their own
     const receipt = await receiptStores.fetchPredecessorOutcomeRows({ workRequestRef: inherited });
     assert.deepEqual(receipt.rows, [], `${inherited} reached Object.prototype through the row table`);
   }
+});
+
+test("STAGING: the faulted store is one instance, and no caller value steers it", async () => {
+  // THE OTHER HALF OF THE CORRECTION. Moving the faults out of the fixture is
+  // worth nothing if the helper merely re-implements the same label lookup one
+  // file over, so the claim is asserted rather than asserted about: each faulted
+  // fetcher does the SAME thing for every argument the sweep can build,
+  // including the four retired trigger strings and the fixtures' own constants.
+  //
+  // A fault that varied with its argument would be a label again, whatever it
+  // was called, and it would fail here on the first shape that differed.
+  const everyArgument = [
+    undefined, ...hostileArguments(),
+    ...RETIRED_FIXTURE_TRIGGERS,
+    ...RETIRED_FIXTURE_TRIGGERS.map(word => ({ canaryRunKey: word, workRequestRef: word,
+      checkName: word, serviceKey: "carr-fleet-sync", headSha: "a".repeat(40) })),
+    ...Object.values(fixtureStores).filter(value => typeof value === "string")
+      .map(word => ({ canaryRunKey: word, workRequestRef: word, checkName: word })),
+  ];
+
+  for (const argument of everyArgument) {
+    // Card 11's fault RETURNS, and its answer's getters throw on read.
+    const answer = await faultedStores.fetchPredecessorOutcomeRows(argument);
+    assert.throws(() => answer.store_ref, `a predecessor fault varied with ${safeLabel(argument)}`);
+    assert.throws(() => answer.rows, `a predecessor fault varied with ${safeLabel(argument)}`);
+
+    // Card 12's fault THROWS a bare string, which is not an Error at all.
+    const thrown = await faultedStores.fetchSchedulerLedgerRows(argument)
+      .then(() => null, one => one);
+    assert.equal(thrown, "allow", `a scheduler fault varied with ${safeLabel(argument)}`);
+
+    // Card 13's fault answers about a store this card was not ruled for.
+    const foreign = await faultedStores.fetchCheckConclusionRows(argument);
+    assert.equal(foreign.store_ref, "control-plane:ops.service+ops.run",
+      `a checks fault varied with ${safeLabel(argument)}`);
+    assert.equal(foreign.rows.length, 1);
+  }
+
+  // And the helper carries the real module's export names, so staging it proves
+  // the same surface the fixtures do rather than a narrower one.
+  for (const name of Object.keys(stores))
+    assert.ok(Object.hasOwn(faultedStores, name),
+      `the fault helper is missing ${name}, so a staged reader would import nothing for it`);
+  // It exports no constant at all: there is no address to hold.
+  for (const [name, value] of Object.entries(faultedStores))
+    assert.equal(typeof value, "function", `the fault helper exports a constant, ${name}`);
 });
 
 test("STAGING CONTROL: each door the fixture-surface sweep closes has been seen to fail", async () => {
@@ -1868,7 +2000,34 @@ test("STAGING CONTROL: each door the fixture-surface sweep closes has been seen 
       fetchCheckConclusionRows: closed(async query => ({ ...answer, asked: query?.checkName ?? null })) }],
     // 4 — a constant that is not a callable at all: the non-function branch of
     //     the sweep is live too.
-    ["a-constant-carrying-a-privileged-word", { ...fixtureStores, FIXTURE_UNREACHABLE: "green" }],
+    ["a-constant-carrying-a-privileged-word", { ...fixtureStores, FIXTURE_PLANTED_WORD: "green" }],
+    // 5 — THE SEVENTH RE-REVIEW'S FINDING, PLANTED BACK. A fetcher that answers
+    //     one exact address with a bare throw, exactly as the store fixture did
+    //     until this correction. Every clause above passes it: the callable is
+    //     bound, guarded and non-constructable, it reads its query through a
+    //     try, and no value in `hostileArguments()` is equal to the address. Only
+    //     the label sweep — which builds its arguments from the namespace and
+    //     from the retired trigger list — can see it.
+    ["a-door-behind-a-retired-address", { ...fixtureStores,
+      fetchSchedulerLedgerRows: closed(async query => {
+        let asked;
+        try { asked = query === null || query === undefined ? undefined : query.canaryRunKey; }
+        catch { asked = undefined; }
+        if (asked === "canary-that-throws-a-raw-value") throw "allow";
+        return { store_ref: "control-plane:ops.service+ops.run", rows: [] };
+      }) }],
+    // 6 — the same shape addressed by the fixture's OWN exported constant rather
+    //     than by a retired one, which is how the door would come back if it came
+    //     back under a new name.
+    ["a-door-behind-an-exported-constant", { ...fixtureStores,
+      fetchCheckConclusionRows: closed(async query => {
+        let asked;
+        try { asked = query === null || query === undefined ? undefined : query.checkName; }
+        catch { asked = undefined; }
+        return asked === fixtureStores.FIXTURE_COMMIT_SHA
+          ? { store_ref: "github:checks", rows: [{ planted: 1 }] }
+          : { store_ref: "github:checks", rows: [] };
+      }) }],
   ];
   for (const [label, plant] of plants) {
     let failed = false;
@@ -2072,15 +2231,10 @@ test("RULED: card 12 reads the rows bin/run-scheduled.sh actually writes", async
       `${key} guessed a clause with no row to read it from`);
   }
 
-  // A store that answers about a DIFFERENT store than the one the ruling names
-  // is not answered over. These rows would otherwise join cleanly.
-  const wrongStore = await read(fixtureStores.FIXTURE_WRONG_STORE);
-  assert.equal(wrongStore.decision, "refuse");
-  assert.equal(wrongStore.reason_id, "store_ref_not_the_ruled_one");
-  assert.equal(wrongStore.finding, null);
-  assert.equal(wrongStore.store_ref, "control-plane:ops.service+ops.run",
-    "the answer reported the store that replied instead of the store that was ruled");
-  assertSwept("card12.wrongStore", wrongStore);
+  // The store-identity check that used to be proved here, by a canary key this
+  // fixture answered about another store, now runs against card 13 in the
+  // faulted-store test below — because an exported key that changes what a
+  // fetcher answers is the label this correction removed.
 
   // A LEDGER WHOSE EVERY IDENTIFIER IS A PRIVILEGED WORD, and all three clauses
   // hold anyway. Before the store reduced identifiers to digests, this row's
@@ -2262,29 +2416,64 @@ test("STORES: the real store module refuses rather than guessing when nothing is
   }
 });
 
-test("RULED: nothing a store does to a reader gets past the reader's boundary", async () => {
-  // The reader's guarded boundary, reached the two ways a store can reach it.
-  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+test("RULED: nothing a faulted store does to a reader gets past the reader's boundary", async () => {
+  // THE READER'S OWN BOUNDARY, reached the three ways a store can reach it, over
+  // the faulted store instance — NOT over a fixture answering an address.
+  //
+  // One fault per card, so one staging proves all three and no fetcher needs a
+  // query value to decide which fault to perform. What is asserted of every
+  // answer is the same thing: it is the reader's own, it carries no byte of the
+  // store's, and no engine-built frame comes back inside it.
+  const ruled = await stagedReaders({ storeFile: FAULT_STORE_FILE });
 
-  // A store that throws a BARE STRING — `throw "allow"`, the value the third
-  // re-review named. It is not an Error, so nothing about it is readable as a
-  // reason; `fetchOrRefuse` answers with the reader's own closed phrase.
+  // CARD 12 — the store throws a BARE STRING, `throw "allow"`, the value the
+  // third re-review named. It is not an Error, so nothing about it is readable
+  // as a reason; `fetchOrRefuse` answers with the reader's own closed phrase.
   const rawThrow = await ruled.readSchedulerCanaryEvidence({
-    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_RAW_THROW });
+    serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" });
   assert.equal(rawThrow.decision, "refuse");
   assert.equal(rawThrow.reason_id, "scheduler_ledger_unreachable");
   assert.equal(rawThrow.unavailable_because, "the ledger did not answer");
-  assertSwept("guarded.raw-throw", rawThrow);
+  assert.equal(rawThrow.finding, null, "an unreachable store produced a finding anyway");
+  assertSwept("faulted.raw-throw", rawThrow);
 
-  // A store that RETURNS, and whose answer throws from the getter the reader
-  // reads outside its own try. That throw lands in the reader itself, which is
-  // the only thing the outer boundary is there for, and the answer is the gate's.
-  const hostileAnswer = await ruled.readSchedulerCanaryEvidence({
-    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_HOSTILE_ANSWER });
+  // CARD 11 — the store RETURNS, and its answer throws from the getter the
+  // reader reads OUTSIDE its own try. That throw lands in the reader itself,
+  // which is the only thing the outer boundary is there for, and the answer is
+  // the gate's own object rather than anything the store produced.
+  const hostileAnswer = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"4".repeat(64)}` });
   assert.equal(digest(hostileAnswer), digest(readGateZeroPredecessorJoin()),
     "a throw inside the reader escaped instead of closing the seam");
-  assert.ok(!JSON.stringify(hostileAnswer).includes(HOSTILE_MARKER));
-  assertSwept("guarded.hostile-answer", hostileAnswer);
+  assertSwept("faulted.hostile-answer", hostileAnswer);
+
+  // CARD 13 — the store answers about a DIFFERENT store than the ruling named,
+  // over rows that would otherwise report a conclusion of "success". The reader
+  // refuses on the identity check, and the store it names in the refusal is the
+  // RULED one, not the one that replied.
+  const foreignStore = await ruled.readGateConclusionEvidence({
+    headSha: "a".repeat(40), checkName: "db-acceptance" });
+  assert.equal(foreignStore.decision, "refuse");
+  assert.equal(foreignStore.reason_id, "store_ref_not_the_ruled_one");
+  assert.equal(foreignStore.finding, null);
+  assert.notEqual(foreignStore.conclusion, "success",
+    "the reader reported over rows it did not ask the ruled store for");
+  assert.equal(foreignStore.store_ref, "github:checks",
+    "the answer reported the store that replied instead of the store that was ruled");
+  assertSwept("faulted.foreign-store", foreignStore);
+
+  // AND NOT ONE BYTE OF ANY OF IT IS THE STORE'S. The hostile answer's getters
+  // throw with the marker in their message; the raw throw is the word `allow`
+  // itself; the foreign answer names a store. None of the three may appear.
+  for (const [at, answer] of [["raw-throw", rawThrow], ["hostile-answer", hostileAnswer],
+    ["foreign-store", foreignStore]]) {
+    const text = JSON.stringify(answer) ?? "";
+    assert.ok(!text.includes(HOSTILE_MARKER), `${at} returned the store's own text`);
+    assert.ok(!text.includes("allow"), `${at} returned the value the store threw`);
+    // A frame is the shape an engine-built stack has: `at <name> (<file>:<n>:<n>)`.
+    assert.equal(/\bat [\w.<>]+ \(/.test(text), false,
+      `${at} carries an engine-built frame, which is the reader's own file and line`);
+  }
 });
 
 test("SWEEP: the same sweep again, over real rows, with every credential configured",
@@ -2530,9 +2719,11 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
 
   const offenders = Object.entries(imports)
     .filter(([, specifiers]) => specifiers.some(one =>
-      one.includes("/test/") || one.startsWith("../test") || one.includes(".fixture.")))
+      one.includes("/test/") || one.startsWith("../test")
+      || one.includes(".fixture.") || one.includes(".testhelper.")))
     .map(([name]) => name);
-  assert.deepEqual(offenders, [], "a production module reached into the test directory");
+  assert.deepEqual(offenders, [],
+    "a production module reached into the test directory, a fixture or a test helper");
 
   // The reader is the only module that imports the stores or the ruling table,
   // so a second consumer of either is red on sight rather than red after an

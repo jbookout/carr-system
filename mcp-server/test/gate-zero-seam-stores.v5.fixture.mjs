@@ -415,84 +415,41 @@ const CHECK_ROWS = Object.freeze({
   })]),
 });
 
-/** The one query value that makes a fixture store unreachable, on every store. */
-export const FIXTURE_UNREACHABLE = "unreachable";
-
-/**
- * The one canary key for which this store answers about a DIFFERENT store than
- * the one it was asked for. Not a thing a real store does — it is how the
- * reader's post-fetch identity check is made reachable, so that check is proved
- * rather than merely written.
- */
-export const FIXTURE_WRONG_STORE = "canary-from-another-store";
-
-/**
- * THE TWO CASES THAT MAKE THE READER'S OWN GUARDED BOUNDARY REACHABLE.
- *
- * A store that refuses with SeamStoreUnreachable is caught by `fetchOrRefuse`,
- * which is the ordinary path and proves nothing about the boundary. These two
- * are the shapes `fetchOrRefuse` cannot answer for:
- *
- *   FIXTURE_RAW_THROW     the store throws a bare string — `throw "allow"`, the
- *                         value the third review round named. It is not an Error
- *                         at all, so nothing about it is readable as a reason.
- *   FIXTURE_HOSTILE_ANSWER  the store RETURNS, and the object it returns throws
- *                         from the getter for `store_ref` — which is read
- *                         outside the try, so the throw lands in the reader
- *                         itself rather than in its fetch.
- *
- * Both must come back as the gate's own unavailable answer, with no byte of
- * either escaping.
- */
-export const FIXTURE_RAW_THROW = "canary-that-throws-a-raw-value";
-export const FIXTURE_HOSTILE_ANSWER = "canary-whose-answer-is-hostile";
-
-const HOSTILE_ANSWER = {
-  get store_ref() { throw new Error("HOSTILEMARKERTEXT-from-a-store-answer"); },
-  get rows() { throw new Error("HOSTILEMARKERTEXT-from-a-store-answer"); },
-};
-
 // ---------------------------------------------------------------------------
 // THE PUBLIC SURFACE, in the closed shape of amendment 2: three bound arrows,
 // each reading its query through the guarded `cell` and addressing its case by
 // an own string key.
 //
-// THE TWO UNGUARDED DOORS BELOW ARE ADDRESSED, NOT OPEN, and that is the whole
-// distinction this file rests on. `throw "allow"` and the hostile answer are
-// what make the READER'S own boundary reachable, so they cannot be removed — but
-// neither is reachable by a hostile value: each fires only for a caller who
-// already holds the exact FIXTURE_ constant this file exports for it. Every
-// other input, hostile ones included, leaves by a conforming door, and the sweep
-// in gate-zero-seam-readers.v5.test.mjs asserts both halves of that.
+// AND THERE IS NO LABEL LEFT ON IT. Until the seventh review round this file
+// exported four trigger strings — an unreachable address, a wrong-store address,
+// a raw-throw address and a hostile-answer address — and its fetchers compared a
+// caller's query value against them and misbehaved on a match. That is an
+// exported constant used as an exact caller-supplied label, which the standing
+// rule of 2026-09-11 forbids under any name, and calling the door "addressed
+// rather than open" did not change what it was. Every fault this file used to
+// inject now lives in ./gate-zero-seam-fault-injection.testhelper.mjs, wired
+// into a DISTINCT instance by closure at construction, where no caller value
+// reaches the decision at all.
+//
+// What is left is a store that serves rows. Every export is swept with no
+// argument exempted, and the sweep asserts in so many words that nothing here
+// answers a label — this file's own constants included.
 // ---------------------------------------------------------------------------
 
-export const fetchPredecessorOutcomeRows = closedCallable(async query => {
-  const workRequestRef = cell(query, "workRequestRef");
-  const storeRef = "record-layer:work-request-outcome-feedback";
-  if (workRequestRef === FIXTURE_UNREACHABLE)
-    throw seamStoreUnreachable(storeRef, "the query did not finish");
-  return { store_ref: storeRef, rows: rowsFor(PREDECESSOR_ROWS, workRequestRef) };
-});
+export const fetchPredecessorOutcomeRows = closedCallable(async query => ({
+  store_ref: "record-layer:work-request-outcome-feedback",
+  rows: rowsFor(PREDECESSOR_ROWS, cell(query, "workRequestRef")),
+}));
 
 export const fetchSchedulerLedgerRows = closedCallable(async query => {
   const serviceKey = cell(query, "serviceKey");
-  const canaryRunKey = cell(query, "canaryRunKey");
   const storeRef = "control-plane:ops.service+ops.run";
-  if (canaryRunKey === FIXTURE_UNREACHABLE)
-    throw seamStoreUnreachable(storeRef, "the query did not finish");
-  if (canaryRunKey === FIXTURE_RAW_THROW) throw "allow";
-  if (canaryRunKey === FIXTURE_HOSTILE_ANSWER) return HOSTILE_ANSWER;
-  if (canaryRunKey === FIXTURE_WRONG_STORE)
-    return { store_ref: "github:checks", rows: rowsFor(SCHEDULER_ROWS, "canary-join") };
   if (serviceKey !== "carr-fleet-sync" && serviceKey !== "release-canary")
     return { store_ref: storeRef, rows: [] };
-  return { store_ref: storeRef, rows: rowsFor(SCHEDULER_ROWS, canaryRunKey) };
+  return { store_ref: storeRef, rows: rowsFor(SCHEDULER_ROWS, cell(query, "canaryRunKey")) };
 });
 
-export const fetchCheckConclusionRows = closedCallable(async query => {
-  const checkName = cell(query, "checkName");
-  const storeRef = "github:checks";
-  if (checkName === FIXTURE_UNREACHABLE)
-    throw seamStoreUnreachable(storeRef, "the checks source was not reachable");
-  return { store_ref: storeRef, rows: rowsFor(CHECK_ROWS, checkName) };
-});
+export const fetchCheckConclusionRows = closedCallable(async query => ({
+  store_ref: "github:checks",
+  rows: rowsFor(CHECK_ROWS, cell(query, "checkName")),
+}));

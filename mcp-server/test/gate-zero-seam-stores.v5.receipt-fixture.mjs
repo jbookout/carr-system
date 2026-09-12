@@ -211,23 +211,25 @@ const PREDECESSOR_ROWS = Object.freeze({
   })]),
 });
 
-export const FIXTURE_UNREACHABLE = "unreachable";
-
 // ---------------------------------------------------------------------------
 // THE PUBLIC SURFACE, in the closed shape of amendment 2, exactly as the other
 // fixture and the real module carry it: bound arrows, no `prototype`, an own
 // `Symbol.hasInstance` data property, and the query read through the guarded
 // `cell`. This file is substituted for the store module too, so its surface owes
 // the same shape.
+//
+// AND NO EXPORT HERE ANSWERS A LABEL EITHER. This file used to export an
+// `unreachable` trigger string its predecessor fetcher compared a caller's query
+// value against, which is the exported-constant-as-caller-label the standing
+// rule forbids. The fault it injected lives in
+// ./gate-zero-seam-fault-injection.testhelper.mjs now, wired in by closure at
+// construction rather than reached by an address a caller can hold.
 // ---------------------------------------------------------------------------
 
-export const fetchPredecessorOutcomeRows = closedCallable(async query => {
-  const workRequestRef = cell(query, "workRequestRef");
-  const storeRef = "record-layer:work-request-outcome-feedback";
-  if (workRequestRef === FIXTURE_UNREACHABLE)
-    throw seamStoreUnreachable(storeRef, "the query did not finish");
-  return { store_ref: storeRef, rows: rowsFor(PREDECESSOR_ROWS, workRequestRef) };
-});
+export const fetchPredecessorOutcomeRows = closedCallable(async query => ({
+  store_ref: "record-layer:work-request-outcome-feedback",
+  rows: rowsFor(PREDECESSOR_ROWS, cell(query, "workRequestRef")),
+}));
 
 /** Card 12 and card 13 are proved by the other fixture; here they hold nothing. */
 export const fetchSchedulerLedgerRows = closedCallable(
