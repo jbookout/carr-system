@@ -523,7 +523,7 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", () =>
   }
 });
 
-test("SURFACE: the producer contract is reported as REGISTERED, and registered is not staffed", () => {
+test("SURFACE: the contract is REGISTERED with the oracle seat STAFFED, and neither is a signature", () => {
   const result = emitGateZeroOutcome(cleanJoin());
   // The five the 2026-09-11 ruling settled are reported, and each one matches
   // the registration rather than a literal typed twice.
@@ -537,8 +537,10 @@ test("SURFACE: the producer contract is reported as REGISTERED, and registered i
   assert.equal(result.producer_registration_decision_ref,
     "20c83902-f150-4d59-beca-915c5c871f95");
   // Whether r7 carries the entry is UNDETERMINED here — the packet's bytes are
-  // not in this repository — and the seat is empty. Those are separate facts and
-  // the refusal depends on the second one, not the first.
+  // not in this repository — and the seat is STAFFED. Those are separate facts,
+  // and the refusal below turns on NEITHER of them: it turns on the producer seam
+  // being unbuilt, which is why `passable` is asserted false at the end of this
+  // test with both of these settled.
   assert.equal(result.r7_entry_witness, null);
   assert.equal(Object.hasOwn(result, "r7_entry_present"), false,
     "the privileged spelling must not come back under any value");
@@ -970,9 +972,16 @@ const UNSTAFFED_SEAT_LINE = "  holder_ref: null,\n";
  * The other two lines of the declaration, so the seat's falsifiers can move ONE
  * of them at a time. A seat that bound on a holder alone would be a seat anybody
  * could claim; these are how that is proved false rather than asserted.
+ *
+ * BOTH ANCHORS ARE CONSTANT REFERENCES rather than the values they resolve to,
+ * because src holds each authority-bearing id in exactly one place and the
+ * declaration cites it by name. A falsifier replaces the whole line with a
+ * literal, which is what a drifted declaration would look like — so the staging
+ * still asks the question it asked when the line carried a uuid of its own.
  */
 const SEAT_CHARTER_LINE = "  charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,\n";
-const SEAT_STAFFING_LINE = '  staffing_decision_ref: "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0",\n';
+const SEAT_STAFFING_LINE =
+  "  staffing_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_STAFFING_DECISION_REF,\n";
 const BOUND_PREDICATE_LINE =
   "  if (ruledCardBinding(binding.card_ref) === null) return null;\n";
 const DIVERGENT_PREDICATE_LINE =
@@ -1502,8 +1511,13 @@ test("PER READER: withdrawing one ruling reopens that card's question and no oth
     // A withdrawal is neither the shipped answer nor the all-three-null one.
     assert.notEqual(digest(emitted), digest(emitGateZeroOutcome()),
       `withdrawing ${card.card} changed nothing`);
+    // AND THE ALL-THREE SENTENCE IS A LIVE ONE. The literal here is the branch
+    // this module actually answers with when every reader card is withdrawn and
+    // the seat is staged unstaffed, so a withdrawal that answered as though all
+    // three were gone is caught. It was main's sentence before this correction,
+    // which made the assertion vacuous.
     assert.notEqual(emitted.unavailable_because,
-      "the producer role is ruled provisionally but r7 carries no entry, no seat holds the oracle, and no reader exists for the evidence one would stand on",
+      "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome",
       `withdrawing ${card.card} answered as though all three were withdrawn`);
     // Whatever it answers is still registered, and still a refusal.
     for (const answer of [emitted, joined, graph]) {
