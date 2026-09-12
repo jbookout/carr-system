@@ -99,8 +99,6 @@ const UNREACHABLE_REASONS = Object.freeze({
   queryNotAddressed: "the query did not address a row",
   foreignRepository: "the configured checks repository is not the one this file serves",
   callDidNotFinish: "the call did not finish",
-  typeIsFinal: "this error type is final",
-  notConstructable: "this callable is not a constructor",
   shaNotAddressed: "the addressed head sha is not the shape this file serves",
   notRegistered: "the reason this store was unreachable is not a registered one",
 });
@@ -152,18 +150,48 @@ function own(target, key, value, enumerable) {
   Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
 }
 
+/**
+ * EVERY EXPORTED CALLABLE OF THIS MODULE ANSWERS `instanceof` WITH FALSE, AND
+ * ANSWERS IT WITHOUT LOOKING AT THE OPERAND. Amendment 2 of 2026-09-12, clause
+ * (b), and the reason is the fifth round's second finding: without an own
+ * `Symbol.hasInstance` the intrinsic one walks the LEFT OPERAND'S prototype
+ * chain, so `hostile instanceof anExportedFetcher` ran the caller's own
+ * getPrototypeOf trap and let the caller's own thrown text out of an exported
+ * callable.
+ *
+ * The guard is an ARROW that ignores its argument — it cannot be constructed,
+ * carries no `prototype`, and has no branch a caller can steer — installed as a
+ * NON-WRITABLE, NON-CONFIGURABLE DATA property, so it can neither be replaced
+ * nor redefined as an accessor. A membership question about this module's type
+ * has one honest answer, `isSeamStoreUnreachable`, and it is not this one.
+ */
+function closedCallable(callable) {
+  // AND IT IS BOUND, NOT BARE. Clause (a) of the amendment names an arrow OR a
+  // bound function, and the difference is only visible in what the ENGINE says
+  // when somebody constructs one: its refusal for a bare arrow quotes the
+  // function's own SOURCE TEXT back, and this file would rather the engine's
+  // sentence carry no line of this module at all. A bound arrow is still not a
+  // constructor and still has no `prototype`; the refusal names
+  // `function () { [native code] }` and nothing else. Binding is lexical-`this`
+  // neutral for an arrow, so no behaviour moves.
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return closed;
+}
+
 class SeamStoreUnreachableType extends Error {
   constructor(storeRef, because, cause) {
-    // SUBCLASSING IS REFUSED, BEFORE ANY WORK HAPPENS. A subclass runs its own
-    // constructor after this one and can install anything it likes — including
-    // the caller's text under these exact names — while still passing an
-    // `instanceof` check. `new.target` is the only moment that is visible.
-    //
-    // The refusal is one of THESE errors and not a native TypeError: a native
-    // one is built by the engine, and its stack is a list of the caller's own
-    // frame names and file paths — bytes this file did not write, leaving an
-    // exported callable.
-    if (new.target !== SeamStoreUnreachableType) throw finalTypeRefusal();
+    // SUBCLASSING IS REFUSED BY REACH, NOT BY A RUNTIME CHECK, and the fifth
+    // review round is what retired the check. A `new.target` guard here could
+    // only ever fire for a caller HOLDING THIS CLASS, and no caller holds it:
+    // the class is module-private, nothing exports it, `prototype.constructor`
+    // is the factory below and not the class, and an instance therefore reaches
+    // the factory too. What a consumer has is an arrow function, which has no
+    // [[Construct]] and no `prototype` for a foreign new.target to be read
+    // against. A clause no input can reach is a clause no mutation can kill, and
+    // this file does not ship one in place of the reach that actually closes it.
     const store = REGISTERED_STORE_TOKENS.includes(storeRef) ? storeRef : STORE_TOKENS.unregistered;
     const reason = REGISTERED_REASONS.includes(because) ? because : UNREACHABLE_REASONS.notRegistered;
     const message = `${store}: ${reason}`;
@@ -182,64 +210,49 @@ class SeamStoreUnreachableType extends Error {
   }
 }
 
-function finalTypeRefusal() {
-  return new SeamStoreUnreachableType(STORE_TOKENS.unregistered, UNREACHABLE_REASONS.typeIsFinal);
-}
+/**
+ * THE PUBLIC SURFACE OF THIS TYPE, AND IT IS NOT THE TYPE.
+ *
+ * The fifth review round found the last two routes, and the orchestrator's
+ * amendment of 2026-09-12 rules the shape that closes them for good: the class
+ * above stays MODULE-PRIVATE and nothing exports it, so there is no binding to
+ * call, no binding to subclass, and no `newTarget.prototype` for the engine to
+ * read on the way in. What leaves this file is an ARROW FUNCTION that builds one
+ * internally.
+ *
+ * An arrow has no [[Construct]] and no `prototype` property at all, so
+ * `new seamStoreUnreachable(...)` and `Reflect.construct(seamStoreUnreachable,
+ * args, somebodyElse)` are refused by the ENGINE before a line of this file
+ * runs — and the amendment puts that refusal out of scope precisely because no
+ * module code is reached: nothing here can have read the caller's object, and
+ * nothing here wrote the sentence that comes back.
+ *
+ * THE PROXY THAT USED TO BE HERE IS DELETED, not tightened. A proxy forwards
+ * `get`, so `SeamStoreUnreachable.prototype.constructor` handed the raw class
+ * straight back out of the exported binding, and the raw class constructed with
+ * a foreign `new.target` read THAT target's own `prototype` — a caller object,
+ * read on the way to building a caller error. There is no wrapper left to
+ * forward anything.
+ */
+export const seamStoreUnreachable = closedCallable(
+  (storeRef, because, cause) => new SeamStoreUnreachableType(storeRef, because, cause));
 
 /**
- * THE EXPORTED BINDING IS A PROXY, AND THE ONE TRAP THAT MATTERS IS `apply`.
+ * `instanceof` IS NOT THE QUESTION A CONSUMER SHOULD ASK OF THIS TYPE, so this
+ * is the question it asks instead, and the reason is the third finding of the
+ * fifth round: the intrinsic `instanceof` runs OrdinaryHasInstance, which WALKS
+ * THE LEFT OPERAND'S PROTOTYPE CHAIN — and a Proxy whose getPrototypeOf trap
+ * throws carried the caller's own text out of an exported callable, a bare
+ * `"allow"` in the probe that found it. Every exported callable of this module
+ * therefore answers `instanceof` with a flat false, without looking at the
+ * operand at all (see `closedCallable`), and the honest question is this
+ * predicate, which is guarded and answers rather than throwing.
  *
- * Calling a class without `new` is refused by the ENGINE, before a line of this
- * file runs — and the engine's TypeError carries a real stack, so a caller
- * function named `green` calling `SeamStoreUnreachable()` got `at green` handed
- * back to it out of an exported callable. That is the third review round's
- * finding in its purest form, and no amount of care inside the constructor
- * closes it, because the constructor never runs.
- *
- * So the call is intercepted and answered with one of this file's own refusals.
- * `construct` forwards unchanged, except that a `new` through the proxy is
- * retargeted to the class itself — otherwise the `new.target` check would see
- * the proxy and refuse every legitimate construction. Everything else keeps its
- * own new.target and is therefore still refused: a subclass, a foreign
- * new.target, a Reflect.construct with somebody else's third argument.
- */
-export const SeamStoreUnreachable = new Proxy(SeamStoreUnreachableType, {
-  apply() { throw finalTypeRefusal(); },
-  construct(target, args, newTarget) {
-    return Reflect.construct(target, args, newTarget === SeamStoreUnreachable ? target : newTarget);
-  },
-});
-
-/**
- * THE TWO ROUTES BACK TO THE RAW CLASS, CLOSED. The proxy above guards the
- * BINDING; neither of these went through the binding, and the fourth review
- * round reached both.
- *
- * (1) `prototype.constructor`. Every class installs its own unwrapped self
- *     there, and the prototype is reachable from the binding and from any
- *     instance — so `SeamStoreUnreachable.prototype.constructor()` and
- *     `error.constructor()` both called the CLASS without `new`, which the
- *     engine refuses with a TypeError whose stack is the caller's own frames. A
- *     caller function named `allow` got `at allow` back. It is redefined as the
- *     guarded binding, so both spellings land on the `apply` trap instead, and
- *     a legitimate `new error.constructor(...)` still works through `construct`.
- *
- * (2) `instanceof`. Without an own `Symbol.hasInstance` the intrinsic one runs
- *     OrdinaryHasInstance, which WALKS THE LEFT OPERAND'S PROTOTYPE CHAIN — and
- *     a Proxy whose getPrototypeOf trap throws propagates the caller's own text
- *     out of `x instanceof SeamStoreUnreachable`, a bare `"allow"` in the probe
- *     that found this. The walk is done here instead, inside a try: a hostile
- *     left operand answers false, and nothing it throws leaves.
- *
- * Both are non-writable, non-configurable data properties, and the prototype is
- * frozen afterwards so neither can be redefined back.
- */
-/**
- * AND THE WALK IS BOUNDED, which the intrinsic one is not. A Proxy over an
+ * AND ITS WALK IS BOUNDED, which the intrinsic one is not. A Proxy over an
  * extensible target may answer its own getPrototypeOf trap with ITSELF, and an
- * unbounded chain walk over that never returns — a hang is a refusal a caller
- * chose, and this file does not hand one out. A chain longer than this is not a
- * chain that reaches this type.
+ * unbounded walk over that never returns — a hang is a refusal the caller chose,
+ * and this file does not hand one out. A chain longer than this is not a chain
+ * that reaches this type.
  */
 const PROTOTYPE_WALK_LIMIT = 100;
 
@@ -258,13 +271,26 @@ function seamStoreInstance(value) {
   }
 }
 
+export const isSeamStoreUnreachable = closedCallable(value => seamStoreInstance(value));
+
+/**
+ * AND AN INSTANCE IS NOT A ROUTE BACK TO THE CLASS EITHER. Every class installs
+ * its own unwrapped self on `prototype.constructor`, so `error.constructor` WAS
+ * the class — callable, constructable, and reachable from any refusal this file
+ * ever returned. It is redefined as the factory, non-writable and
+ * non-configurable, and the prototype is frozen afterwards so it cannot be
+ * redefined back. The private `Symbol.hasInstance` beside it keeps this module's
+ * OWN `instanceof` uses — `causeKind`, `isOwnRefusal` — from walking a hostile
+ * operand's chain with the intrinsic.
+ */
 Object.defineProperty(SeamStoreUnreachableType.prototype, "constructor", {
-  value: SeamStoreUnreachable, writable: false, enumerable: false, configurable: false,
+  value: seamStoreUnreachable, writable: false, enumerable: false, configurable: false,
 });
 Object.defineProperty(SeamStoreUnreachableType, Symbol.hasInstance, {
   value: seamStoreInstance, writable: false, enumerable: false, configurable: false,
 });
 Object.freeze(SeamStoreUnreachableType.prototype);
+
 
 /**
  * THE ONE GUARDED BOUNDARY, applied to every export of this module in one place
@@ -289,39 +315,35 @@ function isOwnRefusal(value) {
 }
 
 /**
- * AND THE BOUNDARY COVERS `new`, NOT ONLY THE CALL. The fourth review round's
- * first finding, and it is a fact about the LANGUAGE rather than about this
- * code: an async function has no [[Construct]] at all, so `Reflect.construct`
- * on one is refused by the ENGINE with a native TypeError — built before a line
- * of this file runs, carrying the caller's own frames, `at green` among them.
- * A try/catch inside the function cannot see it, because the function never
- * starts.
+ * AND THE BOUNDARY COVERS `new`, NOT ONLY THE CALL — by there being nothing to
+ * construct. The fourth review round found that an async function has no
+ * [[Construct]] at all, so `Reflect.construct` on one is refused by the ENGINE
+ * before the function starts; the third correction answered that with a Proxy
+ * whose construct trap threw this module's own refusal, and the fifth round
+ * found what the proxy still forwarded: `get`, and with it the raw target under
+ * `prototype.constructor`.
  *
- * So the exported value is a Proxy whose CONSTRUCT TRAP is this module's own
- * refusal, and its target is a plain function rather than an async one — a
- * proxy is only a constructor when its target is, and a proxy over an async
- * function would be refused by the same engine path with the same native error.
- * The plain function returns the async work as a promise, so every caller sees
- * exactly what it saw before; `new` now reaches a registered refusal with a
- * fixed stack, and `Reflect.construct` with a foreign new.target or a subclass
- * reaches the same trap.
+ * So the wrapper is gone and the exported value is an ARROW FUNCTION. An arrow
+ * is not a constructor and has no `prototype` of its own, so there is no target
+ * to reach and no `newTarget.prototype` read on the way in — construction is
+ * refused by the engine, in the caller's own frame, with nothing of this
+ * module's in it and nothing of this module run. That is the shape amendment 2
+ * of 2026-09-12 rules for every exported callable here, and it is out of scope
+ * as a finding for exactly the reason it is safe: no module code executes.
+ *
+ * The arrow returns the async work as a promise, so every caller sees what it
+ * saw before, and the throwing door is unchanged.
  */
 function guarded(storeRef, call) {
-  function guardedStoreCall(query) {
-    return (async () => {
-      try {
-        return await call(query);
-      } catch (thrown) {
-        if (isOwnRefusal(thrown)) throw thrown;
-        throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.callDidNotFinish);
-      }
-    })();
-  }
-  return new Proxy(guardedStoreCall, {
-    construct() {
-      throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.notConstructable);
-    },
-  });
+  const guardedStoreCall = query => (async () => {
+    try {
+      return await call(query);
+    } catch (thrown) {
+      if (isOwnRefusal(thrown)) throw thrown;
+      throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.callDidNotFinish);
+    }
+  })();
+  return closedCallable(guardedStoreCall);
 }
 
 /**

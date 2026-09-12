@@ -118,6 +118,36 @@ function seamRulingRefOf(cardRef) {
 }
 
 /**
+ * EVERY EXPORTED CALLABLE OF THIS MODULE ANSWERS `instanceof` WITH FALSE, AND
+ * ANSWERS IT WITHOUT LOOKING AT THE OPERAND. Amendment 2 of 2026-09-12, clause
+ * (b), and the reason is the fifth review round's second finding: without an own
+ * `Symbol.hasInstance` the intrinsic one walks the LEFT OPERAND'S prototype
+ * chain, so `hostile instanceof seamRulingRef` ran the caller's own
+ * getPrototypeOf trap and let the caller's own thrown text out of an exported
+ * callable. A lookup has no membership question to answer: nothing is an
+ * instance of it.
+ *
+ * The guard is an ARROW that ignores its argument, installed as a NON-WRITABLE,
+ * NON-CONFIGURABLE DATA property: it cannot be constructed, carries no
+ * `prototype`, cannot be replaced, and cannot be redefined as an accessor.
+ */
+function closedCallable(callable) {
+  // AND IT IS BOUND, NOT BARE. Clause (a) of the amendment names an arrow OR a
+  // bound function, and the difference is only visible in what the ENGINE says
+  // when somebody constructs one: its refusal for a bare arrow quotes the
+  // function's own SOURCE TEXT back, and this file would rather the engine's
+  // sentence carry no line of this module at all. A bound arrow is still not a
+  // constructor and still has no `prototype`; the refusal names
+  // `function () { [native code] }` and nothing else. Binding is lexical-`this`
+  // neutral for an arrow, so no behaviour moves.
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return closed;
+}
+
+/**
  * THE SAME GUARDED BOUNDARY THE OTHER TWO SEAM MODULES USE, and it is here for
  * the same reason rather than because this lookup is expected to throw.
  * `Object.hasOwn` on a frozen literal and a regular expression over a string
@@ -127,22 +157,24 @@ function seamRulingRefOf(cardRef) {
  * caller's frame name can ever come back in a stack. Not-ruled is the only thing
  * this lookup can say when it cannot say anything, and it is the fail-closed
  * answer: a null here shuts the seam.
+ *
+ * AND THE CONSTRUCTION DOOR IS SHUT BY THERE BEING NO DOOR. Every ordinary
+ * function is a constructor, so `new seamRulingRef()` was always reachable —
+ * and the earlier correction answered it from inside the function, which the
+ * fifth review round showed is already too late: the engine reads
+ * `newTarget.prototype` BEFORE the body runs, so a caller's object was read on
+ * the way in, and a caller could reach the raw function again through
+ * `seamRulingRef.prototype.constructor`. An ARROW FUNCTION has neither — no
+ * [[Construct]], no `prototype` — so construction is refused by the engine in
+ * the caller's own frame, having run no line of this file. That is clause (a) of
+ * amendment 2 of 2026-09-12, and null stays the only thing this module says.
  */
-const NOT_A_RULING = Object.freeze({ decision_ref: null, store_ref: null });
-
-export function seamRulingRef(cardRef) {
-  // CONSTRUCTED, NOT CALLED. Every ordinary function is a constructor, so
-  // `new seamRulingRef()` has always been reachable from anywhere — and what it
-  // answered was an accidental `this`, an object this file never wrote, whose
-  // prototype is this function's. `null`, the fail-closed answer, is not
-  // expressible through [[Construct]]: the language returns `this` for any
-  // non-object. So the not-ruled PAIR is returned instead, frozen and carrying
-  // the same two nulls a caller would have to read before it could act, and the
-  // answer is this module's own value either way.
-  if (new.target !== undefined) return NOT_A_RULING;
+const seamRulingRefLookup = (cardRef) => {
   try {
     return seamRulingRefOf(cardRef);
   } catch {
     return null;
   }
-}
+};
+
+export const seamRulingRef = closedCallable(seamRulingRefLookup);

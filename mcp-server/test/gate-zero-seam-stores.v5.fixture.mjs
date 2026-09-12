@@ -59,7 +59,6 @@ const REGISTERED_REASONS = Object.freeze([
   "the query did not address a row",
   "the configured checks repository is not the one this file serves",
   "the call did not finish",
-  "this error type is final",
   "the reason this store was unreachable is not a registered one",
 ]);
 
@@ -77,7 +76,7 @@ function own(target, key, value, enumerable) {
 function causeKind(cause) {
   try {
     if (cause === undefined || cause === null) return "none";
-    if (cause instanceof SeamStoreUnreachable) return "a-seam-store-that-was-unreachable";
+    if (isSeamStoreUnreachable(cause)) return "a-seam-store-that-was-unreachable";
     if (cause instanceof Error) return "an-error";
     return "not-an-error";
   } catch {
@@ -85,10 +84,13 @@ function causeKind(cause) {
   }
 }
 
-export class SeamStoreUnreachable extends Error {
+// THE SAME SHAPE THE REAL STORE MODULE SHIPS, for the same reason and under the
+// same two names: the class is MODULE-PRIVATE, what leaves is an arrow factory
+// that builds one, and membership is asked by a guarded predicate rather than by
+// `instanceof`. The substituted reader imports `isSeamStoreUnreachable` from
+// whichever module file is in place, so this file owes both names.
+class SeamStoreUnreachableType extends Error {
   constructor(storeRef, because, cause) {
-    if (new.target !== SeamStoreUnreachable)
-      throw new TypeError("this error type is final and cannot be extended");
     const store = REGISTERED_STORE_TOKENS.includes(storeRef)
       ? storeRef : "a-store-this-file-does-not-serve";
     const reason = REGISTERED_REASONS.includes(because)
@@ -104,6 +106,17 @@ export class SeamStoreUnreachable extends Error {
     Object.freeze(this);
   }
 }
+
+export const seamStoreUnreachable =
+  (storeRef, because, cause) => new SeamStoreUnreachableType(storeRef, because, cause);
+
+export const isSeamStoreUnreachable = value => {
+  try {
+    return value instanceof SeamStoreUnreachableType;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * The same reductions the real store applies, spelled the same way. `digest` is
@@ -358,7 +371,7 @@ export async function fetchPredecessorOutcomeRows(query) {
   const workRequestRef = query?.workRequestRef;
   const storeRef = "record-layer:work-request-outcome-feedback";
   if (workRequestRef === FIXTURE_UNREACHABLE)
-    throw new SeamStoreUnreachable(storeRef, "the query did not finish");
+    throw seamStoreUnreachable(storeRef, "the query did not finish");
   return { store_ref: storeRef, rows: PREDECESSOR_ROWS[workRequestRef] ?? [] };
 }
 
@@ -367,7 +380,7 @@ export async function fetchSchedulerLedgerRows(query) {
   const canaryRunKey = query?.canaryRunKey;
   const storeRef = "control-plane:ops.service+ops.run";
   if (canaryRunKey === FIXTURE_UNREACHABLE)
-    throw new SeamStoreUnreachable(storeRef, "the query did not finish");
+    throw seamStoreUnreachable(storeRef, "the query did not finish");
   if (canaryRunKey === FIXTURE_RAW_THROW) throw "allow";
   if (canaryRunKey === FIXTURE_HOSTILE_ANSWER) return HOSTILE_ANSWER;
   if (canaryRunKey === FIXTURE_WRONG_STORE)
@@ -381,6 +394,6 @@ export async function fetchCheckConclusionRows(query) {
   const checkName = query?.checkName;
   const storeRef = "github:checks";
   if (checkName === FIXTURE_UNREACHABLE)
-    throw new SeamStoreUnreachable(storeRef, "the checks source was not reachable");
+    throw seamStoreUnreachable(storeRef, "the checks source was not reachable");
   return { store_ref: storeRef, rows: CHECK_ROWS[checkName] ?? [] };
 }

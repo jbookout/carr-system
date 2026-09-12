@@ -109,10 +109,10 @@ import {
 } from "./gate-zero-assurance.v5.js";
 import { seamRulingRef } from "./gate-zero-seam-rulings.v5.js";
 import {
-  SeamStoreUnreachable,
   fetchCheckConclusionRows,
   fetchPredecessorOutcomeRows,
   fetchSchedulerLedgerRows,
+  isSeamStoreUnreachable,
 } from "./gate-zero-seam-stores.v5.js";
 
 /**
@@ -429,7 +429,7 @@ async function fetchOrRefuse(cardRef, ruling, queryDigest, query, unreachableRea
     fetched = await CARD_STORE[cardRef].fetch(query);
   } catch (cause) {
     return { refusal: refuse(cardRef, ruling, queryDigest, unreachableReason,
-      { ...body, unavailable_because: cause instanceof SeamStoreUnreachable ? cause.because : because }) };
+      { ...body, unavailable_because: isSeamStoreUnreachable(cause) ? cause.because : because }) };
   }
   if (fetched?.store_ref !== ruling.store_ref)
     return { refusal: refuse(cardRef, ruling, queryDigest, "store_ref_not_the_ruled_one", body) };
@@ -720,36 +720,64 @@ async function gateConclusionEvidence(query) {
 // at all.
 // ---------------------------------------------------------------------------
 
-// AND THE BOUNDARY HAS TO COVER `new`, WHICH AN async FUNCTION CANNOT. The
-// fourth review round's first finding, and it is a fact about the language
-// rather than about this code: an async function has no [[Construct]] at all,
-// so `Reflect.construct` on one is refused by the ENGINE — a native TypeError,
-// built before any line of this module runs, carrying the caller's own frames
-// with `at green` among them. No try/catch inside the function can see that,
-// because the function never starts.
+/**
+ * EVERY EXPORTED CALLABLE HERE ANSWERS `instanceof` WITH FALSE, AND ANSWERS IT
+ * WITHOUT LOOKING AT THE OPERAND. Amendment 2 of 2026-09-12, clause (b), and the
+ * reason is the fifth review round's second finding: without an own
+ * `Symbol.hasInstance` the intrinsic one walks the LEFT OPERAND'S prototype
+ * chain, so `hostile instanceof readGateConclusionEvidence` ran the caller's own
+ * getPrototypeOf trap and let the caller's own thrown text back out of an
+ * exported callable. A reader has no membership question to answer anyway — it
+ * is a function, and nothing is an instance of it.
+ *
+ * The guard is an ARROW that ignores its argument, installed as a NON-WRITABLE,
+ * NON-CONFIGURABLE DATA property: it cannot be constructed, carries no
+ * `prototype`, cannot be replaced, and cannot be redefined as an accessor.
+ */
+function closedCallable(callable) {
+  // AND IT IS BOUND, NOT BARE. Clause (a) of the amendment names an arrow OR a
+  // bound function, and the difference is only visible in what the ENGINE says
+  // when somebody constructs one: its refusal for a bare arrow quotes the
+  // function's own SOURCE TEXT back, and this file would rather the engine's
+  // sentence carry no line of this module at all. A bound arrow is still not a
+  // constructor and still has no `prototype`; the refusal names
+  // `function () { [native code] }` and nothing else. Binding is lexical-`this`
+  // neutral for an arrow, so no behaviour moves.
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return closed;
+}
+
+// AND THE BOUNDARY HAS TO COVER `new`, WHICH IT DOES BY LEAVING NOTHING TO
+// CONSTRUCT. The fourth review round found that an async function has no
+// [[Construct]] at all, so `Reflect.construct` on one is refused by the ENGINE
+// before the function starts; the third correction answered that with a Proxy
+// whose construct trap returned the gate's own answer, and the fifth round found
+// what that proxy still forwarded — `get`, and with it the raw target under
+// `prototype.constructor`, constructable with a `new.target` of the caller's
+// choosing.
 //
-// So the exported value is a Proxy whose CONSTRUCT TRAP answers, and its target
-// is a plain function rather than an async one — a proxy is a constructor only
-// when its target is, and a proxy over an async function is refused by the same
-// engine path with the same native error. The plain function returns the async
-// work as a promise, so every caller sees exactly what it saw before.
+// So the wrapper is gone and every export is an ARROW FUNCTION. An arrow is not
+// a constructor and has no `prototype`, so there is no target to reach and no
+// `newTarget.prototype` read on the way in: construction is refused by the
+// engine, in the caller's own frame, having run no line of this module. That is
+// clause (a) of amendment 2, and the refusal is out of scope as a finding for
+// exactly the reason it is safe — nothing here executed, so nothing here can
+// have read the caller's object or written the sentence that comes back.
 //
-// WHAT THE TRAP ANSWERS IS THE GATE'S OWN ANSWER, not a thrown refusal, because
-// the contract above is that a reader ANSWERS: `new readGateConclusionEvidence()`
-// now gets the identical object an unruled card gets, which is this surface's
-// fail-closed value. Nothing is thrown, so there is no stack to leak by the
-// construction door either.
+// The arrow returns the async work as a promise, so every caller sees what it
+// saw before, and the CALLING door still answers with the gate's own object.
 function guarded(gateAnswer, read) {
-  function guardedRead(query) {
-    return (async () => {
-      try {
-        return await read(query);
-      } catch {
-        return gateAnswer();
-      }
-    })();
-  }
-  return new Proxy(guardedRead, { construct() { return gateAnswer(); } });
+  const guardedRead = query => (async () => {
+    try {
+      return await read(query);
+    } catch {
+      return gateAnswer();
+    }
+  })();
+  return closedCallable(guardedRead);
 }
 
 export const readPredecessorOutcomeEvidence =
