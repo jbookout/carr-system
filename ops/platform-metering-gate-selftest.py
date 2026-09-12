@@ -82,10 +82,46 @@ def main() -> int:
     check("unknown metered dispatch fails closed", refuses(lambda: authorize_metered_execution(
         POLICY, "unregistered-dispatch", {}, today=date(2026, 8, 17))))
 
-    check("GitHub Actions remains blocked until an allowance reset is verified", refuses(
+    # The 2026-08-17 Actions pause was cleared on 2026-09-12 (decision
+    # 9935743c-21de-4490-83db-d11a5e20f6b1) after it outlived its own
+    # ends_after_verified_allowance_reset date and began refusing on a fact that
+    # was no longer true.  What this check used to assert -- that the LIVE policy
+    # refuses -- is therefore gone on purpose.  What replaces it is the pair that
+    # is actually load-bearing: the live policy admits a candidate that satisfies
+    # its declared contract, and the temporary-control MACHINERY still refuses,
+    # proved against a synthetic policy rather than by leaving a retired control
+    # switched on.  Deleting the first assertion without adding the second would
+    # have removed all coverage of lib/platform_metering.py's two pause clauses.
+    admitted_actions = authorize_metered_execution(POLICY, "github-actions-remote-ci", {
+        "candidate_sha": "a" * 40, "local_checks_green": True,
+    }, today=date(2026, 9, 12))
+    check("GitHub Actions is admitted once the pause is cleared and the contract is met",
+          admitted_actions["admitted"] is True
+          and admitted_actions["gate"] == "github-actions-remote-ci")
+    check("GitHub Actions without green local checks is still refused", refuses(
         lambda: authorize_metered_execution(POLICY, "github-actions-remote-ci", {
+            "candidate_sha": "a" * 40,
+        }, today=date(2026, 9, 12))))
+    check("GitHub Actions without an exact candidate SHA is still refused", refuses(
+        lambda: authorize_metered_execution(POLICY, "github-actions-remote-ci", {
+            "candidate_sha": "a" * 39, "local_checks_green": True,
+        }, today=date(2026, 9, 12))))
+
+    paused = json.loads(json.dumps(POLICY))
+    paused["temporary_controls"]["github_actions_pause"]["repository_actions_enabled"] = False
+    check("a re-imposed repository disable still refuses", refuses(
+        lambda: authorize_metered_execution(paused, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40, "local_checks_green": True,
-        }, today=date(2026, 9, 1))))
+        }, today=date(2026, 9, 12))))
+    unverified = json.loads(json.dumps(POLICY))
+    unverified["temporary_controls"]["github_actions_pause"]["verified_allowance_reset"] = False
+    check("an unverified allowance reset still refuses", refuses(
+        lambda: authorize_metered_execution(unverified, "github-actions-remote-ci", {
+            "candidate_sha": "a" * 40, "local_checks_green": True,
+        }, today=date(2026, 9, 12))))
+    check("the cleared pause records the authority that cleared it",
+          POLICY["temporary_controls"]["github_actions_pause"].get("cleared_decision_ref")
+          == "9935743c-21de-4490-83db-d11a5e20f6b1")
 
     allowed_neon = authorize_metered_execution(POLICY, "neon-disposable-branch", {
         "requested_lifetime_minutes": 120,
