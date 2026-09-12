@@ -287,14 +287,53 @@ const RUN = Object.freeze({
   source_kind: "wrapper", source_ref: "bin/run-scheduled.sh",
 });
 
+/**
+ * THE RECEIPT bin/run-scheduled.sh MINTS, built here the way the wrapper builds
+ * it — `carr-run-receipt:v1:<minted-at>:<nonce>:<sha256(run key) first 32>` —
+ * so a fixture row carries a token production could actually have written. A
+ * fixture that hand-waved the receipt into "some non-null string" is exactly how
+ * the first version of this clause came to accept a stale file.
+ *
+ * `forRunKey` is a SEPARATE argument from the row's own run key on purpose: the
+ * negative cases below need a receipt minted for a DIFFERENT job, and a helper
+ * that derived the hash from the row could not express one.
+ */
+function receipt({ forRunKey, mintedAt, nonce = "0123456789abcdef" }) {
+  const stamp = new Date(Date.parse(mintedAt)).toISOString()
+    .replace(/-/g, "").replace(/:/g, "");
+  const runKeyHash = createHash("sha256").update(forRunKey).digest("hex").slice(0, 32);
+  return `carr-run-receipt:v1:${stamp}:${nonce}:${runKeyHash}`;
+}
+
+/** The store's receipt parse, mirrored. An unparseable ref is two absences. */
+const SCHEDULED_RECEIPT =
+  /^carr-run-receipt:v1:(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})\.(\d{3})Z:[0-9a-f]{16}:([0-9a-f]{32})$/;
+function receiptFields(value) {
+  const parsed = typeof value === "string" ? SCHEDULED_RECEIPT.exec(value) : null;
+  if (parsed === null) return { runKeyHash: null, mintedAt: null };
+  const [, year, month, day, hour, minute, second, millis, runKeyHash] = parsed;
+  return {
+    runKeyHash,
+    mintedAt: instantText(`${year}-${month}-${day}T${hour}:${minute}:${second}.${millis}Z`),
+  };
+}
+function runKeyReceiptHash(value) {
+  return typeof value === "string" && value.length > 0
+    ? createHash("sha256").update(value).digest("hex").slice(0, 32) : null;
+}
+
 /** The real store's card 12 mapping, applied to a raw ledger row. */
 function ledgerRow(raw) {
+  const parsed = receiptFields(raw.evidence_ref);
   return Object.freeze({
     service_key_digest: opaque(raw.service_key),
     run_key_digest: opaque(raw.run_key),
     evidence_ref_digest: opaque(raw.evidence_ref),
     source_kind_digest: opaque(raw.source_kind),
     source_ref_digest: opaque(raw.source_ref),
+    receipt_run_key_digest: opaque(parsed.runKeyHash),
+    run_key_receipt_digest: opaque(runKeyReceiptHash(raw.run_key)),
+    receipt_minted_at: parsed.mintedAt,
     started_at: instantText(raw.started_at),
     ended_at: instantText(raw.ended_at),
     observed_at: instantText(raw.observed_at),
@@ -302,53 +341,93 @@ function ledgerRow(raw) {
 }
 
 const SCHEDULER_ROWS = Object.freeze({
-  // All three clauses hold: the wrapper's own row, carrying a receipt.
+  // All three clauses hold: the wrapper's own row, carrying a receipt the
+  // wrapper minted for THIS run key, after this run's dispatch.
   "canary-join": Object.freeze([ledgerRow({ ...RUN,
-    run_key: "canary-join", evidence_ref: "ops.run:carr-fleet-sync.canary-join" })]),
+    run_key: "canary-join",
+    evidence_ref: receipt({ forRunKey: "canary-join", mintedAt: T1 }) })]),
 
   // NEGATIVE, evidence_ref — and this is not a hypothetical. It is the row
-  // bin/run-scheduled.sh writes TODAY, because it passes no --evidence-ref. A
-  // ruling landing this afternoon would get exactly this answer from a live
-  // scheduled job, and the answer is a refusal that names the owed change.
+  // bin/run-scheduled.sh wrote for 21,894 runs, because it passed no
+  // --evidence-ref and had no way to be given one. Every scheduled run in the
+  // ledger's history looks like this, and this is the answer they get.
   "canary-today": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-today", evidence_ref: null })]),
+
+  // NEGATIVE, THE PRE-EXISTING RECEIPT — the mutation control for the whole
+  // change. A well-formed receipt for the right run key, minted BEFORE this
+  // run was dispatched: a file left on disk by an earlier run that this run's
+  // child never refreshed. Under the old clause ("evidence_ref is not null")
+  // this row bound as readily as a real one, which is why the wrapper no longer
+  // reads a receipt from anywhere a previous run could have left one.
+  "canary-stale-receipt": Object.freeze([ledgerRow({ ...RUN,
+    run_key: "canary-stale-receipt",
+    evidence_ref: receipt({ forRunKey: "canary-stale-receipt",
+      mintedAt: "2026-09-10T17:00:00.000Z", nonce: "fedcba9876543210" }) })]),
+
+  // NEGATIVE, THE RECEIPT MINTED AT THE DISPATCH INSTANT. Equal is not after:
+  // a receipt stamped the same instant as the row's started_at proves no
+  // ordering, and the clause is strict for the same reason the observation
+  // clause is.
+  "canary-instant-receipt": Object.freeze([ledgerRow({ ...RUN,
+    run_key: "canary-instant-receipt",
+    evidence_ref: receipt({ forRunKey: "canary-instant-receipt", mintedAt: T0 }) })]),
+
+  // NEGATIVE, ANOTHER JOB'S RECEIPT — well-formed, minted after this dispatch,
+  // and minted for a different run key. The receipt carries the hash of the run
+  // it was minted for, so it names another run and binds nothing here.
+  "canary-foreign-receipt": Object.freeze([ledgerRow({ ...RUN,
+    run_key: "canary-foreign-receipt",
+    evidence_ref: receipt({ forRunKey: "some-other-run", mintedAt: T1 }) })]),
+
+  // NEGATIVE, FREE-FORM TEXT IN evidence_ref — the shape 121 rows in production
+  // actually carry. It is not null, and under the old clause that was the whole
+  // question. It is not a receipt this wrapper minted, so it parses to nothing.
+  "canary-freeform-receipt": Object.freeze([ledgerRow({ ...RUN,
+    run_key: "canary-freeform-receipt",
+    evidence_ref: "ops.run:carr-fleet-sync.canary-freeform-receipt" })]),
 
   // NEGATIVE, source_kind — an `operator` row is a hand-run, not a dispatch.
   "canary-hand-run": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-hand-run", source_kind: "operator",
-    evidence_ref: "ops.run:carr-fleet-sync.canary-hand-run" })]),
+    evidence_ref: receipt({ forRunKey: "canary-hand-run", mintedAt: T1 }) })]),
 
   // NEGATIVE, source_kind — a `collector` row is a probe writing about a job,
   // not the wrapper that dispatched it.
   "canary-probe": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-probe", source_kind: "collector",
     source_ref: "bin/probe-keepalive.py",
-    evidence_ref: "ops.run:carr-fleet-sync.canary-probe" })]),
+    evidence_ref: receipt({ forRunKey: "canary-probe", mintedAt: T1 }) })]),
 
   // NEGATIVE, source_ref — the right kind, written by a different wrapper.
   "canary-foreign-wrapper": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-foreign-wrapper", source_ref: "bin/deploy-worker.sh",
-    evidence_ref: "ops.run:carr-fleet-sync.canary-foreign-wrapper" })]),
+    evidence_ref: receipt({ forRunKey: "canary-foreign-wrapper", mintedAt: T1 }) })]),
 
-  // Dispatch and observation share one instant — rows written in one transaction.
+  // Dispatch and observation share one instant — rows written in one
+  // transaction. The receipt is minted after the dispatch, so the binding holds
+  // and this case still isolates the observation clause it was written for.
   "canary-same-instant": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-same-instant", ended_at: T0, observed_at: T0,
-    evidence_ref: "ops.run:carr-fleet-sync.canary-same-instant" })]),
+    evidence_ref: receipt({ forRunKey: "canary-same-instant", mintedAt: T1 }) })]),
 
-  // The observation is of a different receipt than the dispatch named.
+  // The observation is of a different receipt than the dispatch named: same run
+  // key, same shape, a different nonce — which is what two runs of one job under
+  // one key actually look like.
   "canary-mismatch": Object.freeze([
     ledgerRow({ ...RUN,
       run_key: "canary-mismatch", ended_at: null, observed_at: T0,
-      evidence_ref: "ops.run:carr-fleet-sync.canary-mismatch.1" }),
+      evidence_ref: receipt({ forRunKey: "canary-mismatch", mintedAt: T1 }) }),
     ledgerRow({ ...RUN,
       run_key: "canary-mismatch", started_at: T0, ended_at: T1, observed_at: T1,
-      evidence_ref: "ops.run:carr-fleet-sync.some-other-run" }),
+      evidence_ref: receipt({ forRunKey: "canary-mismatch", mintedAt: T1,
+        nonce: "abcdef9876543210" }) }),
   ]),
 
   // Dispatched and still in flight: nothing has ended, so nothing is observed.
   "canary-inflight": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-inflight", ended_at: null, observed_at: T0,
-    evidence_ref: "ops.run:carr-fleet-sync.canary-inflight" })]),
+    evidence_ref: receipt({ forRunKey: "canary-inflight", mintedAt: T1 }) })]),
 
   // The left join found the service and no run: the canary never ran.
   "canary-never-ran": Object.freeze([ledgerRow({
@@ -359,14 +438,15 @@ const SCHEDULER_ROWS = Object.freeze({
 
   // A LEDGER FULL OF PRIVILEGED WORDS, and every clause still holds. Nothing
   // here is a hypothetical either: a service someone names `release-canary`
-  // writing an evidence ref that says the run passed is an ordinary naming
-  // choice, and under the pre-reduction store every one of these strings went
-  // into an answer. The finding this case produces must be the joining one, and
-  // the answer must still carry no privileged word.
+  // running a job keyed `allow-commit-green` is an ordinary naming choice, and
+  // under the pre-reduction store every one of these strings went into an
+  // answer. The finding this case produces must be the joining one, and the
+  // answer must still carry no privileged word. The receipt carries the HASH of
+  // that run key rather than the key, which is why the ref itself is hex.
   "canary-green-names": Object.freeze([ledgerRow({ ...RUN,
     service_key: "release-canary",
     run_key: "allow-commit-green",
-    evidence_ref: "ops.run:release-canary.passing-and-complete",
+    evidence_ref: receipt({ forRunKey: "allow-commit-green", mintedAt: T1 }),
     source_kind: "wrapper", source_ref: "bin/run-scheduled.sh" })]),
 });
 

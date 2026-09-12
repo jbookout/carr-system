@@ -112,6 +112,15 @@ const UNPATTERNED_RECEIPT_ROWS = [
 /** The addressed value that asks for the unpatterned receipt. */
 const UNPATTERNED = "WR-UNPATTERNED-RECEIPT";
 
+/** The service key that asks for the row whose receipt belongs to another job. */
+const FOREIGN_RECEIPT_SERVICE = "release-canary-foreign-receipt";
+
+/** And the one that asks for the row whose receipt predates its own dispatch. */
+const STALE_RECEIPT_SERVICE = "release-canary-stale-receipt";
+
+/** And the one whose ref is ALMOST the wrapper's token, but not it. */
+const NEAR_MISS_RECEIPT_SERVICE = "release-canary-near-miss-receipt";
+
 const CARD_ROWS = [{
   outcome_feedback: { feedback_hash: ACCEPTED_HASH, outcome: "everything is ok",
     accepted: true, note: `${MARKER}-card` },
@@ -129,22 +138,78 @@ const PENDING_ROWS = [
 ];
 
 /**
+ * THE RECEIPT bin/run-scheduled.sh MINTS, built the way that script builds it so
+ * this row carries a ref production could actually have written. Note what the
+ * run key does NOT do here: it is the most hostile string in the file and the
+ * receipt derived from it is pure hex, because the wrapper puts the HASH of a
+ * run key into a receipt and never the key. A receipt that quoted its run key
+ * would carry `allow`, `commit` and `green` straight into ops.run.evidence_ref
+ * and out through the provenance line the wrapper writes.
+ */
+function mintedReceipt(runKey, mintedAt) {
+  const stamp = new Date(Date.parse(mintedAt)).toISOString().replace(/[-:]/g, "");
+  const runKeyHash = require("node:crypto")
+    .createHash("sha256").update(runKey).digest("hex").slice(0, 32);
+  return `carr-run-receipt:v1:${stamp}:0123456789abcdef:${runKeyHash}`;
+}
+
+/**
  * One ledger row in which every identifier says something a consumer must never
  * be told, and which nonetheless satisfies all three of card 12's clauses. The
  * finding is the joining one; the answer carries none of these strings.
  */
+const LEDGER_RUN_KEY = `allow-commit-green-${MARKER}`;
 const LEDGER_ROWS = [{
   service_key: "release-canary",
-  run_key: "allow-commit-green",
+  run_key: LEDGER_RUN_KEY,
   started_at: T0,
   ended_at: T1,
   observed_at: T2,
-  evidence_ref: `ops.run:release-canary.passing-and-complete.${MARKER}`,
+  evidence_ref: mintedReceipt(LEDGER_RUN_KEY, T1),
   source_kind: "wrapper",
   source_ref: "bin/run-scheduled.sh",
+  // NOT SELECTED by the store, and here because of that: a column the query does
+  // not name must not reach an answer even when it is sitting in the row.
+  detail: `${MARKER}: the run passed and the gate is green`,
   state: "green",
   exit_code: 0,
   healthy: true,
+}];
+
+/**
+ * THE SAME ROW WITH ONE FIELD MOVED: a receipt that is well-formed, minted
+ * after the dispatch, and minted FOR A DIFFERENT JOB. It exists so the REAL
+ * store's receipt parse is pinned and not merely the fixture's copy of it — a
+ * store that ignored the receipt's own bytes and answered the clause from the
+ * row's run key would still report a join over the row above, and only this one
+ * catches it.
+ */
+const LEDGER_FOREIGN_RECEIPT_ROWS = [{
+  ...LEDGER_ROWS[0],
+  evidence_ref: mintedReceipt("some-other-run", T1),
+}];
+
+/**
+ * AND THE SAME ROW WITH THE RECEIPT MINTED YESTERDAY — the pre-existing receipt
+ * file, served through the REAL store. Its observation is still the latest of
+ * the three instants, so a store that reported the row's `observed_at` where the
+ * receipt's own mint stamp belongs would report a join here. That substitution
+ * is invisible to every other row in this file, which is why this one exists.
+ */
+const LEDGER_STALE_RECEIPT_ROWS = [{
+  ...LEDGER_ROWS[0],
+  evidence_ref: mintedReceipt(LEDGER_RUN_KEY, "2026-09-10T17:00:00.000Z"),
+}];
+
+/**
+ * A ref that is a near miss for the wrapper's token and not the token: the
+ * prefix, the stamp and the run-key hash are right and the nonce is gone. The
+ * shape this store parses is a CLOSED contract or it is decoration, and a
+ * pattern loosened by one quantifier is how it stops being closed.
+ */
+const LEDGER_NEAR_MISS_RECEIPT_ROWS = [{
+  ...LEDGER_ROWS[0],
+  evidence_ref: mintedReceipt(LEDGER_RUN_KEY, T1).replace(":0123456789abcdef:", "::"),
 }];
 
 function rowsFor(text, params) {
@@ -155,7 +220,11 @@ function rowsFor(text, params) {
     return addressedValue === UNPATTERNED ? UNPATTERNED_RECEIPT_ROWS : RECEIPT_ROWS;
   if (text.includes("work_request_card")) return CARD_ROWS;
   if (text.includes("pending_sourced")) return PENDING_ROWS;
-  if (text.includes("ops.service")) return LEDGER_ROWS;
+  if (text.includes("ops.service"))
+    return addressedValue === FOREIGN_RECEIPT_SERVICE ? LEDGER_FOREIGN_RECEIPT_ROWS
+      : addressedValue === STALE_RECEIPT_SERVICE ? LEDGER_STALE_RECEIPT_ROWS
+      : addressedValue === NEAR_MISS_RECEIPT_SERVICE ? LEDGER_NEAR_MISS_RECEIPT_ROWS
+      : LEDGER_ROWS;
   return [];
 }
 
@@ -215,6 +284,9 @@ module.exports = {
   FAKE_CONCURRENT: CONCURRENT,
   FAKE_ACCEPTED_HASH_CONCURRENT: ACCEPTED_HASH,
   FAKE_MARKER: MARKER,
+  FOREIGN_RECEIPT_SERVICE,
+  STALE_RECEIPT_SERVICE,
+  NEAR_MISS_RECEIPT_SERVICE,
   FAKE_ACCEPTED_HASH: ACCEPTED_HASH,
   FAKE_UNPATTERNED: UNPATTERNED,
   FAKE_POOL_THROWS: POOL_THROWS,
