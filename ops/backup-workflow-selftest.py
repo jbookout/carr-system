@@ -105,8 +105,17 @@ elif url.endswith('/cancel') and method == 'POST':
     if state.get('cancel_error'):
         print('synthetic cancel failure', file=sys.stderr); raise SystemExit(1)
     answer({{}})
+elif '/actions/workflows/' in url and url.endswith('/dispatches') and method == 'POST':
+    state.setdefault('dispatches', []).append({{'url': url, 'body': body}}); save()
+    if state.get('dispatch_error'):
+        print('synthetic dispatch failure', file=sys.stderr); raise SystemExit(1)
+    answer({{}})
 elif '/actions/runs/' in url:
     answer(state.get('run', {{}}))
+elif '/commits/' in url:
+    if state.get('branch_head_error'):
+        print('synthetic branch read failure', file=sys.stderr); raise SystemExit(1)
+    answer(state.get('branch_head', {{}}))
 else:
     print('unexpected synthetic gh call: ' + method + ' ' + url, file=sys.stderr)
     raise SystemExit(2)
@@ -1082,6 +1091,99 @@ def service_identity_contract() -> None:
     )
 
 
+def dispatch_door_contract() -> None:
+    """The reviewed dispatch door: admit the spend, or reach no vendor at all.
+
+    The door exists because hooks/guard-unattended.py refuses a session-issued
+    `gh workflow run` and names a reviewed in-process admission as the sanctioned
+    shape instead. These checks hold the two properties that make it that rather
+    than a bypass: every refusal happens BEFORE the dispatch POST, and the only
+    workflow, ref and input names it can reach are literals.
+    """
+    dispatch = "dispatch-controlled-failure"
+    status_source = STATUS_HELPER.read_text(encoding="utf-8")
+    check(
+        "the dispatch door admits the metered spend in-process",
+        "authorize_metered_execution" in status_source
+        and "github-actions-remote-ci" in status_source,
+        "a dispatcher that skips admission is the bypass the metering gate exists to stop",
+    )
+    check(
+        "the dispatch door can start exactly one named workflow",
+        'BACKUP_WORKFLOW_FILE = "backup-nightly.yml"' in status_source
+        and "BACKUP_WORKFLOW_FILE" in status_source.split("def dispatch_controlled_failure")[1],
+        "a caller-named workflow would make this a general door",
+    )
+
+    def fixture(state_extra: dict[str, object] | None = None):
+        root = Path(tempfile.mkdtemp(prefix="carr-dispatch-door-"))
+        state: dict[str, object] = {
+            "run": run_state(), "artifacts": [], "check_runs": [],
+            "branch_head": {"sha": PROOF_HEAD},
+        }
+        state.update(state_extra or {})
+        return fixture_env(root, state)
+
+    # THE HAPPY PATH, and the only one that may reach the vendor.
+    env, state_path, log_path = fixture()
+    result = invoke(env, dispatch, *proof_args())
+    dispatched = read_json(state_path).get("dispatches") or []
+    body = dispatched[0].get("body") if dispatched else {}
+    inputs = body.get("inputs") if isinstance(body, dict) else {}
+    check(
+        f"{dispatch}: an admitted request dispatches the seeded inputs on main",
+        result.returncode == 0
+        and len(dispatched) == 1
+        and str(dispatched[0].get("url", "")).endswith(
+            "/actions/workflows/backup-nightly.yml/dispatches")
+        and isinstance(body, dict) and body.get("ref") == "main"
+        and isinstance(inputs, dict)
+        and inputs.get("wr54_failure_proof_id") == PROOF_ID
+        and inputs.get("wr54_failure_proof_expected_head") == PROOF_HEAD,
+        f"expected one dispatch carrying both proof inputs, got rc={result.returncode} "
+        f"{result.stderr.strip()} {dispatched!r}",
+    )
+    check(
+        f"{dispatch}: the admitted request reports its own admission",
+        '"metering_admitted":true' in result.stdout
+        and '"state":"dispatched"' in result.stdout,
+        "a dispatch whose receipt omits the admission cannot be audited later",
+    )
+
+    # EVERY REFUSAL MUST LEAVE THE VENDOR UNTOUCHED. A door that refuses after
+    # the POST has already spent the minutes it was guarding.
+    refusals: list[tuple[str, dict[str, object], tuple[str, ...]]] = [
+        ("a malformed proof ID refuses", {}, proof_args(proof_id="not-a-uuid")),
+        ("an uppercase proof ID refuses rather than being normalised", {},
+         proof_args(proof_id=PROOF_ID.upper())),
+        ("a short expected head refuses", {}, proof_args(head="abc123")),
+        ("an uppercase expected head refuses rather than being normalised", {},
+         proof_args(head="A" * 40)),
+        ("an expected head that is not the live main head refuses",
+         {"branch_head": {"sha": "b" * 40}}, proof_args()),
+        ("an unreadable main head refuses rather than dispatching blind",
+         {"branch_head_error": True}, proof_args()),
+        ("a proof ID already spent on this head refuses",
+         {"check_runs": [spent_proof_check()]}, proof_args()),
+        ("exhausted Check pagination fails closed instead of dispatching",
+         {"check_pagination_exhausted": True}, proof_args()),
+    ]
+    for label, extra, args in refusals:
+        env, state_path, log_path = fixture(extra)
+        result = invoke(env, dispatch, *args)
+        posted = [
+            row for row in calls(log_path)
+            if str(row.get("url", "")).endswith("/dispatches")
+        ]
+        check(
+            f"{dispatch}: {label}",
+            result.returncode != 0 and not posted
+            and not (read_json(state_path).get("dispatches") or []),
+            f"expected a refusal with no dispatch POST, got rc={result.returncode} "
+            f"posted={posted!r} stderr={result.stderr.strip()}",
+        )
+
+
 def main() -> int:
     source = WORKFLOW.read_text(encoding="utf-8")
     status_source = STATUS_HELPER.read_text(encoding="utf-8") if STATUS_HELPER.is_file() else ""
@@ -1167,6 +1269,7 @@ def main() -> int:
     service_identity_contract()
     behavioral_contract()
     controlled_failure_contract()
+    dispatch_door_contract()
 
     print(f"\nbackup-workflow-selftest: {passed}/{passed + len(failed)} passed")
     if failed:

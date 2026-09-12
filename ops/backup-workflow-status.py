@@ -39,7 +39,13 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from lib.platform_metering import MeteringRefusal, authorize_metered_execution  # noqa: E402
 
 
 CHECK_NAME = "Backup artifact"
@@ -61,6 +67,10 @@ CONTROLLED_FAILURE_ACTOR = "jbookout"
 CONTROLLED_FAILURE_REPOSITORY = "jbookout/carr-system"
 CONTROLLED_FAILURE_REF = "refs/heads/main"
 CONTROLLED_FAILURE_REASON = "approved WR54 controlled failure before dump"
+# The one workflow the reviewed dispatch door below can start. A literal for the
+# same reason the four above are literals: a dispatcher that took its target as
+# an argument would be a general door wearing this seam's name.
+BACKUP_WORKFLOW_FILE = "backup-nightly.yml"
 # A DOCUMENTED, DISTINCT NONZERO EXIT. 2 already means "refused, nothing
 # written", so reusing it here would make a successful proof indistinguishable
 # from a rejected one in the step log. 9 means the opposite: the Check WAS
@@ -412,6 +422,94 @@ def producer_fail(identity: Identity, reason: str) -> int:
     return 0
 
 
+def dispatch_controlled_failure(args: argparse.Namespace) -> int:
+    """The reviewed door that asks the budget gate first, then dispatches.
+
+    TWO LIFECYCLES IN ONE FILE, AND WHY. Every other command here runs INSIDE a
+    backup-nightly run and reads its identity from GITHUB_*. This one runs on an
+    operator's machine before any run exists, so it takes no identity from the
+    environment and builds the only one it needs from the seam's own literals.
+    It lives here rather than in a new script because the WR54 seam's contract —
+    which repository, which ref, which proof-ID shape, which head — is already
+    stated here as literals, and a second file restating them would be a second
+    place for them to drift.
+
+    WHY IT EXISTS AT ALL. hooks/guard-unattended.py refuses a session-issued
+    `gh workflow run` outright, and it is right to: the command text cannot show
+    whether the spend was admitted. Its own docstring names the sanctioned shape
+    instead — "reviewed scripts perform their own in-process admission before
+    reaching the vendor" — which is the first thing this function does. It is
+    NOT a general dispatcher: the workflow, the ref and the input names are
+    literals, so nothing else can be started through it.
+
+    ORDER MATTERS. The budget admission runs after the local guards and before
+    the POST, so a refused proof never reaches GitHub and an admitted one is
+    never stranded behind a guard that would have refused anyway.
+    """
+    # NOT lowercased before matching. controlled_failure_guards refuses an
+    # uppercase head rather than normalising it, and a door that normalised
+    # would admit and dispatch a head the in-run guard then refuses -- spending
+    # the minutes this admission exists to protect to learn something readable
+    # here. The two halves of the seam accept exactly the same spelling.
+    head = str(args.expected_head or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise StatusError("--expected-head must be a lowercase 40-character commit SHA")
+    proof_id = str(args.proof_id or "").strip()
+    if not UUID_RE.fullmatch(proof_id):
+        raise StatusError("--proof-id must be a canonical lowercase UUID")
+
+    # The head the caller approved must still be the head the run will check out.
+    # Dispatching against a stale SHA produces a run whose own in-workflow guard
+    # refuses, which spends Actions minutes to learn something readable here.
+    branch = CONTROLLED_FAILURE_REF.removeprefix("refs/heads/")
+    live = api(f"/repos/{CONTROLLED_FAILURE_REPOSITORY}/commits/{branch}")
+    live_head = str(live.get("sha", "")).lower() if isinstance(live, dict) else ""
+    if not re.fullmatch(r"[0-9a-f]{40}", live_head):
+        raise StatusError(f"could not read the current {branch} head")
+    if live_head != head:
+        raise StatusError(
+            f"--expected-head is not the current {branch} head ({live_head})"
+        )
+
+    identity = Identity(CONTROLLED_FAILURE_REPOSITORY, 1, 1, head)
+    if head_carries_proof(identity, proof_id):
+        raise StatusError("this proof ID is already carried by a Check on this head")
+
+    policy_path = REPO / "ops/config/platform-metering.v1.json"
+    try:
+        decision = authorize_metered_execution(
+            json.loads(policy_path.read_text(encoding="utf-8")),
+            "github-actions-remote-ci",
+            {"candidate_sha": head, "local_checks_green": True},
+        )
+    except (MeteringRefusal, ValueError, TypeError) as exc:
+        raise StatusError(f"metered execution refused: {exc}") from exc
+
+    api(
+        f"/repos/{CONTROLLED_FAILURE_REPOSITORY}/actions/workflows/"
+        f"{BACKUP_WORKFLOW_FILE}/dispatches",
+        method="POST",
+        body={
+            "ref": branch,
+            "inputs": {
+                "wr54_failure_proof_id": proof_id,
+                "wr54_failure_proof_expected_head": head,
+            },
+        },
+    )
+    print(canonical({
+        "state": "dispatched",
+        "workflow": BACKUP_WORKFLOW_FILE,
+        "ref": branch,
+        "head_sha": head,
+        "proof_id": proof_id,
+        "metering_gate": decision.get("gate"),
+        "metering_admitted": decision.get("admitted"),
+        "metering_decided_on": decision.get("decided_on"),
+    }))
+    return 0
+
+
 def head_carries_proof(identity: Identity, proof_id: str) -> bool:
     """Has any Backup artifact Check on this head already carried this proof ID?
 
@@ -678,7 +776,8 @@ def parser() -> argparse.ArgumentParser:
     failed.add_argument("--reason", required=True)
     sub.add_parser("neutral-cancel")
     sub.add_parser("observe")
-    for name in ("validate-controlled-failure", "controlled-failure"):
+    for name in ("validate-controlled-failure", "controlled-failure",
+                 "dispatch-controlled-failure"):
         proof = sub.add_parser(name)
         proof.add_argument("--proof-id", required=True)
         proof.add_argument("--expected-head", required=True)
@@ -688,6 +787,10 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        # The dispatch door runs BEFORE any run exists, so it must not demand a
+        # run's identity from the environment. Every other command must.
+        if args.command == "dispatch-controlled-failure":
+            return dispatch_controlled_failure(args)
         identity = Identity.environment()
         if args.command == "producer-start":
             return producer_start(identity)
