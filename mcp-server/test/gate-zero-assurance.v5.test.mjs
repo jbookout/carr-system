@@ -1344,6 +1344,11 @@ test("SURFACE: the readers are imported, never handed in", () => {
     "the readers are not imported by this module");
   assert.equal(specifiers.includes("./gate-zero-seam-rulings.v5.js"), false,
     "the gate imports the ruling table again, which is how its predicate drifted from the reader's");
+  // And the binding predicate arrives by the INTERNAL path both files import,
+  // which is the third correction's finding: sharing it through the reader's
+  // public namespace made the reader promise a fifth name.
+  assert.ok(specifiers.includes("./internal/gate-zero-seam-binding.v5.js"),
+    "the gate no longer imports the shared ruling predicate it binds seams on");
   for (const name of Object.keys(surface))
     assert.equal(/bind/i.test(name), false, `${name} is a binding door on the surface`);
   // Every exported callable still takes at most one argument, and none of them
@@ -1441,13 +1446,14 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // And specifically: the public surface imports six modules, none of them this
+  // And specifically: the public surface imports seven modules, none of them this
   // slice's classifiers. The fifth is the producer registration, a frozen
   // constant table that reaches nothing; the sixth is the ruled readers, added
-  // on 2026-09-12 — and the ruling table is NOT among them, which is the PR 1004
+  // on 2026-09-12; the seventh is the shared ruling predicate on its internal
+  // path — and the ruling table is NOT among them, which is the PR 1004
   // re-review's finding: the binding condition reaches this module through the
-  // reader's own predicate, so there is one predicate over that table instead of
-  // two that can disagree.
+  // one predicate the readers ask too, so there is one predicate over that table
+  // instead of two that can disagree.
   // THE ORDER MATTERS AND IS ASSERTED: the producer registration must be
   // instantiated before the readers, because the readers read one of its
   // constants through this module's re-export at their own module scope, and
@@ -1456,7 +1462,7 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
-      "./gate-zero-seam-readers.v5.js"]);
+      "./gate-zero-seam-readers.v5.js", "./internal/gate-zero-seam-binding.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
     ["./benchmark-minimum.v5.js"]);
 });

@@ -47,7 +47,10 @@
 // table, no exported findings vocabulary and no exported status object. The
 // derivation — the part that turns rows into a finding — is module-private,
 // below, and there is no route to it that does not go through a reader that has
-// already checked a ruling and fetched the rows itself.
+// already checked a ruling and fetched the rows itself. The ruling predicate the
+// GATE also asks is shared rather than copied, and it is not a fifth name here
+// either: it lives in internal/gate-zero-seam-binding.v5.js, which this module
+// and gate-zero-assurance.v5.js import by that path and neither re-exports.
 //
 // WHAT A CALLER MAY SAY, AND WHAT IT MAY NEVER SAY. A query ADDRESSES a row:
 // which predecessor step, which service and canary, which commit and check.
@@ -121,7 +124,7 @@ import {
   readGateGraphAssurance,
   readGateZeroPredecessorJoin,
 } from "./gate-zero-assurance.v5.js";
-import { seamRulingRef } from "./gate-zero-seam-rulings.v5.js";
+import { ruledCardBinding } from "./internal/gate-zero-seam-binding.v5.js";
 import {
   fetchCheckConclusionRows,
   fetchPredecessorOutcomeRows,
@@ -148,21 +151,20 @@ const CARD_12 = "card:12";
 const CARD_13 = "card:13";
 
 /**
- * The ONE store ref each card's reader will serve, and the fetcher that serves
- * it. This is the reader's half of the two-part binding: the ruling names a
- * store, this table says which store this reader can actually open, and unless
- * they are the same string no row is fetched at all. A ruling that named
- * `github:checks` for card 11 is not a ruling this reader can act on, and the
- * gate's refusal stands — rather than the old behaviour, which reported the
- * ruled ref while querying its own hard-coded store.
+ * The ONE fetcher each card's reader will call. The other half of the binding —
+ * WHICH store ref that card's ruling must name — is the predicate's table, in
+ * internal/gate-zero-seam-binding.v5.js, so the two are not written twice: unless
+ * the ruling names that store, `ruledCardBinding` answers null and no row is
+ * fetched at all. A ruling that named `github:checks` for card 11 is not a ruling
+ * this reader can act on, and the gate's refusal stands — rather than the old
+ * behaviour, which reported the ruled ref while querying its own hard-coded
+ * store. The pairing here is checked a second time at fetch: a store states which
+ * store it is, and a disagreement with the ruling refuses.
  */
-const CARD_STORE = Object.freeze({
-  [CARD_11]: Object.freeze({ store_ref: "record-layer:work-request-outcome-feedback",
-    fetch: fetchPredecessorOutcomeRows }),
-  [CARD_12]: Object.freeze({ store_ref: "control-plane:ops.service+ops.run",
-    fetch: fetchSchedulerLedgerRows }),
-  [CARD_13]: Object.freeze({ store_ref: "github:checks",
-    fetch: fetchCheckConclusionRows }),
+const CARD_FETCH = Object.freeze({
+  [CARD_11]: fetchPredecessorOutcomeRows,
+  [CARD_12]: fetchSchedulerLedgerRows,
+  [CARD_13]: fetchCheckConclusionRows,
 });
 
 /**
@@ -510,44 +512,17 @@ function queryDigestOf(normalized) {
   return digest(canonicalJson(normalized));
 }
 
-/**
- * THE RULING GATE, AND IT IS ON THE SURFACE BECAUSE THE GATE ASKS IT TOO. Both
- * halves must agree: the table must carry a well-formed decision id for this
- * card, AND the store that ruling names must be the one this card's reader
- * actually serves. Anything else is null, and a null here is answered by the
- * gate's own refusal.
- *
- * WHY IT IS EXPORTED — the PR 1004 re-review's finding, and it is a class rather
- * than a line. gate-zero-assurance.v5.js asked the ruling table ITSELF and read
- * any non-null ruling as a bound seam, which is only the first of the two halves
- * above. A ruling that named another registered store therefore made the gate
- * report the seam BOUND while the reader refused that same ruling and fell back
- * without a ruling reference: two predicates for one question, disagreeing. One
- * predicate, imported by the gate, is the only shape in which they cannot — a
- * second copy of these three lines is the defect again, whichever file holds it.
- *
- * IT IS STILL NOT A DOOR. It takes a CARD TOKEN and nothing else, every value it
- * returns is built from this module's frozen table and the ruling table's own
- * constants, and it is strictly NARROWER than `seamRulingRef`, which is already
- * public: a caller learns nothing here that it could not already ask the ruling
- * table for, and learns less for every ruling this reader would refuse. An
- * unknown token, a Proxy, a number, a card with no entry in the store table —
- * each is null, which is the fail-closed answer and shuts the seam in both files
- * at once.
- */
-const ruledCardBindingOf = (cardRef) => {
-  try {
-    const ruling = seamRulingRef(cardRef);
-    if (ruling === null) return null;
-    if (!Object.hasOwn(CARD_STORE, cardRef)) return null;
-    if (ruling.store_ref !== CARD_STORE[cardRef].store_ref) return null;
-    return ruling;
-  } catch {
-    return null;
-  }
-};
-
-export const ruledCardBinding = closedCallable(ruledCardBindingOf);
+// THE RULING GATE IS ONE PREDICATE AND IT IS NOT A NAME ON THIS SURFACE.
+// `ruledCardBinding` asks both halves — the table carries a well-formed decision
+// id for the card, AND the ruling names the one store that card's reader opens —
+// and it lives in internal/gate-zero-seam-binding.v5.js because the GATE asks it
+// too. gate-zero-assurance.v5.js used to ask the ruling table itself and read any
+// non-null ruling as a bound seam, which is half of this test, so a ruling naming
+// another registered store made the gate say bound while this reader refused. One
+// predicate, imported by both, is the only shape in which they cannot drift; a
+// public export of it would have been the fix at the price of this module's
+// four-name promise, so the predicate sits behind an internal path that no public
+// namespace re-exports.
 
 /**
  * Fetch, or hand back the finished refusal. ONE function, not one per reader,
@@ -566,7 +541,7 @@ export const ruledCardBinding = closedCallable(ruledCardBindingOf);
 async function fetchOrRefuse(cardRef, ruling, queryDigest, query, unreachableReason, because, body) {
   let fetched;
   try {
-    fetched = await CARD_STORE[cardRef].fetch(query);
+    fetched = await CARD_FETCH[cardRef](query);
   } catch (cause) {
     return { refusal: refuse(cardRef, ruling, queryDigest, unreachableReason,
       { ...body, unavailable_because: isSeamStoreUnreachable(cause) ? cause.because : because }) };

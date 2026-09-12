@@ -117,6 +117,7 @@ import {
 } from "../src/gate-zero-assurance.v5.js";
 
 import * as readers from "../src/gate-zero-seam-readers.v5.js";
+import * as binding from "../src/internal/gate-zero-seam-binding.v5.js";
 import * as rulings from "../src/gate-zero-seam-rulings.v5.js";
 import * as stores from "../src/gate-zero-seam-stores.v5.js";
 import * as fixtureStores from "./gate-zero-seam-stores.v5.fixture.mjs";
@@ -130,6 +131,8 @@ const FAULT_STORE_FILE =
   fileURLToPath(new URL("./gate-zero-seam-fault-injection.testhelper.mjs", import.meta.url));
 const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 const READERS_FILE = "gate-zero-seam-readers.v5.js";
+/** The internal path the shared ruling predicate moved to, relative to src. */
+const BINDING_FILE = "internal/gate-zero-seam-binding.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
 const GATE_FILE = "gate-zero-assurance.v5.js";
 const FAKE_PG_FILE = fileURLToPath(new URL("./gate-zero-seam-pg.v5.fake.cjs", import.meta.url));
@@ -159,7 +162,8 @@ const STORE_UNREACHABLE_REASONS = Object.freeze([
   "the reason this store was unreachable is not a registered one",
 ]);
 
-const SWEPT_NAMESPACES = () => [["readers", readers], ["rulings", rulings], ["stores", stores]];
+const SWEPT_NAMESPACES = () =>
+  [["readers", readers], ["rulings", rulings], ["stores", stores], ["binding", binding]];
 
 const STORE_CREDENTIALS = ["DATABASE_URL_READER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"];
 
@@ -539,7 +543,7 @@ test("RULED: no query, valid or not, moves the closed half of a ruled answer", a
 test("RULING SHUT: nothing in the reader or the ruling table reaches the environment", () => {
   // A seam an env var could open is a seam any shell could open. Only the store
   // layer reads the environment, and only for WHERE a ruled store lives.
-  for (const file of [RULINGS_FILE, READERS_FILE]) {
+  for (const file of [RULINGS_FILE, READERS_FILE, BINDING_FILE]) {
     const source = readFileSync(join(SRC, file), "utf8");
     assert.equal(/process\s*\.\s*env/.test(source), false, `${file} names the process environment`);
   }
@@ -559,11 +563,14 @@ const EXPECTED_EXPORTS = Object.freeze({
     "readGateConclusionEvidence",
     "readPredecessorOutcomeEvidence",
     "readSchedulerCanaryEvidence",
-    // The ruling predicate, on the surface since the PR 1004 re-review so that
-    // the gate binds a seam on the reader's own test rather than half of it.
-    "ruledCardBinding",
+    // AND NOTHING ELSE. The second correction put the shared ruling predicate
+    // here, which bought the gate the reader's own test at the price of this
+    // module's four-name promise; the third moved it to an internal path both
+    // files import. The absence is asserted below, by name.
   ],
   rulings: ["seamRulingRef"],
+  // The internal surface: one predicate, reachable only by importing the path.
+  binding: ["ruledCardBinding"],
   stores: [
     "fetchCheckConclusionRows",
     "fetchPredecessorOutcomeRows",
@@ -780,7 +787,7 @@ test("SWEEP: the sweep itself catches a privileged outcome when one is planted",
   assert.throws(() => assertSwept("planted", { conclusion: "green" }));
 });
 
-test("SURFACE: every exported callable of all three modules is a guarded one", () => {
+test("SURFACE: every exported callable of all four modules is a guarded one", () => {
   // THE STRUCTURAL HALF OF INVARIANT (2), and it is here because the behavioural
   // half cannot reach all of it. The ruling lookup has no throwing path today —
   // `Object.hasOwn` on a frozen literal and a pattern over a string — so removing
@@ -791,6 +798,7 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
   const stores_ = readFileSync(join(SRC, STORES_FILE), "utf8");
   const readers_ = readFileSync(join(SRC, READERS_FILE), "utf8");
   const rulings_ = readFileSync(join(SRC, RULINGS_FILE), "utf8");
+  const binding_ = readFileSync(join(SRC, BINDING_FILE), "utf8");
 
   // Each module declares exactly one boundary, and it catches everything.
   for (const [name, source] of [["stores", stores_], ["readers", readers_]])
@@ -818,7 +826,8 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
   // constant, and NO Proxy anywhere — the wrapper the fourth correction shipped
   // is what forwarded `get` to a raw target, and it is deleted rather than
   // tightened.
-  const sources = [["stores", stores_], ["readers", readers_], ["rulings", rulings_]];
+  const sources = [["stores", stores_], ["readers", readers_], ["rulings", rulings_],
+    ["binding", binding_]];
   for (const [name, source] of sources) {
     assert.equal((source.match(/^function closedCallable\(/gm) ?? []).length, 1,
       `${name} has no single closed-callable helper, or has more than one`);
@@ -836,6 +845,10 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
   // wrapper of its own in the line that exports it.
   assert.ok(/^export const seamRulingRef = closedCallable\(seamRulingRefLookup\);$/m.test(rulings_),
     "the ruling lookup is exported as something other than a closed callable");
+  // And the shared predicate, for the same reason: its boundary is not reachable
+  // by any input either, so the line that exports it is asserted whole.
+  assert.ok(/^export const ruledCardBinding = closedCallable\(ruledCardBindingOf\);$/m.test(binding_),
+    "the shared ruling predicate is exported as something other than a closed callable");
   // And the store's type is not on the surface at all: a factory and a predicate
   // are, and the class they build is private.
   assert.ok(/^class SeamStoreUnreachableType extends Error \{$/m.test(stores_),
@@ -846,9 +859,11 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
 
 test("SURFACE: the shared ruling predicate answers for the three cards and nothing else", () => {
   // The gate's bound-ness is this function's answer, so what it says for a card
-  // token is asserted here once rather than inferred from a gate answer.
+  // token is asserted here once rather than inferred from a gate answer. It is
+  // asked of the INTERNAL module, because that is where it lives: the third
+  // correction's review refused it as a public name on the reader surface.
   for (const card of ["card:11", "card:12", "card:13"]) {
-    const bound = readers.ruledCardBinding(card);
+    const bound = binding.ruledCardBinding(card);
     assert.notEqual(bound, null, `${card} is ruled in src but the predicate refuses it`);
     // It is the ruling table's own pair, narrowed — never a value of its own.
     assert.deepEqual(bound, rulings.seamRulingRef(card), card);
@@ -857,14 +872,33 @@ test("SURFACE: the shared ruling predicate answers for the three cards and nothi
   // seam, a card with no store behind it, and anything that is not a card token.
   for (const other of ["card:9", "card:10", "card:14", "seam:gate-zero-read-only-outcome-producer",
     "", "16c7cdfb-b675-4b6a-bbff-4bbdab46baf8", 11, null, undefined, {}, Symbol("card:11")])
-    assert.equal(readers.ruledCardBinding(other), null, `${String(other)} answered as a ruled card`);
+    assert.equal(binding.ruledCardBinding(other), null, `${String(other)} answered as a ruled card`);
 });
 
-test("SURFACE: the export list of all three modules is exactly enumerated", () => {
+test("SURFACE: the shared predicate is on no public namespace of this slice", () => {
+  // THE THIRD CORRECTION'S FINDING, asserted as a property rather than as a
+  // count. The predicate is shared — the gate asks the same function — and
+  // sharing it through the reader's public surface is what the review refused:
+  // the reader module promises four names, and a fifth is a wider surface
+  // whether or not the fifth is narrow.
   for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]])
+    assert.equal(Object.hasOwn(namespace, "ruledCardBinding"), false,
+      `the shared predicate is a public name of ${label} again`);
+  assert.deepEqual(Object.keys(readers).sort(), [...EXPECTED_EXPORTS.readers].sort(),
+    "the reader module no longer promises exactly four public names");
+  // And it IS reachable where it lives, or the clause above would hold vacuously
+  // over a predicate nobody can call.
+  assert.equal(typeof binding.ruledCardBinding, "function");
+  assert.notEqual(binding.ruledCardBinding("card:11"), null);
+});
+
+test("SURFACE: the export list of all four modules is exactly enumerated", () => {
+  for (const [label, namespace] of SWEPT_NAMESPACES())
     assert.deepEqual(Object.keys(namespace).sort(), [...EXPECTED_EXPORTS[label]].sort(), label);
-  // No classifier, no binder, no conditional name anywhere on the surface.
-  for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]])
+  // No classifier, no binder, no conditional name anywhere on the surface — the
+  // internal one included, since a name that would be refused in public is not
+  // made acceptable by the path it sits behind.
+  for (const [label, namespace] of SWEPT_NAMESPACES())
     for (const name of Object.keys(namespace)) {
       assert.ok(!/^(classify|evaluate|derive|bind|create|set|would)/.test(name),
         `${label}.${name} is a binder or classifier name on the public surface`);
@@ -873,7 +907,8 @@ test("SURFACE: the export list of all three modules is exactly enumerated", () =
   // The ruling table, the findings vocabulary, the reason ids, the seam list and
   // the producer restatement are all gone from the surface. Naming them here
   // means a future edit that re-exports one fails on this line.
-  for (const gone of ["GATE_ZERO_SEAM_RULINGS", "GATE_ZERO_SEAM_STORE_REFS", "seamRulingDecisionRef",
+  for (const gone of ["ruledCardBinding",
+    "GATE_ZERO_SEAM_RULINGS", "GATE_ZERO_SEAM_STORE_REFS", "seamRulingDecisionRef",
     "DECISION_ID", "GATE_ZERO_SEAM_FINDINGS", "GATE_ZERO_SEAM_READER_REASON_IDS",
     "GATE_ZERO_SEAM_READER_SEAMS", "GATE_ZERO_PRODUCER_SEAM_NOT_BUILT", "gateZeroSeamRulingStatus",
     "wouldAdmitPredecessorOutcome", "wouldReportSchedulerCanary", "wouldReportGateConclusion"]) {
@@ -1237,7 +1272,7 @@ test("SWEEP: every export of every seam module, constants and callables alike", 
     delete process.env[name];
   }
   try {
-    for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]]) {
+    for (const [label, namespace] of SWEPT_NAMESPACES()) {
       for (const [name, value] of Object.entries(namespace)) {
         const at = `${label}.${name}`;
         if (typeof value !== "function") { assertSwept(at, value); continue; }
@@ -3513,19 +3548,36 @@ test("PRODUCER: binding the gate's own answer still does not move, now that read
 // The import graph, parsed rather than grepped.
 // ---------------------------------------------------------------------------
 
-/** V8's own ESM parser, via vm.SourceTextModule in a child process. */
+/**
+ * V8's own ESM parser, via vm.SourceTextModule in a child process.
+ *
+ * IT WALKS SUBDIRECTORIES, and that is the third correction's doing rather than
+ * tidiness: the shared ruling predicate moved to src/internal/, and a scan that
+ * stopped at the top level would have reported an import graph with the predicate
+ * missing from it — every clause below would have passed over a file the graph
+ * could not see. Keys are paths relative to src, so `internal/...` is a key like
+ * any other; specifiers are left EXACTLY as the module wrote them, and the
+ * resolution to a key happens in `resolveFrom` where it can be read.
+ */
 function moduleImports(directory) {
   const script = `
     const { readdirSync, readFileSync } = require("node:fs");
-    const { join } = require("node:path");
+    const { join, relative, sep } = require("node:path");
     const vm = require("node:vm");
-    const dir = process.argv[1];
+    const root = process.argv[1];
     const out = {};
-    for (const name of readdirSync(dir).sort()) {
-      if (!name.endsWith(".js")) continue;
-      const source = readFileSync(join(dir, name), "utf8");
-      out[name] = new vm.SourceTextModule(source, { identifier: name }).dependencySpecifiers;
-    }
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name))) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) { walk(full); continue; }
+        if (!entry.name.endsWith(".js")) continue;
+        const key = relative(root, full).split(sep).join("/");
+        const source = readFileSync(full, "utf8");
+        out[key] = new vm.SourceTextModule(source, { identifier: key }).dependencySpecifiers;
+      }
+    };
+    walk(root);
     process.stdout.write(JSON.stringify(out));
   `;
   const run = spawnSync(process.execPath, ["--experimental-vm-modules", "-e", script, directory],
@@ -3534,10 +3586,38 @@ function moduleImports(directory) {
   return JSON.parse(run.stdout);
 }
 
+/**
+ * Where a specifier written IN `from` lands, as a key of the import graph.
+ *
+ * Relative specifiers only: a bare one ("pg") is not a module in src and is
+ * returned unchanged, so a clause that asks "who imports this file" never
+ * matches one. This is the whole resolution step, written once, so that a module
+ * in a subdirectory naming `../gate-zero-seam-rulings.v5.js` and one at the top
+ * naming `./gate-zero-seam-rulings.v5.js` are the same answer to the same
+ * question — the alternative is a clause that silently stops counting importers
+ * the moment one of them moves a directory.
+ */
+function resolveFrom(from, specifier) {
+  if (!specifier.startsWith(".")) return specifier;
+  const parts = from.split("/").slice(0, -1);
+  for (const step of specifier.split("/")) {
+    if (step === ".") continue;
+    if (step === "..") { parts.pop(); continue; }
+    parts.push(step);
+  }
+  return parts.join("/");
+}
+
 test("ISOLATION: the store module is reached from one place, and nothing in src reaches a fixture", () => {
   const imports = moduleImports(SRC);
   assert.ok(Object.keys(imports).length > 100, "every module in src must have been parsed");
   assert.ok(Object.hasOwn(imports, READERS_FILE));
+  // The subdirectory walk is load-bearing for every clause below that names it.
+  assert.ok(Object.hasOwn(imports, BINDING_FILE),
+    "the import graph does not include the internal predicate, so nothing below is proved of it");
+  // Non-vacuous: resolution really does fold a parent-relative specifier.
+  assert.equal(resolveFrom(BINDING_FILE, "../gate-zero-seam-rulings.v5.js"), RULINGS_FILE);
+  assert.equal(resolveFrom(READERS_FILE, `./${BINDING_FILE}`), BINDING_FILE);
 
   const offenders = Object.entries(imports)
     .filter(([, specifiers]) => specifiers.some(one =>
@@ -3550,7 +3630,7 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   // The reader is the only module that opens the STORES, so a second consumer
   // of a store is red on sight rather than red after an incident.
   const importersOf = module => Object.entries(imports)
-    .filter(([, specifiers]) => specifiers.includes(`./${module}`))
+    .filter(([name, specifiers]) => specifiers.some(one => resolveFrom(name, one) === module))
     .map(([name]) => name).sort();
   assert.deepEqual(importersOf(STORES_FILE), [READERS_FILE],
     "the stores module has an importer other than the reader");
@@ -3561,12 +3641,29 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   // any non-null ruling was a bound seam — which is half of the test the reader
   // applies, so a ruling naming another registered store made the gate say bound
   // while the reader refused. The table is read in ONE place, by the ONE
-  // predicate that also holds the store half, and the gate imports that
-  // predicate. A SECOND importer of this table is the drift itself.
-  assert.deepEqual(importersOf(RULINGS_FILE), [READERS_FILE],
-    "the ruling table has an importer other than the reader, which is how the two predicates drifted");
+  // predicate that also holds the store half. A SECOND importer of this table is
+  // the drift itself.
+  assert.deepEqual(importersOf(RULINGS_FILE), [BINDING_FILE],
+    "the ruling table has an importer other than the shared predicate, which is how the two drifted");
   assert.equal(imports[GATE_FILE].includes(`./${RULINGS_FILE}`), false,
-    "the gate reads the ruling table directly again instead of the reader's predicate");
+    "the gate reads the ruling table directly again instead of the shared predicate");
+  assert.equal(imports[READERS_FILE].includes(`./${RULINGS_FILE}`), false,
+    "the reader reads the ruling table directly again, beside the predicate that answers for it");
+
+  // AND THE PREDICATE IS SHARED THROUGH AN INTERNAL PATH, WHICH IS THE THIRD
+  // CORRECTION'S FINDING. Exactly two modules import it — the readers and the
+  // gate, the two that must not disagree — it imports nothing but the ruling
+  // table, and no public namespace of this slice carries its name (asserted on
+  // the surface test above). A third importer, or a re-export, is how a
+  // deliberately internal surface becomes a public one by accident.
+  assert.deepEqual(importersOf(BINDING_FILE), [GATE_FILE, READERS_FILE].sort(),
+    "the shared predicate has an importer other than the two modules that ask it");
+  assert.deepEqual(imports[BINDING_FILE], [`../${RULINGS_FILE}`],
+    "the shared predicate imports something other than the ruling table it narrows");
+  for (const [name, source] of Object.keys(imports)
+    .map(name => [name, readFileSync(join(SRC, name), "utf8")]))
+    assert.equal(/export\s+\{[^}]*\bruledCardBinding\b/.test(source), false,
+      `${name} re-exports the shared predicate, which puts it back on a public surface`);
   // And the gate reaches the readers directly, which is what "no caller-supplied
   // reader" costs: a module-private import and nothing else.
   assert.ok(imports[GATE_FILE].includes(`./${READERS_FILE}`),
