@@ -2073,9 +2073,9 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // The three agents the v25 registry successor admitted. THE CANARY IS NOT
   // DEFINITION-ONLY BY THIS PREDICATE and must not be pinned as if it were:
   // isDefinitionOnlyLaunchd asks whether the plist carries any trigger at all,
-  // and the canary carries a real hourly StartInterval. What keeps it
-  // uninstalled is ops/config-as-code.py's DEFINITION_ONLY list, which is a
-  // different mechanism in a different file, so that is where this asserts it.
+  // and the canary carries a real hourly StartInterval. What KEPT it uninstalled
+  // until 2026-09-12 was ops/config-as-code.py's DEFINITION_ONLY list, which is
+  // a different mechanism in a different file, so that is where this asserts it.
   for (const label of ["com.carr.canonical-fast-forward", "com.carr.canonical-dirty-watchdog",
     "com.carr.gate-zero-canary"]) {
     const row = launchd.find(entry => entry.launchd_label === label);
@@ -2089,7 +2089,18 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const definitionOnlyBlock = configAsCode.slice(
     configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
     configAsCode.indexOf("\n}\n", configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
-  assert.match(definitionOnlyBlock, /"com\.carr\.gate-zero-canary\.plist"/);
+  // THE CANARY'S SCHEDULE IS STARTED, so this clause is the mirror of what it
+  // was until 2026-09-12: the plist must NOT be a key of DEFINITION_ONLY any
+  // more. Joe's blanket approval (decision idempotency
+  // 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84) and his 2026-09-13 ruling that the
+  // orchestrator runs activation commands itself are the deliberate removal the
+  // hold's own reason asked for, and only launchd firing on its own can answer
+  // step:scheduler-active-receipt -- a hand dispatch through the wrapper proves
+  // the wrapper, never the scheduler. The janitor key is asserted PRESENT in
+  // the same breath so a block that was mis-sliced to nothing cannot satisfy
+  // the doesNotMatch clauses vacuously.
+  assert.match(definitionOnlyBlock, /"com\.carr\.repo-hygiene-janitor\.plist":/);
+  assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.gate-zero-canary\.plist"/);
   assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.canonical-fast-forward\.plist"/);
   assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.canonical-dirty-watchdog\.plist"/);
   assert.deepEqual(launchd.flatMap(row => row.physical_authority_refs)

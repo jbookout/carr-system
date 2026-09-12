@@ -117,13 +117,15 @@ PREREQUISITE_CHECK = machine_prerequisites
 # ran its git commands against the live checkout instead, rewrote local main
 # onto its own seed commits, and marked the repository core.bare true.
 #
-# THIS FILE WAS ASSESSED AS READ-ONLY AND THAT WAS WRONG. Line ~844 runs
-# `git -C REPO config core.hooksPath ops/githooks`, which is a WRITE. Under an
-# inherited GIT_DIR that write lands in whatever repository the variable names,
-# not in REPO — so `config-as-code.py install` invoked from a hook could point a
-# different repository's hooksPath at this repo's ops/githooks. The four reads
-# are the milder half: misdirected, they yield a wrong drift verdict rather than
-# a wrong write, which is a lie in a checker whose entire job is detecting drift.
+# THIS FILE WAS ASSESSED AS READ-ONLY AND THAT WAS WRONG. It used to run
+# `git -C REPO config core.hooksPath ops/githooks`, which is a WRITE: under an
+# inherited GIT_DIR it lands in whatever repository the variable names, not in
+# REPO, so `config-as-code.py install` invoked from a hook could point a
+# different repository's hooksPath at this repo's ops/githooks. That write is
+# GONE — core.hooksPath is no-touch now — which removes the worst case but not
+# the reason for this scrubber: the remaining git calls are reads, and
+# misdirected they yield a wrong drift verdict, which is a lie in a checker
+# whose entire job is detecting drift.
 #
 # GIT_CONFIG_COUNT is the subtle one and is why this list is not just GIT_DIR:
 # its KEY_<n>/VALUE_<n> pairs can set core.worktree and relocate a call with
@@ -280,18 +282,22 @@ DEFINITION_ONLY: dict[str, str] = {
         "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
         "gate is a separately reviewed live-effect packet, so the definition is "
         "written down and left uninstalled until that packet is approved",
-    # Added 2026-09-11 with the canary itself. The job is a no-op and its only
-    # product is an ops.run row bound to a receipt, so nothing it does is
-    # dangerous -- what is gated is the ACT OF STARTING A SCHEDULE, which is a
-    # human's to take. It is held here rather than simply left out of the repo
-    # because the alternative is a schedule that exists only as a command
-    # somebody has to remember to type, which is the two-homes disease this
-    # whole file exists to cure.
-    "com.carr.gate-zero-canary.plist":
-        "the Gate Zero scheduler canary would begin producing scheduled run "
-        "rows the moment it loads; starting a schedule is Joe's act, so the "
-        "definition is written down and left uninstalled until he takes it off "
-        "this list deliberately",
+    # com.carr.gate-zero-canary.plist was held here from 2026-09-11 to
+    # 2026-09-12 with the reason "starting a schedule is Joe's act, so the
+    # definition is written down and left uninstalled until he takes it off this
+    # list deliberately". THAT ACT IS TAKEN. Joe's blanket approval (decision
+    # idempotency 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84, "I approve everything")
+    # together with his 2026-09-13 ruling that the orchestrator runs release and
+    # activation commands itself is the deliberate removal the reason asked for,
+    # so the canary reconciles like any other agent and the next `install
+    # --apply` loads it. What this buys is the only question Gate Zero's fourth
+    # predecessor actually asks: a hand dispatch through bin/run-scheduled.sh
+    # proves the WRAPPER mints a receipt, and only launchd firing on its own
+    # proves the SCHEDULER does -- which is what `step:scheduler-active-receipt`
+    # reads. ops/config-as-code-selftest.py now asserts this release, the way it
+    # already asserts the 2026-08-26 control-plane tick cutover, so putting the
+    # canary back on the list is a change a test refuses rather than a silent
+    # revert.
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
@@ -1443,6 +1449,16 @@ def definition_only_installed_plists():
 
 
 def cmd_check():
+    # THE OBSERVATION TRAILS THE VERDICT. _cmd_check returns this command's
+    # whole judgement; the core.hooksPath line is appended after it because it
+    # is an observation about a no-touch setting, so it changes neither the exit
+    # code nor the first line the health row reads.
+    verdict = _cmd_check()
+    print(git_hooks_path_report())
+    return verdict
+
+
+def _cmd_check():
     # SEVERITY IS NOT COSMETIC HERE, and the 2026-08-08 incident is why.
     # A tracked item MISSING from the machine means a protection that was
     # supposed to be running is not running. A tracked item merely DIFFERENT
@@ -1670,6 +1686,80 @@ def write_claude_settings(path, document, before, sink=None):
     return event
 
 
+# The conventional relative value, kept as the name of a shape this file
+# RECOGNISES. Nothing here writes it: see git_hooks_path_report.
+GIT_HOOKS_RELATIVE = "ops/githooks"
+
+
+def git_hooks_path_conformant(configured: str, hooks_dir: str) -> bool:
+    """Does an ALREADY-CONFIGURED core.hooksPath point at these same hooks?
+
+    A CLASSIFIER FOR A REPORT, NOT A TEST THAT PRECEDES A WRITE. core.hooksPath
+    lives in the single .git/config that every worktree on this machine reads,
+    and install writes it under no condition whatever (see cmd_install). The
+    only caller is git_hooks_path_report, which prints what is observed so a
+    human can decide; a future caller that uses this answer to write the setting
+    would reintroduce exactly the hazard the no-touch contract exists for.
+
+    Install used to write the relative "ops/githooks" unconditionally, which
+    turned the ABSOLUTE canonical path — the designed state, as
+    ops/prepush-floor-selftest.py says in as many words ("always canonical's —
+    core.hooksPath is one shared path for every worktree") — into a value git
+    resolves against whichever worktree is running the hook. On a Mac carrying
+    ~50 worktrees that silently changed WHICH pre-push runs in every one of
+    them, as a side effect of a job about plists. Found and undone by hand
+    during the 2026-09-12 Gate Zero activation.
+
+    The test is RESOLUTION, not string equality, so two shapes count as pointing
+    at these hooks:
+
+      * the literal relative default, which git resolves per worktree but which
+        names this repository's own hooks directory in a canonical checkout;
+      * an absolute path whose realpath is this repo's ops/githooks.
+
+    A relative value that is NOT the default is non-conformant: git resolves it
+    per worktree, so it names no single directory this function could honestly
+    compare. Unset is non-conformant too — that is the fresh-machine case, and
+    it is now reported rather than repaired.
+    """
+    if not configured:
+        return False
+    if configured == GIT_HOOKS_RELATIVE:
+        return True
+    if not os.path.isabs(configured):
+        return False
+    return os.path.realpath(configured) == os.path.realpath(hooks_dir)
+
+
+def git_hooks_path_report() -> str:
+    """One INFORMATIONAL line for `check`: what core.hooksPath is. Nothing else.
+
+    This is the whole of what this tool has to say about a setting it may not
+    touch. It never writes, and it never contributes to the check's exit code —
+    a machine whose hooks are off is not drift this installer may silently
+    repair, because the repair would land in the one .git/config every worktree
+    shares. It is printed AFTER the verdict on purpose: the health row reads
+    only the first line of this command's output, so an observation must never
+    take the headline from a real finding.
+    """
+    hooks_dir = os.path.join(REPO, "ops", "githooks")
+    observed = subprocess.run(
+        ["git", "-C", REPO, "config", "--get", "core.hooksPath"],
+        capture_output=True, text=True, env=_git_env()).stdout.strip()
+    if not observed:
+        note = (f"unset, so git runs .git/hooks and the guards in {hooks_dir} "
+                "are not active; enabling them is a human's own command")
+    elif observed == GIT_HOOKS_RELATIVE:
+        note = ("the relative default, which git resolves against whichever "
+                "worktree runs the hook")
+    elif git_hooks_path_conformant(observed, hooks_dir):
+        note = f"resolves to {hooks_dir}"
+    else:
+        note = (f"does not resolve to {hooks_dir}; this machine's hook "
+                "resolution is someone else's deliberate setting")
+    return f"  git core.hooksPath: {observed or '(unset)'} — {note} [informational]"
+
+
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     settings_existed = os.path.exists(SETTINGS)
@@ -1869,27 +1959,39 @@ def cmd_install(apply):
     # branch protection is unavailable on a private free-plan repo — so the pull
     # request review team-loops T39 relied on has no server-side replacement.
     # ops/githooks/pre-push refuses a direct push to main from any identity but
-    # the owner's. It installs HERE rather than being a step in the runbook,
-    # because a guard that depends on someone remembering a config command is
-    # not a guard. Machine config ships with the code; that is what this file is.
+    # the owner's. The hooks ship with the code and this block makes them
+    # executable. That is ALL it does.
+    #
+    # core.hooksPath IS NO-TOUCH, UNCONDITIONALLY. Install does not set it, does
+    # not reconcile it, and does not read it in order to decide whether to write
+    # it — not when it is unset, not when it is relative, not when it is
+    # absolute, not when it names another repository's hooks. ONE .git/config
+    # holds that value for every worktree on this machine, so any write here
+    # changes which pre-push runs in all of them as a side effect of a job about
+    # plists: an apply run for two launch agents re-pointed ~50 worktrees away
+    # from the canonical hooks ops/prepush-floor-selftest.py relies on, and the
+    # absolute canonical path had to be restored by hand during the 2026-09-12
+    # Gate Zero activation. A conditional write is the same hazard with a
+    # narrower trigger, so there is no condition under which this code writes.
+    #
+    # WHICH LEAVES THE FRESH-MACHINE CASE TO A HUMAN, deliberately. Whether hook
+    # resolution is enabled at all is REPORTED by `config-as-code.py check`
+    # (git_hooks_path_report below) as an observation that never changes the
+    # value and never changes the exit code. Setting it on a new clone is one
+    # documented command a person runs once, which is a smaller cost than an
+    # installer that can silently re-aim every worktree on the machine.
     hooks_dir = os.path.join(REPO, "ops", "githooks")
     if os.path.isdir(hooks_dir):
-        current = subprocess.run(
-            ["git", "-C", REPO, "config", "--get", "core.hooksPath"],
-            capture_output=True, text=True).stdout.strip()
-        if current == "ops/githooks":
-            print("  git hooksPath already points at ops/githooks")
-        else:
-            print(f"  git hooksPath: {current or '(unset)'} -> ops/githooks"
-                  + ("" if apply else "   [would set]"))
         if apply:
-            subprocess.run(["git", "-C", REPO, "config", "core.hooksPath", "ops/githooks"],
-                           check=False, env=_git_env())
             for h in sorted(os.listdir(hooks_dir)):
                 p = os.path.join(hooks_dir, h)
                 if os.path.isfile(p):
                     os.chmod(p, os.stat(p).st_mode | 0o111)
-            print("  git hooks installed (pre-push guards main)")
+            print("  git hooks made executable "
+                  "(core.hooksPath untouched — `check` reports the observed value)")
+        else:
+            print("  would make ops/githooks executable "
+                  "(core.hooksPath untouched — `check` reports the observed value)")
 
     if not apply:
         print("\nDRY RUN — nothing written. Re-run with --apply.")

@@ -8,11 +8,21 @@ import io
 import json
 import os
 import plistlib
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# THE ONE SCRUBBER, not a local copy (rule a8c55a47). The hooksPath fixture below
+# runs `git init`, and ops/selftest-git-isolation-check.py requires every selftest
+# that builds a git repository to reach git through ops/git_env.py: an inherited
+# GIT_DIR outranks both cwd and -C, which is how a fixture destroyed local main on
+# 2026-08-14. fixture_env() additionally hides system and global config, so the
+# core.hooksPath this fixture reads back can only be the one it set itself.
+sys.path.insert(0, os.path.join(REPO, "ops"))
+from git_env import fixture_env  # noqa: E402
 spec = importlib.util.spec_from_file_location(
     "config_as_code", os.path.join(REPO, "ops", "config-as-code.py")
 )
@@ -561,6 +571,223 @@ def main():
             and str(absent_script) in json.dumps(restored_settings.get("hooks", {}))
         )
         mod.IS_PRIMARY = original_primary
+
+        # THE GATE ZERO SCHEDULER CANARY IS EXPECTED INSTALLED, and the point of
+        # asserting it is that the opposite was true yesterday. The plist was
+        # held in DEFINITION_ONLY from 2026-09-11 so that STARTING A SCHEDULE
+        # stayed a human act; Joe's activation approval took that act on
+        # 2026-09-12, and `step:scheduler-active-receipt` — the Gate Zero
+        # predecessor the canary exists for — can only be answered by launchd
+        # firing on its own, never by a hand dispatch through the wrapper. So a
+        # revert that quietly put the canary back on the hold list would leave
+        # that predecessor permanently unanswerable while every check stayed
+        # green. This pins the release the way tick_released pins the 2026-08-26
+        # control-plane cutover.
+        #
+        # TWO HALVES, because the flag alone proves nothing about the installer:
+        # the plist must also be PLANNED as an ordinary write. The plan is taken
+        # from a DRY RUN deliberately — the fixtures above record twice over what
+        # happens when a selftest lets `launchctl load` really run against a temp
+        # HOME that is deleted moments later, and the question here is what the
+        # reconciler INTENDS, which the dry run answers in full.
+        canary_plist = "com.carr.gate-zero-canary.plist"
+        canary_released = canary_plist not in mod.DEFINITION_ONLY
+        (launchd / canary_plist).write_text(
+            (Path(REPO) / "ops" / "launchd" / canary_plist).read_text(encoding="utf-8"),
+            encoding="utf-8")
+        # The wrapper and the canary script itself: missing_targets() skips any
+        # agent whose program was never built, so without these the plan would
+        # read SKIP for a reason that has nothing to do with the hold.
+        for program in ("bin/run-scheduled.sh", "bin/gate-zero-canary.sh"):
+            built = repo / program
+            built.parent.mkdir(parents=True, exist_ok=True)
+            built.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mod.IS_PRIMARY = True
+        with contextlib.redirect_stdout(io.StringIO()) as canary_out:
+            canary_plan_rc = mod.cmd_install(False)
+        canary_output = canary_out.getvalue()
+        # AND THE MIRROR OF THE JANITOR CASE BELOW: an installed copy of a HELD
+        # agent is a refusal ("DEFINITION ONLY, MUST NOT BE INSTALLED") however
+        # exactly its bytes match the repo, because the gate on it had not
+        # passed. A released agent's installed copy is ordinary configuration,
+        # so the same fixture — the concrete render sitting in LaunchAgents —
+        # must now be an ordinary tracked pair and no refusal at all. Nothing is
+        # loaded to prove this: cmd_check only reads.
+        live_canary = Path(mod.LAUNCHD_SRC) / canary_plist
+        live_canary.write_text(
+            mod.concrete((launchd / canary_plist).read_text(encoding="utf-8")),
+            encoding="utf-8")
+        canary_labels = [label for label, _live, _repo in mod.pairs()]
+        canary_installed_allowed = mod.definition_only_installed_plists()
+        with contextlib.redirect_stdout(io.StringIO()) as canary_check_out:
+            mod.cmd_check()
+        canary_check_output = canary_check_out.getvalue()
+        mod.IS_PRIMARY = original_primary
+        canary_planned = (
+            canary_plan_rc == 0
+            and f"would write  {live_canary}" in canary_output
+            and f"SKIP  {canary_plist}" not in canary_output
+            and canary_installed_allowed == []
+            and f"launchd {canary_plist}" in canary_labels
+            and "DEFINITION ONLY, MUST NOT BE INSTALLED" not in canary_check_output
+        )
+        live_canary.unlink()
+        (launchd / canary_plist).unlink()
+
+        # core.hooksPath IS NO-TOUCH, and this is the one setting in this file
+        # whose blast radius is the whole machine rather than the repository it
+        # is read from: it lives in the single .git/config every worktree shares.
+        # Install used to write the relative "ops/githooks" whenever the value
+        # was unset or non-default, so an apply run for two plists silently
+        # re-pointed hook resolution in ~50 worktrees from canonical's hooks to
+        # each worktree's own — the state ops/prepush-floor-selftest.py relies on
+        # being canonical's. It had to be undone by hand during the 2026-09-12
+        # Gate Zero activation, which is not a repair whoever runs the installer
+        # next will know to perform.
+        #
+        # THE CONTRACT IS UNCONDITIONAL, so the fixture is a sweep rather than a
+        # pair: whatever the value is when apply starts — unset, a relative
+        # value that is not the default, the absolute canonical path, an
+        # absolute path pointing at some other hooks directory — .git/config is
+        # byte-identical when apply finishes. Three of these four the old code
+        # would have rewritten, so this is not a restatement of what already
+        # passed. What install may still do is make the hooks executable, and
+        # what it may NOT do instead is left to `check` to report.
+        subprocess.run(["git", "init", "-q", str(repo)],
+                       env=fixture_env(), check=True, capture_output=True)
+        fixture_hooks = repo / "ops" / "githooks"
+        fixture_hooks.mkdir(parents=True, exist_ok=True)
+        (fixture_hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        foreign_hooks = repo / "ops" / "not-githooks"
+        foreign_hooks.mkdir(parents=True, exist_ok=True)
+        local_git_config = repo / ".git" / "config"
+
+        def preset_hooks_path(value: str | None) -> None:
+            """Set the fixture's starting value through the REAL subprocess."""
+            if value is None:
+                subprocess.run(
+                    ["git", "-C", str(repo), "config", "--local",
+                     "--unset-all", "core.hooksPath"],
+                    env=fixture_env(), capture_output=True)
+            else:
+                subprocess.run(
+                    ["git", "-C", str(repo), "config", "--local",
+                     "core.hooksPath", value],
+                    env=fixture_env(), check=True, capture_output=True)
+
+        def fixture_hooks_path() -> str:
+            return subprocess.run(
+                ["git", "-C", str(repo), "config", "--local", "--get", "core.hooksPath"],
+                env=fixture_env(), capture_output=True, text=True).stdout.strip()
+
+        # EVERY git ARGV THE INSTALLER USES, teed off as it runs. A final-value
+        # assertion cannot tell "did not write" from "wrote the same string
+        # back", and the second is a defect under a contract that forbids the
+        # write itself — under an inherited GIT_DIR a write aimed at REPO lands
+        # in another repository entirely, where this fixture would never see it.
+        installer_argv: list[list[str]] = []
+
+        class RecordingSubprocess:
+            """subprocess for the module under test, with argv recorded.
+
+            __getattr__ delegates everything else (SubprocessError, DEVNULL,
+            CalledProcessError, …) so swapping this in changes what is OBSERVED
+            and nothing about what runs.
+            """
+
+            def run(self, args, *positional, **keyword):
+                if isinstance(args, (list, tuple)):
+                    installer_argv.append([str(part) for part in args])
+                return subprocess.run(args, *positional, **keyword)
+
+            def __getattr__(self, name):
+                return getattr(subprocess, name)
+
+        mod.IS_PRIMARY = True
+        original_module_subprocess = mod.subprocess
+        mod.subprocess = RecordingSubprocess()
+        hooks_path_untouched: dict[str, bool] = {}
+        try:
+            for label, preset in (
+                ("unset", None),
+                ("relative", "ops/other-hooks"),
+                ("absolute", str(fixture_hooks)),
+                ("foreign", str(foreign_hooks)),
+            ):
+                preset_hooks_path(preset)
+                config_before = local_git_config.read_bytes()
+                value_before = fixture_hooks_path()
+                with contextlib.redirect_stdout(io.StringIO()) as hooks_out:
+                    hooks_rc = mod.cmd_install(True)
+                hooks_output = hooks_out.getvalue()
+                hooks_path_untouched[label] = (
+                    hooks_rc == 0
+                    and local_git_config.read_bytes() == config_before
+                    and fixture_hooks_path() == value_before
+                    and "core.hooksPath untouched" in hooks_output
+                    and "-> ops/githooks" not in hooks_output
+                )
+            install_argv = list(installer_argv)
+            # LIVENESS, because the assertion below is that a list is EMPTY and
+            # an empty list is also what a recorder wired to nothing produces.
+            # `check` reads core.hooksPath through the very module attribute a
+            # write would go out through, so this proves a core.hooksPath argv
+            # reaches the recorder whenever one is issued — and therefore that
+            # the installer's silence is the installer's, not the spy's.
+            with contextlib.redirect_stdout(io.StringIO()):
+                mod.cmd_check()
+            reporter_argv = installer_argv[len(install_argv):]
+        finally:
+            mod.subprocess = original_module_subprocess
+        # The executable bit is the half install may still do, and dropping the
+        # whole block would satisfy every assertion above.
+        hooks_stay_executable = os.access(fixture_hooks / "pre-push", os.X_OK)
+
+        def names_hooks_path(argv: list[str]) -> bool:
+            return (argv[:1] == ["git"] and "config" in argv
+                    and any("core.hooksPath" in part for part in argv))
+
+        installer_never_names_hooks_path = (
+            [argv for argv in install_argv if names_hooks_path(argv)] == []
+            and [argv for argv in reporter_argv if names_hooks_path(argv)] != []
+        )
+
+        # WHAT INSTALL MAY NOT REPAIR, `check` REPORTS. The report is
+        # informational in both directions: it names the observed value, and it
+        # moves neither the exit code nor the first line the health row reads,
+        # so a machine whose hooks are off is visible without this tool ever
+        # touching the setting or going chronically red over it.
+        preset_hooks_path(str(foreign_hooks))
+        with contextlib.redirect_stdout(io.StringIO()) as foreign_check_out:
+            foreign_check_rc = mod.cmd_check()
+        foreign_check_output = foreign_check_out.getvalue()
+        preset_hooks_path(str(fixture_hooks))
+        with contextlib.redirect_stdout(io.StringIO()) as resolving_check_out:
+            resolving_check_rc = mod.cmd_check()
+        resolving_check_output = resolving_check_out.getvalue()
+        mod.IS_PRIMARY = original_primary
+        hooks_path_reported_informationally = (
+            f"git core.hooksPath: {foreign_hooks} —" in foreign_check_output
+            and "[informational]" in foreign_check_output
+            and f"git core.hooksPath: {fixture_hooks} —" in resolving_check_output
+            # Same verdict either way: the value is reported, never judged.
+            and foreign_check_rc == resolving_check_rc
+            # And it is never the headline the health row prints.
+            and "core.hooksPath" not in foreign_check_output.splitlines()[0]
+            and fixture_hooks_path() == str(fixture_hooks)
+        )
+        # The predicate's own boundary, so the report above cannot be reading a
+        # helper that says yes to everything: a relative value that is NOT the
+        # default names no single directory (git resolves it per worktree), and
+        # an absolute path somewhere else is a different hooks directory.
+        conformance_boundary = (
+            mod.git_hooks_path_conformant(mod.GIT_HOOKS_RELATIVE, str(fixture_hooks))
+            and mod.git_hooks_path_conformant(str(fixture_hooks), str(fixture_hooks))
+            and not mod.git_hooks_path_conformant("", str(fixture_hooks))
+            and not mod.git_hooks_path_conformant("ops/other-hooks", str(fixture_hooks))
+            and not mod.git_hooks_path_conformant(
+                str(repo / "ops" / "not-githooks"), str(fixture_hooks))
+        )
     cases = [
         ("ephemeral marker is honoured inside frontmatter",
          ephemeral_marker_honoured),
@@ -665,6 +892,26 @@ def main():
          and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
         ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
          tick_released),
+        ("the Gate Zero scheduler canary is released from the definition-only "
+         "hold (Joe's activation approval, 2026-09-12)", canary_released),
+        ("the installer plans the canary as an ordinary launchd write, and "
+         "reports it neither skipped nor wrongly installed", canary_planned),
+        ("apply leaves an UNSET core.hooksPath byte-identical",
+         hooks_path_untouched["unset"]),
+        ("apply leaves a non-default RELATIVE core.hooksPath byte-identical",
+         hooks_path_untouched["relative"]),
+        ("apply leaves an ABSOLUTE core.hooksPath that resolves to these hooks "
+         "byte-identical", hooks_path_untouched["absolute"]),
+        ("apply leaves a FOREIGN core.hooksPath byte-identical",
+         hooks_path_untouched["foreign"]),
+        ("apply still makes the hooks executable", hooks_stay_executable),
+        ("the installer issues no `git config core.hooksPath` call at all, "
+         "under any starting value", installer_never_names_hooks_path),
+        ("check reports the observed core.hooksPath without changing it, "
+         "without moving the exit code, and never as the headline",
+         hooks_path_reported_informationally),
+        ("the hooksPath conformance test accepts only the default and an "
+         "absolute path that resolves here", conformance_boundary),
         ("the repo-hygiene janitor agent is held as a definition only",
          janitor_held),
         ("check accepts the janitor agent's intended absence in silence",
