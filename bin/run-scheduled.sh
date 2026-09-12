@@ -146,13 +146,18 @@
 #                 from the row's own run_key and requires equality, so a receipt
 #                 minted for a different job binds nothing.
 #
-# THE FILE IS THIS SCRIPT'S OWN, and no other filesystem object is ever read.
-# The receipt is written under the state directory at a path derived from those
-# hashes, then read back and required to equal what was written, byte for byte.
-# If that path is a symlink, a FIFO, a device, a directory or anything else that
-# is not already a plain regular file, this script writes nothing and reads
-# nothing. One file per service/run-key pair, truncated and rewritten every run,
-# so the directory cannot grow without bound.
+# THE FILE IS THIS SCRIPT'S OWN, in a directory nobody outside this script can
+# name: out/run-scheduled-receipts/<service-hash>.<run-key-hash>.receipt under
+# the repository this file is installed in ($REPO, which is ${0:A:h:h}). There is
+# no argument and no environment variable that moves it, and a variable that
+# tries to is refused rather than obeyed. The leaf is created with one
+# O_CREAT|O_EXCL|O_NOFOLLOW open, and that descriptor — never the name a second
+# time — is what is checked, written and read back, so nothing can be
+# substituted between the check and the write. Anything already at that path
+# other than a plain regular file of ours with a single link (a symlink, a FIFO,
+# a device, a directory, a hard link) refuses under its own code and is left
+# untouched. One file per service/run-key pair, so the directory cannot grow
+# without bound.
 #
 # REJECT, NEVER REPAIR. A service key or run key carrying a space, a carriage
 # return, a newline, a NUL or any other byte outside [A-Za-z0-9:._-] mints NO
@@ -307,31 +312,72 @@ corr=()
 
 mkdir -p "$REPO/out" 2>/dev/null
 
+# The throttle stamp directory, and ONLY the throttle stamp directory. It
+# holds one epoch-seconds file per heartbeat service/run-key pair so a
+# high-frequency succeeded row records at most once an interval, and a test
+# or a drill points it at a scratch path so it never stamps production
+# state. It does NOT reach the receipt below: a stamp is a timestamp, and
+# evidence is not something a caller gets to place.
+STATE_DIR="${CARR_RUN_SCHEDULED_STATE_DIR:-$REPO/out/run-scheduled-state}"
+
 # ── THE RECEIPT THIS RUN MINTS FOR ITSELF ────────────────────────────────────
 # Minted HERE, after the child exited and after ENDED was stamped, out of this
 # process's own clock and this machine's own entropy. Nothing a caller, a plist
 # or the child writes reaches it — there is no argument and no path to give.
-# The header carries the token's shape and why every field of it is either a
-# hash or something this process made.
 #
-# EVERY REFUSAL IS SILENT, deliberately: this is an observation channel bolted
-# to a wrapper whose founding property is that it cannot break the thing it
-# watches. No hasher on the machine, an unwritable state directory, a receipt
-# path that is not already this script's own regular file, a run key carrying a
-# byte the token shape does not admit — all of them leave `evid` empty and the
-# recorder is called with exactly the arguments it received before receipts
-# existed.
-STATE_DIR="${CARR_RUN_SCHEDULED_STATE_DIR:-$REPO/out/run-scheduled-state}"
-RECEIPT_DIR="$STATE_DIR/receipts"
+# THE DIRECTORY IS NOT SELECTABLE, and that is the whole of the 2026-09-12
+# correction. It used to be $CARR_RUN_SCHEDULED_STATE_DIR/receipts, so whoever
+# set that variable chose the directory this wrapper validated and wrote in —
+# and choosing the directory is choosing the parents, which is choosing the
+# file. It is now derived from THIS SCRIPT'S OWN resolved location and nothing
+# else: $REPO is ${0:A:h:h}, symlinks already resolved, so the answer is fixed
+# by where this file is installed rather than by anything the environment says.
+# Deliberately NOT `git rev-parse --show-toplevel`: rev-parse answers about the
+# CALLER'S working directory, which every launchd job inherits from whoever
+# started it and which a child may have changed, and it needs a git checkout a
+# deployed copy may not be — a caller-controlled input wearing a fixed name.
+# CARR_RUN_SCHEDULED_STATE_DIR still redirects the heartbeat THROTTLE STAMP
+# below, which is a timestamp rather than evidence; it does not move the
+# receipt, and a variable that names the receipt directory outright is refused
+# rather than honoured, so tampering is visible instead of silently obeyed.
+#
+# ONE EXCLUSIVE CREATE, THEN ONE DESCRIPTOR. The leaf is created with
+# O_CREAT|O_EXCL|O_NOFOLLOW (zsh/system's sysopen), and every step after it —
+# fstat, write, rewind, read back — addresses fd 3. The pathname is never
+# resolved a second time, so there is no interval between checking a name and
+# using it: the validate-then-open substitution, the FIFO swapped in after the
+# check, the symlink planted between the two, and the hard link that shares an
+# inode with a stranger are all closed by the same property. What was inspected
+# and what the bytes landed in are one open file, not one name looked up twice.
+#
+# EVERY REFUSAL IS SILENT TO THE JOB AND NAMED IN THE LOG. This is an
+# observation channel bolted to a wrapper whose founding property is that it
+# cannot break the thing it watches, so no refusal touches the child's exit
+# code, output or arguments, and the recorder is called with exactly the
+# arguments it received before receipts existed. What changed on 2026-09-12 is
+# that a refusal is no longer anonymous: the provenance line carries
+# receipt_code=<one of RECEIPT_CODES>, so "this job records no evidence" and
+# "something moved the directory under us" stop looking identical.
+RECEIPT_CODES=(
+  none key_shape dir_not_selectable dir_not_fixed dir_unusable leaf_symlink
+  leaf_not_regular leaf_hard_linked leaf_occupied open_refused fd_identity
+  echo_differs no_clock no_nonce no_hasher no_sysopen mint_shape
+  forbidden_word unregistered
+)
+
 evid=()
 evidence_ref=""
+receipt_code=none
+RECEIPT_DIR=""
+RECEIPT_FILE=""
 
 # The closed union of privileged words the 2026-09-11 standing rule names, swept
-# as a lowercase substring against the minted token before that token can reach
-# the recorder or the provenance line. It passes by construction today — the
-# token is a fixed prefix, digits and hex — and that is exactly the point: the
-# day someone puts a caller's own run key back into it, THIS refuses the token,
-# rather than a reviewer catching it on round nine.
+# as a lowercase substring against the minted token AND against the refusal code
+# before either can reach the recorder or the provenance line. Both pass by
+# construction today — the token is a fixed prefix, digits and hex; the codes are
+# this file's own vocabulary — and that is exactly the point: the day someone
+# puts a caller's own run key back into the token, or names a code `passing`,
+# THIS refuses it rather than a reviewer catching it on round nine.
 RECEIPT_FORBIDDEN=(
   allow commit prompt suppress release read covered drafted proposed queued
   healthy passing ok pass satisfied complete admitted resumed attended verified
@@ -365,12 +411,81 @@ receipt_hash() {
   fi
 }
 
-if receipt_token_ok "$SERVICE" && receipt_token_ok "$RUN_KEY"; then
-  # ONE READ of the clock, snapshotted: $EPOCHREALTIME advances on every
-  # access, so reading it twice gives the seconds of one instant and the
-  # milliseconds of another. strftime runs inside a subshell that EXPORTS
-  # TZ, because the module formats in local time and a receipt in local time
-  # compared against a UTC started_at is a silent hour of drift.
+# The ordered procedure, and the order is the security property: identifiers,
+# then the fixed directory, then the token, then what is already at the leaf,
+# then ONE create, then the descriptor's own identity, then write and read back
+# through that descriptor. Each step's refusal names itself and returns.
+mint_receipt() {
+  local v root candidate lowered word minted_at now_real now_frac nonce
+  local run_key_hash service_hash got gotn wrote
+  local -A lst fst
+
+  # 1 ── the two identifiers, whole, against the whitelist
+  if ! receipt_token_ok "$SERVICE" || ! receipt_token_ok "$RUN_KEY"; then
+    receipt_code=key_shape
+    return 1
+  fi
+
+  # 2 ── NO VARIABLE NAMES THE DIRECTORY. Set one and this refuses; there is no
+  #      spelling of an override that works, and the attempt is in the log.
+  for v in CARR_RUN_SCHEDULED_RECEIPT_DIR CARR_RUN_SCHEDULED_RECEIPT_ROOT \
+           CARR_RUN_SCHEDULED_RECEIPT_FILE CARR_RUN_SCHEDULED_RECEIPTS; do
+    if [ -n "${(P)v:-}" ]; then
+      receipt_code=dir_not_selectable
+      return 1
+    fi
+  done
+
+  # 3 ── the fixed directory, derived from this script's own location. zsh's
+  #      sysopen and zstat are how a shell opens a file exclusively and stats a
+  #      DESCRIPTOR; a zsh without them refuses rather than falling back to a
+  #      path-addressed write that re-resolves the name.
+  zmodload zsh/system 2>/dev/null
+  zmodload zsh/stat 2>/dev/null
+  if (( ! $+builtins[sysopen] || ! $+builtins[zstat] )); then
+    receipt_code=no_sysopen
+    return 1
+  fi
+  root="$REPO/out"
+  root="${root:A}"
+  RECEIPT_DIR="$root/run-scheduled-receipts"
+  # lstat FIRST, per component: `:A` resolution below proves the whole chain
+  # under the resolved root carries no symlink, and the -L test says so about
+  # this component without following it. out/ itself may legitimately be the
+  # install's own symlink — every worktree's out/ is one — which is why the root
+  # is resolved once, deliberately, and everything beneath it is not.
+  if [ -L "$RECEIPT_DIR" ]; then
+    receipt_code=dir_not_fixed
+    return 1
+  fi
+  if [ ! -e "$RECEIPT_DIR" ]; then
+    mkdir -m 700 -p -- "$RECEIPT_DIR" 2>/dev/null
+  fi
+  if [ -L "$RECEIPT_DIR" ] || [ "${RECEIPT_DIR:A}" != "$RECEIPT_DIR" ]; then
+    receipt_code=dir_not_fixed
+    return 1
+  fi
+  if [ ! -d "$RECEIPT_DIR" ] || [ ! -w "$RECEIPT_DIR" ]; then
+    receipt_code=dir_unusable
+    return 1
+  fi
+  if ! zstat -L -H lst -- "$RECEIPT_DIR" 2>/dev/null; then
+    receipt_code=dir_unusable
+    return 1
+  fi
+  # OURS, AND NOT WRITABLE BY ANYONE ELSE. This is what makes the leaf checks
+  # below sufficient: nobody but this user can put anything in this directory,
+  # so a leaf owned by a stranger is not a case that has to be handled.
+  if [ "$lst[uid]" -ne "$UID" ] || (( (lst[mode] & 8#22) != 0 )); then
+    receipt_code=dir_unusable
+    return 1
+  fi
+
+  # 4 ── the token. ONE READ of the clock, snapshotted: $EPOCHREALTIME advances
+  #      on every access, so reading it twice gives the seconds of one instant
+  #      and the milliseconds of another. strftime runs inside a subshell that
+  #      EXPORTS TZ, because the module formats in local time and a receipt in
+  #      local time compared against a UTC started_at is a silent hour of drift.
   zmodload zsh/datetime 2>/dev/null
   minted_at=""
   if [ -n "${EPOCHREALTIME:-}" ]; then
@@ -384,45 +499,132 @@ if receipt_token_ok "$SERVICE" && receipt_token_ok "$RUN_KEY"; then
   # would otherwise leave a stub like `.000Z` looking like a timestamp.
   case "$minted_at" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9].[0-9][0-9][0-9]Z) ;;
-    *) minted_at="" ;;
+    *) receipt_code=no_clock
+       return 1 ;;
   esac
   nonce="$( (LC_ALL=C od -An -tx1 -N8 /dev/urandom) 2>/dev/null | tr -d ' \n')"
+  if [ "${#nonce}" -ne 16 ]; then
+    receipt_code=no_nonce
+    return 1
+  fi
   run_key_hash="$(receipt_hash "$RUN_KEY" 32)"
   service_hash="$(receipt_hash "$SERVICE" 16)"
-  if [ -n "$minted_at" ] && [ "${#nonce}" -eq 16 ] \
-      && [ "${#run_key_hash}" -eq 32 ] && [ "${#service_hash}" -eq 16 ]; then
-    candidate="carr-run-receipt:v1:$minted_at:$nonce:$run_key_hash"
-    lowered="${candidate:l}"
-    forbidden=0
-    for word in $RECEIPT_FORBIDDEN; do
-      case "$lowered" in *$word*) forbidden=1 ;; esac
-    done
-    # The path is derived from the two hashes, so no caller byte is in it
-    # either. A symlink is refused BEFORE it is followed, and anything that
-    # exists and is not a regular file — FIFO, device, directory, socket — is
-    # refused without being opened, so nothing here can block on a reader that
-    # never comes.
-    RECEIPT_FILE="$RECEIPT_DIR/$service_hash.$run_key_hash.receipt"
-    if [ "$forbidden" -eq 0 ] && receipt_token_ok "$candidate" \
-        && [ ! -L "$RECEIPT_FILE" ] \
-        && { [ ! -e "$RECEIPT_FILE" ] || [ -f "$RECEIPT_FILE" ]; }; then
-      mkdir -p "$RECEIPT_DIR" 2>/dev/null
-      if ( print -r -- "$candidate" > "$RECEIPT_FILE" ) 2>/dev/null; then
-        # READ BACK WHAT LANDED and require it to equal what was written, in
-        # content AND in length. A short write, a file something else rewrote
-        # between the write and the read, one trailing carriage return: each
-        # leaves the two unequal, and nothing is trimmed to make them agree.
-        landed="$( (cat -- "$RECEIPT_FILE") 2>/dev/null )"
-        landed_bytes="$( (wc -c < "$RECEIPT_FILE") 2>/dev/null | tr -d ' ' )"
-        if [ "$landed" = "$candidate" ] \
-            && [ "$landed_bytes" = "$(( ${#candidate} + 1 ))" ]; then
-          evidence_ref="$candidate"
-          evid=(--evidence-ref "$candidate")
-        fi
-      fi
+  if [ "${#run_key_hash}" -ne 32 ] || [ "${#service_hash}" -ne 16 ]; then
+    receipt_code=no_hasher
+    return 1
+  fi
+  candidate="carr-run-receipt:v1:$minted_at:$nonce:$run_key_hash"
+  lowered="${candidate:l}"
+  for word in $RECEIPT_FORBIDDEN; do
+    case "$lowered" in
+      *$word*) receipt_code=forbidden_word
+               return 1 ;;
+    esac
+  done
+  if ! receipt_token_ok "$candidate"; then
+    receipt_code=mint_shape
+    return 1
+  fi
+
+  # 5 ── WHAT IS ALREADY AT THE LEAF DECIDES, by lstat, before anything opens.
+  #      The path carries only the two hashes, so no caller byte is in it. A
+  #      plain regular file of ours with one link is the only thing this wrapper
+  #      itself leaves behind, and the only thing it will clear: it is unlinked
+  #      (which follows no symlink and opens no FIFO) and a fresh inode created
+  #      below. Anything else — a symlink, a FIFO, a device, a socket, a
+  #      directory, or a regular file someone else also has a name for — is
+  #      refused under its own code and left exactly as it was.
+  RECEIPT_FILE="$RECEIPT_DIR/$service_hash.$run_key_hash.receipt"
+  if [ -L "$RECEIPT_FILE" ]; then
+    receipt_code=leaf_symlink
+    return 1
+  fi
+  if [ -e "$RECEIPT_FILE" ]; then
+    if ! zstat -L -H lst -- "$RECEIPT_FILE" 2>/dev/null; then
+      receipt_code=leaf_not_regular
+      return 1
+    fi
+    if (( (lst[mode] & 8#170000) != 8#100000 )); then
+      receipt_code=leaf_not_regular
+      return 1
+    fi
+    if [ "$lst[nlink]" -ne 1 ]; then
+      receipt_code=leaf_hard_linked
+      return 1
+    fi
+    rm -f -- "$RECEIPT_FILE" 2>/dev/null
+    if [ -e "$RECEIPT_FILE" ] || [ -L "$RECEIPT_FILE" ]; then
+      receipt_code=leaf_occupied
+      return 1
     fi
   fi
+
+  # 6 ── ONE CREATE, and it is the validation: O_EXCL means this inode did not
+  #      exist a moment ago, O_NOFOLLOW means no symlink was traversed to reach
+  #      it, and losing the race to anyone else refuses instead of writing.
+  if ! sysopen -r -w -o creat,excl,nofollow -m 600 -u 3 -- "$RECEIPT_FILE" 2>/dev/null; then
+    receipt_code=open_refused
+    return 1
+  fi
+
+  # 7 ── AND THE DESCRIPTOR ITSELF IS WHAT IS CHECKED: fstat(2) on fd 3, not a
+  #      second look at the name. A fresh, empty, single-link regular file of
+  #      ours is the only thing step 6 can have produced; anything else means
+  #      the assumption was wrong and nothing is written.
+  if ! zstat -f 3 -H fst 2>/dev/null; then
+    exec 3>&-
+    receipt_code=fd_identity
+    return 1
+  fi
+  if (( (fst[mode] & 8#170000) != 8#100000 )) || [ "$fst[nlink]" -ne 1 ] \
+      || [ "$fst[uid]" -ne "$UID" ] || [ "$fst[size]" -ne 0 ]; then
+    exec 3>&-
+    receipt_code=fd_identity
+    return 1
+  fi
+
+  # 8 ── WRITE, REWIND AND READ BACK THROUGH THAT SAME DESCRIPTOR, and require
+  #      equality in content AND in length. syswrite is write(2) and loops until
+  #      the whole value is out, so a short write is visible as a count rather
+  #      than as a truncated receipt. Nothing is trimmed to make the two agree.
+  got=""
+  if ! syswrite -o 3 -c wrote -- "$candidate"$'\n' 2>/dev/null; then
+    exec 3>&-
+    receipt_code=echo_differs
+    return 1
+  fi
+  if ! sysseek -u 3 0 2>/dev/null || ! sysread -c gotn -i 3 got 2>/dev/null; then
+    exec 3>&-
+    receipt_code=echo_differs
+    return 1
+  fi
+  exec 3>&-
+  if [ "$got" != "$candidate"$'\n' ] || [ "$wrote" -ne $(( ${#candidate} + 1 )) ] \
+      || [ "$gotn" -ne $(( ${#candidate} + 1 )) ]; then
+    receipt_code=echo_differs
+    return 1
+  fi
+
+  evidence_ref="$candidate"
+  evid=(--evidence-ref "$candidate")
+  receipt_code=none
+  return 0
+}
+
+mint_receipt || true
+
+# A code is an export too: it must be one this file registers, and it must carry
+# none of the privileged words. A future code that fails either test prints
+# `unregistered` rather than shipping a word the standing rule closes.
+if [ -z "${RECEIPT_CODES[(r)$receipt_code]:-}" ]; then
+  receipt_code=unregistered
 fi
+receipt_code_lowered="${receipt_code:l}"
+for receipt_word in $RECEIPT_FORBIDDEN; do
+  case "$receipt_code_lowered" in
+    *$receipt_word*) receipt_code=unregistered ;;
+  esac
+done
 
 # ── throttle a high-frequency SUCCEEDED row ──────────────────────────────────
 # Inert when HEARTBEAT_INTERVAL is 0 (the default, and every existing job's
@@ -479,7 +681,7 @@ fi
 # stays the trailing field exactly as before, so every existing regex-based
 # check against this line (name=value, argv= to end of line) is unaffected —
 # it only ever gains the new field, never loses or reorders an old one.
-print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$RUN_KEY service=$SERVICE child_exit=$rc state=$state record_action=$record_action recorder_exit=$recorder_exit evidence_ref=${evidence_ref:-none} argv=${argv[*]}" >> "$LOG"
+print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$RUN_KEY service=$SERVICE child_exit=$rc state=$state record_action=$record_action recorder_exit=$recorder_exit evidence_ref=${evidence_ref:-none} receipt_code=$receipt_code argv=${argv[*]}" >> "$LOG"
 
 # ── an independent heartbeat riding this same wake (carr-local-edge-node) ────
 # Deliberately NOT gated on the primary job's own outcome above: a broken
