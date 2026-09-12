@@ -100,9 +100,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import esbuild from "esbuild";
 
 import { digest } from "../src/artifact-trust.js";
 import { V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
@@ -117,11 +119,16 @@ import {
 } from "../src/gate-zero-assurance.v5.js";
 
 import * as readers from "../src/gate-zero-seam-readers.v5.js";
+import * as binding from "../src/internal/gate-zero-seam-binding.v5.js";
 import * as rulings from "../src/gate-zero-seam-rulings.v5.js";
 import * as stores from "../src/gate-zero-seam-stores.v5.js";
 import * as fixtureStores from "./gate-zero-seam-stores.v5.fixture.mjs";
 import * as receiptStores from "./gate-zero-seam-stores.v5.receipt-fixture.mjs";
 import * as faultedStores from "./gate-zero-seam-fault-injection.testhelper.mjs";
+import {
+  PRE_PR_BASELINE, PRE_PR_BASELINE_DIGEST, PRE_PR_COMMIT, commitReachable,
+  prePrCommitReachable, releasePrePrTrees, stagePrePrTree,
+} from "./gate-zero-pre-pr-baseline.v5.testhelper.mjs";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const FIXTURE_STORE_FILE = fileURLToPath(new URL("./gate-zero-seam-stores.v5.fixture.mjs", import.meta.url));
@@ -130,7 +137,10 @@ const FAULT_STORE_FILE =
   fileURLToPath(new URL("./gate-zero-seam-fault-injection.testhelper.mjs", import.meta.url));
 const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 const READERS_FILE = "gate-zero-seam-readers.v5.js";
+/** The internal path the shared ruling predicate moved to, relative to src. */
+const BINDING_FILE = "internal/gate-zero-seam-binding.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
+const GATE_FILE = "gate-zero-assurance.v5.js";
 const FAKE_PG_FILE = fileURLToPath(new URL("./gate-zero-seam-pg.v5.fake.cjs", import.meta.url));
 
 /** The repository the checks store serves, and the only one it will serve. */
@@ -158,7 +168,8 @@ const STORE_UNREACHABLE_REASONS = Object.freeze([
   "the reason this store was unreachable is not a registered one",
 ]);
 
-const SWEPT_NAMESPACES = () => [["readers", readers], ["rulings", rulings], ["stores", stores]];
+const SWEPT_NAMESPACES = () =>
+  [["readers", readers], ["rulings", rulings], ["stores", stores], ["binding", binding]];
 
 const STORE_CREDENTIALS = ["DATABASE_URL_READER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"];
 
@@ -237,16 +248,114 @@ const FIXTURE_DECISION_IDS = Object.freeze([
 // ---------------------------------------------------------------------------
 
 const READERS_UNDER_TEST = [
-  ["readPredecessorOutcomeEvidence", readers.readPredecessorOutcomeEvidence, readGateZeroPredecessorJoin],
-  ["readSchedulerCanaryEvidence", readers.readSchedulerCanaryEvidence, readGateZeroPredecessorJoin],
-  ["readGateConclusionEvidence", readers.readGateConclusionEvidence, readGateGraphAssurance],
+  ["readPredecessorOutcomeEvidence", readers.readPredecessorOutcomeEvidence,
+    readGateZeroPredecessorJoin, "readGateZeroPredecessorJoin"],
+  ["readSchedulerCanaryEvidence", readers.readSchedulerCanaryEvidence,
+    readGateZeroPredecessorJoin, "readGateZeroPredecessorJoin"],
+  ["readGateConclusionEvidence", readers.readGateConclusionEvidence,
+    readGateGraphAssurance, "readGateGraphAssurance"],
 ];
 
-/** The two answers main's gate gives. Nothing in this slice may alter either. */
-const GATE_ANSWER_DIGESTS = new Set([
+/** The repository this suite lives in, for the workflow files it reads below. */
+const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+
+/**
+ * TWO SETS, AND THE DIFFERENCE BETWEEN THEM IS THE WHOLE OF AMENDMENT 3.
+ *
+ * `PRE_PR_GATE_ANSWER_DIGESTS` is the amendment's exemption and is NOT ONE
+ * DIGEST WIDER than the amendment allows: the two answers Gate Zero gave BEFORE
+ * this PR. Amendment 5 of 2026-09-12 is why they are not the literals an earlier
+ * round wrote down — a test may exempt only values it PROVES predate the PR, and
+ * an author's literal proves only what the author believed.
+ *
+ * THE FIFTH CORRECTION IS WHY THEY ARE NO LONGER READ OUT OF `origin/main` AT
+ * LOAD TIME. That ref moves: the moment this PR merges, origin/main IS this
+ * branch, the exemption quietly widens to cover everything this branch writes,
+ * and the "did the staging restore anything" assertion goes empty and red. The
+ * values now come from commit 229980a5 — the merge-base, which cannot move —
+ * committed as explicit values, digest-pinned in the baseline helper, and
+ * REGENERATED from `git show 229980a5:<path>` by the test below wherever that
+ * commit is reachable.
+ *
+ * `GATE_DELEGATION_DIGESTS` is a different question with a different answer and
+ * exempts nothing. It is the set of answers each tree's OWN gate gives, used only
+ * to assert delegation — that an unruled reader hands back its gate's object
+ * whole, and that a ruled one does not. It seeds with the shipped gate's two
+ * answers and takes on each staged tree's as that tree is built, because since
+ * 2026-09-12 the gate binds these readers behind the same ruling table and a tree
+ * with three null lines has a gate that answers differently from the shipped one.
+ * The vocabulary of a branch-authored gate answer is swept where it belongs, in
+ * gate-zero-assurance.v5.test.mjs, against the same pre-PR baseline read the same
+ * way, with this branch's additions enumerated.
+ */
+assert.equal(digest(PRE_PR_BASELINE), PRE_PR_BASELINE_DIGEST,
+  "the committed pre-PR baseline is not the snapshot this suite pins");
+
+const PRE_PR_GATE_ANSWER_DIGESTS = new Set(PRE_PR_BASELINE.gate_answer_digests);
+
+// TWO DISTINCT ANSWERS, AND NEITHER OF THEM IS THIS BRANCH'S. The shipped gate
+// is ruled and answers differently; if the baseline ever held this branch's own
+// answers, the exemption would silently widen to cover everything this branch
+// writes, which is the hole the fourth review named and the ref the fifth one
+// named.
+assert.equal(PRE_PR_GATE_ANSWER_DIGESTS.size, 2,
+  "the pre-PR gate no longer gives two distinct answers");
+for (const answer of [readGateZeroPredecessorJoin(), readGateGraphAssurance()])
+  assert.equal(PRE_PR_GATE_ANSWER_DIGESTS.has(digest(answer)), false,
+    "the pre-PR baseline holds what the shipped gate answers, so it is not the pre-PR gate's");
+
+test("BASELINE: the pre-PR gate answers are that commit's own, regenerated from git", async () => {
+  // THE DIGEST HALF RUNS EVERYWHERE, shallow checkouts included, and these are
+  // its mutation controls.
+  assert.equal(digest(PRE_PR_BASELINE), PRE_PR_BASELINE_DIGEST);
+  assert.notEqual(
+    digest({ ...PRE_PR_BASELINE,
+      gate_answer_digests: [...PRE_PR_BASELINE.gate_answer_digests, digest(readGateGraphAssurance())] }),
+    PRE_PR_BASELINE_DIGEST,
+    "a baseline with this branch's answer added to it digests the same, so the pin proves nothing");
+  assert.notEqual(digest({ ...PRE_PR_BASELINE, commit: "0".repeat(40) }), PRE_PR_BASELINE_DIGEST,
+    "a baseline naming a different commit digests the same");
+
+  // AND THE REGENERATION HALF IS SKIPPABLE ONLY WHERE THE COMMIT IS GENUINELY
+  // GONE — a checkout too shallow to hold the merge-base. The probe is proved to
+  // answer false for an absent commit rather than to answer false always.
+  assert.equal(commitReachable("0".repeat(40)), false,
+    "the reachability probe calls a commit that cannot exist reachable");
+  if (!prePrCommitReachable()) {
+    console.log(`REGENERATION SKIPPED: ${PRE_PR_COMMIT} is not in this checkout`);
+    return;
+  }
+
+  const prePrGate = await import(pathToFileURL(join(stagePrePrTree(), GATE_FILE)).href);
+  const regenerated = [
+    digest(prePrGate.readGateZeroPredecessorJoin()),
+    digest(prePrGate.readGateGraphAssurance()),
+  ].sort();
+  assert.deepEqual(regenerated, [...PRE_PR_BASELINE.gate_answer_digests],
+    "the committed pre-PR answers are not what that commit's gate answers with");
+  assert.equal(new Set(regenerated).size, 2,
+    "that commit's gate gives one answer twice, so the pair proves nothing");
+  // NON-VACUOUS: the tree that was walked is the commit's, not this branch's
+  // wearing its name.
+  for (const answer of [readGateZeroPredecessorJoin(), readGateGraphAssurance()])
+    assert.equal(regenerated.includes(digest(answer)), false,
+      "the staged pre-PR tree answers what this branch answers, so it is not that commit's");
+});
+
+const GATE_DELEGATION_DIGESTS = new Set([
   digest(readGateZeroPredecessorJoin()),
   digest(readGateGraphAssurance()),
 ]);
+
+/** Each staged readers namespace, mapped to the gate module of the same tree. */
+const STAGED_GATES = new Map();
+
+/** The gate that belongs to a staged readers module. */
+function gateOf(stagedReadersModule) {
+  const gate = STAGED_GATES.get(stagedReadersModule);
+  assert.ok(gate !== undefined, "a staged readers module has no gate recorded for its tree");
+  return gate;
+}
 
 test("RULING: all three cards are ruled, and the lookup is still the only way to ask", () => {
   // THE PASTE OF 2026-09-11. The table is not exported: `seamRulingRef` is the
@@ -340,8 +449,8 @@ test("RULING SHUT: an unruled reader returns the gate's own answer, byte for byt
   const saved = saveEnv(STORE_CREDENTIALS);
   try {
     const unruled = await stagedReaders({ unruled: true });
-    for (const [name, , gateFn] of READERS_UNDER_TEST) {
-      const expected = gateFn();
+    for (const [name, , , gateName] of READERS_UNDER_TEST) {
+      const expected = gateOf(unruled)[gateName]();
       const got = await unruled[name]({ stepRef: "step:wr46-dissolution-outcome" });
       assert.deepEqual(got, expected, `${name} returned a different refusal than the gate's`);
       assert.ok(Object.isFrozen(got), name);
@@ -352,12 +461,18 @@ test("RULING SHUT: an unruled reader returns the gate's own answer, byte for byt
       // And it says nothing about a ruling, because there is none to say.
       assert.equal(Object.hasOwn(got, "ruling_decision_ref"), false, name);
     }
+    // And the reason ids are the ones an UNRULED gate refuses with, not new
+    // words. Asked of the staged tree's gate: since 2026-09-12 the shipped gate
+    // binds these readers behind the same three ruling lines, so with the lines
+    // live it refuses one step further on — `gate_zero_producer_seam_unavailable`
+    // — and these two ids are exactly what it goes back to when they are null.
+    const gate = gateOf(unruled);
+    assert.equal(gate.readGateZeroPredecessorJoin().reason_id,
+      "predecessor_outcome_reader_unavailable");
+    assert.equal(gate.readGateGraphAssurance().reason_id, "gate_conclusion_reader_unavailable");
   } finally {
     restoreEnv(saved);
   }
-  // And the reason ids are the ones the gate refuses with today, not new words.
-  assert.equal(readGateZeroPredecessorJoin().reason_id, "predecessor_outcome_reader_unavailable");
-  assert.equal(readGateGraphAssurance().reason_id, "gate_conclusion_reader_unavailable");
 });
 
 test("RULED: each production reader now names its own card's ruling, and refuses anyway", async () => {
@@ -393,7 +508,7 @@ test("RULED: each production reader now names its own card's ruling, and refuses
       assert.deepEqual(got.effects, V5_NO_EFFECTS, name);
       // And it is NOT the gate's answer any more, which is the whole observable
       // difference the paste made.
-      assert.equal(GATE_ANSWER_DIGESTS.has(digest(got)), false,
+      assert.equal(GATE_DELEGATION_DIGESTS.has(digest(got)), false,
         `${name} still answers as though it were unruled`);
     }
   } finally {
@@ -427,13 +542,13 @@ test("BYTE-IDENTICAL TO MAIN: an unruled answer does not move for any query, val
   const saved = saveEnv(STORE_CREDENTIALS);
   try {
     const unruled = await stagedReaders({ unruled: true });
-    for (const [name, , gateFn] of READERS_UNDER_TEST) {
-      const baseline = digest(gateFn());
+    for (const [name, , , gateName] of READERS_UNDER_TEST) {
+      const baseline = digest(gateOf(unruled)[gateName]());
       for (const query of queries) {
         const got = await unruled[name](query);
         assert.equal(digest(got), baseline,
           `${name} answered differently for ${safeLabel(query)}`);
-        assert.ok(GATE_ANSWER_DIGESTS.has(digest(got)), name);
+        assert.ok(GATE_DELEGATION_DIGESTS.has(digest(got)), name);
       }
     }
   } finally {
@@ -491,7 +606,7 @@ test("RULED: no query, valid or not, moves the closed half of a ruled answer", a
 test("RULING SHUT: nothing in the reader or the ruling table reaches the environment", () => {
   // A seam an env var could open is a seam any shell could open. Only the store
   // layer reads the environment, and only for WHERE a ruled store lives.
-  for (const file of [RULINGS_FILE, READERS_FILE]) {
+  for (const file of [RULINGS_FILE, READERS_FILE, BINDING_FILE]) {
     const source = readFileSync(join(SRC, file), "utf8");
     assert.equal(/process\s*\.\s*env/.test(source), false, `${file} names the process environment`);
   }
@@ -511,8 +626,14 @@ const EXPECTED_EXPORTS = Object.freeze({
     "readGateConclusionEvidence",
     "readPredecessorOutcomeEvidence",
     "readSchedulerCanaryEvidence",
+    // AND NOTHING ELSE. The second correction put the shared ruling predicate
+    // here, which bought the gate the reader's own test at the price of this
+    // module's four-name promise; the third moved it to an internal path both
+    // files import. The absence is asserted below, by name.
   ],
   rulings: ["seamRulingRef"],
+  // The internal surface: one predicate, reachable only by importing the path.
+  binding: ["ruledCardBinding"],
   stores: [
     "fetchCheckConclusionRows",
     "fetchPredecessorOutcomeRows",
@@ -582,7 +703,8 @@ function privilegedFindings(value, path = "$", found = []) {
  * otherwise — and everything else is swept with no exemption whatsoever.
  */
 function assertSwept(label, value) {
-  if (value !== null && typeof value === "object" && GATE_ANSWER_DIGESTS.has(digest(value))) return;
+  if (value !== null && typeof value === "object" && PRE_PR_GATE_ANSWER_DIGESTS.has(digest(value)))
+    return;
   assert.deepEqual(privilegedFindings(value, label), [], `${label} carries a privileged outcome`);
 }
 
@@ -728,7 +850,7 @@ test("SWEEP: the sweep itself catches a privileged outcome when one is planted",
   assert.throws(() => assertSwept("planted", { conclusion: "green" }));
 });
 
-test("SURFACE: every exported callable of all three modules is a guarded one", () => {
+test("SURFACE: every exported callable of all four modules is a guarded one", () => {
   // THE STRUCTURAL HALF OF INVARIANT (2), and it is here because the behavioural
   // half cannot reach all of it. The ruling lookup has no throwing path today —
   // `Object.hasOwn` on a frozen literal and a pattern over a string — so removing
@@ -739,6 +861,7 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
   const stores_ = readFileSync(join(SRC, STORES_FILE), "utf8");
   const readers_ = readFileSync(join(SRC, READERS_FILE), "utf8");
   const rulings_ = readFileSync(join(SRC, RULINGS_FILE), "utf8");
+  const binding_ = readFileSync(join(SRC, BINDING_FILE), "utf8");
 
   // Each module declares exactly one boundary, and it catches everything.
   for (const [name, source] of [["stores", stores_], ["readers", readers_]])
@@ -766,7 +889,8 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
   // constant, and NO Proxy anywhere — the wrapper the fourth correction shipped
   // is what forwarded `get` to a raw target, and it is deleted rather than
   // tightened.
-  const sources = [["stores", stores_], ["readers", readers_], ["rulings", rulings_]];
+  const sources = [["stores", stores_], ["readers", readers_], ["rulings", rulings_],
+    ["binding", binding_]];
   for (const [name, source] of sources) {
     assert.equal((source.match(/^function closedCallable\(/gm) ?? []).length, 1,
       `${name} has no single closed-callable helper, or has more than one`);
@@ -784,6 +908,10 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
   // wrapper of its own in the line that exports it.
   assert.ok(/^export const seamRulingRef = closedCallable\(seamRulingRefLookup\);$/m.test(rulings_),
     "the ruling lookup is exported as something other than a closed callable");
+  // And the shared predicate, for the same reason: its boundary is not reachable
+  // by any input either, so the line that exports it is asserted whole.
+  assert.ok(/^export const ruledCardBinding = closedCallable\(ruledCardBindingOf\);$/m.test(binding_),
+    "the shared ruling predicate is exported as something other than a closed callable");
   // And the store's type is not on the surface at all: a factory and a predicate
   // are, and the class they build is private.
   assert.ok(/^class SeamStoreUnreachableType extends Error \{$/m.test(stores_),
@@ -792,11 +920,48 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
     "the store's error type is exported again");
 });
 
-test("SURFACE: the export list of all three modules is exactly enumerated", () => {
+test("SURFACE: the shared ruling predicate answers for the three cards and nothing else", () => {
+  // The gate's bound-ness is this function's answer, so what it says for a card
+  // token is asserted here once rather than inferred from a gate answer. It is
+  // asked of the INTERNAL module, because that is where it lives: the third
+  // correction's review refused it as a public name on the reader surface.
+  for (const card of ["card:11", "card:12", "card:13"]) {
+    const bound = binding.ruledCardBinding(card);
+    assert.notEqual(bound, null, `${card} is ruled in src but the predicate refuses it`);
+    // It is the ruling table's own pair, narrowed — never a value of its own.
+    assert.deepEqual(bound, rulings.seamRulingRef(card), card);
+  }
+  // FAIL-CLOSED, and these are the tokens a caller could reach for: the producer
+  // seam, a card with no store behind it, and anything that is not a card token.
+  for (const other of ["card:9", "card:10", "card:14", "seam:gate-zero-read-only-outcome-producer",
+    "", "16c7cdfb-b675-4b6a-bbff-4bbdab46baf8", 11, null, undefined, {}, Symbol("card:11")])
+    assert.equal(binding.ruledCardBinding(other), null, `${String(other)} answered as a ruled card`);
+});
+
+test("SURFACE: the shared predicate is on no public namespace of this slice", () => {
+  // THE THIRD CORRECTION'S FINDING, asserted as a property rather than as a
+  // count. The predicate is shared — the gate asks the same function — and
+  // sharing it through the reader's public surface is what the review refused:
+  // the reader module promises four names, and a fifth is a wider surface
+  // whether or not the fifth is narrow.
   for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]])
+    assert.equal(Object.hasOwn(namespace, "ruledCardBinding"), false,
+      `the shared predicate is a public name of ${label} again`);
+  assert.deepEqual(Object.keys(readers).sort(), [...EXPECTED_EXPORTS.readers].sort(),
+    "the reader module no longer promises exactly four public names");
+  // And it IS reachable where it lives, or the clause above would hold vacuously
+  // over a predicate nobody can call.
+  assert.equal(typeof binding.ruledCardBinding, "function");
+  assert.notEqual(binding.ruledCardBinding("card:11"), null);
+});
+
+test("SURFACE: the export list of all four modules is exactly enumerated", () => {
+  for (const [label, namespace] of SWEPT_NAMESPACES())
     assert.deepEqual(Object.keys(namespace).sort(), [...EXPECTED_EXPORTS[label]].sort(), label);
-  // No classifier, no binder, no conditional name anywhere on the surface.
-  for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]])
+  // No classifier, no binder, no conditional name anywhere on the surface — the
+  // internal one included, since a name that would be refused in public is not
+  // made acceptable by the path it sits behind.
+  for (const [label, namespace] of SWEPT_NAMESPACES())
     for (const name of Object.keys(namespace)) {
       assert.ok(!/^(classify|evaluate|derive|bind|create|set|would)/.test(name),
         `${label}.${name} is a binder or classifier name on the public surface`);
@@ -805,7 +970,8 @@ test("SURFACE: the export list of all three modules is exactly enumerated", () =
   // The ruling table, the findings vocabulary, the reason ids, the seam list and
   // the producer restatement are all gone from the surface. Naming them here
   // means a future edit that re-exports one fails on this line.
-  for (const gone of ["GATE_ZERO_SEAM_RULINGS", "GATE_ZERO_SEAM_STORE_REFS", "seamRulingDecisionRef",
+  for (const gone of ["ruledCardBinding",
+    "GATE_ZERO_SEAM_RULINGS", "GATE_ZERO_SEAM_STORE_REFS", "seamRulingDecisionRef",
     "DECISION_ID", "GATE_ZERO_SEAM_FINDINGS", "GATE_ZERO_SEAM_READER_REASON_IDS",
     "GATE_ZERO_SEAM_READER_SEAMS", "GATE_ZERO_PRODUCER_SEAM_NOT_BUILT", "gateZeroSeamRulingStatus",
     "wouldAdmitPredecessorOutcome", "wouldReportSchedulerCanary", "wouldReportGateConclusion"]) {
@@ -1137,9 +1303,9 @@ function assertSweptConstructed(at, built) {
   assert.ok(built !== null && typeof built === "object", `${at} did not construct an object`);
   // THE SAME IDENTITY THE VALUE SWEEP USES, and it is here because construction
   // now reaches the readers: `new readGateConclusionEvidence()` answers with the
-  // GATE'S OWN object, which is main's and carries main's strings. Identity
+  // GATE'S OWN object, which is upstream's and carries upstream's strings. Identity
   // admits no new string at all, which is stronger than sweeping its words.
-  if (GATE_ANSWER_DIGESTS.has(digest(built))) return;
+  if (PRE_PR_GATE_ANSWER_DIGESTS.has(digest(built))) return;
   const keys = Reflect.ownKeys(built);
 
   assert.ok(!Object.hasOwn(built, "cause"), `${at} carries an own cause`);
@@ -1169,7 +1335,7 @@ test("SWEEP: every export of every seam module, constants and callables alike", 
     delete process.env[name];
   }
   try {
-    for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]]) {
+    for (const [label, namespace] of SWEPT_NAMESPACES()) {
       for (const [name, value] of Object.entries(namespace)) {
         const at = `${label}.${name}`;
         if (typeof value !== "function") { assertSwept(at, value); continue; }
@@ -1503,10 +1669,11 @@ test("SURFACE: no export can be constructed, and none reads a caller's newTarget
         callables += 1;
         assertClosedCallable(`${label}.${name}`, value);
       }
-    // The six readers and fetchers, the factory, the predicate and the lookup:
-    // an export that stopped being one of them fails here rather than quietly
-    // skipping the loop above.
-    assert.equal(callables, 9, "the callable surface moved without this count following it");
+    // The six readers and fetchers, the factory, the store predicate, the lookup
+    // and — since the PR 1004 re-review — the ruling predicate the gate binds
+    // its seams on: an export that stopped being one of them fails here rather
+    // than quietly skipping the loop above.
+    assert.equal(callables, 10, "the callable surface moved without this count following it");
 
     // AND THE CALLING DOOR STILL ANSWERS, which is the thing the construction
     // door must not have cost. Before Joe's paste this was pinned to the gate's
@@ -1860,7 +2027,7 @@ test("HOSTILE: no hostile query throws out of a reader, and none of its bytes co
           assert.equal(answered.finding ?? null, null, `${name} (${side})`);
         }
         // And the unruled half is still the gate's own answer, whole.
-        assert.ok(GATE_ANSWER_DIGESTS.has(digest(await unruled[name](query))), name);
+        assert.ok(GATE_DELEGATION_DIGESTS.has(digest(await unruled[name](query))), name);
       }
   } finally {
     restoreEnv(saved);
@@ -1927,7 +2094,25 @@ function stageTree({ storeFile = null, card11StoreRef = null, unruled = false } 
 }
 
 async function stagedReaders(options) {
-  return import(pathToFileURL(join(stageTree(options), READERS_FILE)).href);
+  const target = stageTree(options);
+  const staged = await import(pathToFileURL(join(target, READERS_FILE)).href);
+  // The SAME TREE's gate, so a clause about "the gate's own answer" is asked of
+  // the gate that reader actually delegates to rather than of the shipped one.
+  const gate = await import(pathToFileURL(join(target, GATE_FILE)).href);
+  STAGED_GATES.set(staged, gate);
+  const answers = [gate.readGateZeroPredecessorJoin(), gate.readGateGraphAssurance()];
+  for (const answer of answers) GATE_DELEGATION_DIGESTS.add(digest(answer));
+  // AND THE AMENDMENT 3 PROOF, taken here because this is where an unruled tree
+  // exists: with all three ruling lines null the gate's two answers ARE the
+  // pre-PR baseline's pinned bytes, which is what makes the exemption above an
+  // exemption for unchanged upstream output rather than for whatever this branch
+  // happens to answer. A ruled tree's answers are this branch's and are never
+  // added.
+  if (options.unruled === true)
+    for (const answer of answers)
+      assert.ok(PRE_PR_GATE_ANSWER_DIGESTS.has(digest(answer)),
+        "an unruled staged gate no longer answers the pre-PR baseline's bytes");
+  return staged;
 }
 
 /**
@@ -1985,6 +2170,7 @@ const HOSTILE_CHECK_RUNS = Object.freeze([
 
 test.after(() => {
   for (const base of staged) rmSync(base, { recursive: true, force: true });
+  releasePrePrTrees();
 });
 
 test("STAGING: both fixture store modules cover every export the real one has", () => {
@@ -2703,7 +2889,8 @@ test("RULED: a pasted decision id is what opens the seam, and nothing else", asy
   const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const opened = await ruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
-  assert.ok(!GATE_ANSWER_DIGESTS.has(digest(opened)), "the staged ruling did not open the seam");
+  assert.ok(!GATE_DELEGATION_DIGESTS.has(digest(opened)),
+    "the staged ruling did not open the seam");
   assert.equal(opened.ruling_decision_ref, FIXTURE_DECISION_IDS[0]);
 
   // AND THE SHIPPED MODULE IN THIS SAME PROCESS IS UNTOUCHED BY THE STAGING,
@@ -2735,7 +2922,7 @@ test("RULED: a pasted decision id is what opens the seam, and nothing else", asy
   const unruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE, unruled: true });
   const shut = await unruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
-  assert.equal(digest(shut), digest(readGateZeroPredecessorJoin()),
+  assert.equal(digest(shut), digest(gateOf(unruled).readGateZeroPredecessorJoin()),
     "an unruled reader read the fixture store anyway");
 });
 
@@ -3011,8 +3198,23 @@ test("RULED: a ruling naming a store this reader does not serve opens nothing", 
   try {
     const result = await ruled.readPredecessorOutcomeEvidence({
       stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"4".repeat(64)}` });
-    assert.equal(digest(result), digest(readGateZeroPredecessorJoin()),
+    // THE SAME TREE'S GATE, and that is the PR 1004 re-review's finding rather
+    // than a nicety. This clause used to compare against the SHIPPED gate's
+    // answer, and it passed for the wrong reason: the gate read any non-null
+    // ruling as a bound seam, so a staged tree whose card 11 named another store
+    // produced a gate answer identical to the shipped one — the gate calling the
+    // seam bound while this reader refused it. The gate now asks the reader's own
+    // predicate, so the staged gate reports card 11 UNBOUND and its answer is no
+    // longer the shipped bytes. Both halves are asserted.
+    const stagedGate = gateOf(ruled);
+    assert.equal(digest(result), digest(stagedGate.readGateZeroPredecessorJoin()),
       "a ruling naming the wrong store opened the seam anyway");
+    assert.equal(stagedGate.readGateZeroPredecessorJoin().predecessor_outcome_reader_bound, false,
+      "the gate reports card 11 bound while this reader refuses its ruling");
+    assert.equal(stagedGate.emitGateZeroOutcome().predecessor_outcome_reader_bound, false,
+      "the emitted answer reports card 11 bound while this reader refuses its ruling");
+    assert.notEqual(digest(result), digest(readGateZeroPredecessorJoin()),
+      "the staged answer is the shipped one, so the gate still reads a mismatched ruling as bound");
     // The other two cards are ruled normally in this same staging and do open.
     const scheduler = await ruled.readSchedulerCanaryEvidence({
       serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" });
@@ -3121,7 +3323,17 @@ test("RULED: nothing a faulted store does to a reader gets past the reader's bou
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"4".repeat(64)}` });
   assert.equal(digest(hostileAnswer), digest(readGateZeroPredecessorJoin()),
     "a throw inside the reader escaped instead of closing the seam");
-  assertSwept("faulted.hostile-answer", hostileAnswer);
+  // AND THE IDENTITY IS WHAT IS ASSERTED HERE, not the word sweep, which is the
+  // 2026-09-12 review's amendment 3 finding applied to this line. Byte-for-byte
+  // equality with the gate's own answer admits NO new string at all, which is
+  // stronger than sweeping its words; and the answer is the SHIPPED gate's, which
+  // this branch authored, so it is not upstream output and may not take the
+  // amendment 3 exemption. Its own vocabulary is swept in
+  // gate-zero-assurance.v5.test.mjs — against the pre-PR commit's, with every
+  // string this branch adds enumerated and the baseline regenerated from that
+  // commit.
+  assert.ok(!PRE_PR_GATE_ANSWER_DIGESTS.has(digest(hostileAnswer)),
+    "the shipped gate answers the pre-PR baseline's bytes, so this clause proves nothing");
 
   // CARD 13 — the store answers about a DIFFERENT store than the ruling named,
   // over rows that would otherwise report a conclusion of "success". The reader
@@ -3251,7 +3463,7 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
     assert.equal(report13.conclusion, "success");
 
     for (const [name, report] of [["11", report11], ["12", report12], ["13", report13]]) {
-      assert.ok(!GATE_ANSWER_DIGESTS.has(digest(report)), `card ${name} did not open`);
+      assert.ok(!GATE_DELEGATION_DIGESTS.has(digest(report)), `card ${name} did not open`);
       assertSwept(`rows.report.${name}`, report);
       assert.ok(!JSON.stringify(report).includes(HOSTILE_MARKER), `card ${name} leaked store text`);
     }
@@ -3384,11 +3596,17 @@ test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement
 });
 
 test("PRODUCER: binding the gate's own answer still does not move, now that readers exist", () => {
-  // The whole point of building three readers without a ruling: the gate is
-  // exactly as unpassable as it was this morning.
+  // The whole point of building three readers, ruled or not: the gate is exactly
+  // as unpassable as it was before any of them existed. What DID move on
+  // 2026-09-12 is the list of what is still owed — three seams have a ruled
+  // reader bound behind them, and the producer is the one left.
   assert.equal(emitGateZeroOutcome().passable, false);
   assert.equal(emitGateZeroOutcome().join, null);
-  assert.deepEqual([...emitGateZeroOutcome().owed_seams], [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+  assert.equal(emitGateZeroOutcome().producer_bound, false);
+  assert.deepEqual([...emitGateZeroOutcome().owed_seams], [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+  // And the producer seam is still the one thing no ruling line can open: the
+  // ruling table has no entry for it, so the lookup answers null for its name.
+  assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
   assert.deepEqual([...V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS].length > 0, true);
 });
 
@@ -3396,19 +3614,36 @@ test("PRODUCER: binding the gate's own answer still does not move, now that read
 // The import graph, parsed rather than grepped.
 // ---------------------------------------------------------------------------
 
-/** V8's own ESM parser, via vm.SourceTextModule in a child process. */
+/**
+ * V8's own ESM parser, via vm.SourceTextModule in a child process.
+ *
+ * IT WALKS SUBDIRECTORIES, and that is the third correction's doing rather than
+ * tidiness: the shared ruling predicate moved to src/internal/, and a scan that
+ * stopped at the top level would have reported an import graph with the predicate
+ * missing from it — every clause below would have passed over a file the graph
+ * could not see. Keys are paths relative to src, so `internal/...` is a key like
+ * any other; specifiers are left EXACTLY as the module wrote them, and the
+ * resolution to a key happens in `resolveFrom` where it can be read.
+ */
 function moduleImports(directory) {
   const script = `
     const { readdirSync, readFileSync } = require("node:fs");
-    const { join } = require("node:path");
+    const { join, relative, sep } = require("node:path");
     const vm = require("node:vm");
-    const dir = process.argv[1];
+    const root = process.argv[1];
     const out = {};
-    for (const name of readdirSync(dir).sort()) {
-      if (!name.endsWith(".js")) continue;
-      const source = readFileSync(join(dir, name), "utf8");
-      out[name] = new vm.SourceTextModule(source, { identifier: name }).dependencySpecifiers;
-    }
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name))) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) { walk(full); continue; }
+        if (!entry.name.endsWith(".js")) continue;
+        const key = relative(root, full).split(sep).join("/");
+        const source = readFileSync(full, "utf8");
+        out[key] = new vm.SourceTextModule(source, { identifier: key }).dependencySpecifiers;
+      }
+    };
+    walk(root);
     process.stdout.write(JSON.stringify(out));
   `;
   const run = spawnSync(process.execPath, ["--experimental-vm-modules", "-e", script, directory],
@@ -3417,10 +3652,747 @@ function moduleImports(directory) {
   return JSON.parse(run.stdout);
 }
 
-test("ISOLATION: the store module is reached from one place, and nothing in src reaches a fixture", () => {
+/**
+ * Where a specifier written IN `from` lands, as a key of the import graph.
+ *
+ * Relative specifiers only: a bare one ("pg") is not a module in src and is
+ * returned unchanged, so a clause that asks "who imports this file" never
+ * matches one. This is the whole resolution step, written once, so that a module
+ * in a subdirectory naming `../gate-zero-seam-rulings.v5.js` and one at the top
+ * naming `./gate-zero-seam-rulings.v5.js` are the same answer to the same
+ * question — the alternative is a clause that silently stops counting importers
+ * the moment one of them moves a directory.
+ */
+function resolveFrom(from, specifier) {
+  if (!specifier.startsWith(".")) return specifier;
+  const parts = from.split("/").slice(0, -1);
+  for (const step of specifier.split("/")) {
+    if (step === ".") continue;
+    if (step === "..") { parts.pop(); continue; }
+    parts.push(step);
+  }
+  return parts.join("/");
+}
+
+// ---------------------------------------------------------------------------
+// THE EXPORT SURFACE, LINKED RATHER THAN GREPPED — the fourth correction's
+// standards finding.
+//
+// The guard that stood here was `/export\s+\{[^}]*\bruledCardBinding\b/` over
+// each file's text, and the standing rule of 2026-09-11 says in as many words
+// that a static module guard uses a real parser. The regex had the two holes a
+// parser does not: `export * from "./internal/gate-zero-seam-binding.v5.js"`
+// forwards the name without writing it anywhere, and
+// `export { ruledCardBinding as somethingElse }` writes a different name on the
+// surface. The self-test below runs both forms past the old pattern and the new
+// guard so the difference is measured rather than asserted.
+//
+// SO THE QUESTION IS ASKED THREE TIMES, in the three ways it can be wrong.
+//
+//   BY NAME, over EVERY module in src, out of esbuild's linker: `export *` is
+//   resolved to the concrete names it forwards, so a chain of re-exports through
+//   three files is one answer.
+//   BY FORM, over every export statement of every module, read off esbuild's own
+//   printer — because a name check answers `seam` for
+//   `export * as seam from "<the binding>"` and calls that clean. The fifth
+//   correction adds this one; it is built directly below.
+//   BY REACHABILITY AT RUNTIME, over the namespaces the modules actually export,
+//   walked recursively — because neither of the above can see a predicate held
+//   inside an exported object.
+// ---------------------------------------------------------------------------
+
+/** esbuild refuses to run at all if it is missing, rather than degrading quietly. */
+assert.equal(typeof esbuild.buildSync, "function",
+  "the re-export guard needs a real parser; esbuild is not loadable");
+
+/** The internal predicate's own name, the one thing src may not put on a surface. */
+const PREDICATE_NAME = "ruledCardBinding";
+
+/** Every `.js` module under a directory, as the tree-relative keys used below. */
+function modulesUnder(directory) {
+  const found = [];
+  const walk = at => {
+    for (const entry of readdirSync(at, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(at, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (entry.name.endsWith(".js")) found.push(relative(directory, full).split(sep).join("/"));
+    }
+  };
+  walk(directory);
+  return found;
+}
+
+/**
+ * WHAT EVERY MODULE UNDER `directory` EXPORTS, keyed by its path relative to
+ * that directory. Read out of esbuild's metafile after a real bundle, so the
+ * names are the ones a consumer could import, `export *` included.
+ *
+ * The `.ttf` loader is not decoration: one module in src imports a font as a
+ * binary asset, and without a loader for it esbuild refuses the whole batch and
+ * this guard would never run.
+ */
+function exportedNames(directory) {
+  const entryPoints = modulesUnder(directory);
+  const built = esbuild.buildSync({
+    absWorkingDir: directory, entryPoints, bundle: true, write: false, format: "esm",
+    platform: "node", packages: "external", metafile: true, treeShaking: false,
+    outdir: "__exported_names__", outbase: ".", loader: { ".ttf": "binary" },
+    logLevel: "silent", logLimit: 0,
+  });
+  const names = {};
+  for (const output of Object.values(built.metafile.outputs)) {
+    if (output.entryPoint === undefined) continue;
+    names[output.entryPoint] = [...output.exports].sort();
+  }
+  assert.equal(Object.keys(names).length, entryPoints.length,
+    "the linker did not report an export list for every module in the tree");
+  return names;
+}
+
+/** The pattern this guard replaced, kept only so the self-test can measure it. */
+const DELETED_REEXPORT_REGEX = /export\s+\{[^}]*\bruledCardBinding\b/;
+
+// ---------------------------------------------------------------------------
+// AND THE NAME IS NOT THE WHOLE QUESTION — the fifth correction's second
+// finding.
+//
+// The check above asks the linker for export NAMES and the check in ISOLATION
+// asked the two importers for TOP-LEVEL value identity. Both are blind to the
+// same shape, and the review demonstrated it:
+//
+//     export * as seam from "./internal/gate-zero-seam-binding.v5.js";
+//
+// exports the single name `seam`, which is not the predicate's name; the value
+// under it is a module namespace, which is not the predicate; and
+// `seam.ruledCardBinding` is public anyway. `export default { ruledCardBinding }`
+// and `export const api = { seam: ruledCardBinding }` hide it the same way, one
+// property deeper.
+//
+// SO THE QUESTION BECOMES REACHABILITY, ASKED TWICE OVER.
+//
+//   STATICALLY, OVER EVERY EXPORT FORM OF EVERY MODULE IN SRC. Each module is
+//   run through esbuild's parser and PRINTED BACK in a normal form, in which
+//   every re-export has become an import plus one export clause, comments are
+//   gone, and a string that reads like an export statement is printed as the
+//   string it is. The forms are read off that normal form: named, default,
+//   `export * from`, `export { x as y } from`, and `export * as ns from` — the
+//   last being the one that costs a name check its answer. Namespace and star
+//   edges are followed TRANSITIVELY, so a chain through three files is one
+//   answer.
+//
+//   AT RUNTIME, BY WALKING WHAT THE MODULE ACTUALLY EXPORTS. Every own property
+//   of every public namespace of this slice, recursively, compared against the
+//   predicate itself — which is the only check that can see a value re-exposed
+//   inside a container object, under any name, at any depth.
+//
+// THE PARSE IS PROVED COMPLETE RATHER THAN ASSUMED. The names these forms yield
+// are reconciled, module by module across all of src, against the names the
+// LINKER reports for the same module. A form this reader cannot see costs it a
+// name; a phantom read out of a string gains it one; either way the two lists
+// stop matching and the test is red before it asks anything about the predicate.
+// ---------------------------------------------------------------------------
+
+const NAMESPACE_IMPORT = /^import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*"((?:[^"\\]|\\.)*)";$/gm;
+const NAMED_IMPORT = /^import\s*\{([^}]*)\}\s*from\s*"((?:[^"\\]|\\.)*)";$/gm;
+const STAR_REEXPORT = /^export\s*\*\s*from\s*"((?:[^"\\]|\\.)*)";$/gm;
+const EXPORT_CLAUSE = /^export\s*\{([^}]*)\}\s*;$/gm;
+const EXPORT_DECL =
+  /^export\s+(?:async\s+)?(?:const|let|var|function\s*\*?|class)\s+([A-Za-z_$][\w$]*)/gm;
+const EXPORT_DEFAULT = /^export\s+default\b/gm;
+
+/** `a, b as c` → the pairs, an unaliased entry standing for itself. */
+function clauseEntries(text) {
+  return text.split(",").map(one => one.trim()).filter(Boolean).map(entry => {
+    const [local, exported] = entry.split(/\s+as\s+/).map(one => one.trim());
+    return { local, exported: exported ?? local };
+  });
+}
+
+function matchAll(pattern, code) {
+  pattern.lastIndex = 0;
+  return [...code.matchAll(pattern)];
+}
+
+/**
+ * ONE MODULE'S EXPORT FORMS AND THE BINDINGS THEY STAND ON, read off esbuild's
+ * printer: every exported name with the local it came from, every
+ * `export * from`, and for each local the import that bound it — a single name,
+ * or a whole namespace.
+ */
+function exportForms(directory, moduleName) {
+  const code = esbuild.transformSync(readFileSync(join(directory, moduleName), "utf8"),
+    { loader: "js", format: "esm", logLevel: "silent" }).code;
+  const locals = new Map();
+  for (const found of matchAll(NAMESPACE_IMPORT, code))
+    locals.set(found[1], { kind: "namespace", from: found[2] });
+  for (const found of matchAll(NAMED_IMPORT, code))
+    for (const { local, exported } of clauseEntries(found[1]))
+      locals.set(exported, { kind: "named", name: local, from: found[2] });
+
+  const forms = [];
+  for (const found of matchAll(STAR_REEXPORT, code)) forms.push({ kind: "star", from: found[1] });
+  for (const found of matchAll(EXPORT_CLAUSE, code))
+    for (const { local, exported } of clauseEntries(found[1]))
+      forms.push({ kind: "name", exported, local });
+  for (const found of matchAll(EXPORT_DECL, code))
+    forms.push({ kind: "name", exported: found[1], local: found[1] });
+  for (const _ of matchAll(EXPORT_DEFAULT, code))
+    forms.push({ kind: "name", exported: "default", local: null });
+  return { forms, locals };
+}
+
+/**
+ * THE WHOLE TREE'S EXPORT FORMS, with the three questions this guard asks of
+ * them.
+ *
+ * `namesOf(m)` is the names m's forms put on its surface, `export * from`
+ * expanded through the file it names — the list reconciled against the linker.
+ * `namespacesExposedBy(m)` is every module whose NAMESPACE OBJECT a consumer of
+ * m can hold, both edges followed transitively. `namedReexportsOf(m)` is every
+ * binding m forwards by name, under whatever name it forwards it as.
+ */
+function exportGraph(directory) {
+  const modules = modulesUnder(directory);
+  const analyzed = new Map(modules.map(name => [name, exportForms(directory, name)]));
+
+  const namesOf = (name, seen = new Set()) => {
+    if (seen.has(name)) return [];
+    seen.add(name);
+    const module = analyzed.get(name);
+    if (module === undefined) return null;
+    const names = [];
+    for (const form of module.forms) {
+      if (form.kind === "name") { names.push(form.exported); continue; }
+      const forwarded = namesOf(resolveFrom(name, form.from), seen);
+      // A star re-export of a package outside this tree forwards names the
+      // linker knows and this reader does not; it is marked rather than guessed
+      // at, so the reconciliation below would fail rather than pass vacuously.
+      if (forwarded === null) { names.push("<external star re-export>"); continue; }
+      names.push(...forwarded.filter(one => one !== "default"));
+    }
+    return names;
+  };
+
+  const namespacesExposedBy = (name, seen = new Set()) => {
+    const exposed = new Set();
+    if (seen.has(name)) return exposed;
+    seen.add(name);
+    const module = analyzed.get(name);
+    if (module === undefined) return exposed;
+    for (const form of module.forms) {
+      // `export * from t` does not put t's namespace on the surface, but it does
+      // forward every namespace t itself exposes.
+      if (form.kind === "star") {
+        for (const onward of namespacesExposedBy(resolveFrom(name, form.from), seen))
+          exposed.add(onward);
+        continue;
+      }
+      const bound = form.local === null ? undefined : module.locals.get(form.local);
+      if (bound === undefined || bound.kind !== "namespace") continue;
+      const target = resolveFrom(name, bound.from);
+      exposed.add(target);
+      for (const onward of namespacesExposedBy(target, seen)) exposed.add(onward);
+    }
+    return exposed;
+  };
+
+  const namedReexportsOf = name => {
+    const module = analyzed.get(name);
+    const forwarded = [];
+    for (const form of module.forms) {
+      const bound = form.local === null ? undefined : module.locals.get(form.local);
+      if (bound === undefined || bound.kind !== "named") continue;
+      forwarded.push({ exportedAs: form.exported, imported: bound.name,
+        from: resolveFrom(name, bound.from) });
+    }
+    return forwarded;
+  };
+
+  return { modules, namesOf, namespacesExposedBy, namedReexportsOf };
+}
+
+/**
+ * THE PROPERTY PATH BY WHICH A VALUE IS REACHABLE FROM A NAMESPACE, or null.
+ *
+ * This is the half that answers "by any path", and after the sixth review it
+ * answers it literally. The walk is UNBOUNDED — a cycle-safe visited set is what
+ * makes it terminate, in place of the six-edge budget a seven-edge container
+ * walked straight past. It enumerates `Reflect.ownKeys`, so a SYMBOL-keyed
+ * property is read exactly like a string-named one. And it follows the
+ * [[Prototype]] chain, because a value held on a prototype is handed to a caller
+ * as readily as one held on the object itself. It returns the route it found the
+ * value by, so a failure names `seam.ruledCardBinding` rather than just the
+ * module.
+ *
+ * AND ACCESSORS ARE READ, which is what the seventh review corrected. The sixth
+ * correction stepped over a getter unread and said so as a deliberate boundary;
+ * that boundary was wrong, because `export const api = { get seam() { return
+ * predicate; } }` hands a consumer the predicate at `api.seam` exactly as a data
+ * property would, and a guard that answers "by any path" cannot decline to look
+ * down the path a consumer actually uses. Every accessor's `get` is invoked
+ * INSIDE try/catch and its return value is walked like any other edge. A getter
+ * that THROWS is an opaque leaf — a consumer could not have taken a value
+ * through it either — and the walk continues with the next key rather than
+ * failing.
+ *
+ * AND THE EIGHTH REVIEW CLOSED THE TWO ROUTES THE SEVENTH LEFT, which are the
+ * last two members of the closed set amendment 6 names.
+ *
+ *   THE ACCESSOR FUNCTIONS ARE THEMSELVES EDGES. `Object.getOwnPropertyDescriptor
+ *   (api, "seam").get` is public, retrievable by any consumer, and can BE the
+ *   predicate — `Object.defineProperty(api, "seam", { get: predicate })` hands it
+ *   over without the getter ever returning it. Both `get` and `set` are walked as
+ *   objects, at the route `.seam<get>` / `.seam<set>`, before the value the
+ *   getter returns.
+ *
+ *   AND AN INHERITED GETTER IS INVOKED WITH THE EXPORTED CHILD AS RECEIVER, via
+ *   `Reflect.get(proto, key, child)`. The seventh correction invoked it with the
+ *   object it was found ON, which for a prototype is not the object a consumer
+ *   holds: `Object.create({ get seam() { return this === shape ? null : predicate;
+ *   } })` answers the predicate at `api.seam` and answers null to a walk standing
+ *   on the prototype. The receiver is threaded down the [[Prototype]] chain and
+ *   reset at every ordinary edge, and the visited set is keyed by (value,
+ *   receiver) rather than by value, because the same prototype reached under two
+ *   receivers is two different answers.
+ *
+ * The one shape this cannot terminate on is a getter that mints a fresh object
+ * on every read, forever; no reachability scan terminates on that, and neither
+ * does a consumer reach anything through it.
+ *
+ * `parts` exists so the mutation controls can revert ONE part of the walk at a
+ * time against THIS code rather than against a retyped imitation of it.
+ */
+const WHOLE_WALK = Object.freeze({
+  bounded: Infinity, symbols: true, prototypes: true, accessors: true,
+  accessorFunctions: true, inheritedReceiver: true });
+
+/** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
+const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
+
+function pathToValue(root, target, parts = WHOLE_WALK) {
+  // Keyed by the PAIR (value, receiver): the same prototype reached while a
+  // consumer holds two different children can answer two different values, so a
+  // set keyed by the object alone would skip the second answer unread.
+  const seen = new Map();
+  const walk = (value, path, left, receiver) => {
+    if (value === target) return path === "" ? "<the namespace itself>" : path;
+    if (left === 0 || value === null) return null;
+    const kind = typeof value;
+    if (kind !== "object" && kind !== "function") return null;
+    // The visited map is what replaces the depth budget: a value whose whole
+    // subtree has already been searched under THIS receiver cannot hide the
+    // target on a second visit, so revisiting is redundant rather than unsound
+    // once the walk is unbounded.
+    const held = receiver === undefined ? value : receiver;
+    const under = seen.get(value);
+    if (under === undefined) seen.set(value, new Set([held]));
+    else if (under.has(held)) return null;
+    else under.add(held);
+    const keys = parts.symbols ? Reflect.ownKeys(value) : Object.getOwnPropertyNames(value);
+    for (const key of keys) {
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { continue; }
+      // A property whose descriptor cannot be taken at all is the only key
+      // stepped over unread.
+      if (descriptor === undefined) continue;
+      const step = `${path}${stepFor(key)}`;
+      if (Object.hasOwn(descriptor, "value")) {
+        // An ordinary edge: the value is a new object in the consumer's hand, so
+        // the receiver does not travel with it.
+        const found = walk(descriptor.value, step, left - 1, undefined);
+        if (found !== null) return found;
+        continue;
+      }
+      // THE ACCESSOR FUNCTIONS FIRST, because `descriptor.get` is public and can
+      // be the target itself even when calling it returns something harmless.
+      if (parts.accessorFunctions)
+        for (const role of ["get", "set"]) {
+          if (typeof descriptor[role] !== "function") continue;
+          const found = walk(descriptor[role], `${step}<${role}>`, left - 1, undefined);
+          if (found !== null) return found;
+        }
+      if (!parts.accessors || typeof descriptor.get !== "function") continue;
+      // THEN THE VALUE, taken the way a consumer takes it: with the exported
+      // child as the receiver, not the prototype the descriptor was found on. A
+      // throw makes the key an opaque leaf rather than an error in this walk.
+      let edge;
+      try {
+        edge = parts.inheritedReceiver
+          ? Reflect.get(value, key, held)
+          : descriptor.get.call(value);
+      } catch { continue; }
+      const found = walk(edge, step, left - 1, undefined);
+      if (found !== null) return found;
+    }
+    if (!parts.prototypes) return null;
+    let proto;
+    try { proto = Object.getPrototypeOf(value); } catch { return null; }
+    // The receiver travels UP the prototype chain unchanged: the object a
+    // consumer holds is the child, however far up the property lives.
+    return walk(proto, `${path}.[[Prototype]]`, left - 1, held);
+  };
+  return walk(root, "", parts.bounded, undefined);
+}
+
+/** The identity check the fourth correction shipped, kept so the self-test can measure it. */
+function topLevelIdentityOnly(namespace, target) {
+  for (const [exportedAs, value] of Object.entries(namespace))
+    if (value === target) return exportedAs;
+  return null;
+}
+
+/**
+ * ONE MODULE PER RE-EXPOSING FORM, plus the private one that must stay legal.
+ *
+ * `caught` names the checks that MUST see each case and is asserted exactly:
+ * a case the name check alone would catch is not evidence for the two checks
+ * this correction adds, so each case records which of the three answers it.
+ */
+const REEXPORT_CASES = Object.freeze([
+  // A re-export under the same name is both: the linker reports the name, and
+  // the form is a named forward of the binding.
+  { file: "plain.js", caught: ["name", "alias", "runtime"],
+    source: `export { ${PREDICATE_NAME} } from "./binding.js";\n` },
+  { file: "star.js", caught: ["name", "runtime"],
+    source: `export * from "./binding.js";\n` },
+  // THE REVIEW'S OWN PROBE: one name on the surface, and it is not the
+  // predicate's; one value, and it is not the predicate.
+  { file: "namespace.js", caught: ["namespace", "runtime"],
+    source: `export * as seam from "./binding.js";\n` },
+  { file: "chain.js", caught: ["namespace", "runtime"],
+    source: `export * as onward from "./namespace.js";\n` },
+  { file: "star-chain.js", caught: ["namespace", "runtime"],
+    source: `export * from "./namespace.js";\n` },
+  { file: "alias.js", caught: ["alias", "runtime"],
+    source: `import { ${PREDICATE_NAME} as ruledSeam } from "./binding.js";\nexport { ruledSeam };\n` },
+  { file: "from-alias.js", caught: ["alias", "runtime"],
+    source: `export { ${PREDICATE_NAME} as ruledSeam } from "./binding.js";\n` },
+  { file: "defaulted.js", caught: ["runtime"],
+    source: `import { ${PREDICATE_NAME} } from "./binding.js";\nexport default { ${PREDICATE_NAME} };\n` },
+  { file: "container.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\nexport const api = { seam: ${PREDICATE_NAME} };\n` },
+  // THE SIXTH REVIEW'S THREE PROBES, one per part of the walk it defeated: a
+  // chain longer than the old six-edge budget, a symbol key, and a property held
+  // on a prototype rather than on the object. Each is `runtime` only — no name,
+  // no namespace and no alias is on the surface — so each measures the walk and
+  // nothing else.
+  { file: "deep.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = { a: { b: { c: { d: { e: { f: { seam: ${PREDICATE_NAME} } } } } } } };\n` },
+  { file: "symbol.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = { [Symbol.for("gate-zero.seam")]: ${PREDICATE_NAME} };\n` },
+  { file: "inherited.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = Object.create({ seam: ${PREDICATE_NAME} });\n` },
+  // THE SEVENTH REVIEW'S PROBE: a public getter, whose value the sixth
+  // correction declined to read. `api.seam === ruledCardBinding` for any
+  // consumer, so the walk must reach it.
+  { file: "accessor.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = { get seam() { return ${PREDICATE_NAME}; } };\n` },
+  // THE EIGHTH REVIEW'S TWO PROBES, which are the last two members of the
+  // closed reachability set. Each is `runtime` only, and each is a route the
+  // seventh correction's accessor branch stepped over: the getter is inherited
+  // and answers only the exported child, and the descriptor's own `get`/`set`
+  // ARE the predicate while calling the getter hands back nothing.
+  { file: "receiver-getter.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `const shape = { get seam() { return this === shape ? null : ${PREDICATE_NAME}; } };\n`
+      + `export const api = Object.create(shape);\n` },
+  { file: "descriptor-accessor.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = {};\n`
+      + `Object.defineProperty(api, "seam", { get: ${PREDICATE_NAME}, set: ${PREDICATE_NAME},\n`
+      + `  enumerable: true, configurable: true });\n` },
+  // AND THE TWO THE ACCESSOR BRANCH MUST SURVIVE RATHER THAN CATCH: a getter
+  // that throws is an opaque leaf, and one that hands back something else is
+  // walked and found to hold nothing.
+  { file: "throwing-accessor.js", caught: [],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const asked = card => ${PREDICATE_NAME}(card) !== null;\n`
+      + `export const api = { get seam() { throw new Error("no seam here"); } };\n` },
+  // AND THE ONE THAT MUST PASS: imported, used, never handed on.
+  { file: "private.js", caught: [],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const asked = card => ${PREDICATE_NAME}(card) !== null;\n` },
+]);
+
+/** A directory holding the cases above, plus the binding they all reach for. */
+function stageReexportCases() {
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const directory = mkdtempSync(join(cache, "gate-zero-reexport-"));
+  staged.push(directory);
+  writeFileSync(join(directory, "binding.js"),
+    `export const ${PREDICATE_NAME} = () => null;\n`
+    // A comment and a string that read like the forms above, so the reader is
+    // measured against the two things a text scan cannot tell apart from code.
+    + `// export * as fromAComment from "./binding.js";\n`
+    + `export const decoy = 'export * as fromAString from "./binding.js";';\n`);
+  for (const { file, source } of REEXPORT_CASES) writeFileSync(join(directory, file), source);
+  return directory;
+}
+
+test("PARSER: every export form is read, and the three checks catch what each is for", async () => {
+  const directory = stageReexportCases();
+  const graph = exportGraph(directory);
+  const linked = exportedNames(directory);
+  const predicate =
+    (await import(pathToFileURL(join(directory, "binding.js")).href))[PREDICATE_NAME];
+
+  // THE COMPLETENESS PROOF FIRST: what the forms say a module exports is what
+  // the linker says it exports, for every module in the fixture.
+  for (const name of graph.modules)
+    assert.deepEqual([...new Set(graph.namesOf(name))].sort(), linked[name],
+      `the export forms read off ${name} are not the names the linker resolves`);
+  // AND THE COMMENT AND THE STRING IN binding.js PRODUCED NO FORM: the reader
+  // sees code, not text that looks like code.
+  assert.deepEqual(linked["binding.js"], ["decoy", PREDICATE_NAME]);
+  assert.deepEqual([...graph.namespacesExposedBy("binding.js")], []);
+
+  for (const { file, caught } of REEXPORT_CASES) {
+    const byName = linked[file].includes(PREDICATE_NAME);
+    const byNamespace = graph.namespacesExposedBy(file).has("binding.js");
+    const byAlias = graph.namedReexportsOf(file)
+      .some(one => one.from === "binding.js" && one.imported === PREDICATE_NAME);
+    const namespace = await import(pathToFileURL(join(directory, file)).href);
+    const atRuntime = pathToValue(namespace, predicate) !== null;
+    assert.deepEqual(
+      ["name", "namespace", "alias", "runtime"]
+        .filter((_, index) => [byName, byNamespace, byAlias, atRuntime][index]),
+      caught,
+      `${file} is caught by the wrong checks`);
+  }
+
+  // THE MEASUREMENT, AND IT IS WHAT MAKES THIS CORRECTION A DIFFERENCE RATHER
+  // THAN A RESTATEMENT: for the three forms the review named, BOTH checks the
+  // fourth correction shipped come back clean.
+  for (const file of ["namespace.js", "defaulted.js", "container.js"]) {
+    const namespace = await import(pathToFileURL(join(directory, file)).href);
+    assert.equal(linked[file].includes(PREDICATE_NAME), false,
+      `${file}: the name check would have caught this, so it proves nothing new`);
+    assert.equal(topLevelIdentityOnly(namespace, predicate), null,
+      `${file}: the top-level identity check would have caught this`);
+    assert.equal(DELETED_REEXPORT_REGEX.test(REEXPORT_CASES.find(one => one.file === file).source),
+      false, `${file}: the deleted pattern would have caught this`);
+    assert.ok(pathToValue(namespace, predicate) !== null,
+      `${file}: the check this correction adds does NOT catch it`);
+  }
+  // And the route is named, not merely found.
+  assert.equal(pathToValue(await import(pathToFileURL(join(directory, "namespace.js")).href),
+    predicate), ".seam.ruledCardBinding");
+  assert.equal(pathToValue(await import(pathToFileURL(join(directory, "container.js")).href),
+    predicate), ".api.seam");
+  assert.equal(pathToValue(await import(pathToFileURL(join(directory, "chain.js")).href),
+    predicate), ".onward.seam.ruledCardBinding");
+
+  // THE MUTATION CONTROLS THE SIXTH AND EIGHTH CORRECTIONS OWE, as a matrix
+  // rather than a list. Each shape the reviews probed is found by the whole walk
+  // at a named route; then ONE part of the walk is reverted and the matrix is
+  // asserted BOTH ways — every probe that NEEDS that part goes null, and every
+  // probe that does not stays found, so no control is measuring a walk broken in
+  // general.
+  //
+  // `needs` is the honest dependency list, and it is why this replaced the
+  // one-probe-per-part list: Sol's receiver probe rides THREE parts at once (it
+  // sits behind a prototype, behind a getter, and answers only the exported
+  // child), so a control that demanded it survive every other reversion would be
+  // asserting something false. What proves the receiver part is load-bearing is
+  // the row where only that part is reverted.
+  const PROBES = Object.freeze([
+    { probe: "deep.js", route: ".api.a.b.c.d.e.f.seam", needs: ["unbounded depth"] },
+    { probe: "symbol.js", route: ".api[Symbol(gate-zero.seam)]", needs: ["symbol keys"] },
+    { probe: "inherited.js", route: ".api.[[Prototype]].seam", needs: ["the prototype chain"] },
+    { probe: "accessor.js", route: ".api.seam", needs: ["accessor reads"] },
+    { probe: "receiver-getter.js", route: ".api.[[Prototype]].seam",
+      needs: ["the prototype chain", "accessor reads", "the exported child as receiver"] },
+    { probe: "descriptor-accessor.js", route: ".api.seam<get>",
+      needs: ["the get and set objects themselves"] },
+  ]);
+  const REVERTED = Object.freeze([
+    { part: "unbounded depth", walk: { ...WHOLE_WALK, bounded: 6 } },
+    { part: "symbol keys", walk: { ...WHOLE_WALK, symbols: false } },
+    { part: "the prototype chain", walk: { ...WHOLE_WALK, prototypes: false } },
+    { part: "accessor reads", walk: { ...WHOLE_WALK, accessors: false } },
+    { part: "the get and set objects themselves",
+      walk: { ...WHOLE_WALK, accessorFunctions: false } },
+    { part: "the exported child as receiver", walk: { ...WHOLE_WALK, inheritedReceiver: false } },
+  ]);
+  const probes = new Map();
+  for (const { probe } of PROBES)
+    probes.set(probe, await import(pathToFileURL(join(directory, probe)).href));
+  for (const { probe, route } of PROBES)
+    assert.equal(pathToValue(probes.get(probe), predicate), route,
+      `${probe}: the walk does not reach the predicate, or names the wrong route`);
+
+  // AND THE TWO EIGHTH-REVIEW PROBES ARE ASSERTED AS A CONSUMER SEES THEM, so
+  // what the walk is being measured against is Sol's shape and not something
+  // easier: the inherited getter answers the exported child (and answers the
+  // prototype nothing), and the descriptor's own get and set ARE the predicate
+  // while reading the property hands back null.
+  const receiverApi = probes.get("receiver-getter.js").api;
+  assert.equal(receiverApi.seam, predicate,
+    "the receiver probe does not hand a consumer the predicate, so it probes nothing");
+  assert.equal(Object.getPrototypeOf(receiverApi).seam, null,
+    "the receiver probe answers the prototype too, so it is not receiver-sensitive");
+  const descriptorApi = probes.get("descriptor-accessor.js").api;
+  const exposed = Object.getOwnPropertyDescriptor(descriptorApi, "seam");
+  assert.equal(exposed.get, predicate, "the descriptor probe's get is not the predicate");
+  assert.equal(exposed.set, predicate, "the descriptor probe's set is not the predicate");
+  assert.equal(descriptorApi.seam, null,
+    "the descriptor probe returns the predicate from the getter, so it is the seventh case again");
+
+  for (const { part, walk } of REVERTED) {
+    assert.ok(PROBES.some(one => one.needs.includes(part)),
+      `${part} is reverted by a control no probe depends on`);
+    for (const { probe, needs } of PROBES) {
+      const found = pathToValue(probes.get(probe), predicate, walk);
+      if (needs.includes(part))
+        assert.equal(found, null,
+          `${probe} is still found with ${part} reverted, so that part is not what catches it`);
+      else
+        assert.notEqual(found, null,
+          `${probe} is lost with ${part} reverted, so that control is not isolated to its probes`);
+    }
+  }
+});
+
+
+test("PARSER: the re-export guard reads the forms the deleted regex missed", () => {
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const directory = mkdtempSync(join(cache, "gate-zero-reexport-"));
+  staged.push(directory);
+  const cases = {
+    "binding.js": `export const ${PREDICATE_NAME} = () => null;\n`,
+    // The one the regex did catch.
+    "plain.js": `import { ${PREDICATE_NAME} } from "./binding.js";\nexport { ${PREDICATE_NAME} };\n`,
+    // The two it did not: a star re-export never spells the name at all, and a
+    // LOCAL alias spells it only on the import side, which the pattern did not
+    // read.
+    "star.js": `export * from "./binding.js";\n`,
+    "alias.js": `import { ${PREDICATE_NAME} as ruledSeam } from "./binding.js";\nexport { ruledSeam };\n`,
+    // And one that imports it and keeps it private, which must stay legal.
+    "private.js":
+      `import { ${PREDICATE_NAME} } from "./binding.js";\nexport const asked = card => ${PREDICATE_NAME}(card) !== null;\n`,
+  };
+  for (const [name, source] of Object.entries(cases)) writeFileSync(join(directory, name), source);
+
+  const names = exportedNames(directory);
+  // BY NAME: the star re-export is reported, which is the hole that mattered
+  // most — a file can forward the predicate without ever spelling it.
+  assert.ok(names["star.js"].includes(PREDICATE_NAME), "the linker did not resolve export *");
+  assert.ok(names["plain.js"].includes(PREDICATE_NAME));
+  assert.deepEqual(names["alias.js"], ["ruledSeam"]);
+  assert.deepEqual(names["private.js"], ["asked"]);
+  // AND THE MEASUREMENT: the deleted pattern saw neither of the two forms above,
+  // so this is a difference rather than a restatement.
+  assert.equal(DELETED_REEXPORT_REGEX.test(cases["star.js"]), false);
+  assert.equal(DELETED_REEXPORT_REGEX.test(cases["alias.js"]), false);
+  assert.equal(DELETED_REEXPORT_REGEX.test(cases["plain.js"]), true);
+});
+
+test("SURFACE: the shared predicate is unreachable from every public namespace in src, by any path",
+  async () => {
+    const graph = exportGraph(SRC);
+    const linked = exportedNames(SRC);
+    assert.ok(graph.modules.length > 100, "every module in src must have been parsed");
+    assert.ok(graph.modules.includes(BINDING_FILE),
+      "the module walk does not include the predicate, so nothing below is proved of it");
+
+    // THE COMPLETENESS PROOF, OVER THE WHOLE TREE. Every module's forms yield
+    // exactly the names the linker resolves for it. A form this reader cannot
+    // see, or one it imagines out of a string, is red here — before a single
+    // question is asked about the predicate.
+    for (const name of graph.modules)
+      assert.deepEqual([...new Set(graph.namesOf(name))].sort(), linked[name],
+        `the export forms read off ${name} are not the names the linker resolves`);
+
+    // BY NAME, BY NAMESPACE, AND BY ALIAS, for every module in src but the one
+    // the predicate lives in.
+    assert.deepEqual(
+      Object.keys(linked).filter(name => linked[name].includes(PREDICATE_NAME)), [BINDING_FILE],
+      `a module other than ${BINDING_FILE} exports ${PREDICATE_NAME}, directly or through an export *`);
+    for (const name of graph.modules) {
+      if (name === BINDING_FILE) continue;
+      assert.equal(graph.namespacesExposedBy(name).has(BINDING_FILE), false,
+        `${name} puts the predicate's own module namespace on a public surface`);
+      assert.deepEqual(graph.namedReexportsOf(name).filter(one => one.from === BINDING_FILE), [],
+        `${name} forwards a binding of ${BINDING_FILE} under another name`);
+    }
+
+    // AND AT RUNTIME, over every public namespace of this slice, recursively.
+    const gate = await import(pathToFileURL(join(SRC, GATE_FILE)).href);
+    for (const [label, namespace] of
+      [["gate", gate], ["readers", readers], ["rulings", rulings], ["stores", stores]]) {
+      const route = pathToValue(namespace, binding.ruledCardBinding);
+      assert.equal(route, null, `${label} exposes the shared predicate at ${label}${route}`);
+    }
+    // NON-VACUOUS: the same walk finds it in the ONE namespace it is meant to be
+    // in, so a walk that could never find anything is not what passed above.
+    assert.equal(pathToValue(binding, binding.ruledCardBinding), `.${PREDICATE_NAME}`);
+
+    // THE MUTATION CONTROL IS THE REVIEW'S OWN PROBE, RUN ON A COPY OF SRC. One
+    // line is added to the reader — the line a name check and a top-level
+    // identity check both let through — and the two checks this correction adds
+    // are asserted to catch it while the two it replaces are asserted not to.
+    // OUTSIDE the package rather than under its cache, because what is copied is
+    // the package: src reaches a font and a manifest that live beside it, and a
+    // tree without them cannot be linked at all. This suite and node_modules are
+    // left behind.
+    const base = mkdtempSync(join(tmpdir(), "gate-zero-reexport-src-"));
+    staged.push(base);
+    const control = join(base, "src");
+    cpSync(fileURLToPath(new URL("..", import.meta.url)), base,
+      { recursive: true, filter: source => !/\/(?:node_modules|test)$/.test(source) });
+    const readersPath = join(control, READERS_FILE);
+    writeFileSync(readersPath,
+      `${readFileSync(readersPath, "utf8")}\nexport * as seam from "./${BINDING_FILE}";\n`);
+
+    const controlGraph = exportGraph(control);
+    const controlLinked = exportedNames(control);
+    const controlReaders = await import(pathToFileURL(readersPath).href);
+    const controlBinding = await import(pathToFileURL(join(control, BINDING_FILE)).href);
+
+    assert.equal(controlGraph.namespacesExposedBy(READERS_FILE).has(BINDING_FILE), true,
+      "the namespace check does not catch the probe the review demonstrated");
+    assert.equal(pathToValue(controlReaders, controlBinding[PREDICATE_NAME]),
+      `.seam.${PREDICATE_NAME}`,
+      "the runtime walk does not reach the predicate through the re-exported namespace");
+    assert.equal(controlLinked[READERS_FILE].includes(PREDICATE_NAME), false,
+      "the name check catches the probe, so the namespace check proves nothing new");
+    assert.equal(topLevelIdentityOnly(controlReaders, controlBinding[PREDICATE_NAME]), null,
+      "the top-level identity check catches the probe, so the runtime walk proves nothing new");
+    // AND THE CONTROL TREE IS OTHERWISE SRC: nothing else about it moved, so the
+    // difference measured above is the one line.
+    assert.deepEqual(controlGraph.modules, graph.modules);
+    for (const name of controlGraph.modules) {
+      if (name === READERS_FILE) continue;
+      assert.deepEqual(controlLinked[name], linked[name], `${name} changed in the control tree`);
+    }
+  });
+
+test("ISOLATION: the store module is reached from one place, and nothing in src reaches a fixture", async () => {
   const imports = moduleImports(SRC);
   assert.ok(Object.keys(imports).length > 100, "every module in src must have been parsed");
   assert.ok(Object.hasOwn(imports, READERS_FILE));
+  // The subdirectory walk is load-bearing for every clause below that names it.
+  assert.ok(Object.hasOwn(imports, BINDING_FILE),
+    "the import graph does not include the internal predicate, so nothing below is proved of it");
+  // Non-vacuous: resolution really does fold a parent-relative specifier.
+  assert.equal(resolveFrom(BINDING_FILE, "../gate-zero-seam-rulings.v5.js"), RULINGS_FILE);
+  assert.equal(resolveFrom(READERS_FILE, `./${BINDING_FILE}`), BINDING_FILE);
 
   const offenders = Object.entries(imports)
     .filter(([, specifiers]) => specifiers.some(one =>
@@ -3430,15 +4402,65 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   assert.deepEqual(offenders, [],
     "a production module reached into the test directory, a fixture or a test helper");
 
-  // The reader is the only module that imports the stores or the ruling table,
-  // so a second consumer of either is red on sight rather than red after an
-  // incident.
-  for (const module of [STORES_FILE, RULINGS_FILE]) {
-    const importers = Object.entries(imports)
-      .filter(([, specifiers]) => specifiers.includes(`./${module}`))
-      .map(([name]) => name);
-    assert.deepEqual(importers, [READERS_FILE], `${module} has an importer other than the reader`);
+  // The reader is the only module that opens the STORES, so a second consumer
+  // of a store is red on sight rather than red after an incident.
+  const importersOf = module => Object.entries(imports)
+    .filter(([name, specifiers]) => specifiers.some(one => resolveFrom(name, one) === module))
+    .map(([name]) => name).sort();
+  assert.deepEqual(importersOf(STORES_FILE), [READERS_FILE],
+    "the stores module has an importer other than the reader");
+
+  // THE RULING TABLE HAS EXACTLY ONE IMPORTER, and that is the PR 1004
+  // re-review's finding turned into a structural invariant. The gate used to
+  // import the table too and formed its own opinion about what a ruling means —
+  // any non-null ruling was a bound seam — which is half of the test the reader
+  // applies, so a ruling naming another registered store made the gate say bound
+  // while the reader refused. The table is read in ONE place, by the ONE
+  // predicate that also holds the store half. A SECOND importer of this table is
+  // the drift itself.
+  assert.deepEqual(importersOf(RULINGS_FILE), [BINDING_FILE],
+    "the ruling table has an importer other than the shared predicate, which is how the two drifted");
+  assert.equal(imports[GATE_FILE].includes(`./${RULINGS_FILE}`), false,
+    "the gate reads the ruling table directly again instead of the shared predicate");
+  assert.equal(imports[READERS_FILE].includes(`./${RULINGS_FILE}`), false,
+    "the reader reads the ruling table directly again, beside the predicate that answers for it");
+
+  // AND THE PREDICATE IS SHARED THROUGH AN INTERNAL PATH, WHICH IS THE THIRD
+  // CORRECTION'S FINDING. Exactly two modules import it — the readers and the
+  // gate, the two that must not disagree — it imports nothing but the ruling
+  // table, and no public namespace of this slice carries its name (asserted on
+  // the surface test above). A third importer, or a re-export, is how a
+  // deliberately internal surface becomes a public one by accident.
+  assert.deepEqual(importersOf(BINDING_FILE), [GATE_FILE, READERS_FILE].sort(),
+    "the shared predicate has an importer other than the two modules that ask it");
+  assert.deepEqual(imports[BINDING_FILE], [`../${RULINGS_FILE}`],
+    "the shared predicate imports something other than the ruling table it narrows");
+  // NO MODULE PUTS IT BACK ON A PUBLIC SURFACE, asked of the linker and then of
+  // the values themselves. BY NAME first, over every module in src: the binding
+  // file is the one place the name may be exported from.
+  const exported = exportedNames(SRC);
+  assert.deepEqual(Object.keys(exported).filter(name => exported[name].includes(PREDICATE_NAME)),
+    [BINDING_FILE],
+    `a module other than ${BINDING_FILE} exports ${PREDICATE_NAME}, directly or through an export *`);
+  // THEN BY REACHABILITY, over the two modules that import it, because a name
+  // check cannot see `export { ruledCardBinding as somethingElse }` and a
+  // top-level identity check cannot see `export * as seam` or a container object
+  // holding it. Each namespace is WALKED, recursively, against the predicate
+  // itself, so every alias and every route is the same answer. The whole tree is
+  // asked the same question in the SURFACE test above; this is the two modules
+  // that actually hold it, asked where the import graph is already in hand.
+  for (const name of importersOf(BINDING_FILE)) {
+    const namespace = await import(pathToFileURL(join(SRC, name)).href);
+    const route = pathToValue(namespace, binding.ruledCardBinding);
+    assert.equal(route, null,
+      `${name} puts the shared predicate back on a public surface at ${name}${route}`);
   }
+  // And the gate reaches the readers directly, which is what "no caller-supplied
+  // reader" costs: a module-private import and nothing else.
+  assert.ok(imports[GATE_FILE].includes(`./${READERS_FILE}`),
+    "the gate no longer imports the readers it binds");
+  assert.equal(imports[GATE_FILE].includes(`./${STORES_FILE}`), false,
+    "the gate opens a store directly instead of going through a ruled reader");
   // The stores module statically imports ONE thing, the tenant constant. `pg`
   // is dynamic on purpose, so the Worker bundle never pulls it in through here.
   assert.deepEqual(imports[STORES_FILE], ["./artifact-trust.js", "./identity.js"]);
@@ -3467,7 +4489,6 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
 // refusing the new check the first time anyone asks it about one.
 // ---------------------------------------------------------------------------
 
-const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const WORKFLOWS = join(REPO_ROOT, ".github/workflows");
 const BACKUP_STATUS = join(REPO_ROOT, "ops/backup-workflow-status.py");
 
