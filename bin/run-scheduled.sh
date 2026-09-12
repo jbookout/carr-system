@@ -418,7 +418,7 @@ receipt_hash() {
 mint_receipt() {
   local v root candidate lowered word minted_at now_real now_frac nonce
   local run_key_hash service_hash got gotn wrote
-  local -A lst fst
+  local -A lst fst dlnk
 
   # 1 ── the two identifiers, whole, against the whitelist
   if ! receipt_token_ok "$SERVICE" || ! receipt_token_ok "$RUN_KEY"; then
@@ -469,7 +469,21 @@ mint_receipt() {
     receipt_code=dir_unusable
     return 1
   fi
-  if ! zstat -L -H lst -- "$RECEIPT_DIR" 2>/dev/null; then
+  # THE THIRD SPELLING OF THE FIXED-DIRECTORY RULE, and the only portable one.
+  # A symlink's OWN mode is 0777 on Linux and umask-dependent on macOS, so one
+  # lstat whose mode bits are then read as the directory's refuses a symlinked
+  # receipt directory on Linux and accepts it on macOS. Say it outright instead:
+  # lstat answers only whether this is a link, and the ownership and mode below
+  # are read from the directory the write actually lands in.
+  if ! zstat -L -H dlnk -- "$RECEIPT_DIR" 2>/dev/null; then
+    receipt_code=dir_unusable
+    return 1
+  fi
+  if (( (dlnk[mode] & 8#170000) == 8#120000 )); then
+    receipt_code=dir_not_fixed
+    return 1
+  fi
+  if ! zstat -H lst -- "$RECEIPT_DIR" 2>/dev/null; then
     receipt_code=dir_unusable
     return 1
   fi

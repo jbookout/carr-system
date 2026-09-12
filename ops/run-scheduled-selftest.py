@@ -1514,6 +1514,11 @@ def tier1_receipt_mint() -> None:
     return 1
   fi
 """, ""),
+        ("""  if (( (dlnk[mode] & 8#170000) == 8#120000 )); then
+    receipt_code=dir_not_fixed
+    return 1
+  fi
+""", ""),
     ]
     root = install_root(work, DIR_LINK_GUARDS)
     if root is not None:
