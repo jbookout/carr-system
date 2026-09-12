@@ -3,26 +3,29 @@
 //
 // WHAT THIS FILE MAY NOT DECIDE, said first because it is the whole point.
 //
-// (1) THE OUTCOME. r7 — the frozen design packet — registers NO producer,
-// oracle, output schema, evidence scope or gate id for
-// `step:gate-zero-read-only-outcome`. benchmark-minimum.v5.js:52-67 (slice
-// V5-A00) says so in its own words and refuses to invent one.
-//
-// WHAT CHANGED ON 2026-09-11, AND WHAT DID NOT. Decision
-// `20c83902-f150-4d59-beca-915c5c871f95` adopts Option B PROVISIONALLY: the
-// producer ROLE, oracle, output schema, gate id, pass rule and retry policy are
-// now decided, and gate-zero-producer-registration.v5.js carries them in r7's
-// own registry shape. Five fields of the refusal below therefore stop being
-// null and start naming what was ruled — which is the honest report, because
-// a reader who sees null concludes nobody has decided, and somebody has.
+// (1) THE OUTCOME. Until 2026-09-11 r7 — the frozen design packet — registered
+// NO producer, oracle, output schema, evidence scope or gate id for
+// `step:gate-zero-read-only-outcome`. Decision
+// `20c83902-f150-4d59-beca-915c5c871f95` then ruled the role provisionally, and
+// on 2026-09-12 the amendment ruled on loop 589 wrote it into the packet: r7
+// carries the producer row, the `gate-zero-read-only-accepted` gate and the
+// `independent_control_plane_oracle` role, and the packet re-froze from
+// `ef34aa54…` to `ea40f61a…`. gate-zero-producer-registration.v5.js pins that
+// digest; whether a given packet IS it is decided by that module's byte
+// verifier, `v5A02GateZeroR7Presence(<bytes>)`, re-exported here. The
+// registration's own `r7_entry_witness` is NULL, because the packet's bytes are
+// not in this repository and neither a yes nor a no may be asserted without them.
 //
 // NOTHING ELSE MOVED, and the list of what did not is longer than the list of
-// what did. r7 itself still has no entry, so the ruling is a copy held here and
-// not the packet's own word. No seat holds the oracle. No predecessor-outcome
-// reader, scheduler reader or gate-conclusion reader exists. So the producer
+// what did. NO SEAT HOLDS THE ORACLE — card 9 named the reviewer charter, and
+// naming a charter is not staffing a desk. The three evidence readers —
+// gate-zero-seam-readers.v5.js cards 11, 12 and 13, the predecessor-outcome,
+// scheduler-canary and gate-conclusion readers — ARE bound to this surface's
+// seams as of 2026-09-12, which is what section (2) below is about. The producer
 // SEAM is still unbound, `producer_bound` is still false, `passable` is still
-// false for every caller on every input, and there is still no join. Deciding
-// who should sign is not the same as somebody signing.
+// false for every caller on every input, and there is still no join. A
+// registered role is not a signature, and deciding who should sign is not
+// somebody signing.
 //
 // (2) THE EVIDENCE, AND THIS HALF MOVED ON 2026-09-12. A caller object
 // describing four accepted outcomes, a canary, a readback and a green gate graph
@@ -117,8 +120,12 @@ import {
   V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
   V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
   V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
-  V5_A02_GATE_ZERO_R7_ENTRY_PRESENT,
+  V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
+  V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
+  V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+  V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
   V5_A02_SCHEDULER_STEP_REF,
+  v5A02GateZeroR7Presence,
 } from "./gate-zero-producer-registration.v5.js";
 import {
   readGateConclusionEvidence,
@@ -197,14 +204,22 @@ function closedCallable(callable) {
  * them: two copies would be two authorities. A member absent there is not
  * admissible evidence for Gate Zero; a member present there is mandatory.
  *
- * The provisionally-ruled producer registration comes from the same module as
- * ONE frozen constant. There is no builder to call and no predecessor set to
- * hand in. It names a role; it staffs nobody and binds nothing.
+ * The producer registration comes from the same module as ONE frozen constant.
+ * There is no builder to call and no predecessor set to hand in. Its
+ * `r7_entry_witness` is NULL, not true: the 2026-09-12 amendment wrote the
+ * registration into r7 and this repository pins the resulting digest, but the
+ * packet's bytes live in the doctrine store, and only bytes decide. The one
+ * thing that reads them, `v5A02GateZeroR7Presence`, is re-exported here from
+ * the module that owns it — one implementation, not two authorities. Either
+ * way the registration names a role and staffs nobody, so it binds nothing.
  */
 export {
   V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
   V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+  V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+  V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
   V5_A02_SCHEDULER_STEP_REF,
+  v5A02GateZeroR7Presence,
 };
 
 /** What an observation says it saw. "pending" and "absent" are both "no". */
@@ -272,7 +287,7 @@ function reason(id) {
 // module exports no way to bind one.
 // ---------------------------------------------------------------------------
 
-/** Who or what could issue a Gate Zero outcome. r7 registers nobody. */
+/** Who or what could issue a Gate Zero outcome. r7 registers a role; nobody holds it. */
 export const V5_A02_GATE_ZERO_PRODUCER_SEAM = "seam:gate-zero-read-only-outcome-producer";
 
 /** Where an ACCEPTED predecessor outcome could be read from. Nothing today. */
@@ -503,8 +518,11 @@ const PRODUCER_SEAT_UNSTAFFED = "evidence_seams_bound_producer_unstaffed";
  *
  * The four predecessors would have to be read from an accepted-outcome store,
  * and the canary and its readback from the scheduler that dispatched them.
- * Neither reader exists, so this answers `unavailable` and names both — for
- * every caller, on every input, with or without one.
+ * gate-zero-seam-readers.v5.js on main HAS both readers (cards 11 and 12), and
+ * neither is bound to this surface — V5_A02_GATE_ZERO_BINDINGS is null for
+ * every seam, and binding them to Gate Zero is PR 1004's subject. So this
+ * answers `unavailable` and names both seams — for every caller, on every
+ * input, with or without one.
  */
 export const readGateZeroPredecessorJoin = closedCallable(() => {
   const predecessorReader = boundSeam(V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, "readOutcome");
@@ -525,7 +543,7 @@ export const readGateZeroPredecessorJoin = closedCallable(() => {
     return unavailable(
       "gate_zero_predecessor_join",
       "predecessor_outcome_reader_unavailable",
-      "no authoritative accepted-outcome store and no scheduler reader exist to read the four predecessors, the canary or its readback from",
+      "no accepted-outcome or scheduler reader is BOUND to this surface, so the four predecessors, the canary and its readback cannot be read from here",
       seams,
       stood);
   // AND ONE CARD AT A TIME. Each of the two seams has its own ruling, so each
@@ -571,7 +589,9 @@ export const readGateZeroPredecessorJoin = closedCallable(() => {
  *
  * Non-green propagation is only as good as the conclusions it propagates, and a
  * caller-supplied list of gates with their own conclusions on them is a claim
- * about CI, not a reading of it. No gate-conclusion reader exists.
+ * about CI, not a reading of it. The gate-conclusion reader (card 13, in
+ * gate-zero-seam-readers.v5.js) IS bound to this seam as of 2026-09-12, and the
+ * answer is still `unavailable`: a bound reader is a surface, not a subject.
  */
 export const readGateGraphAssurance = closedCallable(() => {
   const conclusionReader = boundSeam(V5_A02_GATE_CONCLUSION_READER_SEAM, "readConclusion");
@@ -583,7 +603,7 @@ export const readGateGraphAssurance = closedCallable(() => {
     return unavailable(
       "gate_graph_assurance",
       "gate_conclusion_reader_unavailable",
-      "no authoritative reader of gate conclusions exists, so a gate graph can only be asserted by its caller",
+      "no gate-conclusion reader is BOUND to this surface, so a gate graph can only be asserted by its caller",
       [V5_A02_GATE_CONCLUSION_READER_SEAM],
       stood);
   // Card 13 is ruled, so a conclusion CAN be read — for one commit, under one
@@ -643,10 +663,10 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
     "gate_zero_outcome_emission",
     "gate_zero_producer_seam_unavailable",
     readersBound
-      ? "the three ruled evidence seams are bound, and the producer role is ruled provisionally to a charter that no seat holds, with r7 still carrying no entry"
+      ? "the three ruled evidence seams are bound, and the registered producer role is held by a charter that no seat staffs"
       : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
-        ? "the producer role is ruled provisionally but r7 carries no entry, no seat holds the oracle, and no reader exists for the evidence one would stand on"
-        : "not every ruled evidence seam is bound, and the producer role is ruled provisionally to a charter that no seat holds, with r7 still carrying no entry",
+        ? "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
+        : "not every ruled evidence seam is bound, and the registered producer role is held by a charter that no seat staffs",
     [...V5_A02_GATE_ZERO_OWED_SEAMS],
     {
       decision_ids: [...V5_A02_DECISION_IDS],
@@ -656,10 +676,10 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
       // one step: a reading is evidence, and this field is a signature.
       passable: false,
       not_passable_because: readersBound
-        ? "the ruled producer role is unstaffed and unregistered in r7, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on"
+        ? "the registered producer role is unstaffed, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on"
         : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
-          ? "the ruled producer role is unstaffed and unregistered in r7, and no authoritative predecessor, scheduler or gate reader exists"
-          : "the ruled producer role is unstaffed and unregistered in r7, and not every ruled evidence seam is bound",
+          ? "the registered producer role is unstaffed, and no predecessor, scheduler or gate-conclusion reader is bound to this surface"
+          : "the registered producer role is unstaffed, and not every ruled evidence seam is bound",
       producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
       // EACH CARD, ON ITS OWN LINE. `seams_bound` above carries all four seams
       // with their live state; these three say the same thing under the names
@@ -670,10 +690,11 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
       gate_conclusion_reader_bound: !owed.includes("conclusion"),
       producer_bound: boundSeam(V5_A02_GATE_ZERO_PRODUCER_SEAM, "emitOutcome") !== null,
       producer_is_caller_supplied: false,
-      // What decision 20c83902 ruled, reported as ruled. These are NOT read
-      // from r7 — `producer_registration.r7_entry_present` says so in the same
-      // breath — and the four fields the ruling could not settle are still
-      // null inside the registration's own `unresolved_without_r7`.
+      // What decision 20c83902 ruled and the 2026-09-12 amendment then wrote
+      // into r7 itself. `producer_registration.r7_packet_sha256` is the digest
+      // this repository pins; `r7_entry_witness` is NULL because only the
+      // packet's bytes decide and they are not here; and the four fields the
+      // ruling could not settle are answered in `resolved_from_r7`.
       producer_role: entry.producer_role,
       oracle_ref: entry.oracle_ref,
       output_schema_ref: entry.output_schema_ref,
@@ -682,15 +703,21 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
       producer_registration: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
       producer_registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
       producer_registration_decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
-      r7_entry_present: V5_A02_GATE_ZERO_R7_ENTRY_PRESENT,
-      // Cards 9 and 10, reported as ruled and not as done. The charter is named
-      // by decision 8a1dad08; naming a charter staffs no desk, so the seat is
-      // still unbound. The r7 amendment is ruled by decision 311a9af5 and is
-      // owed to whoever holds the frozen packet, so the entry is still absent.
+      // NULL, and null is not a soft false: the packet's bytes are not in this
+      // repository, so this surface may assert neither that the amendment landed
+      // nor that it did not. `r7_entry_witness_decided_by` names the only thing
+      // that decides it, and it takes bytes.
+      r7_entry_witness: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
+      r7_entry_witness_decided_by: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
+      // Cards 9 and 10, reported as ruled. The charter is named by decision
+      // 8a1dad08; naming a charter staffs no desk, so the seat is still unbound.
+      // The r7 amendment is ruled by decision 311a9af5 and was applied to the
+      // packet on 2026-09-12 — which is why the field beside it is a witness
+      // over bytes rather than a flag anybody here can set.
       oracle_seat_bound: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound,
       oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
       oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
-      r7_entry_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
+      r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
       // The outcome fields a consumer would need. Null because no run has
       // happened and no seat could have run it.
       outcome_digest: null,
@@ -723,7 +750,6 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
       // all three ruled the list is the two producer questions and nothing else.
       undecided_governance_questions: deepFreeze([
         "which independent seat holds oracle:gate-producer:gate-zero-read-only",
-        "whether r7 itself carries the registration, which today it does not",
         ...owed.map(key => V5_A02_GATE_ZERO_READER_QUESTIONS[key]),
       ]),
     },
@@ -773,3 +799,11 @@ export const v5A02GateZeroPolicyDigest =
 
 export const v5A02GateZeroPolicyCanonicalBytes =
   closedCallable(() => canonicalJson(v5A02GateZeroPolicyPreimage()));
+
+// ---------------------------------------------------------------------------
+// THE R7 CHECK lives in gate-zero-producer-registration.v5.js, beside the
+// registration whose bytes it verifies, and is re-exported above as
+// `v5A02GateZeroR7Presence`. It used to be duplicated here, which is how the
+// registration's own field came to be "derived" from a comparison of two pinned
+// literals while the real byte verifier sat beside it deciding nothing.
+// ---------------------------------------------------------------------------

@@ -19,14 +19,16 @@
 //   which is the half that must never be skippable.
 //
 //   BY REGENERATION, whenever the commit is reachable. `mcp-server/src` is
-//   rebuilt from `git show 229980a5:<path>`, file by file, and the suites walk
+//   rebuilt from `git show <PRE_PR_COMMIT>:<path>`, file by file, and the suites walk
 //   THAT tree with the same walkers they use on the branch and compare the
 //   result to the snapshot. A checkout too shallow to hold the commit skips the
 //   REGENERATION only — never the digest — and says so.
 //
 // The commit is the merge-base of this branch and main, so its values are the
 // pre-PR ones by construction and stay so after the merge that made the old
-// baseline meaningless.
+// baseline meaningless. It is named ONCE, below, and every path here reads it
+// from there — including the two suites, which is why re-pinning it after a
+// merge-from-main is one edit and a regeneration rather than a hunt.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -35,8 +37,24 @@ import { spawnSync } from "node:child_process";
 
 import { digest } from "../src/artifact-trust.js";
 
-/** The merge-base of this branch and main: the last commit that predates PR 1004. */
-export const PRE_PR_COMMIT = "229980a5f2eea8cb5fe3af6b308973557a3ee9cc";
+/**
+ * The merge-base of this branch and main: the last commit that predates this
+ * branch's changes.
+ *
+ * IT MOVED ON 2026-09-12, and the reason is the one this whole helper is about.
+ * The pin was `229980a5…` while PR 1009 was still open. 1009 then merged and
+ * CHANGED the gate's surface — byte-derived r7 presence, the renamed witness
+ * fields, the reworded reader refusals — so `229980a5…` stopped being "the
+ * state this branch is built on" and became a state two PRs back. A baseline
+ * that predates somebody ELSE's merged work would report their strings as this
+ * branch's inventions, which is the opposite of what the exemption is for.
+ *
+ * So the pin follows the merge-base and nothing else: `e05c8939` is 1009's
+ * merge commit, the branch merged from it, and the snapshot below is
+ * REGENERATED from it rather than edited. What does not move is the mechanism —
+ * a commit, never a ref, authenticated by a digest pinned in this file.
+ */
+export const PRE_PR_COMMIT = "e05c89391426e169fa494ba9abf3a6012a899f5a";
 
 /**
  * THE SNAPSHOT'S CANONICAL DIGEST, pinned here and nowhere else.
@@ -47,7 +65,7 @@ export const PRE_PR_COMMIT = "229980a5f2eea8cb5fe3af6b308973557a3ee9cc";
  * describes can be read in this checkout.
  */
 export const PRE_PR_BASELINE_DIGEST =
-  "sha256:e412f0634af6cc2a07938d7ff8502029240e04f9d7c837ff08532cfcbbfe5d4d";
+  "sha256:aefd60e55cbde4c01ed72d2b9a6581e82b8fedaeae214b0e58f5c81564f50941";
 
 /** The prefix every src path carries in git, stripped to get a tree-relative one. */
 const SRC_PREFIX = "mcp-server/src/";

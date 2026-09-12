@@ -48,6 +48,10 @@ import {
 import * as prePrBaselineHelper from "./gate-zero-pre-pr-baseline.v5.testhelper.mjs";
 import * as producerModule from "../src/gate-zero-producer-registration.v5.js";
 import {
+  V5_A02_GATE_ZERO_GATE_ID,
+  V5_A02_GATE_ZERO_PRODUCER_ROLE,
+} from "../src/gate-zero-producer-registration.v5.js";
+import {
   V5_A02_GATE_ZERO_SCHEMA_VERSION,
   V5_A02_POLICY_VERSION,
   V5_A02_DECISION_IDS,
@@ -70,6 +74,9 @@ import {
   v5A02GateZeroPolicyPreimage,
   v5A02GateZeroPolicyDigest,
   v5A02GateZeroPolicyCanonicalBytes,
+  v5A02GateZeroR7Presence,
+  V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+  V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
 } from "../src/gate-zero-assurance.v5.js";
 
 import {
@@ -168,6 +175,8 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
   "V5_A02_GATE_ZERO_PRODUCER_SEAM",
+  "V5_A02_GATE_ZERO_R7_PACKET_SHA256",
+  "V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256",
   "V5_A02_GATE_ZERO_REASON_IDS",
   "V5_A02_GATE_ZERO_SCHEMA_VERSION",
   "V5_A02_OBSERVATION_STATES",
@@ -182,16 +191,91 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "v5A02GateZeroPolicyCanonicalBytes",
   "v5A02GateZeroPolicyDigest",
   "v5A02GateZeroPolicyPreimage",
+  "v5A02GateZeroR7Presence",
 ];
 
-/** The words a consumer would act on. None may come back from this surface. */
-const PRIVILEGED_TRUE_KEYS = new Set([
-  "ok", "green", "joins_exactly", "passable", "activated", "allow", "allowed",
-  "satisfied", "coverage_complete", "is_gate_zero_pass", "claim_matches_derivation",
-  "caller_evidence_admitted", "producer_bound", "request_read",
+/**
+ * THE CLOSED PRIVILEGED UNION, copied from the standing rule learned over nine
+ * review rounds on 2026-09-11, swept AS EXACT MATCH AND AS SUBSTRING the rule
+ * says to. The earlier revision of this file listed only the handful of words
+ * this slice happened to use, which is how `present` — a union member — was
+ * exported from two modules under the sweep's nose, as `present` on the r7
+ * finding and as `r7_entry_present` on the registration. A sweep that only
+ * knows the words the author already avoided catches nothing.
+ */
+const PRIVILEGED_WORDS = Object.freeze([
+  "allow", "commit", "prompt", "suppress", "release", "read", "covered",
+  "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
+  "satisfied", "complete", "admitted", "resumed", "attended", "verified",
+  "present", "equivalent", "operational", "active", "green", "joins_exactly",
+  "coverage_complete", "favorable",
 ]);
+
+/** The slice's own privileged names, beyond the union's words. */
+const PRIVILEGED_TRUE_KEYS = new Set([
+  "allowed", "is_gate_zero_pass", "claim_matches_derivation", "producer_bound",
+]);
+
+/**
+ * A key whose `true` would be a consumer-actionable claim: a union word exactly,
+ * a union word anywhere inside the name, this slice's own list, a `would_`
+ * classifier field, or an `_if_authoritative` conditional leaking outward.
+ */
+function privilegedKey(key) {
+  const lower = key.toLowerCase();
+  if (PRIVILEGED_TRUE_KEYS.has(key)) return true;
+  if (lower.startsWith("would_") || lower.includes("_if_authoritative")) return true;
+  return PRIVILEGED_WORDS.some(word => lower === word || lower.includes(word));
+}
+
+test("SWEEP: the privileged-word set is the standing rule's closed union", () => {
+  // The union is a copied constant, so the copy is checked rather than trusted:
+  // every word the rule names is swept, and the two names this correction
+  // renamed are caught under both their exact and their embedded spellings.
+  assert.equal(PRIVILEGED_WORDS.length, 28);
+  for (const word of ["present", "read", "pass", "verified", "active", "complete"])
+    assert.ok(PRIVILEGED_WORDS.includes(word), `${word} is missing from the union`);
+  for (const key of ["present", "r7_entry_present", "gate_zero_present", "would_allow",
+    "is_read", "coverage_complete", "was_verified_if_authoritative"])
+    assert.equal(privilegedKey(key), true, `${key} must be swept`);
+  // THE SEAM-STATE EXEMPTION IS THREE NAMES WIDE. Each is still privileged to
+  // `privilegedKey` — the exemption lives in the finding walker, not in the
+  // union — and `producer_bound`, the binding boolean that WOULD be a claim, is
+  // outside it and stays swept through both.
+  for (const key of SEAM_STATE_KEYS) assert.equal(privilegedKey(key), true, key);
+  assert.equal(SEAM_STATE_KEYS.size, 3);
+  assert.equal(SEAM_STATE_KEYS.has("producer_bound"), false);
+  assert.deepEqual(privilegedFindings({ producer_bound: true }), ["$.producer_bound === true"],
+    "the seam-state exemption widened to the one boolean that is an authority claim");
+  assert.deepEqual(privilegedFindings({ predecessor_outcome_reader_bound: true }), []);
+  // And the names this slice now uses are NOT swept, so the sweep is a filter
+  // rather than a blanket that would fire on anything.
+  for (const key of ["r7_entry_witness", "witness_conjunction", "digest_matches",
+    "entry_matches", "gate_registered", "role_registered", "parsed", "retryable",
+    "is_superseded_packet", "failed_run_retained"])
+    assert.equal(privilegedKey(key), false, `${key} must not be swept`);
+});
 const PRIVILEGED_VALUES = new Set([
   "allow", "allowed", "green", "pass", "passed", "passable", "operational", "active",
+]);
+
+/**
+ * THE THREE SEAM-STATE BOOLEANS, NAMED ONE BY ONE AND FOR ONE REASON.
+ *
+ * Each says whether a ruled evidence SEAM has a reader behind it — the same fact
+ * `seams_bound` carries as a list — and none of them says any evidence was read,
+ * admitted or acted on. The substring sweep catches them because "reader"
+ * carries the union's "read", which is the word that exists to catch `read:
+ * true` and `is_read: true`.
+ *
+ * THE EXEMPTION IS THREE EXACT NAMES AND NOTHING ELSE. `producer_bound` is a
+ * binding boolean too and is NOT here: it is the one whose `true` would be an
+ * authority claim, and the test below asserts it is still swept.
+ */
+const SEAM_STATE_KEYS = new Set([
+  "predecessor_outcome_reader_bound",
+  "scheduler_reader_bound",
+  "gate_conclusion_reader_bound",
 ]);
 
 /** Every string, key and boolean in a returned value, walked to the leaves. */
@@ -203,7 +287,8 @@ function privilegedFindings(value, path = "$", found = []) {
   if (value !== null && typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
       const at = `${path}.${key}`;
-      if (entry === true && PRIVILEGED_TRUE_KEYS.has(key)) found.push(`${at} === true`);
+      if (entry === true && privilegedKey(key) && !SEAM_STATE_KEYS.has(key))
+        found.push(`${at} === true`);
       if (key.startsWith("would_")) found.push(`${at} is a classifier field on the public surface`);
       privilegedFindings(entry, at, found);
     }
@@ -289,6 +374,7 @@ test("SURFACE: the public export list is exactly the unavailable surface", () =>
  */
 const EXPECTED_PRODUCER_EXPORTS = [
   "GATE_ZERO_STEP_REF",
+  "RESOLVED_FROM_R7",
   "UNRESOLVED_WITHOUT_R7",
   "V5_A02_GATE_ZERO_COMBINER",
   "V5_A02_GATE_ZERO_GATE_ID",
@@ -302,29 +388,58 @@ const EXPECTED_PRODUCER_EXPORTS = [
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS",
   "V5_A02_GATE_ZERO_PRODUCER_ROLE",
   "V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF",
-  "V5_A02_GATE_ZERO_R7_ENTRY_PRESENT",
+  "V5_A02_GATE_ZERO_R7_ENTRY_WITNESS",
+  "V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY",
+  "V5_A02_GATE_ZERO_R7_PACKET_SHA256",
+  "V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256",
   "V5_A02_GATE_ZERO_RECEIPT_REF",
   "V5_A02_GATE_ZERO_RETRY_POLICY",
   "V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION",
   "V5_A02_SCHEDULER_STEP_REF",
+  "v5A02GateZeroR7Presence",
 ];
 
-test("PRODUCER: the registration module exports the frozen record and pure readers only", () => {
+test("PRODUCER: the registration module exports the frozen record and one bytes-only reader", () => {
   assert.deepEqual(Object.keys(producerModule).sort(), EXPECTED_PRODUCER_EXPORTS);
-  // Not one export is callable. A builder is the only shape that could take a
-  // predecessor argument, and the module has none — proved by value, not by name.
+  // EXACTLY ONE export is callable, and it is the byte verifier. The PR 990
+  // defect was an exported BUILDER — the only shape that can take a predecessor
+  // reference and hand back an authority-stamped record over it. The verifier is
+  // the opposite shape: its one argument is bytes, and every other argument
+  // throws rather than being interpreted. Proved by value, not by name.
   const callable = Object.entries(producerModule)
     .filter(([, value]) => typeof value === "function").map(([name]) => name);
-  assert.deepEqual(callable, [],
+  assert.deepEqual(callable, ["v5A02GateZeroR7Presence"],
     "an exported builder can be handed caller-supplied predecessor references");
-  // And proved again in the source, so a future `export function` is red on
-  // sight rather than red only once someone adds it to the list above.
+  const reader = producerModule.v5A02GateZeroR7Presence;
+  assert.equal(reader.length, 1, "the reader takes bytes and nothing else");
+  // An arrow, per amendment 2 of the standing rule: no .prototype, not
+  // constructable, and Symbol.hasInstance answers false without touching its
+  // left operand.
+  assert.equal(Object.hasOwn(reader, "prototype"), false);
+  assert.throws(() => Reflect.construct(reader, [""]), TypeError);
+  assert.equal({} instanceof reader, false);
+  assert.equal(reader[Symbol.hasInstance]({ r7_entry_witness: true }), false);
+  // Every shape that is not bytes throws, including the ones that try to name
+  // the answer or to hand in a reference set.
+  for (const shape of [undefined, null, true, false, 0, 1, {}, [],
+    { r7_entry_present: true }, { witness_conjunction: true },
+    { registry_entry: {}, predecessor_step_refs: ["step:anything"] },
+    ["step:scheduler-active-receipt"], () => true, Symbol("packet"),
+    new Proxy({}, { get: () => true })])
+    assert.throws(() => reader(shape), V5BoundaryError,
+      `${String(typeof shape)} was interpreted instead of refused`);
+  // And proved again in the source, so a SECOND callable is red on sight rather
+  // than red only once someone adds it to the list above.
   const source = readFileSync(
     fileURLToPath(new URL("../src/gate-zero-producer-registration.v5.js", import.meta.url)), "utf8");
-  for (const shape of [/\bexport\s+function\b/, /\bexport\s+default\b/,
-    /\bexport\s+(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:function\b|\()/])
+  for (const shape of [/\bexport\s+function\b/, /\bexport\s+default\b/])
     assert.equal(shape.test(source), false,
       `the registration module exports a callable: ${shape}`);
+  const arrowExports = [...source.matchAll(
+    /\bexport\s+(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function\b|\()/g)]
+    .map(match => match[1]);
+  assert.deepEqual(arrowExports, ["v5A02GateZeroR7Presence"],
+    "only the byte verifier may be an exported callable");
 });
 
 test("PRODUCER: the four canonical predecessors are hard-bound into the frozen registration", () => {
@@ -408,7 +523,7 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", () =>
   }
 });
 
-test("SURFACE: the producer contract is reported as RULED, never as read from r7", () => {
+test("SURFACE: the producer contract is reported as REGISTERED, and registered is not staffed", () => {
   const result = emitGateZeroOutcome(cleanJoin());
   // The five the 2026-09-11 ruling settled are reported, and each one matches
   // the registration rather than a literal typed twice.
@@ -418,20 +533,28 @@ test("SURFACE: the producer contract is reported as RULED, never as read from r7
   assert.equal(result.output_schema_ref, entry.output_schema_ref);
   assert.equal(result.evidence_scope, entry.evidence_scope);
   assert.equal(result.produced_gate_id, entry.produces_gate_ids[0]);
-  // And each one is reported beside the fact that r7 does not carry it.
-  assert.equal(result.producer_registration_status, "provisional");
+  assert.equal(result.producer_registration_status, "registered");
   assert.equal(result.producer_registration_decision_ref,
     "20c83902-f150-4d59-beca-915c5c871f95");
-  assert.equal(result.r7_entry_present, false);
+  // Whether r7 carries the entry is UNDETERMINED here — the packet's bytes are
+  // not in this repository — and the seat is empty. Those are separate facts and
+  // the refusal depends on the second one, not the first.
+  assert.equal(result.r7_entry_witness, null);
+  assert.equal(Object.hasOwn(result, "r7_entry_present"), false,
+    "the privileged spelling must not come back under any value");
+  assert.equal(result.r7_entry_witness_decided_by,
+    "v5A02GateZeroR7Presence(<r7 design packet bytes>).witness_conjunction");
   assert.equal(result.producer_registration.oracle_seat_bound, false);
   // No run has happened, so no outcome exists to report.
   for (const field of ["outcome_digest", "observed_at"])
     assert.equal(result[field], null, `${field} must be null, not invented`);
-  // The three fields the ruling could not settle stay null and stay named.
-  for (const field of ["consumes_gate_ids", "target_dag", "causal_phase"])
-    assert.equal(entry[field], null, `${field} is not knowable here and must stay null`);
+  // Every field of the entry is now a value read from r7; a null would mean the
+  // amendment left a hole, and tools/doctorcre-v5-review.cjs refuses such a row.
+  for (const [field, value] of Object.entries(entry))
+    assert.notEqual(value, null, `${field} must carry r7's answer, not a hole`);
+  assert.deepEqual(V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7, []);
   assert.deepEqual(
-    V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7.map(item => item.field).sort(),
+    V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.resolved_from_r7.map(item => item.field).sort(),
     ["causal_phase", "consumes_gate_ids", "produces_gate_ids[0]", "target_dag"]);
   // THE THREE THAT LEFT THIS LIST ON 2026-09-11, and they left because Joe
   // answered them, not because anybody trimmed the list: cards 11, 12 and 13
@@ -443,22 +566,163 @@ test("SURFACE: the producer contract is reported as RULED, never as read from r7
   ])
     assert.equal(result.undecided_governance_questions.includes(answered), false,
       `${answered} is ruled and must not still be listed as undecided`);
-  // AND THE TWO THAT DID NOT. Cards 9 and 10 are a seat and a sealed packet.
+  // AND THE ONE THAT DID NOT: card 9's seat. Card 10 left this list on
+  // 2026-09-12, when the loop-589 amendment was applied to the frozen packet —
+  // so the ONLY question left open on this surface is who holds the oracle.
   assert.deepEqual([...result.undecided_governance_questions], [
     "which independent seat holds oracle:gate-producer:gate-zero-read-only",
-    "whether r7 itself carries the registration, which today it does not",
   ]);
-  // CARD 9 names a charter and staffs nobody; CARD 10 rules an amendment that
-  // the holder of the frozen packet has not applied. Both are reported as ruled
-  // and neither is reported as done.
+  assert.ok(!result.undecided_governance_questions.some(
+    question => question.includes("whether r7 itself carries the registration")),
+  "r7 carries it; the question must not still be listed as open");
+  // CARD 9 names a charter and staffs nobody, so the seat stays unbound. CARD
+  // 10's amendment landed, and the surface reports it the only honest way: the
+  // ruling's decision ref, and a witness that is NULL because deciding it needs
+  // the packet's bytes. `r7_entry_present` — the flag this surface used to
+  // carry — must be gone entirely, not merely false.
   assert.equal(result.oracle_seat_charter_ref, "charter:reviewer");
   assert.equal(result.oracle_seat_charter_decision_ref,
     "8a1dad08-8707-4bb0-a159-c2831a00cea2");
   assert.equal(result.oracle_seat_bound, false);
-  assert.equal(result.r7_entry_amendment_decision_ref,
+  assert.equal(result.r7_amendment_decision_ref,
     "311a9af5-3685-4c47-a158-f8dd70870ca1");
-  assert.equal(result.producer_registration.r7_entry_amendment_applied, false);
-  assert.equal(result.r7_entry_present, false);
+  assert.equal(result.r7_entry_witness, null);
+  assert.equal(Object.hasOwn(result, "r7_entry_present"), false);
+  assert.equal(Object.hasOwn(result.producer_registration, "r7_entry_amendment_applied"), false,
+    "the amendment landed; a flag saying it did not must not survive the merge");
+});
+
+/**
+ * THE R7 ENTRY IS PROVEN BY BYTES, NOT BY A FLAG AND NOT BY A PIN COMPARED TO
+ * ANOTHER PIN. The registration's `r7_entry_witness` is routed through
+ * `v5A02GateZeroR7Presence`, whose only argument is the packet's bytes; these
+ * cases are that derivation's falsifiers. They are exercised against a packet
+ * built to carry the entry but not hashing to the pin, against packets missing
+ * the gate and the role, against a drifted row, and — in the case below that
+ * takes the real reconstructed packets — against the amended bytes and the
+ * superseded bytes themselves.
+ */
+function r7PacketLike(overrides = {}) {
+  const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
+  return JSON.stringify({
+    receipt_producer_step_registry: [{ ...entry }],
+    consumer_gate_registry: [{
+      gate_id: V5_A02_GATE_ZERO_GATE_ID,
+      receipt_producer_step_refs: [GATE_ZERO_STEP_REF],
+    }],
+    producer_role_registry: [V5_A02_GATE_ZERO_PRODUCER_ROLE],
+    ...overrides,
+  });
+}
+
+test("PRODUCER: r7 presence is read from the packet, and no argument short of it answers true", () => {
+  assert.throws(() => v5A02GateZeroR7Presence(true), V5BoundaryError);
+  assert.throws(() => v5A02GateZeroR7Presence({ r7_entry_present: true }), V5BoundaryError);
+  assert.throws(() => v5A02GateZeroR7Presence(), V5BoundaryError);
+  // THE DERIVATION IS NOT A COMPARISON OF TWO PINS. Without bytes the answer is
+  // null, not true: any revision that goes back to deciding this from the
+  // pinned constants alone turns THIS assertion red.
+  assert.equal(V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.r7_entry_witness, null);
+  assert.equal(producerModule.V5_A02_GATE_ZERO_R7_ENTRY_WITNESS, null);
+  assert.equal(Object.hasOwn(V5_A02_GATE_ZERO_PRODUCER_REGISTRATION, "r7_entry_present"), false);
+  // A packet whose CONTENT is right but whose bytes are not the pinned packet:
+  // every content finding holds and the conjunction is still false. This is the
+  // case that goes red if the digest term is dropped from the conjunction.
+  const lookalike = v5A02GateZeroR7Presence(r7PacketLike());
+  assert.equal(lookalike.entry_matches, true);
+  assert.equal(lookalike.gate_registered, true);
+  assert.equal(lookalike.role_registered, true);
+  assert.equal(lookalike.digest_matches, false);
+  assert.equal(lookalike.witness_conjunction, false,
+    "content without the pinned digest is not the packet");
+  assert.equal(Object.hasOwn(lookalike, "present"), false,
+    "the privileged spelling must not come back under any value");
+  // Each content finding fails on its own mutation.
+  const noRole = v5A02GateZeroR7Presence(r7PacketLike({ producer_role_registry: [] }));
+  assert.equal(noRole.role_registered, false);
+  const noGate = v5A02GateZeroR7Presence(r7PacketLike({ consumer_gate_registry: [] }));
+  assert.equal(noGate.gate_registered, false);
+  const drifted = JSON.parse(r7PacketLike());
+  drifted.receipt_producer_step_registry[0].causal_phase = "production_outcome";
+  assert.equal(v5A02GateZeroR7Presence(JSON.stringify(drifted)).entry_matches, false,
+    "a row that differs by one closed-registry value is not this registration");
+  // Unparseable bytes deny rather than throw.
+  assert.equal(v5A02GateZeroR7Presence("not json").witness_conjunction, false);
+  // NO caller-controlled byte shape reaches a true conjunction, and none of them
+  // brings a privileged word back either.
+  const byteShapes = [r7PacketLike(), r7PacketLike({ producer_role_registry: [] }),
+    r7PacketLike({ consumer_gate_registry: [] }), JSON.stringify(drifted), "not json", "",
+    JSON.stringify({}), JSON.stringify({ present: true, r7_entry_present: true }),
+    JSON.stringify({ receipt_producer_step_registry: "everything" }),
+    Buffer.from(r7PacketLike()), Buffer.alloc(0)];
+  for (const bytes of byteShapes) {
+    const finding = v5A02GateZeroR7Presence(bytes);
+    assert.equal(finding.witness_conjunction, false,
+      `a caller-supplied byte shape reached a true conjunction: ${String(bytes).slice(0, 60)}`);
+    assert.deepEqual(privilegedFindings(finding), [],
+      `the r7 finding leaked a privileged outcome for ${String(bytes).slice(0, 60)}`);
+    assert.ok(Object.isFrozen(finding));
+  }
+  // The two pins are different packets, and the superseded one is named.
+  assert.notEqual(V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256);
+  for (const sha of [V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256])
+    assert.match(sha, /^[0-9a-f]{64}$/);
+});
+
+/**
+ * THE SAME CHECK AGAINST THE TWO REAL PACKETS, WHICH IS THE ONLY PLACE A TRUE
+ * CONJUNCTION CAN COME FROM.
+ *
+ * r7 is not a file in this repository — it is 62 base64 chunk sections in the
+ * doctrine store, 740KB reassembled, and the amended and superseded packets
+ * together are 1.4MB — so it is supplied by path, exactly as
+ * tools/doctorcre-v5-review.cjs is handed the design and constitution by path
+ * rather than carrying them. Point CARR_R7_DESIGN_PACKET at the amended bytes
+ * and CARR_R7_DESIGN_PACKET_SUPERSEDED at the pre-amendment bytes and both run.
+ * They are skipped, never faked: a fixture standing in for the packet would
+ * prove nothing about the pin, which is the entire point of a pin.
+ *
+ * Run on this branch 2026-09-12 against the packets read back out of the
+ * doctrine store after the loop-589 amendment:
+ *
+ *   amended    sha256 ea40f61a…  digest_matches true   witness_conjunction true
+ *   superseded sha256 ef34aa54…  digest_matches false  witness_conjunction false
+ */
+test("PRODUCER: the amended r7 packet witnesses the registration and the superseded one does not", (t) => {
+  const amendedPath = process.env.CARR_R7_DESIGN_PACKET;
+  const supersededPath = process.env.CARR_R7_DESIGN_PACKET_SUPERSEDED;
+  if (!amendedPath && !supersededPath)
+    return t.skip("set CARR_R7_DESIGN_PACKET and CARR_R7_DESIGN_PACKET_SUPERSEDED to the reconstructed r7 packets");
+
+  if (amendedPath) {
+    const finding = v5A02GateZeroR7Presence(readFileSync(amendedPath));
+    assert.equal(finding.observed_sha256, V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+      `CARR_R7_DESIGN_PACKET is not the pinned packet: ${finding.observed_sha256}`);
+    assert.equal(finding.digest_matches, true);
+    assert.equal(finding.is_superseded_packet, false);
+    assert.equal(finding.entry_matches, true);
+    assert.equal(finding.gate_registered, true);
+    assert.equal(finding.role_registered, true);
+    assert.equal(finding.witness_conjunction, true);
+  }
+
+  if (supersededPath) {
+    // The packet as it stood BEFORE the amendment. Every finding must fail:
+    // these bytes hash to the superseded pin, and the packet has no Gate Zero
+    // producer row, gate or role in it at all.
+    const finding = v5A02GateZeroR7Presence(readFileSync(supersededPath));
+    assert.equal(finding.observed_sha256, V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
+      `CARR_R7_DESIGN_PACKET_SUPERSEDED is not the superseded packet: ${finding.observed_sha256}`);
+    assert.equal(finding.digest_matches, false);
+    assert.equal(finding.is_superseded_packet, true);
+    assert.equal(finding.parsed, true, "the superseded packet must parse, so the false is about content");
+    assert.equal(finding.entry_matches, false);
+    assert.equal(finding.gate_registered, false);
+    assert.equal(finding.role_registered, false);
+    assert.equal(finding.witness_conjunction, false);
+  }
 });
 
 test("SURFACE: a ruled producer role does not make the gate passable", () => {
@@ -564,17 +828,17 @@ test("SURFACE: the three ruled readers are bound, and the producer never is", ()
  * the additions are exactly these eleven names, and everything that is not one
  * of them is main's bytes.
  */
-const CARD_9_AND_10_ANSWER_FIELDS = Object.freeze([
+const CARD_9_ANSWER_FIELDS = Object.freeze([
   "oracle_seat_bound",
   "oracle_seat_charter_ref",
   "oracle_seat_charter_decision_ref",
-  "r7_entry_amendment_decision_ref",
+  // Card 10's ref, which main carries on the registration and this branch also
+  // reports at the top of the answer.
+  "r7_amendment_decision_ref",
 ]);
-const CARD_9_AND_10_REGISTRATION_FIELDS = Object.freeze([
+const CARD_9_REGISTRATION_FIELDS = Object.freeze([
   "oracle_seat_charter_ref",
   "oracle_seat_charter_decision_ref",
-  "r7_entry_amendment_decision_ref",
-  "r7_entry_amendment_applied",
 ]);
 
 /**
@@ -592,12 +856,12 @@ const PER_CARD_ANSWER_FIELDS = Object.freeze([
 /** The answer with cards 9 and 10 and the three per-card booleans lifted out. */
 function withoutCards9And10(answer) {
   const stripped = { ...answer };
-  for (const field of [...CARD_9_AND_10_ANSWER_FIELDS, ...PER_CARD_ANSWER_FIELDS]) {
+  for (const field of [...CARD_9_ANSWER_FIELDS, ...PER_CARD_ANSWER_FIELDS]) {
     assert.ok(Object.hasOwn(stripped, field), `${field} is not on the answer`);
     delete stripped[field];
   }
   const registration = { ...stripped.producer_registration };
-  for (const field of CARD_9_AND_10_REGISTRATION_FIELDS) {
+  for (const field of CARD_9_REGISTRATION_FIELDS) {
     assert.ok(Object.hasOwn(registration, field), `${field} is not on the registration`);
     delete registration[field];
   }
@@ -605,16 +869,36 @@ function withoutCards9And10(answer) {
   return stripped;
 }
 
+/**
+ * WHAT MAIN ANSWERS, read off the commit the pre-PR baseline pins and not off a
+ * ref. The first two are the baseline's own `gate_answer_digests`; the third is
+ * the emission, which the baseline does not carry because this branch adds
+ * fields to it on purpose.
+ *
+ * THEY MOVED ON 2026-09-12 and the move is the point: PR 1009 changed this
+ * surface while this branch was open — byte-derived r7 presence, the renamed
+ * witness fields, the reworded reader refusals — so the three digests taken
+ * from `229980a5` were answers no commit gives any more. Re-derived from
+ * `e05c8939`, which is what `PRE_PR_COMMIT` names.
+ */
 const MAIN_ANSWER_DIGESTS = Object.freeze({
   readGateZeroPredecessorJoin:
-    "sha256:06a7af2a2df9a57e2c398980e41ed13f9eb861779c06f7ac8a3fb36ac10218da",
+    "sha256:fd7fade6a1042745171147cd6bbdb699883a841aea158e53436c43a77ab5954a",
   readGateGraphAssurance:
-    "sha256:0af0b1524b0565bcfbef033ee341e1a43a48611eaa38bdce99baebe94c18f51b",
-  // Taken from main the same way, then passed through withoutCards9And10 — on
-  // main that function is the identity, because main has neither field set.
+    "sha256:31c447c1b354cc453c2eea90127a899519bcea514e398bb1ddf5cbc299b9445a",
+  // Taken from that commit the same way, then passed through withoutCards9And10
+  // — on main that function is the identity, because main has no card-9 field.
   emitGateZeroOutcome:
-    "sha256:e8881d51dc8cae751d5c06a30816fdc448fa4a252b70453ecfda311fc817aec9",
+    "sha256:04e750af7bf7728bc0a52ffd6e5d1dd40c9c88c80459647fccdd9c49ae3361b6",
 });
+
+// THE TWO READER DIGESTS ARE THE BASELINE'S OWN, not a second copy of them: the
+// snapshot carries the same pair, digest-authenticated, so a re-pin that updated
+// one and forgot the other is red here rather than silently self-consistent.
+assert.deepEqual([MAIN_ANSWER_DIGESTS.readGateZeroPredecessorJoin,
+  MAIN_ANSWER_DIGESTS.readGateGraphAssurance].sort(),
+[...PRE_PR_BASELINE.gate_answer_digests],
+"the pinned main answers are not the pre-PR commit's, which the baseline holds");
 
 /** The three ruled lines as src holds them, and the null each goes back to. */
 const RULED_DECISION_LINES = Object.freeze([
@@ -834,10 +1118,14 @@ const READER_CARDS = Object.freeze([
   }),
 ]);
 
-/** Cards 9 and 10, which no ruling line here can close. */
+/**
+ * Card 9, which no ruling line here can close. Card 10 left this list when the
+ * loop-589 amendment was applied to the frozen packet — what replaced it is not
+ * a question but a witness over the packet's bytes, and a witness that answers
+ * `null` for want of bytes is not an open governance question.
+ */
 const PRODUCER_QUESTIONS = Object.freeze([
   "which independent seat holds oracle:gate-producer:gate-zero-read-only",
-  "whether r7 itself carries the registration, which today it does not",
 ]);
 
 /** What the emission says about the join for each state of the two join cards. */
@@ -1073,13 +1361,11 @@ test("PER READER: a ruling naming another registered store leaves the card unbou
 // AT ALL, including each of the eight this branch declares below.
 // ---------------------------------------------------------------------------
 
-/** The closed union, verbatim from the standing rule of 2026-09-11. */
-const PRIVILEGED_WORDS = Object.freeze([
-  "allow", "commit", "prompt", "suppress", "release", "read", "covered", "drafted",
-  "proposed", "queued", "healthy", "passing", "ok", "pass", "satisfied", "complete",
-  "admitted", "resumed", "attended", "verified", "present", "equivalent",
-  "operational", "active", "green", "joins_exactly", "coverage_complete", "favorable",
-]);
+// The closed union is declared ONCE, near the top of this file, and the sweep
+// below reads that one — it used to carry its own verbatim copy, which the
+// 2026-09-12 merge collapsed. `PRIVILEGED_WORDS.length` is asserted to be 28
+// there, so a word dropped from the union turns a test red rather than quietly
+// narrowing both sweeps at once.
 
 /**
  * Every way one string can carry a privileged word: it IS one, or it CONTAINS one
@@ -1134,6 +1420,15 @@ function surfaceVocabulary(namespace, label) {
   for (const [name, value] of Object.entries(namespace)) {
     if (!into.has(name)) into.set(name, `${label}.${name} (export name)`);
     if (typeof value !== "function") { collectStrings(value, `${label}.${name}`, into); continue; }
+    // THE ONE EXPORT THAT TAKES AN ARGUMENT, and the argument is required — it
+    // throws rather than interpreting a missing packet, which is the property
+    // the falsifiers above exist to hold. So it is walked over a caller-shaped
+    // packet: the finding's whole vocabulary is swept, and the bytes are ones a
+    // caller could actually supply.
+    if (name === "v5A02GateZeroR7Presence") {
+      collectStrings(value(r7PacketLike()), `${label}.${name}(packet)`, into);
+      continue;
+    }
     const answer = value();
     if (typeof answer !== "string") {
       collectStrings(answer, `${label}.${name}()`, into);
@@ -1214,9 +1509,17 @@ test("BASELINE: the pre-PR vocabulary is that commit's own, regenerated from git
 
 /**
  * Every string this branch adds to the UNRULED surface, and nothing else may be
- * added without appearing here. Seven are cards 9 and 10 — a charter ref, its
- * decision, the r7 amendment decision and the field names that carry them — and
- * the eighth is the reason id the per-card refusal needed.
+ * added without appearing here. Four are card 9 — a charter ref, its decision,
+ * and the two field names that carry them — and the fifth is the reason id the
+ * per-card refusal needed.
+ *
+ * IT SHRANK ON 2026-09-12. `311a9af5…`, the two `r7_entry_amendment_*` names and
+ * `r7_amendment_decision_ref` were this branch's while PR 1009 was open; 1009
+ * then merged carrying the amendment and its ref, so all four are the pre-PR
+ * commit's strings now and declaring any of them would be claiming somebody
+ * else's work. The branch still REPORTS the ref at the top of the emitted
+ * answer, which is a field this branch adds over a string it did not invent —
+ * and the strip list above is where that addition is accounted for.
  *
  * THIS LIST EXEMPTS NOTHING. The only exemption is the pre-PR commit's own
  * vocabulary, committed as values and regenerated from that commit above, and
@@ -1225,13 +1528,10 @@ test("BASELINE: the pre-PR vocabulary is that commit's own, regenerated from git
  * sweep fails here rather than riding the declaration in.
  */
 const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
-  "311a9af5-3685-4c47-a158-f8dd70870ca1",
   "8a1dad08-8707-4bb0-a159-c2831a00cea2",
   "charter:reviewer",
   "oracle_seat_charter_decision_ref",
   "oracle_seat_charter_ref",
-  "r7_entry_amendment_applied",
-  "r7_entry_amendment_decision_ref",
   "scheduler_canary_seam_unavailable",
 ]);
 
@@ -1341,6 +1641,10 @@ const PUBLIC_CALLABLES = Object.freeze([
   "v5A02GateZeroPolicyCanonicalBytes",
   "v5A02GateZeroPolicyDigest",
   "v5A02GateZeroPolicyPreimage",
+  // Re-exported from the registration module, which owns it: one byte verifier,
+  // not two. It is enumerated here because it is reachable HERE, and it wears
+  // the same closed shape the six above do.
+  "v5A02GateZeroR7Presence",
 ]);
 
 /**
@@ -1594,13 +1898,14 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
   // And specifically: the public surface imports seven modules, none of them this
-  // slice's classifiers. The fifth is the producer registration, a frozen
-  // constant table that reaches nothing; the sixth is the ruled readers, added
-  // on 2026-09-12; the seventh is the shared ruling predicate on its internal
-  // path — and the ruling table is NOT among them, which is the PR 1004
-  // re-review's finding: the binding condition reaches this module through the
-  // one predicate the readers ask too, so there is one predicate over that table
-  // instead of two that can disagree.
+  // slice's classifiers. The fifth is the producer registration — a frozen
+  // constant table plus the one byte verifier, reaching only the sha256 and
+  // canonical-JSON helpers that verifier needs and the boundary error it throws;
+  // the sixth is the ruled readers, added on 2026-09-12; the seventh is the
+  // shared ruling predicate on its internal path — and the ruling table is NOT
+  // among them, which is the PR 1004 re-review's finding: the binding condition
+  // reaches this module through the one predicate the readers ask too, so there
+  // is one predicate over that table instead of two that can disagree.
   // THE ORDER MATTERS AND IS ASSERTED: the producer registration must be
   // instantiated before the readers, because the readers read one of its
   // constants through this module's re-export at their own module scope, and
@@ -1611,7 +1916,7 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
       "./gate-zero-seam-readers.v5.js", "./internal/gate-zero-seam-binding.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
-    ["./benchmark-minimum.v5.js"]);
+    ["./artifact-trust.js", "./global-boundaries.v5.js", "./benchmark-minimum.v5.js"]);
 });
 
 /**
