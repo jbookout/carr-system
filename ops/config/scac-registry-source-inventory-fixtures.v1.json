@@ -32910,9 +32910,9 @@
   ],
   "current_source_review": {
     "base_version": "v24",
-    "reason": "observe-memory personal-scope owner repair, rebased onto the #969 reseal: the sponsor slug was bound into memory_item.owner_actor_id, a uuid FK to actor(id), so every personal-scope observation failed at the driver and personal memory was unreachable for both partners. The handler now resolves the sponsor to an actor id and refuses an unprovisioned sponsor by name. The source digest is per file, so all six ingresses declared in memory.js are re-derived from the live inventory rather than merged by hand; no new ingress, no schema change, count unchanged at 835. Also carries the reviewed native Claude continuity repair: the checkpoint ask fires on transcript depth with a cursor fresh as of that prompt, a session's project affinity is pinned at first observation so a mid-session directory change no longer refuses every later write, the PostToolUse sample is decided before the bounded tail read, an unsent spool is announced, and an explicit install or remove may replace a stale mode receipt. Two inventoried script entrypoints changed content; the entry count is unchanged. Merged forward with the humanOnly dispatch gate (WR-000021): executeRegisteredTool refuses a verb declaring humanOnly unless the server-derived actor class is verified_partner, so a sponsored agent can no longer accept the DoctorCRE v5 constitution over its sponsor authority connection. The source digest is per file, so every ingress declared in tools.js is re-derived; no new ingress, no schema change, no effect-class change, count unchanged at 835. Merged forward with the Hermes typed-block argv repair: KanbanAdapter.block emitted the task id ahead of --kind, an order hermes' block subcommand cannot parse because task_id is followed by reason with nargs=\"*\", so the reason left after the flag had no positional slot and every typed block exited 2. This review is the union of main's reviewed rows for the ingresses this branch did not touch and this branch's single re-digested ingress, script-entrypoint:tools/room-bridge/kanban_adapter.py; count unchanged at 835. WR-000040 AC-FRESH: the canonical fast-forward and the independent dirty/staleness watchdog land as lib/canonical_freshness.py, a module with no shebang and no __main__ guard, reached only through tools/repo-hygiene-janitor.py --canonical-freshness. That entrypoint gains the routing and its source digest advances. Count unchanged at 835; the launchd definitions and the two standalone scripts an earlier revision of this branch carried are withdrawn precisely so no ingress is added, and no authority, write flag or principal mode moves. Second correction pass on the same entrypoint: the freshness library now treats a failed git observation as a distinct UNOBSERVED state rather than converting it into a default, refuses a fast-forward unless the checkout is on main, re-samples the clean-tree guard in the instant before the merge, and the janitor's two by-path module loaders collapse into one. Only tools/repo-hygiene-janitor.py is an inventoried source, so only its digest advances; count unchanged at 835, no ingress added or removed, no authority, write flag or principal mode moves. Merged forward again over #996, #997 and #998: this review is the union of main's reviewed rows plus this branch's single re-digested ingress, script-entrypoint:tools/repo-hygiene-janitor.py; the two sides touched disjoint ingresses, no reviewed row was dropped or overwritten, count unchanged at 835. Merged forward again for the V5-A01 tenth-review correction: this branch re-digests one inventoried script entrypoint, script-entrypoint:tools/health-check.py. Its F09 workflow-census section and its A01 assurance-health section both print an invariant unavailable line now, because the routes behind them were DELETED rather than narrowed an eleventh time -- the tenth review ran caller code inside the label route through the del of an unused parameter and rebound the three module strings it then read, and separately rebound the reader's module-level snapshot function to make this surface print a caller's census through run.sh health. lib/assurance_health_sources.assurance_health_census now takes no argument and returns a frozen MappingProxyType built from string literals at import time; lib/control_plane_workflow_truth_reader mints, reads and renders nothing and carries the same frozen unavailable answer; neither module is an inventoried ingress, so only the entrypoint digest moves. This review is the union of main's reviewed rows for the ingresses this branch did not touch and this branch's single re-digested ingress; all 835 rows are re-derived from the live inventory of this merged tree rather than hand-merged, and the reviewed digest reproduces the live digest exactly. No ingress added or removed, no schema change, no effect-class change, no authority, write flag or principal mode moves, count unchanged at 835. Merged forward again for the V5-A01 TWELFTH correction: this branch re-digests the same single inventoried script entrypoint, script-entrypoint:tools/health-check.py. The tenth correction deleted the F09 census route and took health's only red signal on contradictory workflow evidence out with it, which the eleventh review filed as defect 26c1e6d8 rather than blessing; this round restores that alarm as a module-private route in the entrypoint itself. It takes no argument, reads ops.workflow_acceptance and ops.legacy_schedule_observation_receipt in one read-only statement through tools/db-tap.py, and returns a frozen mapping whose verdict is one of two module-level literals; there is no exported classifier, no handle and no caller-supplied input anywhere on it, and the public label route and the census literal are unchanged from rounds 10 and 11. The two acceptance suites that own this surface, ops/control-plane-selftest.py and ops/assurance-health-selftest.py, are not inventoried ingresses, so only the entrypoint digest moves. All 835 rows are re-derived from the live inventory of this tree rather than hand-merged, and the reviewed digest reproduces the live digest exactly. No ingress added or removed, no schema change, no effect-class change, no authority, write flag or principal mode moves, count unchanged at 835.",
-    "expected_count": 835,
-    "expected_sha256": "3da6f543496036b441e8915fe0d976c30cf288481c700c1cb98052199d9b3764",
+    "reason": "observe-memory personal-scope owner repair, rebased onto the #969 reseal: the sponsor slug was bound into memory_item.owner_actor_id, a uuid FK to actor(id), so every personal-scope observation failed at the driver and personal memory was unreachable for both partners. The handler now resolves the sponsor to an actor id and refuses an unprovisioned sponsor by name. The source digest is per file, so all six ingresses declared in memory.js are re-derived from the live inventory rather than merged by hand; no new ingress, no schema change, count unchanged at 835. Also carries the reviewed native Claude continuity repair: the checkpoint ask fires on transcript depth with a cursor fresh as of that prompt, a session's project affinity is pinned at first observation so a mid-session directory change no longer refuses every later write, the PostToolUse sample is decided before the bounded tail read, an unsent spool is announced, and an explicit install or remove may replace a stale mode receipt. Two inventoried script entrypoints changed content; the entry count is unchanged. Merged forward with the humanOnly dispatch gate (WR-000021): executeRegisteredTool refuses a verb declaring humanOnly unless the server-derived actor class is verified_partner, so a sponsored agent can no longer accept the DoctorCRE v5 constitution over its sponsor authority connection. The source digest is per file, so every ingress declared in tools.js is re-derived; no new ingress, no schema change, no effect-class change, count unchanged at 835. Merged forward with the Hermes typed-block argv repair: KanbanAdapter.block emitted the task id ahead of --kind, an order hermes' block subcommand cannot parse because task_id is followed by reason with nargs=\"*\", so the reason left after the flag had no positional slot and every typed block exited 2. This review is the union of main's reviewed rows for the ingresses this branch did not touch and this branch's single re-digested ingress, script-entrypoint:tools/room-bridge/kanban_adapter.py; count unchanged at 835. WR-000040 AC-FRESH: the canonical fast-forward and the independent dirty/staleness watchdog land as lib/canonical_freshness.py, a module with no shebang and no __main__ guard, reached only through tools/repo-hygiene-janitor.py --canonical-freshness. That entrypoint gains the routing and its source digest advances. Count unchanged at 835; the launchd definitions and the two standalone scripts an earlier revision of this branch carried are withdrawn precisely so no ingress is added, and no authority, write flag or principal mode moves. Second correction pass on the same entrypoint: the freshness library now treats a failed git observation as a distinct UNOBSERVED state rather than converting it into a default, refuses a fast-forward unless the checkout is on main, re-samples the clean-tree guard in the instant before the merge, and the janitor's two by-path module loaders collapse into one. Only tools/repo-hygiene-janitor.py is an inventoried source, so only its digest advances; count unchanged at 835, no ingress added or removed, no authority, write flag or principal mode moves. Merged forward again over #996, #997 and #998: this review is the union of main's reviewed rows plus this branch's single re-digested ingress, script-entrypoint:tools/repo-hygiene-janitor.py; the two sides touched disjoint ingresses, no reviewed row was dropped or overwritten, count unchanged at 835. Merged forward again for the V5-A01 tenth-review correction: this branch re-digests one inventoried script entrypoint, script-entrypoint:tools/health-check.py. Its F09 workflow-census section and its A01 assurance-health section both print an invariant unavailable line now, because the routes behind them were DELETED rather than narrowed an eleventh time -- the tenth review ran caller code inside the label route through the del of an unused parameter and rebound the three module strings it then read, and separately rebound the reader's module-level snapshot function to make this surface print a caller's census through run.sh health. lib/assurance_health_sources.assurance_health_census now takes no argument and returns a frozen MappingProxyType built from string literals at import time; lib/control_plane_workflow_truth_reader mints, reads and renders nothing and carries the same frozen unavailable answer; neither module is an inventoried ingress, so only the entrypoint digest moves. This review is the union of main's reviewed rows for the ingresses this branch did not touch and this branch's single re-digested ingress; all 835 rows are re-derived from the live inventory of this merged tree rather than hand-merged, and the reviewed digest reproduces the live digest exactly. No ingress added or removed, no schema change, no effect-class change, no authority, write flag or principal mode moves, count unchanged at 835. Merged forward again for the V5-A01 TWELFTH correction: this branch re-digests the same single inventoried script entrypoint, script-entrypoint:tools/health-check.py. The tenth correction deleted the F09 census route and took health's only red signal on contradictory workflow evidence out with it, which the eleventh review filed as defect 26c1e6d8 rather than blessing; this round restores that alarm as a module-private route in the entrypoint itself. It takes no argument, reads ops.workflow_acceptance and ops.legacy_schedule_observation_receipt in one read-only statement through tools/db-tap.py, and returns a frozen mapping whose verdict is one of two module-level literals; there is no exported classifier, no handle and no caller-supplied input anywhere on it, and the public label route and the census literal are unchanged from rounds 10 and 11. The two acceptance suites that own this surface, ops/control-plane-selftest.py and ops/assurance-health-selftest.py, are not inventoried ingresses, so only the entrypoint digest moves. All 835 rows are re-derived from the live inventory of this tree rather than hand-merged, and the reviewed digest reproduces the live digest exactly. No ingress added or removed, no schema change, no effect-class change, no authority, write flag or principal mode moves, count unchanged at 835. Rebased onto the Gate Zero scheduler canary (step:scheduler-active-receipt): two NEW ingresses, script-entrypoint:bin/gate-zero-canary.sh and launchd-workflow:com.carr.gate-zero-canary, taking the count 835 -> 837. The canary is a no-op job held in DEFINITION_ONLY in ops/config-as-code.py, so the LaunchAgent is a written-down definition and not an active schedule; the siep-11 definition-only exemption is what keeps it out of service closure. Three further rows are CHANGED-KNOWN propagation rather than new surface: script-entrypoint:bin/run-scheduled.sh and script-entrypoint:ops/config-as-code.py moved because their bytes did (the wrapper gained an optional receipt-file flag, the installer gained the definition-only hold), and all 25 pre-existing launchd-workflow rows moved because their physical_authority_catalog_digests.services field is the sha256 of ops/config/services.json itself, which any service registration drifts. Derived from the live inventory, not hand-merged: against the previous review the delta is ADDED = only the two canary ingresses plus the launchd rows that had never needed an override before, REMOVED = none, and CHANGED = only ops/config-as-code.py, so no other seat s in-flight edit is swept into this seal.",
+    "expected_count": 837,
+    "expected_sha256": "8cdf247ef6b566476601fd76d9dd5ac4751fbaeee7684985b60e29b7f14a8d77",
     "upsert": [
       {
         "ingress_key": "external-admin:ops/install-claude-continuity.py",
@@ -32933,6 +32933,1003 @@
         "idempotency_mode": "script_specific_registered_current_control",
         "rollback_class": "forward_fix_only",
         "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.calendar-eventkit",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.calendar-eventkit.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.calendar-eventkit.plist",
+        "schema_digest": "edcb69c68d2c8882ef2c1e0051461b1591ec94a594de9ffbd41441b40c4e7bcf",
+        "handler_digest": "edcb69c68d2c8882ef2c1e0051461b1591ec94a594de9ffbd41441b40c4e7bcf",
+        "launchd_label": "com.carr.calendar-eventkit",
+        "trigger_contract_digest": "c225872f5d84586f2515f150babaf47be80f0f4bbd8d16e4bd57a83bc654274a",
+        "environment_contract_digest": "f63467eb448dad4bc6f25874b4c5f0567541617cab3adfa80f262326a7ea0be4",
+        "program_arguments_digest": "eff09258f286da2ca4f2ac0d8c2b656f5c5b1c00641066aebb831790efddbb8b",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/sh",
+          "executable:/bin/zsh",
+          "script:bin/calendar-eventkit-capture.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.legacy_schedule_launchd_contract:calendar-fetch-daily.launchd.v1",
+          "ops.service_environment:calendar-eventkit:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.calendar-prebrief-joe",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.calendar-prebrief-joe.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.calendar-prebrief-joe.plist",
+        "schema_digest": "155bdcdaff63b0297551b8005af6db435a1a0daba915249066b04c942c9ad085",
+        "handler_digest": "155bdcdaff63b0297551b8005af6db435a1a0daba915249066b04c942c9ad085",
+        "launchd_label": "com.carr.calendar-prebrief-joe",
+        "trigger_contract_digest": "861bf3ed397fc6aa5d45a1c199a6937466fb29dfea955f0f9dbd5466a9ebce34",
+        "environment_contract_digest": "e9dfedb76c0cffc5af690269c980bb92ce0c49c9c04c83e57fff753f65db6f81",
+        "program_arguments_digest": "645e6558e67dcdec1a0b9027c65101e5b7c2c6a633aaf685466071d112ccc5a9",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{HOME}}/.config/carr/calendar-prebrief-joe.env",
+          "argument:{{REPO}}/.venv/bin/python",
+          "script:tools/calendar-prebrief-joe-runtime.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:calendar-prebrief-joe:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.call-mode",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.call-mode.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.call-mode.plist",
+        "schema_digest": "70a1862dbafd062f8bd6b31336733e30d3260094e8325167de641b87b9919b20",
+        "handler_digest": "70a1862dbafd062f8bd6b31336733e30d3260094e8325167de641b87b9919b20",
+        "launchd_label": "com.carr.call-mode",
+        "trigger_contract_digest": "0279d9d4ec2c62fe99d42a073f391555928b703af53da6dc9decddc84f847027",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "66bd6a90226bb69b4c4de0c6413870999c1c3e52335c1ed31b6dafa8bf36d72a",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/usr/bin/python3",
+          "script:tools/dictation-rig/bin/call-mode.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:call-mode:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.capture-poll",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.capture-poll.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.capture-poll.plist",
+        "schema_digest": "761326cb29abae4f153c337421a6406253299704534cd4f666d15feb497fafaf",
+        "handler_digest": "761326cb29abae4f153c337421a6406253299704534cd4f666d15feb497fafaf",
+        "launchd_label": "com.carr.capture-poll",
+        "trigger_contract_digest": "0f14db09c51305bf79f82338e975223e2f36b9206703bec1c18699177c9f23fb",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "2759ce271a6a2a106179e0ac3857d04ea2fde54eaad27d279fac36842340eac8",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/dictation-rig/bin/capture-poll.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:capture-poll:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.capture-watch",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.capture-watch.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.capture-watch.plist",
+        "schema_digest": "c7aa2ead1ae360e1cc4c9df470217c11c214b5835858ead5614e7f270b907802",
+        "handler_digest": "c7aa2ead1ae360e1cc4c9df470217c11c214b5835858ead5614e7f270b907802",
+        "launchd_label": "com.carr.capture-watch",
+        "trigger_contract_digest": "be0c854bcfaf82ebf93cbdeabad2813cbe1aac1a07a47ae95e39f0e73ded99c1",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "beeb8440824b1b0a1f391b2473ea289dea589bbda3530341e68a46b49a20ddcc",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/dictation-rig/bin/capture-watch.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:capture-watch:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.cc-version-sentinel",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.cc-version-sentinel.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.cc-version-sentinel.plist",
+        "schema_digest": "7b4f018d7211093dc7afd3f2d0a5a3dc2c20054586979d4a86e77652d2c68c70",
+        "handler_digest": "7b4f018d7211093dc7afd3f2d0a5a3dc2c20054586979d4a86e77652d2c68c70",
+        "launchd_label": "com.carr.cc-version-sentinel",
+        "trigger_contract_digest": "d0caaffa52fa2cc8f8fe64147a693af322bb3b993506472a130776fa21733e76",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "0a160962ea5c8b10d227a9d2df67c333b1759820b070ce14c521201094709f09",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/cc-version-sentinel.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:cc-version-sentinel:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.control-plane-tick",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.control-plane-tick.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.control-plane-tick.plist",
+        "schema_digest": "43adf1a8f0c21e0107957c4c9741f3cebbe0b7cc85544e4d5888d7fd51c48129",
+        "handler_digest": "43adf1a8f0c21e0107957c4c9741f3cebbe0b7cc85544e4d5888d7fd51c48129",
+        "launchd_label": "com.carr.control-plane-tick",
+        "trigger_contract_digest": "861bf3ed397fc6aa5d45a1c199a6937466fb29dfea955f0f9dbd5466a9ebce34",
+        "environment_contract_digest": "032bd1bc6feee8b1ccd3eb946c48ac74384f0e184db49c85153484a493e64caa",
+        "program_arguments_digest": "80a7c6087b1fffc2714496698fbaa779c8e4f4064a0a01f4ed803bd9f7d98608",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/control-plane-tick.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:control-plane-tick:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.cutover-watch",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.cutover-watch.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.cutover-watch.plist",
+        "schema_digest": "1c65ad05c81d8952c088556e8d97936a68a9db5f71ca03a000ffa782c6f1304b",
+        "handler_digest": "1c65ad05c81d8952c088556e8d97936a68a9db5f71ca03a000ffa782c6f1304b",
+        "launchd_label": "com.carr.cutover-watch",
+        "trigger_contract_digest": "ade8ee4de5c435366f2cfdfa2643c46f438435f40b1fca79b065c3dffd8c108d",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "3e24562d13df2760a0d67527f8e3ec23d3ab1747a48a72af0f133bb395b2160a",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/cutover-watch.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:cutover-watch:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.dictation-consent",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.dictation-consent.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.dictation-consent.plist",
+        "schema_digest": "45fb9fda8a8f9dc2916bfef1ef3eb3e57276e3917ca85f6a3e71a05a269be397",
+        "handler_digest": "45fb9fda8a8f9dc2916bfef1ef3eb3e57276e3917ca85f6a3e71a05a269be397",
+        "launchd_label": "com.carr.dictation-consent",
+        "trigger_contract_digest": "4f06767b2fe77e203e691d68585b9c9890e92428ed0ecd18540f32be80484f00",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "43e27f58b102333b823aa8d2479dcdb5aeecdbd46c77fe6b4aca44690d97f603",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/dictation-rig/bin/consent-watch.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:dictation-consent:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.doc-engine",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.doc-engine.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.doc-engine.plist",
+        "schema_digest": "90c973f4de2000d52030c082ba093dbc5db2d536192b1544f662bab759662cc4",
+        "handler_digest": "90c973f4de2000d52030c082ba093dbc5db2d536192b1544f662bab759662cc4",
+        "launchd_label": "com.carr.doc-engine",
+        "trigger_contract_digest": "bf18b95039fb602d7f19343a73b9cb7abd5277c14f1bc70cdad19d5c641c9882",
+        "environment_contract_digest": "e689b7187ce394bd0a09e2d20a9ccf5b45c478119d97f51875f726035141bcae",
+        "program_arguments_digest": "7434d7f7d01b05f64bdeba89afae1bc20a4d5018e8fb9eae0f4506fd7969600f",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/opt/homebrew/bin/python3",
+          "script:tools/doc-convo/bin/convo-server.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:doc-engine:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.fetch-allowlist",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.fetch-allowlist.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.fetch-allowlist.plist",
+        "schema_digest": "f40b4ecaaade3b3d0093a9b6ac94a370c75b673cf34c783c980f060aaa49a9b7",
+        "handler_digest": "f40b4ecaaade3b3d0093a9b6ac94a370c75b673cf34c783c980f060aaa49a9b7",
+        "launchd_label": "com.carr.fetch-allowlist",
+        "trigger_contract_digest": "14e5ab281fd4bc2f9d38bd56e1c948a12c330a506dbb8f95fe07182fe72fda65",
+        "environment_contract_digest": "ef1c0b578840e84a8b71fef26a7a4fefd2ad32fb6a250a0c81ea3406829d6f55",
+        "program_arguments_digest": "f1034534659685dd3ca72ada4cb2eb08fb5b51b766f121cd94227ed3d8b1d71c",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/.venv/bin/python",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:ops/fetch-allowlist.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:fetch-allowlist:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.fleet-sync",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.fleet-sync.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.fleet-sync.plist",
+        "schema_digest": "26f9e82edd6cec5ee949ed240623a2c1960b20521423da2d4654dcc2f570634c",
+        "handler_digest": "26f9e82edd6cec5ee949ed240623a2c1960b20521423da2d4654dcc2f570634c",
+        "launchd_label": "com.carr.fleet-sync",
+        "trigger_contract_digest": "dbd5957136f871cf19481aeedd63fa1983c502b997c7332d60595a9209b3f991",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "cc1db8cc8275902f6b3bc67d4d1def96d684e25dfcd385927ded9fb646a81c32",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/fleet-sync.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:fleet-sync:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.gate-zero-canary",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.gate-zero-canary.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.gate-zero-canary.plist",
+        "schema_digest": "7f2c7d2a53c5db72784c7fb79b0ac1d0eaaa6822049429857bf34dc0ceaf3c0c",
+        "handler_digest": "7f2c7d2a53c5db72784c7fb79b0ac1d0eaaa6822049429857bf34dc0ceaf3c0c",
+        "launchd_label": "com.carr.gate-zero-canary",
+        "trigger_contract_digest": "d0caaffa52fa2cc8f8fe64147a693af322bb3b993506472a130776fa21733e76",
+        "environment_contract_digest": "6846f0e7e17dfbafcd0d701580ef71240025aa510ea1820e702c5326be7cdaeb",
+        "program_arguments_digest": "8e42918fef4deb86c32506da5c102a9a31ad6128aef8805797bacf19be2d6d95",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/out/gate-zero-canary.receipt",
+          "executable:/bin/zsh",
+          "script:bin/gate-zero-canary.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:gate-zero-canary:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.keepalive-probe",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.keepalive-probe.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.keepalive-probe.plist",
+        "schema_digest": "f5ae3c91e4ec12f9d0c9d8ec9d9a051a5f32f8c3324284ef30baf8169e183f04",
+        "handler_digest": "f5ae3c91e4ec12f9d0c9d8ec9d9a051a5f32f8c3324284ef30baf8169e183f04",
+        "launchd_label": "com.carr.keepalive-probe",
+        "trigger_contract_digest": "ade8ee4de5c435366f2cfdfa2643c46f438435f40b1fca79b065c3dffd8c108d",
+        "environment_contract_digest": "128a482994a8493c576420a8f37ec20838f75fe885ab651e229da4ec37c685d2",
+        "program_arguments_digest": "c03f805b82cfccd698a126d8a3ff5e7c7da0416697003a478d7d2be181b7a065",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/.venv/bin/python",
+          "executable:/bin/zsh",
+          "script:bin/probe-keepalive.py",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:keepalive-probe:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.local-briefs",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.local-briefs.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.local-briefs.plist",
+        "schema_digest": "77e0300ddc63ea0cb8ba97975d051714a3aacb853721b94ea24523ede3170195",
+        "handler_digest": "77e0300ddc63ea0cb8ba97975d051714a3aacb853721b94ea24523ede3170195",
+        "launchd_label": "com.carr.local-briefs",
+        "trigger_contract_digest": "b250cc5b3fea07cdf016148de4a936f7e7d573dd7473feac26c961d9d4cfe21f",
+        "environment_contract_digest": "ef1c0b578840e84a8b71fef26a7a4fefd2ad32fb6a250a0c81ea3406829d6f55",
+        "program_arguments_digest": "d92d324e92964413b32b480718aeea25d01530a6b490b2b12a235afe893e414d",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/local-briefs.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:local-briefs:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.logitech-keymap",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.logitech-keymap.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.logitech-keymap.plist",
+        "schema_digest": "2dd4eddc16a5fd4cbf746af4dbf10a349955f4fc1db444cc96b5ce315ecacba2",
+        "handler_digest": "2dd4eddc16a5fd4cbf746af4dbf10a349955f4fc1db444cc96b5ce315ecacba2",
+        "launchd_label": "com.carr.logitech-keymap",
+        "trigger_contract_digest": "7b76aee22415adae87a98fc6a16d432a52e3fb56860e0b53a35d49fefd93cf71",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "dc4f3675301af50552c0d7fede84c0a4c78dbc43eed8efabbfa39249241c5b68",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/sh",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/dictation-rig/bin/logitech-keymap.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:logitech-keymap:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.nightly-record-layer",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.nightly-record-layer.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.nightly-record-layer.plist",
+        "schema_digest": "93c0deb195bf54c0358362af230a6dbf98ddc92877da1ef2d09d902ba0fe6ea7",
+        "handler_digest": "93c0deb195bf54c0358362af230a6dbf98ddc92877da1ef2d09d902ba0fe6ea7",
+        "launchd_label": "com.carr.nightly-record-layer",
+        "trigger_contract_digest": "9fb4eee7c81e0260fdb84bb803a96b73cd768aec4637ca899b28b77b31c8e5c8",
+        "environment_contract_digest": "128a482994a8493c576420a8f37ec20838f75fe885ab651e229da4ec37c685d2",
+        "program_arguments_digest": "1c9a0ca728b12cdbdb3957d97ad4b0b348354ea15781342c628d921ed80762c7",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/nightly.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.legacy_schedule_launchd_contract:nightly-record-layer.launchd.v1",
+          "ops.service_environment:nightly-record-layer:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.notes-sweep",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.notes-sweep.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.notes-sweep.plist",
+        "schema_digest": "6cd28553323f15d69694fe6cdd2f79d7c885869dad6b06451666f0f17b3e247e",
+        "handler_digest": "6cd28553323f15d69694fe6cdd2f79d7c885869dad6b06451666f0f17b3e247e",
+        "launchd_label": "com.carr.notes-sweep",
+        "trigger_contract_digest": "d0caaffa52fa2cc8f8fe64147a693af322bb3b993506472a130776fa21733e76",
+        "environment_contract_digest": "6846f0e7e17dfbafcd0d701580ef71240025aa510ea1820e702c5326be7cdaeb",
+        "program_arguments_digest": "d6b500ccc9a30f00200bb2cd0082703d909a4f0e74a8835e43afb7dcd5aabbf2",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/notes-sweep-post.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.legacy_schedule_launchd_contract:notes-sweep-hourly.launchd.v1",
+          "ops.service_environment:notes-sweep:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.partner-ping",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.partner-ping.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.partner-ping.plist",
+        "schema_digest": "563a4eb2f1e0b07fa71015279b264b446ed54cb49ca34e88b9d2c03632cb0fc1",
+        "handler_digest": "563a4eb2f1e0b07fa71015279b264b446ed54cb49ca34e88b9d2c03632cb0fc1",
+        "launchd_label": "com.carr.partner-ping",
+        "trigger_contract_digest": "fd64e7bcd94f1dfaa5e898dfc107bde5f3514bb266ddceaf145bec23e4fafdcd",
+        "environment_contract_digest": "da285ebd5206efafa9420877c126e448e31a067f184854e40652a399a1bf5393",
+        "program_arguments_digest": "bdb01e938a697182e25e8de0cb813c673ea3001c854049bab4922696624490d3",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/.venv/bin/python",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:pipelines/partner_ping.py",
+          "script:tools/db-tap.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:carr-local-edge-node:production",
+          "ops.service_environment:partner-ping:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.quill-dictate",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.quill-dictate.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.quill-dictate.plist",
+        "schema_digest": "0f579a455d7e91e0f35d1c6242d7db9d1efd23579f14b38a4194c10b45f51e0f",
+        "handler_digest": "0f579a455d7e91e0f35d1c6242d7db9d1efd23579f14b38a4194c10b45f51e0f",
+        "launchd_label": "com.carr.quill-dictate",
+        "trigger_contract_digest": "0279d9d4ec2c62fe99d42a073f391555928b703af53da6dc9decddc84f847027",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "73fa08cd33289240337cda3e957e060b514b491d1dadf50335a1fba9179584a1",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/tools/dictation-rig/dictate/.build/release/quill-dictate"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:quill-dictate:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.recordings-purge",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.recordings-purge.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.recordings-purge.plist",
+        "schema_digest": "59a943aca04a13b882a1565820ca54f8a37798dcc65a27355da107bd1b87b362",
+        "handler_digest": "59a943aca04a13b882a1565820ca54f8a37798dcc65a27355da107bd1b87b362",
+        "launchd_label": "com.carr.recordings-purge",
+        "trigger_contract_digest": "5054cae8e1365cc2b7b4ad5dcc81b49b2abdd2b6c84d59b74b7723e8efd6641c",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "0cc4664dc003c98a9d9a2f0975e1e822d8a6c5c44b4856db8c8b8ea525a612a2",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/sh",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/dictation-rig/bin/purge-recordings.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:recordings-purge:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.repo-hygiene-janitor",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.repo-hygiene-janitor.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.repo-hygiene-janitor.plist",
+        "schema_digest": "1421580802e1a8c9024df8798d8d7e45e8164e80877cf395bc40cfa0032ed2c6",
+        "handler_digest": "1421580802e1a8c9024df8798d8d7e45e8164e80877cf395bc40cfa0032ed2c6",
+        "launchd_label": "com.carr.repo-hygiene-janitor",
+        "trigger_contract_digest": "383e3ccc1f9719e13d0641e71b267cf546575473f6bf00300240a53505543b28",
+        "environment_contract_digest": "ef1c0b578840e84a8b71fef26a7a4fefd2ad32fb6a250a0c81ea3406829d6f55",
+        "program_arguments_digest": "e7e6acd2bb192355a628a0e3fe88ea1a4fa54cc1b2c6d374205821190bcc9fcc",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/.venv/bin/python",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/repo-hygiene-janitor.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.definition_only_launchd:not_deployed"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.room-bridge",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.room-bridge.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.room-bridge.plist",
+        "schema_digest": "ec0b2a5ca894ef2e8f4f39263dff6bb3f2572d2955f1ce2f5a2952f3ec4ddccd",
+        "handler_digest": "ec0b2a5ca894ef2e8f4f39263dff6bb3f2572d2955f1ce2f5a2952f3ec4ddccd",
+        "launchd_label": "com.carr.room-bridge",
+        "trigger_contract_digest": "fa98a9bd916dfd1101ac338f15df8fd00ae6c40384879e82b43c6d08cc26463a",
+        "environment_contract_digest": "8bf24ef0cf58de3b748d74a575b67387c8cd0373b388064c8d46ce4af504d454",
+        "program_arguments_digest": "68395b3684485b940ab639b1b1f24600622daab9782a88e5d57abb7f41d766e6",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/.venv/bin/python",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/room-bridge/bridge.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:room-bridge:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.rules-refresh",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.rules-refresh.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.rules-refresh.plist",
+        "schema_digest": "ce9fd5efbd00529010ffe0696e59a01df545d3b932a2ad3f214b6a6117738a96",
+        "handler_digest": "ce9fd5efbd00529010ffe0696e59a01df545d3b932a2ad3f214b6a6117738a96",
+        "launchd_label": "com.carr.rules-refresh",
+        "trigger_contract_digest": "67b4047f333619ba0b1f8c226a2b098e13210c918fc0b4619f3b69b2877c32ba",
+        "environment_contract_digest": "ef1c0b578840e84a8b71fef26a7a4fefd2ad32fb6a250a0c81ea3406829d6f55",
+        "program_arguments_digest": "4bd4214b5a7720732eb94ec9c2d6c8b92520f8420f1e2254e419b3ab0d8e47bd",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "executable:/bin/zsh",
+          "script:bin/refresh-rules.sh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:rules-refresh:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.run-spool-flush",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.run-spool-flush.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.run-spool-flush.plist",
+        "schema_digest": "3f0436c5103522ad90a941c228ae2d8f11e56733cb75c27c50ba08c6fb3fe0fe",
+        "handler_digest": "3f0436c5103522ad90a941c228ae2d8f11e56733cb75c27c50ba08c6fb3fe0fe",
+        "launchd_label": "com.carr.run-spool-flush",
+        "trigger_contract_digest": "ade8ee4de5c435366f2cfdfa2643c46f438435f40b1fca79b065c3dffd8c108d",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "1548622870c93cb6ff576962b4b03635ed0fe4845cfd4d0b32eef982c0992c80",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{REPO}}/.venv/bin/python",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh",
+          "script:tools/ops-spool.py"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:run-spool-flush:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "launchd-workflow:com.carr.videopipeline",
+        "ingress_kind": "workflow_entrypoint",
+        "operation": "ops/launchd/com.carr.videopipeline.plist",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/launchd/com.carr.videopipeline.plist",
+        "schema_digest": "ee722c604570863f99b0dc019072561521c3734899ece5b0d067ff05066eafa5",
+        "handler_digest": "ee722c604570863f99b0dc019072561521c3734899ece5b0d067ff05066eafa5",
+        "launchd_label": "com.carr.videopipeline",
+        "trigger_contract_digest": "19f9b285fa4e08f9b045b669a1b12cf45f92d1c9364d95ba99c30d18d2a73c5c",
+        "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "program_arguments_digest": "493fa46a769776e3aac0d6f7ea0156a06df5bde9562927fb40d25fbc1a6dcb5e",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "launchd_user_session_and_declared_environment",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [
+          "argument:{{HOME}}/Movies/CARR Video Pipeline/Scripts/watch-encode.sh",
+          "executable:/bin/zsh",
+          "script:bin/run-scheduled.sh"
+        ],
+        "request_shape": "launchd_trigger_arguments_environment_source_bound",
+        "idempotency_mode": "delegated_entrypoint_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "physical_authority_refs": [
+          "ops.service_environment:videopipeline:production"
+        ],
+        "physical_authority_catalog_digests": {
+          "services": "sha256:213655ff20cf4b490b620b3525155a573a443df4800e1c0cb08010378e3f7fc7",
+          "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+        },
         "owner_package": "11",
         "implementation_state": "inventoried_not_atomically_mediated",
         "classification_authorizing": false
@@ -35603,6 +36600,52 @@
         "classification_authorizing": false
       },
       {
+        "ingress_key": "script-entrypoint:bin/gate-zero-canary.sh",
+        "ingress_kind": "script_entrypoint",
+        "operation": "bin/gate-zero-canary.sh",
+        "effect_class": "administrative_mutation",
+        "source_locator": "bin/gate-zero-canary.sh",
+        "schema_digest": "cb947134d371d31d64406c6e452fc61fee4cb33c2486eacda3247566dd55eac6",
+        "handler_digest": "cb947134d371d31d64406c6e452fc61fee4cb33c2486eacda3247566dd55eac6",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "script-entrypoint:bin/run-scheduled.sh",
+        "ingress_kind": "script_entrypoint",
+        "operation": "bin/run-scheduled.sh",
+        "effect_class": "administrative_mutation",
+        "source_locator": "bin/run-scheduled.sh",
+        "schema_digest": "f71279e2eac6eefc15cb091c7d85d4705b7c9519a64f58a4237396e502696934",
+        "handler_digest": "f71279e2eac6eefc15cb091c7d85d4705b7c9519a64f58a4237396e502696934",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
         "ingress_key": "script-entrypoint:mcp-server/continuity-stdio-proxy.mjs",
         "ingress_kind": "script_entrypoint",
         "operation": "mcp-server/continuity-stdio-proxy.mjs",
@@ -35723,8 +36766,8 @@
         "operation": "ops/config-as-code.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/config-as-code.py",
-        "schema_digest": "23581857bb4ae8afe3548877bc95100536a0a54cf9a5a3cfe7837834e7b23ae5",
-        "handler_digest": "23581857bb4ae8afe3548877bc95100536a0a54cf9a5a3cfe7837834e7b23ae5",
+        "schema_digest": "2b44c875364f19d841ffffaec7b9e112d8c734e1fec4725c6a13946f0e06b7ed",
+        "handler_digest": "2b44c875364f19d841ffffaec7b9e112d8c734e1fec4725c6a13946f0e06b7ed",
         "write": true,
         "human_only": false,
         "authority_only": true,

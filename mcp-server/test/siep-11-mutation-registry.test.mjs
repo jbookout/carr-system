@@ -1591,14 +1591,16 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory(TOOLS).filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  // 543 before this branch; the DoctorCRE portfolio tail adds exactly one
-  // reviewed non-MCP source, ops/work-portfolio-local-pg-gate.py. The count is
-  // pinned rather than derived on purpose, so a source file that appears
-  // without review has to be noticed here. It moves only once the file is
-  // TRACKED: the inventory enumerates git, so an untracked new gate is
+  // 543 before the DoctorCRE portfolio tail, which added exactly one reviewed
+  // non-MCP source (ops/work-portfolio-local-pg-gate.py), taking it to 545.
+  // 546 now: the Gate Zero scheduler canary adds bin/gate-zero-canary.sh, the
+  // no-op job whose only product is an ops.run row bound to a receipt. The
+  // count is pinned rather than derived on purpose, so a source file that
+  // appears without review has to be noticed here. It moves only once the file
+  // is TRACKED: the inventory enumerates git, so an untracked new gate is
   // invisible to this assertion and the count shifts at `git add`, not at
   // save.
-  assert.equal(rows.length, 545);
+  assert.equal(rows.length, 546);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -1606,8 +1608,11 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  // 534 before this branch; same single new executable gate.
-  assert.equal(scripts.length, 536);
+  // 534 before the portfolio tail's single new executable gate, 536 after it,
+  // 537 with the canary script. Same +1, counted independently of the row
+  // assertion above so a file that lands in one enumeration and not the other
+  // cannot pass both.
+  assert.equal(scripts.length, 537);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -1695,7 +1700,15 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 32);
+  // 32 before the Gate Zero scheduler canary; 33 with
+  // ops/launchd/com.carr.gate-zero-canary.plist. That LaunchAgent is a
+  // DEFINITION written down and left uninstalled (it is held in
+  // DEFINITION_ONLY in ops/config-as-code.py), which is why the
+  // definition-only exemption test above covers it and service closure does
+  // not: activating a schedule is a human act, and this file only describes
+  // what would be activated. The github count below is unchanged at 7, so the
+  // one new entrance is provably the launchd side.
+  assert.equal(workflows.length, 33);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
