@@ -100,9 +100,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import esbuild from "esbuild";
 
 import { digest } from "../src/artifact-trust.js";
 import { V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
@@ -250,18 +251,71 @@ const READERS_UNDER_TEST = [
     readGateGraphAssurance, "readGateGraphAssurance"],
 ];
 
+/** The repository this suite lives in, for the one question it asks git. */
+const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+
+/** The prefix every src path carries in git, stripped to get a tree-relative one. */
+const SRC_PREFIX = "mcp-server/src/";
+
+/** Temp trees this module stages before the first test runs, cleaned up with the rest. */
+const stagedAtLoad = [];
+
+/** `git`, run in this repository, refusing loudly rather than answering vaguely. */
+function git(...args) {
+  const run = spawnSync("git", args,
+    { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  assert.equal(run.status, 0,
+    `git ${args.join(" ")} could not be read: ${run.stderr ?? run.error}`);
+  return run.stdout;
+}
+
+/**
+ * SRC AS ORIGIN/MAIN HAS IT, built at load time and never pinned by hand.
+ *
+ * Every path under src that this branch changed is put back to main's bytes with
+ * `git show origin/main:<path>`, and every path this branch ADDED is deleted —
+ * so what is imported from this tree is main's module, not a branch module
+ * wearing main's name.
+ */
+function stageMainTree() {
+  const resolved = spawnSync("git", ["rev-parse", "origin/main^{commit}"],
+    { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(resolved.status, 0,
+    "origin/main is not in this checkout, so the pass-through exemption cannot be proved");
+
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const base = mkdtempSync(join(cache, "gate-zero-main-"));
+  stagedAtLoad.push(base);
+  const target = join(base, "src");
+  cpSync(SRC, target, { recursive: true });
+
+  const changed = git("diff", "--name-status", "--no-renames", "origin/main", "--", "mcp-server/src")
+    .split("\n").filter(Boolean).map(line => line.split("\t"));
+  assert.ok(changed.length > 0,
+    "this branch changes no file under src, so there is nothing here to exempt");
+  for (const [state, path] of changed) {
+    assert.ok(path.startsWith(SRC_PREFIX), `git named a changed path outside src: ${path}`);
+    const at = join(target, path.slice(SRC_PREFIX.length));
+    if (state === "A") { rmSync(at); continue; }
+    mkdirSync(dirname(at), { recursive: true });
+    writeFileSync(at, git("show", `origin/main:${path}`));
+  }
+  return target;
+}
+
 /**
  * TWO SETS, AND THE DIFFERENCE BETWEEN THEM IS THE WHOLE OF AMENDMENT 3.
  *
  * `MAIN_GATE_ANSWER_DIGESTS` is the amendment's exemption and is NOT ONE DIGEST
- * WIDER than the amendment allows: the two answers MAIN's Gate Zero gives, as
- * literals taken from origin/main at 64b22a4b by calling the unmodified module.
- * A value skips the word sweep only by being, byte for byte, one of those — the
- * unchanged output of a module this slice forwards and did not author. The
- * 2026-09-12 review of PR 1004 found the old single set exempting any gate answer
- * at all, including answers THIS BRANCH writes, which is wider than the
- * amendment: a branch-owned string could ride into the exemption inside an object
- * the branch built.
+ * WIDER than the amendment allows: the two answers MAIN's Gate Zero gives — read
+ * by CALLING origin/main's own module, staged above at test time. Amendment 5
+ * of 2026-09-12 is why they are no longer the literals an earlier round wrote
+ * down: a test may exempt only values it PROVES stood on origin/main, and an
+ * author's literal proves only what the author believed. A value skips the word
+ * sweep by being, byte for byte, one of these two — the unchanged output of a
+ * module this slice forwards and did not author — and by nothing else. No
+ * category, no shape, no "historical string" is exempt here.
  *
  * `GATE_DELEGATION_DIGESTS` is a different question with a different answer and
  * exempts nothing. It is the set of answers each tree's OWN gate gives, used only
@@ -271,13 +325,25 @@ const READERS_UNDER_TEST = [
  * 2026-09-12 the gate binds these readers behind the same ruling table and a tree
  * with three null lines has a gate that answers differently from the shipped one.
  * The vocabulary of a branch-authored gate answer is swept where it belongs, in
- * gate-zero-assurance.v5.test.mjs, against main's own vocabulary with this
- * branch's additions enumerated and digest-pinned.
+ * gate-zero-assurance.v5.test.mjs, against origin/main's own vocabulary read the
+ * same way, with this branch's additions enumerated.
  */
+const MAIN_GATE = await import(pathToFileURL(join(stageMainTree(), GATE_FILE)).href);
+
 const MAIN_GATE_ANSWER_DIGESTS = new Set([
-  "sha256:06a7af2a2df9a57e2c398980e41ed13f9eb861779c06f7ac8a3fb36ac10218da",
-  "sha256:0af0b1524b0565bcfbef033ee341e1a43a48611eaa38bdce99baebe94c18f51b",
+  digest(MAIN_GATE.readGateZeroPredecessorJoin()),
+  digest(MAIN_GATE.readGateGraphAssurance()),
 ]);
+
+// TWO DISTINCT ANSWERS, AND NEITHER OF THEM IS THIS BRANCH'S. The shipped gate
+// is ruled and answers differently; if the staging ever handed back the branch's
+// own module under main's name, the exemption would silently widen to cover
+// everything this branch writes, which is the hole the fourth review named.
+assert.equal(MAIN_GATE_ANSWER_DIGESTS.size, 2,
+  "origin/main's gate no longer gives two distinct answers");
+for (const answer of [readGateZeroPredecessorJoin(), readGateGraphAssurance()])
+  assert.equal(MAIN_GATE_ANSWER_DIGESTS.has(digest(answer)), false,
+    "the staged main tree answers what the shipped gate answers, so it is not main's");
 
 const GATE_DELEGATION_DIGESTS = new Set([
   digest(readGateZeroPredecessorJoin()),
@@ -2105,7 +2171,7 @@ const HOSTILE_CHECK_RUNS = Object.freeze([
 ]);
 
 test.after(() => {
-  for (const base of staged) rmSync(base, { recursive: true, force: true });
+  for (const base of [...staged, ...stagedAtLoad]) rmSync(base, { recursive: true, force: true });
 });
 
 test("STAGING: both fixture store modules cover every export the real one has", () => {
@@ -3265,7 +3331,7 @@ test("RULED: nothing a faulted store does to a reader gets past the reader's bou
   // this branch authored, so it is not upstream output and may not take the
   // amendment 3 exemption. Its own vocabulary is swept in
   // gate-zero-assurance.v5.test.mjs — against main's, with every string this
-  // branch adds enumerated and the baseline digest-pinned to origin/main.
+  // branch adds enumerated and the baseline read out of origin/main at test time.
   assert.ok(!MAIN_GATE_ANSWER_DIGESTS.has(digest(hostileAnswer)),
     "the shipped gate answers main's bytes, so this clause proves nothing");
 
@@ -3608,7 +3674,111 @@ function resolveFrom(from, specifier) {
   return parts.join("/");
 }
 
-test("ISOLATION: the store module is reached from one place, and nothing in src reaches a fixture", () => {
+// ---------------------------------------------------------------------------
+// THE EXPORT SURFACE, LINKED RATHER THAN GREPPED — the fourth correction's
+// standards finding.
+//
+// The guard that stood here was `/export\s+\{[^}]*\bruledCardBinding\b/` over
+// each file's text, and the standing rule of 2026-09-11 says in as many words
+// that a static module guard uses a real parser. The regex had the two holes a
+// parser does not: `export * from "./internal/gate-zero-seam-binding.v5.js"`
+// forwards the name without writing it anywhere, and
+// `export { ruledCardBinding as somethingElse }` writes a different name on the
+// surface. The self-test below runs both forms past the old pattern and the new
+// guard so the difference is measured rather than asserted.
+//
+// SO THE QUESTION IS ASKED TWICE, in the two ways it can be wrong.
+//
+//   BY NAME, over EVERY module in src, out of esbuild's linker: `export *` is
+//   resolved to the concrete names it forwards, so a chain of re-exports through
+//   three files is one answer.
+//   BY IDENTITY, over the modules that actually import the predicate — exactly
+//   two, asserted just below — because a name check cannot see an alias. The
+//   module's own namespace is compared against the predicate itself, so any name
+//   it might be exported under is the same answer.
+// ---------------------------------------------------------------------------
+
+/** esbuild refuses to run at all if it is missing, rather than degrading quietly. */
+assert.equal(typeof esbuild.buildSync, "function",
+  "the re-export guard needs a real parser; esbuild is not loadable");
+
+/** The internal predicate's own name, the one thing src may not put on a surface. */
+const PREDICATE_NAME = "ruledCardBinding";
+
+/**
+ * WHAT EVERY MODULE UNDER `directory` EXPORTS, keyed by its path relative to
+ * that directory. Read out of esbuild's metafile after a real bundle, so the
+ * names are the ones a consumer could import, `export *` included.
+ *
+ * The `.ttf` loader is not decoration: one module in src imports a font as a
+ * binary asset, and without a loader for it esbuild refuses the whole batch and
+ * this guard would never run.
+ */
+function exportedNames(directory) {
+  const entryPoints = [];
+  const walk = at => {
+    for (const entry of readdirSync(at, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(at, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (entry.name.endsWith(".js")) entryPoints.push(relative(directory, full).split(sep).join("/"));
+    }
+  };
+  walk(directory);
+  const built = esbuild.buildSync({
+    absWorkingDir: directory, entryPoints, bundle: true, write: false, format: "esm",
+    platform: "node", packages: "external", metafile: true, treeShaking: false,
+    outdir: "__exported_names__", outbase: ".", loader: { ".ttf": "binary" },
+    logLevel: "silent", logLimit: 0,
+  });
+  const names = {};
+  for (const output of Object.values(built.metafile.outputs)) {
+    if (output.entryPoint === undefined) continue;
+    names[output.entryPoint] = [...output.exports].sort();
+  }
+  assert.equal(Object.keys(names).length, entryPoints.length,
+    "the linker did not report an export list for every module in the tree");
+  return names;
+}
+
+/** The pattern this guard replaced, kept only so the self-test can measure it. */
+const DELETED_REEXPORT_REGEX = /export\s+\{[^}]*\bruledCardBinding\b/;
+
+test("PARSER: the re-export guard reads the forms the deleted regex missed", () => {
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const directory = mkdtempSync(join(cache, "gate-zero-reexport-"));
+  staged.push(directory);
+  const cases = {
+    "binding.js": `export const ${PREDICATE_NAME} = () => null;\n`,
+    // The one the regex did catch.
+    "plain.js": `import { ${PREDICATE_NAME} } from "./binding.js";\nexport { ${PREDICATE_NAME} };\n`,
+    // The two it did not: a star re-export never spells the name at all, and a
+    // LOCAL alias spells it only on the import side, which the pattern did not
+    // read.
+    "star.js": `export * from "./binding.js";\n`,
+    "alias.js": `import { ${PREDICATE_NAME} as ruledSeam } from "./binding.js";\nexport { ruledSeam };\n`,
+    // And one that imports it and keeps it private, which must stay legal.
+    "private.js":
+      `import { ${PREDICATE_NAME} } from "./binding.js";\nexport const asked = card => ${PREDICATE_NAME}(card) !== null;\n`,
+  };
+  for (const [name, source] of Object.entries(cases)) writeFileSync(join(directory, name), source);
+
+  const names = exportedNames(directory);
+  // BY NAME: the star re-export is reported, which is the hole that mattered
+  // most — a file can forward the predicate without ever spelling it.
+  assert.ok(names["star.js"].includes(PREDICATE_NAME), "the linker did not resolve export *");
+  assert.ok(names["plain.js"].includes(PREDICATE_NAME));
+  assert.deepEqual(names["alias.js"], ["ruledSeam"]);
+  assert.deepEqual(names["private.js"], ["asked"]);
+  // AND THE MEASUREMENT: the deleted pattern saw neither of the two forms above,
+  // so this is a difference rather than a restatement.
+  assert.equal(DELETED_REEXPORT_REGEX.test(cases["star.js"]), false);
+  assert.equal(DELETED_REEXPORT_REGEX.test(cases["alias.js"]), false);
+  assert.equal(DELETED_REEXPORT_REGEX.test(cases["plain.js"]), true);
+});
+
+test("ISOLATION: the store module is reached from one place, and nothing in src reaches a fixture", async () => {
   const imports = moduleImports(SRC);
   assert.ok(Object.keys(imports).length > 100, "every module in src must have been parsed");
   assert.ok(Object.hasOwn(imports, READERS_FILE));
@@ -3660,10 +3830,22 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
     "the shared predicate has an importer other than the two modules that ask it");
   assert.deepEqual(imports[BINDING_FILE], [`../${RULINGS_FILE}`],
     "the shared predicate imports something other than the ruling table it narrows");
-  for (const [name, source] of Object.keys(imports)
-    .map(name => [name, readFileSync(join(SRC, name), "utf8")]))
-    assert.equal(/export\s+\{[^}]*\bruledCardBinding\b/.test(source), false,
-      `${name} re-exports the shared predicate, which puts it back on a public surface`);
+  // NO MODULE PUTS IT BACK ON A PUBLIC SURFACE, asked of the linker and then of
+  // the values themselves. BY NAME first, over every module in src: the binding
+  // file is the one place the name may be exported from.
+  const exported = exportedNames(SRC);
+  assert.deepEqual(Object.keys(exported).filter(name => exported[name].includes(PREDICATE_NAME)),
+    [BINDING_FILE],
+    `a module other than ${BINDING_FILE} exports ${PREDICATE_NAME}, directly or through an export *`);
+  // THEN BY IDENTITY, over the two modules that import it, because a name check
+  // cannot see `export { ruledCardBinding as somethingElse }`. Each namespace is
+  // compared against the predicate itself, so every alias is the same answer.
+  for (const name of importersOf(BINDING_FILE)) {
+    const namespace = await import(pathToFileURL(join(SRC, name)).href);
+    for (const [exportedAs, value] of Object.entries(namespace))
+      assert.notEqual(value, binding.ruledCardBinding,
+        `${name} exports the shared predicate as ${exportedAs}, which puts it back on a public surface`);
+  }
   // And the gate reaches the readers directly, which is what "no caller-supplied
   // reader" costs: a module-private import and nothing else.
   assert.ok(imports[GATE_FILE].includes(`./${READERS_FILE}`),
@@ -3698,7 +3880,6 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
 // refusing the new check the first time anyone asks it about one.
 // ---------------------------------------------------------------------------
 
-const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const WORKFLOWS = join(REPO_ROOT, ".github/workflows");
 const BACKUP_STATUS = join(REPO_ROOT, "ops/backup-workflow-status.py");
 

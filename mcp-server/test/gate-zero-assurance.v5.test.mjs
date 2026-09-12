@@ -31,7 +31,7 @@ import assert from "node:assert/strict";
 import {
   cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { types } from "node:util";
@@ -1045,17 +1045,23 @@ test("PER READER: a ruling naming another registered store leaves the card unbou
 // names end in `-reader`, `request_read` and `caller_evidence_admitted` are
 // fields of every answer, `predecessor_set_incomplete` is a registered reason —
 // and renaming them would change what Gate Zero says to every caller, which
-// amendment 3 of 2026-09-12 puts out of scope for a slice that forwards them. So
-// the boundary is AMENDMENT 3's, applied string by string: a string main already
-// answered with is main's, and EVERY OTHER STRING ON THE SURFACE IS THIS
-// BRANCH'S AND IS SWEPT WITH NO EXEMPTION AT ALL.
+// amendment 3 of 2026-09-12 puts out of scope for a slice that forwards them.
 //
-// AND MAIN'S HALF IS PROVED, NOT ASSERTED. The baseline is read out of the staged
-// unruled tree — whose three answers are pinned to main's bytes above — and its
-// digest is a LITERAL taken from origin/main at 64b22a4b. The eight strings this
-// branch adds to that tree are declared below and removed before the digest is
-// taken, so a ninth addition cannot slip into the baseline and exempt itself: it
-// moves the digest and this test goes red.
+// AMENDMENT 5 OF 2026-09-12 SAYS HOW THAT BOUNDARY MAY BE DRAWN, and the fourth
+// correction redraws it: the unit of pass-through is THE VALUE, not the file and
+// not a category, and a test may exempt only an explicit list of values it
+// PROVES stood on origin/main before this PR. "Historical strings" as a class is
+// not a list and is not allowed to be one.
+//
+// SO MAIN'S LIST IS READ OUT OF GIT, HERE, AT TEST TIME. `stageMainTree()` takes
+// a copy of src back to origin/main's bytes file by file — every path this
+// branch changed is restored with `git show origin/main:<path>`, and every path
+// this branch ADDED is deleted, so what is imported from that tree is main's
+// module and not a branch module wearing main's name — and main's own gate is
+// then walked with the same walker to produce the exempt set. An author's pinned
+// digest could only ever prove what the author believed; this proves what main
+// says. EVERY VALUE NOT IN THAT SET IS SWEPT WITH NO EXEMPTION AT ALL, including
+// each of the eight this branch declares below.
 // ---------------------------------------------------------------------------
 
 /** The closed union, verbatim from the standing rule of 2026-09-11. */
@@ -1137,23 +1143,91 @@ function surfaceVocabulary(namespace, label) {
   return into;
 }
 
+/** The repository this suite lives in, for the one question it asks git. */
+const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+
+/** The prefix every src path carries in git, stripped to get a tree-relative one. */
+const SRC_PREFIX = "mcp-server/src/";
+
 /**
- * MAIN'S VOCABULARY, PINNED. Taken from `origin/main` at 64b22a4b by walking the
- * unmodified module's whole export surface with the function above: 197 distinct
- * strings, digested as a sorted list. A recomputation from src would confirm
- * itself; a literal cannot.
+ * `git`, run in this repository, refusing loudly rather than answering vaguely.
+ * A baseline that cannot be read is a test that cannot prove its exemption, and
+ * the standing rule's answer to that is to refuse, not to fall back to a literal.
  */
-const MAIN_SURFACE_VOCABULARY_DIGEST =
-  "sha256:0c0d1630fcd1f605ab56b56cb3a6294cff6c8f3e78145c5325ef5f01e4cefffa";
-const MAIN_SURFACE_VOCABULARY_SIZE = 197;
+function git(...args) {
+  const run = spawnSync("git", args,
+    { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  assert.equal(run.status, 0,
+    `git ${args.join(" ")} could not be read: ${run.stderr ?? run.error}`);
+  return run.stdout;
+}
+
+/**
+ * SRC AS ORIGIN/MAIN HAS IT, built at test time and never pinned by hand.
+ *
+ * Amendment 5 of the standing rule makes the unit of pass-through the VALUE: a
+ * string is upstream vocabulary only if it stands byte-identically on
+ * origin/main BEFORE this PR, and the test has to prove that itself. So this
+ * copies src and then puts every path this branch touched back to main's bytes
+ * — `M`/`D` restored with `git show origin/main:<path>`, `A` deleted, since a
+ * file this branch added has no upstream half at all. The result is imported
+ * like any other staged tree.
+ */
+let mainTree = null;
+function stageMainTree() {
+  if (mainTree !== null) return mainTree;
+  const resolved = spawnSync("git", ["rev-parse", "origin/main^{commit}"],
+    { cwd: REPO_ROOT, encoding: "utf8" });
+  assert.equal(resolved.status, 0,
+    "origin/main is not in this checkout, so the pass-through exemption cannot be proved");
+
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const base = mkdtempSync(join(cache, "gate-zero-main-"));
+  stagedTrees.push(base);
+  const target = join(base, "src");
+  cpSync(fileURLToPath(new URL("../src/", import.meta.url)), target, { recursive: true });
+
+  const changed = git("diff", "--name-status", "--no-renames", "origin/main", "--", "mcp-server/src")
+    .split("\n").filter(Boolean).map(line => line.split("\t"));
+  assert.ok(changed.length > 0,
+    "this branch changes no file under src, so there is no branch surface to sweep");
+  for (const [state, path] of changed) {
+    assert.ok(path.startsWith(SRC_PREFIX), `git named a changed path outside src: ${path}`);
+    const at = join(target, path.slice(SRC_PREFIX.length));
+    if (state === "A") { rmSync(at); continue; }
+    mkdirSync(dirname(at), { recursive: true });
+    writeFileSync(at, git("show", `origin/main:${path}`));
+  }
+  mainTree = target;
+  return mainTree;
+}
+
+/**
+ * EVERY STRING ORIGIN/MAIN'S OWN GATE HANDS A CONSUMER — the explicit list the
+ * amendment allows a test to exempt, and the only one. It is the same walker
+ * over the same export surface, so a value is exempt exactly when main already
+ * answered with it.
+ */
+let mainVocabulary = null;
+async function mainSurfaceVocabulary() {
+  if (mainVocabulary !== null) return mainVocabulary;
+  const main = await gateOfTree(stageMainTree());
+  mainVocabulary = new Set(surfaceVocabulary(main, "origin/main").keys());
+  assert.ok(mainVocabulary.size > 0, "origin/main's gate handed back no vocabulary at all");
+  return mainVocabulary;
+}
 
 /**
  * Every string this branch adds to the UNRULED surface, and nothing else may be
  * added without appearing here. Seven are cards 9 and 10 — a charter ref, its
  * decision, the r7 amendment decision and the field names that carry them — and
- * the eighth is the reason id the per-card refusal needed. Each is asserted to be
- * present and to carry no privileged word, so this list cannot be used to bless
- * one: a declared string that failed the sweep would fail it here.
+ * the eighth is the reason id the per-card refusal needed.
+ *
+ * THIS LIST EXEMPTS NOTHING. The only exemption is main's own vocabulary, read
+ * out of git below, and each of these is asserted to be ABSENT from it, to be
+ * present on the surface, and to be swept like everything else — so a declared
+ * string that failed the sweep fails here rather than riding the declaration in.
  */
 const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "311a9af5-3685-4c47-a158-f8dd70870ca1",
@@ -1167,19 +1241,29 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
 ]);
 
 test("SWEEP: the closed union, over every branch-owned string the surface hands back", async () => {
-  const unruled = await gateOfTree(stageTree());
-  const unruledVocabulary = surfaceVocabulary(unruled, "unruled");
-  const baseline = [...unruledVocabulary.keys()]
-    .filter(text => !BRANCH_ADDED_SURFACE_STRINGS.includes(text)).sort();
-  assert.equal(baseline.length, MAIN_SURFACE_VOCABULARY_SIZE,
-    "the unruled surface no longer carries main's vocabulary");
-  assert.equal(digest(baseline), MAIN_SURFACE_VOCABULARY_DIGEST,
-    "a string this branch added is not declared, or main's baseline moved");
+  // ORIGIN/MAIN'S OWN LIST, read out of git rather than pinned by an author.
+  const main = await mainSurfaceVocabulary();
+
+  // EACH DECLARED ADDITION IS PROVED TO BE AN ADDITION. A string that is already
+  // on main is not this branch's to declare, and a declaration cannot be used to
+  // bless a privileged one: both halves are asserted before anything is skipped.
   for (const added of BRANCH_ADDED_SURFACE_STRINGS) {
-    assert.ok(unruledVocabulary.has(added), `${added} is declared but is not on the surface`);
+    assert.equal(main.has(added), false,
+      `${added} is declared as this branch's but already stands on origin/main`);
     assert.deepEqual(privilegedWordsIn(added), [], `the declared addition ${added} is privileged`);
   }
-  const main = new Set(baseline);
+
+  const unruled = await gateOfTree(stageTree());
+  const unruledVocabulary = surfaceVocabulary(unruled, "unruled");
+  for (const added of BRANCH_ADDED_SURFACE_STRINGS)
+    assert.ok(unruledVocabulary.has(added), `${added} is declared but is not on the surface`);
+  // AND NOTHING ELSE IS ADDED TO THE UNRULED SURFACE. Main's list plus exactly
+  // the declared eight is the whole of it, so a ninth addition is named here
+  // rather than discovered by the sweep below.
+  assert.deepEqual(
+    [...unruledVocabulary.keys()].filter(text => !main.has(text)).sort(),
+    [...BRANCH_ADDED_SURFACE_STRINGS].sort(),
+    "the unruled surface carries a string that is neither main's nor declared");
 
   // Every tree this branch can be switched into, the shipped one first.
   const namespaces = [["live", surface]];
@@ -1190,6 +1274,8 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
   const branchOwned = new Map();
   const sweep = (vocabulary, label) => {
     for (const [text, where] of vocabulary) {
+      // THE ONE EXEMPTION, AND IT IS A LIST OF VALUES ORIGIN/MAIN ALREADY
+      // ANSWERED WITH — not a category, not a file, not a shape.
       if (main.has(text)) continue;
       branchOwned.set(text, `${label} ${where}`);
       assert.deepEqual(privilegedWordsIn(text), [],
@@ -1206,11 +1292,15 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
     for (const shape of callerControlledShapes())
       sweep(collectStrings(fn(shape), `${name}(shape)`, new Map()), name);
 
-  // NON-VACUOUS: the sweep has branch-owned strings to look at. Six is the count
-  // this branch ships — the opaque decided_by token and the five sentences the
-  // ruled and part-ruled refusals answer with — so a change that swept nothing
-  // fails here rather than passing quietly.
-  assert.ok(branchOwned.size >= 6,
+  // NON-VACUOUS: the sweep has branch-owned strings to look at, and every one of
+  // the declared eight is among them — the exemption list is main's, so nothing
+  // this branch declares can duck the sweep by being declared. Fourteen is the
+  // floor this branch ships: the eight declared additions, plus the opaque
+  // decided_by token and the five sentences the ruled and part-ruled refusals
+  // answer with, which appear only on a ruled tree.
+  for (const added of BRANCH_ADDED_SURFACE_STRINGS)
+    assert.ok(branchOwned.has(added), `${added} was declared but never swept`);
+  assert.ok(branchOwned.size >= 14,
     `the sweep found only ${branchOwned.size} branch-owned strings: ${[...branchOwned.keys()]}`);
 });
 
