@@ -58,11 +58,17 @@ export const REGISTRY_V21_VERSION = "scac-mutation-registry.v21";
 export const REGISTRY_V22_VERSION = "scac-mutation-registry.v22";
 export const REGISTRY_V23_VERSION = "scac-mutation-registry.v23";
 export const REGISTRY_V24_VERSION = "scac-mutation-registry.v24";
-// v25 admits the two canonical-freshness LaunchAgents (WR-000040 AC-FRESH), the
-// Gate Zero scheduler canary LaunchAgent and its script. Every successor since
-// v20 has been registry-only because its source change re-digested ingresses the
-// frozen inventory already named; this is the first whose whole purpose is to
-// ADMIT new ones, which current_source_review is structurally unable to express.
+// v25 admits the WR-000040 AC-FRESH canonical-freshness agents, the Gate Zero
+// scheduler canary and the files that prove the canary runs. Every successor
+// since v20 has been registry-only because its source change re-digested
+// ingresses the frozen inventory already named; this is the first whose whole
+// purpose is to ADMIT new ones, which current_source_review is structurally
+// unable to express. WHICH ingresses, how many, and of what kinds is NOT
+// restated in prose anywhere in this file: v5ScheduledJobAdmissionProvenance()
+// derives it from the two frozen row sets, and every provenance layer -- the
+// migration comment and the review reason in the fixture -- is rendered from
+// that derivation. A count that is typed is a count that drifts, which is
+// exactly what PR #1006 review 2 caught.
 export const REGISTRY_V25_VERSION = "scac-mutation-registry.v25";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
@@ -465,7 +471,9 @@ export const V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE = Object.fre
   projection_version: "scac-db-catalog-projection.v25",
   // Read back from a clean disposable Postgres carrying db/schema.sql and every
   // migration through this one. This successor is registry-only and its source
-  // change is three LaunchAgent definitions plus one script: it creates no
+  // change ADMITS new ingresses rather than re-digesting existing ones -- the
+  // composition is derived by v5ScheduledJobAdmissionProvenance() and stated
+  // only where it can be computed, never typed in a comment. It creates no
   // table, no role and no domain function, so the entire security-definer delta
   // from v24's 458 is the four seal-and-catalog functions it installs for
   // itself, exactly as the v20, v21 and v23 registry-only successors before it.
@@ -1221,6 +1229,25 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
     const reviewedDigest = sourceInventoryFixtureDigest(reviewed);
     if (reviewed.length !== review.expected_count || reviewedDigest !== review.expected_sha256)
       throw new Error(`current source-inventory review drifted: count ${reviewed.length}/${review.expected_count}, sha256 ${reviewedDigest}/${review.expected_sha256}`);
+    // THE REASON IS PROVENANCE, AND PROVENANCE IS CHECKED. Its accreted
+    // history is prose a reviewer reads, but its claim about THIS frontier is
+    // a measurement: the reason has to end with the paragraph
+    // v5ScheduledJobAdmissionProvenanceFrozen() renders from the row sets, and
+    // no sentence in it may state a frontier transition other than the
+    // measured one. PR #1006 review 2 found a reason claiming "835 to 839",
+    // "four new rows" and 131 reviewed ingresses over an 840-row overlay with
+    // 132 reviewed rows; every one of those three numbers is now computed, and
+    // a typed one fails here rather than surviving to a reviewer.
+    if (version === REGISTRY_V25_VERSION) {
+      const provenance = v5ScheduledJobAdmissionProvenanceFrozen();
+      if (!review.reason.endsWith(provenance.review_reason_paragraph))
+        throw new Error("current source-inventory review reason does not end with the measured v25 admission provenance paragraph");
+      const expectedTransition =
+        `${provenance.previous_frontier_count} to ${provenance.frontier_count}`;
+      for (const match of review.reason.matchAll(/\b\d{3} to \d{3}\b/g))
+        if (match[0] !== expectedTransition)
+          throw new Error(`current source-inventory review reason states a superseded frontier transition: ${match[0]} rather than ${expectedTransition}`);
+    }
     frozen = reviewed;
   }
   const currentDigest = sourceInventoryFixtureDigest(current);
@@ -7884,6 +7911,148 @@ function closedExport(callable) {
   return closed;
 }
 
+/**
+ * THE v25 ADMISSION PROVENANCE, DERIVED — the fix for PR #1006 review 2.
+ *
+ * The first revision of this successor stated its own delta in prose, three
+ * times over, in three files: the migration's preflight comment, this module's
+ * catalog-baseline comment, and the `reason` on `current_source_review`. The
+ * frontier then moved from four admitted ingresses to five, the row sets and
+ * the migration followed, and two of the three prose statements did not — the
+ * fixture still said "835 to 839", "four new rows" and "131 reviewed
+ * ingresses" against an 840-row overlay carrying 132 reviewed rows. Nothing was
+ * red, because nothing compared the sentence to the rows.
+ *
+ * So no provenance layer types a count any more. This function MEASURES the
+ * delta between the two frozen row sets and renders the sentences the other
+ * layers use; `assertCurrentSourceInventoryMatchesFixture` then refuses a
+ * fixture whose reason is not the rendered one, which makes a typed count a
+ * failure of the frontier check rather than a thing a reviewer has to notice.
+ *
+ * Every input is frozen: the v24 and v25 row sets replayed from the fixture's
+ * own base and patches, and the overlay's own row list. No caller reaches it.
+ */
+const ADMITTED_INGRESS_NOUNS = Object.freeze([
+  Object.freeze({
+    match: row => row.ingress_kind === "workflow_entrypoint" &&
+      row.source_locator.startsWith("ops/launchd/"),
+    one: "LaunchAgent definition", many: "LaunchAgent definitions",
+  }),
+  Object.freeze({
+    match: row => row.ingress_kind === "workflow_entrypoint" &&
+      row.source_locator.startsWith(".github/workflows/"),
+    one: "GitHub workflow", many: "GitHub workflows",
+  }),
+  Object.freeze({
+    match: row => row.ingress_kind === "script_entrypoint",
+    one: "script entrypoint", many: "script entrypoints",
+  }),
+  Object.freeze({
+    match: row => row.ingress_kind === "mcp_tool",
+    one: "MCP tool", many: "MCP tools",
+  }),
+]);
+// Words rather than digits for the small composition counts, because that is
+// how the sentences read; the mapping is a lookup, so the WORD is derived from
+// the measured count exactly as the digits are.
+const COUNT_WORDS = Object.freeze([
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+  "nine", "ten", "eleven", "twelve",
+]);
+
+function countWord(count) {
+  if (!Number.isInteger(count) || count < 0)
+    throw new Error(`admission provenance count is not a whole number: ${count}`);
+  return COUNT_WORDS[count] ?? String(count);
+}
+
+function joinWithAnd(parts) {
+  if (parts.length === 0) return "no new ingress";
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+}
+
+function wrapSqlComment(text, width = 76) {
+  const lines = [];
+  let line = "--";
+  for (const word of text.split(" ")) {
+    if (line === "--") line = `-- ${word}`;
+    else if (`${line} ${word}`.length <= width) line = `${line} ${word}`;
+    else { lines.push(line); line = `-- ${word}`; }
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
+
+function v5ScheduledJobAdmissionProvenanceFrozen() {
+  const previous = frozenInventory(REGISTRY_V24_VERSION);
+  const frontier = frozenInventory(REGISTRY_V25_VERSION);
+  const previousKeys = new Set(previous.map(row => row.ingress_key));
+  const frontierKeys = new Set(frontier.map(row => row.ingress_key));
+  const admittedRows = frontier.filter(row => !previousKeys.has(row.ingress_key))
+    .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
+  const removedKeys = previous.filter(row => !frontierKeys.has(row.ingress_key))
+    .map(row => row.ingress_key).sort((left, right) => left.localeCompare(right));
+  const composition = [];
+  for (const noun of ADMITTED_INGRESS_NOUNS) {
+    const count = admittedRows.filter(row => noun.match(row)).length;
+    if (count > 0) composition.push(`${countWord(count)} ${count === 1 ? noun.one : noun.many}`);
+  }
+  // Every admitted row must fall in exactly one noun bucket, or the
+  // description would silently under-report the delta -- the same failure in a
+  // new costume.
+  const classified = admittedRows
+    .filter(row => ADMITTED_INGRESS_NOUNS.filter(noun => noun.match(row)).length === 1).length;
+  if (classified !== admittedRows.length)
+    throw new Error("v25 admission provenance cannot name the kind of every admitted ingress exactly once");
+  const patch = SOURCE_INVENTORY_FIXTURES.patches
+    .find(entry => entry.version === REGISTRY_V25_VERSION.split(".").at(-1));
+  if (!patch || !Array.isArray(patch.upsert))
+    throw new Error("v25 admission provenance cannot read the v25 fixture patch");
+  const redigested = patch.upsert
+    .filter(row => previousKeys.has(row.ingress_key)).length;
+  const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
+  if (!review || !Array.isArray(review.upsert))
+    throw new Error("v25 admission provenance cannot read the current source review");
+  const admittedKeys = admittedRows.map(row => row.ingress_key);
+  const description = joinWithAnd(composition);
+  const transition = `${previous.length} to ${frontier.length}`;
+  const migrationSentence = "What it DOES change is the sealed source inventory " +
+    `itself, which grows from ${transition} rows: ${description} ` +
+    "are admitted as new ingresses, which is the one shape " +
+    "current_source_review cannot carry.";
+  const reviewReasonParagraph = " v25 admission provenance, measured from the " +
+    "sealed row sets rather than typed: the frozen source inventory grows from " +
+    `${transition} rows, admitting ${countWord(admittedKeys.length)} new ` +
+    `${admittedKeys.length === 1 ? "ingress" : "ingresses"} -- ${description} ` +
+    `-- namely ${admittedKeys.join(", ")}, and removing ` +
+    `${removedKeys.length === 0 ? "none" : removedKeys.join(", ")}. The v25 ` +
+    `patch carries those ${countWord(admittedKeys.length)} additions plus ` +
+    `${countWord(redigested)} already-known rows whose bytes the same change ` +
+    `moved, and this overlay re-derives ${review.upsert.length} reviewed ` +
+    "ingresses from the live inventory of this tree rather than hand-merging " +
+    "them, so the reviewed digest reproduces the live digest exactly. Every " +
+    "count in these two sentences is computed by " +
+    "v5ScheduledJobAdmissionProvenance() from frozenInventory(\"" +
+    `${REGISTRY_V24_VERSION}") and frozenInventory("${REGISTRY_V25_VERSION}"), ` +
+    "and the frontier check refuses a reason that does not end with the " +
+    "rendered text.";
+  return Object.freeze({
+    previous_version: REGISTRY_V24_VERSION,
+    version: REGISTRY_V25_VERSION,
+    previous_frontier_count: previous.length,
+    frontier_count: frontier.length,
+    admitted_count: admittedKeys.length,
+    admitted_ingress_keys: Object.freeze([...admittedKeys]),
+    removed_ingress_keys: Object.freeze([...removedKeys]),
+    admitted_description: description,
+    patch_redigested_count: redigested,
+    reviewed_ingress_count: review.upsert.length,
+    migration_comment: wrapSqlComment(migrationSentence),
+    review_reason_paragraph: reviewReasonParagraph,
+  });
+}
+
 // Shared v25 trust root. Every entry path that renders or writes a v25
 // artifact calls this before doing any work, so an unbound predecessor seal,
 // catalog baseline or artifact pin refuses here rather than producing a
@@ -7911,9 +8080,10 @@ function assertV5ScheduledJobAdmissionV25TrustRootFrozen() {
 
 // Registry-only successor that ADMITS new source ingresses. Every predecessor
 // from v20 on was registry-only because its source change re-digested existing
-// entrypoints; this one exists because three LaunchAgent definitions and two
-// script entrypoints are NEW ingresses, which current_source_review cannot
-// express at all (assertCurrentSourceInventoryMatchesFixture refuses an unknown
+// entrypoints; this one exists because the agents and scripts that
+// v5ScheduledJobAdmissionProvenance() enumerates from the row sets are NEW
+// ingresses, which current_source_review cannot express at all
+// (assertCurrentSourceInventoryMatchesFixture refuses an unknown
 // ingress_key). It creates no table, no role and no domain function: it seals
 // the widened source inventory and installs the v25 catalog/policy projection
 // after the immutable v24 frontier. The v24 predecessor was NOT registry-only,
@@ -8138,12 +8308,15 @@ comment on function ops.scac_mutation_catalog_v24_current() is 'Historical v24 l
     `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'V5 scheduled job admission pre-v25 role-authority receipt drifted'; end if;`,
     "V5 scheduled job admission pre-v25 role receipt");
   const predecessorHash = sha256(v24Migration);
+  // The third sentence is MEASURED, not written: it is the composition of the
+  // admitted rows as v5ScheduledJobAdmissionProvenanceFrozen() reads them off
+  // the two frozen row sets. PR #1006 review 2 caught this file and the fixture
+  // disagreeing about the delta because both had it typed.
+  const admissionComment = v5ScheduledJobAdmissionProvenanceFrozen().migration_comment;
   const predecessorPreflight =
 `-- Exact disposable-Postgres post-0498 receipt. Refuse before any v25 function
 -- exists; this registry-only successor changes no domain DDL or business rows.
--- What it DOES change is the sealed source inventory itself: three LaunchAgent
--- definitions and two script entrypoints are admitted as new ingresses, which
--- is the one shape current_source_review cannot carry.
+${admissionComment}
 do $v5_scheduled_job_admission_preflight$
 declare observed_count integer; observed_digest text; grant_snapshot jsonb;
 begin
@@ -8184,6 +8357,15 @@ export const renderV5ScheduledJobAdmissionForwardRegistrySql =
   closedExport(() => renderV5ScheduledJobAdmissionRegistrySqlFrozen(
     frozenInventory(REGISTRY_V25_VERSION),
     V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE));
+/**
+ * The measured v25 admission delta and the prose every provenance layer uses.
+ * Same closed shape and same closed inputs: it reads the two frozen row sets
+ * and the fixture's own overlay, answers with a frozen object, and takes
+ * nothing from a caller — so no consumer can talk it into describing a delta
+ * the rows do not have.
+ */
+export const v5ScheduledJobAdmissionProvenance =
+  closedExport(() => v5ScheduledJobAdmissionProvenanceFrozen());
 
 
 export function renderGeneratedFrontier() {

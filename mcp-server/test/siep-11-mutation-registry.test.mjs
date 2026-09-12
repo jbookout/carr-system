@@ -44,6 +44,7 @@ import {
   renderV5F09WorkflowTruthForwardRegistrySql,
   renderV5ScheduledJobAdmissionForwardRegistrySql,
   assertV5ScheduledJobAdmissionV25TrustRoot,
+  v5ScheduledJobAdmissionProvenance,
   R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
   renderR07RepoHygieneJanitorForwardRegistrySql,
   isDefinitionOnlyLaunchd,
@@ -1222,7 +1223,15 @@ test("v25 admits the scheduled freshness and canary ingresses and preserves the 
   assert.doesNotMatch(v25Migration, /^\s*(begin|commit)\s*;\s*$/im);
   assert.doesNotMatch(v25Migration, /__V24_|__V25_|__V5_F09_V24_CATALOG_SUCCESSOR__|UNBOUND/);
   assert.match(v25Migration, /do \$v5_scheduled_job_admission_preflight\$/);
-  assert.match(v25Migration, /two script entrypoints are admitted as new ingresses/);
+  // The migration states its own delta in MEASURED words, so this reads the
+  // measurement rather than a sentence someone typed. De-wrapped because the
+  // comment is hard-wrapped at 76 columns by the renderer, and a wrap that
+  // moves is not a defect.
+  const provenance = v5ScheduledJobAdmissionProvenance();
+  const dewrapped = v25Migration.replaceAll("\n-- ", " ");
+  assert.ok(dewrapped.includes(
+    `which grows from ${provenance.previous_frontier_count} to ${provenance.frontier_count} rows: ` +
+    `${provenance.admitted_description} are admitted as new ingresses`), dewrapped.slice(0, 400));
 
   // v25 is the seal this migration CREATES, so it carries every predecessor
   // seal tuple and none of its own.
@@ -1230,6 +1239,87 @@ test("v25 admits the scheduled freshness and canary ingresses and preserves the 
     const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
     assert.ok(v25Migration.includes(tuple), seal.version);
   }
+});
+
+test("the v25 admission provenance is measured from the row sets and binds every prose layer", () => {
+  // THE DEFECT THIS EXISTS FOR (PR #1006 review 2). The frontier moved from
+  // four admitted ingresses to five; the row sets, the migration and the tests
+  // followed; two prose layers did not. The fixture's reason still said
+  // "835 to 839", "four new rows" and "131 reviewed ingresses" against an
+  // 840-row overlay carrying 132 reviewed rows, and the generator's
+  // catalog-baseline comment still said one script where the migration said
+  // two. Nothing was red because nothing compared a sentence to the rows.
+  //
+  // So this test recomputes the delta from the two frozen row sets ITSELF --
+  // deliberately not by reading the provenance object's own numbers back to
+  // it -- and then requires every layer to say what the recomputation says.
+  const before = frozenInventory(REGISTRY_V24_VERSION);
+  const after = frozenInventory(REGISTRY_V25_VERSION);
+  const beforeKeys = new Set(before.map(row => row.ingress_key));
+  const afterKeys = new Set(after.map(row => row.ingress_key));
+  const admitted = after.filter(row => !beforeKeys.has(row.ingress_key));
+  const removed = before.filter(row => !afterKeys.has(row.ingress_key));
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven"];
+  const launchAgents = admitted.filter(row => row.ingress_kind === "workflow_entrypoint" &&
+    row.source_locator.startsWith("ops/launchd/")).length;
+  const scripts = admitted.filter(row => row.ingress_kind === "script_entrypoint").length;
+  assert.equal(launchAgents + scripts, admitted.length);
+
+  const provenance = v5ScheduledJobAdmissionProvenance();
+  assert.equal(provenance.previous_frontier_count, before.length);
+  assert.equal(provenance.frontier_count, after.length);
+  assert.equal(provenance.admitted_count, admitted.length);
+  assert.deepEqual([...provenance.admitted_ingress_keys],
+    admitted.map(row => row.ingress_key).sort((left, right) => left.localeCompare(right)));
+  assert.deepEqual([...provenance.removed_ingress_keys], removed.map(row => row.ingress_key));
+  assert.equal(provenance.admitted_description,
+    `${words[launchAgents]} LaunchAgent definitions and ${words[scripts]} script entrypoints`);
+
+  // The fixture is read as bytes here, not through the module that also
+  // renders the paragraph: the file on disk is the artifact a reviewer reads.
+  const fixture = JSON.parse(fs.readFileSync(
+    new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json",
+      import.meta.url), "utf8"));
+  const review = fixture.current_source_review;
+  const patch = fixture.patches.find(entry => entry.version === "v25");
+  assert.equal(provenance.reviewed_ingress_count, review.upsert.length);
+  assert.equal(provenance.patch_redigested_count,
+    patch.upsert.filter(row => beforeKeys.has(row.ingress_key)).length);
+  assert.equal(patch.upsert.length, admitted.length + provenance.patch_redigested_count);
+
+  // THE COUNTS IN THE REASON ARE THE OVERLAY'S REAL COUNTS. Every number in
+  // the closing paragraph is asserted against the recomputation above, and the
+  // paragraph is asserted to be the end of the reason, so a count typed into
+  // the fixture by hand cannot survive either check.
+  const paragraph = provenance.review_reason_paragraph;
+  assert.ok(review.reason.endsWith(paragraph), review.reason.slice(-600));
+  assert.ok(paragraph.includes(`grows from ${before.length} to ${after.length} rows`), paragraph);
+  assert.ok(paragraph.includes(`admitting ${words[admitted.length]} new ingresses`), paragraph);
+  assert.ok(paragraph.includes(
+    `${words[launchAgents]} LaunchAgent definitions and ${words[scripts]} script entrypoints`), paragraph);
+  assert.ok(paragraph.includes(`plus ${words[provenance.patch_redigested_count] ??
+    provenance.patch_redigested_count} already-known rows`), paragraph);
+  assert.ok(paragraph.includes(`${review.upsert.length} reviewed ingresses`), paragraph);
+  assert.ok(paragraph.includes("and removing none"), paragraph);
+  for (const key of provenance.admitted_ingress_keys) assert.ok(paragraph.includes(key), key);
+
+  // And no OTHER sentence in the accreted reason may claim a frontier
+  // transition: the superseded "835 to 839" was exactly that shape, sitting in
+  // a paragraph nobody re-read. The frontier check enforces the same rule, so
+  // this fails in ops/ci.sh --only gates as well as here.
+  assert.deepEqual([...review.reason.matchAll(/\b\d{3} to \d{3}\b/g)].map(match => match[0]),
+    [`${before.length} to ${after.length}`]);
+
+  // The migration says the same measured thing, and the generator states no
+  // count of its own in prose any more -- a comment cannot be derived, so it
+  // must not carry the number that drifted.
+  const generator = fs.readFileSync(
+    new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
+  const comments = generator.split("\n").filter(line => line.trim().startsWith("//"));
+  for (const line of comments)
+    assert.doesNotMatch(line, /(three|four|five) LaunchAgent definitions/, line.trim());
+  assert.ok(v25Migration.replaceAll("\n-- ", " ").includes(
+    `${provenance.admitted_description} are admitted as new ingresses`));
 });
 
 test("the Gate Zero canary agent passes only arguments the wrapper's own parser accepts", () => {
@@ -1300,6 +1390,7 @@ test("the v25 public surface admits no caller input under any shape", () => {
   // holder, so a Proxy get trap threw the caller's own value back out and a
   // caller-supplied row carrying a privileged word landed in the returned SQL.
   const canonical = renderV5ScheduledJobAdmissionForwardRegistrySql();
+  const canonicalProvenance = v5ScheduledJobAdmissionProvenance();
   const marker = "HOSTILEMARKERTEXT";
   const privileged = [
     "allow", "commit", "prompt", "suppress", "release", "read", "covered",
@@ -1331,6 +1422,10 @@ test("the v25 public surface admits no caller input under any shape", () => {
     assert.equal(rendered, canonical, label);
     assert.equal(rendered.includes(marker), false, label);
     assert.equal(assertV5ScheduledJobAdmissionV25TrustRoot(...argv), undefined, label);
+    // The provenance export is on this sweep too: it MEASURES a delta and
+    // renders the sentences three other files carry, so a caller that could
+    // steer it could steer the provenance of the seal itself.
+    assert.deepEqual(v5ScheduledJobAdmissionProvenance(...argv), canonicalProvenance, label);
   }
   // The canonical artifact carries no privileged word of its own as a bare
   // token either, beyond the SQL vocabulary the migration is written in. This
@@ -1344,6 +1439,7 @@ test("the v25 public surface admits no caller input under any shape", () => {
   for (const [name, exported] of [
     ["renderV5ScheduledJobAdmissionForwardRegistrySql", renderV5ScheduledJobAdmissionForwardRegistrySql],
     ["assertV5ScheduledJobAdmissionV25TrustRoot", assertV5ScheduledJobAdmissionV25TrustRoot],
+    ["v5ScheduledJobAdmissionProvenance", v5ScheduledJobAdmissionProvenance],
   ]) {
     assert.equal(typeof exported, "function", name);
     assert.equal(Object.hasOwn(exported, "prototype"), false, name);
