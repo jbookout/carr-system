@@ -46,7 +46,19 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from lib.platform_metering import MeteringRefusal, authorize_metered_execution  # noqa: E402
+# IMPORTED UNDER PRIVATE NAMES ON PURPOSE. A plain `from lib.platform_metering
+# import authorize_metered_execution` binds that callable as a PUBLIC attribute
+# of this module, so anyone who imports this file re-reaches the metering gate
+# through it and gets the privileged `admitted` outcome back from their own
+# policy and request objects. The standing authority rule forbids exporting that
+# outcome under ANY name, and a re-export is a name. The underscore keeps both
+# out of this module's public surface; _public_surface_contract in
+# ops/backup-workflow-selftest.py holds the property and fails if either is
+# rebound publicly again.
+from lib.platform_metering import (  # noqa: E402
+    MeteringRefusal as _MeteringRefusal,
+    authorize_metered_execution as _authorize_metered_execution,
+)
 
 
 CHECK_NAME = "Backup artifact"
@@ -77,9 +89,11 @@ BACKUP_WORKFLOW_FILE = "backup-nightly.yml"
 # from a rejected one in the step log. 9 means the opposite: the Check WAS
 # written and this process failed the run on purpose.
 CONTROLLED_FAILURE_EXIT = 9
-# ── who may be excluded from the head's own Check evidence ──────────────────
-# EVERY INPUT TO THAT EXCLUSION IS THE PROVIDER'S OWN ATTRIBUTION, and nothing
-# the Check's creator wrote. An earlier revision paired the app stamp below with
+# ── whose attribution the head's Check evidence is decided on ───────────────
+# EVERY INPUT TO BOTH DECISIONS BELOW -- which row is the seam's own and may be
+# set aside, and which row is the repository's required check and may be stood
+# on -- IS THE PROVIDER'S OWN ATTRIBUTION, and nothing the Check's creator
+# wrote. An earlier revision paired the app stamp below with
 # the seam's external_id envelope, and review forged it: the stamp is shared by
 # every Actions Check on the head, ``external_id`` is a string the creator
 # supplies, so a valid envelope under the shared stamp excluded a red Check that
@@ -93,8 +107,32 @@ CONTROLLED_FAILURE_EXIT = 9
 # earlier failure then counts as red and a later proof refuses. That is the
 # fail-closed direction on purpose -- a stale producer id costs a refusal, it
 # never admits a spend.
-BACKUP_CHECK_APP_ID = 15368
-BACKUP_CHECK_APP_SLUG = "github-actions"
+ACTIONS_APP_ID = 15368
+ACTIONS_APP_SLUG = "github-actions"
+# ── the Check the head's POSITIVE evidence has to actually be ───────────────
+# A green head is not "no red rows". AGENTS.md states the repository's own
+# requirement -- ruleset "main: CI must be green" requires the `ops/ci.sh
+# --strict` status check -- and ops/config/automerge-pilot-policy.v1.json
+# registers that check's provider identity: the name below, the Actions app
+# slug above, and the workflow file that produces it. Those three are restated
+# here as literals rather than read from the policy file at runtime, because
+# this door resolves its own tree (see _paused_policy_tree in the selftest) and
+# a second file to load would be a second thing that can go missing between the
+# guards and the POST. The selftest holds the two spellings equal instead.
+#
+# THE NAME IS NOT WHAT AUTHENTICATES IT. `ops/ci.sh --strict` is free text any
+# creator can attach, exactly like "Backup artifact" was. What authenticates is
+# the same provider fact the exclusion stands on: GitHub assigns a check-run's
+# check-suite, and the suites of ci.yml's runs on THIS head are resolved from
+# the provider's own run listing first. The name only SELECTS among rows that
+# are already provider-authenticated as this workflow's output on this commit.
+REQUIRED_CHECK_NAME = "ops/ci.sh --strict"
+REQUIRED_CHECK_WORKFLOW_FILE = "ci.yml"
+REQUIRED_CHECK_WORKFLOW_PATH = ".github/workflows/" + REQUIRED_CHECK_WORKFLOW_FILE
+# STRICTER THAN NON_FAILING_CHECK_CONCLUSIONS ON PURPOSE. A neutral or skipped
+# required check means the suite did not run, which is the absence of evidence,
+# not evidence of green. Only "success" carries the admission.
+REQUIRED_CHECK_CONCLUSION = "success"
 # The repository path the provider reports on a workflow run, as opposed to the
 # bare file name the dispatch endpoint takes. ``workflow_run.path`` is GitHub's
 # own statement of WHICH WORKFLOW FILE produced a run, and it is the fact the
@@ -477,22 +515,35 @@ def _parse_proof_request(args: argparse.Namespace) -> tuple[str, str]:
     return proof_id, head
 
 
-def _seam_run_check_suites(identity: Identity) -> frozenset[int]:
-    """Which check-suites on this head did the seam's OWN workflow file produce?
+def _workflow_run_check_suites(
+    identity: Identity,
+    workflow_file: str,
+    workflow_path: str,
+) -> frozenset[int]:
+    """Which check-suites on this head did ONE named workflow file produce?
 
     ASKED OF THE PROVIDER, AND OF NOTHING ELSE. GitHub holds the binding between
     a check-run and the workflow run that produced it: every check-run carries a
     ``check_suite``, and every workflow run reports the ``check_suite_id`` it
     writes into, alongside the ``path`` of the workflow file that ran and the
     ``head_sha`` it ran on. Those three are provider facts -- a creator cannot
-    set any of them on a Check it posts -- so resolving the seam's own suites
-    once, from the runs endpoint scoped to this one workflow file and this one
-    head, gives the exclusion an identity nobody outside the seam can mint.
+    set any of them on a Check it posts -- so resolving a workflow's suites once,
+    from the runs endpoint scoped to one workflow file and this one head, gives
+    both decisions below an identity nobody outside that workflow can mint.
+
+    ONE READER, TWO CALLERS, AND WHY IT TAKES ITS WORKFLOW AS AN ARGUMENT. The
+    exclusion asks it about backup-nightly.yml and the positive evidence asks it
+    about ci.yml. The alternative was a second paged reader with the same
+    pagination, the same re-reads and the same fail-closed cap -- which is the
+    duplicated-validation shape that produced this seam's earlier normalisation
+    divergence. It is module-private and both callers below are module-private
+    wrappers that pass this file's own literals; no caller of this module can
+    name a workflow.
 
     THE ORDERED QUESTIONS, per returned run:
-      1. Does the provider say this run came from BACKUP_WORKFLOW_PATH? A run
-         from any other workflow file contributes no suite, which is what stops
-         a different workflow under the same Actions app from being excluded.
+      1. Does the provider say this run came from ``workflow_path``? A run from
+         any other workflow file contributes no suite, which is what stops a
+         different workflow under the same Actions app from being counted.
       2. Does the provider say it ran on THIS head? The listing is already
          filtered by head, and the answer is re-read rather than assumed, which
          is what stops a run of this same workflow on another commit from
@@ -500,14 +551,15 @@ def _seam_run_check_suites(identity: Identity) -> frozenset[int]:
       3. Is ``check_suite_id`` a positive integer? Anything else is not an
          identity and is skipped.
 
-    FAIL-CLOSED IN BOTH DIRECTIONS. An unreadable listing raises out of ``api``
-    and the dispatch refuses. A readable listing that names no run returns an
-    empty set, which excludes nothing -- so the seam's own earlier failure then
-    counts as ordinary red evidence and the proof refuses. Neither outcome can
-    admit a spend; the cost of being wrong here is always a refusal.
+    FAIL-CLOSED IN BOTH DIRECTIONS, for both callers. An unreadable listing
+    raises out of ``api`` and the dispatch refuses. A readable listing that names
+    no run returns an empty set -- which for the exclusion means the seam's own
+    earlier failure counts as ordinary red evidence, and for the positive
+    evidence means no row can authenticate as the required check. Neither
+    outcome can admit a spend; the cost of being wrong here is always a refusal.
     """
     path = (f"/repos/{identity.repository}/actions/workflows/"
-            f"{BACKUP_WORKFLOW_FILE}/runs")
+            f"{workflow_file}/runs")
     suites: set[int] = set()
     seen: set[int] = set()
     for page in range(1, MAX_RUN_PAGES + 1):
@@ -524,7 +576,7 @@ def _seam_run_check_suites(identity: Identity) -> frozenset[int]:
             if not isinstance(row, dict):
                 raise StatusError("workflow run response contains a non-object")
             seen.add(positive_int(row.get("id"), "workflow run ID"))
-            if row.get("path") != BACKUP_WORKFLOW_PATH:
+            if row.get("path") != workflow_path:
                 continue
             if str(row.get("head_sha", "")).lower() != identity.head_sha:
                 continue
@@ -539,6 +591,68 @@ def _seam_run_check_suites(identity: Identity) -> frozenset[int]:
     raise StatusError("workflow run pagination cap exhausted")
 
 
+def _seam_run_check_suites(identity: Identity) -> frozenset[int]:
+    """The suites this seam's OWN workflow file produced on this head."""
+    return _workflow_run_check_suites(
+        identity, BACKUP_WORKFLOW_FILE, BACKUP_WORKFLOW_PATH)
+
+
+def _required_check_suites(identity: Identity) -> frozenset[int]:
+    """The suites the REQUIRED check's workflow file produced on this head."""
+    return _workflow_run_check_suites(
+        identity, REQUIRED_CHECK_WORKFLOW_FILE, REQUIRED_CHECK_WORKFLOW_PATH)
+
+
+def _provider_suite_id(item: dict[str, Any], identity: Identity) -> int | None:
+    """Which check-suite did GITHUB place this row in, if it is an Actions row?
+
+    The one piece of identity on a check-run that its creator cannot choose, and
+    the only thing either decision below is allowed to turn on. Returns the
+    provider-assigned suite ID, or None when the row does not authenticate at
+    all.
+
+    THE ORDERED QUESTIONS. The answer must be yes at every one; the first no
+    returns None and the caller treats the row as unauthenticated.
+
+      1. Did the provider stamp a producer app object on the row at all? A row
+         with no app is unattributed.
+      2. Is that app the registered Actions app -- BOTH id and slug?
+      3. Does the provider place this row on THIS head?
+      4. Did the provider assign it a positive integer check-suite ID?
+
+    NOTHING THE CREATOR WROTE IS ONE OF THE QUESTIONS -- not the name, not the
+    title, not the output, not the ``external_id`` envelope. That is the whole
+    point of this function, and it is the second time it has had to be learned.
+    Deciding by NAME meant any creator who could attach the label "Backup
+    artifact" hid a red Check. Deciding by the app stamp PLUS the envelope was no
+    better: the stamp is shared with every ordinary Actions Check on the head,
+    and the envelope is a string the creator supplies, so review forged a valid
+    envelope under the shared stamp and had a red Check excluded. A label is not
+    access control, and neither is a receipt the caller wrote.
+
+    QUESTION 2 IS CHEAP NARROWING, NOT THE AUTHENTICATION. What the callers
+    actually stand on is that the suite ID returned here can be compared against
+    the suites a NAMED WORKFLOW FILE produced on this head, resolved from the
+    provider's own run listing -- and the creator of a Check cannot choose its
+    check-suite: GitHub assigns it from the installation and, for an Actions run,
+    from the run itself.
+    """
+    app = item.get("app")
+    if not isinstance(app, dict):
+        return None
+    if app.get("id") != ACTIONS_APP_ID or app.get("slug") != ACTIONS_APP_SLUG:
+        return None
+    if str(item.get("head_sha", "")).lower() != identity.head_sha:
+        return None
+    suite = item.get("check_suite")
+    if not isinstance(suite, dict):
+        return None
+    suite_id = suite.get("id")
+    if isinstance(suite_id, bool) or not isinstance(suite_id, int) or suite_id <= 0:
+        return None
+    return suite_id
+
+
 def _is_seam_producer_check(
     item: dict[str, Any],
     identity: Identity,
@@ -546,51 +660,52 @@ def _is_seam_producer_check(
 ) -> bool:
     """Is this check-run the backup seam's OWN outcome, by PROVIDER-BACKED identity?
 
-    THE ORDERED QUESTIONS. The answer must be yes at every one; the first no
-    ends it and the row stays in the head's evidence.
-
-      1. Did the provider stamp a producer app object on the row at all? A row
-         with no app is unattributed and is never excluded.
-      2. Is that app the registered producer -- BOTH id and slug?
-      3. Does the provider place this row on THIS head?
-      4. Does the provider place it in a check-suite that ``_seam_run_check_suites``
-         resolved from a run of THIS workflow file on THIS head?
-
-    NOTHING THE CREATOR WROTE IS ONE OF THE QUESTIONS -- not the name, not the
-    output, and no longer the ``external_id`` envelope. That is the whole point
-    of this predicate, and the second time it has had to be learned. Excluding
-    by NAME meant any creator who could attach the label "Backup artifact" hid a
-    red Check. Excluding by the app stamp PLUS the envelope was no better: the
-    stamp is shared with every ordinary Actions Check on the head, and the
-    envelope is a string the creator supplies, so review forged a valid envelope
-    under the shared stamp and had a red Check excluded. A label is not access
-    control, and neither is a receipt the caller wrote.
-
-    WHAT AUTHENTICATES INSTEAD is question 4, and it holds because the creator
-    of a Check cannot choose its check-suite: GitHub assigns the suite from the
-    installation and, for an Actions run, from the run itself. Question 2 is
-    kept because it is cheap and narrows first; question 4 is what the exclusion
-    actually stands on.
+    One question on top of ``_provider_suite_id``: does GitHub itself place this
+    row in a suite that ``_seam_run_check_suites`` resolved from a run of THIS
+    workflow file on THIS head? The row's name is not consulted, here or there.
 
     THE BOUNDARY CASE THAT IS EASY TO GET WRONG: a run of a DIFFERENT workflow
     file in this repository carries the same Actions app stamp and is a real
     workflow run with a real suite -- and it is not this seam. ``seam_suites``
     is scoped by ``workflow_run.path`` precisely so that row stays red evidence.
     """
-    app = item.get("app")
-    if not isinstance(app, dict):
+    suite_id = _provider_suite_id(item, identity)
+    return suite_id is not None and suite_id in seam_suites
+
+
+def _is_authentic_required_check(
+    item: dict[str, Any],
+    identity: Identity,
+    required_suites: frozenset[int],
+) -> bool:
+    """Is this check-run the repository's REQUIRED check, by provider-backed identity?
+
+    THE ORDERED QUESTIONS, and the order is the point:
+
+      1. Does ``_provider_suite_id`` authenticate the row at all -- Actions app,
+         this head, a provider-assigned suite?
+      2. Is that suite one ``_required_check_suites`` resolved from a run of
+         ci.yml on THIS head? A success from any other workflow file fails here.
+      3. ONLY THEN: is the row's name the required check's name?
+
+    WHY THE NAME IS CONSULTED AT ALL, AND WHY IT IS SAFE HERE. ci.yml can grow a
+    second job tomorrow, and the repository's ruleset requires one specific
+    context. Question 3 SELECTS among rows that questions 1 and 2 have already
+    proved the provider attributes to this workflow's run on this commit; it can
+    only ever narrow that set. It is the exact opposite of the retired name-only
+    exclusion, where the name was the WHOLE test and attaching the label was
+    enough to change the outcome. A caller who attaches "ops/ci.sh --strict" to
+    a Check it posts still fails question 1 or 2 and supplies no evidence.
+
+    THE BOUNDARY CASE THAT IS EASY TO GET WRONG: a genuine ci.yml run on a
+    DIFFERENT commit has a genuine Actions suite. ``required_suites`` is resolved
+    from a listing filtered to this head and re-read per row, so it carries no
+    authority here.
+    """
+    suite_id = _provider_suite_id(item, identity)
+    if suite_id is None or suite_id not in required_suites:
         return False
-    if app.get("id") != BACKUP_CHECK_APP_ID or app.get("slug") != BACKUP_CHECK_APP_SLUG:
-        return False
-    if str(item.get("head_sha", "")).lower() != identity.head_sha:
-        return False
-    suite = item.get("check_suite")
-    if not isinstance(suite, dict):
-        return False
-    suite_id = suite.get("id")
-    if isinstance(suite_id, bool) or not isinstance(suite_id, int) or suite_id <= 0:
-        return False
-    return suite_id in seam_suites
+    return item.get("name") == REQUIRED_CHECK_NAME
 
 
 def _require_head_checks_clean(identity: Identity) -> None:
@@ -605,18 +720,36 @@ def _require_head_checks_clean(identity: Identity) -> None:
     for this one too, and REFUSES rather than returning a verdict anyone could
     pass around.
 
-    THE SEAM'S OWN CHECK IS EXCLUDED BY PROVIDER-BACKED IDENTITY -- never by its
-    name, and never by an envelope its creator wrote. The suites the seam's own
-    workflow file produced on this head are resolved from the provider FIRST,
-    and _is_seam_producer_check then asks only whether GitHub itself places a row
-    in one of them; see that predicate for the four questions. The exclusion
-    exists because the nightly backup's own outcome on a commit is not evidence
-    ABOUT that commit, and a head already carrying an earlier seeded failure
-    would otherwise refuse every later proof forever. Both listings fail closed
-    on exhausted pagination, so an incomplete answer refuses here rather than
-    reading as a clean head.
+    GREEN IS TWO FACTS, NOT ONE, AND THE SECOND ONE IS WHY THIS WAS REOPENED.
+    An earlier revision required only that no row on the head had failed. That
+    is the ABSENCE of red, and absence is cheap: a head with one caller-created
+    Check concluded ``neutral`` satisfied it. The repository's own requirement is
+    positive and specific -- AGENTS.md: ruleset "main: CI must be green" requires
+    the ``ops/ci.sh --strict`` status check -- so this now demands both:
+
+      1. NO RED. Every check GitHub holds for this head has concluded, and none
+         of them failed. The only rows set aside are those the PROVIDER places in
+         a check-suite produced by this seam's own workflow file on this same
+         head (see _is_seam_producer_check) -- never a row merely NAMED like one.
+      2. A REAL GREEN. At least one row authenticates as the required check by
+         provider-backed identity (see _is_authentic_required_check) and concluded
+         REQUIRED_CHECK_CONCLUSION. A caller-created Check carrying that name, and
+         a genuine success from any other workflow file, both fail this.
+
+    Fact 2 is strictly stronger than fact 1 could ever be, and it is checked
+    second so the more specific refusal message survives: a head with a red row
+    is told which row, and a head with no authenticated strict run is told that.
+
+    THE EXCLUSION IS NOT A HOLE IN FACT 2. Rows the seam wrote are set aside from
+    the evidence entirely, so an excluded row can neither carry the head nor be
+    the required check -- the seam's own workflow file is not ci.yml, so it could
+    never authenticate as one anyway.
+
+    Both listings fail closed on exhausted pagination, so an incomplete answer
+    refuses here rather than reading as a clean head.
     """
     seam_suites = _seam_run_check_suites(identity)
+    required_suites = _required_check_suites(identity)
     observed = [
         item for item in checks(identity)
         if not _is_seam_producer_check(item, identity, seam_suites)
@@ -632,6 +765,20 @@ def _require_head_checks_clean(identity: Identity) -> None:
             raise StatusError(
                 f"check {name!r} on {identity.head_sha} concluded "
                 f"{item.get('conclusion')!r}")
+    authentic = [
+        item for item in observed
+        if _is_authentic_required_check(item, identity, required_suites)
+    ]
+    if not authentic:
+        raise StatusError(
+            f"{identity.head_sha} carries no provider-authenticated "
+            f"{REQUIRED_CHECK_NAME!r} check from "
+            f"{REQUIRED_CHECK_WORKFLOW_PATH} to stand on")
+    if not any(item.get("conclusion") == REQUIRED_CHECK_CONCLUSION
+               for item in authentic):
+        raise StatusError(
+            f"the authenticated {REQUIRED_CHECK_NAME!r} check on "
+            f"{identity.head_sha} did not conclude {REQUIRED_CHECK_CONCLUSION}")
 
 
 def _metering_gate_digest(decision: dict[str, Any]) -> str:
@@ -704,19 +851,21 @@ def _dispatch_controlled_failure(proof_id: str, head: str) -> int:
 
     policy_path = REPO / "ops/config/platform-metering.v1.json"
     try:
-        decision = authorize_metered_execution(
+        decision = _authorize_metered_execution(
             json.loads(policy_path.read_text(encoding="utf-8")),
             "github-actions-remote-ci",
             # Established immediately above by _require_head_checks_clean,
-            # which refuses unless every check GitHub holds for this head has
-            # concluded and none of them failed. The only rows it sets aside are
-            # the ones the PROVIDER places in a check-suite produced by this
-            # seam's own workflow file on this same head -- never a row merely
-            # NAMED like one, and never one merely carrying a copy of the seam's
-            # envelope. Never a literal standing in for a fact nobody checked.
+            # which refuses unless BOTH halves hold: every check GitHub holds
+            # for this head has concluded and none failed, AND at least one row
+            # the PROVIDER attributes to a ci.yml run on this same head carries
+            # the required check's name and concluded success. Both decisions
+            # turn on the provider-assigned check-suite -- never on a row merely
+            # NAMED like the seam's or like the required check, and never on a
+            # copy of the seam's envelope. Never a literal standing in for a
+            # fact nobody checked.
             {"candidate_sha": head, "local_checks_green": True},
         )
-    except (MeteringRefusal, ValueError, TypeError) as exc:
+    except (_MeteringRefusal, ValueError, TypeError) as exc:
         raise StatusError(f"metered execution refused: {exc}") from exc
     # The gate raises rather than returning a refusal today, so this is belt and
     # braces -- but the POST is the irreversible half of this function, and it

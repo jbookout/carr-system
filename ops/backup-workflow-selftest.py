@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -616,11 +617,25 @@ _CHECK_STATES: dict[str, dict[str, object]] = {
     "concluded_clean": {"status": "completed", "conclusion": "success"},
     "unconcluded": {"status": "in_progress", "conclusion": None},
     "concluded_red": {"status": "completed", "conclusion": "failure"},
+    # NOT RED, AND NOT EVIDENCE EITHER. NON_FAILING_CHECK_CONCLUSIONS accepts
+    # neutral, so a row in this state passes the no-red half untouched; the
+    # positive half must still refuse it, because a neutral required check means
+    # the suite did not run.
+    "concluded_neutral": {"status": "completed", "conclusion": "neutral"},
 }
 # "seam_label" is the exact label the retired name-only exclusion trusted. It
 # is registered here precisely so the controls below can attach it to rows the
 # seam did not write.
-_CHECK_LABELS = {"ordinary_ci": "gates", "seam_label": "Backup artifact"}
+# "required_ci" is the exact context AGENTS.md says the ruleset requires and
+# ops/config/automerge-pilot-policy.v1.json registers. It is a LABEL here like
+# every other: the controls below attach it to rows no ci.yml run produced, and
+# the door must refuse every one of them.
+_CHECK_LABELS = {
+    "ordinary_ci": "gates",
+    "other_ci": "coverage",
+    "required_ci": "ops/ci.sh --strict",
+    "seam_label": "Backup artifact",
+}
 _CHECK_PRODUCERS: dict[str, dict[str, object] | None] = {
     # The producer the door authenticates: GitHub's own Actions app, which is
     # what stamps a Check created with a workflow run's GITHUB_TOKEN.
@@ -646,16 +661,23 @@ _CHECK_ENVELOPES: dict[str, dict[str, object] | None] = {
 # the door resolves which suites belong to this seam from the workflow-run
 # listing below rather than believing any row about itself.
 _SEAM_WORKFLOW_PATH = ".github/workflows/backup-nightly.yml"
+_REQUIRED_WORKFLOW_PATH = ".github/workflows/ci.yml"
 _CHECK_SUITES: dict[str, dict[str, object] | None] = {
     "absent": None,
     # The suite of a backup-nightly.yml run on the proof head: the seam's own.
     "seam_run": {"id": 4200},
     # A run of a DIFFERENT workflow file in the same repository. Same Actions
-    # app, same head, real suite -- and not this seam.
+    # app, same head, real suite -- and neither this seam nor the required CI.
     "other_workflow": {"id": 4300},
     # A run of the SEAM'S OWN workflow file bound to another head. Authentic
     # elsewhere, worthless here.
     "other_head_run": {"id": 4400},
+    # The suite of a ci.yml run on the proof head: the ONE suite a row may sit
+    # in and authenticate as this repository's required check.
+    "required_run": {"id": 4500},
+    # A ci.yml run bound to another head. Same workflow file, same app, real
+    # suite -- and it says nothing about this commit.
+    "required_other_head_run": {"id": 4600},
 }
 
 
@@ -687,6 +709,22 @@ def _workflow_runs() -> list[dict[str, object]]:
             "id": 4003, "path": ".github/workflows/gates.yml", "head_sha": _PROOF_HEAD,
             "check_suite_id": 4300, "status": "completed", "conclusion": "success",
         },
+        # THE REQUIRED CHECK'S OWN WORKFLOW FILE, on this head. Suite 4500 is
+        # the only suite a row may sit in and authenticate as `ops/ci.sh
+        # --strict`, and it reaches the door through the provider's listing --
+        # never through anything the Check itself says about itself.
+        {
+            "id": 4004, "path": _REQUIRED_WORKFLOW_PATH, "head_sha": _PROOF_HEAD,
+            "check_suite_id": 4500, "status": "completed", "conclusion": "success",
+        },
+        # The same workflow file on ANOTHER head. It is here for the same reason
+        # run 4002 is: if the head re-read is dropped, suite 4600 joins the
+        # required set and a Check bound to a different commit authenticates
+        # this one.
+        {
+            "id": 4005, "path": _REQUIRED_WORKFLOW_PATH, "head_sha": "d" * 40,
+            "check_suite_id": 4600, "status": "completed", "conclusion": "success",
+        },
     ]
 _CHECK_SUMMARIES: dict[str, dict[str, object] | None] = {
     "absent": None,
@@ -702,10 +740,20 @@ _CHECK_SUMMARIES: dict[str, dict[str, object] | None] = {
 _CHECK_IDS = {
     ("actions_app", "ordinary_ci", "other_workflow"): 7300,
     ("actions_app", "ordinary_ci", "absent"): 7310,
+    ("actions_app", "other_ci", "other_workflow"): 7340,
     ("actions_app", "seam_label", "seam_run"): 7301,
     ("actions_app", "seam_label", "other_workflow"): 7302,
     ("actions_app", "seam_label", "other_head_run"): 7303,
     ("actions_app", "seam_label", "absent"): 7304,
+    # THE AUTHENTIC REQUIRED CHECK and its four near-misses. Each differs from
+    # 7320 in exactly one provider fact, which is what makes the refusals below
+    # attributable to that fact rather than to a door that refuses everything.
+    ("actions_app", "required_ci", "required_run"): 7320,
+    ("actions_app", "required_ci", "other_workflow"): 7321,
+    ("actions_app", "required_ci", "required_other_head_run"): 7322,
+    ("actions_app", "required_ci", "absent"): 7323,
+    ("foreign_app", "required_ci", "required_run"): 7420,
+    ("unattributed", "required_ci", "required_run"): 7520,
     ("foreign_app", "ordinary_ci", "absent"): 7400,
     ("foreign_app", "seam_label", "seam_run"): 7401,
     ("unattributed", "ordinary_ci", "absent"): 7500,
@@ -757,6 +805,31 @@ def _ci_check(
             "summary": json.dumps(reported, sort_keys=True),
         }
     return row
+
+
+def _required_check(state: str = "concluded_clean", **shape: str) -> dict[str, object]:
+    """The repository's required check on the proof head, authentic by default.
+
+    Authentic means every one of the four provider facts the door authenticates:
+    the Actions app stamp, this head, and a check-suite the provider assigned to
+    a ci.yml run on this head. A keyword override changes exactly one of them,
+    which is how each near-miss control below is built.
+    """
+    return _ci_check(state, label="required_ci", **{"suite": "required_run", **shape})
+
+
+def _green_head(*extra: dict[str, object]) -> list[dict[str, object]]:
+    """A head that genuinely satisfies BOTH halves of the door's evidence test.
+
+    WHY THIS EXISTS RATHER THAN A BARE ORDINARY CHECK. Every refusal control
+    below seeds the row it is actually testing beside a head that would
+    otherwise dispatch. If the base head did not carry an authentic `ops/ci.sh
+    --strict` success, every one of those controls would refuse for the MISSING
+    REQUIRED CHECK instead of for the row under test -- passing while proving
+    nothing, which is how a fixture fakes a pass. The positive half is seeded
+    here once, so a refusal below is attributable to the extra row.
+    """
+    return [_ci_check("concluded_clean"), _required_check(), *extra]
 
 
 def _proof_args(*, proof_id: str = _PROOF_ID, head: str = _PROOF_HEAD) -> tuple[str, ...]:
@@ -1316,43 +1389,59 @@ def _privileged_hits(value: object, path: str = "") -> list[str]:
     return hits
 
 
-_PROVIDER_BINDING = """    suite = item.get("check_suite")
-    if not isinstance(suite, dict):
-        return False
-    suite_id = suite.get("id")
-    if isinstance(suite_id, bool) or not isinstance(suite_id, int) or suite_id <= 0:
-        return False
-    return suite_id in seam_suites"""
-# What the predicate decided on BEFORE the re-review forged it: the envelope the
+_PROVIDER_BINDING = """    suite_id = _provider_suite_id(item, identity)
+    return suite_id is not None and suite_id in seam_suites"""
+# What the EXCLUSION decided on before the re-review forged it: the envelope the
 # Check's own creator wrote. The control below puts exactly this back.
 _FORGEABLE_BINDING = "    return check_identity(item) is not None"
+# The POSITIVE half's binding, and the shape it must never collapse to. The
+# retired exclusion trusted a name outright; the control below asks what happens
+# if the required check is trusted the same way, and the answer must be that a
+# success from another workflow file starts carrying the head.
+_POSITIVE_BINDING = """    suite_id = _provider_suite_id(item, identity)
+    if suite_id is None or suite_id not in required_suites:
+        return False
+    return item.get("name") == REQUIRED_CHECK_NAME"""
+_NAME_ONLY_BINDING = '    return item.get("name") == REQUIRED_CHECK_NAME'
 
 
-def _unbound_predicate_tree() -> Path | None:
-    """A copy of the door's tree with the PROVIDER BINDING taken back out.
+def _mutated_status_tree(original: str, replacement: str, prefix: str) -> Path | None:
+    """A copy of the door's own tree with ONE decision rewritten, nothing else.
 
-    THE CONTROL THIS EXISTS FOR. Every refusal above is consistent with a door
+    THE CONTROL THIS EXISTS FOR. Every refusal below is consistent with a door
     that refuses everything -- a predicate hard-wired to ``return False`` would
     pass all of them and fail only the positive control. What has to be shown is
-    that one specific line is what refuses a same-app row from another workflow
-    file. So this tree restores the forgeable rule the re-review broke, changing
-    nothing else, and the caller watches that same fixture DISPATCH.
+    that one specific decision is what refuses a given fixture. So a tree is
+    built whose only difference is that decision, and the caller watches the same
+    fixture DISPATCH there.
 
-    Returns None if the binding is not found verbatim, and the caller reports a
-    FAIL rather than skipping: a control that silently stops controlling is
-    worse than no control.
+    Returns None if ``original`` is not found exactly once, and every caller
+    reports a FAIL rather than skipping: a control that silently stops
+    controlling is worse than no control.
     """
     source = _STATUS_HELPER.read_text(encoding="utf-8")
-    if source.count(_PROVIDER_BINDING) != 1:
+    if source.count(original) != 1:
         return None
-    root = Path(tempfile.mkdtemp(prefix="carr-dispatch-unbound-"))
+    root = Path(tempfile.mkdtemp(prefix=prefix))
     (root / "ops" / "config").mkdir(parents=True)
     (root / "lib").mkdir()
     (root / "ops" / _STATUS_HELPER.name).write_text(
-        source.replace(_PROVIDER_BINDING, _FORGEABLE_BINDING, 1), encoding="utf-8")
+        source.replace(original, replacement, 1), encoding="utf-8")
     shutil.copy2(_ROOT / "lib" / "platform_metering.py", root / "lib" / "platform_metering.py")
     shutil.copy2(_METERING_POLICY, root / "ops" / "config" / _METERING_POLICY.name)
     return root
+
+
+def _unbound_predicate_tree() -> Path | None:
+    """The door's tree with the seam EXCLUSION's provider binding taken back out."""
+    return _mutated_status_tree(
+        _PROVIDER_BINDING, _FORGEABLE_BINDING, "carr-dispatch-unbound-")
+
+
+def _name_only_required_tree() -> Path | None:
+    """The door's tree with the REQUIRED CHECK authenticated by its name alone."""
+    return _mutated_status_tree(
+        _POSITIVE_BINDING, _NAME_ONLY_BINDING, "carr-dispatch-nameonly-")
 
 
 def _paused_policy_tree() -> Path:
@@ -1416,29 +1505,33 @@ def _dispatch_door_contract() -> None:
         "between the guards and the POST",
     )
     # Read the DOOR'S OWN BODY, not the file. Asked of the whole file, "does it
-    # call authorize_metered_execution" is answered yes by the import line alone
+    # call the metering authorizer" is answered yes by the import line alone
     # — which is how this check first passed against a door whose admission had
     # been deleted outright.
     door_body = (status_source.split(signature, 1)[-1].split("\ndef ", 1)[0]
                  if signature in status_source else "")
+    # THE PRIVATE SPELLING IS PART OF THE ASSERTION. The door must call the gate
+    # through the underscore-aliased import, because the public one would also
+    # be an export of this repository's decision function through the status
+    # module -- which is the finding _public_surface_contract now closes.
     _check(
         "the dispatch door admits the metered spend in its own body",
-        "authorize_metered_execution(" in door_body
+        "_authorize_metered_execution(" in door_body
         and '"github-actions-remote-ci"' in door_body,
         "a dispatcher that skips admission is the bypass the metering gate exists to stop",
     )
     _check(
         "the dispatch door admits BEFORE it reaches the vendor",
-        "authorize_metered_execution(" in door_body and "/dispatches" in door_body
-        and door_body.index("authorize_metered_execution(") < door_body.index("/dispatches"),
+        "_authorize_metered_execution(" in door_body and "/dispatches" in door_body
+        and door_body.index("_authorize_metered_execution(") < door_body.index("/dispatches"),
         "admitting after the POST spends the minutes the admission was guarding",
     )
     _check(
         "the dispatch door establishes green local checks before it admits",
         "_require_head_checks_clean(identity)" in door_body
-        and "authorize_metered_execution(" in door_body
+        and "_authorize_metered_execution(" in door_body
         and door_body.index("_require_head_checks_clean(identity)")
-        < door_body.index("authorize_metered_execution("),
+        < door_body.index("_authorize_metered_execution("),
         "handing the budget gate a literal True makes the admission decorative",
     )
     # HOW the head evidence is scoped, read off the two functions that decide
@@ -1448,9 +1541,9 @@ def _dispatch_door_contract() -> None:
     clean_signature = "def _require_head_checks_clean(identity: Identity) -> None:"
     clean_body = (status_source.split(clean_signature, 1)[-1].split("\ndef ", 1)[0]
                   if clean_signature in status_source else "")
-    # The predicate's exact signature, and the suite set is part of it: a
+    # The predicates' exact signatures, and the suite set is part of each: a
     # predicate that still took only (item, identity) could not consult the
-    # provider at all, and this read reports FAIL rather than matching a
+    # provider at all, and these reads report FAIL rather than matching a
     # renamed or narrowed one.
     predicate_signature = (
         "def _is_seam_producer_check(\n"
@@ -1461,60 +1554,153 @@ def _dispatch_door_contract() -> None:
     )
     predicate_body = (status_source.split(predicate_signature, 1)[-1].split("\ndef ", 1)[0]
                       if predicate_signature in status_source else "")
+    required_signature = (
+        "def _is_authentic_required_check(\n"
+        "    item: dict[str, Any],\n"
+        "    identity: Identity,\n"
+        "    required_suites: frozenset[int],\n"
+        ") -> bool:"
+    )
+    required_body = (status_source.split(required_signature, 1)[-1].split("\ndef ", 1)[0]
+                     if required_signature in status_source else "")
+    stamp_signature = (
+        "def _provider_suite_id(item: dict[str, Any], identity: Identity) -> int | None:")
+    stamp_body = (status_source.split(stamp_signature, 1)[-1].split("\ndef ", 1)[0]
+                  if stamp_signature in status_source else "")
     clean_code = _code_only(clean_body)
     predicate_code = _code_only(predicate_body)
+    required_code = _code_only(required_body)
+    stamp_code = _code_only(stamp_body)
     _check(
         "the head-evidence scan excludes by authenticated producer, not by Check name",
         "_is_seam_producer_check(item, identity, seam_suites)" in clean_code
-        and "CHECK_NAME" not in clean_code,
+        and "CHECK_NAME" not in clean_code.replace("REQUIRED_CHECK_NAME", ""),
         "excluding by name lets anyone who can attach that label hide a red Check "
         "from the evidence the budget admission stands on",
     )
-    resolver_signature = "def _seam_run_check_suites(identity: Identity) -> frozenset[int]:"
-    resolver_body = (status_source.split(resolver_signature, 1)[-1].split("\ndef ", 1)[0]
-                     if resolver_signature in status_source else "")
     _check(
-        "the producer predicate decides on provider facts only, never on creator text",
-        "BACKUP_CHECK_APP_ID" in predicate_code
-        and "BACKUP_CHECK_APP_SLUG" in predicate_code
-        and 'item.get("check_suite")' in predicate_code
-        and "seam_suites" in predicate_code
-        and "check_identity(" not in predicate_code
-        and "external_id" not in predicate_code
+        "the provider stamp reader decides on provider facts only, never on creator text",
+        "ACTIONS_APP_ID" in stamp_code
+        and "ACTIONS_APP_SLUG" in stamp_code
+        and 'item.get("check_suite")' in stamp_code
+        and 'item.get("head_sha", "")' in stamp_code
+        and "check_identity(" not in stamp_code
+        and "external_id" not in stamp_code
         and "BACKUP_CHECK_ENVELOPE_KEYS" not in status_source
-        and "CHECK_NAME" not in predicate_code
-        and '.get("name")' not in predicate_code,
+        and "CHECK_NAME" not in stamp_code
+        and '.get("name")' not in stamp_code,
         "the app stamp is shared with every other Actions Check on the head and "
         "external_id is text any creator can copy, so the pair authenticated nothing: "
         "only the provider's own check-suite binding does",
     )
+    _check(
+        "the seam exclusion turns on the provider's suite set and nothing else",
+        "_provider_suite_id(item, identity)" in predicate_code
+        and "seam_suites" in predicate_code
+        and "external_id" not in predicate_code
+        and "CHECK_NAME" not in predicate_code
+        and '.get("name")' not in predicate_code,
+        "a row the seam did not write must not be excluded by anything its creator "
+        "could attach to it",
+    )
+    # THE POSITIVE HALF, and the property that makes consulting the name safe
+    # there: the provider authentication runs FIRST, and the name can only narrow
+    # a set the provider has already attributed to ci.yml on this head.
+    _check(
+        "the required check authenticates through the provider before it reads a name",
+        "_provider_suite_id(item, identity)" in required_code
+        and "required_suites" in required_code
+        and 'item.get("name") == REQUIRED_CHECK_NAME' in required_code
+        and required_code.index("_provider_suite_id(item, identity)")
+        < required_code.index('item.get("name")')
+        and required_code.index("required_suites")
+        < required_code.index('item.get("name")')
+        and "external_id" not in required_code,
+        "a name read before or instead of the provider's suite binding is the retired "
+        "name-only rule wearing the required check's label",
+    )
+    resolver_signature = (
+        "def _workflow_run_check_suites(\n"
+        "    identity: Identity,\n"
+        "    workflow_file: str,\n"
+        "    workflow_path: str,\n"
+        ") -> frozenset[int]:"
+    )
+    resolver_body = (status_source.split(resolver_signature, 1)[-1].split("\ndef ", 1)[0]
+                     if resolver_signature in status_source else "")
     resolver_code = _code_only(resolver_body)
     _check(
-        "the seam's check-suites are resolved from the provider's own run listing",
-        "BACKUP_WORKFLOW_FILE" in resolver_code
-        and "BACKUP_WORKFLOW_PATH" in resolver_code
+        "check-suites are resolved from the provider's own run listing",
+        "workflow_file" in resolver_code
+        and 'row.get("path") != workflow_path' in resolver_code
         and '"head_sha": identity.head_sha' in resolver_code
+        and 'str(row.get("head_sha", "")).lower() != identity.head_sha' in resolver_code
         and '"check_suite_id"' in resolver_code
-        and "external_id" not in resolver_code
-        and 'BACKUP_WORKFLOW_PATH = ".github/workflows/" + BACKUP_WORKFLOW_FILE'
-        in status_source,
-        "a suite set built from anything the Check itself carries would hand the "
-        "exclusion straight back to the creator",
+        and "external_id" not in resolver_code,
+        "a suite set built from anything the Check itself carries would hand both "
+        "decisions straight back to the creator",
     )
     _check(
-        "the head-evidence scan resolves the seam's suites before it scans",
+        "both suite resolvers name their workflow with this file's own literals",
+        "return _workflow_run_check_suites(\n"
+        "        identity, BACKUP_WORKFLOW_FILE, BACKUP_WORKFLOW_PATH)" in status_source
+        and "return _workflow_run_check_suites(\n"
+        "        identity, REQUIRED_CHECK_WORKFLOW_FILE, REQUIRED_CHECK_WORKFLOW_PATH)"
+        in status_source
+        and 'BACKUP_WORKFLOW_PATH = ".github/workflows/" + BACKUP_WORKFLOW_FILE'
+        in status_source
+        and 'REQUIRED_CHECK_WORKFLOW_PATH = ".github/workflows/" '
+            "+ REQUIRED_CHECK_WORKFLOW_FILE" in status_source
+        and "args." not in resolver_code,
+        "a resolver whose workflow file came from the caller would authenticate nothing",
+    )
+    # THE REGISTERED IDENTITY THE LITERALS RESTATE. AGENTS.md names the required
+    # context and ops/config/automerge-pilot-policy.v1.json registers its
+    # provider identity; the door restates both as literals because it has to run
+    # from a copied tree with no second file to load. Equal spellings are
+    # asserted here so the restatement cannot drift into a check nobody produces.
+    registered_raw = json.loads(
+        (_ROOT / "ops" / "config" / "automerge-pilot-policy.v1.json")
+        .read_text(encoding="utf-8")).get("required_check")
+    registered = registered_raw if isinstance(registered_raw, dict) else {}
+    _check(
+        "the door's required-check literals are the ones the repository registers",
+        'REQUIRED_CHECK_NAME = "ops/ci.sh --strict"' in status_source
+        and 'REQUIRED_CHECK_WORKFLOW_FILE = "ci.yml"' in status_source
+        and 'REQUIRED_CHECK_CONCLUSION = "success"' in status_source
+        and registered.get("name") == "ops/ci.sh --strict"
+        and registered.get("workflow_file") == "ci.yml"
+        and registered.get("app_slug") == "github-actions"
+        and 'ACTIONS_APP_SLUG = "github-actions"' in status_source,
+        f"the door would demand a check nobody produces: registered {registered!r}",
+    )
+    _check(
+        "the head-evidence scan resolves both suite sets before it scans",
         "_seam_run_check_suites(identity)" in clean_code
+        and "_required_check_suites(identity)" in clean_code
         and "_is_seam_producer_check(item, identity, seam_suites)" in clean_code
-        and clean_code.index("_seam_run_check_suites(identity)")
-        < clean_code.index("_is_seam_producer_check(item, identity, seam_suites)"),
+        and "_is_authentic_required_check(item, identity, required_suites)" in clean_code
+        and max(clean_code.index("_seam_run_check_suites(identity)"),
+                clean_code.index("_required_check_suites(identity)"))
+        < min(clean_code.index("_is_seam_producer_check(item, identity, seam_suites)"),
+              clean_code.index(
+                  "_is_authentic_required_check(item, identity, required_suites)")),
         "a predicate asked without the provider's suite set could only fall back on "
         "what the row says about itself",
     )
     _check(
+        "absence of red is not enough: an authenticated required success is demanded",
+        "if not authentic:" in clean_code
+        and "raise StatusError(" in clean_code.split("if not authentic:", 1)[-1]
+        and 'item.get("conclusion") == REQUIRED_CHECK_CONCLUSION' in clean_code,
+        "a head whose only evidence is the absence of failures is a head a caller can "
+        "manufacture with one neutral Check",
+    )
+    _check(
         "the registered producer identity is a literal pair, not a caller argument",
-        "BACKUP_CHECK_APP_ID = 15368" in status_source
-        and 'BACKUP_CHECK_APP_SLUG = "github-actions"' in status_source
-        and "BACKUP_CHECK_APP_ID" not in door_body,
+        "ACTIONS_APP_ID = 15368" in status_source
+        and 'ACTIONS_APP_SLUG = "github-actions"' in status_source
+        and "ACTIONS_APP_ID" not in door_body,
         "a producer identity taken from the caller would authenticate nothing",
     )
     _check(
@@ -1529,7 +1715,10 @@ def _dispatch_door_contract() -> None:
         root = Path(tempfile.mkdtemp(prefix="carr-dispatch-door-"))
         state: dict[str, object] = {
             "run": _run_state(), "artifacts": [],
-            "check_runs": [_ci_check("concluded_clean")],
+            # BOTH halves of the door's evidence test, seeded green: one
+            # ordinary Check with nothing failing, and the repository's own
+            # required check authenticated to a ci.yml run on this head.
+            "check_runs": _green_head(),
             "branch_head": {"sha": _PROOF_HEAD},
             # What the provider answers about backup-nightly.yml's own runs.
             # The door reads this to learn which check-suites are the seam's;
@@ -1581,6 +1770,17 @@ def _dispatch_door_contract() -> None:
         "the door must scope its own question even though it re-reads every answer: "
         f"got {listings!r}",
     )
+    required_listings = [
+        row for row in _calls(log_path)
+        if str(row.get("url", "")).endswith("/actions/workflows/ci.yml/runs")
+    ]
+    _check(
+        f"{dispatch}: the required check's suites are asked of ci.yml on this head",
+        bool(required_listings)
+        and all(scoped_to_this_head(row) for row in required_listings),
+        "the positive half has to resolve the required workflow's own suites from the "
+        f"provider before it trusts any row that carries that name: got {required_listings!r}",
+    )
     receipt = _parsed_output(result)
     digest = receipt.get("metering_gate_digest")
     _check(
@@ -1631,72 +1831,119 @@ def _dispatch_door_contract() -> None:
          {"check_runs": [_spent_proof_check()]}, _proof_args()),
         ("exhausted Check pagination fails closed instead of dispatching",
          {"check_pagination_exhausted": True}, _proof_args()),
-        # The fact the budget gate requires is READ, not asserted: these three
-        # are the head states that cannot support it.
+        # The fact the budget gate requires is READ, not asserted: these are the
+        # head states that cannot support it. Every row that is NOT about a
+        # missing required check is seeded on _green_head(), so it refuses for
+        # the row under test rather than for the positive half being absent.
         ("a head carrying no Checks at all refuses rather than claiming green",
          {"check_runs": []}, _proof_args()),
         ("a head whose Check has not concluded refuses",
-         {"check_runs": [_ci_check("unconcluded")]},
+         {"check_runs": _green_head(_ci_check("unconcluded", label="other_ci"))},
          _proof_args()),
         ("a head carrying a failed Check refuses",
-         {"check_runs": [_ci_check("concluded_red")]}, _proof_args()),
+         {"check_runs": _green_head(_ci_check("concluded_red", label="other_ci"))},
+         _proof_args()),
+        # ── THE MUTATION CONTROLS for the POSITIVE half ────────────────────
+        # Absence of red is not evidence of green. Each row below is a SUCCESS
+        # carrying the required check's exact registered name, and each differs
+        # from the authentic one in exactly one provider fact.
+        # (1) NOTHING BUT ORDINARY GREEN. The head the happy path used to run on:
+        # a concluded, clean Check from some other workflow, and no `ops/ci.sh
+        # --strict` row at all. It has no red, and it is not green either.
+        ("a head with no required check at all refuses rather than claiming green",
+         {"check_runs": [_ci_check("concluded_clean")]}, _proof_args()),
+        # (2) UNAUTHENTICATED POSITIVE, no producer stamp. The exact shape the
+        # re-review named: a caller-created Check named like the required one.
+        ("an unstamped Check named like the required one is not the required check",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _required_check(producer="unattributed")]},
+         _proof_args()),
+        # (3) UNAUTHENTICATED POSITIVE, foreign installation. Same free text,
+        # same claimed suite, a different app stamp.
+        ("a foreign app's success named like the required one is not the required check",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _required_check(producer="foreign_app")]},
+         _proof_args()),
+        # (4) A FOREIGN WORKFLOW'S SUCCESS. A genuine Actions row in a genuine
+        # provider-assigned suite -- produced by another workflow file. The
+        # required suite set is scoped by workflow_run.path, so it is not this.
+        ("a success from another workflow file is not the required check",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _required_check(suite="other_workflow")]},
+         _proof_args()),
+        # (5) THE RIGHT WORKFLOW, THE WRONG COMMIT. ci.yml really did produce
+        # suite 4600 -- on commit d…d. The required set is resolved from a
+        # listing filtered to THIS head and re-read per row.
+        ("a ci.yml success bound to another head cannot carry this one",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _required_check(suite="required_other_head_run")]},
+         _proof_args()),
+        # (6) NO PROVIDER SUITE AT ALL. A row GitHub placed in no check-suite
+        # cannot be attributed to any workflow run.
+        ("a required-named Check in no check-suite authenticates nothing",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _required_check(suite="absent")]},
+         _proof_args()),
+        # (7) AUTHENTIC, AND NOT A SUCCESS. This row passes the no-red half
+        # untouched -- NON_FAILING_CHECK_CONCLUSIONS accepts neutral -- so it is
+        # the one shape that proves the positive half demands REQUIRED_CHECK_
+        # CONCLUSION rather than merely "did not fail".
+        ("an authentic required check concluded neutral is not a green head",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _required_check("concluded_neutral")]},
+         _proof_args()),
         # ── THE MUTATION CONTROLS for the producer-identity exclusion ──────
         # Each seeds a CONCLUDED-RED row carrying the seam's own label "Backup
-        # artifact" beside one ordinary green Check, and none of them is the
-        # seam's own row. The first shape retired here was the name-only
+        # artifact" beside a head that would otherwise dispatch, and none of them
+        # is the seam's own row. The first shape retired here was the name-only
         # exclusion; the second was the app stamp PLUS the seam's external_id
         # envelope, which review forged -- the envelope is creator text and the
         # stamp is shared with every Actions Check on the head. So every row
         # below carries the forged envelope under the genuine Actions stamp,
         # and differs from the seam only in what the PROVIDER says about it.
         ("a failed Check merely NAMED like the seam's own still counts as red",
-         {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label",
-                                   suite="absent")]},
+         {"check_runs": _green_head(
+             _ci_check("concluded_red", label="seam_label", suite="absent"))},
          _proof_args()),
         # THE FORGERY THE RE-REVIEW PERFORMED: the shared Actions app stamp and
         # a byte-perfect copy of this seam's envelope for this very head, on a
         # row the seam never wrote. It was excluded before; it is red now.
         ("a copied seam envelope under the shared Actions stamp counts as red",
-         {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label",
-                                   envelope="seam_this_head", suite="absent")]},
+         {"check_runs": _green_head(
+             _ci_check("concluded_red", label="seam_label",
+                       envelope="seam_this_head", suite="absent"))},
          _proof_args()),
         # (1) SAME APP, ANOTHER WORKFLOW FILE. A real Actions run in this
         # repository, with a real provider-assigned suite -- and the suite set
         # is scoped by workflow_run.path, so it is not this seam's.
         ("a failed seam-labelled Check from another workflow file counts as red",
-         {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label",
-                                   envelope="seam_this_head",
-                                   suite="other_workflow")]},
+         {"check_runs": _green_head(
+             _ci_check("concluded_red", label="seam_label",
+                       envelope="seam_this_head", suite="other_workflow"))},
          _proof_args()),
         # (2) SAME WORKFLOW FILE, ANOTHER HEAD. backup-nightly.yml really did
         # produce suite 4400 -- on commit d…d. The suite set is resolved from a
         # listing filtered to THIS head, so it carries no authority here.
         ("a seam-workflow suite bound to another head counts as red on this one",
-         {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label",
-                                   envelope="seam_this_head",
-                                   suite="other_head_run")]},
+         {"check_runs": _green_head(
+             _ci_check("concluded_red", label="seam_label",
+                       envelope="seam_this_head", suite="other_head_run"))},
          _proof_args()),
         ("a failed seam-labelled Check from a foreign app counts as red even when it "
          "claims the seam's own suite",
-         {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label",
-                                   producer="foreign_app",
-                                   suite="seam_run")]},
+         {"check_runs": _green_head(
+             _ci_check("concluded_red", label="seam_label",
+                       producer="foreign_app", suite="seam_run"))},
          _proof_args()),
         ("a failed seam-labelled Check with no producer stamp at all counts as red",
-         {"check_runs": [_ci_check("concluded_clean"),
-                         _ci_check("concluded_red", label="seam_label",
-                                   producer="unattributed",
-                                   suite="seam_run")]},
+         {"check_runs": _green_head(
+             _ci_check("concluded_red", label="seam_label",
+                       producer="unattributed", suite="seam_run"))},
          _proof_args()),
         # (3, second half) The authentic seam failure IS excluded -- and being
         # excluded buys the head nothing while any OTHER Check is red.
         ("an excluded seam failure cannot carry a head whose other Check is red",
-         {"check_runs": [_ci_check("concluded_red"),
+         {"check_runs": [_ci_check("concluded_red"), _required_check(),
                          _ci_check("concluded_red", label="seam_label",
                                    envelope="seam_this_head", suite="seam_run",
                                    summary="earlier_proof")]},
@@ -1735,11 +1982,10 @@ def _dispatch_door_contract() -> None:
     # failure, provider-stamped and carrying this seam's envelope for this head
     # with an EARLIER proof ID in its summary, is excluded; the ordinary green
     # Check beside it carries the admission and a fresh proof dispatches.
-    env, state_path, log_path = fixture({"check_runs": [
-        _ci_check("concluded_clean"),
+    env, state_path, log_path = fixture({"check_runs": _green_head(
         _ci_check("concluded_red", label="seam_label", envelope="seam_this_head",
                   suite="seam_run", summary="earlier_proof"),
-    ]})
+    )})
     seeded = _invoke(env, dispatch, *_proof_args())
     raw_after_seed = _read_json(state_path).get("dispatches")
     after_seed = [row for row in raw_after_seed if isinstance(row, dict)] \
@@ -1760,11 +2006,10 @@ def _dispatch_door_contract() -> None:
     # above attributable to the binding rather than to a door that refuses
     # everything.
     unbound_root = _unbound_predicate_tree()
-    forged: dict[str, object] = {"check_runs": [
-        _ci_check("concluded_clean"),
+    forged: dict[str, object] = {"check_runs": _green_head(
         _ci_check("concluded_red", label="seam_label", envelope="seam_this_head",
                   suite="other_workflow"),
-    ]}
+    )}
     if unbound_root is None:
         _check(
             f"{dispatch}: the provider binding is present to be mutated",
@@ -1789,6 +2034,65 @@ def _dispatch_door_contract() -> None:
             "if the envelope-only predicate ALSO refuses this fixture, the refusal "
             "above is not evidence that the provider binding does anything: "
             f"rc={unbound.returncode} {unbound.stderr.strip()} {unbound_posted!r}",
+        )
+
+    # MUTATION CONTROL (5): THE AUTHENTIC REQUIRED CHECK *DOES* CARRY THE HEAD.
+    # The A/B for the positive half. Both heads below carry one ordinary green
+    # Check and one success named exactly `ops/ci.sh --strict`; they differ in
+    # ONE provider fact -- which check-suite GitHub put that success in. The
+    # other-workflow suite refuses in the table above; the ci.yml suite for this
+    # head dispatches here. Without this pair, every refusal above is equally
+    # consistent with a door that refuses every head it is shown.
+    env, state_path, log_path = fixture({"check_runs": [
+        _ci_check("concluded_clean"), _required_check(),
+    ]})
+    authentic = _invoke(env, dispatch, *_proof_args())
+    raw_authentic = _read_json(state_path).get("dispatches")
+    authentic_posted = [row for row in raw_authentic if isinstance(row, dict)] \
+        if isinstance(raw_authentic, list) else []
+    _check(
+        f"{dispatch}: the provider-authenticated required success carries the head",
+        authentic.returncode == 0 and len(authentic_posted) == 1,
+        "if the authentic required check does not dispatch, the refusals above are "
+        "not attributable to the suite binding: "
+        f"rc={authentic.returncode} {authentic.stderr.strip()} {authentic_posted!r}",
+    )
+
+    # MUTATION CONTROL (6): WITHOUT THE PROVIDER BINDING, THE FOREIGN-WORKFLOW
+    # SUCCESS GOES GREEN. The same fixture the table refuses at "a success from
+    # another workflow file is not the required check", run against a tree whose
+    # required-check predicate trusts the NAME alone -- the retired rule, moved
+    # onto the positive half. It dispatches, which is what makes that refusal
+    # attributable to the binding rather than to a door that refuses everything.
+    name_only_root = _name_only_required_tree()
+    foreign_success: dict[str, object] = {"check_runs": [
+        _ci_check("concluded_clean"), _required_check(suite="other_workflow"),
+    ]}
+    if name_only_root is None:
+        _check(
+            f"{dispatch}: the required check's provider binding is present to be mutated",
+            False,
+            "the control could not find the required-check authentication verbatim, so "
+            "it proves nothing about the refusal above",
+        )
+    else:
+        env, state_path, log_path = fixture(foreign_success)
+        name_only = subprocess.run(
+            [sys.executable, str(name_only_root / "ops" / _STATUS_HELPER.name),
+             dispatch, *_proof_args()],
+            cwd=name_only_root, env=env, text=True, capture_output=True,
+            timeout=8, check=False,
+        )
+        raw_name_only = _read_json(state_path).get("dispatches")
+        name_only_posted = [row for row in raw_name_only if isinstance(row, dict)] \
+            if isinstance(raw_name_only, list) else []
+        _check(
+            f"{dispatch}: trusting the required check's name alone lets a foreign "
+            "workflow carry the head",
+            name_only.returncode == 0 and len(name_only_posted) == 1,
+            "if the name-only predicate ALSO refuses this fixture, the refusal above is "
+            "not evidence that the suite binding does anything: "
+            f"rc={name_only.returncode} {name_only.stderr.strip()} {name_only_posted!r}",
         )
 
     # THE ONE REFUSAL THE SOURCE SEARCHES ABOVE CANNOT PROVE: the BUDGET GATE
@@ -1833,8 +2137,104 @@ def _module_level_names(text: str) -> set[str]:
     return bound
 
 
+def _repo_reexports(module: ModuleType, home: Path) -> set[str]:
+    """Public names on a module that came from ANOTHER module in this repository.
+
+    THE QUESTION THIS ANSWERS is the one the standing authority rule asks of any
+    changed module: can a caller reach a privileged decision function through
+    this file's public surface? An `from lib.x import decide` at module level
+    binds ``decide`` as a public attribute here, so importing this file re-exports
+    the gate -- under this file's name, which the rule says is still a name.
+
+    THE ORDERED QUESTIONS, per attribute:
+      1. Is it public, and not a module object? Underscore names are not exports
+         and `import json` binds a module, not a decision.
+      2. Was it DEFINED in this file? A function whose code object lives here is
+         this module's own surface, judged by the checks around this one.
+      3. Otherwise, does its ``__module__`` resolve to a .py file inside this
+         repository? Then it is one of ours, reached through a file that is not
+         its own -- which is the re-export.
+
+    Standard-library and third-party names are deliberately not counted: they
+    are upstream vocabulary, not this repository's decisions.
+    """
+    found: set[str] = set()
+    resolved = str(home.resolve())
+    for name, value in vars(module).items():
+        if name.startswith("_") or isinstance(value, ModuleType):
+            continue
+        code = getattr(value, "__code__", None)
+        if code is not None and str(Path(code.co_filename).resolve()) == resolved:
+            continue
+        origin = str(getattr(value, "__module__", "") or "")
+        if origin and (_ROOT / (origin.replace(".", "/") + ".py")).is_file():
+            found.add(name)
+    return found
+
+
+def _public_repo_imports(text: str) -> set[str]:
+    """Public names a source binds by importing them FROM this repository's modules.
+
+    The static half of the same question, and it needs a real parser rather than
+    a regex: the reachable shape is `from lib.platform_metering import
+    authorize_metered_execution`, and its spellings (parenthesised lists,
+    aliases, multiple names per statement) are exactly what a regex gets wrong.
+    ``from __future__`` is skipped, and so is any module that does not resolve to
+    a file in this repository -- stdlib vocabulary is not a re-export.
+    """
+    bound: set[str] = set()
+    for node in ast.parse(text).body:
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if node.module == "__future__" or node.level:
+            continue
+        if not (_ROOT / (node.module.replace(".", "/") + ".py")).is_file():
+            continue
+        bound.update(alias.asname or alias.name for alias in node.names)
+    return {name for name in bound if not name.startswith("_")}
+
+
+def _load_module(path: Path, name: str) -> ModuleType:
+    """Import a file by path, including one whose name is not an identifier.
+
+    Registered in ``sys.modules`` under the probe name BEFORE it executes,
+    because @dataclass resolves its own class's module through that table while
+    the module body is still running. The name is a probe-only one, so nothing
+    else in the process resolves to it.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def _reexport_probe_module() -> tuple[ModuleType, str]:
+    """A module that DOES re-export the metering authorizer, for the control.
+
+    This is the exact line the re-review found on the status helper, alone in a
+    file of its own: the mutation the guard above has to catch. The caller
+    proves two things with it -- that the sweep finds the name, and that the name
+    it finds really does hand a caller the privileged outcome from the caller's
+    own policy and request.
+    """
+    source = ("import sys\n"
+              f"sys.path.insert(0, {str(_ROOT)!r})\n"
+              "from lib.platform_metering import authorize_metered_execution\n")
+    root = Path(tempfile.mkdtemp(prefix="carr-reexport-probe-"))
+    probe = root / "reexport_probe.py"
+    probe.write_text(source, encoding="utf-8")
+    return _load_module(probe, "carr_reexport_probe"), source
+
+
 def _public_surface_contract() -> None:
-    """This suite's own public surface, swept for the closed union.
+    """The public surface of BOTH modules this slice changed, swept.
 
     WHY THE SURFACE AND NOT THE FIXTURES. The standing authority rule forbids an
     EXPORTED function that returns a privileged outcome built from caller input.
@@ -1844,17 +2244,31 @@ def _public_surface_contract() -> None:
     the only public name this file defines is main(), which returns a process
     exit code, then no caller-input-to-privileged-outcome path is exported at
     all, under ANY name. A previous revision exported green_ci_check(name=...,
-    status=...) and privileged_hits(), which is the shape this sweep now catches.
+    status=...) and privileged_hits(), which is the shape this sweep catches.
+
+    AND WHY IT NOW SWEEPS THE STATUS MODULE TOO. An earlier revision of this
+    function proved that property about ITSELF while the module it exercises
+    grew a public `from lib.platform_metering import authorize_metered_execution`
+    -- the exact re-export named in the docstring below it. A read-only probe
+    imported ops/backup-workflow-status.py, reached the gate through it, and got
+    the privileged outcome back from its own objects. Proving a rule about the
+    test file while the changed file breaks it is worse than not proving it: it
+    reads as covered.
 
     THE ORDERED QUESTIONS:
-      1. Statically, what module-level names does this file bind, and is the
+      1. Statically, what module-level names does THIS file bind, and is the
          public subset exactly {"main"} with an int return?
-      2. At runtime, does the module expose anything of its own -- or anything
+      2. At runtime, does this module expose anything of its own -- or anything
          re-exported from this repository's modules -- beyond main()?
       3. Does the closed union of privileged words appear anywhere in that
          public surface?
-      4. MUTATION CONTROL: does question 1's reader actually see the shape the
-         re-review flagged, when it is given one?
+      4. Does the STATUS module bind any of this repository's names publicly,
+         statically (a real parser, not a regex) or at runtime -- and does it
+         still reach the gate privately, rather than not at all?
+      5. MUTATION CONTROLS: re-adding the exact re-export must turn both status
+         sweeps red, and the name it re-exports must really yield the privileged
+         outcome; and question 1's reader must see the helper shape the earlier
+         review flagged, when it is given one.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     public = {name for name in _module_level_names(source) if not name.startswith("_")}
@@ -1878,18 +2292,13 @@ def _public_surface_contract() -> None:
 
     module = sys.modules[__name__]
     this_file = str(Path(__file__).resolve())
-    own: set[str] = set()
-    reexported: set[str] = set()
-    for name, value in vars(module).items():
-        if name.startswith("_") or isinstance(value, ModuleType):
-            continue
-        code = getattr(value, "__code__", None)
-        if code is not None and str(Path(code.co_filename).resolve()) == this_file:
-            own.add(name)
-            continue
-        origin = str(getattr(value, "__module__", "") or "")
-        if origin and (_ROOT / (origin.replace(".", "/") + ".py")).is_file():
-            reexported.add(name)
+    own = {
+        name for name, value in vars(module).items()
+        if not name.startswith("_") and not isinstance(value, ModuleType)
+        and getattr(value, "__code__", None) is not None
+        and str(Path(value.__code__.co_filename).resolve()) == this_file
+    }
+    reexported = _repo_reexports(module, Path(__file__))
     _check(
         "at runtime the suite exposes only main() from its own body",
         own == {"main"},
@@ -1906,6 +2315,70 @@ def _public_surface_contract() -> None:
         not _privileged_hits(sorted(public)),
         f"the closed union reached the exported surface: "
         f"{_privileged_hits(sorted(public))}",
+    )
+
+
+    # ── THE CHANGED MODULE'S OWN SURFACE ───────────────────────────────────
+    # The re-review found this suite proving a property about ITSELF while the
+    # module it exercises grew the very re-export this function's docstring
+    # names. A read-only probe imported ops/backup-workflow-status.py, reached
+    # authorize_metered_execution through it, and got {"admitted": true} back
+    # from its own policy and request objects. The sweep now walks the STATUS
+    # module too, statically and at runtime, and the control below re-adds the
+    # exact line and watches it turn red.
+    status_source = _STATUS_HELPER.read_text(encoding="utf-8")
+    status_imports = _public_repo_imports(status_source)
+    _check(
+        "the status module imports nothing of this repository's under a public name",
+        not status_imports,
+        "a module-level `from lib.x import decide` binds decide as a public attribute "
+        "of the status module, so importing that file re-exports the decision: "
+        f"{sorted(status_imports)}",
+    )
+    status_module = _load_module(_STATUS_HELPER, "carr_backup_workflow_status_probe")
+    status_reexports = _repo_reexports(status_module, _STATUS_HELPER)
+    _check(
+        "at runtime the status module re-exports nothing of this repository's",
+        not status_reexports,
+        "the metering gate must not be reachable through the door's own file under any "
+        f"name: {sorted(status_reexports)}",
+    )
+    _check(
+        "the status module still admits its own spend through a private name",
+        getattr(status_module, "_authorize_metered_execution", None) is not None
+        and getattr(status_module, "_MeteringRefusal", None) is not None
+        and not hasattr(status_module, "authorize_metered_execution")
+        and not hasattr(status_module, "MeteringRefusal"),
+        "the fix is a PRIVATE binding, not a deleted admission: a door that stopped "
+        "calling the gate would also pass the two checks above",
+    )
+
+    # THE MUTATION CONTROL FOR BOTH SWEEPS. A module carrying exactly the line
+    # the re-review found, and nothing else. It has to (a) be caught by the
+    # static reader, (b) be caught by the runtime sweep, and (c) actually hand a
+    # caller the privileged outcome -- because a control that flags a harmless
+    # name proves nothing about what the guard is for.
+    probe_module, probe_source = _reexport_probe_module()
+    probe_public = _public_repo_imports(probe_source)
+    probe_runtime = _repo_reexports(probe_module, Path(probe_module.__file__ or ""))
+    privileged_outcome = getattr(probe_module, "authorize_metered_execution")(
+        json.loads(_METERING_POLICY.read_text(encoding="utf-8")),
+        "github-actions-remote-ci",
+        {"candidate_sha": _PROOF_HEAD, "local_checks_green": True},
+    )
+    _check(
+        "re-adding the re-export turns both sweeps red",
+        probe_public == {"authorize_metered_execution"}
+        and probe_runtime == {"authorize_metered_execution"},
+        "a sweep that cannot find the exact line the re-review found is measuring "
+        f"nothing: static {sorted(probe_public)}, runtime {sorted(probe_runtime)}",
+    )
+    _check(
+        "the re-export the sweeps catch is the privileged outcome, not a harmless name",
+        isinstance(privileged_outcome, dict)
+        and privileged_outcome.get("admitted") is True,
+        "if reaching the gate through a public re-export did NOT yield the privileged "
+        f"outcome, the two sweeps above would be guarding nothing: {privileged_outcome!r}",
     )
 
     flagged = _module_level_names(

@@ -14,7 +14,15 @@ from typing import Any, Callable
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from lib.platform_metering import MeteringRefusal, authorize_metered_execution  # noqa: E402
+# PRIVATE NAMES, for the reason ops/backup-workflow-status.py now uses them: a
+# module-level public import re-exports the metering gate through THIS file, and
+# a caller who imports this suite gets the privileged `admitted` outcome back
+# from its own policy and request objects. This shape pre-dates the standing
+# authority rule; it is closed here rather than left as the next instance of it.
+from lib.platform_metering import (  # noqa: E402
+    MeteringRefusal as _MeteringRefusal,
+    authorize_metered_execution as _authorize_metered_execution,
+)
 
 
 POLICY = json.loads((REPO / "ops/config/platform-metering.v1.json").read_text(encoding="utf-8"))
@@ -72,7 +80,7 @@ def check(label: str, condition: bool) -> None:
 def refuses(call: Callable[[], Any]) -> bool:
     try:
         call()
-    except MeteringRefusal:
+    except _MeteringRefusal:
         return True
     return False
 
@@ -109,7 +117,7 @@ def _gate_mark(call: Callable[[], Any], gate_key: str) -> str:
     """
     try:
         decision = call()
-    except MeteringRefusal:
+    except _MeteringRefusal:
         return _MARK_REFUSED
     if (isinstance(decision, dict) and decision.get("admitted") is True
             and decision.get("gate") == gate_key):
@@ -120,7 +128,7 @@ def _gate_mark(call: Callable[[], Any], gate_key: str) -> str:
 def main() -> int:
     print("platform-metering-gate-selftest — paid dispatch is admitted before execution\n")
 
-    check("unknown metered dispatch fails closed", refuses(lambda: authorize_metered_execution(
+    check("unknown metered dispatch fails closed", refuses(lambda: _authorize_metered_execution(
         POLICY, "unregistered-dispatch", {}, today=date(2026, 8, 17))))
 
     # The 2026-08-17 Actions pause was cleared on 2026-09-12 (decision
@@ -135,69 +143,69 @@ def main() -> int:
     # have removed all coverage of lib/platform_metering.py's two pause clauses.
     # _gate_mark() rather than a bare call: a re-imposed pause must FAIL this
     # check by name, not crash the process before the twenty later checks run.
-    actions_mark = _gate_mark(lambda: authorize_metered_execution(
+    actions_mark = _gate_mark(lambda: _authorize_metered_execution(
         POLICY, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40, "local_checks_green": True,
         }, today=date(2026, 9, 12)), "github-actions-remote-ci")
     check("GitHub Actions clears its own contract once the pause is lifted",
           actions_mark == _MARK_CONTRACT_HELD)
     check("GitHub Actions without proven local checks is still refused", refuses(
-        lambda: authorize_metered_execution(POLICY, "github-actions-remote-ci", {
+        lambda: _authorize_metered_execution(POLICY, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40,
         }, today=date(2026, 9, 12))))
     check("GitHub Actions without an exact candidate SHA is still refused", refuses(
-        lambda: authorize_metered_execution(POLICY, "github-actions-remote-ci", {
+        lambda: _authorize_metered_execution(POLICY, "github-actions-remote-ci", {
             "candidate_sha": "a" * 39, "local_checks_green": True,
         }, today=date(2026, 9, 12))))
 
     paused = json.loads(json.dumps(POLICY))
     paused["temporary_controls"]["github_actions_pause"]["repository_actions_enabled"] = False
     check("a re-imposed repository disable still refuses", refuses(
-        lambda: authorize_metered_execution(paused, "github-actions-remote-ci", {
+        lambda: _authorize_metered_execution(paused, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40, "local_checks_green": True,
         }, today=date(2026, 9, 12))))
     unverified = json.loads(json.dumps(POLICY))
     unverified["temporary_controls"]["github_actions_pause"]["verified_allowance_reset"] = False
     check("an unverified allowance reset still refuses", refuses(
-        lambda: authorize_metered_execution(unverified, "github-actions-remote-ci", {
+        lambda: _authorize_metered_execution(unverified, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40, "local_checks_green": True,
         }, today=date(2026, 9, 12))))
     check("the cleared pause records the authority that cleared it",
           POLICY["temporary_controls"]["github_actions_pause"].get("cleared_decision_ref")
           == "9935743c-21de-4490-83db-d11a5e20f6b1")
 
-    allowed_neon = authorize_metered_execution(POLICY, "neon-disposable-branch", {
+    allowed_neon = _authorize_metered_execution(POLICY, "neon-disposable-branch", {
         "requested_lifetime_minutes": 120,
         "cleanup_registered": True,
         "active_nondefault_branches": 1,
     }, today=date(2026, 8, 17))
     check("one bounded disposable Neon branch is admitted", allowed_neon["admitted"] is True)
     check("Neon branch without same-run cleanup is refused", refuses(
-        lambda: authorize_metered_execution(POLICY, "neon-disposable-branch", {
+        lambda: _authorize_metered_execution(POLICY, "neon-disposable-branch", {
             "requested_lifetime_minutes": 120,
             "cleanup_registered": False,
             "active_nondefault_branches": 1,
         }, today=date(2026, 8, 17))))
     check("Neon branch over the lifetime cap is refused", refuses(
-        lambda: authorize_metered_execution(POLICY, "neon-disposable-branch", {
+        lambda: _authorize_metered_execution(POLICY, "neon-disposable-branch", {
             "requested_lifetime_minutes": 121,
             "cleanup_registered": True,
             "active_nondefault_branches": 1,
         }, today=date(2026, 8, 17))))
     check("Neon fanout over the branch cap is refused", refuses(
-        lambda: authorize_metered_execution(POLICY, "neon-disposable-branch", {
+        lambda: _authorize_metered_execution(POLICY, "neon-disposable-branch", {
             "requested_lifetime_minutes": 60,
             "cleanup_registered": True,
             "active_nondefault_branches": 3,
         }, today=date(2026, 8, 17))))
 
     check("Cloudflare deploy without local verification is refused", refuses(
-        lambda: authorize_metered_execution(POLICY, "cloudflare-worker-release", {
+        lambda: _authorize_metered_execution(POLICY, "cloudflare-worker-release", {
             "release_preflight_green": False,
             "performance_budget_ref": "release:R-1",
             "release_candidate_count": 1,
         }, today=date(2026, 8, 17))))
-    allowed_deploy = authorize_metered_execution(POLICY, "cloudflare-worker-release", {
+    allowed_deploy = _authorize_metered_execution(POLICY, "cloudflare-worker-release", {
         "release_preflight_green": True,
         "performance_budget_ref": "release:R-1",
         "release_candidate_count": 1,
