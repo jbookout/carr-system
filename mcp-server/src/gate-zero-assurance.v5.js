@@ -558,15 +558,24 @@ const noProducerBecause = (wouldName) => (oracleSeatBound()
 // ---------------------------------------------------------------------------
 
 /**
- * What a Gate Zero predecessor join would need and cannot get.
+ * What a Gate Zero predecessor join would need and still cannot get.
  *
  * The four predecessors would have to be read from an accepted-outcome store,
- * and the canary and its readback from the scheduler that dispatched them.
- * gate-zero-seam-readers.v5.js on main HAS both readers (cards 11 and 12), and
- * neither is bound to this surface — V5_A02_GATE_ZERO_BINDINGS is null for
- * every seam, and binding them to Gate Zero is PR 1004's subject. So this
- * answers `unavailable` and names both seams — for every caller, on every
- * input, with or without one.
+ * and the canary and its readback from the scheduler that dispatched them. Both
+ * of those readers exist and BOTH ARE BOUND to this surface: cards 11 and 12 in
+ * gate-zero-seam-readers.v5.js, bound through V5_A02_GATE_ZERO_SEAM_BINDINGS on
+ * exactly the condition their rulings are open. The oracle seat is staffed too
+ * — card 9, decision `359784f1-5d9e-4e11-bcce-af8b0dfcc5e0`, 2026-09-13 — so
+ * neither a missing reader nor an empty seat is what stands here any more.
+ *
+ * WHAT IS NOT BUILT IS THE PRODUCER BEHIND THE PRODUCER SEAM. A bound reader
+ * answers truthfully about whatever row it is pointed at, and no code in this
+ * repository does the pointing: which accepted outcome and which canary row a
+ * Gate Zero run stands on are the producer's bindings. So the answer is still
+ * `unavailable` for every caller on every input — now naming that ONE owed
+ * seam alongside the two bound ones it stands on, and `decided_by` says the
+ * seam is unbuilt rather than the seat empty. Put either ruling line back to
+ * null and the earlier per-card refusals below answer again.
  */
 export const readGateZeroPredecessorJoin = closedCallable(() => {
   const predecessorReader = boundSeam(V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, "readOutcome");
