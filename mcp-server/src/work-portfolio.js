@@ -896,10 +896,11 @@ export function workPortfolioTools({ withEnvelope, writeEvent, ToolError }) {
             JSON.stringify(args.source_digests), args.graph_digest, args.accepted_digest,
             JSON.stringify(view.child_bindings), JSON.stringify(args.nodes),
             JSON.stringify(args.edges)])).rows[0].id;
-        await writeEvent(c, { subject_type: "portfolio", subject_id: revisionId,
-          verb: "propose-portfolio-revision",
-          payload: { portfolio_ref: args.portfolio_ref, revision_version: args.revision_version,
-            accepted_digest: args.accepted_digest } });
+        await writeEvent(c, actor, "propose-portfolio-revision", "portfolio", revisionId,
+          { field: "revision_proposed",
+            new: { portfolio_ref: args.portfolio_ref, revision_version: args.revision_version,
+              accepted_digest: args.accepted_digest },
+            idempotency_key: args.idempotency_key });
         return { ok: true, revision_id: revisionId, portfolio_ref: args.portfolio_ref,
           graph_digest: view.graph_digest, accepted_digest: view.accepted_digest,
           child_bindings: view.child_bindings, accepted: false,
@@ -925,9 +926,10 @@ export function workPortfolioTools({ withEnvelope, writeEvent, ToolError }) {
           `select ops.portfolio_review_revision($1::uuid,$2::uuid,$3::text,$4::text,$5::text) as id`,
           [args.revision_id, args.idempotency_key, args.reviewed_digest, args.verdict,
             args.review_summary])).rows[0].id;
-        await writeEvent(c, { subject_type: "portfolio", subject_id: args.revision_id,
-          verb: "review-portfolio-revision",
-          payload: { verdict: args.verdict, reviewed_digest: args.reviewed_digest } });
+        await writeEvent(c, actor, "review-portfolio-revision", "portfolio", args.revision_id,
+          { field: "revision_reviewed",
+            new: { verdict: args.verdict, reviewed_digest: args.reviewed_digest },
+            idempotency_key: args.idempotency_key });
         return { ok: true, review_id: reviewId, verdict: args.verdict,
           reviewed_digest: args.reviewed_digest,
           effects: { creates_effect: false, jobs: 0, capabilities: 0, execution_envelopes: 0,
@@ -950,9 +952,10 @@ export function workPortfolioTools({ withEnvelope, writeEvent, ToolError }) {
         const receiptId = (await c.query(
           `select ops.portfolio_accept_revision($1::uuid,$2::uuid,$3::text,$4::uuid) as id`,
           [args.revision_id, args.idempotency_key, args.accepted_digest, args.review_id])).rows[0].id;
-        await writeEvent(c, { subject_type: "portfolio", subject_id: args.revision_id,
-          verb: "accept-portfolio-revision",
-          payload: { accepted_digest: args.accepted_digest } });
+        await writeEvent(c, actor, "accept-portfolio-revision", "portfolio", args.revision_id,
+          { field: "revision_accepted",
+            new: { accepted_digest: args.accepted_digest },
+            idempotency_key: args.idempotency_key });
         return { ok: true, receipt_id: receiptId, accepted_digest: args.accepted_digest,
           accepted: true,
           effects: { creates_effect: false, jobs: 0, capabilities: 0, execution_envelopes: 0,
