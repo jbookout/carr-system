@@ -30,6 +30,7 @@ run's own recorded inputs back afterwards.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -422,42 +423,115 @@ def producer_fail(identity: Identity, reason: str) -> int:
     return 0
 
 
-def dispatch_controlled_failure(args: argparse.Namespace) -> int:
-    """The reviewed door that asks the budget gate first, then dispatches.
+NON_FAILING_CHECK_CONCLUSIONS = ("success", "neutral", "skipped")
 
-    TWO LIFECYCLES IN ONE FILE, AND WHY. Every other command here runs INSIDE a
-    backup-nightly run and reads its identity from GITHUB_*. This one runs on an
-    operator's machine before any run exists, so it takes no identity from the
-    environment and builds the only one it needs from the seam's own literals.
-    It lives here rather than in a new script because the WR54 seam's contract —
-    which repository, which ref, which proof-ID shape, which head — is already
-    stated here as literals, and a second file restating them would be a second
-    place for them to drift.
 
-    WHY IT EXISTS AT ALL. hooks/guard-unattended.py refuses a session-issued
-    `gh workflow run` outright, and it is right to: the command text cannot show
-    whether the spend was admitted. Its own docstring names the sanctioned shape
-    instead — "reviewed scripts perform their own in-process admission before
-    reaching the vendor" — which is the first thing this function does. It is
-    NOT a general dispatcher: the workflow, the ref and the input names are
-    literals, so nothing else can be started through it.
+def _parse_proof_request(args: argparse.Namespace) -> tuple[str, str]:
+    """The one spelling of the controlled-failure proof arguments.
 
-    ORDER MATTERS. The budget admission runs after the local guards and before
-    the POST, so a refused proof never reaches GitHub and an admitted one is
-    never stranded behind a guard that would have refused anyway.
+    Both sides of this seam take the same two arguments and must accept exactly
+    the same spelling of them: the operator-side dispatch door below, and the
+    in-run guards in controlled_failure_guards. They were parsed in two places,
+    which is precisely the shape that produces a normalisation divergence -- a
+    door that lowercased and an in-run guard that did not would dispatch a head
+    the run then refuses, spending the very minutes the admission exists to
+    protect. One parse, one pair of messages, no room to drift apart.
+
+    NOT lowercased. The in-run guard refuses an uppercase head rather than
+    normalising it, and this helper keeps that refusal rather than softening it
+    on its way to a new caller.
     """
-    # NOT lowercased before matching. controlled_failure_guards refuses an
-    # uppercase head rather than normalising it, and a door that normalised
-    # would admit and dispatch a head the in-run guard then refuses -- spending
-    # the minutes this admission exists to protect to learn something readable
-    # here. The two halves of the seam accept exactly the same spelling.
     head = str(args.expected_head or "").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise StatusError("--expected-head must be a lowercase 40-character commit SHA")
     proof_id = str(args.proof_id or "").strip()
     if not UUID_RE.fullmatch(proof_id):
         raise StatusError("--proof-id must be a canonical lowercase UUID")
+    return proof_id, head
 
+
+def _require_head_checks_clean(identity: Identity) -> None:
+    """Establish the fact the budget gate asks for, rather than assert it.
+
+    ``local_checks_green`` is a required-true field on the github-actions-remote-ci
+    gate -- the gate's own upstream spelling, unchanged here. A door that hands
+    it a literal True has told the budget gate something it never checked, which
+    makes the admission decorative. The authoritative owner of "how did this
+    commit's checks conclude" is GitHub's own check-run list for the head -- a
+    list this file already reads for a different question, so the door reads it
+    for this one too, and REFUSES rather than returning a verdict anyone could
+    pass around.
+
+    THE SEAM'S OWN CHECK IS EXCLUDED BY NAME. "Backup artifact" is the nightly
+    backup's outcome on that commit, not evidence about the commit; a head that
+    already carries an earlier seeded failure would otherwise refuse every later
+    proof forever. ``checks`` fails closed on exhausted pagination, so an
+    incomplete answer refuses here rather than reading as a clean head.
+    """
+    observed = [item for item in checks(identity) if item.get("name") != CHECK_NAME]
+    if not observed:
+        raise StatusError(
+            f"{identity.head_sha} carries no concluded checks to stand on")
+    for item in observed:
+        name = str(item.get("name"))
+        if item.get("status") != "completed":
+            raise StatusError(f"check {name!r} on {identity.head_sha} has not concluded")
+        if item.get("conclusion") not in NON_FAILING_CHECK_CONCLUSIONS:
+            raise StatusError(
+                f"check {name!r} on {identity.head_sha} concluded "
+                f"{item.get('conclusion')!r}")
+
+
+def _metering_gate_digest(decision: dict[str, Any]) -> str:
+    """An opaque, recomputable digest of the admission the GATE itself issued.
+
+    The receipt has to record which admission this dispatch stands on without
+    restating it in the gate's own verdict vocabulary -- a receipt key an
+    auditor could read as the outcome is a label pretending to be authority.
+    A digest cannot be read that way, and it is not weaker evidence: an auditor
+    recomputes it from the gate's own answer for the same request and compares.
+
+    ``decided_on`` is deliberately outside the digest and reported beside it, so
+    the mark is stable for a given admission rather than changing with the
+    calendar.
+    """
+    return hashlib.sha256(canonical({
+        key: decision.get(key)
+        for key in ("admitted", "authority", "gate", "platform", "policy_schema_version")
+    }).encode("utf-8")).hexdigest()[:16]
+
+
+def _dispatch_controlled_failure(proof_id: str, head: str) -> int:
+    """The reviewed door that asks the budget gate first, then dispatches.
+
+    MODULE-PRIVATE, and it takes two already-parsed strings rather than the
+    argparse namespace. Its first revision was a public function that read
+    attributes off a caller-supplied object, which is inside the threat model:
+    an object whose attribute access runs caller code sits between the guards
+    and the vendor POST. main() below is the only caller, and it hands over
+    plain validated text.
+
+    TWO LIFECYCLES IN ONE FILE, AND WHY. Every other command here runs INSIDE a
+    backup-nightly run and reads its identity from GITHUB_*. This one runs on an
+    operator's machine before any run exists, so it takes no identity from the
+    environment and builds the only one it needs from the seam's own literals.
+    It lives here rather than in a new script because the WR54 seam's contract --
+    which repository, which ref, which proof-ID shape, which head -- is already
+    stated here as literals, and a second file restating them would be a second
+    place for them to drift.
+
+    WHY IT EXISTS AT ALL. hooks/guard-unattended.py refuses a session-issued
+    `gh workflow run` outright, and it is right to: the command text cannot show
+    whether the spend was admitted. Its own docstring names the sanctioned shape
+    instead -- "reviewed scripts perform their own in-process admission before
+    reaching the vendor" -- which is the last thing this function does before the
+    POST. It is NOT a general dispatcher: the workflow, the ref and the input
+    names are literals, so nothing else can be started through it.
+
+    ORDER MATTERS. The budget admission runs after the local guards and before
+    the POST, so a refused proof never reaches GitHub and an admitted one is
+    never stranded behind a guard that would have refused anyway.
+    """
     # The head the caller approved must still be the head the run will check out.
     # Dispatching against a stale SHA produces a run whose own in-workflow guard
     # refuses, which spends Actions minutes to learn something readable here.
@@ -474,16 +548,27 @@ def dispatch_controlled_failure(args: argparse.Namespace) -> int:
     identity = Identity(CONTROLLED_FAILURE_REPOSITORY, 1, 1, head)
     if head_carries_proof(identity, proof_id):
         raise StatusError("this proof ID is already carried by a Check on this head")
+    _require_head_checks_clean(identity)
 
     policy_path = REPO / "ops/config/platform-metering.v1.json"
     try:
         decision = authorize_metered_execution(
             json.loads(policy_path.read_text(encoding="utf-8")),
             "github-actions-remote-ci",
+            # Established immediately above by _require_head_checks_clean,
+            # which refuses unless every check GitHub holds for this head has
+            # concluded and none of them failed. Never a literal standing in
+            # for a fact nobody checked.
             {"candidate_sha": head, "local_checks_green": True},
         )
     except (MeteringRefusal, ValueError, TypeError) as exc:
         raise StatusError(f"metered execution refused: {exc}") from exc
+    # The gate raises rather than returning a refusal today, so this is belt and
+    # braces -- but the POST is the irreversible half of this function, and it
+    # should read its authority rather than assume the shape of it.
+    if (not isinstance(decision, dict) or decision.get("admitted") is not True
+            or decision.get("gate") != "github-actions-remote-ci"):
+        raise StatusError("metered execution returned no admission for this gate")
 
     api(
         f"/repos/{CONTROLLED_FAILURE_REPOSITORY}/actions/workflows/"
@@ -504,7 +589,7 @@ def dispatch_controlled_failure(args: argparse.Namespace) -> int:
         "head_sha": head,
         "proof_id": proof_id,
         "metering_gate": decision.get("gate"),
-        "metering_admitted": decision.get("admitted"),
+        "metering_gate_digest": _metering_gate_digest(decision),
         "metering_decided_on": decision.get("decided_on"),
     }))
     return 0
@@ -558,14 +643,9 @@ def controlled_failure_guards(identity: Identity, args: argparse.Namespace) -> s
     ref = required_env("GITHUB_REF")
     if ref != CONTROLLED_FAILURE_REF:
         raise StatusError(f"controlled failure is bound to {CONTROLLED_FAILURE_REF}")
-    expected_head = str(args.expected_head or "").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
-        raise StatusError("--expected-head must be a lowercase 40-character commit SHA")
+    proof_id, expected_head = _parse_proof_request(args)
     if expected_head != identity.head_sha:
         raise StatusError("--expected-head does not equal this run's GITHUB_SHA")
-    proof_id = str(args.proof_id or "").strip()
-    if not UUID_RE.fullmatch(proof_id):
-        raise StatusError("--proof-id must be a canonical lowercase UUID")
     if run_artifacts(identity):
         raise StatusError("controlled failure requires a run with zero artifacts")
     if head_carries_proof(identity, proof_id):
@@ -790,7 +870,7 @@ def main(argv: list[str] | None = None) -> int:
         # The dispatch door runs BEFORE any run exists, so it must not demand a
         # run's identity from the environment. Every other command must.
         if args.command == "dispatch-controlled-failure":
-            return dispatch_controlled_failure(args)
+            return _dispatch_controlled_failure(*_parse_proof_request(args))
         identity = Identity.environment()
         if args.command == "producer-start":
             return producer_start(identity)

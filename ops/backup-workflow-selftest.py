@@ -8,9 +8,11 @@ cannot reach success, and a separate observer for the terminal provider state.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,6 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "backup-nightly.yml"
 STATUS_HELPER = ROOT / "ops" / "backup-workflow-status.py"
 SERVICES = ROOT / "ops" / "config" / "services.json"
+METERING_POLICY = ROOT / "ops" / "config" / "platform-metering.v1.json"
+
+sys.path.insert(0, str(ROOT))
+
+from lib.platform_metering import authorize_metered_execution  # noqa: E402
 
 passed = 0
 failed: list[str] = []
@@ -1091,23 +1098,103 @@ def service_identity_contract() -> None:
     )
 
 
+# The closed union of privileged words from the standing authority rule, swept
+# as exact match AND substring. A receipt key or value that lands inside it is a
+# label pretending to be authority, which is why this suite refuses one.
+PRIVILEGED_WORDS = (
+    "allow", "commit", "prompt", "suppress", "release", "read", "covered",
+    "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
+    "satisfied", "complete", "admitted", "resumed", "attended", "verified",
+    "present", "equivalent", "operational", "active", "green", "joins_exactly",
+    "coverage_complete", "favorable",
+)
+
+
+def privileged_hits(value: object, path: str = "") -> list[str]:
+    """Every place a privileged word appears in a receipt's keys or string values."""
+    hits: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            text = str(key).lower()
+            hits.extend(f"{path}{key} (key: {word})" for word in PRIVILEGED_WORDS
+                        if word in text)
+            if re.search(r"^would_|_if_authoritative", text):
+                hits.append(f"{path}{key} (key: reserved prefix or suffix)")
+            hits.extend(privileged_hits(item, f"{path}{key}."))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            hits.extend(privileged_hits(item, f"{path}{index}."))
+    elif isinstance(value, str):
+        text = value.lower()
+        hits.extend(f"{path} (value {value!r}: {word})" for word in PRIVILEGED_WORDS
+                    if word in text)
+        if re.search(r"^would_|_if_authoritative", text):
+            hits.append(f"{path} (value {value!r}: reserved prefix or suffix)")
+    return hits
+
+
+def green_ci_check(check_id: int = 7300, name: str = "gates",
+                   conclusion: str | None = "success",
+                   status: str = "completed") -> dict[str, object]:
+    """One ordinary CI Check on the head, in the shape GitHub returns."""
+    return {
+        "id": check_id, "name": name, "head_sha": PROOF_HEAD,
+        "status": status, "conclusion": conclusion,
+    }
+
+
+def paused_policy_tree() -> Path:
+    """A copy of the door's own tree whose metering policy re-imposes the pause.
+
+    The door resolves its policy from its OWN resolved location, not from an
+    environment variable, which is the property that makes it a door rather than
+    a bypass -- so the only honest way to watch a real metering refusal is to run
+    the door from a tree whose policy says no. Nothing is patched, injected or
+    rebound: the same bytes of the same script read a different sealed file.
+    """
+    root = Path(tempfile.mkdtemp(prefix="carr-dispatch-paused-"))
+    (root / "ops" / "config").mkdir(parents=True)
+    (root / "lib").mkdir()
+    shutil.copy2(STATUS_HELPER, root / "ops" / STATUS_HELPER.name)
+    shutil.copy2(ROOT / "lib" / "platform_metering.py", root / "lib" / "platform_metering.py")
+    policy = json.loads(METERING_POLICY.read_text(encoding="utf-8"))
+    policy["temporary_controls"]["github_actions_pause"]["repository_actions_enabled"] = False
+    (root / "ops" / "config" / "platform-metering.v1.json").write_text(
+        json.dumps(policy, indent=2), encoding="utf-8")
+    return root
+
+
 def dispatch_door_contract() -> None:
     """The reviewed dispatch door: admit the spend, or reach no vendor at all.
 
     The door exists because hooks/guard-unattended.py refuses a session-issued
     `gh workflow run` and names a reviewed in-process admission as the sanctioned
-    shape instead. These checks hold the two properties that make it that rather
-    than a bypass: every refusal happens BEFORE the dispatch POST, and the only
-    workflow, ref and input names it can reach are literals.
+    shape instead. These checks hold the three properties that make it that
+    rather than a bypass: the budget refusal happens BEFORE the dispatch POST and
+    is proved by making the budget actually refuse, the only workflow, ref and
+    input names it can reach are literals, and the fact the budget gate requires
+    is established from the head's own Checks rather than asserted.
     """
     dispatch = "dispatch-controlled-failure"
     status_source = STATUS_HELPER.read_text(encoding="utf-8")
+    # The door's exact signature is the anchor for everything below, so it is
+    # asserted first and the later reads are written to report FAIL rather than
+    # raise when it is gone. A renamed door used to take this whole function down
+    # with a traceback, which reads as a broken suite instead of a missing door.
+    signature = "def _dispatch_controlled_failure(proof_id: str, head: str) -> int:"
+    check(
+        "the dispatch door is module-private and takes no caller object",
+        signature in status_source
+        and "\ndef dispatch_controlled_failure" not in status_source,
+        "a public door that reads attributes off a caller's object runs caller code "
+        "between the guards and the POST",
+    )
     # Read the DOOR'S OWN BODY, not the file. Asked of the whole file, "does it
     # call authorize_metered_execution" is answered yes by the import line alone
     # — which is how this check first passed against a door whose admission had
     # been deleted outright.
-    door_body = status_source.split("def dispatch_controlled_failure", 1)[-1].split(
-        "\ndef ", 1)[0]
+    door_body = (status_source.split(signature, 1)[-1].split("\ndef ", 1)[0]
+                 if signature in status_source else "")
     check(
         "the dispatch door admits the metered spend in its own body",
         "authorize_metered_execution(" in door_body
@@ -1116,22 +1203,31 @@ def dispatch_door_contract() -> None:
     )
     check(
         "the dispatch door admits BEFORE it reaches the vendor",
-        door_body.index("authorize_metered_execution(") < door_body.index("/dispatches"),
+        "authorize_metered_execution(" in door_body and "/dispatches" in door_body
+        and door_body.index("authorize_metered_execution(") < door_body.index("/dispatches"),
         "admitting after the POST spends the minutes the admission was guarding",
+    )
+    check(
+        "the dispatch door establishes green local checks before it admits",
+        "_require_head_checks_clean(identity)" in door_body
+        and "authorize_metered_execution(" in door_body
+        and door_body.index("_require_head_checks_clean(identity)")
+        < door_body.index("authorize_metered_execution("),
+        "handing the budget gate a literal True makes the admission decorative",
     )
     check(
         "the dispatch door can start exactly one named workflow",
         'BACKUP_WORKFLOW_FILE = "backup-nightly.yml"' in status_source
         and "BACKUP_WORKFLOW_FILE" in door_body
-        and "args.proof_id" not in door_body.split("/dispatches")[0].rsplit(
-            "authorize_metered_execution(", 1)[-1],
+        and "args." not in door_body,
         "a caller-named workflow would make this a general door",
     )
 
     def fixture(state_extra: dict[str, object] | None = None):
         root = Path(tempfile.mkdtemp(prefix="carr-dispatch-door-"))
         state: dict[str, object] = {
-            "run": run_state(), "artifacts": [], "check_runs": [],
+            "run": run_state(), "artifacts": [],
+            "check_runs": [green_ci_check()],
             "branch_head": {"sha": PROOF_HEAD},
         }
         state.update(state_extra or {})
@@ -1159,11 +1255,37 @@ def dispatch_door_contract() -> None:
         f"expected one dispatch carrying both proof inputs, got rc={result.returncode} "
         f"{result.stderr.strip()} {dispatched!r}",
     )
+    receipt = parsed_output(result)
+    digest = receipt.get("metering_gate_digest")
     check(
-        f"{dispatch}: the admitted request reports its own admission",
-        '"metering_admitted":true' in result.stdout
-        and '"state":"dispatched"' in result.stdout,
-        "a dispatch whose receipt omits the admission cannot be audited later",
+        f"{dispatch}: the receipt records WHICH admission it stands on, opaquely",
+        receipt.get("state") == "dispatched"
+        and receipt.get("metering_gate") == "github-actions-remote-ci"
+        and isinstance(digest, str) and bool(re.fullmatch(r"[0-9a-f]{16}", digest)),
+        f"expected an opaque 16-hex admission digest beside the gate key, got {receipt!r}",
+    )
+    check(
+        f"{dispatch}: no receipt key or value is a privileged word",
+        not privileged_hits(receipt),
+        f"a receipt an auditor can read as the outcome is a label wearing authority: "
+        f"{privileged_hits(receipt)}",
+    )
+    # The digest is EVIDENCE, not decoration: it must reproduce from the gate's
+    # own answer for this same request, and must not be some constant the door
+    # could print without ever calling the gate.
+    expected = authorize_metered_execution(
+        json.loads(METERING_POLICY.read_text(encoding="utf-8")),
+        "github-actions-remote-ci",
+        {"candidate_sha": PROOF_HEAD, "local_checks_green": True},
+    )
+    recomputed = hashlib.sha256(json.dumps({
+        key: expected.get(key)
+        for key in ("admitted", "authority", "gate", "platform", "policy_schema_version")
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    check(
+        f"{dispatch}: the receipt's digest reproduces from the gate's own answer",
+        digest == recomputed,
+        f"expected {recomputed}, got {digest!r}",
     )
 
     # EVERY REFUSAL MUST LEAVE THE VENDOR UNTOUCHED. A door that refuses after
@@ -1183,6 +1305,15 @@ def dispatch_door_contract() -> None:
          {"check_runs": [spent_proof_check()]}, proof_args()),
         ("exhausted Check pagination fails closed instead of dispatching",
          {"check_pagination_exhausted": True}, proof_args()),
+        # The fact the budget gate requires is READ, not asserted: these three
+        # are the head states that cannot support it.
+        ("a head carrying no Checks at all refuses rather than claiming green",
+         {"check_runs": []}, proof_args()),
+        ("a head whose Check has not concluded refuses",
+         {"check_runs": [green_ci_check(status="in_progress", conclusion=None)]},
+         proof_args()),
+        ("a head carrying a failed Check refuses",
+         {"check_runs": [green_ci_check(conclusion="failure")]}, proof_args()),
     ]
     for label, extra, args in refusals:
         env, state_path, log_path = fixture(extra)
@@ -1198,6 +1329,26 @@ def dispatch_door_contract() -> None:
             f"expected a refusal with no dispatch POST, got rc={result.returncode} "
             f"posted={posted!r} stderr={result.stderr.strip()}",
         )
+
+    # THE ONE REFUSAL THE SOURCE SEARCHES ABOVE CANNOT PROVE: the BUDGET GATE
+    # itself saying no. Run the door's own bytes from a tree whose sealed policy
+    # re-imposes the Actions pause, and watch it reach no vendor at all.
+    paused_root = paused_policy_tree()
+    env, state_path, log_path = fixture()
+    refused = subprocess.run(
+        [sys.executable, str(paused_root / "ops" / STATUS_HELPER.name), dispatch, *proof_args()],
+        cwd=paused_root, env=env, text=True, capture_output=True, timeout=8, check=False,
+    )
+    posted = [row for row in calls(log_path) if str(row.get("url", "")).endswith("/dispatches")]
+    check(
+        f"{dispatch}: a refusing budget gate stops the dispatch before the vendor",
+        refused.returncode != 0
+        and "metered execution refused" in refused.stderr
+        and not posted
+        and not (read_json(state_path).get("dispatches") or []),
+        f"expected the metering refusal to reach no vendor, got rc={refused.returncode} "
+        f"posted={posted!r} stderr={refused.stderr.strip()}",
+    )
 
 
 def main() -> int:

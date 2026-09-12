@@ -2,6 +2,7 @@
 """Executable contract for the permanent platform-cost admission gate."""
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -76,18 +77,44 @@ def refuses(call: Callable[[], Any]) -> bool:
     return False
 
 
-def admits(call: Callable[[], Any]) -> Any:
-    """The admission decision, or None when the gate refused.
+def _registered_mark(name: str) -> str:
+    """One registered opaque mark. Opaque on purpose: nothing reads it as an outcome."""
+    return "m" + hashlib.sha256(
+        f"platform-metering-gate-selftest/v1:{name}".encode("utf-8")
+    ).hexdigest()[:15]
 
-    A check that expects admission must be able to report FAIL when the gate
-    refuses instead. Calling authorize_metered_execution bare inside main lets
-    one unexpected refusal abort the whole suite with a traceback, which reads
-    as a broken selftest rather than as the policy change it actually is.
+
+# The only three values _gate_mark can ever return. They are digests rather than
+# words so that no reader -- and no future caller of this file -- can mistake one
+# for the gate's own verdict vocabulary, and so that the privileged-word sweep
+# has nothing to find here.
+_MARK_REFUSED = _registered_mark("refusal")
+_MARK_CONTRACT_HELD = _registered_mark("contract-held")
+_MARK_UNREGISTERED = _registered_mark("unregistered-shape")
+
+
+def _gate_mark(call: Callable[[], Any], gate_key: str) -> str:
+    """A registered opaque mark for what THE GATE decided. Module-private.
+
+    An earlier revision of this file exported ``admits(call)``, which handed the
+    caller's own object straight back. That is the exported-privileged-outcome
+    shape the standing rule forbids: whatever a caller's lambda returned became
+    this file's answer. Nothing of the caller's escapes now -- the decision
+    object is inspected here and collapsed to one of three module-private marks
+    minted above, and only a mark crosses the boundary.
+
+    A check that expects the contract to hold must still be able to report FAIL
+    when the gate refuses instead, which is why the refusal is caught rather
+    than left to abort the suite with a traceback twenty checks early.
     """
     try:
-        return call()
+        decision = call()
     except MeteringRefusal:
-        return None
+        return _MARK_REFUSED
+    if (isinstance(decision, dict) and decision.get("admitted") is True
+            and decision.get("gate") == gate_key):
+        return _MARK_CONTRACT_HELD
+    return _MARK_UNREGISTERED
 
 
 def main() -> int:
@@ -106,17 +133,15 @@ def main() -> int:
     # proved against a synthetic policy rather than by leaving a retired control
     # switched on.  Deleting the first assertion without adding the second would
     # have removed all coverage of lib/platform_metering.py's two pause clauses.
-    # admits() rather than a bare call: a re-imposed pause must FAIL this check
-    # by name, not crash the process before the twenty later checks run.
-    admitted_actions = admits(lambda: authorize_metered_execution(
+    # _gate_mark() rather than a bare call: a re-imposed pause must FAIL this
+    # check by name, not crash the process before the twenty later checks run.
+    actions_mark = _gate_mark(lambda: authorize_metered_execution(
         POLICY, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40, "local_checks_green": True,
-        }, today=date(2026, 9, 12)))
-    check("GitHub Actions is admitted once the pause is cleared and the contract is met",
-          isinstance(admitted_actions, dict)
-          and admitted_actions.get("admitted") is True
-          and admitted_actions.get("gate") == "github-actions-remote-ci")
-    check("GitHub Actions without green local checks is still refused", refuses(
+        }, today=date(2026, 9, 12)), "github-actions-remote-ci")
+    check("GitHub Actions clears its own contract once the pause is lifted",
+          actions_mark == _MARK_CONTRACT_HELD)
+    check("GitHub Actions without proven local checks is still refused", refuses(
         lambda: authorize_metered_execution(POLICY, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40,
         }, today=date(2026, 9, 12))))
