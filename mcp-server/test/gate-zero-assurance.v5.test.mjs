@@ -588,7 +588,7 @@ test("SURFACE: the producer contract is reported as REGISTERED, and registered i
   assert.equal(result.oracle_seat_bound, true);
   assert.equal(result.oracle_seat_holder_ref, "seat:codex-reviewer:gpt-5.6-sol");
   assert.equal(result.oracle_seat_staffing_decision_ref,
-    "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84");
+    "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0");
   assert.equal(result.producer_registration.oracle_seat_owed, null,
     "a seat that is held may not still be reported as owed");
   // AND THE SEAT MOVED NOTHING ELSE. This is the confusion card 9 could
@@ -972,7 +972,7 @@ const UNSTAFFED_SEAT_LINE = "  holder_ref: null,\n";
  * could claim; these are how that is proved false rather than asserted.
  */
 const SEAT_CHARTER_LINE = "  charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,\n";
-const SEAT_STAFFING_LINE = '  staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",\n';
+const SEAT_STAFFING_LINE = '  staffing_decision_ref: "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0",\n';
 const BOUND_PREDICATE_LINE =
   "  if (ruledCardBinding(binding.card_ref) === null) return null;\n";
 const DIVERGENT_PREDICATE_LINE =
@@ -1234,7 +1234,7 @@ const JOIN_SENTENCES = Object.freeze({
 const SEAT_STAFFED_FIELDS = Object.freeze({
   oracle_seat_bound: true,
   oracle_seat_holder_ref: "seat:codex-reviewer:gpt-5.6-sol",
-  oracle_seat_staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",
+  oracle_seat_staffing_decision_ref: "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0",
 });
 const SEAT_UNSTAFFED_FIELDS = Object.freeze({
   oracle_seat_bound: false,
@@ -1366,7 +1366,26 @@ const SEAT_FALSIFIERS = Object.freeze([
   },
   {
     name: "a staffing ruling that is a near miss for one",
-    edit: [SEAT_STAFFING_LINE, '  staffing_decision_ref: "5E2B8C1A-9F47-4D63-B0E5-7A3D1C9F2E84",\n'],
+    edit: [SEAT_STAFFING_LINE, '  staffing_decision_ref: "359784F1-5D9E-4E11-BCCE-AF8B0DFCC5E0",\n'],
+  },
+  // THE THREE CASES A UUID-SHAPE CHECK COULD NOT TELL APART, which is the whole
+  // of the 2026-09-12 review's first finding. Each of these is well formed, each
+  // passed the regex the predicate used to run, and none of them is the staffing
+  // ruling.
+  {
+    name: "a well-formed decision id that is not this seat's staffing ruling",
+    edit: [SEAT_STAFFING_LINE,
+      '  staffing_decision_ref: "76782922-f9b5-4492-83fc-f144184c61ff",\n'],
+  },
+  {
+    name: "the idempotency key the blanket approval was logged under",
+    edit: [SEAT_STAFFING_LINE,
+      '  staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",\n'],
+  },
+  {
+    name: "the charter ruling standing in the staffing slot",
+    edit: [SEAT_STAFFING_LINE,
+      '  staffing_decision_ref: "8a1dad08-8707-4bb0-a159-c2831a00cea2",\n'],
   },
   {
     name: "a holder that is not a seat ref",
@@ -1394,8 +1413,15 @@ test("SEAT: the seat binds on the whole declaration, and fails closed on any of 
   // same way through the same machinery, binds. Without this the five cases
   // above would pass just as well against a staging step that broke the file.
   const intact = await gateOfTree(stageSeatTree({ staffedSeat: true }));
-  assert.equal(intact.emitGateZeroOutcome().oracle_seat_bound, true,
+  const emittedIntact = intact.emitGateZeroOutcome();
+  assert.equal(emittedIntact.oracle_seat_bound, true,
     "the staging itself unstaffs the seat, so the falsifiers prove nothing");
+  // AND THE ONE VALUE THAT BINDS IS THE DECISION'S OWN ID. The falsifiers above
+  // are only falsifiers if the thing they were moved away from is the real
+  // ruling, so it is named here rather than left implied by "the file as it is".
+  assert.equal(emittedIntact.oracle_seat_staffing_decision_ref,
+    "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0",
+    "the seat binds on something other than the blanket approval's decision id");
 });
 
 test("PER READER: with all three ruled, nothing reports a reader as missing", () => {
@@ -1808,6 +1834,20 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "scheduler_canary_seam_unavailable",
 ]);
 
+/**
+ * THE FOUR SENTENCES A STAFFED SEAT ANSWERS WITH WHILE A READER CARD IS NOT
+ * RULED — the combination no staged tree used to produce, because every staged
+ * tree unstaffs the seat by default. Two of them carried `reader`, and `read` is
+ * a word of the closed union; the sweep below now walks the trees that reach
+ * them, and this list is how that walk is proved non-vacuous.
+ */
+const STAFFED_WITHDRAWN_SENTENCES = Object.freeze([
+  "the producer seam is unbuilt and no evidence seam is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome",
+  "the producer seam is unbuilt, and no predecessor, scheduler or gate-conclusion evidence seam is bound to this surface",
+  "not every ruled evidence seam is bound, and the producer seam the staffed seat would work through is unbuilt",
+  "the producer seam is unbuilt, and not every ruled evidence seam is bound",
+]);
+
 test("SWEEP: the closed union, over every branch-owned string the surface hands back", async () => {
   // THE PRE-PR COMMIT'S OWN LIST, committed as values and regenerated from that
   // commit by the baseline test above rather than read off a ref that moves.
@@ -1835,10 +1875,20 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
     [...BRANCH_ADDED_SURFACE_STRINGS].sort(),
     "the unruled surface carries a string that is neither the pre-PR baseline's nor declared");
 
-  // Every tree this branch can be switched into, the shipped one first.
+  // Every tree this branch can be switched into, the shipped one first — AND
+  // BOTH SEAT STATES OF EACH, which the 2026-09-12 review's second finding is
+  // about. `stageTree` unstaffs the seat unless asked otherwise, so the sweep
+  // used to see the staffed seat only on the tree where all three readers are
+  // bound. Four of this branch's sentences are answered only when a seat IS
+  // staffed and a reader card is NOT ruled, and nothing looked at them.
   const namespaces = [["live", surface]];
-  for (const [index, card] of READER_CARDS.entries())
+  for (const [index, card] of READER_CARDS.entries()) {
     namespaces.push([`withdrawn:${card.key}`, await gateOfTree(stageTree([index]))]);
+    namespaces.push([`withdrawn-staffed:${card.key}`,
+      await gateOfTree(stageTree([index], { staffedSeat: true }))]);
+  }
+  namespaces.push(["unruled-staffed",
+    await gateOfTree(stageTree(undefined, { staffedSeat: true }))]);
   namespaces.push(["unruled", unruled]);
 
   const branchOwned = new Map();
@@ -1871,6 +1921,12 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
   // answer with, which appear only on a ruled tree.
   for (const added of BRANCH_ADDED_SURFACE_STRINGS)
     assert.ok(branchOwned.has(added), `${added} was declared but never swept`);
+  // AND THE FOUR SENTENCES THE EXTENSION EXISTS TO REACH ARE REACHED. Without
+  // this, a staged tree that quietly stopped staffing the seat would shrink the
+  // sweep back to what it was and every assertion above would still pass.
+  for (const sentence of STAFFED_WITHDRAWN_SENTENCES)
+    assert.ok(branchOwned.has(sentence),
+      `a staffed-and-withdrawn sentence was never swept: ${JSON.stringify(sentence)}`);
   assert.ok(branchOwned.size >= 14,
     `the sweep found only ${branchOwned.size} branch-owned strings: ${[...branchOwned.keys()]}`);
 });

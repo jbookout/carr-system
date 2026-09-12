@@ -236,13 +236,21 @@ export const V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF = "8a1dad08-8707-4bb0-a15
  *
  * Naming the reviewer charter left `oracle_seat_bound` false because a charter
  * is a job description and not a desk with somebody at it. What was still owed
- * was a named holder. Joe's blanket approval
- * `5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84`, together with his 2026-09-13 ruling
+ * was a named holder. Joe's blanket approval of the v5 program, decision
+ * `359784f1-5d9e-4e11-bcce-af8b0dfcc5e0`, together with his 2026-09-13 ruling
  * that the orchestrator performs the remaining Gate Zero acts itself, staffs the
  * seat with the desk the charter already describes: the independent Codex
  * reviewer lane (`gpt-5.6-sol`, read-only sandbox), which reviewed every Gate
  * Zero pull request and built none of them. That is the independence
  * `oracle_seat_owed` asked for, stated as a holder instead of as a category.
+ *
+ * THE REF IS THE DECISION'S ID, NOT THE KEY IT WAS WRITTEN UNDER, and the first
+ * revision of this line had the wrong one. `log-decision` generates the decision
+ * id itself and stores the caller's idempotency key in a different column, so
+ * `5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84` — the key that blanket approval was
+ * logged under — names no decision at all when it is read back. Both are uuids,
+ * which is exactly why a uuid-shaped check could not tell them apart. The id
+ * above is the one the record layer answers with for that event.
  *
  * IT IS THE SAME KIND OF SWITCH AS gate-zero-seam-rulings.v5.js's three
  * `decision_id:` lines, and for the same reasons. The declaration is
@@ -263,11 +271,47 @@ const V5_A02_GATE_ZERO_ORACLE_SEAT = Object.freeze({
   holder_ref: "seat:codex-reviewer:gpt-5.6-sol",
   charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
   charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
-  staffing_decision_ref: "5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84",
+  staffing_decision_ref: "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0",
 });
 
-/** The uuid shape a ruling has, the same one the seam ruling table requires. */
-const SEAT_DECISION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * THE TWO RULINGS THIS SEAT MAY CITE, BY ID, AND NOTHING ELSE IS A RULING HERE.
+ *
+ * The first revision tested `staffing_decision_ref` against a uuid REGEX, which
+ * is a test of typography rather than of authority: every uuid passes it,
+ * including one that names no decision, and including the idempotency key the
+ * blanket approval happened to be written under. A shape check cannot answer
+ * "does this decision exist, and is it the staffing ruling" — only a table of
+ * the decisions this module actually knows can, so that is what the predicate
+ * reads.
+ *
+ * It is MODULE-PRIVATE and frozen, like the declaration it checks: there is no
+ * argument, setter or environment variable that adds a ruling to it, and adding
+ * one is a source edit a reviewer sees. Each id was read back from the record
+ * layer as the decision's OWN id — not the key its event carries — and each
+ * carries the role it plays in the declaration, so a declaration that cited the
+ * charter ruling as its staffing ruling (or the reverse) fails closed too.
+ */
+const V5_A02_GATE_ZERO_SEAT_RULINGS = Object.freeze({
+  // Card 9, 2026-09-11: the oracle is held by the reviewer charter.
+  "8a1dad08-8707-4bb0-a159-c2831a00cea2": "charter",
+  // Joe's blanket approval of the v5 program, 2026-09-11 22:50Z, which is the
+  // authority the holder below stands on.
+  "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0": "staffing",
+});
+
+/**
+ * The role a decision ref plays in this seat, or null when this module knows no
+ * such decision. `hasOwnProperty` rather than a bare index, so an inherited
+ * property name — `constructor`, `toString` — answers null like any other
+ * stranger instead of returning a function.
+ */
+function seatRulingRole(decisionRef) {
+  if (typeof decisionRef !== "string") return null;
+  if (!Object.prototype.hasOwnProperty.call(V5_A02_GATE_ZERO_SEAT_RULINGS, decisionRef))
+    return null;
+  return V5_A02_GATE_ZERO_SEAT_RULINGS[decisionRef];
+}
 
 /** The shape a holder ref has: `seat:<lane>:<desk>`, lowercase and closed. */
 const SEAT_HOLDER_REF = /^seat:[a-z0-9][a-z0-9.-]*:[a-z0-9][a-z0-9.-]*$/;
@@ -276,9 +320,11 @@ const SEAT_HOLDER_REF = /^seat:[a-z0-9][a-z0-9.-]*:[a-z0-9][a-z0-9.-]*$/;
  * IS THE SEAT STAFFED? DERIVED FROM THE DECLARATION, never asserted, and
  * fail-closed in every direction: a missing holder, a holder that is not a
  * well-formed seat ref, a charter that is not the ruled one, a malformed or
- * substituted charter decision, a missing staffing decision, a non-object, a
- * Proxy that throws — each answers false, which is the same "no" this surface
- * gave before any seat existed.
+ * substituted charter decision, a staffing ref that is not this module's
+ * staffing ruling — an unrelated uuid, the idempotency key that approval was
+ * logged under, the charter ruling in the staffing slot — a non-object, a Proxy
+ * that throws: each answers false, which is the same "no" this surface gave
+ * before any seat existed.
  *
  * IT IS MODULE-PRIVATE, and stays so. This module's promise is that exactly one
  * of its exports is callable — the byte verifier — because an exported callable
@@ -294,8 +340,8 @@ function seatWitnessOf(seat) {
     return typeof seat.holder_ref === "string" && SEAT_HOLDER_REF.test(seat.holder_ref)
       && seat.charter_ref === V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF
       && seat.charter_decision_ref === V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF
-      && typeof seat.staffing_decision_ref === "string"
-      && SEAT_DECISION_ID.test(seat.staffing_decision_ref);
+      && seatRulingRole(seat.charter_decision_ref) === "charter"
+      && seatRulingRole(seat.staffing_decision_ref) === "staffing";
   } catch {
     return false;
   }

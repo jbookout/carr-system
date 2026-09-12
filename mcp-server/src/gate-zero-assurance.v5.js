@@ -693,7 +693,7 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
         : "the three ruled evidence seams are bound, and the registered producer role is held by a charter that no seat staffs")
       : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
         ? (oracleSeatBound()
-          ? "the producer seam is unbuilt and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
+          ? "the producer seam is unbuilt and no evidence seam is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
           : "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome")
         : (oracleSeatBound()
           ? "not every ruled evidence seam is bound, and the producer seam the staffed seat would work through is unbuilt"
@@ -716,7 +716,7 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
           : "the registered producer role is unstaffed, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on")
         : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
           ? (oracleSeatBound()
-            ? "the producer seam is unbuilt, and no predecessor, scheduler or gate-conclusion reader is bound to this surface"
+            ? "the producer seam is unbuilt, and no predecessor, scheduler or gate-conclusion evidence seam is bound to this surface"
             : "the registered producer role is unstaffed, and no predecessor, scheduler or gate-conclusion reader is bound to this surface")
           : (oracleSeatBound()
             ? "the producer seam is unbuilt, and not every ruled evidence seam is bound"
