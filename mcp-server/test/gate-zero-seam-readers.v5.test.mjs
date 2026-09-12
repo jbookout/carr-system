@@ -112,6 +112,7 @@ import {
   V5_A02_GATE_ZERO_OWED_SEAMS,
   V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
   V5_A02_GATE_ZERO_PRODUCER_SEAM,
+  V5_A02_POLICY_VERSION,
   V5_A02_SCHEDULER_STEP_REF,
   emitGateZeroOutcome,
   readGateGraphAssurance,
@@ -141,6 +142,17 @@ const READERS_FILE = "gate-zero-seam-readers.v5.js";
 const BINDING_FILE = "internal/gate-zero-seam-binding.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
 const GATE_FILE = "gate-zero-assurance.v5.js";
+const REGISTRATION_FILE = "gate-zero-producer-registration.v5.js";
+
+/**
+ * CARD 9'S ONE LINE, and the null it goes back to — the same anchor
+ * gate-zero-assurance.v5.test.mjs stages against, because it is the same switch.
+ * It matters here because the producer seam's binding condition IS that
+ * declaration: an unruled staging that left the seat staffed would leave a bound
+ * producer behind a gate whose three readers are all withdrawn.
+ */
+const STAFFED_SEAT_LINE = '  holder_ref: "seat:codex-reviewer:gpt-5.6-sol",\n';
+const UNSTAFFED_SEAT_LINE = "  holder_ref: null,\n";
 const FAKE_PG_FILE = fileURLToPath(new URL("./gate-zero-seam-pg.v5.fake.cjs", import.meta.url));
 
 /** The repository the checks store serves, and the only one it will serve. */
@@ -292,6 +304,24 @@ assert.equal(digest(PRE_PR_BASELINE), PRE_PR_BASELINE_DIGEST,
   "the committed pre-PR baseline is not the snapshot this suite pins");
 
 const PRE_PR_GATE_ANSWER_DIGESTS = new Set(PRE_PR_BASELINE.gate_answer_digests);
+
+/**
+ * The pre-PR policy version, put back before a pinned comparison. See the note
+ * at the pin itself: this slice moved `V5_A02_POLICY_VERSION` 2 -> 3 because the
+ * surface stopped being one that can only refuse, and that number rides on every
+ * object the gate builds. Everything else is still compared byte for byte, and
+ * the two assertions inside make the normalization itself falsifiable — it
+ * refuses to run against an answer that does not carry this branch's version,
+ * and it refuses to exist at all if the version ever stops having moved.
+ */
+const PRE_PR_POLICY_VERSION = 2;
+function atPrePrPolicyVersion(answer) {
+  assert.equal(answer.policy_version, V5_A02_POLICY_VERSION,
+    "the answer does not carry this branch's policy version, so the normalization is wrong");
+  assert.notEqual(V5_A02_POLICY_VERSION, PRE_PR_POLICY_VERSION,
+    "the policy version did not move, so this normalization is hiding nothing and must go");
+  return { ...answer, policy_version: PRE_PR_POLICY_VERSION };
+}
 
 // TWO DISTINCT ANSWERS, AND NEITHER OF THEM IS THIS BRANCH'S. The shipped gate
 // is ruled and answers differently; if the baseline ever held this branch's own
@@ -2089,6 +2119,19 @@ function stageTree({ storeFile = null, card11StoreRef = null, unruled = false } 
   }
   writeFileSync(path, ruled);
 
+  // AND CARD 9'S SEAT GOES BACK TO UNSTAFFED IN THE UNRULED TREE, for the same
+  // reason the three ruling lines do. The producer seam's binding condition is
+  // that declaration, so a staged tree that kept the staffed seat would have a
+  // BOUND producer behind a gate whose readers are all withdrawn — which is not
+  // the tree main shipped, and the pin below is about the tree main shipped.
+  if (unruled) {
+    const registrationPath = join(target, REGISTRATION_FILE);
+    const registration = readFileSync(registrationPath, "utf8");
+    assert.equal(registration.split(STAFFED_SEAT_LINE).length - 1, 1,
+      "the staging anchor no longer matches the seat declaration");
+    writeFileSync(registrationPath, registration.replace(STAFFED_SEAT_LINE, UNSTAFFED_SEAT_LINE));
+  }
+
   if (storeFile !== null) cpSync(storeFile, join(target, STORES_FILE));
   return target;
 }
@@ -2108,9 +2151,16 @@ async function stagedReaders(options) {
   // exemption for unchanged upstream output rather than for whatever this branch
   // happens to answer. A ruled tree's answers are this branch's and are never
   // added.
+  //
+  // ONE FIELD IS NORMALIZED AND IT IS DECLARED: `V5_A02_POLICY_VERSION` moved
+  // 2 -> 3 in the producer slice, on purpose — version 2's claim was that this
+  // surface answers `unavailable` for every caller on every input, and it can
+  // now answer over rows. The number is in every object the gate builds, so no
+  // tree can be byte-identical to main while it stands. Everything else is
+  // compared exactly, which is what this pin is for.
   if (options.unruled === true)
     for (const answer of answers)
-      assert.ok(PRE_PR_GATE_ANSWER_DIGESTS.has(digest(answer)),
+      assert.ok(PRE_PR_GATE_ANSWER_DIGESTS.has(digest(atPrePrPolicyVersion(answer))),
         "an unruled staged gate no longer answers the pre-PR baseline's bytes");
   return staged;
 }
@@ -3211,7 +3261,7 @@ test("RULED: a ruling naming a store this reader does not serve opens nothing", 
       "a ruling naming the wrong store opened the seam anyway");
     assert.equal(stagedGate.readGateZeroPredecessorJoin().predecessor_outcome_reader_bound, false,
       "the gate reports card 11 bound while this reader refuses its ruling");
-    assert.equal(stagedGate.emitGateZeroOutcome().predecessor_outcome_reader_bound, false,
+    assert.equal((await stagedGate.emitGateZeroOutcome()).predecessor_outcome_reader_bound, false,
       "the emitted answer reports card 11 bound while this reader refuses its ruling");
     assert.notEqual(digest(result), digest(readGateZeroPredecessorJoin()),
       "the staged answer is the shipped one, so the gate still reads a mismatched ruling as bound");
@@ -3574,11 +3624,15 @@ test("STORES: the checks store serves one repository, and refuses every other", 
 // PART D — the producer seam, not built, and said in exactly one place.
 // ---------------------------------------------------------------------------
 
-test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement", () => {
-  const live = emitGateZeroOutcome();
+test("PRODUCER: the producer seam is built, and still has no ruling line and no reader", async () => {
+  const live = await emitGateZeroOutcome();
   assert.equal(live.passable, false);
-  assert.equal(live.producer_bound, false);
-  assert.ok(live.owed_seams.includes(V5_A02_GATE_ZERO_PRODUCER_SEAM));
+  // BOUND AS OF THE PRODUCER SLICE — by card 9's seat declaration, which is a
+  // committed line and not a ruling line. The distinction is the subject of the
+  // rest of this test: the seam opened, and it did NOT open through this
+  // module's table.
+  assert.equal(live.producer_bound, true);
+  assert.deepEqual(live.owed_seams, []);
 
   // No ruling line: the lookup has no entry for it, so no paste could open it.
   assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
@@ -3595,15 +3649,15 @@ test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement
     assert.ok(!/producer/i.test(name), `${name} names the producer seam on the reader surface`);
 });
 
-test("PRODUCER: binding the gate's own answer still does not move, now that readers exist", () => {
-  // The whole point of building three readers, ruled or not: the gate is exactly
-  // as unpassable as it was before any of them existed. What DID move on
-  // 2026-09-12 is the list of what is still owed — three seams have a ruled
-  // reader bound behind them, and the producer is the one left.
-  assert.equal(emitGateZeroOutcome().passable, false);
-  assert.equal(emitGateZeroOutcome().join, null);
-  assert.equal(emitGateZeroOutcome().producer_bound, false);
-  assert.deepEqual([...emitGateZeroOutcome().owed_seams], [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+test("PRODUCER: three bound readers and a built seam still do not make the gate pass", async () => {
+  // The whole point of building three readers, and then the producer behind
+  // them: neither is a signature. Every seam has something behind it and the
+  // gate still refuses, because the rows a run would stand on are not named.
+  const emitted = await emitGateZeroOutcome();
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.join, null);
+  assert.equal(emitted.producer_bound, true);
+  assert.deepEqual([...emitted.owed_seams], []);
   // And the producer seam is still the one thing no ruling line can open: the
   // ruling table has no entry for it, so the lookup answers null for its name.
   assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
