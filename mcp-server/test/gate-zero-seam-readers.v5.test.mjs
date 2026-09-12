@@ -3915,30 +3915,61 @@ function exportGraph(directory) {
 /**
  * THE PROPERTY PATH BY WHICH A VALUE IS REACHABLE FROM A NAMESPACE, or null.
  *
- * This is the half that answers "by any path": it walks the OWN PROPERTIES of
- * what a module actually exports, recursively, and returns the route it found
- * the value by, so a failure names `seam.ruledCardBinding` rather than just the
- * module. Getters are invoked, and one that throws is stepped over — a property
- * that cannot be read cannot hand the predicate to a caller.
+ * This is the half that answers "by any path", and after the sixth review it
+ * answers it literally. The walk is UNBOUNDED — a cycle-safe visited set is what
+ * makes it terminate, in place of the six-edge budget a seven-edge container
+ * walked straight past. It enumerates `Reflect.ownKeys`, so a SYMBOL-keyed
+ * property is read exactly like a string-named one. And it follows the
+ * [[Prototype]] chain, because a value held on a prototype is handed to a caller
+ * as readily as one held on the object itself. It returns the route it found the
+ * value by, so a failure names `seam.ruledCardBinding` rather than just the
+ * module.
+ *
+ * THE ONE DELIBERATE BOUNDARY, stated here rather than left to be discovered:
+ * only an own DATA descriptor's `value` is descended into, and ACCESSOR GETTERS
+ * ARE NEVER INVOKED. A reachability scan that calls arbitrary getters runs
+ * module code — with whatever side effects, throws and laziness that code has —
+ * to answer a question about shape, and an invoked getter can synthesize a value
+ * no caller would ever have been handed. What a getter would return is therefore
+ * outside this guard by choice, not by oversight.
+ *
+ * `parts` exists so the mutation controls can revert ONE part of the walk at a
+ * time against THIS code rather than against a retyped imitation of it.
  */
-function pathToValue(root, target, depth = 6) {
+const WHOLE_WALK = Object.freeze({ bounded: Infinity, symbols: true, prototypes: true });
+
+/** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
+const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
+
+function pathToValue(root, target, parts = WHOLE_WALK) {
   const seen = new Set();
   const walk = (value, path, left) => {
     if (value === target) return path === "" ? "<the namespace itself>" : path;
     if (left === 0 || value === null) return null;
     const kind = typeof value;
     if (kind !== "object" && kind !== "function") return null;
+    // The visited set is what replaces the depth budget: a value whose whole
+    // subtree has already been searched cannot hide the target on a second
+    // visit, so revisiting is redundant rather than unsound once the walk is
+    // unbounded.
     if (seen.has(value)) return null;
     seen.add(value);
-    for (const key of Object.getOwnPropertyNames(value)) {
-      let held;
-      try { held = value[key]; } catch { continue; }
-      const found = walk(held, `${path}.${key}`, left - 1);
+    const keys = parts.symbols ? Reflect.ownKeys(value) : Object.getOwnPropertyNames(value);
+    for (const key of keys) {
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { continue; }
+      // An accessor is stepped over UNREAD — the boundary stated above — and so
+      // is a property whose descriptor cannot be taken at all.
+      if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) continue;
+      const found = walk(descriptor.value, `${path}${stepFor(key)}`, left - 1);
       if (found !== null) return found;
     }
-    return null;
+    if (!parts.prototypes) return null;
+    let proto;
+    try { proto = Object.getPrototypeOf(value); } catch { return null; }
+    return walk(proto, `${path}.[[Prototype]]`, left - 1);
   };
-  return walk(root, "", depth);
+  return walk(root, "", parts.bounded);
 }
 
 /** The identity check the fourth correction shipped, kept so the self-test can measure it. */
@@ -3979,6 +4010,23 @@ const REEXPORT_CASES = Object.freeze([
   { file: "container.js", caught: ["runtime"],
     source:
       `import { ${PREDICATE_NAME} } from "./binding.js";\nexport const api = { seam: ${PREDICATE_NAME} };\n` },
+  // THE SIXTH REVIEW'S THREE PROBES, one per part of the walk it defeated: a
+  // chain longer than the old six-edge budget, a symbol key, and a property held
+  // on a prototype rather than on the object. Each is `runtime` only — no name,
+  // no namespace and no alias is on the surface — so each measures the walk and
+  // nothing else.
+  { file: "deep.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = { a: { b: { c: { d: { e: { f: { seam: ${PREDICATE_NAME} } } } } } } };\n` },
+  { file: "symbol.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = { [Symbol.for("gate-zero.seam")]: ${PREDICATE_NAME} };\n` },
+  { file: "inherited.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = Object.create({ seam: ${PREDICATE_NAME} });\n` },
   // AND THE ONE THAT MUST PASS: imported, used, never handed on.
   { file: "private.js", caught: [],
     source:
@@ -4054,6 +4102,35 @@ test("PARSER: every export form is read, and the three checks catch what each is
     predicate), ".api.seam");
   assert.equal(pathToValue(await import(pathToFileURL(join(directory, "chain.js")).href),
     predicate), ".onward.seam.ruledCardBinding");
+
+  // THE THREE MUTATION CONTROLS THE SIXTH CORRECTION OWES. Each shape the review
+  // probed is found by the whole walk, at a named route; then the ONE part of the
+  // walk that reaches it is reverted and that shape goes null — while the other
+  // two stay found, so each control measures its own part rather than breaking
+  // the walk in general.
+  const REVERTED = Object.freeze([
+    { part: "unbounded depth", probe: "deep.js", route: ".api.a.b.c.d.e.f.seam",
+      walk: { ...WHOLE_WALK, bounded: 6 } },
+    { part: "symbol keys", probe: "symbol.js", route: ".api[Symbol(gate-zero.seam)]",
+      walk: { ...WHOLE_WALK, symbols: false } },
+    { part: "the prototype chain", probe: "inherited.js", route: ".api.[[Prototype]].seam",
+      walk: { ...WHOLE_WALK, prototypes: false } },
+  ]);
+  const probes = new Map();
+  for (const { probe } of REVERTED)
+    probes.set(probe, await import(pathToFileURL(join(directory, probe)).href));
+  for (const { probe, route } of REVERTED)
+    assert.equal(pathToValue(probes.get(probe), predicate), route,
+      `${probe}: the walk does not reach the predicate, or names the wrong route`);
+  for (const { part, probe, walk } of REVERTED) {
+    assert.equal(pathToValue(probes.get(probe), predicate, walk), null,
+      `${probe} is still found with ${part} reverted, so that part is not what catches it`);
+    for (const other of REVERTED) {
+      if (other.probe === probe) continue;
+      assert.notEqual(pathToValue(probes.get(other.probe), predicate, walk), null,
+        `${other.probe} is lost with ${part} reverted, so the control is not isolated to ${probe}`);
+    }
+  }
 });
 
 
