@@ -413,6 +413,26 @@
     },
 
     {
+      "key": "gate-zero-canary",
+      "name": "Gate Zero scheduler canary",
+      "purpose": "The no-op job whose only product is proof that the scheduler ran it. Gate Zero's fourth predecessor step, step:scheduler-active-receipt, needs an ops.run row bound to a receipt — non-null evidence_ref, written by bin/run-scheduled.sh with source_kind wrapper — plus an observation strictly after that dispatch; mcp-server/src/gate-zero-seam-readers.v5.js is the reader that judges it. Measured 2026-09-11 against production: 28,309 runs, 21,894 of them from the wrapper, and ZERO carrying an evidence_ref, so the clause was unsatisfiable by any row in the ledger's history rather than merely unmet. WHY A DEDICATED JOB: a real job's row conflates 'the scheduler fired' with 'the work succeeded', and a red row cannot be read for the first without knowing the second. This job has no work to fail at, so its row is a clean statement about the scheduler alone.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "bin/gate-zero-canary.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.gate-zero-canary.plist",
+          "expected_cadence_seconds": 3600,
+          "cadence_grace_seconds": 5400,
+          "notes": "NOT YET ACTIVATED, deliberately: the plist is held in DEFINITION_ONLY in ops/config-as-code.py, so installing it is Joe's own act and its presence in ~/Library/LaunchAgents is a drift finding until he takes it off that list. Until then this service has no runs and reads unknown — the honest answer for a job nobody has started, and the same posture carr-mcp already takes. CRITICALITY IS LOW because nothing depends on the canary's own work: it has none. What depends on it is one gate's ability to ask a question, and that gate reads a missing canary correctly today. Grace 5400s against a 3600s cadence covers the 30-minute run-spool flush (tools/ops-spool.py) exactly as notes-sweep's and run-spool-flush's graces do: a succeeded row queues locally and lands at the next flush, so the worst honest gap is one interval plus one flush."
+        }
+      ]
+    },
+
+    {
       "key": "npi-sweep-weekly",
       "name": "Weekly NPI new-provider sweep",
       "purpose": "NPPES weekly file to territory lead digest and hot-leads dashboard.",

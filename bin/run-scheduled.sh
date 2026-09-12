@@ -4,6 +4,7 @@
 #
 #   usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS]
 #                                [--also-heartbeat SERVICE]
+#                                [--evidence-ref-file PATH]
 #                                <service-key> <run-key> <command> [args...]
 #
 # WHY THIS EXISTS, measured 2026-08-14. `tools/ops-record.py health` read 21 of
@@ -106,7 +107,39 @@
 #                                  the "provenance line is the tested surface"
 #                                  property above extends to it unchanged.
 #
-# Neither flag touches the job itself: the child still runs exactly once,
+#   --evidence-ref-file PATH       AFTER the child exits, read one line from
+#                                  PATH and pass it to the recorder as
+#                                  --evidence-ref, binding this run row to a
+#                                  receipt the job itself minted. Without it
+#                                  every row this wrapper has ever written
+#                                  carries evidence_ref null — measured
+#                                  2026-09-11 against production: 21,894
+#                                  wrapper rows, 0 of them bound — so the
+#                                  Gate Zero scheduler clause
+#                                  (`step:scheduler-active-receipt`, read by
+#                                  mcp-server/src/gate-zero-seam-readers.v5.js)
+#                                  could never be satisfied by any scheduled
+#                                  run, canary or otherwise.
+#
+#                                  A FILE, NOT THE CHILD'S STDOUT, and that is
+#                                  the whole design. The transparency property
+#                                  above forbids capturing, filtering or
+#                                  reordering the child's output, so the
+#                                  receipt travels out of band: the job writes
+#                                  the token, this script reads the file it was
+#                                  told to read. Nothing about the child's
+#                                  execution changes.
+#
+#                                  IT CANNOT FAIL A JOB. An absent, empty,
+#                                  unreadable, oversized or malformed file
+#                                  yields NO --evidence-ref argument and the
+#                                  recording proceeds exactly as it does today.
+#                                  The token must match [A-Za-z0-9:._-]{1,128}
+#                                  — the same shape the reader's RUN_KEY
+#                                  pattern accepts — so a job cannot inject
+#                                  recorder arguments through its own receipt.
+#
+# No flag touches the job itself: the child still runs exactly once,
 # unmodified, and nothing here can change what it does, prints, or returns —
 # only what this script decides to WRITE afterward.
 
@@ -116,8 +149,15 @@ EX_USAGE=64
 
 HEARTBEAT_INTERVAL=0
 ALSO_HEARTBEAT=""
+EVIDENCE_REF_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --evidence-ref-file)
+      if [ "$#" -lt 2 ]; then
+        print -ru2 -- "usage: --evidence-ref-file requires a value"
+        exit $EX_USAGE
+      fi
+      EVIDENCE_REF_FILE="$2"; shift 2 ;;
     --heartbeat-interval)
       if [ "$#" -lt 2 ]; then
         print -ru2 -- "usage: --heartbeat-interval requires a value"
@@ -136,7 +176,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ $# -lt 3 ]; then
-  print -ru2 -- "usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS] [--also-heartbeat SERVICE] <service-key> <run-key> <command> [args...]"
+  print -ru2 -- "usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS] [--also-heartbeat SERVICE] [--evidence-ref-file PATH] <service-key> <run-key> <command> [args...]"
   print -ru2 -- "  e.g. bin/run-scheduled.sh nightly-record-layer rules.refresh /bin/zsh {{REPO}}/bin/refresh-rules.sh"
   exit $EX_USAGE
 fi
@@ -248,6 +288,50 @@ corr=()
 
 mkdir -p "$REPO/out" 2>/dev/null
 
+# ── the receipt this run is bound to, if the job minted one ──────────────────
+# Read AFTER the child exited, from a path the CALLER named, never from the
+# child's own output stream — capturing stdout would break the transparency
+# property this whole file is built around.
+#
+# Every failure mode here is silence, deliberately: this is an observation
+# channel, and a wrapper that could refuse to record because a receipt file was
+# missing would have put itself in the failure path of the thing it watches,
+# which is the one thing the header forbids. So an absent file, an unreadable
+# file, an empty file, a file whose first line does not match the token shape,
+# and a file larger than one small line all produce the SAME result — evid
+# stays empty and the recorder is called with exactly the arguments it would
+# have received before this flag existed.
+#
+# THE PATTERN IS A WHITELIST, not an escape. The token may carry only
+# [A-Za-z0-9:._-] and may be at most 128 characters, which is the shape
+# mcp-server/src/gate-zero-seam-readers.v5.js already accepts for a run key.
+# A job cannot smuggle a second recorder argument, a shell metacharacter or a
+# newline into ops.run.evidence_ref through a file this script reads.
+evid=()
+if [ -n "$EVIDENCE_REF_FILE" ] && [ -r "$EVIDENCE_REF_FILE" ]; then
+  # The first line, with a trailing CR removed and NOTHING else normalized.
+  # An earlier draft ran the line through `tr -d '[:space:]'` first, and that
+  # was a guard that failed OPEN: handed `--state failed --exit-code 1` it
+  # deleted the spaces and accepted the result as `--statefailed--exit-code1`,
+  # because every surviving character is in the whitelist. Stripping before
+  # matching turns a token the pattern was built to reject into one it accepts.
+  # A receipt with whitespace in it is not a receipt, so it is refused rather
+  # than repaired.
+  evidence_ref="$(head -c 4096 -- "$EVIDENCE_REF_FILE" 2>/dev/null | head -n 1 | tr -d '\r')"
+  # grep, not a zsh glob: the `##` form that expresses "one or more" needs
+  # EXTENDED_GLOB, which is NOT set in this script, and an unset option would
+  # have made `##` literal and the test silently wrong in the permissive
+  # direction. A pattern that fails open is worse than no pattern.
+  if [ -n "$evidence_ref" ] && [ "${#evidence_ref}" -le 128 ] \
+      && print -r -- "$evidence_ref" | grep -qE '^[A-Za-z0-9:._-]+$'; then
+    evid=(--evidence-ref "$evidence_ref")
+  else
+    evidence_ref=""
+  fi
+else
+  evidence_ref=""
+fi
+
 # ── throttle a high-frequency SUCCEEDED row ──────────────────────────────────
 # Inert when HEARTBEAT_INTERVAL is 0 (the default, and every existing job's
 # real invocation today): should_record is always 1 below, so this is a no-op
@@ -273,7 +357,7 @@ if [ "$should_record" -eq 1 ]; then
     --service "$SERVICE" --key "$RUN_KEY" --state "$state" \
     --exit-code "$rc" --started-at "$STARTED" --ended-at "$ENDED" \
     --source-kind wrapper --source-ref bin/run-scheduled.sh \
-    --detail "$RUN_KEY exited $rc" "${fclass[@]}" "${corr[@]}"
+    --detail "$RUN_KEY exited $rc" "${fclass[@]}" "${corr[@]}" "${evid[@]}"
   "${argv[@]}" >> "$LOG" 2>&1
   recorder_exit=$?
   record_action=recorded
@@ -307,7 +391,7 @@ fi
 # stays the trailing field exactly as before, so every existing regex-based
 # check against this line (name=value, argv= to end of line) is unaffected —
 # it only ever gains the new field, never loses or reorders an old one.
-print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$RUN_KEY service=$SERVICE child_exit=$rc state=$state record_action=$record_action recorder_exit=$recorder_exit argv=${argv[*]}" >> "$LOG"
+print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') run-scheduled key=$RUN_KEY service=$SERVICE child_exit=$rc state=$state record_action=$record_action recorder_exit=$recorder_exit evidence_ref=${evidence_ref:-none} argv=${argv[*]}" >> "$LOG"
 
 # ── an independent heartbeat riding this same wake (carr-local-edge-node) ────
 # Deliberately NOT gated on the primary job's own outcome above: a broken

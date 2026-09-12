@@ -63,6 +63,7 @@ RUN IT:
     python3 ops/run-scheduled-selftest.py
     tools/db-tap.py --project staging run ops/run-scheduled-selftest.py
 """
+import json
 import os
 import re
 import sqlite3
@@ -930,10 +931,183 @@ def tier2() -> None:
         print("  (tier 2 probe rows deleted)")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TIER 1 — THE RECEIPT BINDING (--evidence-ref-file), added 2026-09-11.
+#
+# WHY THIS SECTION EXISTS. Gate Zero's fourth predecessor step,
+# `step:scheduler-active-receipt`, is read by
+# mcp-server/src/gate-zero-seam-readers.v5.js, whose `receipt_binding` clause
+# wants a run row with a NON-NULL ops.run.evidence_ref written by this wrapper.
+# Measured against production on 2026-09-11: 28,309 rows in ops.run, 21,894 of
+# them written by bin/run-scheduled.sh, and ZERO carrying an evidence_ref. The
+# clause was unsatisfiable by construction, and --evidence-ref-file is the flag
+# that makes it satisfiable.
+#
+# WHAT THESE CHECKS DEFEND, and both halves matter equally:
+#
+#   THE FLAG NEVER FAILS A JOB. It is an observation channel bolted to a
+#   wrapper whose founding property is that it cannot break the thing it
+#   watches. Absent file, unreadable file, empty file, bad token, oversized
+#   token — every one of them records exactly what the wrapper recorded before
+#   this flag existed, and the child's exit code is untouched.
+#
+#   THE WHITELIST DOES NOT FAIL OPEN. The first draft of the guard normalized
+#   the line with `tr -d '[:space:]'` BEFORE matching, so `--state failed
+#   --exit-code 1` lost its spaces and was accepted as
+#   `--statefailed--exit-code1` — every surviving character is in the
+#   whitelist. That is the exact shape of a check that reports green over a
+#   broken substrate, and case (c) below is its regression test. A receipt
+#   containing whitespace is REFUSED, never repaired.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def recorded_argv(run_key: str, db: str) -> list:
+    """The argument list the wrapper handed the recorder for one run key."""
+    rows = spool_rows(run_key, db=db)
+    return json.loads(rows[0][3]) if rows else []
+
+
+def evidence_ref_of(run_key: str, db: str):
+    """The --evidence-ref value in that argv, or None when the flag is absent."""
+    argv = recorded_argv(run_key, db)
+    return argv[argv.index("--evidence-ref") + 1] if "--evidence-ref" in argv else None
+
+
+def tier1_evidence_ref() -> None:
+    print()
+    print("TIER 1 — the receipt binding (--evidence-ref-file)")
+
+    work = tempfile.mkdtemp(prefix="carr-selftest-receipt-")
+    state_dir = os.path.join(work, "state")
+    os.makedirs(state_dir, exist_ok=True)
+
+    def run(flags: list, content=None, filename: str = "receipt"):
+        """One wrapper run over a trivial child. `content` None means the
+        receipt file is never created at all."""
+        run_key = "selftest.evidence." + uuid.uuid4().hex[:8]
+        db = os.path.join(work, run_key + ".sqlite3")
+        path = os.path.join(work, run_key + "." + filename)
+        if content is not None:
+            with open(path, "w") as fh:
+                fh.write(content)
+        env = unreachable_env()
+        env["CARR_RUN_SPOOL_DB"] = db
+        env["CARR_RUN_SCHEDULED_STATE_DIR"] = state_dir
+        resolved = [path if f == "@RECEIPT@" else f for f in flags]
+        proc = subprocess.run(
+            [WRAPPER, *resolved, "carr-selftest-probe", run_key, "/bin/sh", "-c", "exit 0"],
+            capture_output=True, text=True, timeout=120, env=env, cwd=REPO)
+        return proc, run_key, db
+
+    # (a) THE DEFAULT PATH IS BYTE-FOR-BYTE UNCHANGED. Every job in
+    #     ops/launchd/ today passes no such flag, so this is the case that
+    #     must not have moved at all.
+    proc, rk, db = run([])
+    check("no --evidence-ref-file: the recorder is called with NO "
+          "--evidence-ref, exactly as before the flag existed",
+          evidence_ref_of(rk, db) is None, repr(recorded_argv(rk, db)))
+    check("no --evidence-ref-file: the child's exit code is still its own",
+          proc.returncode == 0, f"got {proc.returncode}")
+
+    # (b) THE HAPPY PATH. A well-formed token reaches the recorder verbatim.
+    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"],
+                       content="gatezero.canary:20260911T000000Z:abcdef0123456789\n")
+    check("a well-formed receipt is passed through verbatim as --evidence-ref",
+          evidence_ref_of(rk, db) == "gatezero.canary:20260911T000000Z:abcdef0123456789",
+          repr(evidence_ref_of(rk, db)))
+
+    # (c) THE REGRESSION THE FIRST DRAFT SHIPPED. Whitespace is a REJECTION,
+    #     never a thing to strip and then accept.
+    for label, body in (
+        ("an argument-injection attempt", "--state failed --exit-code 1\n"),
+        ("a leading space", " token\n"),
+        ("an embedded tab", "a\tb\n"),
+    ):
+        proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=body)
+        check(f"{label} is REFUSED, not normalized into an acceptable token",
+              evidence_ref_of(rk, db) is None, repr(evidence_ref_of(rk, db)))
+        check(f"...and {label} still leaves the job's own exit code alone",
+              proc.returncode == 0, f"got {proc.returncode}")
+
+    # (d) THE LENGTH BOUNDARY, checked on BOTH sides so the cap is proven to
+    #     be 128 rather than merely "some number".
+    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=("a" * 128) + "\n")
+    check("a 128-character receipt is accepted (the boundary itself)",
+          evidence_ref_of(rk, db) == "a" * 128, repr(evidence_ref_of(rk, db)))
+    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=("a" * 129) + "\n")
+    check("a 129-character receipt is refused",
+          evidence_ref_of(rk, db) is None, repr(evidence_ref_of(rk, db)))
+
+    # (e) EVERY WAY THE FILE CAN BE USELESS IS SILENT.
+    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=None)
+    check("an ABSENT receipt file records the row anyway, with no "
+          "--evidence-ref and no failure",
+          evidence_ref_of(rk, db) is None and proc.returncode == 0,
+          f"{evidence_ref_of(rk, db)!r} rc={proc.returncode}")
+    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content="")
+    check("an EMPTY receipt file records the row anyway, with no "
+          "--evidence-ref and no failure",
+          evidence_ref_of(rk, db) is None and proc.returncode == 0,
+          f"{evidence_ref_of(rk, db)!r} rc={proc.returncode}")
+
+    # (f) ONLY THE FIRST LINE IS READ, so a job cannot append a second value
+    #     and hope the last one wins.
+    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content="first\nsecond\n")
+    check("only the FIRST line of a receipt file is read",
+          evidence_ref_of(rk, db) == "first", repr(evidence_ref_of(rk, db)))
+
+    # (g) THE FLAG STILL DEMANDS ITS VALUE, like every other flag here.
+    proc = subprocess.run([WRAPPER, "--evidence-ref-file"],
+                          capture_output=True, text=True, timeout=60,
+                          env=unreachable_env(), cwd=REPO)
+    check("--evidence-ref-file with no value exits EX_USAGE (64)",
+          proc.returncode == 64, f"got {proc.returncode}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TIER 1 — THE CANARY JOB ITSELF (bin/gate-zero-canary.sh).
+#
+# The job has no work, so there is nothing to assert about what it computed.
+# What IS assertable is the receipt: it must be well-formed, it must be
+# accepted by the wrapper's own whitelist, and it must be DIFFERENT every run —
+# a constant token would let a row from last week answer a question about
+# today, which is the whole failure the canary exists to rule out.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def tier1_canary_job() -> None:
+    print()
+    print("TIER 1 — the Gate Zero canary job (bin/gate-zero-canary.sh)")
+
+    canary = os.path.join(REPO, "bin", "gate-zero-canary.sh")
+    work = tempfile.mkdtemp(prefix="carr-selftest-canary-")
+    tokens = []
+    for i in range(3):
+        path = os.path.join(work, f"receipt.{i}")
+        proc = subprocess.run([canary, path], capture_output=True, text=True, timeout=60)
+        check(f"canary run {i} exits 0", proc.returncode == 0, proc.stderr.strip())
+        with open(path) as fh:
+            tokens.append(fh.read().strip())
+
+    check("the canary mints a DISTINCT receipt on every run",
+          len(set(tokens)) == 3, repr(tokens))
+    check("every minted receipt matches the wrapper's whitelist",
+          all(re.fullmatch(r"[A-Za-z0-9:._-]{1,128}", t) for t in tokens),
+          repr(tokens))
+    check("every minted receipt names itself as a gate-zero canary receipt",
+          all(t.startswith("gatezero.canary:") for t in tokens), repr(tokens))
+
+    proc = subprocess.run([canary], capture_output=True, text=True, timeout=60)
+    check("the canary with no receipt path exits EX_USAGE (64)",
+          proc.returncode == 64, f"got {proc.returncode}")
+
+
 def main() -> int:
     print("run-scheduled-selftest — bin/run-scheduled.sh must never change what "
           "a job does, prints, or returns")
     tier1()
+    tier1_evidence_ref()
+    tier1_canary_job()
     tier1_throttle()
     tier1_refresh_rules()
     tier2()

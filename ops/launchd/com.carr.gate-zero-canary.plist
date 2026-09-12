@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    THE GATE ZERO SCHEDULER CANARY, AND IT IS WRITTEN DOWN UNINSTALLED.
+
+    This agent is listed in DEFINITION_ONLY in ops/config-as-code.py, so its
+    PRESENCE in ~/Library/LaunchAgents is a drift finding until Joe removes it
+    from that list deliberately. Activating a schedule is a human act; this
+    file is the definition of what would be activated, in the repo, where the
+    rest of the machine's config already lives.
+
+    WHAT IT IS FOR. Gate Zero's fourth predecessor step,
+    `step:scheduler-active-receipt`, asks whether the scheduler is really
+    running. The reader that judges it lives in
+    mcp-server/src/gate-zero-seam-readers.v5.js and wants an ops.run row whose
+    evidence_ref is not null, written by bin/run-scheduled.sh, plus a later
+    observation of that same run key and receipt. Nothing in the ledger could
+    supply that: on 2026-09-11 production held 28,309 runs, 21,894 of them from
+    this wrapper, and not one carrying an evidence_ref.
+
+    WHY A DISTINCT RUN KEY. Every other wrapper-driven agent passes
+    `launchd.run`, so the ledger cannot tell one job's dispatch from another's
+    by key alone. This one passes `gatezero.canary`, which is the key the gate
+    is pointed at and which nothing else writes.
+
+    WHY A RECEIPT FILE AND NOT A CONSTANT. The receipt path is handed to the
+    job AND to the wrapper (the wrapper's receipt flag is spelled out in
+    ProgramArguments below rather than here: a double hyphen is illegal inside
+    an XML comment, and writing one is what made notes-sweep the single plist
+    in this directory no strict XML parser could read, found 2026-08-14 by
+    tools/scheduler-truth.py). The job mints a fresh token per run and writes
+    it there; the wrapper reads it back after the child exits and binds the row
+    to it. A constant receipt would let a row from last month answer a question
+    about today, which is the exact failure this canary exists to rule out.
+
+    THE CADENCE IS HOURLY because the gate wants a recent dispatch, not a
+    frequent one, and because every fire costs one spooled row. The service's
+    declared grace in ops/config/services.json is sized for the 30-minute
+    run-spool flush on top of that interval.
+  -->
+  <key>Label</key><string>com.carr.gate-zero-canary</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>--evidence-ref-file</string>
+    <string>{{REPO}}/out/gate-zero-canary.receipt</string>
+    <string>gate-zero-canary</string>
+    <string>gatezero.canary</string>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/gate-zero-canary.sh</string>
+    <string>{{REPO}}/out/gate-zero-canary.receipt</string>
+  </array>
+
+  <key>StartInterval</key><integer>3600</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key><string>{{REPO}}/out/gate-zero-canary-launchd.log</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/gate-zero-canary-launchd.log</string>
+</dict>
+</plist>
