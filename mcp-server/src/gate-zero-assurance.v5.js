@@ -156,6 +156,36 @@ function fail(code, message, detail) {
   throw new V5BoundaryError(code, message, detail);
 }
 
+/**
+ * AMENDMENT 2's CLOSED SHAPE FOR AN EXPORTED CALLABLE, and every export of this
+ * module wears it. It is the same helper gate-zero-seam-readers.v5.js uses, for
+ * the same two reasons.
+ *
+ * (a) NOT CONSTRUCTABLE, AND WITHOUT QUOTING THIS FILE. A bound function is not
+ * a constructor and carries no `prototype`, so `new` and `Reflect.construct` are
+ * refused by the ENGINE before a line here runs; binding also means the engine's
+ * refusal names `function () { [native code] }` rather than reciting this
+ * module's own source text back to whoever probed it. Binding is neutral for an
+ * arrow, so no behaviour moves.
+ *
+ * (b) `instanceof` ANSWERS FALSE WITHOUT TOUCHING THE OPERAND. Without an own
+ * `Symbol.hasInstance` the intrinsic one walks the LEFT operand's prototype
+ * chain, which runs the CALLER's `getPrototypeOf` trap and can hand the caller's
+ * own thrown text back out of an exported callable. These exports have no
+ * membership question to answer: they are functions, and nothing is an instance
+ * of one. The guard is an arrow that ignores its argument, installed as a
+ * NON-WRITABLE, NON-CONFIGURABLE DATA property, on a FROZEN callable — so it
+ * cannot be replaced, cannot be redefined as an accessor, and no property of the
+ * export can be written over afterwards.
+ */
+function closedCallable(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return Object.freeze(closed);
+}
+
 // ---------------------------------------------------------------------------
 // The frozen plan's four bound predecessors, and the scheduler among them.
 // ---------------------------------------------------------------------------
@@ -220,6 +250,7 @@ export const V5_A02_GATE_ZERO_REASON_IDS = deepFreeze([
   "predecessor_outcome_reader_unavailable",
   "predecessor_set_incomplete",
   "scheduler_canary_digest_mismatch",
+  "scheduler_canary_seam_unavailable",
   "scheduler_canary_not_bound_to_receipt",
   "scheduler_readback_absent",
   "scheduler_readback_canary_mismatch",
@@ -395,10 +426,50 @@ function allReaderSeamsBound() {
 }
 
 /**
- * The one sentence that is true of every answer here once the readers are bound:
- * the reading is available and the POINTING is not.
+ * THE THREE SEAMS, ASKED ONE AT A TIME — and the reason this is a map rather
+ * than a boolean is the PR 1004 review's first finding.
+ *
+ * A single `readersBound` flag made every answer say the same thing about all
+ * three cards: with all three ruled the emission still reported that no
+ * predecessor or scheduler reader existed, and withdrawing ONE ruling reopened
+ * all three governance questions. Each card is its own ruling and its own seam,
+ * so each is reported on its own. `withdrawn()` names which of the three a
+ * caller is still owed, in card order, and every sentence and list below is
+ * derived from it rather than from a single yes/no.
  */
-const PRODUCER_POINTS_THE_READERS = "ruled_readers_bound_producer_unstaffed";
+const V5_A02_GATE_ZERO_READER_SEAM_KEYS = deepFreeze(["predecessor", "scheduler", "conclusion"]);
+
+const V5_A02_GATE_ZERO_READER_SEAM_BY_KEY = Object.freeze({
+  predecessor: V5_A02_PREDECESSOR_OUTCOME_READER_SEAM,
+  scheduler: V5_A02_SCHEDULER_READER_SEAM,
+  conclusion: V5_A02_GATE_CONCLUSION_READER_SEAM,
+});
+
+/**
+ * The governance question each unbound reader seam leaves open, and it is
+ * listed for THAT seam alone. Putting `null` back on card 12's ruling line
+ * reopens the scheduler question and neither of the other two.
+ */
+const V5_A02_GATE_ZERO_READER_QUESTIONS = Object.freeze({
+  predecessor: "which store an accepted predecessor outcome is read from",
+  scheduler: "which scheduler surface a canary and its readback are read from",
+  conclusion: "which surface a gate's own conclusion is read from",
+});
+
+/** Which of the three ruled reader seams have no bound holder, in card order. */
+function withdrawn() {
+  return V5_A02_GATE_ZERO_READER_SEAM_KEYS
+    .filter(key => !seamBound(V5_A02_GATE_ZERO_READER_SEAM_BY_KEY[key]));
+}
+
+/**
+ * The one sentence that is true of every answer here once ALL THREE readers are
+ * bound: the evidence surfaces are available and the POINTING is not. It is an
+ * opaque token on purpose — the PR 1004 review's second finding was that a
+ * branch-owned value carrying a word of the closed union is a word a consumer
+ * can pattern-match, whatever it was meant to say.
+ */
+const PRODUCER_SEAT_UNSTAFFED = "evidence_seams_bound_producer_unstaffed";
 
 // ---------------------------------------------------------------------------
 // checkable_done 1 — "WR prerequisites and scheduler canary/readback join
@@ -413,7 +484,7 @@ const PRODUCER_POINTS_THE_READERS = "ruled_readers_bound_producer_unstaffed";
  * Neither reader exists, so this answers `unavailable` and names both — for
  * every caller, on every input, with or without one.
  */
-export function readGateZeroPredecessorJoin() {
+export const readGateZeroPredecessorJoin = closedCallable(() => {
   const predecessorReader = boundSeam(V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, "readOutcome");
   const schedulerReader = boundSeam(V5_A02_SCHEDULER_READER_SEAM, "readCanary");
   const stood = {
@@ -427,12 +498,31 @@ export function readGateZeroPredecessorJoin() {
   // given; a tree with `null` back on the ruling lines reproduces this object's
   // exact digest, and gate-zero-assurance.v5.test.mjs proves it against the
   // digest main published.
-  if (predecessorReader === null || schedulerReader === null)
+  const seams = [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, V5_A02_SCHEDULER_READER_SEAM];
+  if (predecessorReader === null && schedulerReader === null)
     return unavailable(
       "gate_zero_predecessor_join",
       "predecessor_outcome_reader_unavailable",
       "no authoritative accepted-outcome store and no scheduler reader exist to read the four predecessors, the canary or its readback from",
-      [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, V5_A02_SCHEDULER_READER_SEAM],
+      seams,
+      stood);
+  // AND ONE CARD AT A TIME. Each of the two seams has its own ruling, so each
+  // absence is its own refusal: a withdrawn card 11 says nothing about card 12,
+  // and the reason id names the seam that is actually missing rather than always
+  // naming the first one.
+  if (predecessorReader === null)
+    return unavailable(
+      "gate_zero_predecessor_join",
+      "predecessor_outcome_reader_unavailable",
+      "no authoritative accepted-outcome store is bound to name the four predecessors, and the ruled scheduler canary seam is bound",
+      seams,
+      stood);
+  if (schedulerReader === null)
+    return unavailable(
+      "gate_zero_predecessor_join",
+      "scheduler_canary_seam_unavailable",
+      "the ruled accepted-outcome seam for the four predecessors is bound, and no authoritative scheduler surface is bound to name the canary or the observation that answers it",
+      seams,
       stood);
   // AND THE RULED ONE, which refuses for a different and more advanced reason.
   // Both readers are bound and either would answer about a row. Nothing here can
@@ -443,12 +533,11 @@ export function readGateZeroPredecessorJoin() {
   return unavailable(
     "gate_zero_predecessor_join",
     "gate_zero_producer_seam_unavailable",
-    "the ruled readers for the four predecessors and for the scheduler canary are bound, and no seat holds the producer that would say which accepted outcome and which canary row a Gate Zero run stands on",
-    [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, V5_A02_SCHEDULER_READER_SEAM,
-      V5_A02_GATE_ZERO_PRODUCER_SEAM],
+    "the ruled evidence seams for the four predecessors and for the scheduler canary are bound, and no seat holds the producer that would name which accepted outcome and which canary row a Gate Zero run stands on",
+    [...seams, V5_A02_GATE_ZERO_PRODUCER_SEAM],
     stood,
-    PRODUCER_POINTS_THE_READERS);
-}
+    PRODUCER_SEAT_UNSTAFFED);
+});
 
 // ---------------------------------------------------------------------------
 // checkable_done 2 — "failed injected gate cannot claim green". The propagation
@@ -462,7 +551,7 @@ export function readGateZeroPredecessorJoin() {
  * caller-supplied list of gates with their own conclusions on them is a claim
  * about CI, not a reading of it. No gate-conclusion reader exists.
  */
-export function readGateGraphAssurance() {
+export const readGateGraphAssurance = closedCallable(() => {
   const conclusionReader = boundSeam(V5_A02_GATE_CONCLUSION_READER_SEAM, "readConclusion");
   // The conclusions vocabulary is an EXPORTED CONSTANT, not a field of this
   // answer: an unavailable answer recites nothing a caller could mistake for a
@@ -483,11 +572,11 @@ export function readGateGraphAssurance() {
   return unavailable(
     "gate_graph_assurance",
     "gate_zero_producer_seam_unavailable",
-    "the ruled reader of gate conclusions is bound, and no seat holds the producer that would say which commit and which declared check a Gate Zero run stands on",
+    "the ruled evidence seam for gate conclusions is bound, and no seat holds the producer that would name which head revision and which declared check a Gate Zero run stands on",
     [V5_A02_GATE_CONCLUSION_READER_SEAM, V5_A02_GATE_ZERO_PRODUCER_SEAM],
     stood,
-    PRODUCER_POINTS_THE_READERS);
-}
+    PRODUCER_SEAT_UNSTAFFED);
+});
 
 // ---------------------------------------------------------------------------
 // The privileged path, and the refusal that stands where it would be.
@@ -510,22 +599,32 @@ export function readGateGraphAssurance() {
  * reader gets instead is the truth: the join is unavailable, and here is every
  * seam it is owed.
  */
-export function emitGateZeroOutcome(request) {
-  // eslint-disable-next-line no-unused-vars, prefer-rest-params -- the arity IS
-  // the boundary, and the request is deliberately not read.
-  if (arguments.length > 1)
+export const emitGateZeroOutcome = closedCallable((...received) => {
+  // THE ARITY IS STILL THE BOUNDARY, counted from a rest parameter because an
+  // arrow has no `arguments` object — and amendment 2 clause (a) requires an
+  // arrow or a bound function. The request itself is as unread as it ever was:
+  // `received` is measured and never looked into.
+  if (received.length > 1)
     fail("gate_zero_producer_is_not_an_argument",
       "emitGateZeroOutcome takes one request; the producer is bound by this module",
-      { arguments_received: arguments.length, required_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM });
+      { arguments_received: received.length, required_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM });
 
   const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
-  const readersBound = allReaderSeamsBound();
+  // THE THREE CARDS, ASKED SEPARATELY. `owed` is the ones with no bound holder,
+  // in card order, and every sentence and list below reads it rather than a
+  // single flag: with all three bound this answer no longer says a predecessor or
+  // scheduler reader is missing, and with ONE withdrawn it reopens that card's
+  // governance question alone.
+  const owed = withdrawn();
+  const readersBound = owed.length === 0;
   return unavailable(
     "gate_zero_outcome_emission",
     "gate_zero_producer_seam_unavailable",
     readersBound
-      ? "the three ruled evidence readers are bound, and the producer role is ruled provisionally to a charter that no seat holds, with r7 still carrying no entry"
-      : "the producer role is ruled provisionally but r7 carries no entry, no seat holds the oracle, and no reader exists for the evidence one would stand on",
+      ? "the three ruled evidence seams are bound, and the producer role is ruled provisionally to a charter that no seat holds, with r7 still carrying no entry"
+      : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
+        ? "the producer role is ruled provisionally but r7 carries no entry, no seat holds the oracle, and no reader exists for the evidence one would stand on"
+        : "not every ruled evidence seam is bound, and the producer role is ruled provisionally to a charter that no seat holds, with r7 still carrying no entry",
     [...V5_A02_GATE_ZERO_OWED_SEAMS],
     {
       decision_ids: [...V5_A02_DECISION_IDS],
@@ -535,9 +634,18 @@ export function emitGateZeroOutcome(request) {
       // one step: a reading is evidence, and this field is a signature.
       passable: false,
       not_passable_because: readersBound
-        ? "the ruled producer role is unstaffed and unregistered in r7, so nothing may point the three bound readers at the rows a Gate Zero run would stand on"
-        : "the ruled producer role is unstaffed and unregistered in r7, and no authoritative predecessor, scheduler or gate reader exists",
+        ? "the ruled producer role is unstaffed and unregistered in r7, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on"
+        : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
+          ? "the ruled producer role is unstaffed and unregistered in r7, and no authoritative predecessor, scheduler or gate reader exists"
+          : "the ruled producer role is unstaffed and unregistered in r7, and not every ruled evidence seam is bound",
       producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
+      // EACH CARD, ON ITS OWN LINE. `seams_bound` above carries all four seams
+      // with their live state; these three say the same thing under the names
+      // the two reader answers already use, so a consumer reading only this
+      // answer can still tell WHICH of the three is missing.
+      predecessor_outcome_reader_bound: !owed.includes("predecessor"),
+      scheduler_reader_bound: !owed.includes("scheduler"),
+      gate_conclusion_reader_bound: !owed.includes("conclusion"),
       producer_bound: boundSeam(V5_A02_GATE_ZERO_PRODUCER_SEAM, "emitOutcome") !== null,
       producer_is_caller_supplied: false,
       // What decision 20c83902 ruled, reported as ruled. These are NOT read
@@ -568,7 +676,17 @@ export function emitGateZeroOutcome(request) {
       // AND the join fields. Null because there is no join to report, not
       // because this one happened to fail.
       join: null,
-      join_unavailable_because: "no authoritative predecessor-outcome or scheduler reader exists to join",
+      // AND THE REASON THERE IS NO JOIN, PER CARD. The 2026-09-12 review found
+      // this sentence claiming no predecessor or scheduler reader existed while
+      // both were bound; it now says which of the two is missing, and says
+      // neither is when neither is.
+      join_unavailable_because: owed.includes("predecessor") && owed.includes("scheduler")
+        ? "no authoritative predecessor-outcome or scheduler reader exists to join"
+        : owed.includes("predecessor")
+          ? "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against"
+          : owed.includes("scheduler")
+            ? "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against"
+            : "the two ruled evidence seams are bound and no seat holds the producer that would name the rows to join",
       predecessor_evidence_read: null,
       // The four the ruling answered are gone from this list and reported
       // above instead. What is left is what is still genuinely open, plus the
@@ -577,25 +695,22 @@ export function emitGateZeroOutcome(request) {
       // 13, and the readers those rulings switched on are bound above. They are
       // listed again the moment a ruling line goes back to null, because this
       // list is derived from the bindings rather than maintained beside them.
-      undecided_governance_questions: deepFreeze(readersBound
-        ? [
-          "which independent seat holds oracle:gate-producer:gate-zero-read-only",
-          "whether r7 itself carries the registration, which today it does not",
-        ]
-        : [
-          "which independent seat holds oracle:gate-producer:gate-zero-read-only",
-          "whether r7 itself carries the registration, which today it does not",
-          "which store an accepted predecessor outcome is read from",
-          "which scheduler surface a canary and its readback are read from",
-          "which surface a gate's own conclusion is read from",
-        ]),
+      // The two cards 9 and 10 left open, plus ONE ENTRY PER WITHDRAWN CARD in
+      // card order — so withdrawing card 12 reopens the scheduler question and
+      // not the other two, which is the defect this list carried until now. With
+      // all three ruled the list is the two producer questions and nothing else.
+      undecided_governance_questions: deepFreeze([
+        "which independent seat holds oracle:gate-producer:gate-zero-read-only",
+        "whether r7 itself carries the registration, which today it does not",
+        ...owed.map(key => V5_A02_GATE_ZERO_READER_QUESTIONS[key]),
+      ]),
     },
     // WHO DECIDED THIS REFUSAL. While no reader is bound it is decided by there
     // being nothing authoritative to read; once the three ruled readers are
     // bound it is decided by the producer seat nobody holds, which is a
     // different fact and deserves a different word.
-    readersBound ? PRODUCER_POINTS_THE_READERS : "no_authoritative_reader");
-}
+    readersBound ? PRODUCER_SEAT_UNSTAFFED : "no_authoritative_reader");
+});
 
 // ---------------------------------------------------------------------------
 // The closed, versioned policy preimage and its digest.
@@ -606,8 +721,7 @@ export function emitGateZeroOutcome(request) {
 // receipt, and not evidence for any consumer gate.
 // ---------------------------------------------------------------------------
 
-export function v5A02GateZeroPolicyPreimage() {
-  return {
+export const v5A02GateZeroPolicyPreimage = closedCallable(() => ({
     schema_version: V5_A02_GATE_ZERO_SCHEMA_VERSION,
     policy_version: V5_A02_POLICY_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -630,13 +744,10 @@ export function v5A02GateZeroPolicyPreimage() {
     authoritative_readers_bound: allReaderSeamsBound(),
     public_surface_answers: "unavailable",
     gate_zero_passable: false,
-  };
-}
+  }));
 
-export function v5A02GateZeroPolicyDigest() {
-  return digest(v5A02GateZeroPolicyPreimage());
-}
+export const v5A02GateZeroPolicyDigest =
+  closedCallable(() => digest(v5A02GateZeroPolicyPreimage()));
 
-export function v5A02GateZeroPolicyCanonicalBytes() {
-  return canonicalJson(v5A02GateZeroPolicyPreimage());
-}
+export const v5A02GateZeroPolicyCanonicalBytes =
+  closedCallable(() => canonicalJson(v5A02GateZeroPolicyPreimage()));

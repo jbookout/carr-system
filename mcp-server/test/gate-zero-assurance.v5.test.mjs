@@ -34,6 +34,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { types } from "node:util";
 
 import { digest } from "../src/artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
@@ -488,7 +489,7 @@ test("SURFACE: the three ruled readers are bound, and the producer never is", ()
   assert.equal(join.predecessor_outcome_reader_bound, true);
   assert.equal(join.scheduler_reader_bound, true);
   assert.equal(join.reason_id, "gate_zero_producer_seam_unavailable");
-  assert.equal(join.decided_by, "ruled_readers_bound_producer_unstaffed");
+  assert.equal(join.decided_by, "evidence_seams_bound_producer_unstaffed");
   assert.deepEqual(join.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
 
   const graph = readGateGraphAssurance();
@@ -550,12 +551,13 @@ test("SURFACE: the three ruled readers are bound, and the producer never is", ()
  * WHAT THE PIN COVERS, AND THE ONE PLACE IT CANNOT.
  *
  * The two reader answers are pinned WHOLE: nothing about them may move in an
- * unruled tree. `emitGateZeroOutcome` carries four fields this change added on
+ * unruled tree. `emitGateZeroOutcome` carries fields this change added on
  * purpose — cards 9 and 10, which are a charter and a sealed packet and have
- * nothing to do with the rulings switch — so it is pinned with those four (and
- * the four the registration gained beneath them) removed. Both halves are
- * asserted: the additions are exactly these eight names, and everything that is
- * not one of them is main's bytes.
+ * nothing to do with the rulings switch, and the three per-card booleans the
+ * 2026-09-12 review asked for, which report each ruled reader's state
+ * individually — so it is pinned with those removed. Both halves are asserted:
+ * the additions are exactly these eleven names, and everything that is not one
+ * of them is main's bytes.
  */
 const CARD_9_AND_10_ANSWER_FIELDS = Object.freeze([
   "oracle_seat_bound",
@@ -570,10 +572,22 @@ const CARD_9_AND_10_REGISTRATION_FIELDS = Object.freeze([
   "r7_entry_amendment_applied",
 ]);
 
-/** The answer with cards 9 and 10 lifted back out of it. */
+/**
+ * The three booleans that say which ruled reader is bound, one card at a time.
+ * They are this branch's addition to the emitted answer — the two reader answers
+ * already carried the same names on main — so the pin below is taken without
+ * them and their own values are asserted per permutation further down.
+ */
+const PER_CARD_ANSWER_FIELDS = Object.freeze([
+  "predecessor_outcome_reader_bound",
+  "scheduler_reader_bound",
+  "gate_conclusion_reader_bound",
+]);
+
+/** The answer with cards 9 and 10 and the three per-card booleans lifted out. */
 function withoutCards9And10(answer) {
   const stripped = { ...answer };
-  for (const field of CARD_9_AND_10_ANSWER_FIELDS) {
+  for (const field of [...CARD_9_AND_10_ANSWER_FIELDS, ...PER_CARD_ANSWER_FIELDS]) {
     assert.ok(Object.hasOwn(stripped, field), `${field} is not on the answer`);
     delete stripped[field];
   }
@@ -611,7 +625,16 @@ after(() => {
   for (const base of stagedTrees) rmSync(base, { recursive: true, force: true });
 });
 
-function stageUnruledTree() {
+/**
+ * A copy of src with the NAMED cards' ruling lines set back to null — by default
+ * all three, which is the tree main shipped, and otherwise exactly the ones asked
+ * for. Withdrawing one ruling at a time is how the 2026-09-12 review's first
+ * finding is tested: three cards, three separate seams, three separate answers.
+ *
+ * Nothing in src is edited, no argument of any export selects the copy, and no
+ * environment variable points at it: the copy is reached by importing it.
+ */
+function stageTree(withdrawnCards = [0, 1, 2]) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
   const base = mkdtempSync(join(cache, "gate-zero-unruled-"));
@@ -621,15 +644,25 @@ function stageUnruledTree() {
 
   const rulingsPath = join(target, "gate-zero-seam-rulings.v5.js");
   let rulings = readFileSync(rulingsPath, "utf8");
-  for (const anchor of RULED_DECISION_LINES) {
+  RULED_DECISION_LINES.forEach((anchor, index) => {
     assert.equal(rulings.split(anchor).length - 1, 1,
       "a staging anchor no longer matches a ruling line in src");
-    rulings = rulings.replace(anchor, NULL_DECISION_LINE);
-  }
-  assert.equal(rulings.split(NULL_DECISION_LINE).length - 1, 3,
+    if (withdrawnCards.includes(index)) rulings = rulings.replace(anchor, NULL_DECISION_LINE);
+  });
+  assert.equal(rulings.split(NULL_DECISION_LINE).length - 1, withdrawnCards.length,
     "the staging left the wrong number of unruled lines");
   writeFileSync(rulingsPath, rulings);
   return target;
+}
+
+/** The tree main shipped: all three rulings withdrawn. */
+function stageUnruledTree() {
+  return stageTree();
+}
+
+/** One staged tree's gate module, imported from the copy. */
+function gateOfTree(target) {
+  return import(pathToFileURL(join(target, "gate-zero-assurance.v5.js")).href);
 }
 
 test("SWITCH: with the three rulings back to null, the answers are main's bytes", async () => {
@@ -676,26 +709,498 @@ test("SWITCH: the shipped answers are NOT main's bytes, so the pin can fail", ()
     "the emitted answer moved only by the card 9 and 10 fields");
 });
 
+// ---------------------------------------------------------------------------
+// ONE CARD AT A TIME — the 2026-09-12 review's first finding.
+//
+// Three cards, three rulings, three seams. The defect was a single
+// `readersBound` flag: with all three ruled the emission still reported that no
+// predecessor or scheduler reader existed, and withdrawing ONE ruling reopened
+// all three governance questions. Every permutation below is a staged tree with
+// exactly one ruling line back to null, and each is asserted to move exactly its
+// own card's report and nothing else.
+// ---------------------------------------------------------------------------
+
+/** The three ruled cards, in the order their ruling lines sit in the table. */
+const READER_CARDS = Object.freeze([
+  Object.freeze({
+    key: "predecessor", card: "card:11", bound: "predecessor_outcome_reader_bound",
+    seam: V5_A02_PREDECESSOR_OUTCOME_READER_SEAM,
+    question: "which store an accepted predecessor outcome is read from",
+  }),
+  Object.freeze({
+    key: "scheduler", card: "card:12", bound: "scheduler_reader_bound",
+    seam: V5_A02_SCHEDULER_READER_SEAM,
+    question: "which scheduler surface a canary and its readback are read from",
+  }),
+  Object.freeze({
+    key: "conclusion", card: "card:13", bound: "gate_conclusion_reader_bound",
+    seam: V5_A02_GATE_CONCLUSION_READER_SEAM,
+    question: "which surface a gate's own conclusion is read from",
+  }),
+]);
+
+/** Cards 9 and 10, which no ruling line here can close. */
+const PRODUCER_QUESTIONS = Object.freeze([
+  "which independent seat holds oracle:gate-producer:gate-zero-read-only",
+  "whether r7 itself carries the registration, which today it does not",
+]);
+
+/** What the emission says about the join for each state of the two join cards. */
+const JOIN_SENTENCES = Object.freeze({
+  both: "no authoritative predecessor-outcome or scheduler reader exists to join",
+  predecessor: "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against",
+  scheduler: "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against",
+  neither: "the two ruled evidence seams are bound and no seat holds the producer that would name the rows to join",
+});
+
+test("PER READER: with all three ruled, nothing reports a reader as missing", () => {
+  const emitted = emitGateZeroOutcome();
+  // The list the review found wrong: with three live rulings it is cards 9 and
+  // 10 and nothing else.
+  assert.deepEqual([...emitted.undecided_governance_questions], [...PRODUCER_QUESTIONS]);
+  for (const card of READER_CARDS) {
+    assert.equal(emitted.undecided_governance_questions.includes(card.question), false, card.card);
+    assert.equal(emitted[card.bound], true, card.bound);
+  }
+  // And the sentence the review quoted: it may not say a reader is absent when
+  // none is.
+  assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.neither);
+  assert.equal(emitted.join_unavailable_because.includes("no authoritative predecessor-outcome or scheduler reader exists"),
+    false, "the emission still reports both readers missing while both are bound");
+  assert.equal(readGateZeroPredecessorJoin().reason_id, "gate_zero_producer_seam_unavailable");
+  assert.equal(readGateGraphAssurance().reason_id, "gate_zero_producer_seam_unavailable");
+});
+
+test("PER READER: withdrawing one ruling reopens that card's question and no other", async () => {
+  const digests = new Map();
+  for (const [index, card] of READER_CARDS.entries()) {
+    const target = stageTree([index]);
+    // THE STAGING TARGETED THE NAMED CARD, proved in the staged ruling table
+    // itself rather than inferred from the answer that came out of it. A fixture
+    // that nulled the wrong line would otherwise pass every clause below by
+    // accident.
+    const rulings = await import(
+      pathToFileURL(join(target, "gate-zero-seam-rulings.v5.js")).href);
+    assert.equal(rulings.seamRulingRef(card.card), null, `${card.card} is still ruled`);
+    for (const other of READER_CARDS.filter(one => one !== card))
+      assert.notEqual(rulings.seamRulingRef(other.card), null,
+        `${other.card} was withdrawn as well as ${card.card}`);
+
+    const tree = await gateOfTree(target);
+    const emitted = tree.emitGateZeroOutcome();
+    digests.set(card.key, digest(emitted));
+
+    // ONE reader question, and it is this card's.
+    assert.deepEqual([...emitted.undecided_governance_questions],
+      [...PRODUCER_QUESTIONS, card.question], card.card);
+    // The three per-card booleans and the whole seam list agree on WHICH.
+    const bound = new Map(emitted.seams_bound.map(entry => [entry.seam, entry.bound]));
+    for (const one of READER_CARDS) {
+      assert.equal(emitted[one.bound], one !== card, `${one.bound} with ${card.card} withdrawn`);
+      assert.equal(bound.get(one.seam), one !== card, `${one.seam} with ${card.card} withdrawn`);
+      assert.equal(emitted.owed_seams.includes(one.seam), one === card, one.seam);
+    }
+    // And the two reader answers, each about its own seams.
+    const joined = tree.readGateZeroPredecessorJoin();
+    const graph = tree.readGateGraphAssurance();
+    assert.equal(joined.predecessor_outcome_reader_bound, card.key !== "predecessor");
+    assert.equal(joined.scheduler_reader_bound, card.key !== "scheduler");
+    assert.equal(graph.gate_conclusion_reader_bound, card.key !== "conclusion");
+    if (card.key === "predecessor") {
+      assert.equal(joined.reason_id, "predecessor_outcome_reader_unavailable");
+      assert.ok(joined.unavailable_because.includes("the ruled scheduler canary seam is bound"),
+        "the join still reports the scheduler seam as absent");
+      assert.equal(graph.reason_id, "gate_zero_producer_seam_unavailable");
+      assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.predecessor);
+    }
+    if (card.key === "scheduler") {
+      assert.equal(joined.reason_id, "scheduler_canary_seam_unavailable");
+      assert.ok(joined.unavailable_because.startsWith("the ruled accepted-outcome seam"),
+        "the join still reports the predecessor seam as absent");
+      assert.equal(graph.reason_id, "gate_zero_producer_seam_unavailable");
+      assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.scheduler);
+    }
+    if (card.key === "conclusion") {
+      assert.equal(joined.reason_id, "gate_zero_producer_seam_unavailable");
+      assert.equal(graph.reason_id, "gate_conclusion_reader_unavailable");
+      assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.neither);
+    }
+    // A withdrawal is neither the shipped answer nor the all-three-null one.
+    assert.notEqual(digest(emitted), digest(emitGateZeroOutcome()),
+      `withdrawing ${card.card} changed nothing`);
+    assert.notEqual(emitted.unavailable_because,
+      "the producer role is ruled provisionally but r7 carries no entry, no seat holds the oracle, and no reader exists for the evidence one would stand on",
+      `withdrawing ${card.card} answered as though all three were withdrawn`);
+    // Whatever it answers is still registered, and still a refusal.
+    for (const answer of [emitted, joined, graph]) {
+      assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes(answer.reason_id), answer.reason_id);
+      assert.equal(answer.decision, "refuse");
+      assert.equal(answer.status, "unavailable");
+      assert.equal(answer.request_read, false);
+    }
+    assert.equal(emitted.passable, false);
+  }
+  // MUTATION CONTROL ACROSS THE PERMUTATIONS. Three different withdrawals, three
+  // different answers: a gate that still read the three cards as one flag would
+  // hand back identical bytes for all three, which is the defect itself.
+  assert.equal(new Set(digests.values()).size, 3,
+    "two different withdrawals produced the same answer");
+  // And none of the three is the all-withdrawn answer either.
+  const allWithdrawn = digest((await gateOfTree(stageTree())).emitGateZeroOutcome());
+  for (const [key, one] of digests)
+    assert.notEqual(one, allWithdrawn, `withdrawing ${key} alone answered as three withdrawals`);
+});
+
+// ---------------------------------------------------------------------------
+// THE CLOSED UNION, SWEPT OVER EVERY BRANCH-OWNED STRING — the review's second
+// finding. The old sweep read a reduced exact-match set, so a new value carrying
+// `read` or `commit` passed.
+//
+// WHAT IS SWEPT AND WHAT IS NOT, because on this surface that boundary is the
+// whole design. Main's own vocabulary is saturated with union words — the seam
+// names end in `-reader`, `request_read` and `caller_evidence_admitted` are
+// fields of every answer, `predecessor_set_incomplete` is a registered reason —
+// and renaming them would change what Gate Zero says to every caller, which
+// amendment 3 of 2026-09-12 puts out of scope for a slice that forwards them. So
+// the boundary is AMENDMENT 3's, applied string by string: a string main already
+// answered with is main's, and EVERY OTHER STRING ON THE SURFACE IS THIS
+// BRANCH'S AND IS SWEPT WITH NO EXEMPTION AT ALL.
+//
+// AND MAIN'S HALF IS PROVED, NOT ASSERTED. The baseline is read out of the staged
+// unruled tree — whose three answers are pinned to main's bytes above — and its
+// digest is a LITERAL taken from origin/main at 64b22a4b. The eight strings this
+// branch adds to that tree are declared below and removed before the digest is
+// taken, so a ninth addition cannot slip into the baseline and exempt itself: it
+// moves the digest and this test goes red.
+// ---------------------------------------------------------------------------
+
+/** The closed union, verbatim from the standing rule of 2026-09-11. */
+const PRIVILEGED_WORDS = Object.freeze([
+  "allow", "commit", "prompt", "suppress", "release", "read", "covered", "drafted",
+  "proposed", "queued", "healthy", "passing", "ok", "pass", "satisfied", "complete",
+  "admitted", "resumed", "attended", "verified", "present", "equivalent",
+  "operational", "active", "green", "joins_exactly", "coverage_complete", "favorable",
+]);
+
 /**
- * NO CALLER-SUPPLIED READER, AND NO ROUTE TO ONE. The readers arrive as a
- * module-private import; the only thing that decides whether a seam is bound is
- * a decision id committed to a file. Proved in the source rather than only in
- * behaviour, so a future `export function bindReader` is red on sight.
+ * Every way one string can carry a privileged word: it IS one, or it CONTAINS one
+ * anywhere with case folded away, plus the two shapes the rule names by pattern.
+ */
+function privilegedWordsIn(text) {
+  const folded = text.toLowerCase();
+  const found = [];
+  for (const word of PRIVILEGED_WORDS) {
+    if (folded === word) found.push(`is ${word}`);
+    else if (folded.includes(word)) found.push(`carries ${word}`);
+  }
+  if (/^would_/.test(folded)) found.push("would_ prefix");
+  if (folded.includes("_if_authoritative")) found.push("_if_authoritative");
+  return found;
+}
+
+/** Every key at every depth and every string leaf, with where it was found. */
+function collectStrings(value, path, into) {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => collectStrings(entry, `${path}[${index}]`, into));
+    return into;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (!into.has(key)) into.set(key, `${path}.${key} (key)`);
+      collectStrings(entry, `${path}.${key}`, into);
+    }
+    return into;
+  }
+  if (typeof value === "string" && !into.has(value)) into.set(value, path);
+  return into;
+}
+
+const DIGEST_SHAPE = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * Every string a module namespace can hand a consumer: each export NAME, each
+ * key and string leaf of each exported value, and the RETURN of every callable
+ * export.
+ *
+ * TWO RETURNS ARE NORMALIZED, AND THE NORMALIZATION IS PROVED. The policy digest
+ * is a hex identity — it carries no vocabulary at all, and it is asserted to BE
+ * the digest of the preimage before it is skipped. The canonical bytes are that
+ * same preimage serialized, asserted to round-trip and to digest to the same
+ * value, and then walked as the STRUCTURE they stand for — so the preimage's own
+ * strings are swept, once, rather than a serialization of them being swept as one
+ * enormous string.
+ */
+function surfaceVocabulary(namespace, label) {
+  const into = new Map();
+  for (const [name, value] of Object.entries(namespace)) {
+    if (!into.has(name)) into.set(name, `${label}.${name} (export name)`);
+    if (typeof value !== "function") { collectStrings(value, `${label}.${name}`, into); continue; }
+    const answer = value();
+    if (typeof answer !== "string") {
+      collectStrings(answer, `${label}.${name}()`, into);
+      continue;
+    }
+    const preimageDigest = digest(namespace.v5A02GateZeroPolicyPreimage());
+    if (DIGEST_SHAPE.test(answer)) {
+      assert.equal(answer, preimageDigest, `${label}.${name} is not the preimage's digest`);
+      continue;
+    }
+    const parsed = JSON.parse(answer);
+    assert.equal(JSON.stringify(parsed), answer, `${label}.${name} is not canonical bytes`);
+    assert.equal(digest(parsed), preimageDigest, `${label}.${name} is not the preimage`);
+    collectStrings(parsed, `${label}.${name}() parsed`, into);
+  }
+  return into;
+}
+
+/**
+ * MAIN'S VOCABULARY, PINNED. Taken from `origin/main` at 64b22a4b by walking the
+ * unmodified module's whole export surface with the function above: 197 distinct
+ * strings, digested as a sorted list. A recomputation from src would confirm
+ * itself; a literal cannot.
+ */
+const MAIN_SURFACE_VOCABULARY_DIGEST =
+  "sha256:0c0d1630fcd1f605ab56b56cb3a6294cff6c8f3e78145c5325ef5f01e4cefffa";
+const MAIN_SURFACE_VOCABULARY_SIZE = 197;
+
+/**
+ * Every string this branch adds to the UNRULED surface, and nothing else may be
+ * added without appearing here. Seven are cards 9 and 10 — a charter ref, its
+ * decision, the r7 amendment decision and the field names that carry them — and
+ * the eighth is the reason id the per-card refusal needed. Each is asserted to be
+ * present and to carry no privileged word, so this list cannot be used to bless
+ * one: a declared string that failed the sweep would fail it here.
+ */
+const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
+  "311a9af5-3685-4c47-a158-f8dd70870ca1",
+  "8a1dad08-8707-4bb0-a159-c2831a00cea2",
+  "charter:reviewer",
+  "oracle_seat_charter_decision_ref",
+  "oracle_seat_charter_ref",
+  "r7_entry_amendment_applied",
+  "r7_entry_amendment_decision_ref",
+  "scheduler_canary_seam_unavailable",
+]);
+
+test("SWEEP: the closed union, over every branch-owned string the surface hands back", async () => {
+  const unruled = await gateOfTree(stageTree());
+  const unruledVocabulary = surfaceVocabulary(unruled, "unruled");
+  const baseline = [...unruledVocabulary.keys()]
+    .filter(text => !BRANCH_ADDED_SURFACE_STRINGS.includes(text)).sort();
+  assert.equal(baseline.length, MAIN_SURFACE_VOCABULARY_SIZE,
+    "the unruled surface no longer carries main's vocabulary");
+  assert.equal(digest(baseline), MAIN_SURFACE_VOCABULARY_DIGEST,
+    "a string this branch added is not declared, or main's baseline moved");
+  for (const added of BRANCH_ADDED_SURFACE_STRINGS) {
+    assert.ok(unruledVocabulary.has(added), `${added} is declared but is not on the surface`);
+    assert.deepEqual(privilegedWordsIn(added), [], `the declared addition ${added} is privileged`);
+  }
+  const main = new Set(baseline);
+
+  // Every tree this branch can be switched into, the shipped one first.
+  const namespaces = [["live", surface]];
+  for (const [index, card] of READER_CARDS.entries())
+    namespaces.push([`withdrawn:${card.key}`, await gateOfTree(stageTree([index]))]);
+  namespaces.push(["unruled", unruled]);
+
+  const branchOwned = new Map();
+  const sweep = (vocabulary, label) => {
+    for (const [text, where] of vocabulary) {
+      if (main.has(text)) continue;
+      branchOwned.set(text, `${label} ${where}`);
+      assert.deepEqual(privilegedWordsIn(text), [],
+        `${label} ${where} carries a privileged word: ${JSON.stringify(text)}`);
+    }
+  };
+  for (const [label, namespace] of namespaces)
+    sweep(surfaceVocabulary(namespace, label), label);
+
+  // AND OVER EVERY CALLER-CONTROLLED SHAPE, including the reviewer's one-gate
+  // construction: a sweep that only ever saw the no-argument answer would not
+  // have seen a value a request could have put there.
+  for (const [name, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT)
+    for (const shape of callerControlledShapes())
+      sweep(collectStrings(fn(shape), `${name}(shape)`, new Map()), name);
+
+  // NON-VACUOUS: the sweep has branch-owned strings to look at. Six is the count
+  // this branch ships — the opaque decided_by token and the five sentences the
+  // ruled and part-ruled refusals answer with — so a change that swept nothing
+  // fails here rather than passing quietly.
+  assert.ok(branchOwned.size >= 6,
+    `the sweep found only ${branchOwned.size} branch-owned strings: ${[...branchOwned.keys()]}`);
+});
+
+test("SWEEP: the sweep catches what it exists to catch", () => {
+  // Exact, substring, case, and the two patterns the rule names.
+  assert.deepEqual(privilegedWordsIn("ok"), ["is ok"]);
+  assert.ok(privilegedWordsIn("ruled_readers_bound_producer_unstaffed").includes("carries read"),
+    "the name this branch replaced would pass the sweep");
+  assert.ok(privilegedWordsIn("which COMMIT a run stands on").includes("carries commit"));
+  // `would_` and `_if_authoritative` are the two patterns the rule names; `join`
+  // on its own is not a union word, and the sweep must not pretend it is.
+  assert.deepEqual(privilegedWordsIn("would_join_exactly_if_authoritative"),
+    ["would_ prefix", "_if_authoritative"]);
+  assert.deepEqual(privilegedWordsIn("joins_exactly"), ["is joins_exactly"]);
+  assert.deepEqual(privilegedWordsIn("evidence_seams_bound_producer_unstaffed"), [],
+    "the replacement name is itself privileged");
+  // The walker reaches keys, leaves, nested arrays and a callable's return.
+  const reached = collectStrings({ outer: [{ inner: "leaf" }] }, "$", new Map());
+  for (const text of ["outer", "inner", "leaf"]) assert.ok(reached.has(text), text);
+  const returned = surfaceVocabulary({ answered: () => ({ nested: ["value"] }) }, "probe");
+  for (const text of ["answered", "nested", "value"]) assert.ok(returned.has(text), text);
+  // AND THE BOUNDARY IS LOAD-BEARING: the live surface does carry union words, in
+  // main's vocabulary, so a sweep with no boundary would fail and one with a
+  // boundary that admitted everything would prove nothing.
+  const privileged = [...surfaceVocabulary(surface, "live").keys()]
+    .filter(text => privilegedWordsIn(text).length > 0);
+  assert.ok(privileged.length > 0,
+    "nothing on the surface carries a union word, so the boundary above is untested");
+});
+
+// ---------------------------------------------------------------------------
+// AMENDMENT 2's CLOSED SHAPE, FOR EVERY PUBLIC CALLABLE THIS CHANGE TOUCHED.
+// ---------------------------------------------------------------------------
+
+/** Every export of this module that is a function. All five changed here. */
+const PUBLIC_CALLABLES = Object.freeze([
+  "emitGateZeroOutcome",
+  "readGateGraphAssurance",
+  "readGateZeroPredecessorJoin",
+  "v5A02GateZeroPolicyCanonicalBytes",
+  "v5A02GateZeroPolicyDigest",
+  "v5A02GateZeroPolicyPreimage",
+]);
+
+/**
+ * Clauses (a), (b) and (d) of amendment 2, as a list of findings rather than a
+ * pile of assertions — so the same function can be run against something that
+ * FAILS it and prove the check is load-bearing.
+ */
+function shapeFindings(fn) {
+  const found = [];
+  if (typeof fn !== "function") return ["not a function"];
+  // (a) an arrow or a bound function: no `prototype`, and the engine refuses to
+  // construct it before a line of module code runs.
+  if (Object.hasOwn(fn, "prototype")) found.push("carries a prototype");
+  try { Reflect.construct(fn, []); found.push("is constructable"); } catch { /* the engine's */ }
+  // (b) an own Symbol.hasInstance DATA property that answers false without
+  // touching the left operand.
+  const descriptor = Object.getOwnPropertyDescriptor(fn, Symbol.hasInstance);
+  if (descriptor === undefined) found.push("has no own Symbol.hasInstance");
+  else {
+    if (!Object.hasOwn(descriptor, "value")) found.push("hasInstance is an accessor");
+    if (descriptor.writable !== false) found.push("hasInstance is writable");
+    if (descriptor.configurable !== false) found.push("hasInstance is configurable");
+    if (descriptor.enumerable !== false) found.push("hasInstance is enumerable");
+    if (typeof descriptor.value !== "function") found.push("hasInstance is not callable");
+  }
+  // The operand is never read: every trap on it throws, and `instanceof` is still
+  // false rather than the caller's own error.
+  const hostile = new Proxy({}, {
+    get() { throw new Error("the operand was read"); },
+    getPrototypeOf() { throw new Error("the operand's chain was walked"); },
+  });
+  try {
+    if (hostile instanceof fn) found.push("answered instanceof with true");
+  } catch (error) { found.push(`instanceof touched the operand: ${error.message}`); }
+  // (d) no Proxy wrapper around the export.
+  if (types.isProxy(fn)) found.push("is a Proxy");
+  if (!Object.isFrozen(fn)) found.push("is not frozen");
+  return found;
+}
+
+test("SHAPE: every public callable wears amendment 2's closed shape", () => {
+  for (const name of PUBLIC_CALLABLES) {
+    assert.ok(Object.hasOwn(surface, name), `${name} is not exported`);
+    assert.deepEqual(shapeFindings(surface[name]), [], name);
+  }
+  // Every function export is on the list, so a new one cannot skip the shape.
+  assert.deepEqual(Object.entries(surface)
+    .filter(([, value]) => typeof value === "function").map(([name]) => name).sort(),
+    [...PUBLIC_CALLABLES].sort());
+  // NON-VACUOUS, three ways: a plain function, a class and a Proxy over a closed
+  // callable each fail, and they fail on the clauses that separate them.
+  const plain = shapeFindings(function ordinary() {});
+  assert.ok(plain.includes("carries a prototype"), plain);
+  assert.ok(plain.includes("is constructable"), plain);
+  assert.ok(plain.includes("has no own Symbol.hasInstance"), plain);
+  assert.ok(shapeFindings(class Refused {}).length >= 3);
+  assert.ok(shapeFindings(new Proxy(surface.readGateGraphAssurance, {})).includes("is a Proxy"));
+  // A hasInstance that walks the operand is caught rather than crashing the test.
+  const walker = Object.defineProperty(() => undefined, Symbol.hasInstance, {
+    value: operand => Object.getPrototypeOf(operand) !== null,
+    writable: false, enumerable: false, configurable: false,
+  });
+  assert.ok(shapeFindings(Object.freeze(walker)).some(one => one.startsWith("instanceof touched")));
+});
+
+/**
+ * NO CALLER-SUPPLIED READER, AND NO ROUTE TO ONE — proved with V8's own module
+ * parser and with behaviour, and no longer with a regex over source text.
+ *
+ * The standing rule of 2026-09-11 requires a real parser for a static import
+ * guard, and the 2026-09-12 review found this test still matching source text.
+ * Each clause moved to the instrument that actually decides it:
+ *
+ *   * WHAT THIS MODULE IMPORTS — `dependencySpecifiers` off a parsed module
+ *     record, which a dynamic or concatenated specifier cannot hide from.
+ *   * WHETHER A BINDING DOOR IS EXPORTED — the module namespace's own key list,
+ *     asserted exactly above and re-asked here by name; an `export function
+ *     bindReader` is a new key and fails both.
+ *   * WHETHER THE ENVIRONMENT CAN BIND ONE — a copy of the tree imported in a
+ *     child process under hostile variables, whose three answers must be the
+ *     bytes this process gets without them. That is the property the old
+ *     `/process\.env/` grep was standing in for, and it holds however the module
+ *     spells the lookup.
  */
 test("SURFACE: the readers are imported, never handed in", () => {
-  const source = readFileSync(
-    fileURLToPath(new URL("../src/gate-zero-assurance.v5.js", import.meta.url)), "utf8");
-  assert.ok(/^import \{\n(?:.*\n)*?\} from "\.\/gate-zero-seam-readers\.v5\.js";$/m.test(source),
+  const directory = fileURLToPath(new URL("../src", import.meta.url));
+  const specifiers = moduleImports(directory)["gate-zero-assurance.v5.js"];
+  assert.ok(specifiers.includes("./gate-zero-seam-readers.v5.js"),
     "the readers are not imported by this module");
-  assert.ok(source.includes('import { seamRulingRef } from "./gate-zero-seam-rulings.v5.js";'),
+  assert.ok(specifiers.includes("./gate-zero-seam-rulings.v5.js"),
     "the binding condition is not the ruling table");
-  for (const shape of [/\bexport\s+function\s+bind/, /\bexport\s+const\s+\w*[Bb]ind\w*\s*=/,
-    /process\.env/, /globalThis\.process/])
-    assert.equal(shape.test(source), false, `the gate exposes a binding door: ${shape}`);
+  for (const name of Object.keys(surface))
+    assert.equal(/bind/i.test(name), false, `${name} is a binding door on the surface`);
   // Every exported callable still takes at most one argument, and none of them
   // is a reader.
   for (const [, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT)
     assert.ok(fn.length <= 1, "an export takes a second argument");
+});
+
+test("SURFACE: no environment variable binds a seam", () => {
+  // A FRESH PROCESS, because a module reads its environment while it evaluates:
+  // the variables are set before the import, not after it.
+  const script = `
+    const { pathToFileURL } = require("node:url");
+    import(pathToFileURL(process.argv[1]).href).then(async gate => {
+      const { digest } = await import(pathToFileURL(process.argv[2]).href);
+      process.stdout.write(JSON.stringify({
+        join: digest(gate.readGateZeroPredecessorJoin()),
+        graph: digest(gate.readGateGraphAssurance()),
+        emitted: digest(gate.emitGateZeroOutcome()),
+      }));
+    }).catch(error => { process.stderr.write(String(error)); process.exit(1); });
+  `;
+  const gatePath = fileURLToPath(new URL("../src/gate-zero-assurance.v5.js", import.meta.url));
+  const trustPath = fileURLToPath(new URL("../src/artifact-trust.js", import.meta.url));
+  const hostile = {
+    ...process.env,
+    CARR_GATE_ZERO_PRODUCER: "allow",
+    CARR_GATE_ZERO_PREDECESSOR_OUTCOME_READER: "bound",
+    CARR_GATE_ZERO_SCHEDULER_READER: "bound",
+    CARR_GATE_ZERO_GATE_CONCLUSION_READER: "bound",
+    GATE_ZERO_PASSABLE: "true",
+    SEAM_RULING_DECISION_ID: "00000000-0000-4000-8000-000000000000",
+  };
+  const run = spawnSync(process.execPath, ["-e", script, gatePath, trustPath],
+    { encoding: "utf8", env: hostile });
+  assert.equal(run.status, 0, `the child failed: ${run.stderr}`);
+  assert.deepEqual(JSON.parse(run.stdout), {
+    join: digest(readGateZeroPredecessorJoin()),
+    graph: digest(readGateGraphAssurance()),
+    emitted: digest(emitGateZeroOutcome()),
+  }, "an environment variable moved an answer");
 });
 
 test("SURFACE: a producer cannot be handed in as a second argument", () => {

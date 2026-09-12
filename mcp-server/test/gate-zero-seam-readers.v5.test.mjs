@@ -247,17 +247,35 @@ const READERS_UNDER_TEST = [
 ];
 
 /**
- * The answers a gate gives, and it is a SET THAT GROWS rather than two literals.
+ * TWO SETS, AND THE DIFFERENCE BETWEEN THEM IS THE WHOLE OF AMENDMENT 3.
  *
- * It seeds with the shipped gate's two answers and takes on each STAGED tree's
- * as that tree is built. It has to: since 2026-09-12 the gate binds these
- * readers behind the same ruling table, so a tree whose three `decision_id:`
- * lines are null has a gate that answers differently from the shipped one — and
- * BOTH are "the gate's own answer" for the tree they belong to. The invariant
- * this file cares about is unchanged and is now stated where it is true: an
- * unruled reader hands back the answer OF THE GATE IN ITS OWN TREE, whole.
+ * `MAIN_GATE_ANSWER_DIGESTS` is the amendment's exemption and is NOT ONE DIGEST
+ * WIDER than the amendment allows: the two answers MAIN's Gate Zero gives, as
+ * literals taken from origin/main at 64b22a4b by calling the unmodified module.
+ * A value skips the word sweep only by being, byte for byte, one of those — the
+ * unchanged output of a module this slice forwards and did not author. The
+ * 2026-09-12 review of PR 1004 found the old single set exempting any gate answer
+ * at all, including answers THIS BRANCH writes, which is wider than the
+ * amendment: a branch-owned string could ride into the exemption inside an object
+ * the branch built.
+ *
+ * `GATE_DELEGATION_DIGESTS` is a different question with a different answer and
+ * exempts nothing. It is the set of answers each tree's OWN gate gives, used only
+ * to assert delegation — that an unruled reader hands back its gate's object
+ * whole, and that a ruled one does not. It seeds with the shipped gate's two
+ * answers and takes on each staged tree's as that tree is built, because since
+ * 2026-09-12 the gate binds these readers behind the same ruling table and a tree
+ * with three null lines has a gate that answers differently from the shipped one.
+ * The vocabulary of a branch-authored gate answer is swept where it belongs, in
+ * gate-zero-assurance.v5.test.mjs, against main's own vocabulary with this
+ * branch's additions enumerated and digest-pinned.
  */
-const GATE_ANSWER_DIGESTS = new Set([
+const MAIN_GATE_ANSWER_DIGESTS = new Set([
+  "sha256:06a7af2a2df9a57e2c398980e41ed13f9eb861779c06f7ac8a3fb36ac10218da",
+  "sha256:0af0b1524b0565bcfbef033ee341e1a43a48611eaa38bdce99baebe94c18f51b",
+]);
+
+const GATE_DELEGATION_DIGESTS = new Set([
   digest(readGateZeroPredecessorJoin()),
   digest(readGateGraphAssurance()),
 ]);
@@ -423,7 +441,7 @@ test("RULED: each production reader now names its own card's ruling, and refuses
       assert.deepEqual(got.effects, V5_NO_EFFECTS, name);
       // And it is NOT the gate's answer any more, which is the whole observable
       // difference the paste made.
-      assert.equal(GATE_ANSWER_DIGESTS.has(digest(got)), false,
+      assert.equal(GATE_DELEGATION_DIGESTS.has(digest(got)), false,
         `${name} still answers as though it were unruled`);
     }
   } finally {
@@ -463,7 +481,7 @@ test("BYTE-IDENTICAL TO MAIN: an unruled answer does not move for any query, val
         const got = await unruled[name](query);
         assert.equal(digest(got), baseline,
           `${name} answered differently for ${safeLabel(query)}`);
-        assert.ok(GATE_ANSWER_DIGESTS.has(digest(got)), name);
+        assert.ok(GATE_DELEGATION_DIGESTS.has(digest(got)), name);
       }
     }
   } finally {
@@ -612,7 +630,8 @@ function privilegedFindings(value, path = "$", found = []) {
  * otherwise — and everything else is swept with no exemption whatsoever.
  */
 function assertSwept(label, value) {
-  if (value !== null && typeof value === "object" && GATE_ANSWER_DIGESTS.has(digest(value))) return;
+  if (value !== null && typeof value === "object" && MAIN_GATE_ANSWER_DIGESTS.has(digest(value)))
+    return;
   assert.deepEqual(privilegedFindings(value, label), [], `${label} carries a privileged outcome`);
 }
 
@@ -1169,7 +1188,7 @@ function assertSweptConstructed(at, built) {
   // now reaches the readers: `new readGateConclusionEvidence()` answers with the
   // GATE'S OWN object, which is main's and carries main's strings. Identity
   // admits no new string at all, which is stronger than sweeping its words.
-  if (GATE_ANSWER_DIGESTS.has(digest(built))) return;
+  if (MAIN_GATE_ANSWER_DIGESTS.has(digest(built))) return;
   const keys = Reflect.ownKeys(built);
 
   assert.ok(!Object.hasOwn(built, "cause"), `${at} carries an own cause`);
@@ -1890,7 +1909,7 @@ test("HOSTILE: no hostile query throws out of a reader, and none of its bytes co
           assert.equal(answered.finding ?? null, null, `${name} (${side})`);
         }
         // And the unruled half is still the gate's own answer, whole.
-        assert.ok(GATE_ANSWER_DIGESTS.has(digest(await unruled[name](query))), name);
+        assert.ok(GATE_DELEGATION_DIGESTS.has(digest(await unruled[name](query))), name);
       }
   } finally {
     restoreEnv(saved);
@@ -1963,8 +1982,17 @@ async function stagedReaders(options) {
   // the gate that reader actually delegates to rather than of the shipped one.
   const gate = await import(pathToFileURL(join(target, GATE_FILE)).href);
   STAGED_GATES.set(staged, gate);
-  for (const answer of [gate.readGateZeroPredecessorJoin(), gate.readGateGraphAssurance()])
-    GATE_ANSWER_DIGESTS.add(digest(answer));
+  const answers = [gate.readGateZeroPredecessorJoin(), gate.readGateGraphAssurance()];
+  for (const answer of answers) GATE_DELEGATION_DIGESTS.add(digest(answer));
+  // AND THE AMENDMENT 3 PROOF, taken here because this is where an unruled tree
+  // exists: with all three ruling lines null the gate's two answers ARE main's
+  // pinned bytes, which is what makes the exemption above an exemption for
+  // unchanged upstream output rather than for whatever this branch happens to
+  // answer. A ruled tree's answers are this branch's and are never added.
+  if (options.unruled === true)
+    for (const answer of answers)
+      assert.ok(MAIN_GATE_ANSWER_DIGESTS.has(digest(answer)),
+        "an unruled staged gate no longer answers main's bytes");
   return staged;
 }
 
@@ -2741,7 +2769,8 @@ test("RULED: a pasted decision id is what opens the seam, and nothing else", asy
   const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const opened = await ruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
-  assert.ok(!GATE_ANSWER_DIGESTS.has(digest(opened)), "the staged ruling did not open the seam");
+  assert.ok(!GATE_DELEGATION_DIGESTS.has(digest(opened)),
+    "the staged ruling did not open the seam");
   assert.equal(opened.ruling_decision_ref, FIXTURE_DECISION_IDS[0]);
 
   // AND THE SHIPPED MODULE IN THIS SAME PROCESS IS UNTOUCHED BY THE STAGING,
@@ -3159,7 +3188,16 @@ test("RULED: nothing a faulted store does to a reader gets past the reader's bou
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"4".repeat(64)}` });
   assert.equal(digest(hostileAnswer), digest(readGateZeroPredecessorJoin()),
     "a throw inside the reader escaped instead of closing the seam");
-  assertSwept("faulted.hostile-answer", hostileAnswer);
+  // AND THE IDENTITY IS WHAT IS ASSERTED HERE, not the word sweep, which is the
+  // 2026-09-12 review's amendment 3 finding applied to this line. Byte-for-byte
+  // equality with the gate's own answer admits NO new string at all, which is
+  // stronger than sweeping its words; and the answer is the SHIPPED gate's, which
+  // this branch authored, so it is not upstream output and may not take the
+  // amendment 3 exemption. Its own vocabulary is swept in
+  // gate-zero-assurance.v5.test.mjs — against main's, with every string this
+  // branch adds enumerated and the baseline digest-pinned to origin/main.
+  assert.ok(!MAIN_GATE_ANSWER_DIGESTS.has(digest(hostileAnswer)),
+    "the shipped gate answers main's bytes, so this clause proves nothing");
 
   // CARD 13 — the store answers about a DIFFERENT store than the ruling named,
   // over rows that would otherwise report a conclusion of "success". The reader
@@ -3289,7 +3327,7 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
     assert.equal(report13.conclusion, "success");
 
     for (const [name, report] of [["11", report11], ["12", report12], ["13", report13]]) {
-      assert.ok(!GATE_ANSWER_DIGESTS.has(digest(report)), `card ${name} did not open`);
+      assert.ok(!GATE_DELEGATION_DIGESTS.has(digest(report)), `card ${name} did not open`);
       assertSwept(`rows.report.${name}`, report);
       assert.ok(!JSON.stringify(report).includes(HOSTILE_MARKER), `card ${name} leaked store text`);
     }

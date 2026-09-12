@@ -915,9 +915,17 @@ function guarded(gateAnswer, read) {
   return closedCallable(guardedRead);
 }
 
+// THE GATE'S ANSWER ARRIVES AS A THUNK, and that is load order rather than
+// style. gate-zero-assurance.v5.js imports this module for its seam bindings and
+// this module imports its answers back, so the two form a cycle; since its
+// exports wear amendment 2's closed shape they are `const` bindings, which are in
+// their temporal dead zone until that module's body has run. Reading one HERE, at
+// this module's own evaluation time, throws on the import order that starts at
+// the gate. A thunk reads it when a reader actually falls back, by which time
+// both modules are evaluated.
 export const readPredecessorOutcomeEvidence =
-  guarded(readGateZeroPredecessorJoin, predecessorOutcomeEvidence);
+  guarded(() => readGateZeroPredecessorJoin(), predecessorOutcomeEvidence);
 export const readSchedulerCanaryEvidence =
-  guarded(readGateZeroPredecessorJoin, schedulerCanaryEvidence);
+  guarded(() => readGateZeroPredecessorJoin(), schedulerCanaryEvidence);
 export const readGateConclusionEvidence =
-  guarded(readGateGraphAssurance, gateConclusionEvidence);
+  guarded(() => readGateGraphAssurance(), gateConclusionEvidence);
