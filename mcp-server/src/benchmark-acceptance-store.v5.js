@@ -551,10 +551,15 @@ export const BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT = deepFreeze({
   // bindable HERE. Resolving it does not turn this constant into a claim about
   // what Gate Zero decided; the rail binds a recorded outcome and judges none.
   scope: "the binding available in this record layer, not a judgement about what a Gate Zero run decided",
+  // FALSE SINCE 2026-09-12, and it is a correction rather than a ruling: r7
+  // carries the producer row, so a Gate Zero outcome is a v5 producer's output
+  // and not an external arrival this record layer is merely receiving. The
+  // producer itself landed in Step A (gate-zero-producer.v5.js).
   external_producer_is_intentional: false,
   what_was_unbound: [
     "This record layer held no authenticated Gate Zero outcome: no outcome digest and no observed instant, so an acceptance had nothing here to bind to.",
     "Both readers were fail-closed stubs, and either implemented alone would have opened the gate without a record on the other side.",
+    "Whether the registered producer had emitted an outcome was unknowable to this module, because nothing here could see one. Step A built the producer and Step B records what it emits, so the question is now answered by a row rather than left open.",
   ],
   // THE CORRECTION, kept as a field because a deleted wrong sentence teaches
   // nobody. See the doc comment above.

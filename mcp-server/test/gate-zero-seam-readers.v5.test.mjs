@@ -106,12 +106,16 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import esbuild from "esbuild";
 
+import { WHOLE_WALK, pathToValue, topLevelIdentityOnly }
+  from "./gate-zero-reachability-walk.testhelper.mjs";
+
 import { digest } from "../src/artifact-trust.js";
 import { V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import {
   V5_A02_GATE_ZERO_OWED_SEAMS,
   V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
   V5_A02_GATE_ZERO_PRODUCER_SEAM,
+  V5_A02_POLICY_VERSION,
   V5_A02_SCHEDULER_STEP_REF,
   emitGateZeroOutcome,
   readGateGraphAssurance,
@@ -141,6 +145,17 @@ const READERS_FILE = "gate-zero-seam-readers.v5.js";
 const BINDING_FILE = "internal/gate-zero-seam-binding.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
 const GATE_FILE = "gate-zero-assurance.v5.js";
+const REGISTRATION_FILE = "gate-zero-producer-registration.v5.js";
+
+/**
+ * CARD 9'S ONE LINE, and the null it goes back to — the same anchor
+ * gate-zero-assurance.v5.test.mjs stages against, because it is the same switch.
+ * It matters here because the producer seam's binding condition IS that
+ * declaration: an unruled staging that left the seat staffed would leave a bound
+ * producer behind a gate whose three readers are all withdrawn.
+ */
+const STAFFED_SEAT_LINE = '  holder_ref: "seat:codex-reviewer:gpt-5.6-sol",\n';
+const UNSTAFFED_SEAT_LINE = "  holder_ref: null,\n";
 const FAKE_PG_FILE = fileURLToPath(new URL("./gate-zero-seam-pg.v5.fake.cjs", import.meta.url));
 
 /** The repository the checks store serves, and the only one it will serve. */
@@ -292,6 +307,24 @@ assert.equal(digest(PRE_PR_BASELINE), PRE_PR_BASELINE_DIGEST,
   "the committed pre-PR baseline is not the snapshot this suite pins");
 
 const PRE_PR_GATE_ANSWER_DIGESTS = new Set(PRE_PR_BASELINE.gate_answer_digests);
+
+/**
+ * The pre-PR policy version, put back before a pinned comparison. See the note
+ * at the pin itself: this slice moved `V5_A02_POLICY_VERSION` 2 -> 3 because the
+ * surface stopped being one that can only refuse, and that number rides on every
+ * object the gate builds. Everything else is still compared byte for byte, and
+ * the two assertions inside make the normalization itself falsifiable — it
+ * refuses to run against an answer that does not carry this branch's version,
+ * and it refuses to exist at all if the version ever stops having moved.
+ */
+const PRE_PR_POLICY_VERSION = 2;
+function atPrePrPolicyVersion(answer) {
+  assert.equal(answer.policy_version, V5_A02_POLICY_VERSION,
+    "the answer does not carry this branch's policy version, so the normalization is wrong");
+  assert.notEqual(V5_A02_POLICY_VERSION, PRE_PR_POLICY_VERSION,
+    "the policy version did not move, so this normalization is hiding nothing and must go");
+  return { ...answer, policy_version: PRE_PR_POLICY_VERSION };
+}
 
 // TWO DISTINCT ANSWERS, AND NEITHER OF THEM IS THIS BRANCH'S. The shipped gate
 // is ruled and answers differently; if the baseline ever held this branch's own
@@ -2089,6 +2122,19 @@ function stageTree({ storeFile = null, card11StoreRef = null, unruled = false } 
   }
   writeFileSync(path, ruled);
 
+  // AND CARD 9'S SEAT GOES BACK TO UNSTAFFED IN THE UNRULED TREE, for the same
+  // reason the three ruling lines do. The producer seam's binding condition is
+  // that declaration, so a staged tree that kept the staffed seat would have a
+  // BOUND producer behind a gate whose readers are all withdrawn — which is not
+  // the tree main shipped, and the pin below is about the tree main shipped.
+  if (unruled) {
+    const registrationPath = join(target, REGISTRATION_FILE);
+    const registration = readFileSync(registrationPath, "utf8");
+    assert.equal(registration.split(STAFFED_SEAT_LINE).length - 1, 1,
+      "the staging anchor no longer matches the seat declaration");
+    writeFileSync(registrationPath, registration.replace(STAFFED_SEAT_LINE, UNSTAFFED_SEAT_LINE));
+  }
+
   if (storeFile !== null) cpSync(storeFile, join(target, STORES_FILE));
   return target;
 }
@@ -2108,9 +2154,16 @@ async function stagedReaders(options) {
   // exemption for unchanged upstream output rather than for whatever this branch
   // happens to answer. A ruled tree's answers are this branch's and are never
   // added.
+  //
+  // ONE FIELD IS NORMALIZED AND IT IS DECLARED: `V5_A02_POLICY_VERSION` moved
+  // 2 -> 3 in the producer slice, on purpose — version 2's claim was that this
+  // surface answers `unavailable` for every caller on every input, and it can
+  // now answer over rows. The number is in every object the gate builds, so no
+  // tree can be byte-identical to main while it stands. Everything else is
+  // compared exactly, which is what this pin is for.
   if (options.unruled === true)
     for (const answer of answers)
-      assert.ok(PRE_PR_GATE_ANSWER_DIGESTS.has(digest(answer)),
+      assert.ok(PRE_PR_GATE_ANSWER_DIGESTS.has(digest(atPrePrPolicyVersion(answer))),
         "an unruled staged gate no longer answers the pre-PR baseline's bytes");
   return staged;
 }
@@ -3211,7 +3264,7 @@ test("RULED: a ruling naming a store this reader does not serve opens nothing", 
       "a ruling naming the wrong store opened the seam anyway");
     assert.equal(stagedGate.readGateZeroPredecessorJoin().predecessor_outcome_reader_bound, false,
       "the gate reports card 11 bound while this reader refuses its ruling");
-    assert.equal(stagedGate.emitGateZeroOutcome().predecessor_outcome_reader_bound, false,
+    assert.equal((await stagedGate.emitGateZeroOutcome()).predecessor_outcome_reader_bound, false,
       "the emitted answer reports card 11 bound while this reader refuses its ruling");
     assert.notEqual(digest(result), digest(readGateZeroPredecessorJoin()),
       "the staged answer is the shipped one, so the gate still reads a mismatched ruling as bound");
@@ -3270,13 +3323,24 @@ test("STORES: a query that addresses no row says so, and does not say it broke",
   try {
     for (const [name, fetcher, query] of [
       ["predecessor", stores.fetchPredecessorOutcomeRows, {}],
-      ["ledger", stores.fetchSchedulerLedgerRows, { serviceKey: "carr-fleet-sync" }],
+      // THE SERVICE IS THE LEDGER'S REQUIRED ADDRESS, and since 2026-09-12 it
+      // is the only one: an omitted `canaryRunKey` asks for the latest run this
+      // service's wrapper minted a receipt for, which is a row the ledger can
+      // find on its own. A NAMED-BUT-EMPTY one is still no address at all, and
+      // the last shape below proves it.
+      ["ledger", stores.fetchSchedulerLedgerRows, { canaryRunKey: "gate-zero-run-1" }],
       ["checks", stores.fetchCheckConclusionRows, { headSha: "a".repeat(40) }],
     ])
       for (const shape of [undefined, null, query, { ...query, extra: 1 }])
         await assert.rejects(() => fetcher(shape),
           error => stores.isSeamStoreUnreachable(error) && error.because === notAddressed,
           `${name} answered a query that addressed no row with something else`);
+    // The ledger's optional address is optional, not unchecked: present and
+    // unusable is refused exactly the way an absent service key is.
+    await assert.rejects(
+      () => stores.fetchSchedulerLedgerRows({ serviceKey: "carr-fleet-sync", canaryRunKey: "" }),
+      error => stores.isSeamStoreUnreachable(error) && error.because === notAddressed,
+      "a named-but-empty canary run key was treated as an omitted one");
   } finally {
     restoreEnv(saved);
   }
@@ -3574,11 +3638,15 @@ test("STORES: the checks store serves one repository, and refuses every other", 
 // PART D — the producer seam, not built, and said in exactly one place.
 // ---------------------------------------------------------------------------
 
-test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement", () => {
-  const live = emitGateZeroOutcome();
+test("PRODUCER: the producer seam is built, and still has no ruling line and no reader", async () => {
+  const live = await emitGateZeroOutcome();
   assert.equal(live.passable, false);
-  assert.equal(live.producer_bound, false);
-  assert.ok(live.owed_seams.includes(V5_A02_GATE_ZERO_PRODUCER_SEAM));
+  // BOUND AS OF THE PRODUCER SLICE — by card 9's seat declaration, which is a
+  // committed line and not a ruling line. The distinction is the subject of the
+  // rest of this test: the seam opened, and it did NOT open through this
+  // module's table.
+  assert.equal(live.producer_bound, true);
+  assert.deepEqual(live.owed_seams, []);
 
   // No ruling line: the lookup has no entry for it, so no paste could open it.
   assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
@@ -3595,15 +3663,15 @@ test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement
     assert.ok(!/producer/i.test(name), `${name} names the producer seam on the reader surface`);
 });
 
-test("PRODUCER: binding the gate's own answer still does not move, now that readers exist", () => {
-  // The whole point of building three readers, ruled or not: the gate is exactly
-  // as unpassable as it was before any of them existed. What DID move on
-  // 2026-09-12 is the list of what is still owed — three seams have a ruled
-  // reader bound behind them, and the producer is the one left.
-  assert.equal(emitGateZeroOutcome().passable, false);
-  assert.equal(emitGateZeroOutcome().join, null);
-  assert.equal(emitGateZeroOutcome().producer_bound, false);
-  assert.deepEqual([...emitGateZeroOutcome().owed_seams], [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+test("PRODUCER: three bound readers and a built seam still do not make the gate pass", async () => {
+  // The whole point of building three readers, and then the producer behind
+  // them: neither is a signature. Every seam has something behind it and the
+  // gate still refuses, because the rows a run would stand on are not named.
+  const emitted = await emitGateZeroOutcome();
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.join, null);
+  assert.equal(emitted.producer_bound, true);
+  assert.deepEqual([...emitted.owed_seams], []);
   // And the producer seam is still the one thing no ruling line can open: the
   // ruling table has no entry for it, so the lookup answers null for its name.
   assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
@@ -3912,135 +3980,12 @@ function exportGraph(directory) {
   return { modules, namesOf, namespacesExposedBy, namedReexportsOf };
 }
 
-/**
- * THE PROPERTY PATH BY WHICH A VALUE IS REACHABLE FROM A NAMESPACE, or null.
- *
- * This is the half that answers "by any path", and after the sixth review it
- * answers it literally. The walk is UNBOUNDED — a cycle-safe visited set is what
- * makes it terminate, in place of the six-edge budget a seven-edge container
- * walked straight past. It enumerates `Reflect.ownKeys`, so a SYMBOL-keyed
- * property is read exactly like a string-named one. And it follows the
- * [[Prototype]] chain, because a value held on a prototype is handed to a caller
- * as readily as one held on the object itself. It returns the route it found the
- * value by, so a failure names `seam.ruledCardBinding` rather than just the
- * module.
- *
- * AND ACCESSORS ARE READ, which is what the seventh review corrected. The sixth
- * correction stepped over a getter unread and said so as a deliberate boundary;
- * that boundary was wrong, because `export const api = { get seam() { return
- * predicate; } }` hands a consumer the predicate at `api.seam` exactly as a data
- * property would, and a guard that answers "by any path" cannot decline to look
- * down the path a consumer actually uses. Every accessor's `get` is invoked
- * INSIDE try/catch and its return value is walked like any other edge. A getter
- * that THROWS is an opaque leaf — a consumer could not have taken a value
- * through it either — and the walk continues with the next key rather than
- * failing.
- *
- * AND THE EIGHTH REVIEW CLOSED THE TWO ROUTES THE SEVENTH LEFT, which are the
- * last two members of the closed set amendment 6 names.
- *
- *   THE ACCESSOR FUNCTIONS ARE THEMSELVES EDGES. `Object.getOwnPropertyDescriptor
- *   (api, "seam").get` is public, retrievable by any consumer, and can BE the
- *   predicate — `Object.defineProperty(api, "seam", { get: predicate })` hands it
- *   over without the getter ever returning it. Both `get` and `set` are walked as
- *   objects, at the route `.seam<get>` / `.seam<set>`, before the value the
- *   getter returns.
- *
- *   AND AN INHERITED GETTER IS INVOKED WITH THE EXPORTED CHILD AS RECEIVER, via
- *   `Reflect.get(proto, key, child)`. The seventh correction invoked it with the
- *   object it was found ON, which for a prototype is not the object a consumer
- *   holds: `Object.create({ get seam() { return this === shape ? null : predicate;
- *   } })` answers the predicate at `api.seam` and answers null to a walk standing
- *   on the prototype. The receiver is threaded down the [[Prototype]] chain and
- *   reset at every ordinary edge, and the visited set is keyed by (value,
- *   receiver) rather than by value, because the same prototype reached under two
- *   receivers is two different answers.
- *
- * The one shape this cannot terminate on is a getter that mints a fresh object
- * on every read, forever; no reachability scan terminates on that, and neither
- * does a consumer reach anything through it.
- *
- * `parts` exists so the mutation controls can revert ONE part of the walk at a
- * time against THIS code rather than against a retyped imitation of it.
- */
-const WHOLE_WALK = Object.freeze({
-  bounded: Infinity, symbols: true, prototypes: true, accessors: true,
-  accessorFunctions: true, inheritedReceiver: true });
-
-/** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
-const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
-
-function pathToValue(root, target, parts = WHOLE_WALK) {
-  // Keyed by the PAIR (value, receiver): the same prototype reached while a
-  // consumer holds two different children can answer two different values, so a
-  // set keyed by the object alone would skip the second answer unread.
-  const seen = new Map();
-  const walk = (value, path, left, receiver) => {
-    if (value === target) return path === "" ? "<the namespace itself>" : path;
-    if (left === 0 || value === null) return null;
-    const kind = typeof value;
-    if (kind !== "object" && kind !== "function") return null;
-    // The visited map is what replaces the depth budget: a value whose whole
-    // subtree has already been searched under THIS receiver cannot hide the
-    // target on a second visit, so revisiting is redundant rather than unsound
-    // once the walk is unbounded.
-    const held = receiver === undefined ? value : receiver;
-    const under = seen.get(value);
-    if (under === undefined) seen.set(value, new Set([held]));
-    else if (under.has(held)) return null;
-    else under.add(held);
-    const keys = parts.symbols ? Reflect.ownKeys(value) : Object.getOwnPropertyNames(value);
-    for (const key of keys) {
-      let descriptor;
-      try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { continue; }
-      // A property whose descriptor cannot be taken at all is the only key
-      // stepped over unread.
-      if (descriptor === undefined) continue;
-      const step = `${path}${stepFor(key)}`;
-      if (Object.hasOwn(descriptor, "value")) {
-        // An ordinary edge: the value is a new object in the consumer's hand, so
-        // the receiver does not travel with it.
-        const found = walk(descriptor.value, step, left - 1, undefined);
-        if (found !== null) return found;
-        continue;
-      }
-      // THE ACCESSOR FUNCTIONS FIRST, because `descriptor.get` is public and can
-      // be the target itself even when calling it returns something harmless.
-      if (parts.accessorFunctions)
-        for (const role of ["get", "set"]) {
-          if (typeof descriptor[role] !== "function") continue;
-          const found = walk(descriptor[role], `${step}<${role}>`, left - 1, undefined);
-          if (found !== null) return found;
-        }
-      if (!parts.accessors || typeof descriptor.get !== "function") continue;
-      // THEN THE VALUE, taken the way a consumer takes it: with the exported
-      // child as the receiver, not the prototype the descriptor was found on. A
-      // throw makes the key an opaque leaf rather than an error in this walk.
-      let edge;
-      try {
-        edge = parts.inheritedReceiver
-          ? Reflect.get(value, key, held)
-          : descriptor.get.call(value);
-      } catch { continue; }
-      const found = walk(edge, step, left - 1, undefined);
-      if (found !== null) return found;
-    }
-    if (!parts.prototypes) return null;
-    let proto;
-    try { proto = Object.getPrototypeOf(value); } catch { return null; }
-    // The receiver travels UP the prototype chain unchanged: the object a
-    // consumer holds is the child, however far up the property lives.
-    return walk(proto, `${path}.[[Prototype]]`, left - 1, held);
-  };
-  return walk(root, "", parts.bounded, undefined);
-}
-
-/** The identity check the fourth correction shipped, kept so the self-test can measure it. */
-function topLevelIdentityOnly(namespace, target) {
-  for (const [exportedAs, value] of Object.entries(namespace))
-    if (value === target) return exportedAs;
-  return null;
-}
+// THE RUNTIME REACHABILITY WALK LIVES IN ITS OWN FILE NOW
+// (./gate-zero-reachability-walk.testhelper.mjs, 2026-09-12). The producer suite
+// needs the same walk applied to its own callable, and the one thing that must
+// not happen is a second copy written from memory: `parts` still lets the
+// mutation controls below revert ONE part of the walk at a time against THAT
+// code, which is the same code the producer suite runs.
 
 /**
  * ONE MODULE PER RE-EXPOSING FORM, plus the private one that must stay legal.

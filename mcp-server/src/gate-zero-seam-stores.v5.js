@@ -664,10 +664,35 @@ function runKeyReceiptHash(value) {
     : null;
 }
 
+/**
+ * THE LATEST SCHEDULER-MINTED RUN FOR A SERVICE, as a SQL address rather than a
+ * value a caller supplies (2026-09-12, PR 1013 correction round).
+ *
+ * An absent `canaryRunKey` no longer refuses: it means "the run this service's
+ * scheduler wrapper most recently minted a receipt for", which the ledger can
+ * answer on its own and no human has to look up and paste. The predicate is the
+ * receipt shape SCHEDULED_RECEIPT parses plus the wrapper's own source kind, so
+ * an operator row, a collector row or a pre-receipt row is not a candidate; the
+ * run key selected is still never returned as text, only as a digest, and the
+ * derivation over the rows is byte-for-byte the one it always was.
+ */
+const LATEST_MINTED_RUN_KEY = `
+      and r.run_key = (
+        select r2.run_key from ops.run r2
+         where r2.service_id = s.id
+           and r2.source_kind = 'wrapper'
+           and r2.evidence_ref like 'carr-run-receipt:v1:%'
+         order by r2.started_at desc nulls last, r2.run_key desc
+         limit 1)`;
+
 async function schedulerLedgerRows(query) {
   const storeRef = STORE_TOKENS.schedulerLedger;
   const serviceKey = addressed(storeRef, query, "serviceKey");
-  const canaryRunKey = addressed(storeRef, query, "canaryRunKey");
+  // OPTIONAL, and the only optional address in this file. Absent is a REQUEST
+  // for the derivation above, not a malformed query; a present-but-unusable
+  // value is still refused by `addressed`.
+  const named = cell(query, "canaryRunKey") !== undefined;
+  const canaryRunKey = named ? addressed(storeRef, query, "canaryRunKey") : null;
   const [raw] = await readOnlyStatements(storeRef, [{ text: `
     select s.key            as service_key,
            r.run_key,
@@ -678,7 +703,8 @@ async function schedulerLedgerRows(query) {
            r.source_kind,
            r.source_ref
       from ops.service s
-      left join ops.run r on r.service_id = s.id and r.run_key = $2
+      left join ops.run r on r.service_id = s.id
+       and ${named ? "r.run_key = $2" : "$2::text is null" + LATEST_MINTED_RUN_KEY}
      where s.key = $1
      order by r.observed_at desc nulls last`, params: [serviceKey, canaryRunKey] }]);
   const rows = (Array.isArray(raw) ? raw : []).map(row => {

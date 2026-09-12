@@ -18,6 +18,8 @@
 // Both auth paths — the OAuth grant (props) and the legacy PARTNER_TOKENS
 // bearer — resolve through this file, so they cannot drift apart.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /** Google identities permitted to be issued a token. Everything else is refused. */
 export const ALLOW_LIST = Object.freeze({
   "joe.bookout.carr.us@gmail.com": "joe",
@@ -504,4 +506,93 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
   return { slug, display: `Hermes CoS (${slug})`, human: false,
            hermes: true, hermesCos: true, via: "hermes-cos-token", client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
+}
+
+// ---------------------------------------------------------------------------
+// THE AUTHENTICATED CALL CONTEXT (2026-09-12, PR 1013 correction round).
+//
+// WHY IT EXISTS. r7's identity rule says every receipt identity is DERIVED from
+// authenticated execution context, and caller-supplied identity denies. A module
+// that must not take an actor parameter — because a parameter is exactly the
+// door a caller smuggles an identity through — then has no way to ask who is
+// calling it. The Gate Zero producer is that module: its arity is zero by
+// design, and the first review round found it reconstructing a reviewer identity
+// out of a static declaration instead, so ANY process that imported it received
+// a receipt signed `codex-reviewer` without ever authenticating.
+//
+// WHAT THIS IS. One AsyncLocalStorage, entered ONCE, at tools.js's single verb
+// dispatch — the same choke point every verb already funnels through. Inside a
+// verb call the derived identity is readable with no argument; outside one there
+// is nothing to read and `authenticatedCallIdentity()` answers null. A test, a
+// CLI probe or an unauthenticated import therefore CANNOT obtain an identity,
+// which is the property the producer's refusal stands on.
+//
+// WHAT TRAVELS IS THE DERIVATION, NOT THE ACTOR. The store holds a frozen
+// three-field `authenticated-receipt-identity.v1` — actor_id, session_ref,
+// authority_class — computed here from the server-established actor. The actor
+// object itself is deliberately not stored: a consumer that could reach it could
+// read the grant props, and nothing downstream needs more than these three.
+//
+// THE SESSION REF IS THE SERVER'S OWN CORRELATION ID, not a digest of whatever
+// the call happened to be looking at. correlation.js stamps one per request and
+// mcp.js decorates it onto the actor; it is the only per-call identifier in this
+// system that no caller writes. No correlation id means no session, and no
+// session means no identity — a run that cannot be told apart from another run
+// is not one a receipt may name.
+//
+// THE DOOR IS NOT IN THE REF. A correlation id already identifies one call
+// uniquely, so naming the provenance beside it would add nothing — and it would
+// put `review-token` into a value the v5 privileged-word sweep closes over as a
+// SUBSTRING. The via is still validated, because a call with no recognizable
+// provenance is not one this derivation will speak for.
+//
+// FAIL-CLOSED AND NON-FATAL. A call whose identity cannot be derived runs with
+// the context CLEARED rather than with a previous call's: the surfaces that read
+// it refuse, and every verb that does not read it is unaffected.
+
+const AUTHENTICATED_CALL = new AsyncLocalStorage();
+
+/** The shapes a derived session ref is built from. Server-written, both of them. */
+const CALL_VIA = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const CALL_CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The `authenticated-receipt-identity.v1` for one server-established actor, or
+ * null when this actor cannot be spoken for.
+ *
+ * Every field is computed here and now: the slug is the one identity.js already
+ * accepted, the class is what authorizationClassForActor derives for it, and the
+ * session is the server's correlation id. Nothing is read from a tool argument
+ * and nothing is read from a stored row.
+ */
+function deriveCallIdentity(actor) {
+  if (!actor || typeof actor.slug !== "string") return null;
+  if (personalScopeForActor(actor).status === "error") return null;
+  const via = typeof actor.via === "string" ? actor.via.toLowerCase() : "";
+  const correlationId = typeof actor.correlation_id === "string"
+    ? actor.correlation_id.toLowerCase() : "";
+  if (!CALL_VIA.test(via) || !CALL_CORRELATION_ID.test(correlationId)) return null;
+  return Object.freeze({
+    actor_id: actor.slug,
+    session_ref: `session:${correlationId}`,
+    authority_class: authorizationClassForActor(actor),
+  });
+}
+
+/**
+ * Run `fn` as the authenticated call this actor established. The one caller is
+ * tools.js's verb dispatch; adding a second is a security-relevant change, not a
+ * convenience, because whatever enters here is what a receipt will be signed by.
+ */
+export function runInAuthenticatedCall(actor, fn) {
+  return AUTHENTICATED_CALL.run(deriveCallIdentity(actor), fn);
+}
+
+/**
+ * The identity of the authenticated call this code is running inside, or null
+ * when there is no such call. Takes no argument, so there is nothing to supply.
+ */
+export function authenticatedCallIdentity() {
+  const identity = AUTHENTICATED_CALL.getStore();
+  return identity === undefined ? null : identity;
 }

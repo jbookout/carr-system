@@ -385,6 +385,20 @@ test("the Gate Zero requirement is still scoped to this record layer after resol
   // this constant is about what is bindable here, not about what a Gate Zero
   // run decided — a rail that started reporting verdicts would be a second
   // Gate Zero policy, which is the thing this slice is forbidden to invent.
+  //
+  // AND THE STALE CLAUSE STAYS CORRECTED. It used to say r7 registers no v5
+  // producer for Gate Zero and that this was intentional; the loop-589
+  // amendment (decision 311a9af5) wrote the producer row into the frozen packet
+  // and Step A built the producer itself. A stale sentence inside a frozen
+  // constant is the single most likely thing to send the next reader looking for
+  // a human outcome arriving from outside, so the assertion below keeps it gone.
+  assert.equal(requirement.external_producer_is_intentional, false);
+  assert.equal(Object.hasOwn(requirement, "why_unresolved"), false,
+    "a resolved requirement kept a why_unresolved list");
+  assert.equal(requirement.what_was_unbound.some(clause =>
+    /r7 registers no v5 producer/i.test(clause)), false,
+    "the stale clause is back");
+  assert.match(requirement.corrected_stale_clause.corrected_by, /311a9af5/);
   assert.ok(/record layer/i.test(requirement.scope));
   assert.equal(/verdict|passed|green/i.test(requirement.scope), false);
   assert.ok(requirement.what_was_unbound.some(clause => /this record layer held no/i.test(clause)));
