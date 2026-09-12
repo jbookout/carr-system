@@ -1828,28 +1828,207 @@ const READER_QUERY_KEYS = Object.freeze([
   "headSha", "checkName", "workRequestRef", "commitSha",
 ]);
 
-async function assertNoExportAnswersALabel(label, namespace) {
-  const labels = [
-    ...RETIRED_FIXTURE_TRIGGERS,
-    ...Object.keys(namespace),
-    ...Object.values(namespace).filter(value => typeof value === "string"),
+// ---------------------------------------------------------------------------
+// AND THE LABEL SWEEP REACHES EVERY EXPORT, NOT THREE OF THEM — the finding of
+// the eighth re-review, and a gap in the sweep's own reach rather than in its
+// idea.
+//
+// The sweep this replaces derived its words from the namespace, which was the
+// seventh round's correction, and then handed them to the entries of
+// `FETCHER_STORE_REFS` and nothing else. Two exported callables of each fixture
+// — the error factory and the membership predicate — were never asked a label
+// at all, and neither were the production readers or the ruling lookup. Both
+// label-door mutation controls planted their door in a fetcher, so the clause
+// was proved exactly where it was already enforced and nowhere else. A label
+// branch in `seamStoreUnreachable` or in `isSeamStoreUnreachable` would have
+// survived a green run of this file.
+//
+// WHAT IS ASKED NOW, of every exported callable of all five namespaces — the two
+// fixtures, and the three production modules — is the claim in its general form:
+//
+//   THE SURFACE'S BEHAVIOUR DOES NOT VARY WITH THE WORD IT IS HANDED.
+//
+// Each word is handed to each export in every argument position and, because a
+// door does not have to be at the top of an object, as a nested KEY and as a
+// nested LEAF. The same call is then made again with the word's TWIN — the same
+// string with one character moved within its own class, so a 40-hex sha stays a
+// 40-hex sha and a `sha256:` hash stays one, and no refusal moves because a
+// pattern stopped matching. The two outcomes must be the same outcome.
+//
+// That comparison is what makes the claim falsifiable without an allow-list of
+// answers: a module constant that appears in the answer appears in the twin's
+// answer too and says nothing, while a word that came back BECAUSE THE CALLER
+// SENT IT comes back as the twin instead, and the two disagree.
+// ---------------------------------------------------------------------------
+
+/** The one phrase every label clause fails with, so a control can attribute it. */
+const LABEL_CLAUSE = "on the label";
+
+/**
+ * The words a namespace is asked about: every name it exports, every string it
+ * exports under one, and the four retired triggers by their exact text.
+ */
+function labelsOf(namespace) {
+  const words = new Set(RETIRED_FIXTURE_TRIGGERS);
+  for (const [name, value] of Object.entries(namespace)) {
+    words.add(name);
+    if (typeof value === "string") words.add(value);
+  }
+  return [...words].filter(word => word.length > 0);
+}
+
+/**
+ * The alphabet a character must stay inside for its twin to be the same KIND of
+ * string. Lower-case hex is its own class because three of this slice's patterns
+ * are built out of it, and a twin that left it would move a refusal honestly and
+ * read here as a door.
+ */
+function characterClass(character) {
+  if (/[0-9]/.test(character)) return "0123456789";
+  if (/[a-f]/.test(character)) return "abcdef";
+  if (/[g-z]/.test(character)) return "ghijklmnopqrstuvwxyz";
+  if (/[A-Z]/.test(character)) return "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  return null;
+}
+
+/**
+ * The same word with its last alphanumeric character moved one place inside its
+ * own class. Null when the word has no such character, in which case there is no
+ * twin to compare against and the word is swept for its other clauses only.
+ */
+function twinOf(word) {
+  for (let at = word.length - 1; at >= 0; at -= 1) {
+    const alphabet = characterClass(word[at]);
+    if (alphabet === null) continue;
+    const moved = alphabet[(alphabet.indexOf(word[at]) + 1) % alphabet.length];
+    return `${word.slice(0, at)}${moved}${word.slice(at + 1)}`;
+  }
+  return null;
+}
+
+/** The same argument structure with every occurrence of the word — key or leaf — replaced. */
+function substituted(value, word, twin) {
+  if (value === word) return twin;
+  if (Array.isArray(value)) return value.map(one => substituted(one, word, twin));
+  if (value !== null && typeof value === "object") {
+    const rebuilt = {};
+    for (const [key, one] of Object.entries(value))
+      rebuilt[key === word ? twin : key] = substituted(one, word, twin);
+    return rebuilt;
+  }
+  return value;
+}
+
+/**
+ * One word, in every position an argument can take: alone first, second and
+ * third; in all three at once; under each query key the readers use, alone and
+ * beside a service key the fixtures do serve, because a door behind two
+ * conditions is still a door; and as a key and as a leaf, one and two levels
+ * down.
+ */
+function labelArgumentLists(word) {
+  const lists = [
+    [word], [undefined, word], [undefined, undefined, word], [word, word, word],
   ];
-  for (const [name, storeRef] of Object.entries(FETCHER_STORE_REFS)) {
-    const fetcher = namespace[name];
-    assert.equal(typeof fetcher, "function", `${label}.${name} is not a callable`);
-    const reading = { store_ref: storeRef, rows: [] };
-    for (const word of labels)
-      for (const key of READER_QUERY_KEYS)
-        // Once with the label alone, and once beside a service key the fixture
-        // does serve — because a door behind two conditions is still a door.
-        for (const query of [{ [key]: word }, { serviceKey: "carr-fleet-sync", [key]: word }]) {
-          const answered = await fetcher(query)
-            .then(one => one, thrown => ({ threw: safeLabel(thrown) }));
-          assert.deepEqual(answered, reading,
-            `${label}.${name} answered the label ${safeLabel(word)} under ${key}`);
-        }
+  for (const key of READER_QUERY_KEYS)
+    lists.push([{ [key]: word }], [{ serviceKey: "carr-fleet-sync", [key]: word }]);
+  lists.push([{ [word]: word }]);
+  lists.push([{ wrapped: { [word]: [word] } }]);
+  lists.push([{ serviceKey: "carr-fleet-sync", nested: [{ [word]: { leaf: word } }] }]);
+  return lists;
+}
+
+async function outcomeOf(callable, argumentList) {
+  try {
+    return { kind: "returned", value: await callable(...argumentList) };
+  } catch (thrown) {
+    return { kind: "threw", value: thrown };
   }
 }
+
+/** A digest is content-derived, so a twin moves it honestly; nothing else may move. */
+const DIGEST_TEXT = /sha256:[0-9a-f]{64}/g;
+const SHAPE_DEPTH_LIMIT = 6;
+
+/**
+ * What a caller can observe of a value: its own properties including the
+ * non-enumerable ones an Error keeps, read through a `try` so a refusing getter
+ * is a fact rather than a crash, with digests masked.
+ */
+function observableShape(value, depth = 0, seen = new Set()) {
+  if (value === undefined) return "<undefined>";
+  if (value === null) return null;
+  const kind = typeof value;
+  if (kind === "string") return value.replace(DIGEST_TEXT, "sha256:<digest>");
+  if (kind === "number" || kind === "boolean") return value;
+  if (kind === "bigint") return `<bigint:${value}>`;
+  if (kind === "symbol") return `<symbol:${String(value.description)}>`;
+  if (kind === "function") return "<function>";
+  if (depth >= SHAPE_DEPTH_LIMIT || seen.has(value)) return "<not-walked-further>";
+  seen.add(value);
+  const shaped = Array.isArray(value) ? { "<array>": value.length } : {};
+  for (const key of safeOwnKeys(value).filter(one => typeof one === "string").sort())
+    shaped[key] = observableShape(safeRead(value, key), depth + 1, seen);
+  return shaped;
+}
+
+/** Every string a caller could read off a value, keys included. */
+function surfaceText(value, depth = 0, seen = new Set(), parts = []) {
+  if (typeof value === "string") { parts.push(value); return parts; }
+  if (typeof value === "symbol") { parts.push(String(value.description)); return parts; }
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) return parts;
+  if (depth >= SHAPE_DEPTH_LIMIT || seen.has(value)) return parts;
+  seen.add(value);
+  for (const key of safeOwnKeys(value)) {
+    parts.push(String(key));
+    surfaceText(safeRead(value, key), depth + 1, seen, parts);
+  }
+  return parts;
+}
+
+function saysTheWord(value, word) {
+  return surfaceText(value).some(part => part.includes(word));
+}
+
+/**
+ * EVERY exported callable of a namespace, against every word derived from that
+ * namespace, in every argument position and nested as a key and as a leaf.
+ *
+ * Three clauses per call, and the twin is what makes the first two decidable:
+ *   behaviour  the outcome for the word is the outcome for its twin — the same
+ *              kind, and the same observable shape once digests are masked.
+ *   echo       the word appears in the outcome only where the twin's outcome
+ *              carries it too, which is to say only because the module already
+ *              said it and not because the caller did.
+ *   raw        whatever is thrown is one of the module's own registered
+ *              refusals, and whatever is returned carries no privileged outcome.
+ */
+async function assertNoExportAnswersALabel(label, namespace) {
+  for (const [name, exported] of Object.entries(namespace)) {
+    if (typeof exported !== "function") continue;
+    const at = `${label}.${name}`;
+    for (const word of labelsOf(namespace)) {
+      const twin = twinOf(word);
+      for (const argumentList of labelArgumentLists(word)) {
+        const where = `${at} ${LABEL_CLAUSE} ${safeLabel(word)} at ${safeLabel(argumentList)}`;
+        const answered = await outcomeOf(exported, argumentList);
+        if (answered.kind === "threw") assertNothingRaw(at, answered.value);
+        else assertSwept(`${at}.returned`, answered.value);
+        if (twin === null) continue;
+        const twinAnswered = await outcomeOf(
+          exported, argumentList.map(one => substituted(one, word, twin)));
+        assert.equal(answered.kind, twinAnswered.kind, `${where}: it answered a different way`);
+        assert.deepEqual(observableShape(answered.value), observableShape(twinAnswered.value),
+          `${where}: its answer moved`);
+        assert.ok(!saysTheWord(answered.value, word) || saysTheWord(twinAnswered.value, word),
+          `${where}: it said the caller's own word back`);
+      }
+    }
+  }
+}
+
+/** The five namespaces the label sweep owes: both fixtures and all three modules. */
+const LABEL_SWEPT_NAMESPACES = () => [...SWEPT_FIXTURE_NAMESPACES(), ...SWEPT_NAMESPACES()];
 
 test("STAGING: both fixture namespaces hold the closed shape the real module does", async () => {
   const saved = saveEnv(STORE_CREDENTIALS);
@@ -1869,7 +2048,7 @@ test("STAGING: both fixture namespaces hold the closed shape the real module doe
   }
 });
 
-test("STAGING: no fixture export answers a label, and the four retired doors stay shut", async () => {
+test("STAGING: no export of any of the five namespaces answers a label, and the four retired doors stay shut", async () => {
   // WHAT THIS REPLACES, said plainly, because the claim has changed rather than
   // been tightened. The test that stood here asserted that the store fixture's
   // two deliberate misbehaviours — `throw "allow"` and an answer whose getters
@@ -1886,9 +2065,28 @@ test("STAGING: no fixture export answers a label, and the four retired doors sta
   // one, because there is nothing to select.
   //
   // So what is asserted here is the opposite of what used to be: that no export
-  // of either fixture answers a label of any kind.
+  // of either fixture answers a label of any kind — and, since the eighth
+  // re-review, that no export of the three PRODUCTION namespaces does either.
+  // The credentials are cleared for the production half so that every refusal is
+  // the configured one and no call in this file reaches a network.
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  try {
+    for (const [label, namespace] of LABEL_SWEPT_NAMESPACES())
+      await assertNoExportAnswersALabel(label, namespace);
+  } finally {
+    restoreEnv(savedEnv);
+  }
+
+  // AND THE THREE FETCHERS OF EACH FIXTURE SAY THE SAME EMPTY READING BY NAME,
+  // which is the concrete form of the general claim above: the twin comparison
+  // proves the answer did not MOVE, and this proves what the answer IS.
   for (const [label, namespace] of SWEPT_FIXTURE_NAMESPACES())
-    await assertNoExportAnswersALabel(label, namespace);
+    for (const [name, storeRef] of Object.entries(FETCHER_STORE_REFS))
+      for (const word of labelsOf(namespace))
+        for (const key of READER_QUERY_KEYS)
+          for (const query of [{ [key]: word }, { serviceKey: "carr-fleet-sync", [key]: word }])
+            assert.deepEqual(await namespace[name](query), { store_ref: storeRef, rows: [] },
+              `${label}.${name} answered the label ${safeLabel(word)} under ${key}`);
 
   // AND THE FOUR RETIRED ADDRESSES BY NAME, against the fetcher each used to
   // open a door on, with the service key that used to be its other half.
@@ -2078,6 +2276,140 @@ test("STAGING CONTROL: each door the fixture-surface sweep closes has been seen 
   // And the shipped fixtures go through the whole check untouched.
   for (const [label, namespace] of SWEPT_FIXTURE_NAMESPACES())
     await assertFixtureSurfaceClosed(`calibration.${label}`, namespace);
+});
+
+test("STAGING CONTROL: a planted label door in every export class has been seen to fail", async () => {
+  // THE FINDING OF THE EIGHTH RE-REVIEW WAS NOT THAT THE SWEEP WAS WEAK — it was
+  // that it was AIMED. Both label-door controls planted their door in a fetcher,
+  // which is the one export class the label sweep already reached, so the clause
+  // was proved exactly where it was already enforced and nowhere else. A control
+  // that can only fail where the check already runs proves the check runs, not
+  // that it covers anything.
+  //
+  // So there is a plant per EXPORT CLASS now: the error factory, the membership
+  // predicate, a fetcher, a reader, and the ruling lookup. Each namespace is
+  // identical to the shipped one in every way but the single planted branch, so
+  // a failure is attributable to that branch — and the clause that catches it is
+  // named in the plant and asserted, so a plant that trips some other check on
+  // its way past is a red control rather than a green one.
+  const planted = callable => {
+    const bound = callable.bind(null);
+    Object.defineProperty(bound, Symbol.hasInstance,
+      { value: () => false, writable: false, enumerable: false, configurable: false });
+    return bound;
+  };
+  // One door text for all five namespaces: a retired trigger is in every derived
+  // label set, because `labelsOf` seeds every set with the four of them.
+  const DOOR = RETIRED_FIXTURE_TRIGGERS[0];
+  const askedFor = (query, key) => {
+    try { return query === null || query === undefined ? undefined : query[key]; }
+    catch { return undefined; }
+  };
+  const SWEPT_CLAUSE = "carries a privileged outcome";
+
+  const plants = [
+    // THE ERROR FACTORY — the class the sweep never handed a word to. The door is
+    // the quietest one a factory has: the same refusal, built with a cause it was
+    // not given, so only `cause_kind` moves.
+    ["the error factory", "fixtureStores", LABEL_CLAUSE, { ...fixtureStores,
+      seamStoreUnreachable: planted((storeRef, because, cause) =>
+        storeRef === DOOR || because === DOOR
+          ? fixtureStores.seamStoreUnreachable(storeRef, because, new Error("a door"))
+          : fixtureStores.seamStoreUnreachable(storeRef, because, cause)) }],
+    // THE MEMBERSHIP PREDICATE, twice, because its whole answer space is two
+    // booleans and the two doors it has are caught by different clauses.
+    //
+    // (a) It REFUSES on the label instead of answering. The refusal is one of the
+    //     fixture's own registered ones, so the raw clause is satisfied and it is
+    //     the label clause that sees the kind change.
+    ["the membership predicate, refusing on a label", "fixtureStores", LABEL_CLAUSE,
+      { ...fixtureStores,
+        isSeamStoreUnreachable: planted(value => {
+          if (value !== DOOR) return fixtureStores.isSeamStoreUnreachable(value);
+          throw fixtureStores.seamStoreUnreachable(
+            "control-plane:ops.service+ops.run", "the call did not finish");
+        }) }],
+    // (b) It ANSWERS TRUE on the label, which is the door a predicate actually
+    //     has. The twin comparison would see it too, but the sweep's own raw
+    //     clause gets there first: a bare `true` is a privileged outcome
+    //     wherever it appears, so this plant is asserted against THAT clause
+    //     rather than against the label one. Both are clauses of this sweep.
+    ["the membership predicate, answering true on a label", "fixtureStores", SWEPT_CLAUSE,
+      { ...fixtureStores,
+        isSeamStoreUnreachable: planted(value =>
+          value === DOOR ? true : fixtureStores.isSeamStoreUnreachable(value)) }],
+    // A FETCHER — the class both earlier controls covered, kept so the change is
+    // additive and the class is not left uncovered by the rewrite.
+    ["a fetcher", "fixtureStores", LABEL_CLAUSE, { ...fixtureStores,
+      fetchSchedulerLedgerRows: planted(async query =>
+        askedFor(query, "canaryRunKey") === DOOR
+          ? { store_ref: "control-plane:ops.service+ops.run", rows: [{ planted: 1 }] }
+          : fixtureStores.fetchSchedulerLedgerRows(query)) }],
+    // A READER — a door that answers with another card's answer, which is a
+    // well-formed gate answer and so invisible to every clause but the twin.
+    ["a reader", "readers", LABEL_CLAUSE, { ...readers,
+      readGateConclusionEvidence: planted(async query =>
+        askedFor(query, "checkName") === DOOR
+          ? readers.readPredecessorOutcomeEvidence({})
+          : readers.readGateConclusionEvidence(query)) }],
+    // THE RULING LOOKUP — the one export of its module, and the one whose door
+    // would open the seam outright: a ruling where the record has none.
+    ["the ruling lookup", "rulings", LABEL_CLAUSE, { ...rulings,
+      seamRulingRef: planted(cardRef =>
+        cardRef === DOOR
+          ? Object.freeze({ decision_ref: FIXTURE_DECISION_IDS[0], store_ref: "github:checks" })
+          : rulings.seamRulingRef(cardRef)) }],
+  ];
+
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  try {
+    for (const [what, label, clause, plant] of plants) {
+      let failure = null;
+      try {
+        await assertNoExportAnswersALabel(`control.${label}`, plant);
+      } catch (thrown) {
+        failure = thrown;
+      }
+      assert.ok(failure !== null, `the sweep passed a label door planted in ${what}`);
+      assert.ok(String(failure?.message ?? "").includes(clause),
+        `the door in ${what} was caught by a clause other than ${clause}: ${failure?.message}`);
+    }
+
+    // AND THE CALIBRATION, which is what makes each red above attributable: the
+    // same five namespaces, unplanted, go through the same sweep untouched.
+    for (const [label, namespace] of LABEL_SWEPT_NAMESPACES())
+      await assertNoExportAnswersALabel(`calibration.${label}`, namespace);
+  } finally {
+    restoreEnv(savedEnv);
+  }
+});
+
+test("STAGING CONTROL: a word's twin is the same kind of string, and differs from it", () => {
+  // THE SWEEP'S COMPARISON RESTS ENTIRELY ON THIS, so it is asserted rather than
+  // assumed: a twin that stopped matching a pattern its word matched would make
+  // every honest refusal look like a door, and a twin equal to its word would
+  // make every door look honest.
+  const patterns = [/^[0-9a-f]{40}$/, /^sha256:[0-9a-f]{64}$/, /^[a-z0-9][a-z0-9._-]{0,63}$/,
+    /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/, /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/];
+  const words = new Set([...RETIRED_FIXTURE_TRIGGERS]);
+  for (const [, namespace] of LABEL_SWEPT_NAMESPACES())
+    for (const word of labelsOf(namespace)) words.add(word);
+  for (const word of words) {
+    const twin = twinOf(word);
+    assert.equal(typeof twin, "string", `no twin was built for ${safeLabel(word)}`);
+    assert.notEqual(twin, word, `the twin of ${safeLabel(word)} is the word itself`);
+    assert.equal(twin.length, word.length, `the twin of ${safeLabel(word)} changed length`);
+    for (const pattern of patterns)
+      assert.equal(pattern.test(twin), pattern.test(word),
+        `the twin of ${safeLabel(word)} changed which shapes it matches`);
+  }
+  // And a word with nothing to move has no twin, which the sweep reads as "no
+  // comparison to make" rather than as a passing comparison.
+  assert.equal(twinOf("---"), null);
+  assert.equal(twinOf(""), null);
+  // And the substitution reaches keys and leaves at every depth the sweep builds.
+  assert.deepEqual(substituted({ a: ["a", { a: "a" }] }, "a", "b"),
+    { b: ["b", { b: "b" }] });
 });
 
 test("RULED: a pasted decision id is what opens the seam, and nothing else", async () => {
