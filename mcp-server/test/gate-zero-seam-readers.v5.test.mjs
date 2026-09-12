@@ -1276,9 +1276,12 @@ test("STORE ERROR: a setter on the prototype chain cannot stand in for a field",
 
 test("SWEEP CONTROL: each assertion the constructor sweep makes has been seen to fail", () => {
   // A sweep nobody has seen fail is a sweep nobody has tested, and this one is
-  // new. SEVEN PLANTS, each differing from the shipped class in exactly ONE way,
-  // so no working assertion can cover for a broken one. Plant 1 is the code this
-  // correction replaced, verbatim; the other six isolate one clause each.
+  // new. EIGHT PLANTS — counted as the loop below executes them, which is the
+  // only count that proves anything — each differing from the shipped class in
+  // exactly ONE way, so no working assertion can cover for a broken one. Plant 1
+  // is the code this correction replaced, verbatim; the other seven isolate one
+  // clause each. Seven CLASSES are declared for the eight, because the last two
+  // plants differ in how the same class is exported rather than in its body.
   const REASONS = Object.freeze(["the query did not finish", "the checks source was not reachable",
     "the reason this store was unreachable is not a registered one"]);
   const TOKENS = Object.freeze(["github:checks", "a-store-this-file-does-not-serve"]);
@@ -1381,7 +1384,8 @@ test("SWEEP CONTROL: each assertion the constructor sweep makes has been seen to
     }
   }
 
-  // 7 — everything above it, minus the `new.target` check.
+  // The body behind plants 7 and 8: everything above it, minus the `new.target`
+  // check. The two plants differ in how it is EXPORTED, not in what it does.
   class Subclassable extends Error {
     constructor(storeRef, because) {
       const [store, reason] = fixed(storeRef, because);
@@ -1421,13 +1425,13 @@ test("SWEEP CONTROL: each assertion the constructor sweep makes has been seen to
     ["keeps-cause", factoryFor(KeepsCause)],
     ["engine-stack", factoryFor(EngineStack)],
     ["accessor-field", factoryFor(AccessorField)],
-    // 8 — every value it yields is registered and every shape clause holds. The
+    // 7 — every value it yields is registered and every shape clause holds. The
     //     ROUTE is the defect: `prototype.constructor` is left as the class the
     //     engine installed, so any refusal it produces hands a caller back a
     //     constructor to aim a new.target at. That is the fourth round's finding
     //     (2), and nothing about the VALUES it returns is wrong.
     ["leaks-the-class", closed((...args) => new Subclassable(...args))],
-    // 9 — the class itself, exported the way the first draft exported it:
+    // 8 — the class itself, exported the way the first draft exported it:
     //     constructable, carrying a prototype, callable by anybody.
     ["the-class-itself", Subclassable],
   ])
@@ -1524,8 +1528,8 @@ test("SURFACE: no export can be constructed, and none reads a caller's newTarget
 
 test("SURFACE CONTROL: each clause of the closed-callable check has been seen to fail", () => {
   // A check nobody has seen fail is a check nobody has tested, and every clause
-  // here is new. ONE PLANT PER CLAUSE, each differing from the shipped shape in
-  // exactly one way.
+  // here is new. ELEVEN PLANTS, one per clause, each differing from the shipped
+  // shape in exactly one way.
   const deny = (callable, value) => {
     Object.defineProperty(callable, Symbol.hasInstance, value);
     return callable;
@@ -1548,19 +1552,19 @@ test("SURFACE CONTROL: each clause of the closed-callable check has been seen to
     // 5 — closed in every other way, and BARE rather than bound: the engine's
     //     refusal of it quotes the function's own source text back.
     ["a-bare-arrow", deny(query => query, flat)],
-    // 5 — a guard that is an accessor: it runs code on every read of the slot.
+    // 6 — a guard that is an accessor: it runs code on every read of the slot.
     ["hasInstance-accessor", deny((() => {}).bind(null), { get: () => () => false, configurable: true })],
-    // 6 — a guard that can be replaced.
+    // 7 — a guard that can be replaced.
     ["hasInstance-writable", deny((() => {}).bind(null), { ...flat, writable: true })],
-    // 7 — a guard that can be redefined as an accessor afterwards.
+    // 8 — a guard that can be redefined as an accessor afterwards.
     ["hasInstance-configurable", deny((() => {}).bind(null), { ...flat, configurable: true })],
-    // 8 — a guard that is itself a constructable callable, which is the fifth
+    // 9 — a guard that is itself a constructable callable, which is the fifth
     //     round's second standards finding: the retrieved function was another
     //     door nobody had enumerated.
     ["hasInstance-constructable", deny((() => {}).bind(null), { ...flat, value: function () { return false; } })],
-    // 9 — a guard that answers the membership question yes.
+    // 10 — a guard that answers the membership question yes.
     ["hasInstance-answers-true", deny((() => {}).bind(null), { ...flat, value: () => true })],
-    // 10 — a guard that LOOKS at the operand: it answers correctly for innocent
+    // 11 — a guard that LOOKS at the operand: it answers correctly for innocent
     //      values and runs the caller's getPrototypeOf trap for hostile ones.
     ["hasInstance-reads-the-operand",
       deny((() => {}).bind(null), { ...flat, value: x => x instanceof Error })],
@@ -2427,8 +2431,8 @@ test("STAGING: the faulted store is one instance, and no caller value steers it"
 
 test("STAGING CONTROL: each door the fixture-surface sweep closes has been seen to fail", async () => {
   // A check nobody has seen fail is a check nobody has tested, and this whole
-  // test is new. ONE PLANT PER CLAUSE, each a namespace identical to the shipped
-  // fixture in every way but one, so a failure is attributable to that one.
+  // test is new. SIX PLANTS, one per clause, each a namespace identical to the
+  // shipped fixture in every way but one, so a failure is attributable to that one.
   const closed = callable => {
     const bound = callable.bind(null);
     Object.defineProperty(bound, Symbol.hasInstance,
@@ -2543,7 +2547,8 @@ test("STAGING CONTROL: a planted label door in every export class has been seen 
   // that it covers anything.
   //
   // So there is a plant per EXPORT CLASS now: the error factory, the membership
-  // predicate, a fetcher, a reader, and the ruling lookup. Each namespace is
+  // predicate, a fetcher, a reader, and the ruling lookup — EIGHT PLANTS across
+  // those five classes, because two of them have two doors. Each namespace is
   // identical to the shipped one in every way but the single planted branch, so
   // a failure is attributable to that branch — and the clause that catches it is
   // named in the plant and asserted, so a plant that trips some other check on
