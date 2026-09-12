@@ -26,10 +26,13 @@
 //
 //   node --test mcp-server/test/gate-zero-assurance.v5.test.mjs
 
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import {
+  cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { digest } from "../src/artifact-trust.js";
@@ -284,12 +287,15 @@ const EXPECTED_PRODUCER_EXPORTS = [
   "V5_A02_GATE_ZERO_COMBINER",
   "V5_A02_GATE_ZERO_GATE_ID",
   "V5_A02_GATE_ZERO_ORACLE_REF",
+  "V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF",
+  "V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF",
   "V5_A02_GATE_ZERO_ORACLE_VERSION",
   "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
   "V5_A02_GATE_ZERO_PRODUCER_DECISION_REF",
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS",
   "V5_A02_GATE_ZERO_PRODUCER_ROLE",
+  "V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF",
   "V5_A02_GATE_ZERO_R7_ENTRY_PRESENT",
   "V5_A02_GATE_ZERO_RECEIPT_REF",
   "V5_A02_GATE_ZERO_RETRY_POLICY",
@@ -389,7 +395,10 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", () =>
     assert.equal(result.join, null, "no join may ride inside the refusal");
     assert.equal(result.predecessor_evidence_read, null);
     assert.equal(Object.hasOwn(result, "joins_exactly"), false);
-    assert.deepEqual(result.owed_seams, [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+    // OWED, not merely named: the three reader seams have a ruled reader behind
+    // them now, and the one thing still owed is the producer. `seams_bound`
+    // below carries the whole list so the filter hides nothing.
+    assert.deepEqual(result.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
   }
 });
 
@@ -418,10 +427,32 @@ test("SURFACE: the producer contract is reported as RULED, never as read from r7
   assert.deepEqual(
     V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7.map(item => item.field).sort(),
     ["causal_phase", "consumes_gate_ids", "produces_gate_ids[0]", "target_dag"]);
-  assert.ok(result.undecided_governance_questions.includes(
-    "which store an accepted predecessor outcome is read from"));
-  assert.ok(result.undecided_governance_questions.includes(
-    "whether r7 itself carries the registration, which today it does not"));
+  // THE THREE THAT LEFT THIS LIST ON 2026-09-11, and they left because Joe
+  // answered them, not because anybody trimmed the list: cards 11, 12 and 13
+  // each name a store, and the readers those rulings switched on are bound.
+  for (const answered of [
+    "which store an accepted predecessor outcome is read from",
+    "which scheduler surface a canary and its readback are read from",
+    "which surface a gate's own conclusion is read from",
+  ])
+    assert.equal(result.undecided_governance_questions.includes(answered), false,
+      `${answered} is ruled and must not still be listed as undecided`);
+  // AND THE TWO THAT DID NOT. Cards 9 and 10 are a seat and a sealed packet.
+  assert.deepEqual([...result.undecided_governance_questions], [
+    "which independent seat holds oracle:gate-producer:gate-zero-read-only",
+    "whether r7 itself carries the registration, which today it does not",
+  ]);
+  // CARD 9 names a charter and staffs nobody; CARD 10 rules an amendment that
+  // the holder of the frozen packet has not applied. Both are reported as ruled
+  // and neither is reported as done.
+  assert.equal(result.oracle_seat_charter_ref, "charter:reviewer");
+  assert.equal(result.oracle_seat_charter_decision_ref,
+    "8a1dad08-8707-4bb0-a159-c2831a00cea2");
+  assert.equal(result.oracle_seat_bound, false);
+  assert.equal(result.r7_entry_amendment_decision_ref,
+    "311a9af5-3685-4c47-a158-f8dd70870ca1");
+  assert.equal(result.producer_registration.r7_entry_amendment_applied, false);
+  assert.equal(result.r7_entry_present, false);
 });
 
 test("SURFACE: a ruled producer role does not make the gate passable", () => {
@@ -433,26 +464,238 @@ test("SURFACE: a ruled producer role does not make the gate passable", () => {
   assert.equal(result.status, "unavailable");
   assert.equal(result.decision, "refuse");
   assert.equal(result.join, null);
-  assert.deepEqual(result.owed_seams, [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+  assert.deepEqual(result.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
   assert.equal(v5A02GateZeroPolicyPreimage().gate_zero_passable, false);
+  // And three bound readers do not make it passable either, which is the SECOND
+  // confusion available here: evidence is not a signature.
+  assert.equal(v5A02GateZeroPolicyPreimage().authoritative_readers_bound, true);
+  assert.equal(v5A02GateZeroPolicyPreimage().producer_bound, false);
 });
 
-test("SURFACE: every unavailable answer names the seams it is owed and binds none", () => {
+/**
+ * THE WIRING, AND THE ONE THING IT DID NOT DO.
+ *
+ * Joe ruled cards 11, 12 and 13 on 2026-09-11 and PR 1001 built their readers,
+ * so three of the four seams have an authoritative surface behind them and this
+ * module imports it. What that buys is a READING, and what Gate Zero is missing
+ * is a SIGNATURE: which accepted outcome, which canary row, which commit and
+ * which declared check a run stands on are the producer's bindings, and cards 9
+ * and 10 left that seam unbuilt on purpose. So every answer still refuses — one
+ * step further along, on the reason that is now the true one.
+ */
+test("SURFACE: the three ruled readers are bound, and the producer never is", () => {
   const join = readGateZeroPredecessorJoin();
-  assert.equal(join.reason_id, "predecessor_outcome_reader_unavailable");
-  assert.deepEqual(join.owed_seams,
-    [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, V5_A02_SCHEDULER_READER_SEAM].sort());
-  assert.equal(join.predecessor_outcome_reader_bound, false);
-  assert.equal(join.scheduler_reader_bound, false);
+  assert.equal(join.predecessor_outcome_reader_bound, true);
+  assert.equal(join.scheduler_reader_bound, true);
+  assert.equal(join.reason_id, "gate_zero_producer_seam_unavailable");
+  assert.equal(join.decided_by, "ruled_readers_bound_producer_unstaffed");
+  assert.deepEqual(join.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
 
   const graph = readGateGraphAssurance();
-  assert.equal(graph.reason_id, "gate_conclusion_reader_unavailable");
-  assert.deepEqual(graph.owed_seams, [V5_A02_GATE_CONCLUSION_READER_SEAM]);
-  assert.equal(graph.gate_conclusion_reader_bound, false);
+  assert.equal(graph.gate_conclusion_reader_bound, true);
+  assert.equal(graph.reason_id, "gate_zero_producer_seam_unavailable");
+  assert.deepEqual(graph.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
 
-  for (const result of [join, graph, emitGateZeroOutcome(cleanJoin())])
+  // Still a refusal, on all three, whatever is bound.
+  for (const result of [join, graph, emitGateZeroOutcome(cleanJoin())]) {
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.decision, "refuse");
+    assert.equal(result.request_read, false);
+    assert.equal(result.caller_evidence_admitted, false);
+    // THE ONE SEAM THAT MAY NEVER REPORT BOUND HERE. It has no card token, so
+    // no ruling line can open it, and nothing below a human seat can.
+    const producer = result.seams_bound
+      .find(entry => entry.seam === V5_A02_GATE_ZERO_PRODUCER_SEAM);
+    if (producer !== undefined)
+      assert.equal(producer.bound, false, "the producer seam reported bound");
+    assert.ok(result.owed_seams.includes(V5_A02_GATE_ZERO_PRODUCER_SEAM));
+  }
+  assert.equal(emitGateZeroOutcome(cleanJoin()).producer_bound, false);
+
+  // And the three reader seams report bound in the whole list, not only in the
+  // three named booleans above.
+  const bound = new Map(emitGateZeroOutcome(cleanJoin()).seams_bound
+    .map(entry => [entry.seam, entry.bound]));
+  assert.deepEqual([...bound.entries()].sort(), [
+    [V5_A02_GATE_CONCLUSION_READER_SEAM, true],
+    [V5_A02_GATE_ZERO_PRODUCER_SEAM, false],
+    [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, true],
+    [V5_A02_SCHEDULER_READER_SEAM, true],
+  ].sort());
+});
+
+/**
+ * THE SWITCH TURNS BOTH WAYS, AND THIS IS THE PROOF.
+ *
+ * The binding condition is `seamRulingRef(card)` — the same ruling table the
+ * readers ask — so putting `null` back on a card's `decision_id:` line unbinds
+ * the seam HERE as well as there. The falsifiable form of "nothing else moved"
+ * is a digest: with all three lines null, the three public answers must be the
+ * exact bytes main published before any of this landed.
+ *
+ * THE DIGESTS BELOW ARE PINNED, not recomputed from src, and that is the whole
+ * point. They were taken from `origin/main` at 64b22a4b — "Admit the
+ * repository's real check names in the Gate Zero conclusion reader (#1003)" —
+ * by calling the three exports of the unmodified module and digesting each
+ * answer. A recomputation from src would confirm itself; a literal cannot.
+ *
+ * HOW THE UNRULED TREE IS REACHED, and why it is not a door. src is copied to a
+ * temp directory under node_modules/.cache, the three ruling lines in the COPY
+ * are set back to null, and the COPY'S OWN gate module is imported. Nothing in
+ * src is edited, no argument selects it, no environment variable points at it —
+ * it is the same staging gate-zero-seam-readers.v5.test.mjs uses, for the same
+ * reason.
+ */
+/**
+ * WHAT THE PIN COVERS, AND THE ONE PLACE IT CANNOT.
+ *
+ * The two reader answers are pinned WHOLE: nothing about them may move in an
+ * unruled tree. `emitGateZeroOutcome` carries four fields this change added on
+ * purpose — cards 9 and 10, which are a charter and a sealed packet and have
+ * nothing to do with the rulings switch — so it is pinned with those four (and
+ * the four the registration gained beneath them) removed. Both halves are
+ * asserted: the additions are exactly these eight names, and everything that is
+ * not one of them is main's bytes.
+ */
+const CARD_9_AND_10_ANSWER_FIELDS = Object.freeze([
+  "oracle_seat_bound",
+  "oracle_seat_charter_ref",
+  "oracle_seat_charter_decision_ref",
+  "r7_entry_amendment_decision_ref",
+]);
+const CARD_9_AND_10_REGISTRATION_FIELDS = Object.freeze([
+  "oracle_seat_charter_ref",
+  "oracle_seat_charter_decision_ref",
+  "r7_entry_amendment_decision_ref",
+  "r7_entry_amendment_applied",
+]);
+
+/** The answer with cards 9 and 10 lifted back out of it. */
+function withoutCards9And10(answer) {
+  const stripped = { ...answer };
+  for (const field of CARD_9_AND_10_ANSWER_FIELDS) {
+    assert.ok(Object.hasOwn(stripped, field), `${field} is not on the answer`);
+    delete stripped[field];
+  }
+  const registration = { ...stripped.producer_registration };
+  for (const field of CARD_9_AND_10_REGISTRATION_FIELDS) {
+    assert.ok(Object.hasOwn(registration, field), `${field} is not on the registration`);
+    delete registration[field];
+  }
+  stripped.producer_registration = registration;
+  return stripped;
+}
+
+const MAIN_ANSWER_DIGESTS = Object.freeze({
+  readGateZeroPredecessorJoin:
+    "sha256:06a7af2a2df9a57e2c398980e41ed13f9eb861779c06f7ac8a3fb36ac10218da",
+  readGateGraphAssurance:
+    "sha256:0af0b1524b0565bcfbef033ee341e1a43a48611eaa38bdce99baebe94c18f51b",
+  // Taken from main the same way, then passed through withoutCards9And10 — on
+  // main that function is the identity, because main has neither field set.
+  emitGateZeroOutcome:
+    "sha256:e8881d51dc8cae751d5c06a30816fdc448fa4a252b70453ecfda311fc817aec9",
+});
+
+/** The three ruled lines as src holds them, and the null each goes back to. */
+const RULED_DECISION_LINES = Object.freeze([
+  '    decision_id: "16c7cdfb-b675-4b6a-bbff-4bbdab46baf8",\n',
+  '    decision_id: "f7c486d6-5bee-4c4c-a76f-c0f162f66db8",\n',
+  '    decision_id: "87e9e11e-64b2-49b3-a6aa-4901c24eaa91",\n',
+]);
+const NULL_DECISION_LINE = "    decision_id: null,\n";
+
+const stagedTrees = [];
+
+after(() => {
+  for (const base of stagedTrees) rmSync(base, { recursive: true, force: true });
+});
+
+function stageUnruledTree() {
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const base = mkdtempSync(join(cache, "gate-zero-unruled-"));
+  stagedTrees.push(base);
+  const target = join(base, "src");
+  cpSync(fileURLToPath(new URL("../src/", import.meta.url)), target, { recursive: true });
+
+  const rulingsPath = join(target, "gate-zero-seam-rulings.v5.js");
+  let rulings = readFileSync(rulingsPath, "utf8");
+  for (const anchor of RULED_DECISION_LINES) {
+    assert.equal(rulings.split(anchor).length - 1, 1,
+      "a staging anchor no longer matches a ruling line in src");
+    rulings = rulings.replace(anchor, NULL_DECISION_LINE);
+  }
+  assert.equal(rulings.split(NULL_DECISION_LINE).length - 1, 3,
+    "the staging left the wrong number of unruled lines");
+  writeFileSync(rulingsPath, rulings);
+  return target;
+}
+
+test("SWITCH: with the three rulings back to null, the answers are main's bytes", async () => {
+  const target = stageUnruledTree();
+  const unruled = await import(
+    pathToFileURL(join(target, "gate-zero-assurance.v5.js")).href);
+
+  for (const name of ["readGateZeroPredecessorJoin", "readGateGraphAssurance"])
+    assert.equal(digest(unruled[name]()), MAIN_ANSWER_DIGESTS[name],
+      `${name} no longer answers what main answered while unruled`);
+  // And the emission, with cards 9 and 10 lifted out: every other byte is main's.
+  assert.equal(digest(withoutCards9And10(unruled.emitGateZeroOutcome())),
+    MAIN_ANSWER_DIGESTS.emitGateZeroOutcome,
+    "the emitted answer moved for a reason other than cards 9 and 10");
+
+  // And the readings the answers report are the readings main reported.
+  const unruledJoin = unruled.readGateZeroPredecessorJoin();
+  assert.equal(unruledJoin.reason_id, "predecessor_outcome_reader_unavailable");
+  assert.equal(unruledJoin.predecessor_outcome_reader_bound, false);
+  assert.equal(unruledJoin.scheduler_reader_bound, false);
+  assert.equal(unruledJoin.decided_by, "no_authoritative_reader");
+  assert.equal(unruled.readGateGraphAssurance().gate_conclusion_reader_bound, false);
+  for (const result of [unruledJoin, unruled.readGateGraphAssurance(),
+    unruled.emitGateZeroOutcome()])
     for (const entry of result.seams_bound)
-      assert.equal(entry.bound, false, `${entry.seam} must be unbound`);
+      assert.equal(entry.bound, false, `${entry.seam} reported bound in an unruled tree`);
+
+  // The staging is a copy; src itself still carries Joe's three rulings.
+  assert.equal(readGateZeroPredecessorJoin().predecessor_outcome_reader_bound, true);
+});
+
+test("SWITCH: the shipped answers are NOT main's bytes, so the pin can fail", () => {
+  // Without this, a wiring that did nothing would pass the test above silently.
+  for (const [name, fn] of [
+    ["readGateZeroPredecessorJoin", readGateZeroPredecessorJoin],
+    ["readGateGraphAssurance", readGateGraphAssurance],
+  ])
+    assert.notEqual(digest(fn()), MAIN_ANSWER_DIGESTS[name],
+      `${name} still answers exactly what it answered unwired`);
+  // The emission too, and it must differ for the READER reason and not only
+  // because cards 9 and 10 added four names: strip those and it still moves.
+  assert.notEqual(digest(withoutCards9And10(emitGateZeroOutcome())),
+    MAIN_ANSWER_DIGESTS.emitGateZeroOutcome,
+    "the emitted answer moved only by the card 9 and 10 fields");
+});
+
+/**
+ * NO CALLER-SUPPLIED READER, AND NO ROUTE TO ONE. The readers arrive as a
+ * module-private import; the only thing that decides whether a seam is bound is
+ * a decision id committed to a file. Proved in the source rather than only in
+ * behaviour, so a future `export function bindReader` is red on sight.
+ */
+test("SURFACE: the readers are imported, never handed in", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../src/gate-zero-assurance.v5.js", import.meta.url)), "utf8");
+  assert.ok(/^import \{\n(?:.*\n)*?\} from "\.\/gate-zero-seam-readers\.v5\.js";$/m.test(source),
+    "the readers are not imported by this module");
+  assert.ok(source.includes('import { seamRulingRef } from "./gate-zero-seam-rulings.v5.js";'),
+    "the binding condition is not the ruling table");
+  for (const shape of [/\bexport\s+function\s+bind/, /\bexport\s+const\s+\w*[Bb]ind\w*\s*=/,
+    /process\.env/, /globalThis\.process/])
+    assert.equal(shape.test(source), false, `the gate exposes a binding door: ${shape}`);
+  // Every exported callable still takes at most one argument, and none of them
+  // is a reader.
+  for (const [, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT)
+    assert.ok(fn.length <= 1, "an export takes a second argument");
 });
 
 test("SURFACE: a producer cannot be handed in as a second argument", () => {
@@ -509,12 +752,19 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // And specifically: the public surface imports five modules, none of them this
-  // slice's classifiers. The fifth is the producer registration, which is a
-  // frozen constant table and reaches nothing.
+  // And specifically: the public surface imports seven modules, none of them
+  // this slice's classifiers. The fifth is the producer registration, a frozen
+  // constant table that reaches nothing; the sixth and seventh are the ruled
+  // readers and the ruling table they are bound behind, added on 2026-09-12.
+  // THE ORDER MATTERS AND IS ASSERTED: the producer registration must be
+  // instantiated before the readers, because the readers read one of its
+  // constants through this module's re-export at their own module scope, and
+  // the two files form a cycle. Move the reader import above it and the import
+  // order that starts at the gate hits a temporal dead zone.
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
-      "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js"]);
+      "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
+      "./gate-zero-seam-readers.v5.js", "./gate-zero-seam-rulings.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
     ["./benchmark-minimum.v5.js"]);
 });
@@ -946,7 +1196,10 @@ test("POLICY: the preimage is stable, caller-independent, and says the surface r
   assert.equal(preimage.policy_version, V5_A02_POLICY_VERSION);
   assert.equal(preimage.gate_zero_passable, false);
   assert.equal(preimage.producer_bound, false);
-  assert.equal(preimage.authoritative_readers_bound, false);
+  // TRUE since 2026-09-12, and DERIVED rather than typed: cards 11, 12 and 13
+  // are ruled and their readers are bound. It says false again in a tree whose
+  // ruling lines are null, which the SWITCH test proves by digest.
+  assert.equal(preimage.authoritative_readers_bound, true);
   assert.equal(preimage.public_surface_answers, "unavailable");
   assert.deepEqual(preimage.owed_seams, [...V5_A02_GATE_ZERO_OWED_SEAMS]);
   // It takes no caller input, and proves it by ignoring some.

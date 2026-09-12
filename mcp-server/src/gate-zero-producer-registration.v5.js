@@ -63,6 +63,41 @@ export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS = "provisional";
 /** False until the frozen r7 packet itself carries the entry below. */
 export const V5_A02_GATE_ZERO_R7_ENTRY_PRESENT = false;
 
+/**
+ * CARD 9, AND IT NAMES A CHARTER RATHER THAN A PERSON. Decision
+ * `8a1dad08-8707-4bb0-a159-c2831a00cea2` (2026-09-11) rules that
+ * `oracle:gate-producer:gate-zero-read-only` is held by the REVIEWER charter —
+ * the only one of the eight whose subject is independent verification of builds
+ * it did not make, which is the independence `oracle_seat_owed` asks for.
+ *
+ * WHAT IT DOES NOT DO, and the ruling says this in its own words: naming a
+ * charter is not staffing a desk. `oracle_seat_bound` stays false, because no
+ * seat holds it and staffing one is not something this repository can do. What
+ * changes here is that the seat is no longer OPEN TO ANYONE — a later seat that
+ * claimed the oracle without holding the reviewer charter would now be checkable
+ * against a named authority instead of against nothing.
+ */
+export const V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF = "charter:reviewer";
+
+/** Joe's ruling that puts the charter above on the record. Card 9. */
+export const V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF = "8a1dad08-8707-4bb0-a159-c2831a00cea2";
+
+/**
+ * CARD 10, AND IT IS A RULING THIS REPOSITORY CANNOT EXECUTE. Decision
+ * `311a9af5-3685-4c47-a158-f8dd70870ca1` (2026-09-11) rules AMEND: r7 is to
+ * carry the registration below. r7 is neither a file here nor a section of the
+ * doctrine store — it is a sealed artifact fed to tools/doctorcre-v5-review.cjs
+ * on STDIN, pinned in doctrine only by the digest `normalized_r7_sha256`, so
+ * applying the amendment is a design write owed to whoever holds the packet and
+ * it re-pins that digest in the same act.
+ *
+ * So the ruling is CARRIED here and the entry is still ABSENT there. That gap is
+ * the honest state and it is why `V5_A02_GATE_ZERO_R7_ENTRY_PRESENT` is still
+ * false: a ruling to amend is not an amendment, and this constant is the thing a
+ * later reader checks to find out which of the two happened.
+ */
+export const V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF = "311a9af5-3685-4c47-a158-f8dd70870ca1";
+
 /** The role, in the family of the seven independent boundary-receipt oracles. */
 export const V5_A02_GATE_ZERO_PRODUCER_ROLE = "independent_control_plane_oracle";
 
@@ -206,10 +241,21 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
     combiner: V5_A02_GATE_ZERO_COMBINER,
     retry_policy: V5_A02_GATE_ZERO_RETRY_POLICY,
     unresolved_without_r7: [...UNRESOLVED_WITHOUT_R7],
-    // The seat. Registering a role does not staff one.
+    // The seat. Registering a role does not staff one, and naming the charter
+    // that holds it does not either — which is exactly what card 9 ruled and
+    // exactly what these three fields say together.
     oracle_seat_bound: false,
+    oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
+    oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
+    // UNCHANGED TEXT, deliberately. Card 9 is carried in the two fields above,
+    // so this sentence stays exactly what main published and the whole card-9
+    // change is ADDITIVE — which is what lets the gate's switch test prove that
+    // nothing else in the emitted answer moved.
     oracle_seat_owed:
       "an independent seat, distinct from the V5-A02 builder, holding oracle:gate-producer:gate-zero-read-only",
+    // Card 10: ruled to amend r7, owed to the packet holder, not applied.
+    r7_entry_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
+    r7_entry_amendment_applied: false,
   });
 }
 

@@ -131,6 +131,7 @@ const FAULT_STORE_FILE =
 const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 const READERS_FILE = "gate-zero-seam-readers.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
+const GATE_FILE = "gate-zero-assurance.v5.js";
 const FAKE_PG_FILE = fileURLToPath(new URL("./gate-zero-seam-pg.v5.fake.cjs", import.meta.url));
 
 /** The repository the checks store serves, and the only one it will serve. */
@@ -237,16 +238,39 @@ const FIXTURE_DECISION_IDS = Object.freeze([
 // ---------------------------------------------------------------------------
 
 const READERS_UNDER_TEST = [
-  ["readPredecessorOutcomeEvidence", readers.readPredecessorOutcomeEvidence, readGateZeroPredecessorJoin],
-  ["readSchedulerCanaryEvidence", readers.readSchedulerCanaryEvidence, readGateZeroPredecessorJoin],
-  ["readGateConclusionEvidence", readers.readGateConclusionEvidence, readGateGraphAssurance],
+  ["readPredecessorOutcomeEvidence", readers.readPredecessorOutcomeEvidence,
+    readGateZeroPredecessorJoin, "readGateZeroPredecessorJoin"],
+  ["readSchedulerCanaryEvidence", readers.readSchedulerCanaryEvidence,
+    readGateZeroPredecessorJoin, "readGateZeroPredecessorJoin"],
+  ["readGateConclusionEvidence", readers.readGateConclusionEvidence,
+    readGateGraphAssurance, "readGateGraphAssurance"],
 ];
 
-/** The two answers main's gate gives. Nothing in this slice may alter either. */
+/**
+ * The answers a gate gives, and it is a SET THAT GROWS rather than two literals.
+ *
+ * It seeds with the shipped gate's two answers and takes on each STAGED tree's
+ * as that tree is built. It has to: since 2026-09-12 the gate binds these
+ * readers behind the same ruling table, so a tree whose three `decision_id:`
+ * lines are null has a gate that answers differently from the shipped one — and
+ * BOTH are "the gate's own answer" for the tree they belong to. The invariant
+ * this file cares about is unchanged and is now stated where it is true: an
+ * unruled reader hands back the answer OF THE GATE IN ITS OWN TREE, whole.
+ */
 const GATE_ANSWER_DIGESTS = new Set([
   digest(readGateZeroPredecessorJoin()),
   digest(readGateGraphAssurance()),
 ]);
+
+/** Each staged readers namespace, mapped to the gate module of the same tree. */
+const STAGED_GATES = new Map();
+
+/** The gate that belongs to a staged readers module. */
+function gateOf(stagedReadersModule) {
+  const gate = STAGED_GATES.get(stagedReadersModule);
+  assert.ok(gate !== undefined, "a staged readers module has no gate recorded for its tree");
+  return gate;
+}
 
 test("RULING: all three cards are ruled, and the lookup is still the only way to ask", () => {
   // THE PASTE OF 2026-09-11. The table is not exported: `seamRulingRef` is the
@@ -340,8 +364,8 @@ test("RULING SHUT: an unruled reader returns the gate's own answer, byte for byt
   const saved = saveEnv(STORE_CREDENTIALS);
   try {
     const unruled = await stagedReaders({ unruled: true });
-    for (const [name, , gateFn] of READERS_UNDER_TEST) {
-      const expected = gateFn();
+    for (const [name, , , gateName] of READERS_UNDER_TEST) {
+      const expected = gateOf(unruled)[gateName]();
       const got = await unruled[name]({ stepRef: "step:wr46-dissolution-outcome" });
       assert.deepEqual(got, expected, `${name} returned a different refusal than the gate's`);
       assert.ok(Object.isFrozen(got), name);
@@ -352,12 +376,18 @@ test("RULING SHUT: an unruled reader returns the gate's own answer, byte for byt
       // And it says nothing about a ruling, because there is none to say.
       assert.equal(Object.hasOwn(got, "ruling_decision_ref"), false, name);
     }
+    // And the reason ids are the ones an UNRULED gate refuses with, not new
+    // words. Asked of the staged tree's gate: since 2026-09-12 the shipped gate
+    // binds these readers behind the same three ruling lines, so with the lines
+    // live it refuses one step further on — `gate_zero_producer_seam_unavailable`
+    // — and these two ids are exactly what it goes back to when they are null.
+    const gate = gateOf(unruled);
+    assert.equal(gate.readGateZeroPredecessorJoin().reason_id,
+      "predecessor_outcome_reader_unavailable");
+    assert.equal(gate.readGateGraphAssurance().reason_id, "gate_conclusion_reader_unavailable");
   } finally {
     restoreEnv(saved);
   }
-  // And the reason ids are the ones the gate refuses with today, not new words.
-  assert.equal(readGateZeroPredecessorJoin().reason_id, "predecessor_outcome_reader_unavailable");
-  assert.equal(readGateGraphAssurance().reason_id, "gate_conclusion_reader_unavailable");
 });
 
 test("RULED: each production reader now names its own card's ruling, and refuses anyway", async () => {
@@ -427,8 +457,8 @@ test("BYTE-IDENTICAL TO MAIN: an unruled answer does not move for any query, val
   const saved = saveEnv(STORE_CREDENTIALS);
   try {
     const unruled = await stagedReaders({ unruled: true });
-    for (const [name, , gateFn] of READERS_UNDER_TEST) {
-      const baseline = digest(gateFn());
+    for (const [name, , , gateName] of READERS_UNDER_TEST) {
+      const baseline = digest(gateOf(unruled)[gateName]());
       for (const query of queries) {
         const got = await unruled[name](query);
         assert.equal(digest(got), baseline,
@@ -1927,7 +1957,15 @@ function stageTree({ storeFile = null, card11StoreRef = null, unruled = false } 
 }
 
 async function stagedReaders(options) {
-  return import(pathToFileURL(join(stageTree(options), READERS_FILE)).href);
+  const target = stageTree(options);
+  const staged = await import(pathToFileURL(join(target, READERS_FILE)).href);
+  // The SAME TREE's gate, so a clause about "the gate's own answer" is asked of
+  // the gate that reader actually delegates to rather than of the shipped one.
+  const gate = await import(pathToFileURL(join(target, GATE_FILE)).href);
+  STAGED_GATES.set(staged, gate);
+  for (const answer of [gate.readGateZeroPredecessorJoin(), gate.readGateGraphAssurance()])
+    GATE_ANSWER_DIGESTS.add(digest(answer));
+  return staged;
 }
 
 /**
@@ -2735,7 +2773,7 @@ test("RULED: a pasted decision id is what opens the seam, and nothing else", asy
   const unruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE, unruled: true });
   const shut = await unruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
-  assert.equal(digest(shut), digest(readGateZeroPredecessorJoin()),
+  assert.equal(digest(shut), digest(gateOf(unruled).readGateZeroPredecessorJoin()),
     "an unruled reader read the fixture store anyway");
 });
 
@@ -3327,11 +3365,17 @@ test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement
 });
 
 test("PRODUCER: binding the gate's own answer still does not move, now that readers exist", () => {
-  // The whole point of building three readers without a ruling: the gate is
-  // exactly as unpassable as it was this morning.
+  // The whole point of building three readers, ruled or not: the gate is exactly
+  // as unpassable as it was before any of them existed. What DID move on
+  // 2026-09-12 is the list of what is still owed — three seams have a ruled
+  // reader bound behind them, and the producer is the one left.
   assert.equal(emitGateZeroOutcome().passable, false);
   assert.equal(emitGateZeroOutcome().join, null);
-  assert.deepEqual([...emitGateZeroOutcome().owed_seams], [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+  assert.equal(emitGateZeroOutcome().producer_bound, false);
+  assert.deepEqual([...emitGateZeroOutcome().owed_seams], [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+  // And the producer seam is still the one thing no ruling line can open: the
+  // ruling table has no entry for it, so the lookup answers null for its name.
+  assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
   assert.deepEqual([...V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS].length > 0, true);
 });
 
@@ -3373,15 +3417,27 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   assert.deepEqual(offenders, [],
     "a production module reached into the test directory, a fixture or a test helper");
 
-  // The reader is the only module that imports the stores or the ruling table,
-  // so a second consumer of either is red on sight rather than red after an
-  // incident.
-  for (const module of [STORES_FILE, RULINGS_FILE]) {
-    const importers = Object.entries(imports)
-      .filter(([, specifiers]) => specifiers.includes(`./${module}`))
-      .map(([name]) => name);
-    assert.deepEqual(importers, [READERS_FILE], `${module} has an importer other than the reader`);
-  }
+  // The reader is the only module that opens the STORES, so a second consumer
+  // of a store is red on sight rather than red after an incident.
+  const importersOf = module => Object.entries(imports)
+    .filter(([, specifiers]) => specifiers.includes(`./${module}`))
+    .map(([name]) => name).sort();
+  assert.deepEqual(importersOf(STORES_FILE), [READERS_FILE],
+    "the stores module has an importer other than the reader");
+
+  // THE RULING TABLE HAS EXACTLY TWO, and the second one is the wiring of
+  // 2026-09-12. The gate asks the same table the readers ask, so a seam is bound
+  // in the gate on exactly the condition its reader is open — one switch, read
+  // by both, rather than the gate carrying a second copy of the ruling that
+  // could drift from this one. A THIRD importer is the thing to be red about.
+  assert.deepEqual(importersOf(RULINGS_FILE), [GATE_FILE, READERS_FILE].sort(),
+    "the ruling table has an importer other than the reader and the gate");
+  // And the gate reaches the readers directly, which is what "no caller-supplied
+  // reader" costs: a module-private import and nothing else.
+  assert.ok(imports[GATE_FILE].includes(`./${READERS_FILE}`),
+    "the gate no longer imports the readers it binds");
+  assert.equal(imports[GATE_FILE].includes(`./${STORES_FILE}`), false,
+    "the gate opens a store directly instead of going through a ruled reader");
   // The stores module statically imports ONE thing, the tenant constant. `pg`
   // is dynamic on purpose, so the Worker bundle never pulls it in through here.
   assert.deepEqual(imports[STORES_FILE], ["./artifact-trust.js", "./identity.js"]);
