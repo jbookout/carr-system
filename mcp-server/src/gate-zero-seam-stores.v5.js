@@ -612,13 +612,58 @@ async function predecessorOutcomeRows(query) {
  * and `observed_at` are readback. Ordering by `observed_at desc` is a
  * presentation choice; the reader compares instants and never trusts position.
  *
- * THE FIVE IDENTIFIERS COME BACK AS DIGESTS. A service key, a run key, an
- * evidence ref, a source kind and a source ref are all free-form ledger text,
+ * THE IDENTIFIERS COME BACK AS DIGESTS. A service key, a run key, an evidence
+ * ref, a source kind and a source ref are all free-form ledger text,
  * and the derivation asks nothing of them but equality — is this observation of
  * the same run as that dispatch, was this row written by the wrapper. Digesting
  * answers exactly those questions and answers nothing else, so a service someone
- * names `release-canary` cannot put a privileged word into an answer.
+ * names `release-canary` cannot put a privileged word into an answer. The two
+ * receipt fields are digested for the same reason and answer the same kind of
+ * question: `receipt_run_key_digest` is what the receipt says its run is,
+ * `run_key_receipt_digest` is what this row's own run key hashes to, and
+ * `receipt_minted_at` is the instant the wrapper stamped after its child exited.
  */
+/**
+ * THE ONLY RECEIPT SHAPE THIS STORE WILL PARSE, and it is bin/run-scheduled.sh's
+ * own mint:
+ *
+ *     carr-run-receipt:v1:<YYYYMMDDTHHMMSS.mmmZ>:<16 hex>:<32 hex run-key hash>
+ *
+ * Nothing else in ops.run.evidence_ref parses, and a ref that does not parse
+ * reaches the derivation as an absence rather than as text. That is the point:
+ * evidence_ref is free-form ledger text that ANY writer can put a value into,
+ * and before this shape existed the only question asked of it was "not null" —
+ * which a hand-written row, a stale file or a fabricated string answered as
+ * readily as a real dispatch.
+ */
+const SCHEDULED_RECEIPT =
+  /^carr-run-receipt:v1:(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})\.(\d{3})Z:[0-9a-f]{16}:([0-9a-f]{32})$/;
+
+/** The two facts a parsed receipt carries, or two absences. */
+function receiptFields(value) {
+  const parsed = typeof value === "string" ? SCHEDULED_RECEIPT.exec(value) : null;
+  if (parsed === null) return { runKeyHash: null, mintedAt: null };
+  const [, year, month, day, hour, minute, second, millis, runKeyHash] = parsed;
+  return {
+    runKeyHash,
+    mintedAt: instantText(`${year}-${month}-${day}T${hour}:${minute}:${second}.${millis}Z`),
+  };
+}
+
+/**
+ * The same truncated digest of a run key that a minted receipt carries, computed
+ * HERE from the row's own run_key. The derivation's question — is this receipt
+ * this run's receipt — is then an equality between two values this file
+ * produced, and a receipt minted for some other job answers it with a mismatch
+ * instead of with a shrug.
+ */
+const RECEIPT_HASH_PREFIX = "sha256:".length;
+function runKeyReceiptHash(value) {
+  return typeof value === "string" && value.length > 0
+    ? digest(value).slice(RECEIPT_HASH_PREFIX, RECEIPT_HASH_PREFIX + 32)
+    : null;
+}
+
 async function schedulerLedgerRows(query) {
   const storeRef = STORE_TOKENS.schedulerLedger;
   const serviceKey = addressed(storeRef, query, "serviceKey");
@@ -636,16 +681,26 @@ async function schedulerLedgerRows(query) {
       left join ops.run r on r.service_id = s.id and r.run_key = $2
      where s.key = $1
      order by r.observed_at desc nulls last`, params: [serviceKey, canaryRunKey] }]);
-  const rows = (Array.isArray(raw) ? raw : []).map(row => ({
-    service_key_digest: opaque(cell(row, "service_key")),
-    run_key_digest: opaque(cell(row, "run_key")),
-    evidence_ref_digest: opaque(cell(row, "evidence_ref")),
-    source_kind_digest: opaque(cell(row, "source_kind")),
-    source_ref_digest: opaque(cell(row, "source_ref")),
-    started_at: instantText(cell(row, "started_at")),
-    ended_at: instantText(cell(row, "ended_at")),
-    observed_at: instantText(cell(row, "observed_at")),
-  }));
+  const rows = (Array.isArray(raw) ? raw : []).map(row => {
+    const receipt = receiptFields(cell(row, "evidence_ref"));
+    return {
+      service_key_digest: opaque(cell(row, "service_key")),
+      run_key_digest: opaque(cell(row, "run_key")),
+      evidence_ref_digest: opaque(cell(row, "evidence_ref")),
+      source_kind_digest: opaque(cell(row, "source_kind")),
+      source_ref_digest: opaque(cell(row, "source_ref")),
+      // The receipt's own claim about which run it belongs to, and this file's
+      // answer to the same question from the row itself. Digested like every
+      // other identifier here, so the derivation can ask equality and nothing
+      // else, and no hex the ledger happened to hold reaches an answer.
+      receipt_run_key_digest: opaque(receipt.runKeyHash),
+      run_key_receipt_digest: opaque(runKeyReceiptHash(cell(row, "run_key"))),
+      receipt_minted_at: receipt.mintedAt,
+      started_at: instantText(cell(row, "started_at")),
+      ended_at: instantText(cell(row, "ended_at")),
+      observed_at: instantText(cell(row, "observed_at")),
+    };
+  });
   return { store_ref: storeRef, rows };
 }
 

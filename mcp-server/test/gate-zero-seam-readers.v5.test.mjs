@@ -2849,7 +2849,20 @@ test("RULED: card 12 reads the rows bin/run-scheduled.sh actually writes", async
   // ONE NEGATIVE ROW PER FIELD the receipt-binding clause reads. Each changes a
   // single field of the row the wrapper writes, so a clause that stopped reading
   // one field fails on exactly one case.
-  for (const key of ["canary-today", "canary-hand-run", "canary-probe", "canary-foreign-wrapper"]) {
+  //
+  // THE LAST FOUR ARE THE MUTATION CONTROL for the receipt itself, and they are
+  // the reason this clause is no longer "evidence_ref is not null". Every one of
+  // them carries a non-null evidence ref and would have bound under the old
+  // clause: a well-formed receipt minted YESTERDAY (a file an earlier run left
+  // behind that this run's child never refreshed), one minted at the very
+  // instant of dispatch, one minted for a DIFFERENT job, and the free-form
+  // `ops.run:...` text 121 production rows actually carry. A receipt that a
+  // previous run could have left on disk must not bind this run's row, and
+  // these are the cases that prove it.
+  for (const key of ["canary-today", "canary-hand-run", "canary-probe",
+                     "canary-foreign-wrapper", "canary-stale-receipt",
+                     "canary-instant-receipt", "canary-foreign-receipt",
+                     "canary-freeform-receipt"]) {
     const result = await read(key);
     assert.equal(result.decision, "refuse", key);
     assert.equal(result.finding, "scheduler_canary_not_bound_to_receipt", key);
@@ -2915,6 +2928,21 @@ test("SCHEMA: the source_kind the clause requires is one db/schema.sql permits",
   const wrapper = readFileSync(join(repo, "bin/run-scheduled.sh"), "utf8");
   assert.ok(/--source-kind wrapper --source-ref bin\/run-scheduled\.sh/.test(wrapper),
     "bin/run-scheduled.sh no longer writes the source kind and ref the clause binds to");
+
+  // THE RECEIPT IS MINTED BY THE WRAPPER AND BY NOTHING ELSE, read off the
+  // wrapper itself rather than taken on trust. The token this store parses is
+  // built in that file out of its own clock, its own entropy and a hash of the
+  // run key; there is no flag, no path and no environment variable by which a
+  // caller, a plist or the child could hand one in. The first draft took
+  // `--evidence-ref-file PATH` and promoted whatever that file held, which is
+  // the shape these two assertions exist to keep from coming back.
+  assert.ok(/candidate="carr-run-receipt:v1:\$minted_at:\$nonce:\$run_key_hash"/.test(wrapper),
+    "bin/run-scheduled.sh no longer mints the receipt this clause parses");
+  assert.equal(/^\s*--evidence-ref-file\)/m.test(wrapper), false,
+    "bin/run-scheduled.sh takes a caller-supplied receipt path again");
+  const storeSource = readFileSync(join(SRC, "gate-zero-seam-stores.v5.js"), "utf8");
+  assert.ok(/carr-run-receipt:v1:/.test(storeSource),
+    "the store no longer parses the wrapper's minted receipt shape");
   // And the clause binds to those exact two strings, not to an invented one.
   const source = readFileSync(join(SRC, READERS_FILE), "utf8");
   assert.ok(/const SCHEDULER_SOURCE_KIND = "wrapper";/.test(source));
@@ -3187,6 +3215,35 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
       { serviceKey: "release-canary", canaryRunKey: "allow-commit-green" });
     assert.equal(report12.finding, "scheduler_canary_and_observation_join");
     assert.equal(report12.decision, "report");
+
+    // THE REAL STORE'S RECEIPT PARSE, pinned over real rows rather than over the
+    // fixture's copy of it. Same row, same clocks, same wrapper — one field
+    // moved: the receipt is minted for a DIFFERENT run key. A store that
+    // answered "is this the run's own receipt" from the row instead of from the
+    // receipt's own bytes would join here, and nothing else in this file would
+    // notice.
+    const foreign = await staged.readers.readSchedulerCanaryEvidence(
+      { serviceKey: "release-canary-foreign-receipt", canaryRunKey: "allow-commit-green" });
+    assert.equal(foreign.finding, "scheduler_canary_not_bound_to_receipt");
+    assert.equal(foreign.receipt_binding, "failed");
+    assertSwept("rows.foreign-receipt", foreign);
+
+    // And the stale one, for the same reason: the receipt is for the right run,
+    // minted the day BEFORE this dispatch. The row's own observation is still
+    // the latest instant it carries, so a store that read the mint stamp off
+    // `observed_at` would join here.
+    const stale = await staged.readers.readSchedulerCanaryEvidence(
+      { serviceKey: "release-canary-stale-receipt", canaryRunKey: "allow-commit-green" });
+    assert.equal(stale.finding, "scheduler_canary_not_bound_to_receipt");
+    assert.equal(stale.receipt_binding, "failed");
+    assertSwept("rows.stale-receipt", stale);
+
+    // And a ref that is a near miss for the token rather than the token.
+    const nearMiss = await staged.readers.readSchedulerCanaryEvidence(
+      { serviceKey: "release-canary-near-miss-receipt", canaryRunKey: "allow-commit-green" });
+    assert.equal(nearMiss.finding, "scheduler_canary_not_bound_to_receipt");
+    assert.equal(nearMiss.receipt_binding, "failed");
+    assertSwept("rows.near-miss-receipt", nearMiss);
 
     const report13 = await staged.readers.readGateConclusionEvidence(
       { headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
