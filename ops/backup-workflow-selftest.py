@@ -1102,16 +1102,29 @@ def dispatch_door_contract() -> None:
     """
     dispatch = "dispatch-controlled-failure"
     status_source = STATUS_HELPER.read_text(encoding="utf-8")
+    # Read the DOOR'S OWN BODY, not the file. Asked of the whole file, "does it
+    # call authorize_metered_execution" is answered yes by the import line alone
+    # — which is how this check first passed against a door whose admission had
+    # been deleted outright.
+    door_body = status_source.split("def dispatch_controlled_failure", 1)[-1].split(
+        "\ndef ", 1)[0]
     check(
-        "the dispatch door admits the metered spend in-process",
-        "authorize_metered_execution" in status_source
-        and "github-actions-remote-ci" in status_source,
+        "the dispatch door admits the metered spend in its own body",
+        "authorize_metered_execution(" in door_body
+        and '"github-actions-remote-ci"' in door_body,
         "a dispatcher that skips admission is the bypass the metering gate exists to stop",
+    )
+    check(
+        "the dispatch door admits BEFORE it reaches the vendor",
+        door_body.index("authorize_metered_execution(") < door_body.index("/dispatches"),
+        "admitting after the POST spends the minutes the admission was guarding",
     )
     check(
         "the dispatch door can start exactly one named workflow",
         'BACKUP_WORKFLOW_FILE = "backup-nightly.yml"' in status_source
-        and "BACKUP_WORKFLOW_FILE" in status_source.split("def dispatch_controlled_failure")[1],
+        and "BACKUP_WORKFLOW_FILE" in door_body
+        and "args.proof_id" not in door_body.split("/dispatches")[0].rsplit(
+            "authorize_metered_execution(", 1)[-1],
         "a caller-named workflow would make this a general door",
     )
 
