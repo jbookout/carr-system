@@ -212,6 +212,25 @@ function r7EntryWitness(entry, r7DesignPacketBytes) {
   return r7PacketWitness(entry, r7DesignPacketBytes).witness_conjunction;
 }
 
+/**
+ * CARD 9, AND IT NAMES A CHARTER RATHER THAN A PERSON. Decision
+ * `8a1dad08-8707-4bb0-a159-c2831a00cea2` (2026-09-11) rules that
+ * `oracle:gate-producer:gate-zero-read-only` is held by the REVIEWER charter —
+ * the only one of the eight whose subject is independent verification of builds
+ * it did not make, which is the independence `oracle_seat_owed` asks for.
+ *
+ * WHAT IT DOES NOT DO, and the ruling says this in its own words: naming a
+ * charter is not staffing a desk. `oracle_seat_bound` stays false, because no
+ * seat holds it and staffing one is not something this repository can do. What
+ * changes here is that the seat is no longer OPEN TO ANYONE — a later seat that
+ * claimed the oracle without holding the reviewer charter would now be checkable
+ * against a named authority instead of against nothing.
+ */
+export const V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF = "charter:reviewer";
+
+/** Joe's ruling that puts the charter above on the record. Card 9. */
+export const V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF = "8a1dad08-8707-4bb0-a159-c2831a00cea2";
+
 /** The role, in the family of the seven independent boundary-receipt oracles. */
 export const V5_A02_GATE_ZERO_PRODUCER_ROLE = "independent_control_plane_oracle";
 
@@ -377,8 +396,16 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
     retry_policy: V5_A02_GATE_ZERO_RETRY_POLICY,
     unresolved_without_r7: [...UNRESOLVED_WITHOUT_R7],
     resolved_from_r7: [...RESOLVED_FROM_R7],
-    // The seat. Registering a role does not staff one.
+    // The seat. Registering a role does not staff one, and naming the charter
+    // that holds it does not either — which is exactly what card 9 ruled and
+    // exactly what these three fields say together.
     oracle_seat_bound: false,
+    oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
+    oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
+    // UNCHANGED TEXT, deliberately. Card 9 is carried in the two fields above,
+    // so this sentence stays exactly what main published and the whole card-9
+    // change is ADDITIVE — which is what lets the gate's switch test prove that
+    // nothing else in the emitted answer moved.
     oracle_seat_owed:
       "an independent seat, distinct from the V5-A02 builder, holding oracle:gate-producer:gate-zero-read-only",
   });
@@ -425,3 +452,8 @@ export const v5A02GateZeroR7Presence = (r7DesignPacketBytes) =>
 Object.defineProperty(v5A02GateZeroR7Presence, Symbol.hasInstance, {
   value: () => false, writable: false, enumerable: false, configurable: false,
 });
+// AND FROZEN, which is clause (d) of the same amendment: without it no property
+// of the export can be redefined, but a new one can still be written onto it.
+// The shape enumeration in gate-zero-assurance.v5.test.mjs is what found this
+// missing — the export was closed against redefinition and open to extension.
+Object.freeze(v5A02GateZeroR7Presence);
