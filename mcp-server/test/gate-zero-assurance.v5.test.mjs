@@ -31,7 +31,7 @@ import assert from "node:assert/strict";
 import {
   cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { types } from "node:util";
@@ -41,6 +41,10 @@ import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import { GATE_ZERO_STEP_REF } from "../src/benchmark-minimum.v5.js";
 
 import * as surface from "../src/gate-zero-assurance.v5.js";
+import {
+  PRE_PR_BASELINE, PRE_PR_BASELINE_DIGEST, PRE_PR_COMMIT, commitReachable,
+  prePrCommitReachable, releasePrePrTrees, stagePrePrTree,
+} from "./gate-zero-pre-pr-baseline.v5.testhelper.mjs";
 import * as producerModule from "../src/gate-zero-producer-registration.v5.js";
 import {
   V5_A02_GATE_ZERO_SCHEMA_VERSION,
@@ -654,6 +658,7 @@ const stagedTrees = [];
 
 after(() => {
   for (const base of stagedTrees) rmSync(base, { recursive: true, force: true });
+  releasePrePrTrees();
 });
 
 /**
@@ -1053,15 +1058,18 @@ test("PER READER: a ruling naming another registered store leaves the card unbou
 // PROVES stood on origin/main before this PR. "Historical strings" as a class is
 // not a list and is not allowed to be one.
 //
-// SO MAIN'S LIST IS READ OUT OF GIT, HERE, AT TEST TIME. `stageMainTree()` takes
-// a copy of src back to origin/main's bytes file by file — every path this
-// branch changed is restored with `git show origin/main:<path>`, and every path
-// this branch ADDED is deleted, so what is imported from that tree is main's
-// module and not a branch module wearing main's name — and main's own gate is
-// then walked with the same walker to produce the exempt set. An author's pinned
-// digest could only ever prove what the author believed; this proves what main
-// says. EVERY VALUE NOT IN THAT SET IS SWEPT WITH NO EXEMPTION AT ALL, including
-// each of the eight this branch declares below.
+// SO THE LIST IS THE PRE-PR COMMIT'S, READ OUT OF GIT AND COMMITTED AS VALUES.
+// The fourth correction read it from `origin/main` at test time, and the fifth
+// review named what that costs: the ref moves, so the merge of this very PR
+// turns the baseline into this PR's own values and empties the diff the staging
+// depended on. The commit 229980a5 — the merge-base, the last state that
+// predates PR 1004 — does not move. Its gate's whole vocabulary is committed in
+// `gate-zero-pre-pr-baseline.v5.json`, digest-pinned in the helper, and
+// REGENERATED below from `git show 229980a5:<path>` wherever that commit is
+// reachable. An author's pinned digest could only ever prove what the author
+// believed; a digest over values the commit itself still answers with proves
+// what the commit says. EVERY VALUE NOT IN THAT SET IS SWEPT WITH NO EXEMPTION
+// AT ALL, including each of the eight this branch declares below.
 // ---------------------------------------------------------------------------
 
 /** The closed union, verbatim from the standing rule of 2026-09-11. */
@@ -1143,80 +1151,65 @@ function surfaceVocabulary(namespace, label) {
   return into;
 }
 
-/** The repository this suite lives in, for the one question it asks git. */
-const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
-
-/** The prefix every src path carries in git, stripped to get a tree-relative one. */
-const SRC_PREFIX = "mcp-server/src/";
-
 /**
- * `git`, run in this repository, refusing loudly rather than answering vaguely.
- * A baseline that cannot be read is a test that cannot prove its exemption, and
- * the standing rule's answer to that is to refuse, not to fall back to a literal.
- */
-function git(...args) {
-  const run = spawnSync("git", args,
-    { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  assert.equal(run.status, 0,
-    `git ${args.join(" ")} could not be read: ${run.stderr ?? run.error}`);
-  return run.stdout;
-}
-
-/**
- * SRC AS ORIGIN/MAIN HAS IT, built at test time and never pinned by hand.
+ * EVERY STRING THE PRE-PR GATE HANDED A CONSUMER — the explicit list the
+ * amendment allows a test to exempt, and the only one. It is produced by the
+ * same walker over the same export surface, so a value is exempt exactly when
+ * the commit that predates this PR already answered with it.
  *
- * Amendment 5 of the standing rule makes the unit of pass-through the VALUE: a
- * string is upstream vocabulary only if it stands byte-identically on
- * origin/main BEFORE this PR, and the test has to prove that itself. So this
- * copies src and then puts every path this branch touched back to main's bytes
- * — `M`/`D` restored with `git show origin/main:<path>`, `A` deleted, since a
- * file this branch added has no upstream half at all. The result is imported
- * like any other staged tree.
+ * The values are committed; the digest that authenticates them is pinned in the
+ * helper; the test below regenerates them from the commit itself. Nothing here
+ * reads a ref that can move under it.
  */
-let mainTree = null;
-function stageMainTree() {
-  if (mainTree !== null) return mainTree;
-  const resolved = spawnSync("git", ["rev-parse", "origin/main^{commit}"],
-    { cwd: REPO_ROOT, encoding: "utf8" });
-  assert.equal(resolved.status, 0,
-    "origin/main is not in this checkout, so the pass-through exemption cannot be proved");
+assert.equal(digest(PRE_PR_BASELINE), PRE_PR_BASELINE_DIGEST,
+  "the committed pre-PR baseline is not the snapshot this suite pins");
 
-  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
-  mkdirSync(cache, { recursive: true });
-  const base = mkdtempSync(join(cache, "gate-zero-main-"));
-  stagedTrees.push(base);
-  const target = join(base, "src");
-  cpSync(fileURLToPath(new URL("../src/", import.meta.url)), target, { recursive: true });
+const PRE_PR_VOCABULARY = new Set(PRE_PR_BASELINE.surface_vocabulary);
+assert.ok(PRE_PR_VOCABULARY.size > 0, "the pre-PR gate handed back no vocabulary at all");
+assert.equal(PRE_PR_VOCABULARY.size, PRE_PR_BASELINE.surface_vocabulary.length,
+  "the snapshot lists a value twice, so it is not the set its digest stands for");
 
-  const changed = git("diff", "--name-status", "--no-renames", "origin/main", "--", "mcp-server/src")
-    .split("\n").filter(Boolean).map(line => line.split("\t"));
-  assert.ok(changed.length > 0,
-    "this branch changes no file under src, so there is no branch surface to sweep");
-  for (const [state, path] of changed) {
-    assert.ok(path.startsWith(SRC_PREFIX), `git named a changed path outside src: ${path}`);
-    const at = join(target, path.slice(SRC_PREFIX.length));
-    if (state === "A") { rmSync(at); continue; }
-    mkdirSync(dirname(at), { recursive: true });
-    writeFileSync(at, git("show", `origin/main:${path}`));
+test("BASELINE: the pre-PR vocabulary is that commit's own, regenerated from git", async () => {
+  // THE DIGEST HALF RUNS EVERYWHERE, and these are its mutation controls: a
+  // snapshot edited to admit one more string, or to name another commit, is a
+  // different snapshot and the pin says so.
+  assert.equal(digest(PRE_PR_BASELINE), PRE_PR_BASELINE_DIGEST);
+  assert.notEqual(
+    digest({ ...PRE_PR_BASELINE,
+      surface_vocabulary: [...PRE_PR_BASELINE.surface_vocabulary, "would_join_exactly"] }),
+    PRE_PR_BASELINE_DIGEST,
+    "a snapshot with a string added to it digests the same, so the pin proves nothing");
+  assert.notEqual(digest({ ...PRE_PR_BASELINE, commit: "0".repeat(40) }),
+    PRE_PR_BASELINE_DIGEST,
+    "a snapshot naming a different commit digests the same");
+
+  // THE REGENERATION HALF IS SKIPPABLE ONLY WHERE THE COMMIT IS GENUINELY GONE,
+  // and the probe is proved to answer false rather than to answer false always.
+  assert.equal(commitReachable("0".repeat(40)), false,
+    "the reachability probe calls a commit that cannot exist reachable");
+  if (!prePrCommitReachable()) {
+    console.log(`REGENERATION SKIPPED: ${PRE_PR_COMMIT} is not in this checkout`);
+    return;
   }
-  mainTree = target;
-  return mainTree;
-}
 
-/**
- * EVERY STRING ORIGIN/MAIN'S OWN GATE HANDS A CONSUMER — the explicit list the
- * amendment allows a test to exempt, and the only one. It is the same walker
- * over the same export surface, so a value is exempt exactly when main already
- * answered with it.
- */
-let mainVocabulary = null;
-async function mainSurfaceVocabulary() {
-  if (mainVocabulary !== null) return mainVocabulary;
-  const main = await gateOfTree(stageMainTree());
-  mainVocabulary = new Set(surfaceVocabulary(main, "origin/main").keys());
-  assert.ok(mainVocabulary.size > 0, "origin/main's gate handed back no vocabulary at all");
-  return mainVocabulary;
-}
+  const regenerated =
+    [...surfaceVocabulary(await gateOfTree(stagePrePrTree()), "pre-pr").keys()].sort();
+  assert.deepEqual(regenerated, [...PRE_PR_BASELINE.surface_vocabulary],
+    "the committed pre-PR vocabulary is not what that commit's gate answers with");
+  // NON-VACUOUS, three ways: the walk found a real surface, it would have caught
+  // a snapshot one string wide of the commit, and the tree it walked is the
+  // commit's rather than this branch's wearing its name.
+  assert.ok(regenerated.length > 100,
+    `the pre-PR gate answered with only ${regenerated.length} strings`);
+  assert.notDeepEqual(regenerated,
+    [...PRE_PR_BASELINE.surface_vocabulary, "would_join_exactly"].sort(),
+    "the comparison above accepts a vocabulary with a string added to it");
+  assert.notDeepEqual([...new Set(surfaceVocabulary(surface, "live").keys())].sort(), regenerated,
+    "the staged pre-PR tree answers exactly what this branch answers, so it is not the commit's");
+  for (const added of BRANCH_ADDED_SURFACE_STRINGS)
+    assert.equal(PRE_PR_VOCABULARY.has(added), false,
+      `${added} is declared as this branch's but stands in the pre-PR baseline`);
+});
 
 /**
  * Every string this branch adds to the UNRULED surface, and nothing else may be
@@ -1224,10 +1217,11 @@ async function mainSurfaceVocabulary() {
  * decision, the r7 amendment decision and the field names that carry them — and
  * the eighth is the reason id the per-card refusal needed.
  *
- * THIS LIST EXEMPTS NOTHING. The only exemption is main's own vocabulary, read
- * out of git below, and each of these is asserted to be ABSENT from it, to be
- * present on the surface, and to be swept like everything else — so a declared
- * string that failed the sweep fails here rather than riding the declaration in.
+ * THIS LIST EXEMPTS NOTHING. The only exemption is the pre-PR commit's own
+ * vocabulary, committed as values and regenerated from that commit above, and
+ * each of these is asserted to be ABSENT from it, to be present on the surface,
+ * and to be swept like everything else — so a declared string that failed the
+ * sweep fails here rather than riding the declaration in.
  */
 const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "311a9af5-3685-4c47-a158-f8dd70870ca1",
@@ -1241,15 +1235,17 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
 ]);
 
 test("SWEEP: the closed union, over every branch-owned string the surface hands back", async () => {
-  // ORIGIN/MAIN'S OWN LIST, read out of git rather than pinned by an author.
-  const main = await mainSurfaceVocabulary();
+  // THE PRE-PR COMMIT'S OWN LIST, committed as values and regenerated from that
+  // commit by the baseline test above rather than read off a ref that moves.
+  const main = PRE_PR_VOCABULARY;
 
-  // EACH DECLARED ADDITION IS PROVED TO BE AN ADDITION. A string that is already
-  // on main is not this branch's to declare, and a declaration cannot be used to
-  // bless a privileged one: both halves are asserted before anything is skipped.
+  // EACH DECLARED ADDITION IS PROVED TO BE AN ADDITION. A string that already
+  // stood before this PR is not this branch's to declare, and a declaration
+  // cannot be used to bless a privileged one: both halves are asserted before
+  // anything is skipped.
   for (const added of BRANCH_ADDED_SURFACE_STRINGS) {
     assert.equal(main.has(added), false,
-      `${added} is declared as this branch's but already stands on origin/main`);
+      `${added} is declared as this branch's but already stands in the pre-PR baseline`);
     assert.deepEqual(privilegedWordsIn(added), [], `the declared addition ${added} is privileged`);
   }
 
@@ -1257,13 +1253,13 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
   const unruledVocabulary = surfaceVocabulary(unruled, "unruled");
   for (const added of BRANCH_ADDED_SURFACE_STRINGS)
     assert.ok(unruledVocabulary.has(added), `${added} is declared but is not on the surface`);
-  // AND NOTHING ELSE IS ADDED TO THE UNRULED SURFACE. Main's list plus exactly
-  // the declared eight is the whole of it, so a ninth addition is named here
-  // rather than discovered by the sweep below.
+  // AND NOTHING ELSE IS ADDED TO THE UNRULED SURFACE. The pre-PR list plus
+  // exactly the declared eight is the whole of it, so a ninth addition is named
+  // here rather than discovered by the sweep below.
   assert.deepEqual(
     [...unruledVocabulary.keys()].filter(text => !main.has(text)).sort(),
     [...BRANCH_ADDED_SURFACE_STRINGS].sort(),
-    "the unruled surface carries a string that is neither main's nor declared");
+    "the unruled surface carries a string that is neither the pre-PR baseline's nor declared");
 
   // Every tree this branch can be switched into, the shipped one first.
   const namespaces = [["live", surface]];
@@ -1274,7 +1270,7 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
   const branchOwned = new Map();
   const sweep = (vocabulary, label) => {
     for (const [text, where] of vocabulary) {
-      // THE ONE EXEMPTION, AND IT IS A LIST OF VALUES ORIGIN/MAIN ALREADY
+      // THE ONE EXEMPTION, AND IT IS A LIST OF VALUES THE PRE-PR COMMIT ALREADY
       // ANSWERED WITH — not a category, not a file, not a shape.
       if (main.has(text)) continue;
       branchOwned.set(text, `${label} ${where}`);
@@ -1293,8 +1289,9 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
       sweep(collectStrings(fn(shape), `${name}(shape)`, new Map()), name);
 
   // NON-VACUOUS: the sweep has branch-owned strings to look at, and every one of
-  // the declared eight is among them — the exemption list is main's, so nothing
-  // this branch declares can duck the sweep by being declared. Fourteen is the
+  // the declared eight is among them — the exemption list is the pre-PR
+  // commit's, so nothing this branch declares can duck the sweep by being
+  // declared. Fourteen is the
   // floor this branch ships: the eight declared additions, plus the opaque
   // decided_by token and the five sentences the ruled and part-ruled refusals
   // answer with, which appear only on a ruled tree.
@@ -1323,7 +1320,7 @@ test("SWEEP: the sweep catches what it exists to catch", () => {
   const returned = surfaceVocabulary({ answered: () => ({ nested: ["value"] }) }, "probe");
   for (const text of ["answered", "nested", "value"]) assert.ok(returned.has(text), text);
   // AND THE BOUNDARY IS LOAD-BEARING: the live surface does carry union words, in
-  // main's vocabulary, so a sweep with no boundary would fail and one with a
+  // the pre-PR vocabulary, so a sweep with no boundary would fail and one with a
   // boundary that admitted everything would prove nothing.
   const privileged = [...surfaceVocabulary(surface, "live").keys()]
     .filter(text => privilegedWordsIn(text).length > 0);
