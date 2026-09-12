@@ -252,10 +252,92 @@ const PREDECESSOR_WORK_REQUEST_REFS = Object.freeze({
 // `invalid_field`, and "commitSha" contains a word the privileged-word sweep
 // closes over. GitHub's own API calls the field head_sha anyway.
 const HEAD_SHA = /^[0-9a-f]{40}$/;
-const CHECK_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/;
 const SERVICE_KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const RUN_KEY = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
 const OUTCOME_HASH = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * THE CHECK NAMES THIS REPOSITORY ACTUALLY DECLARES, and it is a closed set
+ * rather than a shape.
+ *
+ * DEFECT 0c7bc84a. The shape that stood here was
+ * `/^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/` — a character class with no comma in
+ * it. The only check that guards main is named
+ * `main canary (gates, migration, types, freshness)`, so the one name card 13
+ * exists to read was the one name it refused, with `gate_conclusion_query_invalid`
+ * and an `invalid_field` of `checkName`. `pg_dump -> age-encrypt -> artifact`
+ * was refused too, for the `>`. A reader whose validator was invented rather
+ * than read off the workflows could not have admitted either.
+ *
+ * SO THE VALIDATOR IS AN ENUMERATION, READ OFF THE DECLARING FILES. Every entry
+ * below is the name GitHub gives a check run for one declared job, or the name
+ * this repository's own code posts a check run under. A job's check-run name is
+ * its `name:` when it has one and its job id when it does not, which is why
+ * `merge` is in the list spelled the way source-merge-controller.yml spells the
+ * job.
+ *
+ *   .github/workflows/automerge-pilot.yml:25   Plan against current GitHub evidence
+ *   .github/workflows/automerge-pilot.yml:91   Read-only exact merge-ref verification
+ *   .github/workflows/automerge-pilot.yml:178  Conditional squash merge from protected main
+ *   .github/workflows/backup-nightly.yml:116   pg_dump -> age-encrypt -> artifact
+ *   .github/workflows/ci.yml:89                ops/ci.sh --strict
+ *   .github/workflows/db-acceptance.yml:71     local-db-ci --class migration
+ *   .github/workflows/edge-liveness.yml:70     is anything that should be reporting not reporting
+ *   .github/workflows/main-canary.yml:77       main canary (gates, migration, types, freshness)
+ *   .github/workflows/source-merge-controller.yml:20  merge   (job id; the job declares no name:)
+ *   ops/backup-workflow-status.py:45           Backup artifact   (CHECK_NAME, posted by create_check)
+ *
+ * WHY A SET AND NOT A WIDER PATTERN, and the two clauses it reconciles. A
+ * pattern that admitted every name above would have to admit `,` `>` and `/`,
+ * because declared names contain all three — at which point "reject path
+ * separators" is no longer something the validator does. An enumeration rejects
+ * a newline, rejects a separator, and rejects three hundred characters for the
+ * same reason it rejects everything else: the string is not one of ten literal
+ * names this module wrote down. The only `/` and `>` that reach the store are
+ * this module's own two, out of this module's own constant, and they reach it as
+ * an `encodeURIComponent`-ed query parameter rather than as a path segment.
+ *
+ * THIS IS AN ADDRESS, NOT AN AUTHORITY. A caller still chooses WHICH declared
+ * check to ask about, exactly as it chooses which commit; what it cannot do is
+ * name a check that no workflow declares, and it never chose the answer. The set
+ * is module-private and frozen, and nothing exported hands it back.
+ *
+ * WHEN A WORKFLOW ADDS A JOB this list is wrong, and it is wrong quietly —
+ * a reader would refuse the new check instead of reading it. So the test file
+ * derives the same set a second time by parsing `.github/workflows/*.yml` and
+ * `ops/backup-workflow-status.py`, and fails when the two disagree. That test is
+ * the maintenance contract for this constant.
+ */
+const DECLARED_CHECK_NAMES = Object.freeze([
+  "Plan against current GitHub evidence",
+  "Read-only exact merge-ref verification",
+  "Conditional squash merge from protected main",
+  "pg_dump -> age-encrypt -> artifact",
+  "ops/ci.sh --strict",
+  "local-db-ci --class migration",
+  "is anything that should be reporting not reporting",
+  "main canary (gates, migration, types, freshness)",
+  "merge",
+  "Backup artifact",
+]);
+
+/**
+ * GitHub's own ceiling on a check run's name. Nothing caller-supplied is ever
+ * measured against it — the enumeration above already refuses every length but
+ * the ten it holds. It is here so the enumeration is measured against it: the
+ * self-check below refuses to let this module load carrying a name with a
+ * newline, a control character, or more bytes than GitHub would store, which is
+ * the way a future edit to the list gets caught at import rather than at a
+ * reader's first live call.
+ */
+const GITHUB_CHECK_NAME_LIMIT = 255;
+const DECLARED_CHECK_NAME_SHAPE = /^[^\p{Cc}\p{Cf}]+$/u;
+for (const declared of DECLARED_CHECK_NAMES) {
+  if (typeof declared !== "string" || declared.length === 0
+    || declared.length > GITHUB_CHECK_NAME_LIMIT
+    || !DECLARED_CHECK_NAME_SHAPE.test(declared))
+    throw new TypeError("a declared check name is not a storable check name");
+}
 
 /**
  * WHAT THE SCHEDULER WRAPPER ACTUALLY WRITES, read off the two places that
@@ -350,6 +432,19 @@ function field(query, key) {
 function matched(query, key, pattern) {
   const value = field(query, key);
   return value !== null && pattern.test(value) ? value : null;
+}
+
+/**
+ * A DECLARED check name, or null. Membership in this module's own frozen list,
+ * by `Array.prototype.includes` over its elements — not a property lookup on a
+ * table, because `TABLE["toString"]` answers with a function and a caller that
+ * names `constructor` would have addressed something no workflow declares. A
+ * value that is not a string never gets this far: `field()` returns null for
+ * everything else.
+ */
+function declaredCheckName(query, key) {
+  const value = field(query, key);
+  return value !== null && DECLARED_CHECK_NAMES.includes(value) ? value : null;
 }
 
 function reason(id) {
@@ -699,7 +794,7 @@ async function gateConclusionEvidence(query) {
   if (ruling === null) return readGateGraphAssurance();
 
   const headSha = matched(query, "headSha", HEAD_SHA);
-  const checkName = matched(query, "checkName", CHECK_NAME);
+  const checkName = declaredCheckName(query, "checkName");
   const queryDigest = queryDigestOf({ head_sha: headSha, check_name: checkName });
 
   if (headSha === null || checkName === null)
