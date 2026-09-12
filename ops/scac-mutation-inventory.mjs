@@ -7883,9 +7883,12 @@ const V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH =
   "mcp-server/src/scac-mutation-registry.v24.generated.js";
 
 /**
- * THE CLOSED SHAPE FOR A v25 EXPORT, and the two exports below are the only
- * ones in this file that carry it — deliberately, because they are the only
- * ones this branch adds.
+ * THE CLOSED SHAPE FOR A v25 EXPORT. The exports below that carry it are the
+ * only ones in this file that do — deliberately, because they are the only
+ * ones this branch adds. They are named, not counted, at their definitions
+ * further down: a numeral here is a claim nothing re-derives, and this comment
+ * said "the two exports" for a whole review round after the provenance export
+ * made it three (PR #1006 review 4).
  *
  * Amendment 2 of the 2026-09-11 standing rule (orchestrator ruling 2026-09-12
  * 00:20Z) names it: an exported callable is an arrow or a bound function, never
@@ -7966,6 +7969,10 @@ function countWord(count) {
   return COUNT_WORDS[count] ?? String(count);
 }
 
+function capitalize(word) {
+  return word.slice(0, 1).toUpperCase() + word.slice(1);
+}
+
 function joinWithAnd(parts) {
   if (parts.length === 0) return "no new ingress";
   if (parts.length === 1) return parts[0];
@@ -8015,7 +8022,34 @@ function v5ScheduledJobAdmissionProvenanceFrozen() {
   if (!review || !Array.isArray(review.upsert))
     throw new Error("v25 admission provenance cannot read the current source review");
   const admittedKeys = admittedRows.map(row => row.ingress_key);
+  // THE ROWS THIS BRANCH MOVED AFTER ITS OWN PATCH WAS CUT, derived rather than
+  // listed. PR #1006 review 4 found the reason naming three files as the
+  // branch-moved reviewed rows -- a hand-typed list written at correction 3
+  // that correction 4 then falsified by re-digesting the canary gate into the
+  // overlay and leaving the sentence alone. Comparing the overlay against the
+  // v25 patch answers the same question without anyone typing a filename: a
+  // key the patch seals whose overlay row carries different bytes is exactly a
+  // row a later correction moved past the seal.
+  const patchByKey = new Map(patch.upsert.map(row => [row.ingress_key, row]));
+  const resealedKeys = review.upsert
+    .filter(row => {
+      const sealed = patchByKey.get(row.ingress_key);
+      return sealed !== undefined &&
+        JSON.stringify(canonicalize(sealed)) !== JSON.stringify(canonicalize(row));
+    })
+    .map(row => row.ingress_key)
+    .sort((left, right) => left.localeCompare(right));
   const description = joinWithAnd(composition);
+  const resealedSentence = resealedKeys.length === 0
+    ? " No reviewed row supersedes a row the v25 patch seals: every ingress " +
+      "the patch carries still holds the bytes it was sealed with."
+    : ` ${capitalize(countWord(resealedKeys.length))} of those reviewed ` +
+      `${resealedKeys.length === 1 ? "rows supersedes a row" : "rows supersede rows"} ` +
+      `the v25 patch itself seals -- ${resealedKeys.join(", ")} -- because a ` +
+      "later correction on this branch moved those bytes after the patch was " +
+      "cut, so the overlay rather than the seal carries their live digest; " +
+      "that list is derived by comparing the overlay against the patch rather " +
+      "than named by hand.";
   const transition = `${previous.length} to ${frontier.length}`;
   const migrationSentence = "What it DOES change is the sealed source inventory " +
     `itself, which grows from ${transition} rows: ${description} ` +
@@ -8031,12 +8065,12 @@ function v5ScheduledJobAdmissionProvenanceFrozen() {
     `${countWord(redigested)} already-known rows whose bytes the same change ` +
     `moved, and this overlay re-derives ${review.upsert.length} reviewed ` +
     "ingresses from the live inventory of this tree rather than hand-merging " +
-    "them, so the reviewed digest reproduces the live digest exactly. Every " +
-    "count in these two sentences is computed by " +
-    "v5ScheduledJobAdmissionProvenance() from frozenInventory(\"" +
-    `${REGISTRY_V24_VERSION}") and frozenInventory("${REGISTRY_V25_VERSION}"), ` +
-    "and the frontier check refuses a reason that does not end with the " +
-    "rendered text.";
+    "them, so the reviewed digest reproduces the live digest exactly." +
+    resealedSentence + " Every count and every ingress key in this paragraph " +
+    "is computed by v5ScheduledJobAdmissionProvenance() from frozenInventory(\"" +
+    `${REGISTRY_V24_VERSION}"), frozenInventory("${REGISTRY_V25_VERSION}") and ` +
+    "the fixture's own v25 patch and overlay, and the frontier check refuses a " +
+    "reason that does not end with the rendered text.";
   return Object.freeze({
     previous_version: REGISTRY_V24_VERSION,
     version: REGISTRY_V25_VERSION,
@@ -8048,6 +8082,7 @@ function v5ScheduledJobAdmissionProvenanceFrozen() {
     admitted_description: description,
     patch_redigested_count: redigested,
     reviewed_ingress_count: review.upsert.length,
+    overlay_resealed_ingress_keys: Object.freeze([...resealedKeys]),
     migration_comment: wrapSqlComment(migrationSentence),
     review_reason_paragraph: reviewReasonParagraph,
   });

@@ -9,6 +9,7 @@ import {
   assertCurrentSourceInventoryMatchesFixture,
   assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
+  canonicalize,
   DB_CATALOG_BASELINE,
   discoverScriptEntrypoints,
   frozenInventory,
@@ -1283,6 +1284,22 @@ test("the v25 admission provenance is measured from the row sets and binds every
   const review = fixture.current_source_review;
   const patch = fixture.patches.find(entry => entry.version === "v25");
   assert.equal(provenance.reviewed_ingress_count, review.upsert.length);
+
+  // THE REVIEWED NUMBER IS THE EFFECTIVE OVERLAY'S NUMBER, derived twice here.
+  // PR #1006 review 4 found the successor report claiming 132 reviewed
+  // ingresses in one paragraph and 138 in another, because both were typed.
+  // The count is only honest if every overlay row actually supersedes the
+  // frozen row it names -- a redundant row identical to the frontier would
+  // raise the number without moving a single digest -- so the effective
+  // overlay is recomputed against the frozen rows and asserted to be the whole
+  // overlay.
+  const frozenByKey = new Map(after.map(row => [row.ingress_key, row]));
+  const canonicalJson = value => JSON.stringify(canonicalize(value));
+  const effectiveOverlay = review.upsert.filter(row =>
+    canonicalJson(row) !== canonicalJson(frozenByKey.get(row.ingress_key)));
+  assert.equal(effectiveOverlay.length, review.upsert.length);
+  assert.equal(provenance.reviewed_ingress_count, effectiveOverlay.length);
+
   assert.equal(provenance.patch_redigested_count,
     patch.upsert.filter(row => beforeKeys.has(row.ingress_key)).length);
   assert.equal(patch.upsert.length, admitted.length + provenance.patch_redigested_count);
@@ -1302,6 +1319,22 @@ test("the v25 admission provenance is measured from the row sets and binds every
   assert.ok(paragraph.includes(`${review.upsert.length} reviewed ingresses`), paragraph);
   assert.ok(paragraph.includes("and removing none"), paragraph);
   for (const key of provenance.admitted_ingress_keys) assert.ok(paragraph.includes(key), key);
+
+  // THE BRANCH-MOVED LIST IS DERIVED, NOT TYPED (PR #1006 review 4, finding 3).
+  // A row this branch re-digested after the v25 patch was cut shows up as an
+  // overlay row whose bytes differ from the patch row of the same key -- which
+  // is how correction 3's canary-gate re-digest went unnamed for a whole round
+  // while a hand-written sentence listed three other files. Recomputed from the
+  // fixture bytes and asserted against both the provenance object and the
+  // paragraph a reviewer reads.
+  const patchByKey = new Map(patch.upsert.map(row => [row.ingress_key, row]));
+  const resealed = review.upsert
+    .filter(row => patchByKey.has(row.ingress_key) &&
+      canonicalJson(patchByKey.get(row.ingress_key)) !== canonicalJson(row))
+    .map(row => row.ingress_key)
+    .sort((left, right) => left.localeCompare(right));
+  assert.deepEqual([...provenance.overlay_resealed_ingress_keys], resealed);
+  for (const key of resealed) assert.ok(paragraph.includes(key), key);
 
   // And no OTHER sentence in the accreted reason may claim a frontier
   // transition: the superseded "835 to 839" was exactly that shape, sitting in
@@ -1384,9 +1417,13 @@ test("the Gate Zero canary agent passes only arguments the wrapper's own parser 
 });
 
 test("the v25 public surface admits no caller input under any shape", () => {
-  // THE MANDATORY SWEEP of the 2026-09-11 standing rule, for the two exports
-  // this branch adds. Both were plain functions reading caller-supplied values
-  // until PR #1006 review 1: the renderer took `rows` and a `predecessorArtifacts`
+  // THE MANDATORY SWEEP of the 2026-09-11 standing rule, for every export this
+  // branch adds -- the renderer, the trust root and the provenance, each named
+  // in the loop at the end of this test rather than counted here, because the
+  // count in this comment went stale the moment the third one arrived (PR
+  // #1006 review 4). The renderer and the trust root were plain functions
+  // reading caller-supplied values until PR #1006 review 1: the renderer took
+  // `rows` and a `predecessorArtifacts`
   // holder, so a Proxy get trap threw the caller's own value back out and a
   // caller-supplied row carrying a privileged word landed in the returned SQL.
   const canonical = renderV5ScheduledJobAdmissionForwardRegistrySql();
@@ -1433,14 +1470,29 @@ test("the v25 public surface admits no caller input under any shape", () => {
   // name reaches the output, so the only occurrences are this repository's own.
   assert.equal(privileged.some(word => canonical.includes(`${marker}${word}`)), false);
 
-  // Amendment 2's closed shape for an exported callable, on both exports: not
+  // Amendment 2's closed shape for an exported callable, on each export the
+  // loop below names -- the list, not a count, is what has to stay true: not
   // constructable, no prototype, and an own Symbol.hasInstance data property
   // that answers without touching the left operand.
-  for (const [name, exported] of [
+  const closedSurface = [
     ["renderV5ScheduledJobAdmissionForwardRegistrySql", renderV5ScheduledJobAdmissionForwardRegistrySql],
     ["assertV5ScheduledJobAdmissionV25TrustRoot", assertV5ScheduledJobAdmissionV25TrustRoot],
     ["v5ScheduledJobAdmissionProvenance", v5ScheduledJobAdmissionProvenance],
-  ]) {
+  ];
+
+  // A FOURTH CLOSED EXPORT CANNOT ARRIVE UNSWEPT. Two comments counted this
+  // surface instead of naming it and both went stale when the provenance
+  // export landed; the durable fix is that the LIST is now checked against the
+  // module's own text, so an export added without a line in this sweep fails
+  // here rather than in a reviewer's diff.
+  const generatorSource = fs.readFileSync(
+    new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
+  assert.deepEqual(
+    [...generatorSource.matchAll(/^export const (\w+) =\s*\n\s*closedExport\(/gm)]
+      .map(match => match[1]).sort(),
+    closedSurface.map(([name]) => name).sort());
+
+  for (const [name, exported] of closedSurface) {
     assert.equal(typeof exported, "function", name);
     assert.equal(Object.hasOwn(exported, "prototype"), false, name);
     assert.throws(() => Reflect.construct(exported, []), TypeError, name);
