@@ -3930,11 +3930,31 @@ function exportGraph(directory) {
  * that boundary was wrong, because `export const api = { get seam() { return
  * predicate; } }` hands a consumer the predicate at `api.seam` exactly as a data
  * property would, and a guard that answers "by any path" cannot decline to look
- * down the path a consumer actually uses. Every own accessor's `get` is invoked
- * INSIDE try/catch, with the object it was found on as the receiver, and its
- * return value is walked like any other edge. A getter that THROWS is an opaque
- * leaf — a consumer could not have taken a value through it either — and the
- * walk continues with the next key rather than failing.
+ * down the path a consumer actually uses. Every accessor's `get` is invoked
+ * INSIDE try/catch and its return value is walked like any other edge. A getter
+ * that THROWS is an opaque leaf — a consumer could not have taken a value
+ * through it either — and the walk continues with the next key rather than
+ * failing.
+ *
+ * AND THE EIGHTH REVIEW CLOSED THE TWO ROUTES THE SEVENTH LEFT, which are the
+ * last two members of the closed set amendment 6 names.
+ *
+ *   THE ACCESSOR FUNCTIONS ARE THEMSELVES EDGES. `Object.getOwnPropertyDescriptor
+ *   (api, "seam").get` is public, retrievable by any consumer, and can BE the
+ *   predicate — `Object.defineProperty(api, "seam", { get: predicate })` hands it
+ *   over without the getter ever returning it. Both `get` and `set` are walked as
+ *   objects, at the route `.seam<get>` / `.seam<set>`, before the value the
+ *   getter returns.
+ *
+ *   AND AN INHERITED GETTER IS INVOKED WITH THE EXPORTED CHILD AS RECEIVER, via
+ *   `Reflect.get(proto, key, child)`. The seventh correction invoked it with the
+ *   object it was found ON, which for a prototype is not the object a consumer
+ *   holds: `Object.create({ get seam() { return this === shape ? null : predicate;
+ *   } })` answers the predicate at `api.seam` and answers null to a walk standing
+ *   on the prototype. The receiver is threaded down the [[Prototype]] chain and
+ *   reset at every ordinary edge, and the visited set is keyed by (value,
+ *   receiver) rather than by value, because the same prototype reached under two
+ *   receivers is two different answers.
  *
  * The one shape this cannot terminate on is a getter that mints a fresh object
  * on every read, forever; no reachability scan terminates on that, and neither
@@ -3943,25 +3963,32 @@ function exportGraph(directory) {
  * `parts` exists so the mutation controls can revert ONE part of the walk at a
  * time against THIS code rather than against a retyped imitation of it.
  */
-const WHOLE_WALK =
-  Object.freeze({ bounded: Infinity, symbols: true, prototypes: true, accessors: true });
+const WHOLE_WALK = Object.freeze({
+  bounded: Infinity, symbols: true, prototypes: true, accessors: true,
+  accessorFunctions: true, inheritedReceiver: true });
 
 /** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
 const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
 
 function pathToValue(root, target, parts = WHOLE_WALK) {
-  const seen = new Set();
-  const walk = (value, path, left) => {
+  // Keyed by the PAIR (value, receiver): the same prototype reached while a
+  // consumer holds two different children can answer two different values, so a
+  // set keyed by the object alone would skip the second answer unread.
+  const seen = new Map();
+  const walk = (value, path, left, receiver) => {
     if (value === target) return path === "" ? "<the namespace itself>" : path;
     if (left === 0 || value === null) return null;
     const kind = typeof value;
     if (kind !== "object" && kind !== "function") return null;
-    // The visited set is what replaces the depth budget: a value whose whole
-    // subtree has already been searched cannot hide the target on a second
-    // visit, so revisiting is redundant rather than unsound once the walk is
-    // unbounded.
-    if (seen.has(value)) return null;
-    seen.add(value);
+    // The visited map is what replaces the depth budget: a value whose whole
+    // subtree has already been searched under THIS receiver cannot hide the
+    // target on a second visit, so revisiting is redundant rather than unsound
+    // once the walk is unbounded.
+    const held = receiver === undefined ? value : receiver;
+    const under = seen.get(value);
+    if (under === undefined) seen.set(value, new Set([held]));
+    else if (under.has(held)) return null;
+    else under.add(held);
     const keys = parts.symbols ? Reflect.ownKeys(value) : Object.getOwnPropertyNames(value);
     for (const key of keys) {
       let descriptor;
@@ -3969,22 +3996,43 @@ function pathToValue(root, target, parts = WHOLE_WALK) {
       // A property whose descriptor cannot be taken at all is the only key
       // stepped over unread.
       if (descriptor === undefined) continue;
+      const step = `${path}${stepFor(key)}`;
+      if (Object.hasOwn(descriptor, "value")) {
+        // An ordinary edge: the value is a new object in the consumer's hand, so
+        // the receiver does not travel with it.
+        const found = walk(descriptor.value, step, left - 1, undefined);
+        if (found !== null) return found;
+        continue;
+      }
+      // THE ACCESSOR FUNCTIONS FIRST, because `descriptor.get` is public and can
+      // be the target itself even when calling it returns something harmless.
+      if (parts.accessorFunctions)
+        for (const role of ["get", "set"]) {
+          if (typeof descriptor[role] !== "function") continue;
+          const found = walk(descriptor[role], `${step}<${role}>`, left - 1, undefined);
+          if (found !== null) return found;
+        }
+      if (!parts.accessors || typeof descriptor.get !== "function") continue;
+      // THEN THE VALUE, taken the way a consumer takes it: with the exported
+      // child as the receiver, not the prototype the descriptor was found on. A
+      // throw makes the key an opaque leaf rather than an error in this walk.
       let edge;
-      if (Object.hasOwn(descriptor, "value")) edge = descriptor.value;
-      else if (!parts.accessors || typeof descriptor.get !== "function") continue;
-      // The getter is invoked ON THE OBJECT IT WAS FOUND ON, so a getter that
-      // reads `this` sees the receiver a consumer would give it; a throw makes
-      // the key an opaque leaf rather than an error in this walk.
-      else { try { edge = descriptor.get.call(value); } catch { continue; } }
-      const found = walk(edge, `${path}${stepFor(key)}`, left - 1);
+      try {
+        edge = parts.inheritedReceiver
+          ? Reflect.get(value, key, held)
+          : descriptor.get.call(value);
+      } catch { continue; }
+      const found = walk(edge, step, left - 1, undefined);
       if (found !== null) return found;
     }
     if (!parts.prototypes) return null;
     let proto;
     try { proto = Object.getPrototypeOf(value); } catch { return null; }
-    return walk(proto, `${path}.[[Prototype]]`, left - 1);
+    // The receiver travels UP the prototype chain unchanged: the object a
+    // consumer holds is the child, however far up the property lives.
+    return walk(proto, `${path}.[[Prototype]]`, left - 1, held);
   };
-  return walk(root, "", parts.bounded);
+  return walk(root, "", parts.bounded, undefined);
 }
 
 /** The identity check the fourth correction shipped, kept so the self-test can measure it. */
@@ -4049,6 +4097,22 @@ const REEXPORT_CASES = Object.freeze([
     source:
       `import { ${PREDICATE_NAME} } from "./binding.js";\n`
       + `export const api = { get seam() { return ${PREDICATE_NAME}; } };\n` },
+  // THE EIGHTH REVIEW'S TWO PROBES, which are the last two members of the
+  // closed reachability set. Each is `runtime` only, and each is a route the
+  // seventh correction's accessor branch stepped over: the getter is inherited
+  // and answers only the exported child, and the descriptor's own `get`/`set`
+  // ARE the predicate while calling the getter hands back nothing.
+  { file: "receiver-getter.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `const shape = { get seam() { return this === shape ? null : ${PREDICATE_NAME}; } };\n`
+      + `export const api = Object.create(shape);\n` },
+  { file: "descriptor-accessor.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = {};\n`
+      + `Object.defineProperty(api, "seam", { get: ${PREDICATE_NAME}, set: ${PREDICATE_NAME},\n`
+      + `  enumerable: true, configurable: true });\n` },
   // AND THE TWO THE ACCESSOR BRANCH MUST SURVIVE RATHER THAN CATCH: a getter
   // that throws is an opaque leaf, and one that hands back something else is
   // walked and found to hold nothing.
@@ -4133,34 +4197,73 @@ test("PARSER: every export form is read, and the three checks catch what each is
   assert.equal(pathToValue(await import(pathToFileURL(join(directory, "chain.js")).href),
     predicate), ".onward.seam.ruledCardBinding");
 
-  // THE THREE MUTATION CONTROLS THE SIXTH CORRECTION OWES. Each shape the review
-  // probed is found by the whole walk, at a named route; then the ONE part of the
-  // walk that reaches it is reverted and that shape goes null — while the other
-  // two stay found, so each control measures its own part rather than breaking
-  // the walk in general.
+  // THE MUTATION CONTROLS THE SIXTH AND EIGHTH CORRECTIONS OWE, as a matrix
+  // rather than a list. Each shape the reviews probed is found by the whole walk
+  // at a named route; then ONE part of the walk is reverted and the matrix is
+  // asserted BOTH ways — every probe that NEEDS that part goes null, and every
+  // probe that does not stays found, so no control is measuring a walk broken in
+  // general.
+  //
+  // `needs` is the honest dependency list, and it is why this replaced the
+  // one-probe-per-part list: Sol's receiver probe rides THREE parts at once (it
+  // sits behind a prototype, behind a getter, and answers only the exported
+  // child), so a control that demanded it survive every other reversion would be
+  // asserting something false. What proves the receiver part is load-bearing is
+  // the row where only that part is reverted.
+  const PROBES = Object.freeze([
+    { probe: "deep.js", route: ".api.a.b.c.d.e.f.seam", needs: ["unbounded depth"] },
+    { probe: "symbol.js", route: ".api[Symbol(gate-zero.seam)]", needs: ["symbol keys"] },
+    { probe: "inherited.js", route: ".api.[[Prototype]].seam", needs: ["the prototype chain"] },
+    { probe: "accessor.js", route: ".api.seam", needs: ["accessor reads"] },
+    { probe: "receiver-getter.js", route: ".api.[[Prototype]].seam",
+      needs: ["the prototype chain", "accessor reads", "the exported child as receiver"] },
+    { probe: "descriptor-accessor.js", route: ".api.seam<get>",
+      needs: ["the get and set objects themselves"] },
+  ]);
   const REVERTED = Object.freeze([
-    { part: "unbounded depth", probe: "deep.js", route: ".api.a.b.c.d.e.f.seam",
-      walk: { ...WHOLE_WALK, bounded: 6 } },
-    { part: "symbol keys", probe: "symbol.js", route: ".api[Symbol(gate-zero.seam)]",
-      walk: { ...WHOLE_WALK, symbols: false } },
-    { part: "the prototype chain", probe: "inherited.js", route: ".api.[[Prototype]].seam",
-      walk: { ...WHOLE_WALK, prototypes: false } },
-    { part: "accessor reads", probe: "accessor.js", route: ".api.seam",
-      walk: { ...WHOLE_WALK, accessors: false } },
+    { part: "unbounded depth", walk: { ...WHOLE_WALK, bounded: 6 } },
+    { part: "symbol keys", walk: { ...WHOLE_WALK, symbols: false } },
+    { part: "the prototype chain", walk: { ...WHOLE_WALK, prototypes: false } },
+    { part: "accessor reads", walk: { ...WHOLE_WALK, accessors: false } },
+    { part: "the get and set objects themselves",
+      walk: { ...WHOLE_WALK, accessorFunctions: false } },
+    { part: "the exported child as receiver", walk: { ...WHOLE_WALK, inheritedReceiver: false } },
   ]);
   const probes = new Map();
-  for (const { probe } of REVERTED)
+  for (const { probe } of PROBES)
     probes.set(probe, await import(pathToFileURL(join(directory, probe)).href));
-  for (const { probe, route } of REVERTED)
+  for (const { probe, route } of PROBES)
     assert.equal(pathToValue(probes.get(probe), predicate), route,
       `${probe}: the walk does not reach the predicate, or names the wrong route`);
-  for (const { part, probe, walk } of REVERTED) {
-    assert.equal(pathToValue(probes.get(probe), predicate, walk), null,
-      `${probe} is still found with ${part} reverted, so that part is not what catches it`);
-    for (const other of REVERTED) {
-      if (other.probe === probe) continue;
-      assert.notEqual(pathToValue(probes.get(other.probe), predicate, walk), null,
-        `${other.probe} is lost with ${part} reverted, so the control is not isolated to ${probe}`);
+
+  // AND THE TWO EIGHTH-REVIEW PROBES ARE ASSERTED AS A CONSUMER SEES THEM, so
+  // what the walk is being measured against is Sol's shape and not something
+  // easier: the inherited getter answers the exported child (and answers the
+  // prototype nothing), and the descriptor's own get and set ARE the predicate
+  // while reading the property hands back null.
+  const receiverApi = probes.get("receiver-getter.js").api;
+  assert.equal(receiverApi.seam, predicate,
+    "the receiver probe does not hand a consumer the predicate, so it probes nothing");
+  assert.equal(Object.getPrototypeOf(receiverApi).seam, null,
+    "the receiver probe answers the prototype too, so it is not receiver-sensitive");
+  const descriptorApi = probes.get("descriptor-accessor.js").api;
+  const exposed = Object.getOwnPropertyDescriptor(descriptorApi, "seam");
+  assert.equal(exposed.get, predicate, "the descriptor probe's get is not the predicate");
+  assert.equal(exposed.set, predicate, "the descriptor probe's set is not the predicate");
+  assert.equal(descriptorApi.seam, null,
+    "the descriptor probe returns the predicate from the getter, so it is the seventh case again");
+
+  for (const { part, walk } of REVERTED) {
+    assert.ok(PROBES.some(one => one.needs.includes(part)),
+      `${part} is reverted by a control no probe depends on`);
+    for (const { probe, needs } of PROBES) {
+      const found = pathToValue(probes.get(probe), predicate, walk);
+      if (needs.includes(part))
+        assert.equal(found, null,
+          `${probe} is still found with ${part} reverted, so that part is not what catches it`);
+      else
+        assert.notEqual(found, null,
+          `${probe} is lost with ${part} reverted, so that control is not isolated to its probes`);
     }
   }
 });
