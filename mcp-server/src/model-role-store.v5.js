@@ -1292,11 +1292,11 @@ export function modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }) {
             { expected: rows.role_digest, stored: revalidated.role_digest });
         }
 
-        await writeEvent(c, {
-          subject_type: "model_role", subject_id: revisionId,
-          verb: "record-model-role-revision",
-          payload: { role_key: args.role_key, revision_no: args.revision_no, role_digest: rows.role_digest },
-        });
+        await writeEvent(c, actor, "record-model-role-revision", "model_role", revisionId,
+          { field: "revision_recorded",
+            new: { role_key: args.role_key, revision_no: args.revision_no,
+              role_digest: rows.role_digest },
+            idempotency_key: args.idempotency_key });
 
         return {
           ok: true,
@@ -1418,15 +1418,12 @@ export function modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }) {
           });
         }
 
-        await writeEvent(c, {
-          subject_type: "model_role", subject_id: pointerId,
-          verb: "set-current-model-role-revision",
-          payload: {
-            role_key: args.role_key, revision_no: args.revision_no,
-            role_digest: args.role_digest,
-            expected_current_revision_no: args.expected_current_revision_no,
-          },
-        });
+        await writeEvent(c, actor, "set-current-model-role-revision", "model_role", pointerId,
+          { field: "current_revision_set",
+            new: { role_key: args.role_key, revision_no: args.revision_no,
+              role_digest: args.role_digest,
+              expected_current_revision_no: args.expected_current_revision_no },
+            idempotency_key: args.idempotency_key });
 
         return {
           ok: true,
