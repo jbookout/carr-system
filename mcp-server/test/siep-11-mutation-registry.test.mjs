@@ -40,7 +40,9 @@ import {
   REGISTRY_V22_VERSION,
   REGISTRY_V23_VERSION,
   REGISTRY_V24_VERSION,
+  REGISTRY_V25_VERSION,
   renderV5F09WorkflowTruthForwardRegistrySql,
+  renderV5ScheduledJobAdmissionForwardRegistrySql,
   R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
   renderR07RepoHygieneJanitorForwardRegistrySql,
   isDefinitionOnlyLaunchd,
@@ -205,6 +207,9 @@ const v22Migration = fs.readFileSync(
     import.meta.url), "utf8");
 const v24Migration = fs.readFileSync(
   new URL("../../migrations/0498_f09_workflow_truth_and_scac_successor.sql",
+    import.meta.url), "utf8");
+const v25Migration = fs.readFileSync(
+  new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
 const v23Migration = fs.readFileSync(
   new URL("../../migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql",
@@ -1070,7 +1075,7 @@ test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predece
   // tuple through v20 and not its own. v22 is a LATER seal and is likewise
   // absent, which is why the set is filtered rather than taken whole.
   for (const [key, seal] of Object.entries(HISTORICAL_REGISTRY_SEALS)) {
-    if (key === "v21" || key === "v22" || key === "v23") continue;
+    if (key === "v21" || key === "v22" || key === "v23" || key === "v24") continue;
     assert.ok(v21Migration.includes(
       `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
   }
@@ -1176,6 +1181,50 @@ test("v24 seals the V5-F09 workflow-truth frontier and preserves the v23 predece
   }
 });
 
+test("v25 admits the scheduled freshness and canary ingresses and preserves the v24 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V25_VERSION);
+  assert.equal(v25Migration, renderV5ScheduledJobAdmissionForwardRegistrySql(rows));
+
+  // THE POINT OF THIS SUCCESSOR, and the only thing that separates it from
+  // every registry-only predecessor since v20: the frozen inventory GROWS.
+  // A re-digest could have ridden current_source_review; a new ingress cannot.
+  assert.equal(rows.length, 839);
+  assert.equal(frozenInventory(REGISTRY_V24_VERSION).length, 835);
+  for (const key of [
+    "launchd-workflow:com.carr.canonical-fast-forward",
+    "launchd-workflow:com.carr.canonical-dirty-watchdog",
+    "launchd-workflow:com.carr.gate-zero-canary",
+    "script-entrypoint:bin/gate-zero-canary.sh",
+  ]) {
+    assert.ok(rows.some(row => row.ingress_key === key), key);
+    assert.ok(!frozenInventory(REGISTRY_V24_VERSION).some(row => row.ingress_key === key), key);
+  }
+
+  // Registry-only: no table, no role, no domain function, and none of the
+  // predecessor's domain DDL dragged forward by the core slice.
+  assert.doesNotMatch(v25Migration, /create table (?!if not exists ops[.]scac_)/);
+  assert.doesNotMatch(v25Migration, /create or replace function ops\.enqueue_job\(/);
+  assert.doesNotMatch(v25Migration, /create or replace function ops\.current_sourced_work_requests\(/);
+  assert.doesNotMatch(v25Migration, /pg_advisory_xact_lock/);
+
+  assert.match(v25Migration,
+    /-- SCAC-12: registry-only mutation registry v25 after the scheduled freshness and canary job definitions\./);
+  assert.match(v25Migration, /scac_mutation_registry_v24_seal_available\(\)/);
+  assert.match(v25Migration, /scac_mutation_catalog_v24_live_at_seal/);
+  assert.match(v25Migration, /scac_mutation_catalog_v25_current\(\)/);
+  assert.match(v25Migration, /scac_policy_epoch_snapshot_v24/);
+  assert.doesNotMatch(v25Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  assert.doesNotMatch(v25Migration, /__V24_|__V25_|__V5_F09_V24_CATALOG_SUCCESSOR__|UNBOUND/);
+  assert.match(v25Migration, /do \$v5_scheduled_job_admission_preflight\$/);
+
+  // v25 is the seal this migration CREATES, so it carries every predecessor
+  // seal tuple and none of its own.
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
+    const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
+    assert.ok(v25Migration.includes(tuple), seal.version);
+  }
+});
+
 test("v23 seals the R07 repo-hygiene janitor frontier and preserves the v22 predecessor", () => {
   const rows = frozenInventory(REGISTRY_V23_VERSION);
   assert.equal(v23Migration, renderR07RepoHygieneJanitorForwardRegistrySql(rows));
@@ -1201,10 +1250,12 @@ test("v23 seals the R07 repo-hygiene janitor frontier and preserves the v22 pred
   assert.match(v23Migration, /do \$r07_repo_hygiene_janitor_preflight\$/);
 
   // v23 is the seal this migration CREATES, so it carries every predecessor
-  // seal tuple and none of its own.
+  // seal tuple and none of its own -- nor any of its SUCCESSORS', which is what
+  // the ordinal comparison below says rather than naming v23 alone.
   for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
     const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
-    assert.equal(v23Migration.includes(tuple), seal.version !== REGISTRY_V23_VERSION, seal.version);
+    const ordinal = Number(seal.version.split(".v").at(-1));
+    assert.equal(v23Migration.includes(tuple), ordinal < 23, seal.version);
   }
   // Every earlier generated artifact is untouched byte-for-byte.
   assert.equal(v22Migration, renderDoctorcrePortfolioForwardRegistrySql(
@@ -1461,11 +1512,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 32);
+  assert.equal(migrations.length, 33);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 23);
-  assert.equal(paths.length, 55);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 24);
+  assert.equal(paths.length, 57);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -1598,7 +1649,10 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // TRACKED: the inventory enumerates git, so an untracked new gate is
   // invisible to this assertion and the count shifts at `git add`, not at
   // save.
-  assert.equal(rows.length, 545);
+  // 545 before the v25 registry successor; admitting the Gate Zero canary adds
+  // exactly one reviewed non-MCP source, bin/gate-zero-canary.sh. The three new
+  // LaunchAgents are workflow_entrypoint rows and are filtered out above.
+  assert.equal(rows.length, 546);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -1606,8 +1660,9 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  // 534 before this branch; same single new executable gate.
-  assert.equal(scripts.length, 536);
+  // 534 before the portfolio tail, 536 before v25; same single new executable,
+  // bin/gate-zero-canary.sh.
+  assert.equal(scripts.length, 537);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -1695,7 +1750,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 32);
+  assert.equal(workflows.length, 35);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -1707,7 +1762,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  assert.equal(launchd.length, 25);
+  assert.equal(launchd.length, 28);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -1721,7 +1776,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 25);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, 28);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in
@@ -1732,6 +1787,28 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     .map(row => row.launchd_label), ["com.carr.repo-hygiene-janitor"]);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.repo-hygiene-janitor")
     .physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")), false);
+  // The three agents the v25 registry successor admitted. THE CANARY IS NOT
+  // DEFINITION-ONLY BY THIS PREDICATE and must not be pinned as if it were:
+  // isDefinitionOnlyLaunchd asks whether the plist carries any trigger at all,
+  // and the canary carries a real hourly StartInterval. What keeps it
+  // uninstalled is ops/config-as-code.py's DEFINITION_ONLY list, which is a
+  // different mechanism in a different file, so that is where this asserts it.
+  for (const label of ["com.carr.canonical-fast-forward", "com.carr.canonical-dirty-watchdog",
+    "com.carr.gate-zero-canary"]) {
+    const row = launchd.find(entry => entry.launchd_label === label);
+    assert.ok(row, label);
+    assert.ok(row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")), label);
+    assert.ok(Object.keys(row.trigger_contract || {}).length > 0 ||
+      row.trigger_contract_digest, label);
+  }
+  const configAsCode = fs.readFileSync(
+    new URL("../../ops/config-as-code.py", import.meta.url), "utf8");
+  const definitionOnlyBlock = configAsCode.slice(
+    configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
+    configAsCode.indexOf("\n}\n", configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
+  assert.match(definitionOnlyBlock, /"com\.carr\.gate-zero-canary\.plist"/);
+  assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.canonical-fast-forward\.plist"/);
+  assert.doesNotMatch(definitionOnlyBlock, /"com\.carr\.canonical-dirty-watchdog\.plist"/);
   assert.deepEqual(launchd.flatMap(row => row.physical_authority_refs)
     .filter(ref => ref.startsWith("ops.legacy_schedule_launchd_contract:")).sort(), [
       "ops.legacy_schedule_launchd_contract:calendar-fetch-daily.launchd.v1",

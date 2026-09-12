@@ -604,19 +604,69 @@ class CanonicalFreshnessTests(unittest.TestCase):
         self.assertTrue(mode, "lib/canonical_freshness.py is not tracked")
         self.assertEqual(mode[0], "100644", "an executable bit would register a new ingress")
 
-    def test_no_launchagent_definition_ships_ahead_of_its_activation_ruling(self):
-        """The plists were withdrawn from this change on purpose.
+    def test_both_agents_are_declared_and_carry_the_ruled_cadence(self):
+        """The inverse of the assertion this file carried until the activation.
 
-        A new ops/launchd/*.plist is a new launchd-workflow row in the same
-        sealed inventory, and `current_source_review` cannot add one. The
-        definitions belong to the activation change that carries the successor
-        and Joe's AC-FRESH cadence ruling; until then nothing in this repository
-        may name them.
+        PR 991 withheld both plists because a new ops/launchd/*.plist is a new
+        launchd-workflow row in a sealed inventory `current_source_review`
+        cannot add to, and because no cadence had been ruled. Joe ruled the
+        cadence on 2026-09-11 (decision fa8ae14b-e6fe-4e1b-ae98-0b6eb5a255f8):
+        the fast-forward daily, the watchdog hourly, paging on TRACKED dirt
+        only. So the definitions now have to exist, and each one has to carry
+        the cadence it was ruled rather than whatever a later edit drifts it to.
+
+        WHAT THIS PINS AND WHY EACH PIN IS HERE:
+
+        * Both files exist and are tracked, because an untracked plist is not a
+          declaration — config-as-code would still install it and nothing in the
+          repository would say what runs.
+        * Neither is definition-only. `isDefinitionOnlyLaunchd` in
+          ops/scac-mutation-inventory.mjs reads a plist with no trigger and no
+          RunAtLoad as a reviewed artifact rather than a deployed service, and
+          such an agent is exempt from ops.service closure. A freshness job with
+          no moment at which launchd would fire it is the exact false green this
+          whole slice exists to refuse, so the trigger is asserted here.
+        * Each is registered in ops/config/services.json with a deploy
+          mechanism, which is what makes the exemption above inapplicable and
+          puts both jobs under `ops-record health`.
+        * The fast-forward runs its own mode, and the watchdog runs its own, on
+          separate agents. One agent running both would mean that the instant
+          launchd drops it, nothing is left to say the fast-forward stopped —
+          which is the single failure the watchdog is for.
         """
-        for name in ("com.carr.canonical-fast-forward.plist",
-                     "com.carr.canonical-dirty-watchdog.plist"):
-            self.assertFalse((REPO_ROOT / "ops" / "launchd" / name).exists(), name)
-            self.assertNotIn(name, (REPO_ROOT / "ops" / "config-as-code.py").read_text())
+        services = json.loads(
+            (REPO_ROOT / "ops" / "config" / "services.json").read_text(encoding="utf-8"))
+        by_mechanism = {
+            environment.get("deploy_mechanism"): service["key"]
+            for service in services["services"]
+            for environment in service.get("environments", [])
+        }
+        expected = {
+            "com.carr.canonical-fast-forward.plist": ("fast-forward", "StartCalendarInterval"),
+            "com.carr.canonical-dirty-watchdog.plist": ("watchdog", "StartInterval"),
+        }
+        for name, (mode, trigger) in expected.items():
+            path = REPO_ROOT / "ops" / "launchd" / name
+            self.assertTrue(path.exists(), name)
+            tracked = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch",
+                                      f"ops/launchd/{name}"], capture_output=True, text=True)
+            self.assertEqual(tracked.returncode, 0, f"{name} is not tracked")
+            body = path.read_text(encoding="utf-8")
+            # Comments are stripped first: this file's plists explain themselves
+            # at length, and a key named in prose is not a key launchd reads.
+            keys = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+            self.assertIn(f"<key>{trigger}</key>", keys,
+                          f"{name} has no cadence launchd would fire")
+            self.assertIn(f"<string>{mode}</string>", keys, f"{name} runs the wrong mode")
+            self.assertIn("--canonical-freshness", keys, name)
+            self.assertEqual(by_mechanism.get(f"ops/launchd/{name}"),
+                             {"fast-forward": "canonical-fast-forward",
+                              "watchdog": "canonical-dirty-watchdog"}[mode],
+                             f"{name} is not registered in services.json")
+        # The two modes are on two agents, not one.
+        self.assertNotEqual(*[
+            (REPO_ROOT / "ops" / "launchd" / name).read_text(encoding="utf-8")
+            for name in expected])
 
 
 if __name__ == "__main__":

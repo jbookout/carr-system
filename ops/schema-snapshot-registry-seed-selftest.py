@@ -83,7 +83,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 24)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 25)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -112,6 +112,16 @@ assert (FULL_SET_SEALS["scac-mutation-registry.v23"]
         != "sha256:d6633db96266ebd54bf6ade83cd35b587ee9f128f0f9db35ea557861e66f743b")
 assert (FULL_SET_SEALS["scac-mutation-registry.v23"]
         != FULL_SET_SEALS["scac-mutation-registry.v22"])
+# v24 became readable only once 0501 sealed it, on the same one-behind rule. The
+# digest was measured against a real disposable database carrying every
+# migration through 0500, and it is deliberately NOT the v24 registry digest.
+assert FULL_SET_SEALS["scac-mutation-registry.v24"] == (
+    "sha256:0740fee473c1ab6882ddf629372eaae39657dd3f37f2ace349dbebbf2bab9157"
+)
+assert (FULL_SET_SEALS["scac-mutation-registry.v24"]
+        != "sha256:d280236b45e706ba6e2c642a526ffc827afdc0a1e2220331fb0424ea16758c23")
+assert (FULL_SET_SEALS["scac-mutation-registry.v24"]
+        != FULL_SET_SEALS["scac-mutation-registry.v23"])
 assert FULL_SET_SEALS["scac-mutation-registry.v12"] == (
     "sha256:e0cae72f977332f93e02ce7c30f5b00a5438b13500dcc0e3d6d33db2f3685f9d"
 )
@@ -133,10 +143,17 @@ assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
 # the v23 branch below so this file fails if the snapshot ever loses the current
 # frontier while keeping its history -- the failure mode a substring-presence
 # test is otherwise blind to.
+assert "SCAC_CURRENT_NUMBER=25" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=37054" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1608" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=839" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=24" in GENERATOR
+assert "ops.scac_mutation_catalog_v25_current()" in GENERATOR
+assert "0501_scheduled_job_admission_and_scac_successor.sql" in GENERATOR
+# The v24 frontier stays a selectable branch behind the new one.
 assert "SCAC_CURRENT_NUMBER=24" in GENERATOR
 assert "SCAC_TOTAL_ENTRY_COUNT=35446" in GENERATOR
 assert "SCAC_CURRENT_ENTRY_COUNT=1600" in GENERATOR
-assert "SCAC_CURRENT_SOURCE_COUNT=835" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=23" in GENERATOR
 assert "ops.scac_mutation_catalog_v24_current()" in GENERATOR
 assert "0498_f09_workflow_truth_and_scac_successor.sql" in GENERATOR
@@ -220,14 +237,14 @@ loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
 loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\")\"", loader_start)
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "23"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "24"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 23
-assert loaded_sql.count("sha256:") == 23
-assert FULL_SET_SEALS["scac-mutation-registry.v23"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 24
+assert loaded_sql.count("sha256:") == 24
+assert FULL_SET_SEALS["scac-mutation-registry.v24"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -247,13 +264,13 @@ def loader_rejects(seals: dict, count: str) -> bool:
         os.unlink(path)
 
 
-dropped = {k: v for k, v in FULL_SET_SEALS.items() if k != "scac-mutation-registry.v23"}
-assert loader_rejects(dropped, "23"), "a seal file missing v23 must not load"
+dropped = {k: v for k, v in FULL_SET_SEALS.items() if k != "scac-mutation-registry.v24"}
+assert loader_rejects(dropped, "24"), "a seal file missing v24 must not load"
 assert loader_rejects(dropped, "21"), (
-    "lowering the count must not be a way to hide a missing v23 seal"
+    "lowering the count must not be a way to hide a missing v24 seal"
 )
-malformed = dict(FULL_SET_SEALS, **{"scac-mutation-registry.v23": "sha256:not-a-digest"})
-assert loader_rejects(malformed, "23"), "a malformed v23 seal must not load"
+malformed = dict(FULL_SET_SEALS, **{"scac-mutation-registry.v24": "sha256:not-a-digest"})
+assert loader_rejects(malformed, "24"), "a malformed v24 seal must not load"
 
 def runtime_seal(source: str, name: str) -> str:
     match = re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', source, re.MULTILINE)

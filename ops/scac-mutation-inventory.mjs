@@ -58,6 +58,12 @@ export const REGISTRY_V21_VERSION = "scac-mutation-registry.v21";
 export const REGISTRY_V22_VERSION = "scac-mutation-registry.v22";
 export const REGISTRY_V23_VERSION = "scac-mutation-registry.v23";
 export const REGISTRY_V24_VERSION = "scac-mutation-registry.v24";
+// v25 admits the two canonical-freshness LaunchAgents (WR-000040 AC-FRESH), the
+// Gate Zero scheduler canary LaunchAgent and its script. Every successor since
+// v20 has been registry-only because its source change re-digested ingresses the
+// frozen inventory already named; this is the first whose whole purpose is to
+// ADMIT new ones, which current_source_review is structurally unable to express.
+export const REGISTRY_V25_VERSION = "scac-mutation-registry.v25";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -101,6 +107,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v21: Object.freeze({ version: REGISTRY_V21_VERSION, digest: "sha256:d9100082d444f090e062a2fb9ac55043d0c9790c2fbd9b68672987e3ed12927b", entryCount: 1528, sourceEntryCount: 828 }),
   v22: Object.freeze({ version: REGISTRY_V22_VERSION, digest: "sha256:5bbe68942f2652523b52c024c07615b1718b59c7de4c0e41524a955566ba5f75", entryCount: 1590, sourceEntryCount: 833 }),
   v23: Object.freeze({ version: REGISTRY_V23_VERSION, digest: "sha256:d6633db96266ebd54bf6ade83cd35b587ee9f128f0f9db35ea557861e66f743b", entryCount: 1596, sourceEntryCount: 835 }),
+  v24: Object.freeze({ version: REGISTRY_V24_VERSION, digest: "sha256:d280236b45e706ba6e2c642a526ffc827afdc0a1e2220331fb0424ea16758c23", entryCount: 1600, sourceEntryCount: 835 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -148,6 +155,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql": "b8de4ce8bfa23c5ac06c4a1729456da4cfc301ec6b82e54b336ab072c3d6dca7",
   "migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql": "88a9f228116f9814bc32d4d26663ec5e2885557ea8f985f4468300894ff4ad1b",
   "mcp-server/src/scac-mutation-registry.v23.generated.js": "0dec1d570e18816106f22401dfcf32a78179c265f7b2a48e3e1ebe04f87d0ccb",
+  "migrations/0498_f09_workflow_truth_and_scac_successor.sql": "2c4d52031e1150e31459df5c96b49a4de54324e28abca45d15350ac2332c2923",
+  "mcp-server/src/scac-mutation-registry.v24.generated.js": "6278c2bfadc10c532e18a105d589efabe61d84b3920279606da4c6137fb1a0db",
   "mcp-server/src/scac-mutation-registry.v22.generated.js": "58e37870d1aba7750b841468ef0c4bea76cb75f18ee2a978eb4b3ce567302c20",
 });
 // WR-000068 rebases four Production-applied consumers of the sourced shape
@@ -447,6 +456,22 @@ export const V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   // still moves, because the two replaced bodies are part of the projection --
   // which is the whole reason a domain change owes a registry successor.
   secdef_execute: { count: 458, digest: "sha256:3b9472c743e1ab3cff189e370e4a785c0483391adacbb85b495842f5c4e2b7b0" },
+});
+
+export const V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE =
+  V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE;
+export const V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v25",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. This successor is registry-only and its source
+  // change is three LaunchAgent definitions plus one script: it creates no
+  // table, no role and no domain function, so the entire security-definer delta
+  // from v24's 458 is the four seal-and-catalog functions it installs for
+  // itself, exactly as the v20, v21 and v23 registry-only successors before it.
+  // relation_dml, column_dml, role_authority and runtime_dml_grants are
+  // unchanged for the same reason.
+  secdef_execute: { count: 462, digest: "sha256:e401b63f9bfe2808be4f09ce454e34c5a07c6656bd49997a10f268daba0b247a" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -1118,6 +1143,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V22_VERSION]: "v22",
   [REGISTRY_V23_VERSION]: "v23",
   [REGISTRY_V24_VERSION]: "v24",
+  [REGISTRY_V25_VERSION]: "v25",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1173,7 +1199,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V24_VERSION) {
+  version = REGISTRY_V25_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1212,7 +1238,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
     REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
     REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
-    REGISTRY_V23_VERSION, REGISTRY_V24_VERSION].includes(version))
+    REGISTRY_V23_VERSION, REGISTRY_V24_VERSION,
+    REGISTRY_V25_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -7823,6 +7850,278 @@ ${preflightBody}end $v5_f09_workflow_truth_preflight$;
 }
 
 
+const V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH =
+  "migrations/0498_f09_workflow_truth_and_scac_successor.sql";
+const V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v24.generated.js";
+
+// Shared v25 trust root. Every entry path that renders or writes a v25
+// artifact calls this before doing any work, so an unbound predecessor seal,
+// catalog baseline or artifact pin refuses here rather than producing a
+// plausible-looking successor from a broken chain.
+export function assertV5ScheduledJobAdmissionV25TrustRoot() {
+  assertV5F09WorkflowTruthV24TrustRoot();
+  const { v24: v24Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v24Seal?.version !== REGISTRY_V24_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v24Seal?.digest ?? "") ||
+      !Number.isInteger(v24Seal?.entryCount) || v24Seal.entryCount < 1 ||
+      !Number.isInteger(v24Seal?.sourceEntryCount) || v24Seal.sourceEntryCount < 1)
+    throw new Error("V5 scheduled job admission v25 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v24",
+    V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v24");
+  assertR06HooksCorrectnessCatalogBaseline("successor v25",
+    V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v25");
+  for (const path of [
+    V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH, V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`V5 scheduled job admission v25 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor that ADMITS new source ingresses. Every predecessor
+// from v20 on was registry-only because its source change re-digested existing
+// entrypoints; this one exists because three LaunchAgent definitions and one
+// script are NEW ingresses, which current_source_review cannot express at all
+// (assertCurrentSourceInventoryMatchesFixture refuses an unknown ingress_key).
+// It creates no table, no role and no domain function: it seals the widened
+// source inventory and installs the v25 catalog/policy projection after the
+// immutable v24 frontier. The v24 predecessor was NOT registry-only, so the
+// header-marker slice below is also what drops the V5-F09 domain SQL.
+export function renderV5ScheduledJobAdmissionForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  assertV5ScheduledJobAdmissionV25TrustRoot();
+  const { v24: v24Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = V5_SCHEDULED_JOB_ADMISSION_PRE_V25_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  assertR06HooksCorrectnessCatalogBaseline("successor v25", dbCatalogBaseline,
+    "scac-db-catalog-projection.v25");
+
+  const v25Digest = registryDigestFor(REGISTRY_V25_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v24MigrationPath = V5_SCHEDULED_JOB_ADMISSION_V24_MIGRATION_PATH;
+  const v24RuntimePath = V5_SCHEDULED_JOB_ADMISSION_V24_RUNTIME_PATH;
+  const v24Rows = frozenInventory(REGISTRY_V24_VERSION);
+  const v24Migration = predecessorArtifacts?.migration ??
+    renderV5F09WorkflowTruthForwardRegistrySql(v24Rows, predecessorDbCatalogBaseline);
+  const v24Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v24Rows, {
+    version: REGISTRY_V24_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v24MigrationPath, v24Migration], [v24RuntimePath, v24Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`V5 scheduled job admission v25 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v24 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: mutation registry v24 after the V5-F09 workflow truth enforcement.";
+  const coreStart = v24Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v24Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v24 migration has no exact successor core boundary");
+  const v24Core = v24Migration.slice(coreStart);
+  const currentV24Marker = "create or replace function ops.scac_mutation_catalog_v24_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v23;";
+  const currentV24Start = v24Core.indexOf(currentV24Marker);
+  const secondCurrentV24 = v24Core.indexOf(
+    currentV24Marker, currentV24Start + currentV24Marker.length);
+  const v23HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v23_current() rename to scac_mutation_catalog_v23_live_at_seal;";
+  const v23HistoryStart = v24Core.indexOf(v23HistoryMarker);
+  const secondV23History = v24Core.indexOf(
+    v23HistoryMarker, v23HistoryStart + v23HistoryMarker.length);
+  const policyStart = v24Core.indexOf(policyMarker);
+  const secondPolicy = v24Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v23HistoryStart < 0 || secondV23History >= 0 || currentV24Start <= v23HistoryStart ||
+      secondCurrentV24 >= 0 || policyStart <= currentV24Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v24 migration has no exact catalog successor boundary");
+  const installedV23History = v24Core.slice(v23HistoryStart, currentV24Start);
+  const v24Current = v24Core.slice(currentV24Start, policyStart);
+  const v24History =
+`alter function ops.scac_mutation_catalog_v24_current() rename to scac_mutation_catalog_v24_live_at_seal;
+create or replace function ops.scac_mutation_registry_v24_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v24')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v24_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v24_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v24_seal_available() is 'Exact immutable v24 registry seal; separate from whether the live catalog still equals v24.';
+comment on function ops.scac_mutation_catalog_v24_current() is 'Historical v24 live-catalog validator; expected to become false after the v25 authority surface is installed.';
+
+`;
+  const renderV25Current = baseline => {
+    let current = v24Current
+      .replaceAll("scac_mutation_catalog_v24_current", "scac_mutation_catalog_v25_current")
+      .replaceAll("scac-mutation-registry.v24", "scac-mutation-registry.v25");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `V5 scheduled job admission v25 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "V5 scheduled job admission v25 role-authority baseline");
+  };
+  const v25Current = renderV25Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v24Core, v24Current,
+    "__V5_F09_V24_CATALOG_SUCCESSOR__",
+    "V5 scheduled job admission v24 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV23History, "",
+    "V5 scheduled job admission already-installed v23 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v25 after the scheduled freshness and canary job definitions.",
+    "V5 scheduled job admission migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v24", "scac-mutation-registry.v25")
+    .replaceAll("_v24", "_v25")
+    .replaceAll(" v24", " v25");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "V5 scheduled job admission v25 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v24Seal.digest}',${v24Seal.entryCount},${v24Seal.sourceEntryCount},`,
+    `'sha256:${v25Digest}',${entryCount},${rows.length},`,
+    "V5 scheduled job admission v25 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v25('${v24Seal.digest}',`,
+    `ops.scac_mutation_registration_v25('sha256:${v25Digest}',`,
+    "V5 scheduled job admission v25 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v23;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v24;",
+    "V5 scheduled job admission policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__V5_F09_V24_CATALOG_SUCCESSOR__",
+    `${v24History}${v25Current}`, "V5 scheduled job admission v24 catalog history insertion");
+
+  const versionsThrough24 = Array.from({ length: 24 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough23 = Array.from({ length: 23 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough23},'scac-mutation-registry.v25'))`,
+    `check (registry_version in (${versionsThrough24},'scac-mutation-registry.v25'))`,
+    "V5 scheduled job admission registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough23}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough24}) then return false; end if;`,
+    "V5 scheduled job admission historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when '${REGISTRY_V23_VERSION}' then '${HISTORICAL_REGISTRY_SEALS.v23.digest}' end;`,
+    `    when '${REGISTRY_V23_VERSION}' then '${HISTORICAL_REGISTRY_SEALS.v23.digest}'\n    when '${v24Seal.version}' then '${v24Seal.digest}' end;`,
+    "V5 scheduled job admission historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when '${REGISTRY_V23_VERSION}' then '${JSON.stringify(R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when '${REGISTRY_V23_VERSION}' then '${JSON.stringify(R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v24Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "V5 scheduled job admission historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('${REGISTRY_V23_VERSION}','${HISTORICAL_REGISTRY_SEALS.v23.digest}',${HISTORICAL_REGISTRY_SEALS.v23.entryCount},${HISTORICAL_REGISTRY_SEALS.v23.sourceEntryCount})\n`,
+    `    ('${REGISTRY_V23_VERSION}','${HISTORICAL_REGISTRY_SEALS.v23.digest}',${HISTORICAL_REGISTRY_SEALS.v23.entryCount},${HISTORICAL_REGISTRY_SEALS.v23.sourceEntryCount}),\n    ('${v24Seal.version}','${v24Seal.digest}',${v24Seal.entryCount},${v24Seal.sourceEntryCount})\n`,
+    "V5 scheduled job admission historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v23_seal_available()) then",
+    "    ops.scac_mutation_registry_v23_seal_available() and\n    ops.scac_mutation_registry_v24_seal_available()) then",
+    "V5 scheduled job admission snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v25' and r.registry_digest='${v24Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v24' and r.registry_digest='${v24Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v25' and r.registry_digest='sha256:${v25Digest}')`,
+    "V5 scheduled job admission epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v25' and registry_digest='${v24Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v24' and registry_digest='${v24Seal.digest}') or\n  (registry_version='scac-mutation-registry.v25' and registry_digest='sha256:${v25Digest}')`,
+    "V5 scheduled job admission epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v24Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v25Digest}'::text)`,
+    "V5 scheduled job admission snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v23_seal_available(),ops.scac_mutation_catalog_v25_current()",
+    "ops.scac_mutation_registry_v23_seal_available(),ops.scac_mutation_catalog_v24_live_at_seal(),ops.scac_mutation_catalog_v24_current(),ops.scac_mutation_registry_v24_seal_available(),ops.scac_mutation_catalog_v25_current()",
+    "V5 scheduled job admission historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "V5-F09 workflow truth successor snapshot: current policy epochs bind mutation registry v25 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23 epochs remain immutable.",
+    "V5 scheduled job admission successor snapshot: current policy epochs bind mutation registry v25 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24 epochs remain immutable.",
+    "V5 scheduled job admission policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v25')<>${v24Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v25')<>${entryCount}`,
+    "V5 scheduled job admission v25 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V23_VERSION}')<>'${HISTORICAL_REGISTRY_SEALS.v23.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${REGISTRY_V23_VERSION}')<>${HISTORICAL_REGISTRY_SEALS.v23.entryCount} then raise exception 'sealed SCAC mutation registry v23 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v24Seal.version}')<>'${v24Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v24Seal.version}')<>${v24Seal.entryCount} then raise exception 'sealed SCAC mutation registry v24 changed during successor creation'; end if;`,
+    "V5 scheduled job admission predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),ops.scac_policy_epoch_snapshot_v24(),",
+    "V5 scheduled job admission historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v24 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV25Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v25 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'V5 scheduled job admission pre-v25 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'V5 scheduled job admission pre-v25 role-authority receipt drifted'; end if;`,
+    "V5 scheduled job admission pre-v25 role receipt");
+  const predecessorHash = sha256(v24Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0498 receipt. Refuse before any v25 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+-- What it DOES change is the sealed source inventory itself: three LaunchAgent
+-- definitions and one script entrypoint are admitted as new ingresses, which is
+-- the one shape current_source_review cannot carry.
+do $v5_scheduled_job_admission_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0498_f09_workflow_truth_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0498_f09_workflow_truth_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'V5 scheduled job admission pre-v25 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'V5 scheduled job admission pre-v25 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $v5_scheduled_job_admission_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
 
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
@@ -8121,9 +8420,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v23.generated.js"],
       });
 
+  const v25Rows = frozenInventory(REGISTRY_V25_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v25.generated.js"] =
+    renderRuntimeProjection(v25Rows, {
+      version: REGISTRY_V25_VERSION,
+      dbCatalogBaseline: V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0501_scheduled_job_admission_and_scac_successor.sql"] =
+    renderV5ScheduledJobAdmissionForwardRegistrySql(v25Rows,
+      V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0498_f09_workflow_truth_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v24.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 32 || runtimeCount !== 23 || Object.keys(artifacts).length !== 55)
+  if (migrationCount !== 33 || runtimeCount !== 24 || Object.keys(artifacts).length !== 57)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -8580,9 +8892,24 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V24_VERSION);
     await writeFile(target, renderV5F09WorkflowTruthForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v25") {
+    assertV5ScheduledJobAdmissionV25TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v25.generated.js");
+    const rows = frozenInventory(REGISTRY_V25_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V25_VERSION,
+      dbCatalogBaseline: V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-v5-scheduled-job-admission-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0501_scheduled_job_admission_and_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V25_VERSION);
+    await writeFile(target, renderV5ScheduledJobAdmissionForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V24_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V25_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
