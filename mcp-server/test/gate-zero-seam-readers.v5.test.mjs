@@ -3925,18 +3925,26 @@ function exportGraph(directory) {
  * value by, so a failure names `seam.ruledCardBinding` rather than just the
  * module.
  *
- * THE ONE DELIBERATE BOUNDARY, stated here rather than left to be discovered:
- * only an own DATA descriptor's `value` is descended into, and ACCESSOR GETTERS
- * ARE NEVER INVOKED. A reachability scan that calls arbitrary getters runs
- * module code — with whatever side effects, throws and laziness that code has —
- * to answer a question about shape, and an invoked getter can synthesize a value
- * no caller would ever have been handed. What a getter would return is therefore
- * outside this guard by choice, not by oversight.
+ * AND ACCESSORS ARE READ, which is what the seventh review corrected. The sixth
+ * correction stepped over a getter unread and said so as a deliberate boundary;
+ * that boundary was wrong, because `export const api = { get seam() { return
+ * predicate; } }` hands a consumer the predicate at `api.seam` exactly as a data
+ * property would, and a guard that answers "by any path" cannot decline to look
+ * down the path a consumer actually uses. Every own accessor's `get` is invoked
+ * INSIDE try/catch, with the object it was found on as the receiver, and its
+ * return value is walked like any other edge. A getter that THROWS is an opaque
+ * leaf — a consumer could not have taken a value through it either — and the
+ * walk continues with the next key rather than failing.
+ *
+ * The one shape this cannot terminate on is a getter that mints a fresh object
+ * on every read, forever; no reachability scan terminates on that, and neither
+ * does a consumer reach anything through it.
  *
  * `parts` exists so the mutation controls can revert ONE part of the walk at a
  * time against THIS code rather than against a retyped imitation of it.
  */
-const WHOLE_WALK = Object.freeze({ bounded: Infinity, symbols: true, prototypes: true });
+const WHOLE_WALK =
+  Object.freeze({ bounded: Infinity, symbols: true, prototypes: true, accessors: true });
 
 /** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
 const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
@@ -3958,10 +3966,17 @@ function pathToValue(root, target, parts = WHOLE_WALK) {
     for (const key of keys) {
       let descriptor;
       try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { continue; }
-      // An accessor is stepped over UNREAD — the boundary stated above — and so
-      // is a property whose descriptor cannot be taken at all.
-      if (descriptor === undefined || !Object.hasOwn(descriptor, "value")) continue;
-      const found = walk(descriptor.value, `${path}${stepFor(key)}`, left - 1);
+      // A property whose descriptor cannot be taken at all is the only key
+      // stepped over unread.
+      if (descriptor === undefined) continue;
+      let edge;
+      if (Object.hasOwn(descriptor, "value")) edge = descriptor.value;
+      else if (!parts.accessors || typeof descriptor.get !== "function") continue;
+      // The getter is invoked ON THE OBJECT IT WAS FOUND ON, so a getter that
+      // reads `this` sees the receiver a consumer would give it; a throw makes
+      // the key an opaque leaf rather than an error in this walk.
+      else { try { edge = descriptor.get.call(value); } catch { continue; } }
+      const found = walk(edge, `${path}${stepFor(key)}`, left - 1);
       if (found !== null) return found;
     }
     if (!parts.prototypes) return null;
@@ -4027,6 +4042,21 @@ const REEXPORT_CASES = Object.freeze([
     source:
       `import { ${PREDICATE_NAME} } from "./binding.js";\n`
       + `export const api = Object.create({ seam: ${PREDICATE_NAME} });\n` },
+  // THE SEVENTH REVIEW'S PROBE: a public getter, whose value the sixth
+  // correction declined to read. `api.seam === ruledCardBinding` for any
+  // consumer, so the walk must reach it.
+  { file: "accessor.js", caught: ["runtime"],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const api = { get seam() { return ${PREDICATE_NAME}; } };\n` },
+  // AND THE TWO THE ACCESSOR BRANCH MUST SURVIVE RATHER THAN CATCH: a getter
+  // that throws is an opaque leaf, and one that hands back something else is
+  // walked and found to hold nothing.
+  { file: "throwing-accessor.js", caught: [],
+    source:
+      `import { ${PREDICATE_NAME} } from "./binding.js";\n`
+      + `export const asked = card => ${PREDICATE_NAME}(card) !== null;\n`
+      + `export const api = { get seam() { throw new Error("no seam here"); } };\n` },
   // AND THE ONE THAT MUST PASS: imported, used, never handed on.
   { file: "private.js", caught: [],
     source:
@@ -4115,6 +4145,8 @@ test("PARSER: every export form is read, and the three checks catch what each is
       walk: { ...WHOLE_WALK, symbols: false } },
     { part: "the prototype chain", probe: "inherited.js", route: ".api.[[Prototype]].seam",
       walk: { ...WHOLE_WALK, prototypes: false } },
+    { part: "accessor reads", probe: "accessor.js", route: ".api.seam",
+      walk: { ...WHOLE_WALK, accessors: false } },
   ]);
   const probes = new Map();
   for (const { probe } of REVERTED)

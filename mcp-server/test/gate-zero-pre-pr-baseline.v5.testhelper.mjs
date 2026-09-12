@@ -70,6 +70,27 @@ assert.equal(PRE_PR_BASELINE.commit, PRE_PR_COMMIT,
   "the committed pre-PR baseline describes a different commit");
 assert.equal(PRE_PR_BASELINE.schema_version, "gate-zero-pre-pr-baseline.v1");
 
+/**
+ * AMENDMENT 2's CLOSED SHAPE, WORN BY EVERY CALLABLE THIS MODULE EXPORTS.
+ *
+ * The seventh review found these four helpers constructable, carrying an own
+ * `prototype`, and answering `instanceof` by walking the left operand — so a
+ * hostile operand's `getPrototypeOf` trap ran inside an `instanceof` against an
+ * export of this module. Amendment 2's clauses (a), (b) and (d) close that:
+ * bound (non-constructable, no own `prototype`), an own non-writable,
+ * non-configurable, non-enumerable DATA `Symbol.hasInstance` that answers false
+ * without reading its argument, no Proxy, and frozen afterwards. Binding is
+ * neutral for an arrow, so no behaviour moves. The shape is asserted, export by
+ * export, by the SHAPE test in `gate-zero-assurance.v5.test.mjs`.
+ */
+function closedCallable(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return Object.freeze(closed);
+}
+
 /** `git`, run in this repository, refusing loudly rather than answering vaguely. */
 function git(args, encoding = "utf8") {
   const run = spawnSync("git", args,
@@ -85,14 +106,11 @@ function git(args, encoding = "utf8") {
  * that is to skip the regeneration and keep the digest check, not to invent a
  * baseline.
  */
-export function commitReachable(rev) {
-  return spawnSync("git", ["cat-file", "-e", `${rev}^{commit}`],
-    { cwd: REPO_ROOT, encoding: "utf8" }).status === 0;
-}
+export const commitReachable = closedCallable(rev =>
+  spawnSync("git", ["cat-file", "-e", `${rev}^{commit}`],
+    { cwd: REPO_ROOT, encoding: "utf8" }).status === 0);
 
-export function prePrCommitReachable() {
-  return commitReachable(PRE_PR_COMMIT);
-}
+export const prePrCommitReachable = closedCallable(() => commitReachable(PRE_PR_COMMIT));
 
 const stagedTrees = [];
 let prePrTree = null;
@@ -107,7 +125,7 @@ let prePrTree = null;
  * BYTES so the one binary asset in src survives the round trip, so what is
  * imported from this tree is the commit's module and nothing of this branch.
  */
-export function stagePrePrTree() {
+export const stagePrePrTree = closedCallable(() => {
   if (prePrTree !== null) return prePrTree;
   assert.ok(prePrCommitReachable(),
     `${PRE_PR_COMMIT} is not in this checkout, so its tree cannot be staged`);
@@ -129,11 +147,11 @@ export function stagePrePrTree() {
   }
   prePrTree = target;
   return prePrTree;
-}
+});
 
 /** Every tree this helper staged, removed together. */
-export function releasePrePrTrees() {
+export const releasePrePrTrees = closedCallable(() => {
   for (const base of stagedTrees) rmSync(base, { recursive: true, force: true });
   stagedTrees.length = 0;
   prePrTree = null;
-}
+});

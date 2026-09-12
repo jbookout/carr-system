@@ -45,6 +45,7 @@ import {
   PRE_PR_BASELINE, PRE_PR_BASELINE_DIGEST, PRE_PR_COMMIT, commitReachable,
   prePrCommitReachable, releasePrePrTrees, stagePrePrTree,
 } from "./gate-zero-pre-pr-baseline.v5.testhelper.mjs";
+import * as prePrBaselineHelper from "./gate-zero-pre-pr-baseline.v5.testhelper.mjs";
 import * as producerModule from "../src/gate-zero-producer-registration.v5.js";
 import {
   V5_A02_GATE_ZERO_SCHEMA_VERSION,
@@ -1380,7 +1381,33 @@ function shapeFindings(fn) {
   return found;
 }
 
-test("SHAPE: every public callable wears amendment 2's closed shape", () => {
+/**
+ * EVERY FUNCTION EXPORT OF A MODULE NAMESPACE, AND WHAT EACH ONE FAILS.
+ *
+ * Enumerated rather than listed, so a callable added to either module is
+ * measured without anyone remembering to name it here, and labelled by module
+ * and export so a failure says which one.
+ */
+function moduleShapeFindings(namespace, label) {
+  return Object.entries(namespace)
+    .filter(([, value]) => typeof value === "function")
+    .flatMap(([name, value]) => shapeFindings(value).map(one => `${label}.${name}: ${one}`));
+}
+
+/**
+ * THE HELPER MODULE'S OWN EXPORTS ARE IN SCOPE, which the seventh review had to
+ * point out. Amendment 2's shape is a property of an exported callable, not of a
+ * directory: a test helper imported by two suites is as reachable a public
+ * surface as src/, and all four of its callables were constructable.
+ */
+const HELPER_CALLABLES = Object.freeze([
+  "commitReachable",
+  "prePrCommitReachable",
+  "releasePrePrTrees",
+  "stagePrePrTree",
+]);
+
+test("SHAPE: every public callable wears amendment 2's closed shape", async () => {
   for (const name of PUBLIC_CALLABLES) {
     assert.ok(Object.hasOwn(surface, name), `${name} is not exported`);
     assert.deepEqual(shapeFindings(surface[name]), [], name);
@@ -1389,6 +1416,39 @@ test("SHAPE: every public callable wears amendment 2's closed shape", () => {
   assert.deepEqual(Object.entries(surface)
     .filter(([, value]) => typeof value === "function").map(([name]) => name).sort(),
     [...PUBLIC_CALLABLES].sort());
+  assert.deepEqual(moduleShapeFindings(surface, "gate-zero-assurance.v5.js"), []);
+
+  // AND THE PRE-PR BASELINE HELPER, export by export, enumerated the same way.
+  assert.deepEqual(moduleShapeFindings(prePrBaselineHelper, "pre-pr-baseline helper"), []);
+  assert.deepEqual(Object.entries(prePrBaselineHelper)
+    .filter(([, value]) => typeof value === "function").map(([name]) => name).sort(),
+    [...HELPER_CALLABLES].sort(),
+    "the helper module's callables are not the four this shape test names");
+
+  // THE MUTATION CONTROL FOR THE ENUMERATION: a module written the way those
+  // four were written — a plain `export function` declaration — is red, and it
+  // is red on the three clauses that separate a declaration from a bound arrow.
+  // A control that only fed `shapeFindings` a function would not prove the
+  // ENUMERATION reaches a module's exports, so this one is a real module.
+  const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
+  mkdirSync(cache, { recursive: true });
+  const controlDirectory = mkdtempSync(join(cache, "gate-zero-helper-shape-"));
+  stagedTrees.push(controlDirectory);
+  writeFileSync(join(controlDirectory, "control.mjs"),
+    "const closed = fn => { Object.defineProperty(fn, Symbol.hasInstance,"
+    + " { value: () => false, writable: false, enumerable: false, configurable: false });"
+    + " return Object.freeze(fn); };\n"
+    + "export const alreadyClosed = closed((() => undefined).bind(null));\n"
+    + "export function commitReachable() { return false; }\n");
+  const control =
+    await import(pathToFileURL(join(controlDirectory, "control.mjs")).href);
+  const controlFindings = moduleShapeFindings(control, "control");
+  for (const clause of ["carries a prototype", "is constructable", "has no own Symbol.hasInstance"])
+    assert.ok(controlFindings.includes(`control.commitReachable: ${clause}`),
+      `the control is not red on "${clause}": ${controlFindings}`);
+  // ISOLATED: the closed export in the same module is clean, so the control
+  // measures the plain declaration and not the enumeration failing wholesale.
+  assert.deepEqual(controlFindings.filter(one => !one.startsWith("control.commitReachable:")), []);
   // NON-VACUOUS, three ways: a plain function, a class and a Proxy over a closed
   // callable each fail, and they fail on the clauses that separate them.
   const plain = shapeFindings(function ordinary() {});
