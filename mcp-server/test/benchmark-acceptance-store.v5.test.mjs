@@ -332,22 +332,31 @@ test("both private readers are private and not exported", () => {
   }
 });
 
-test("the prerequisites report ONE unbound acceptance binding and acceptance still unavailable", () => {
+test("the prerequisites report NO unbound acceptance binding, and say what that does not mean", () => {
   const prerequisites = benchmarkAcceptancePrerequisites();
-  // THE ASSERTION THE WHOLE UNIT TURNS ON. The list was two entries. The
-  // coverage binding cleared on its own evidence and Gate Zero did not clear
-  // with it, so the list is now exactly one entry long and that entry is Gate
-  // Zero. Both halves matter: a list that had shrunk to zero would mean the
-  // coverage work had been let to open the gate, and a list that still had two
-  // would mean nothing was recorded.
-  assert.equal(prerequisites.acceptance_blocked_by.length, 1);
-  assert.deepEqual(prerequisites.acceptance_blocked_by, [GATE_ZERO_STEP_REF]);
-  // AND ACCEPTANCE IS STILL SHUT. One unbound binding is as closed as two.
-  assert.equal(prerequisites.acceptance_available, false);
-  assert.equal(prerequisites.gate_zero.resolved, false);
+  // THE ASSERTION THE WHOLE UNIT TURNS ON, AND IT HAS MOVED TWICE. The list was
+  // two entries, then one when the coverage binding cleared on its own
+  // evidence, and it is now zero because migration 0502 landed the Gate Zero
+  // record and both its readers together. Each step is a record landing in a
+  // field a reader can check, never two requirements being merged.
+  assert.deepEqual(prerequisites.acceptance_blocked_by, []);
+  // `acceptance_available` reports the SHAPE of the rail, not a prediction: no
+  // binding is structurally absent any more. Every acceptance still refuses
+  // unless all three answer, which the refusal tests below prove directly.
+  assert.equal(prerequisites.acceptance_available, true);
+  assert.equal(prerequisites.gate_zero.resolved, true);
   assert.equal(prerequisites.gate_zero.step_ref, GATE_ZERO_STEP_REF);
-  assert.ok(prerequisites.gate_zero.required_to_resolve.length > 0);
-  assert.ok(prerequisites.gate_zero.explicitly_refused.length > 0);
+  assert.ok(prerequisites.gate_zero.resolved_by.length > 0);
+  assert.ok(prerequisites.gate_zero.still_refused_after_resolution.length > 0);
+  // THE STALE CLAUSE IS CORRECTED, NOT DELETED. A wrong sentence that simply
+  // disappears teaches nobody, and this one is the sentence that would send the
+  // next reader looking for a human to supply the outcome.
+  assert.equal(prerequisites.gate_zero.external_producer_is_intentional, false);
+  assert.match(prerequisites.gate_zero.corrected_stale_clause.said, /registers no v5 producer/);
+  assert.match(prerequisites.gate_zero.corrected_stale_clause.corrected_to,
+    /independent_control_plane_oracle/);
+  assert.equal(prerequisites.gate_zero.corrected_stale_clause.corrected_by,
+    "311a9af5-3685-4c47-a158-f8dd70870ca1");
   assert.equal(prerequisites.measurement_coverage_proof.resolved, true);
   assert.equal(prerequisites.measurement_coverage_proof.independent_of, GATE_ZERO_STEP_REF);
   assert.equal(prerequisites.portfolio_constitution.resolved, true);
@@ -369,21 +378,75 @@ test("the portfolio prerequisite reports what it proves and refuses to claim lin
   assert.ok(/lineage/i.test(portfolio.lineage_note));
 });
 
-test("the Gate Zero requirement is scoped to this record layer, not to Gate Zero itself", () => {
+test("the Gate Zero requirement is still scoped to this record layer after resolving", () => {
   const requirement = BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT;
-  // The external pre-v5 producer is intentional and nothing here asks for a
-  // registry entry, so the requirement says so in a field rather than treating
-  // the absent producer as the defect.
-  assert.equal(requirement.external_producer_is_intentional, true);
+  assert.equal(requirement.resolved, true);
+  // RESOLVING IT DID NOT TURN IT INTO A JUDGEMENT. The scope clause still says
+  // this constant is about what is bindable here, not about what a Gate Zero
+  // run decided — a rail that started reporting verdicts would be a second
+  // Gate Zero policy, which is the thing this slice is forbidden to invent.
   assert.ok(/record layer/i.test(requirement.scope));
-  // No clause may assert that Gate Zero produced no outcome anywhere. What this
-  // module can observe is what is bindable here.
-  for (const clause of requirement.why_unresolved) {
-    assert.equal(/no canonical gate zero outcome record exists/i.test(clause), false,
-      `why_unresolved asserts a global absence: ${clause}`);
+  assert.equal(/verdict|passed|green/i.test(requirement.scope), false);
+  assert.ok(requirement.what_was_unbound.some(clause => /this record layer held no/i.test(clause)));
+  // THE REFUSALS SURVIVE THE RESOLUTION, and one is NEW because resolving it
+  // created a way to get it wrong that did not exist before: a recorded
+  // non-passing or expired outcome standing in for a current one.
+  for (const clause of [
+    "a Gate Zero outcome digest supplied by a caller",
+    "a digest derived from a synthetic test fixture",
+    "a Gate Zero policy invented in this slice",
+    "a recorded non-passing or expired outcome standing in for a current one",
+  ]) assert.ok(requirement.still_refused_after_resolution.includes(clause), clause);
+  // Resolving Gate Zero must not silently upgrade the coverage attestation,
+  // which is the fourth thing that requirement explicitly refuses.
+  assert.ok(requirement.still_refused_after_resolution.some(
+    clause => /silently upgrading the measurement coverage attestation/i.test(clause)));
+});
+
+test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without the other", () => {
+  // THE PAIRING WAS ENFORCED BY TWO THROWS AND IS NOW ENFORCED BY THIS TEST.
+  // While both readers were fail-closed stubs, "delete the throw in one and the
+  // gate opens without a record" was the hazard, and the throws themselves were
+  // the guard. Both are implemented now, so the hazard reversed: reverting
+  // EITHER side to a raise while the other still reads is a half-finished
+  // rollback, and that is what this asserts — from the two sources, because
+  // there is no runtime state that would show it.
+  const moduleSource = readFileSync(
+    new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
+  const migration = readFileSync(
+    new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
+  const candidate = readFileSync(
+    new URL("../../ops/benchmark-acceptance.candidate.sql", import.meta.url), "utf8");
+
+  // (a) THE MODULE HALF READS. It takes a connection, selects the current
+  // passing row, and is not a parameterless always-throwing stub.
+  assert.match(moduleSource, /async function readGateZeroOutcome\(c\) \{/);
+  assert.match(moduleSource, /from ops\.gate_zero_read_only_outcome/);
+  assert.equal(/function readGateZeroOutcome\(\) \{/.test(moduleSource), false,
+    "the module reader reverted to the parameterless stub while the SQL half still reads");
+
+  // (b) BOTH SQL HALVES READ, and they are the same reader in two files: the
+  // numbered migration that binds, and the candidate source that must not drift
+  // from it. A body present in one and raising in the other is the exact
+  // half-landed state the stubs warned about.
+  for (const [name, sql] of [["migration 0502", migration], ["candidate source", candidate]]) {
+    assert.match(sql, /create or replace function ops\.benchmark_gate_zero_outcome\(\)/, name);
+    assert.match(sql, /where status = 'pass' and ttl_expires_at > now\(\)/, name);
+    assert.ok(sql.includes("order by observed_at desc, outcome_digest collate \"C\" desc"), name);
   }
-  assert.ok(requirement.explicitly_refused.includes("a claim that Gate Zero produced no outcome"));
-  assert.ok(requirement.why_unresolved.some(clause => /this record layer/i.test(clause)));
+
+  // (c) AND BOTH STILL FAIL CLOSED. Implementing them was not the same as
+  // opening them: each still raises when no current passing outcome exists, and
+  // a reader that stopped raising would be a gate opened by omission.
+  assert.match(moduleSource, /refuse\("gate_zero_outcome_unresolved"/);
+  assert.match(moduleSource, /refuse\("gate_zero_outcome_not_current"/);
+  for (const [name, sql] of [["migration 0502", migration], ["candidate source", candidate]]) {
+    assert.equal(sql.includes(
+      "benchmark acceptance requires a current passing Gate Zero read-only outcome"), true, name);
+    assert.equal(sql.includes(
+      "benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and none has been recorded here yet"),
+      true, name);
+  }
 });
 
 test("the coverage requirement is resolved and its trust boundary is unchanged", () => {
@@ -573,7 +636,8 @@ test("propose sends the decomposed rows and the digest it computed itself", asyn
   assert.equal(result.accepted, false);
   assert.equal(result.admissibility.accepted, false);
   assert.equal(result.admissibility.proposed_benchmark_manifest_digest, expected);
-  assert.equal(result.acceptance_prerequisites.acceptance_available, false);
+  // The rail's bindings are all present now; proposing one still accepts nothing.
+  assert.equal(result.acceptance_prerequisites.acceptance_available, true);
   assert.equal(result.effects.creates_effect, false);
   assert.equal(result.effects.clock_started, false);
   assert.equal(c.events.length, 1);
@@ -973,8 +1037,18 @@ test("a review writes its audit event with a real actor, verb and subject", asyn
 
 // --- acceptance, which fails closed -----------------------------------------
 
-test("acceptance fails closed on the unresolved Gate Zero binding, before any statement", async () => {
-  const c = mockDatabase();
+test("acceptance fails closed when no Gate Zero outcome has been recorded, and writes nothing", async () => {
+  // THE ASSERTION MOVED WITH THE POLICY, AND THIS IS THE HONEST FORM OF IT.
+  // While Gate Zero was a stub the strongest claim was "ZERO statements". The
+  // reader is a real read now, so it necessarily issues one — and the claim
+  // that replaces it is stronger where it matters: the path issues only READS
+  // and writes NOTHING when the binding refuses.
+  // ORDER MATTERS in mockDatabase: it matches by substring in insertion order,
+  // and the exists probe contains the table name too, so it is declared first.
+  const c = mockDatabase({
+    "select exists (select 1 from ops.gate_zero_read_only_outcome)": [{ recorded: false }],
+    "from ops.gate_zero_read_only_outcome": [],
+  });
   const refused = await refusal(tools["accept-benchmark-manifest-draft"].handler(c, PARTNER, {
     idempotency_key: KEY, draft_id: DRAFT_ID,
     accepted_payload_digest: benchmarkPayloadDigest(payload()),
@@ -982,11 +1056,32 @@ test("acceptance fails closed on the unresolved Gate Zero binding, before any st
   }));
   assert.equal(refused.error, "gate_zero_outcome_unresolved");
   assert.equal(refused.detail.step_ref, GATE_ZERO_STEP_REF);
-  assert.equal(refused.detail.resolved, false);
-  // THE ASSERTION THAT MATTERS. Nothing was attempted, so nothing can be read
-  // as an acceptance that nearly succeeded.
-  assert.equal(c.calls.length, 0, "the acceptance path reached the database");
+  assert.equal(refused.detail.recorded_outcomes_present, false);
   assert.equal(c.events.length, 0, "the acceptance path recorded an event");
+  for (const call of c.calls)
+    assert.match(call.sql, /^\s*select/i, `the acceptance path issued a non-read: ${call.sql}`);
+});
+
+test("a recorded but non-current Gate Zero outcome refuses differently, and still writes nothing", async () => {
+  // TWO EMPTY CASES, TOLD APART. "Nothing ever ran" and "everything that ran is
+  // failing or expired" are different problems for whoever hits them, and a
+  // rail that reported them identically would make a quarantined Gate Zero look
+  // like a Gate Zero that never happened. This is Q036.D1's truthful-failure
+  // clause reaching the acceptance rail.
+  const c = mockDatabase({
+    "select exists (select 1 from ops.gate_zero_read_only_outcome)": [{ recorded: true }],
+    "from ops.gate_zero_read_only_outcome": [],
+  });
+  const refused = await refusal(tools["accept-benchmark-manifest-draft"].handler(c, PARTNER, {
+    idempotency_key: KEY, draft_id: DRAFT_ID,
+    accepted_payload_digest: benchmarkPayloadDigest(payload()),
+    review_id: REVIEW_ID, portfolio_ref: "WR-DOCTORCRE-V5",
+  }));
+  assert.equal(refused.error, "gate_zero_outcome_not_current");
+  assert.equal(refused.detail.recorded_outcomes_present, true);
+  assert.equal(c.events.length, 0);
+  for (const call of c.calls)
+    assert.match(call.sql, /^\s*select/i, `the acceptance path issued a non-read: ${call.sql}`);
 });
 
 test("the acceptance audit call is positional, checked at the source because it is unreachable", () => {
@@ -1010,24 +1105,26 @@ test("the acceptance audit call is positional, checked at the source because it 
   assert.equal(/writeEvent\(\s*c\s*,\s*\{/.test(call[0]), false);
 });
 
-test("the acceptance verb names its one remaining refusal and oversells the other's retirement not at all", () => {
+test("the acceptance verb says all three bindings are bound AND that it still refuses", () => {
   const description = tools["accept-benchmark-manifest-draft"].description;
-  // ONE reason now, said in the description a caller actually reads.
-  assert.ok(/FOR ONE REMAINING REASON/.test(description));
-  assert.equal(/TWO INDEPENDENT REASONS/.test(description), false);
-  assert.ok(/record layer holds no authenticated Gate Zero outcome/i.test(description));
-  // The retirement is attributed to the coverage record, explicitly NOT to Gate
-  // Zero -- which is the fourth thing the coverage requirement refuses.
+  // BOTH HALVES, because either alone would mislead. A description that only
+  // said "bound" would read as an open gate; one that only said "refuses" would
+  // hide that the structural gap is closed.
+  assert.ok(/ALL THREE BINDINGS ARE NOW BOUND/.test(description));
+  assert.ok(/STILL REFUSES UNLESS EACH ANSWERS/.test(description));
+  assert.equal(/FOR ONE REMAINING REASON/.test(description), false,
+    "the description still claims a remaining structural gap that migration 0502 closed");
+  // The non-green case is named where a caller reads it, not only in the SQL.
+  assert.ok(/recorded fail, unknown, stale or quarantined outcome is a run and not a binding/i.test(description));
+  assert.ok(/truthful-failure-propagation/i.test(description));
+  // The coverage retirement is still attributed to its own evidence, and Gate
+  // Zero landing must not be described as having upgraded it.
   assert.ok(/on its own evidence and not by Gate Zero/i.test(description));
-  // And the description still says what the attestation is not.
+  assert.ok(/Gate Zero landing did not upgrade it/i.test(description));
   assert.ok(/not an independent verification/i.test(description));
   assert.ok(/samples are outside this record layer/i.test(description));
-  // The guarantee is stated in its honest form, not dropped.
-  assert.ok(/while Gate Zero is unbound/i.test(description));
-  // And the portfolio binding is described as a prerequisite, not as lineage.
+  // And the portfolio binding is still described as a prerequisite, not lineage.
   assert.ok(/not a claim of lineage/i.test(description));
-  // It does not claim Gate Zero produced nothing anywhere.
-  assert.equal(/no canonical Gate Zero outcome record exists/i.test(description), false);
 });
 
 test("acceptance refuses a non-partner before it reaches the Gate Zero refusal", async () => {
@@ -1046,6 +1143,8 @@ test("no verb in this module can report an accepted benchmark today", async () =
   // Propose and review both say so in their own results; acceptance cannot
   // produce a result at all. Together that is the whole surface.
   const c = mockDatabase({
+    "select exists (select 1 from ops.gate_zero_read_only_outcome)": [{ recorded: false }],
+    "from ops.gate_zero_read_only_outcome": [],
     ...liveDraftResponse(),
     benchmark_propose_manifest_draft: [{ id: DRAFT_ID }],
     benchmark_review_manifest_draft: [{ id: REVIEW_ID }],

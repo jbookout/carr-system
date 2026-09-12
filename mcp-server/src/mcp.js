@@ -191,7 +191,18 @@ export const PROFILES = {
   // the profile is the whole point, not a suggestion the model could widen by
   // passing a different verb name (callTool's allowedIn() check enforces this
   // at call time, same as every other profile).
-  reviewer: new Set(["record-finding"]),
+  // THE SECOND ENTRY, ADDED 2026-09-13, AND IT IS NARROWER THAN IT LOOKS. The
+  // profile now admits two write verbs rather than one, and the addition is
+  // record-gate-zero-read-only-outcome under Joe's ruling
+  // d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70. This entry is NOT the authority: it
+  // is the blast-radius limiter, and on its own it would admit BOTH reviewer
+  // lanes, because grok-reviewer authenticates through the same door and lands
+  // in the same profile. The authority is the `oracleSeatOnly` gate in
+  // executeRegisteredTool, which reads the staffed seat off the frozen
+  // registration and refuses every lane but that one. Both are kept: the
+  // profile keeps a reviewer out of the other two hundred write verbs, and the
+  // seat gate keeps the wrong reviewer out of this one.
+  reviewer: new Set(["record-finding", "record-gate-zero-read-only-outcome"]),
 
   // HERMES (R0 runtime evaluation, 2026-08-16). The write set is EMPTY, which
   // is the whole design: the 2026-08-12 frontier council cleared Hermes for a
@@ -283,8 +294,11 @@ const PROFILE_NOTICE = {
     "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
     "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
   reviewer:
-    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly one write verb, " +
-    "record-finding. Every other write verb refuses with not_in_profile — no advancing a deal, no " +
+    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly two write verbs, " +
+    "record-finding and record-gate-zero-read-only-outcome. The second one additionally refuses every " +
+    "reviewer lane except the one staffed with the DoctorCRE v5 Gate Zero oracle seat, so being in this " +
+    "profile is not by itself permission to call it. Every other write verb refuses with not_in_profile " +
+    "— no advancing a deal, no " +
     "drafting a document, no touching a party or a rule. This profile is locked server-side by a " +
     "REVIEW_TOKENS bearer, not by ?profile=, and cannot be widened by this token under any request. " +
     "This is the Automatic Review Council's Codex-reviewer machine actor, never a human seat. Land " +

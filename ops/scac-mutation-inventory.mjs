@@ -70,6 +70,7 @@ export const REGISTRY_V24_VERSION = "scac-mutation-registry.v24";
 // that derivation. A count that is typed is a count that drifts, which is
 // exactly what PR #1006 review 2 caught.
 export const REGISTRY_V25_VERSION = "scac-mutation-registry.v25";
+export const REGISTRY_V26_VERSION = "scac-mutation-registry.v26";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -114,8 +115,14 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v22: Object.freeze({ version: REGISTRY_V22_VERSION, digest: "sha256:5bbe68942f2652523b52c024c07615b1718b59c7de4c0e41524a955566ba5f75", entryCount: 1590, sourceEntryCount: 833 }),
   v23: Object.freeze({ version: REGISTRY_V23_VERSION, digest: "sha256:d6633db96266ebd54bf6ade83cd35b587ee9f128f0f9db35ea557861e66f743b", entryCount: 1596, sourceEntryCount: 835 }),
   v24: Object.freeze({ version: REGISTRY_V24_VERSION, digest: "sha256:d280236b45e706ba6e2c642a526ffc827afdc0a1e2220331fb0424ea16758c23", entryCount: 1600, sourceEntryCount: 835 }),
+  // Read off migration 0501's own sealed text rather than recomputed here, for
+  // the reason every seal above it was: a number this file derives could drift
+  // with this file, and the point of a seal is that it cannot.
+  v25: Object.freeze({ version: REGISTRY_V25_VERSION, digest: "sha256:f4d2642e4744b2f55894b17ce17d25a2dd55ad721c02bad1c0e5b3b45b8f5fd0", entryCount: 1609, sourceEntryCount: 840 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
+  "migrations/0501_scheduled_job_admission_and_scac_successor.sql": "a0014c38dd90874c0331f0fe4b56df4290cc11bb49e615945b70fbef967a2b3f",
+  "mcp-server/src/scac-mutation-registry.v25.generated.js": "6bdef1596b8d7da958575c614363a4c25feb2d83e6d0e23adf6f6618d7420596",
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
   "migrations/0455_siep12_policy_epoch.sql": "8a2e223cf1c3637ad2b8d8b2fcac54f6407f9e2ceef9f7b227c502b13dc04101",
   "migrations/0457_siep13_forward_mutation_registry.sql": "32e85f50dcb95909db2e85d8eb41ff656cd642899d4e356f926c9edf39b0b007",
@@ -480,6 +487,48 @@ export const V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE = Object.fre
   // relation_dml, column_dml, role_authority and runtime_dml_grants are
   // unchanged for the same reason.
   secdef_execute: { count: 462, digest: "sha256:e401b63f9bfe2808be4f09ce454e34c5a07c6656bd49997a10f268daba0b247a" },
+});
+
+// THE FIRST SUCCESSOR WHOSE PREDECESSOR BASELINE IS NOT ITS PREDECESSOR'S
+// FORWARD BASELINE, and the difference is worth reading before copying this
+// block forward. Every successor from v20 to v25 was registry-only, so the
+// database state immediately before it was exactly the state its predecessor
+// left. v26 is not: migration 0502_gate_zero_read_only_outcome.sql lands a
+// DOMAIN change between 0501 and this successor -- the Gate Zero outcome record
+// and its writer -- so the state this successor must find is v25's forward
+// state PLUS that migration's effect.
+//
+// THAT EFFECT IS EXACTLY ONE SECURITY-DEFINER GRANT, predicted before it was
+// measured and then measured: ops.gate_zero_record_read_only_outcome(uuid,jsonb)
+// granted to carr_writer. The other three functions 0502 creates are either not
+// security definer (the seat holder ref and the digest helper are immutable
+// sql) or granted to no role at all (the authority test and the private Gate
+// Zero reader), so none of them can appear in a category that counts granted
+// definer execute. relation_dml is unchanged because 0502 revokes every direct
+// DML on its table and grants none; column_dml, role_authority,
+// runtime_dml_grants and job_definitions are unchanged because it creates no
+// role, no column grant and no job.
+//
+// 462 -> 463 is that one row. Read back from a clean disposable Postgres
+// carrying db/schema.sql and every migration through 0502, exactly as every
+// baseline above it was, and never from Production or from a caller.
+export const GATE_ZERO_OUTCOME_PRE_V26_DB_CATALOG_BASELINE = Object.freeze({
+  ...V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
+  secdef_execute: { count: 463, digest: "sha256:c4e0e4c28df3968495ee7245cdd5db899e2dddf646dd37f6360ed91d426c80ed" },
+});
+
+export const GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...GATE_ZERO_OUTCOME_PRE_V26_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v26",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. This successor is registry-only: it creates no
+  // table, no role and no domain function of its own -- 0502 did that, one
+  // migration earlier and under its own review -- so the entire
+  // security-definer delta from the pre-v26 463 is the four seal-and-catalog
+  // functions this successor installs for itself, exactly as the v20, v21, v23
+  // and v25 registry-only successors before it. Every other category is
+  // unchanged for the same reason.
+  secdef_execute: { count: 467, digest: "sha256:d521f356734abe17c4c47f0d8ffc2edf3bfd522bb0ac61d17dc6db5cb1d7c7a4" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -1152,6 +1201,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V23_VERSION]: "v23",
   [REGISTRY_V24_VERSION]: "v24",
   [REGISTRY_V25_VERSION]: "v25",
+  [REGISTRY_V26_VERSION]: "v26",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1207,7 +1257,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V25_VERSION) {
+  version = REGISTRY_V26_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1238,10 +1288,10 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
     // "four new rows" and 131 reviewed ingresses over an 840-row overlay with
     // 132 reviewed rows; every one of those three numbers is now computed, and
     // a typed one fails here rather than surviving to a reviewer.
-    if (version === REGISTRY_V25_VERSION) {
-      const provenance = v5ScheduledJobAdmissionProvenanceFrozen();
+    if (version === REGISTRY_V26_VERSION) {
+      const provenance = gateZeroOutcomeAdmissionProvenanceFrozen();
       if (!review.reason.endsWith(provenance.review_reason_paragraph))
-        throw new Error("current source-inventory review reason does not end with the measured v25 admission provenance paragraph");
+        throw new Error("current source-inventory review reason does not end with the measured v26 admission provenance paragraph");
       const expectedTransition =
         `${provenance.previous_frontier_count} to ${provenance.frontier_count}`;
       for (const match of review.reason.matchAll(/\b\d{3} to \d{3}\b/g))
@@ -1266,7 +1316,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
     REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
     REGISTRY_V23_VERSION, REGISTRY_V24_VERSION,
-    REGISTRY_V25_VERSION].includes(version))
+    REGISTRY_V25_VERSION, REGISTRY_V26_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -8413,6 +8463,484 @@ export const v5ScheduledJobAdmissionProvenance =
   closedExport(() => v5ScheduledJobAdmissionProvenanceFrozen());
 
 
+const GATE_ZERO_OUTCOME_V25_MIGRATION_PATH =
+  "migrations/0501_scheduled_job_admission_and_scac_successor.sql";
+const GATE_ZERO_OUTCOME_V25_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v25.generated.js";
+
+
+
+
+
+
+function gateZeroOutcomeAdmissionProvenanceFrozen() {
+  const previous = frozenInventory(REGISTRY_V25_VERSION);
+  const frontier = frozenInventory(REGISTRY_V26_VERSION);
+  const previousKeys = new Set(previous.map(row => row.ingress_key));
+  const frontierKeys = new Set(frontier.map(row => row.ingress_key));
+  const admittedRows = frontier.filter(row => !previousKeys.has(row.ingress_key))
+    .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
+  const removedKeys = previous.filter(row => !frontierKeys.has(row.ingress_key))
+    .map(row => row.ingress_key).sort((left, right) => left.localeCompare(right));
+  const composition = [];
+  for (const noun of ADMITTED_INGRESS_NOUNS) {
+    const count = admittedRows.filter(row => noun.match(row)).length;
+    if (count > 0) composition.push(`${countWord(count)} ${count === 1 ? noun.one : noun.many}`);
+  }
+  // Every admitted row must fall in exactly one noun bucket, or the
+  // description would silently under-report the delta -- the same failure in a
+  // new costume.
+  const classified = admittedRows
+    .filter(row => ADMITTED_INGRESS_NOUNS.filter(noun => noun.match(row)).length === 1).length;
+  if (classified !== admittedRows.length)
+    throw new Error("v26 admission provenance cannot name the kind of every admitted ingress exactly once");
+  const patch = SOURCE_INVENTORY_FIXTURES.patches
+    .find(entry => entry.version === REGISTRY_V26_VERSION.split(".").at(-1));
+  if (!patch || !Array.isArray(patch.upsert))
+    throw new Error("v26 admission provenance cannot read the v26 fixture patch");
+  const redigested = patch.upsert
+    .filter(row => previousKeys.has(row.ingress_key)).length;
+  const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
+  if (!review || !Array.isArray(review.upsert))
+    throw new Error("v26 admission provenance cannot read the current source review");
+  const admittedKeys = admittedRows.map(row => row.ingress_key);
+  // THE ROWS THIS BRANCH MOVED AFTER ITS OWN PATCH WAS CUT, derived rather than
+  // listed. PR #1006 review 4 found the reason naming three files as the
+  // branch-moved reviewed rows -- a hand-typed list written at correction 3
+  // that correction 4 then falsified by re-digesting the canary gate into the
+  // overlay and leaving the sentence alone. Comparing the overlay against the
+  // v26 patch answers the same question without anyone typing a filename: a
+  // key the patch seals whose overlay row carries different bytes is exactly a
+  // row a later correction moved past the seal.
+  const patchByKey = new Map(patch.upsert.map(row => [row.ingress_key, row]));
+  const resealedKeys = review.upsert
+    .filter(row => {
+      const sealed = patchByKey.get(row.ingress_key);
+      return sealed !== undefined &&
+        JSON.stringify(canonicalize(sealed)) !== JSON.stringify(canonicalize(row));
+    })
+    .map(row => row.ingress_key)
+    .sort((left, right) => left.localeCompare(right));
+  const description = joinWithAnd(composition);
+  const resealedSentence = resealedKeys.length === 0
+    ? " No reviewed row supersedes a row the v26 patch seals: every ingress " +
+      "the patch carries still holds the bytes it was sealed with."
+    : ` ${capitalize(countWord(resealedKeys.length))} of those reviewed ` +
+      `${resealedKeys.length === 1 ? "rows supersedes a row" : "rows supersede rows"} ` +
+      `the v26 patch itself seals -- ${resealedKeys.join(", ")} -- because a ` +
+      "later correction on this branch moved those bytes after the patch was " +
+      "cut, so the overlay rather than the seal carries their live digest; " +
+      "that list is derived by comparing the overlay against the patch rather " +
+      "than named by hand.";
+  const transition = `${previous.length} to ${frontier.length}`;
+  // NUMBER AGREEMENT IS DERIVED TOO. One admitted ingress reads "is admitted as
+  // a new ingress"; more than one reads "are admitted as new ingresses". A fixed
+  // plural here would be one more sentence describing a delta it did not
+  // measure, which is the whole failure this function exists to prevent.
+  const admissionVerb = admittedKeys.length === 1
+    ? "is admitted as a new ingress" : "are admitted as new ingresses";
+  const migrationSentence = "What it DOES change is the sealed source inventory " +
+    `itself, which grows from ${transition} rows: ${description} ` +
+    `${admissionVerb}, which is the one shape ` +
+    "current_source_review cannot carry.";
+  const reviewReasonParagraph = " v26 admission provenance, measured from the " +
+    "sealed row sets rather than typed: the frozen source inventory grows from " +
+    `${transition} rows, admitting ${countWord(admittedKeys.length)} new ` +
+    `${admittedKeys.length === 1 ? "ingress" : "ingresses"} -- ${description} ` +
+    `-- namely ${admittedKeys.join(", ")}, and removing ` +
+    `${removedKeys.length === 0 ? "none" : removedKeys.join(", ")}. The v26 ` +
+    `patch carries those ${countWord(admittedKeys.length)} additions plus ` +
+    `${countWord(redigested)} already-known rows whose bytes the same change ` +
+    `moved, and this overlay re-derives ${review.upsert.length} reviewed ` +
+    "ingresses from the live inventory of this tree rather than hand-merging " +
+    "them, so the reviewed digest reproduces the live digest exactly." +
+    resealedSentence + " Every count and every ingress key in this paragraph " +
+    "is computed by gateZeroOutcomeAdmissionProvenance() from frozenInventory(\"" +
+    `${REGISTRY_V25_VERSION}"), frozenInventory("${REGISTRY_V26_VERSION}") and ` +
+    "the fixture's own v26 patch and overlay, and the frontier check refuses a " +
+    "reason that does not end with the rendered text.";
+  return Object.freeze({
+    previous_version: REGISTRY_V25_VERSION,
+    version: REGISTRY_V26_VERSION,
+    previous_frontier_count: previous.length,
+    frontier_count: frontier.length,
+    admitted_count: admittedKeys.length,
+    admitted_ingress_keys: Object.freeze([...admittedKeys]),
+    removed_ingress_keys: Object.freeze([...removedKeys]),
+    admitted_description: description,
+    patch_redigested_count: redigested,
+    reviewed_ingress_count: review.upsert.length,
+    overlay_resealed_ingress_keys: Object.freeze([...resealedKeys]),
+    migration_comment: wrapSqlComment(migrationSentence),
+    review_reason_paragraph: reviewReasonParagraph,
+  });
+}
+
+// Shared v26 trust root. Every entry path that renders or writes a v25
+// artifact calls this before doing any work, so an unbound predecessor seal,
+// catalog baseline or artifact pin refuses here rather than producing a
+// plausible-looking successor from a broken chain.
+function assertGateZeroOutcomeAdmissionV26TrustRootFrozen() {
+  assertV5ScheduledJobAdmissionV25TrustRoot();
+  const { v25: v25Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v25Seal?.version !== REGISTRY_V25_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v25Seal?.digest ?? "") ||
+      !Number.isInteger(v25Seal?.entryCount) || v25Seal.entryCount < 1 ||
+      !Number.isInteger(v25Seal?.sourceEntryCount) || v25Seal.sourceEntryCount < 1)
+    throw new Error("Gate Zero outcome admission v26 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v25",
+    GATE_ZERO_OUTCOME_PRE_V26_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v25");
+  assertR06HooksCorrectnessCatalogBaseline("successor v26",
+    GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v26");
+  for (const path of [
+    GATE_ZERO_OUTCOME_V25_MIGRATION_PATH, GATE_ZERO_OUTCOME_V25_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`Gate Zero outcome admission v26 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor that ADMITS new source ingresses. Every predecessor
+// from v20 on was registry-only because its source change re-digested existing
+// entrypoints; this one exists because the agents and scripts that
+// gateZeroOutcomeAdmissionProvenance() enumerates from the row sets are NEW
+// ingresses, which current_source_review cannot express at all
+// (assertCurrentSourceInventoryMatchesFixture refuses an unknown
+// ingress_key). It creates no table, no role and no domain function: it seals
+// the widened source inventory and installs the v26 catalog/policy projection
+// after the immutable v24 frontier. The v24 predecessor was NOT registry-only,
+// so the header-marker slice below is also what drops the V5-F09 domain SQL.
+//
+// MODULE-PRIVATE, and that is the second finding of PR #1006 review 1. Every
+// parameter here is a lever over what the rendered SQL says: `rows` becomes the
+// seeded registry entries, and `predecessorArtifacts` was READ as an object —
+// `?.migration`, `?.runtime` — so a Proxy whose get trap threw carried the
+// caller's own thrown value out through an export, and a caller-supplied row
+// carrying a privileged word landed in the returned SQL. The 2026-09-11
+// standing rule closes exactly that: no exported function takes a caller's
+// object or a caller's rows and speaks from them. The public surface below
+// takes NOTHING and renders the one artifact this branch seals; this function
+// is reachable only from inside this module, where every argument is a frozen
+// fixture or an artifact this file just rendered itself.
+function renderGateZeroOutcomeAdmissionRegistrySqlFrozen(rows,
+  dbCatalogBaseline = GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  assertGateZeroOutcomeAdmissionV26TrustRootFrozen();
+  const { v25: v25Seal } = HISTORICAL_REGISTRY_SEALS;
+  // TWO PREDECESSOR BASELINES, AND THIS IS THE FIRST SUCCESSOR IN THE CHAIN
+  // THAT NEEDS BOTH. Every successor from v20 to v25 was preceded only by its
+  // own predecessor successor, so "what the sealed predecessor migration SAYS"
+  // and "what the database WILL HOLD when this one runs" were the same object.
+  // They are not here: migration 0502 lands the Gate Zero outcome record
+  // between 0501 and this successor, adding one security-definer grant.
+  //   * sealedPredecessorBaseline is what the SEALED v25 TEXT carries. Every
+  //     replaceExactlyOnce anchor below searches that text, so an anchor built
+  //     from the other baseline would simply miss and refuse by name.
+  //   * predecessorDbCatalogBaseline is what a live database carrying 0502
+  //     holds, and it is what this migration's own preflight receipt asserts.
+  // Conflating them is the mistake this comment exists to prevent.
+  const sealedPredecessorBaseline = V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE;
+  const predecessorDbCatalogBaseline = GATE_ZERO_OUTCOME_PRE_V26_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  assertR06HooksCorrectnessCatalogBaseline("successor v26", dbCatalogBaseline,
+    "scac-db-catalog-projection.v26");
+
+  const v26Digest = registryDigestFor(REGISTRY_V26_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v25MigrationPath = GATE_ZERO_OUTCOME_V25_MIGRATION_PATH;
+  const v25RuntimePath = GATE_ZERO_OUTCOME_V25_RUNTIME_PATH;
+  const v25Rows = frozenInventory(REGISTRY_V25_VERSION);
+  // RE-RENDERED WITH THE SEALED BASELINE, not the pre-v26 one: these two are
+  // reproductions of the COMMITTED v25 artifacts, and the committed artifacts
+  // were rendered from what v25 declared. Handing them the pre-v26 baseline
+  // would reproduce two files that never existed and fail the pin below with a
+  // digest nobody could explain.
+  const v25Migration = predecessorArtifacts?.migration ??
+    renderV5ScheduledJobAdmissionForwardRegistrySql(v25Rows, sealedPredecessorBaseline);
+  const v25Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v25Rows, {
+    version: REGISTRY_V25_VERSION,
+    dbCatalogBaseline: sealedPredecessorBaseline,
+  });
+  for (const [path, source] of [
+    [v25MigrationPath, v25Migration], [v25RuntimePath, v25Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`Gate Zero outcome admission v26 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v25 artifact changed: ${path}: ${observed}`);
+  }
+
+  // THE PREDECESSOR'S OWN HEADER, VERBATIM. Each successor rewrites this line to
+  // its own text, so the marker to slice on is whatever the SEALED predecessor
+  // says -- not the line the predecessor's own renderer searched for.
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v25 after the scheduled freshness and canary job definitions.";
+  const coreStart = v25Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v25Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v25 migration has no exact successor core boundary");
+  const v25Core = v25Migration.slice(coreStart);
+  const currentV25Marker = "create or replace function ops.scac_mutation_catalog_v25_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v24;";
+  const currentV25Start = v25Core.indexOf(currentV25Marker);
+  const secondCurrentV25 = v25Core.indexOf(
+    currentV25Marker, currentV25Start + currentV25Marker.length);
+  const v24HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v24_current() rename to scac_mutation_catalog_v24_live_at_seal;";
+  const v24HistoryStart = v25Core.indexOf(v24HistoryMarker);
+  const secondV24History = v25Core.indexOf(
+    v24HistoryMarker, v24HistoryStart + v24HistoryMarker.length);
+  const policyStart = v25Core.indexOf(policyMarker);
+  const secondPolicy = v25Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v24HistoryStart < 0 || secondV24History >= 0 || currentV25Start <= v24HistoryStart ||
+      secondCurrentV25 >= 0 || policyStart <= currentV25Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v25 migration has no exact catalog successor boundary");
+  const installedV24History = v25Core.slice(v24HistoryStart, currentV25Start);
+  const v25Current = v25Core.slice(currentV25Start, policyStart);
+  const v25History =
+`alter function ops.scac_mutation_catalog_v25_current() rename to scac_mutation_catalog_v25_live_at_seal;
+create or replace function ops.scac_mutation_registry_v25_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v25')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v25_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v25_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v25_seal_available() is 'Exact immutable v24 registry seal; separate from whether the live catalog still equals v24.';
+comment on function ops.scac_mutation_catalog_v25_current() is 'Historical v24 live-catalog validator; expected to become false after the v26 authority surface is installed.';
+
+`;
+  const renderV26Current = baseline => {
+    let current = v25Current
+      .replaceAll("scac_mutation_catalog_v25_current", "scac_mutation_catalog_v26_current")
+      .replaceAll("scac-mutation-registry.v25", "scac-mutation-registry.v26");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${sealedPredecessorBaseline[category].count} or observed_digest<>'${sealedPredecessorBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `Gate Zero outcome admission v26 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${sealedPredecessorBaseline.role_authority.count} and observed_digest='${sealedPredecessorBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Gate Zero outcome admission v26 role-authority baseline");
+  };
+  const v26Current = renderV26Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v25Core, v25Current,
+    "__V5_F09_V24_CATALOG_SUCCESSOR__",
+    "Gate Zero outcome admission v24 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV24History, "",
+    "Gate Zero outcome admission already-installed v23 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v26 after the Gate Zero read-only outcome record.",
+    "Gate Zero outcome admission migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v25", "scac-mutation-registry.v26")
+    .replaceAll("_v25", "_v26")
+    .replaceAll(" v25", " v26");
+  sql = replaceExactlyOnce(sql, JSON.stringify(sealedPredecessorBaseline),
+    JSON.stringify(dbCatalogBaseline), "Gate Zero outcome admission v26 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v25Seal.digest}',${v25Seal.entryCount},${v25Seal.sourceEntryCount},`,
+    `'sha256:${v26Digest}',${entryCount},${rows.length},`,
+    "Gate Zero outcome admission v26 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v26('${v25Seal.digest}',`,
+    `ops.scac_mutation_registration_v26('sha256:${v26Digest}',`,
+    "Gate Zero outcome admission v26 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v24;",
+    // v25, NOT v24: 0501 already renamed the previous snapshot to _v24, so
+    // emitting that name again is a DuplicateFunction at apply time. A
+    // mechanical ordinal shift of this renderer produces exactly that no-op --
+    // the anchor and the replacement shift together and the substitution stops
+    // substituting -- which is why the no-op sweep in
+    // mcp-server/test/siep-11-mutation-registry.test.mjs now asserts that no
+    // replaceExactlyOnce in this renderer has an anchor equal to its
+    // replacement. A disposable Postgres found this one; the test keeps it found.
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v25;",
+    "Gate Zero outcome admission policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__V5_F09_V24_CATALOG_SUCCESSOR__",
+    `${v25History}${v26Current}`, "Gate Zero outcome admission v24 catalog history insertion");
+
+  const versionsThrough25 = Array.from({ length: 25 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough24 = Array.from({ length: 24 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough24},'scac-mutation-registry.v26'))`,
+    `check (registry_version in (${versionsThrough25},'scac-mutation-registry.v26'))`,
+    "Gate Zero outcome admission registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough24}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough25}) then return false; end if;`,
+    "Gate Zero outcome admission historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when '${REGISTRY_V24_VERSION}' then '${HISTORICAL_REGISTRY_SEALS.v24.digest}' end;`,
+    `    when '${REGISTRY_V24_VERSION}' then '${HISTORICAL_REGISTRY_SEALS.v24.digest}'\n    when '${v25Seal.version}' then '${v25Seal.digest}' end;`,
+    "Gate Zero outcome admission historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when '${REGISTRY_V24_VERSION}' then '${JSON.stringify(V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when '${REGISTRY_V24_VERSION}' then '${JSON.stringify(V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v25Seal.version}' then '${JSON.stringify(sealedPredecessorBaseline)}'::jsonb end;`,
+    "Gate Zero outcome admission historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('${REGISTRY_V24_VERSION}','${HISTORICAL_REGISTRY_SEALS.v24.digest}',${HISTORICAL_REGISTRY_SEALS.v24.entryCount},${HISTORICAL_REGISTRY_SEALS.v24.sourceEntryCount})\n`,
+    `    ('${REGISTRY_V24_VERSION}','${HISTORICAL_REGISTRY_SEALS.v24.digest}',${HISTORICAL_REGISTRY_SEALS.v24.entryCount},${HISTORICAL_REGISTRY_SEALS.v24.sourceEntryCount}),\n    ('${v25Seal.version}','${v25Seal.digest}',${v25Seal.entryCount},${v25Seal.sourceEntryCount})\n`,
+    "Gate Zero outcome admission historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v24_seal_available()) then",
+    "    ops.scac_mutation_registry_v24_seal_available() and\n    ops.scac_mutation_registry_v25_seal_available()) then",
+    "Gate Zero outcome admission snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v26' and r.registry_digest='${v25Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v25' and r.registry_digest='${v25Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v26' and r.registry_digest='sha256:${v26Digest}')`,
+    "Gate Zero outcome admission epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v26' and registry_digest='${v25Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v25' and registry_digest='${v25Seal.digest}') or\n  (registry_version='scac-mutation-registry.v26' and registry_digest='sha256:${v26Digest}')`,
+    "Gate Zero outcome admission epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v25Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v26Digest}'::text)`,
+    "Gate Zero outcome admission snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v24_seal_available(),ops.scac_mutation_catalog_v26_current()",
+    "ops.scac_mutation_registry_v24_seal_available(),ops.scac_mutation_catalog_v25_live_at_seal(),ops.scac_mutation_catalog_v25_current(),ops.scac_mutation_registry_v25_seal_available(),ops.scac_mutation_catalog_v26_current()",
+    "Gate Zero outcome admission historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "V5 scheduled job admission successor snapshot: current policy epochs bind mutation registry v26 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24 epochs remain immutable.",
+    "Gate Zero outcome admission successor snapshot: current policy epochs bind mutation registry v26 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24/v25 epochs remain immutable.",
+    "Gate Zero outcome admission policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v26')<>${v25Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v26')<>${entryCount}`,
+    "Gate Zero outcome admission v26 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V24_VERSION}')<>'${HISTORICAL_REGISTRY_SEALS.v24.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${REGISTRY_V24_VERSION}')<>${HISTORICAL_REGISTRY_SEALS.v24.entryCount} then raise exception 'sealed SCAC mutation registry v24 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v25Seal.version}')<>'${v25Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v25Seal.version}')<>${v25Seal.entryCount} then raise exception 'sealed SCAC mutation registry v25 changed during successor creation'; end if;`,
+    "Gate Zero outcome admission predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),ops.scac_policy_epoch_snapshot_v24(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),ops.scac_policy_epoch_snapshot_v24(),ops.scac_policy_epoch_snapshot_v25(),",
+    "Gate Zero outcome admission historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v25 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  // Anchored on the sealed v25 text and rendered with the PRE-V26 baseline, so
+  // the receipt asserts the state a database carrying 0502 actually holds.
+  const preflightCurrent = renderV26Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v26 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Gate Zero outcome admission pre-v26 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'Gate Zero outcome admission pre-v26 role-authority receipt drifted'; end if;`,
+    "Gate Zero outcome admission pre-v26 role receipt");
+  const predecessorHash = sha256(v25Migration);
+  // The third sentence is MEASURED, not written: it is the composition of the
+  // admitted rows as gateZeroOutcomeAdmissionProvenanceFrozen() reads them off
+  // the two frozen row sets. PR #1006 review 2 caught this file and the fixture
+  // disagreeing about the delta because both had it typed.
+  const admissionComment = gateZeroOutcomeAdmissionProvenanceFrozen().migration_comment;
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0502 receipt. Refuse before any v26 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+-- The Gate Zero outcome RECORD is migration 0502's, landed under its own
+-- review; this successor only seals the source inventory that admitting its
+-- write verb widened.
+${admissionComment}
+do $gate_zero_outcome_admission_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0501_scheduled_job_admission_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0501_scheduled_job_admission_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'Gate Zero outcome admission pre-v26 migration ledger receipt drifted';
+  end if;
+  -- THE DOMAIN MIGRATION THIS SUCCESSOR STANDS ON. 0502 is what added the one
+  -- security-definer grant the catalog receipt below expects, so a database
+  -- carrying 0501 but not 0502 must refuse HERE, by name, rather than at an
+  -- unexplained catalog-count mismatch four statements later.
+  if (select count(*) from public.schema_migrations where filename='0502_gate_zero_read_only_outcome.sql')<>1 then
+    raise exception 'Gate Zero outcome admission pre-v26 receipt requires migration 0502_gate_zero_read_only_outcome.sql to be applied';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'Gate Zero outcome admission pre-v26 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $gate_zero_outcome_admission_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+/**
+ * THE v26 PUBLIC ENTRY POINTS — every one this module exports, and not one of
+ * them reads a caller. They are, exactly:
+ * `assertGateZeroOutcomeAdmissionV26TrustRoot`,
+ * `renderGateZeroOutcomeAdmissionForwardRegistrySql`, and
+ * `gateZeroOutcomeAdmissionProvenance`. Naming them rather than counting them is
+ * deliberate: a numeral in a comment is a claim nothing re-derives, and this
+ * block already went stale once when the third export arrived (PR #1006
+ * correction 2, which added the provenance export so the admission delta is
+ * measured from the rows instead of typed into three files by hand).
+ *
+ * `renderGateZeroOutcomeAdmissionForwardRegistrySql()` renders migration 0501
+ * from the FROZEN v26 inventory and this module's own catalog baseline. It
+ * declares no parameters and consults none: `arguments` is not read, so a
+ * caller's rows, a caller's baseline and a caller's predecessor-artifact holder
+ * are not merely validated away — there is no path by which they could arrive.
+ * Every call, from any caller, with any argument, returns the same bytes as the
+ * committed artifact, which is what the public-surface sweep in
+ * mcp-server/test/siep-11-mutation-registry.test.mjs asserts input by input —
+ * and that sweep, not this prose, is what an added export has to satisfy.
+ *
+ * The trust root is the same story in one line: it takes nothing, answers
+ * nothing, and either returns or throws this module's own Error. The provenance
+ * export is the same shape again, documented at its own definition below.
+ */
+export const assertGateZeroOutcomeAdmissionV26TrustRoot =
+  closedExport(() => assertGateZeroOutcomeAdmissionV26TrustRootFrozen());
+export const renderGateZeroOutcomeAdmissionForwardRegistrySql =
+  closedExport(() => renderGateZeroOutcomeAdmissionRegistrySqlFrozen(
+    frozenInventory(REGISTRY_V26_VERSION),
+    GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE));
+/**
+ * The measured v26 admission delta and the prose every provenance layer uses.
+ * Same closed shape and same closed inputs: it reads the two frozen row sets
+ * and the fixture's own overlay, answers with a frozen object, and takes
+ * nothing from a caller — so no consumer can talk it into describing a delta
+ * the rows do not have.
+ */
+export const gateZeroOutcomeAdmissionProvenance =
+  closedExport(() => gateZeroOutcomeAdmissionProvenanceFrozen());
+
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
   // in v21 artifacts, and every input to the guard is a fixed module constant.
@@ -8723,9 +9251,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v24.generated.js"],
       });
 
+  const v26Rows = frozenInventory(REGISTRY_V26_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v26.generated.js"] =
+    renderRuntimeProjection(v26Rows, {
+      version: REGISTRY_V26_VERSION,
+      dbCatalogBaseline: GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0503_gate_zero_outcome_and_scac_successor.sql"] =
+    renderGateZeroOutcomeAdmissionRegistrySqlFrozen(v26Rows,
+      GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0501_scheduled_job_admission_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v25.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 33 || runtimeCount !== 24 || Object.keys(artifacts).length !== 57)
+  if (migrationCount !== 34 || runtimeCount !== 25 || Object.keys(artifacts).length !== 59)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -9198,9 +9739,25 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     // and nothing else, so the CLI cannot pick what gets sealed either.
     await writeFile(target, renderV5ScheduledJobAdmissionForwardRegistrySql());
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v26") {
+    assertGateZeroOutcomeAdmissionV26TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v26.generated.js");
+    const rows = frozenInventory(REGISTRY_V26_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V26_VERSION,
+      dbCatalogBaseline: GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-gate-zero-outcome-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0503_gate_zero_outcome_and_scac_successor.sql");
+    // No rows argument: the public entry point renders the frozen v26 frontier
+    // and nothing else, so the CLI cannot pick what gets sealed either.
+    await writeFile(target, renderGateZeroOutcomeAdmissionForwardRegistrySql());
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V25_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V26_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
