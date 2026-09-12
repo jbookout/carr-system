@@ -418,7 +418,7 @@ test("BYTE-IDENTICAL TO MAIN: an unruled answer does not move for any query, val
     undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
     { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
     { serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" },
-    { headSha: "a".repeat(40), checkName: "db-acceptance" },
+    { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" },
     { decision_id: FIXTURE_DECISION_IDS[0], stepRef: "step:wr46-dissolution-outcome" },
     { ruling_decision_ref: FIXTURE_DECISION_IDS[0] },
     { card_ref: "card:11", store_ref: "github:checks", finding: "gate_conclusion_observed" },
@@ -455,7 +455,7 @@ test("RULED: no query, valid or not, moves the closed half of a ruled answer", a
     undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
     { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
     { serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" },
-    { headSha: "a".repeat(40), checkName: "db-acceptance" },
+    { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" },
     { decision_id: FIXTURE_DECISION_IDS[0], stepRef: "step:wr46-dissolution-outcome" },
     { ruling_decision_ref: FIXTURE_DECISION_IDS[0] },
     // The real ruling handed back in as a query field, which is the one shape a
@@ -1692,7 +1692,7 @@ test("STORES: a head sha that is not one never reaches the URL, and the path sta
       ["a-privileged-word", "green"],
     ])
       await assert.rejects(
-        () => stores.fetchCheckConclusionRows({ headSha, checkName: "db-acceptance" }),
+        () => stores.fetchCheckConclusionRows({ headSha, checkName: "main canary (gates, migration, types, freshness)" }),
         error => stores.isSeamStoreUnreachable(error)
           && error.store_ref === "github:checks" && error.because === refused, label);
     assert.deepEqual(calls, [], "a sha this file will not serve reached the source anyway");
@@ -1701,12 +1701,12 @@ test("STORES: a head sha that is not one never reaches the URL, and the path sta
     // asserted on the NORMALIZED path rather than on a substring of the string
     // that was built — a `includes("/repos/jbookout/carr-system/")` passes just
     // as happily on a URL that then traverses back out of it.
-    await stores.fetchCheckConclusionRows({ headSha: sha, checkName: "db-acceptance" });
+    await stores.fetchCheckConclusionRows({ headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
     assert.equal(calls.length, 1, "the checks store never called its source");
     const url = new URL(calls[0].url);
     assert.equal(url.origin, "https://api.github.com");
     assert.equal(url.pathname, `/repos/${AUTHORITATIVE_REPOSITORY}/commits/${sha}/check-runs`);
-    assert.equal(url.searchParams.get("check_name"), "db-acceptance");
+    assert.equal(url.searchParams.get("check_name"), "main canary (gates, migration, types, freshness)");
 
     // A check name is not a path segment, and it may not become one.
     calls.length = 0;
@@ -2955,7 +2955,7 @@ test("RULED: the conclusion reader returns GitHub's own word, and translates not
   const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const sha = fixtureStores.FIXTURE_COMMIT_SHA;
 
-  const success = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "db-acceptance" });
+  const success = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
   assert.equal(success.decision, "report");
   assert.equal(success.finding, "gate_conclusion_observed");
   assert.equal(success.conclusion, "success");
@@ -2965,33 +2965,33 @@ test("RULED: the conclusion reader returns GitHub's own word, and translates not
   assertSwept("card13.success", success);
 
   // A re-run: the later conclusion is the one reported, and the count is visible.
-  const rerun = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "rerun-check" });
+  const rerun = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "ops/ci.sh --strict" });
   assert.equal(rerun.conclusion, "failure");
   assert.equal(rerun.completed_runs_seen, 2);
   assert.equal(rerun.decision, "report",
     "a reported conclusion is a reading, not a verdict — failure is still a reading");
 
   // Queued: no conclusion exists, so none is invented.
-  const queued = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "queued-check" });
+  const queued = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "local-db-ci --class migration" });
   assert.equal(queued.decision, "refuse");
   assert.equal(queued.finding, "gate_conclusion_check_absent");
   assert.equal(queued.conclusion, null);
 
   // A completed run that belongs to a different commit does not answer for this one.
-  const wrongCommit = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "wrong-commit" });
+  const wrongCommit = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "Backup artifact" });
   assert.equal(wrongCommit.finding, "gate_conclusion_check_absent");
   assert.equal(wrongCommit.check_runs_seen, 1,
     "the row was seen and still did not answer, which is the point");
 
   // A word GitHub does not document is not passed through: the only conclusion
   // strings a consumer sees are constants out of the reader module.
-  const invented = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "invented-conclusion" });
+  const invented = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "pg_dump -> age-encrypt -> artifact" });
   assert.equal(invented.finding, "gate_conclusion_unrecognized");
   assert.equal(invented.conclusion, null);
   assert.equal(invented.decision, "refuse");
   assertSwept("card13.invented", invented);
 
-  const badQuery = await ruled.readGateConclusionEvidence({ headSha: "nope", checkName: "db-acceptance" });
+  const badQuery = await ruled.readGateConclusionEvidence({ headSha: "nope", checkName: "main canary (gates, migration, types, freshness)" });
   assert.equal(badQuery.reason_id, "gate_conclusion_query_invalid");
   assert.equal(badQuery.invalid_field, "headSha");
 });
@@ -3043,7 +3043,7 @@ test("RULED: with the real stores and nothing configured, every seam reports unr
     assert.equal(scheduler.reason_id, "scheduler_ledger_unreachable");
 
     const conclusion = await ruled.readGateConclusionEvidence({
-      headSha: "a".repeat(40), checkName: "db-acceptance" });
+      headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" });
     assert.equal(conclusion.reason_id, "gate_conclusion_source_unreachable");
     assert.equal(conclusion.unavailable_because,
       "the checks source credentials are not configured in this process");
@@ -3128,7 +3128,7 @@ test("RULED: nothing a faulted store does to a reader gets past the reader's bou
   // refuses on the identity check, and the store it names in the refusal is the
   // RULED one, not the one that replied.
   const foreignStore = await ruled.readGateConclusionEvidence({
-    headSha: "a".repeat(40), checkName: "db-acceptance" });
+    headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" });
   assert.equal(foreignStore.decision, "refuse");
   assert.equal(foreignStore.reason_id, "store_ref_not_the_ruled_one");
   assert.equal(foreignStore.finding, null);
@@ -3194,7 +3194,7 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
     assertSwept("rows.ledger", ledger);
 
     const checks = await staged.stores.fetchCheckConclusionRows(
-      { headSha: sha, checkName: "db-acceptance" });
+      { headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
     assert.ok(checks.rows.length > 0, "the checks store returned no rows to sweep");
     assert.ok(calls.length > 0, "the checks store never called its source");
     assertSwept("rows.checks", checks);
@@ -3246,7 +3246,7 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
     assertSwept("rows.near-miss-receipt", nearMiss);
 
     const report13 = await staged.readers.readGateConclusionEvidence(
-      { headSha: sha, checkName: "db-acceptance" });
+      { headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
     assert.equal(report13.finding, "gate_conclusion_observed");
     assert.equal(report13.conclusion, "success");
 
@@ -3306,7 +3306,7 @@ test("STORES: the checks store serves one repository, and refuses every other", 
   const calls = [];
   globalThis.fetch = fakeChecksSource(HOSTILE_CHECK_RUNS, calls);
   process.env.GITHUB_TOKEN = "a-token-this-test-wrote";
-  const query = { headSha: "a".repeat(40), checkName: "db-acceptance" };
+  const query = { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" };
   try {
     // (a) A FOREIGN REPOSITORY IN THE ENVIRONMENT IS REFUSED, and the refusal
     //     happens before anything is called — a refusal that first fetched would
@@ -3445,4 +3445,211 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
 
   const strays = readdirSync(SRC).filter(name => /\.(testonly|testhelper|fixture)\./.test(name));
   assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");
+});
+
+// ---------------------------------------------------------------------------
+// PART E — THE CHECK NAME IS AN ENUMERATION READ OFF THE WORKFLOWS, NOT A SHAPE
+// SOMEBODY IMAGINED.
+//
+// DEFECT 0c7bc84a. Card 13's validator was
+// `/^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/`, a character class with no comma in
+// it, and the only check that guards main is named
+// `main canary (gates, migration, types, freshness)`. The one name the reader
+// exists to read was the one name it refused. `pg_dump -> age-encrypt ->
+// artifact` was refused too, for the `>`. Nothing was broken about the reader's
+// machinery; the validator had simply never been compared against a real name.
+//
+// SO THIS PART DERIVES THE SET A SECOND TIME, FROM THE DECLARING FILES, and
+// asserts three things against that derivation rather than against the module's
+// own list: every declared name is admitted, nothing else is, and the two lists
+// are equal. The third is what makes the first two stay true — add a job to a
+// workflow and this part goes red in the same commit, instead of card 13 quietly
+// refusing the new check the first time anyone asks it about one.
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+const WORKFLOWS = join(REPO_ROOT, ".github/workflows");
+const BACKUP_STATUS = join(REPO_ROOT, "ops/backup-workflow-status.py");
+
+/**
+ * THE CHECK-RUN NAMES THE WORKFLOWS DECLARE, parsed here rather than imported
+ * from the module under test — a test that read the module's own list would
+ * assert the module agrees with itself.
+ *
+ * GitHub names a workflow job's check run after the job's `name:`, and after the
+ * job's ID when the job declares no name. Both cases are covered: a two-space
+ * key under `jobs:` is a job id, a four-space `name:` beneath it renames it, and
+ * a job that never gets one keeps its id.
+ */
+function declaredWorkflowCheckNames() {
+  const names = [];
+  for (const file of readdirSync(WORKFLOWS).sort()) {
+    if (!/\.ya?ml$/.test(file)) continue;
+    let inJobs = false;
+    let current = -1;
+    for (const line of readFileSync(join(WORKFLOWS, file), "utf8").split("\n")) {
+      if (/^jobs:\s*$/.test(line)) { inJobs = true; current = -1; continue; }
+      if (!inJobs) continue;
+      if (/^\S/.test(line)) { inJobs = false; continue; }
+      const job = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+      if (job !== null) { current = names.push(job[1]) - 1; continue; }
+      const named = /^ {4}name:\s*(\S.*?)\s*$/.exec(line);
+      if (named !== null && current >= 0) names[current] = named[1];
+    }
+  }
+  // And the one check run this repository posts for itself, out of the constant
+  // that posts it.
+  const posted = /^CHECK_NAME = "([^"\n]+)"$/m.exec(readFileSync(BACKUP_STATUS, "utf8"));
+  assert.ok(posted, "ops/backup-workflow-status.py no longer declares CHECK_NAME where this test reads it");
+  names.push(posted[1]);
+  return names.sort();
+}
+
+/** The set the reader module actually carries, read out of its source. */
+function moduleCheckNames() {
+  const source = readFileSync(join(SRC, READERS_FILE), "utf8");
+  const block = /const DECLARED_CHECK_NAMES = Object\.freeze\(\[([\s\S]*?)\]\);/.exec(source);
+  assert.ok(block, "the reader no longer declares its check names where this test reads them");
+  return [...block[1].matchAll(/"((?:[^"\\\n]|\\.)*)"/g)].map(one => one[1]).sort();
+}
+
+/**
+ * The reader's own registered reason ids, read out of its source. The registry
+ * is module-private on purpose — an importer able to enumerate it could
+ * assemble a message out of it and hand it back in — so a test that needs to
+ * assert "registered" reads the declaration rather than importing it.
+ */
+function registeredReaderReasonIds() {
+  const source = readFileSync(join(SRC, READERS_FILE), "utf8");
+  const registry = /const REASON_IDS = Object\.freeze\(\[([\s\S]*?)\]\);/.exec(source);
+  assert.ok(registry, "the reader's reason registry is no longer where this test reads it");
+  return [...registry[1].matchAll(/"([^"\n]+)"/g)].map(one => one[1]);
+}
+
+/** The validator this part retired, kept only so the control below can run it. */
+const RETIRED_CHECK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/;
+
+/** The one name main is actually guarded by, spelled once. */
+const MAIN_CANARY_CHECK = "main canary (gates, migration, types, freshness)";
+
+test("CHECK NAME: the reader's set is exactly what the repository's own files declare", () => {
+  const declared = declaredWorkflowCheckNames();
+  // The canary is the defect's own case, asserted by name so that renaming the
+  // job in main-canary.yml cannot quietly satisfy this test by removing it.
+  assert.ok(declared.includes(MAIN_CANARY_CHECK),
+    "main-canary.yml no longer declares the check this reader was fixed to admit");
+  assert.deepEqual(moduleCheckNames(), declared,
+    "a workflow declares a check name the reader would refuse, or the reader carries one nothing declares");
+});
+
+test("CHECK NAME: every declared check name is admitted, the canary's included", async () => {
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+  const sha = fixtureStores.FIXTURE_COMMIT_SHA;
+
+  for (const name of declaredWorkflowCheckNames()) {
+    const answer = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: name });
+    // ADMITTED means the query got past validation and the store was opened. A
+    // name the fixture holds no row for comes back `gate_conclusion_check_absent`,
+    // which is an answer ABOUT the store; `gate_conclusion_query_invalid` is the
+    // refusal to look at all, and that is the one the defect produced.
+    assert.notEqual(answer.reason_id, "gate_conclusion_query_invalid",
+      `the reader refused ${JSON.stringify(name)}, which this repository declares`);
+    assert.equal(answer.invalid_field, undefined);
+    assert.equal(answer.card_ref, "card:13");
+  }
+
+  // And the defect's own name reaches a row and reads its conclusion.
+  const canary = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: MAIN_CANARY_CHECK });
+  assert.equal(canary.decision, "report");
+  assert.equal(canary.finding, "gate_conclusion_observed");
+  assert.equal(canary.conclusion, "success");
+  assertSwept("card13.canary-name", canary);
+});
+
+test("CHECK NAME: a newline, a path separator and three hundred characters are each refused", async () => {
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+  const sha = fixtureStores.FIXTURE_COMMIT_SHA;
+
+  const NEWLINE = String.fromCharCode(10);
+  const RETURN = String.fromCharCode(13);
+  const refused = [
+    ["a newline", `main canary${NEWLINE}(gates, migration, types, freshness)`],
+    ["a carriage return", `main canary${RETURN}(gates, migration, types, freshness)`],
+    ["a header split", `main canary${RETURN}${NEWLINE}x-injected: 1`],
+    ["a trailing newline on a declared name", `${MAIN_CANARY_CHECK}${NEWLINE}`],
+    ["a path separator", "../../foreign/name"],
+    ["a path separator inside a declared name", "ops/../ci.sh --strict"],
+    ["a bare separator", "/"],
+    ["three hundred characters", "m".repeat(300)],
+    ["the GitHub limit exactly", "m".repeat(255)],
+    ["an empty name", ""],
+    ["a declared name with a trailing space", "ops/ci.sh --strict "],
+    ["a prototype key toString", "toString"],
+    ["a prototype key constructor", "constructor"],
+    ["a smuggled query parameter", "main canary&check_name=other"],
+  ];
+
+  for (const [why, name] of refused) {
+    const answer = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: name });
+    assert.equal(answer.reason_id, "gate_conclusion_query_invalid", `${why} was admitted`);
+    assert.equal(answer.invalid_field, "checkName", `${why} was refused for the wrong field`);
+    assert.equal(answer.decision, "refuse");
+    assert.equal(answer.status, "unavailable");
+    assert.equal(answer.finding, null);
+    // The registered-code contract: the id is one the module's own registry
+    // holds, so a refusal cannot carry an unregistered word. The registry is
+    // module-private by design, so it is read out of the source the same way
+    // the store's reason registry is.
+    assert.ok(registeredReaderReasonIds().includes(answer.reason_id),
+      `${why} was refused with an unregistered reason id`);
+    assertSwept(`card13.refused.${why}`, answer);
+    // And the caller's own bytes are not in the answer. The two prototype keys
+    // are ordinary English substrings of this module's prose, so they are read
+    // for membership only; every other shape is checked byte-wise.
+    if (name.length >= 6 && name !== "toString" && name !== "constructor")
+      assert.equal(JSON.stringify(answer).includes(name.slice(0, 6)), false,
+        `${why} put the caller's own bytes in the answer`);
+  }
+});
+
+test("CHECK NAME CONTROL: the retired pattern has been seen to refuse the names this admits", () => {
+  const declared = declaredWorkflowCheckNames();
+  const wouldHaveBeenRefused = declared.filter(name => !RETIRED_CHECK_NAME_PATTERN.test(name)).sort();
+
+  // THE MUTATION THIS TEST IS THE CONTROL FOR: put the retired pattern back and
+  // the acceptance test above goes red on these two names. If this list is ever
+  // empty the acceptance test proves nothing, because the old validator would
+  // have passed it too.
+  assert.deepEqual(wouldHaveBeenRefused, [
+    MAIN_CANARY_CHECK,
+    "pg_dump -> age-encrypt -> artifact",
+  ], "the retired pattern no longer refuses anything, so the acceptance test is not load-bearing");
+
+  // And the retired pattern is not still in the module under some other name.
+  // The class is asserted against as a DECLARATION rather than as a substring:
+  // the module quotes it once, in the comment that records why it was retired,
+  // and a test that banned the bytes would have banned the explanation too.
+  const source = readFileSync(join(SRC, READERS_FILE), "utf8");
+  assert.equal(/=\s*\/\^\[A-Za-z0-9\]\[A-Za-z0-9 \._\/\(\)-\]/.test(source), false,
+    "the reader still assigns the character class that produced defect 0c7bc84a");
+  assert.equal(/const CHECK_NAME\s*=/.test(source), false,
+    "the retired CHECK_NAME pattern is still declared");
+  assert.equal(source.split("[A-Za-z0-9 ._/()-]").length - 1, 1,
+    "the retired character class appears somewhere other than the comment that retires it");
+  assert.equal(/checkName", CHECK_NAME/.test(source), false,
+    "the conclusion reader still validates its check name against a shape");
+
+  // The module's own import-time self-check is real: every name it carries is
+  // one GitHub would store, and none of them could split a header.
+  for (const name of moduleCheckNames()) {
+    assert.ok(name.length > 0 && name.length <= 255, `${name} is not a storable check name`);
+    // Character codes, not an escape inside a pattern: the bytes this asserts
+    // the absence of must not be writable into the assertion that looks for
+    // them, or the test file itself carries what it forbids.
+    const control = [...name].some(one => {
+      const code = one.codePointAt(0);
+      return code < 32 || code === 127;
+    });
+    assert.equal(control, false, `${name} carries a control character`);
+  }
 });

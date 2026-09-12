@@ -461,36 +461,36 @@ function checkRow(raw) {
 }
 
 const CHECK_ROWS = Object.freeze({
-  "db-acceptance": Object.freeze([checkRow({
-    name: "db-acceptance", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
+  "main canary (gates, migration, types, freshness)": Object.freeze([checkRow({
+    name: "main canary (gates, migration, types, freshness)", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
     conclusion: "success", completed_at: T1, html_url: "https://github.test/run/1",
   })]),
   // A re-run: two completed runs, and the later one is what the merge gate acts on.
-  "rerun-check": Object.freeze([
+  "ops/ci.sh --strict": Object.freeze([
     checkRow({
-      name: "rerun-check", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
+      name: "ops/ci.sh --strict", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
       conclusion: "success", completed_at: T0, html_url: "https://github.test/run/2",
     }),
     checkRow({
-      name: "rerun-check", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
+      name: "ops/ci.sh --strict", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
       conclusion: "failure", completed_at: T1, html_url: "https://github.test/run/3",
     }),
   ]),
   // Still queued: no conclusion exists, so none is reported.
-  "queued-check": Object.freeze([checkRow({
-    name: "queued-check", head_sha: FIXTURE_COMMIT_SHA, status: "queued",
+  "local-db-ci --class migration": Object.freeze([checkRow({
+    name: "local-db-ci --class migration", head_sha: FIXTURE_COMMIT_SHA, status: "queued",
     conclusion: null, completed_at: null, html_url: "https://github.test/run/4",
   })]),
   // A completed run that belongs to a DIFFERENT commit than the one asked about.
-  "wrong-commit": Object.freeze([checkRow({
-    name: "wrong-commit", head_sha: FIXTURE_OTHER_COMMIT_SHA, status: "completed",
+  "Backup artifact": Object.freeze([checkRow({
+    name: "Backup artifact", head_sha: FIXTURE_OTHER_COMMIT_SHA, status: "completed",
     conclusion: "success", completed_at: T1, html_url: "https://github.test/run/5",
   })]),
   // A word GitHub's API does not document. Not passed through: reported as
   // unrecognized, so the only conclusion strings a consumer ever sees are the
   // constants in the reader module.
-  "invented-conclusion": Object.freeze([checkRow({
-    name: "invented-conclusion", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
+  "pg_dump -> age-encrypt -> artifact": Object.freeze([checkRow({
+    name: "pg_dump -> age-encrypt -> artifact", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
     conclusion: "everything is fine", completed_at: T1, html_url: "https://github.test/run/6",
   })]),
 });
