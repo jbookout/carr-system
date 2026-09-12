@@ -4,7 +4,6 @@
 #
 #   usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS]
 #                                [--also-heartbeat SERVICE]
-#                                [--evidence-ref-file PATH]
 #                                <service-key> <run-key> <command> [args...]
 #
 # WHY THIS EXISTS, measured 2026-08-14. `tools/ops-record.py health` read 21 of
@@ -107,37 +106,64 @@
 #                                  the "provenance line is the tested surface"
 #                                  property above extends to it unchanged.
 #
-#   --evidence-ref-file PATH       AFTER the child exits, read one line from
-#                                  PATH and pass it to the recorder as
-#                                  --evidence-ref, binding this run row to a
-#                                  receipt the job itself minted. Without it
-#                                  every row this wrapper has ever written
-#                                  carries evidence_ref null — measured
-#                                  2026-09-11 against production: 21,894
-#                                  wrapper rows, 0 of them bound — so the
-#                                  Gate Zero scheduler clause
-#                                  (`step:scheduler-active-receipt`, read by
-#                                  mcp-server/src/gate-zero-seam-readers.v5.js)
-#                                  could never be satisfied by any scheduled
-#                                  run, canary or otherwise.
+# ── THE RECEIPT THIS RUN MINTS FOR ITSELF (2026-09-11) ──────────────────────
+# Gate Zero's `step:scheduler-active-receipt` clause, read by
+# mcp-server/src/gate-zero-seam-readers.v5.js, wants an ops.run row bound to a
+# receipt. Measured against production 2026-09-11: 21,894 rows written by this
+# wrapper, none of them carrying an evidence_ref. The clause was not merely
+# unmet, it was unsatisfiable by construction.
 #
-#                                  A FILE, NOT THE CHILD'S STDOUT, and that is
-#                                  the whole design. The transparency property
-#                                  above forbids capturing, filtering or
-#                                  reordering the child's output, so the
-#                                  receipt travels out of band: the job writes
-#                                  the token, this script reads the file it was
-#                                  told to read. Nothing about the child's
-#                                  execution changes.
+# THIS SCRIPT MINTS THE RECEIPT. There is no flag, no path, no environment
+# variable and no channel of any kind by which a caller, a plist or the child
+# can supply, pre-seed or point at one. The first draft of this change took a
+# `--evidence-ref-file PATH` and promoted whatever that file held, which made a
+# stale or fabricated file indistinguishable from a receipt minted during this
+# run — the one thing a receipt exists to rule out. A binding whose evidence the
+# bound party supplies is not a binding.
 #
-#                                  IT CANNOT FAIL A JOB. An absent, empty,
-#                                  unreadable, oversized or malformed file
-#                                  yields NO --evidence-ref argument and the
-#                                  recording proceeds exactly as it does today.
-#                                  The token must match [A-Za-z0-9:._-]{1,128}
-#                                  — the same shape the reader's RUN_KEY
-#                                  pattern accepts — so a job cannot inject
-#                                  recorder arguments through its own receipt.
+# WHAT A RECEIPT IS, byte for byte:
+#
+#     carr-run-receipt:v1:<minted-at>:<nonce>:<run-key-hash>
+#
+#   minted-at     YYYYMMDDTHHMMSS.mmmZ, off this process's clock AFTER the
+#                 child exited, so a receipt cannot predate the run it speaks
+#                 for. The reader requires it STRICTLY AFTER the row's
+#                 started_at, which is what makes a receipt left on disk by an
+#                 earlier run bind nothing. MILLISECONDS, and not because
+#                 precision is pretty: started_at is stamped to the second, so a
+#                 job that begins and ends inside one second would tie against
+#                 its own dispatch and bind nothing at all — which is most of
+#                 the fleet. On a zsh without the datetime module the fraction
+#                 is `.000`, those runs tie, and they bind nothing; that is
+#                 stated rather than papered over.
+#   nonce         16 hex from /dev/urandom, minted here. It is what makes THIS
+#                 run's receipt distinct from the last run's under the same key,
+#                 so the reader can tell one dispatch from another.
+#   run-key-hash  the first 32 hex of sha256(run key). A HASH, not the key: the
+#                 run key is caller text, and caller text must never travel
+#                 verbatim into ops.run.evidence_ref or into the provenance line
+#                 at the bottom of this file. The reader recomputes this hash
+#                 from the row's own run_key and requires equality, so a receipt
+#                 minted for a different job binds nothing.
+#
+# THE FILE IS THIS SCRIPT'S OWN, and no other filesystem object is ever read.
+# The receipt is written under the state directory at a path derived from those
+# hashes, then read back and required to equal what was written, byte for byte.
+# If that path is a symlink, a FIFO, a device, a directory or anything else that
+# is not already a plain regular file, this script writes nothing and reads
+# nothing. One file per service/run-key pair, truncated and rewritten every run,
+# so the directory cannot grow without bound.
+#
+# REJECT, NEVER REPAIR. A service key or run key carrying a space, a carriage
+# return, a newline, a NUL or any other byte outside [A-Za-z0-9:._-] mints NO
+# receipt, and is not first stripped down to an acceptable shape: the earliest
+# draft of the guard normalized with `tr -d '[:space:]'`, which turned
+# `--state failed --exit-code 1` into `--statefailed--exit-code1` — a token the
+# whitelist then accepted. Stripping before matching is how a guard fails open.
+#
+# IT CANNOT FAIL A JOB. Every refusal above records exactly the row this wrapper
+# recorded before receipts existed, and the child's exit code, output, arguments
+# and working directory are untouched in all of them.
 #
 # No flag touches the job itself: the child still runs exactly once,
 # unmodified, and nothing here can change what it does, prints, or returns —
@@ -149,15 +175,8 @@ EX_USAGE=64
 
 HEARTBEAT_INTERVAL=0
 ALSO_HEARTBEAT=""
-EVIDENCE_REF_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --evidence-ref-file)
-      if [ "$#" -lt 2 ]; then
-        print -ru2 -- "usage: --evidence-ref-file requires a value"
-        exit $EX_USAGE
-      fi
-      EVIDENCE_REF_FILE="$2"; shift 2 ;;
     --heartbeat-interval)
       if [ "$#" -lt 2 ]; then
         print -ru2 -- "usage: --heartbeat-interval requires a value"
@@ -176,7 +195,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ $# -lt 3 ]; then
-  print -ru2 -- "usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS] [--also-heartbeat SERVICE] [--evidence-ref-file PATH] <service-key> <run-key> <command> [args...]"
+  print -ru2 -- "usage: bin/run-scheduled.sh [--heartbeat-interval SECONDS] [--also-heartbeat SERVICE] <service-key> <run-key> <command> [args...]"
   print -ru2 -- "  e.g. bin/run-scheduled.sh nightly-record-layer rules.refresh /bin/zsh {{REPO}}/bin/refresh-rules.sh"
   exit $EX_USAGE
 fi
@@ -288,58 +307,127 @@ corr=()
 
 mkdir -p "$REPO/out" 2>/dev/null
 
-# ── the receipt this run is bound to, if the job minted one ──────────────────
-# Read AFTER the child exited, from a path the CALLER named, never from the
-# child's own output stream — capturing stdout would break the transparency
-# property this whole file is built around.
+# ── THE RECEIPT THIS RUN MINTS FOR ITSELF ────────────────────────────────────
+# Minted HERE, after the child exited and after ENDED was stamped, out of this
+# process's own clock and this machine's own entropy. Nothing a caller, a plist
+# or the child writes reaches it — there is no argument and no path to give.
+# The header carries the token's shape and why every field of it is either a
+# hash or something this process made.
 #
-# Every failure mode here is silence, deliberately: this is an observation
-# channel, and a wrapper that could refuse to record because a receipt file was
-# missing would have put itself in the failure path of the thing it watches,
-# which is the one thing the header forbids. So an absent file, an unreadable
-# file, an empty file, a file whose first line does not match the token shape,
-# and a file larger than one small line all produce the SAME result — evid
-# stays empty and the recorder is called with exactly the arguments it would
-# have received before this flag existed.
-#
-# THE PATTERN IS A WHITELIST, not an escape. The token may carry only
-# [A-Za-z0-9:._-] and may be at most 128 characters, which is the shape
-# mcp-server/src/gate-zero-seam-readers.v5.js already accepts for a run key.
-# A job cannot smuggle a second recorder argument, a shell metacharacter or a
-# newline into ops.run.evidence_ref through a file this script reads.
+# EVERY REFUSAL IS SILENT, deliberately: this is an observation channel bolted
+# to a wrapper whose founding property is that it cannot break the thing it
+# watches. No hasher on the machine, an unwritable state directory, a receipt
+# path that is not already this script's own regular file, a run key carrying a
+# byte the token shape does not admit — all of them leave `evid` empty and the
+# recorder is called with exactly the arguments it received before receipts
+# existed.
+STATE_DIR="${CARR_RUN_SCHEDULED_STATE_DIR:-$REPO/out/run-scheduled-state}"
+RECEIPT_DIR="$STATE_DIR/receipts"
 evid=()
-if [ -n "$EVIDENCE_REF_FILE" ] && [ -r "$EVIDENCE_REF_FILE" ]; then
-  # The first line, with a trailing CR removed and NOTHING else normalized.
-  # An earlier draft ran the line through `tr -d '[:space:]'` first, and that
-  # was a guard that failed OPEN: handed `--state failed --exit-code 1` it
-  # deleted the spaces and accepted the result as `--statefailed--exit-code1`,
-  # because every surviving character is in the whitelist. Stripping before
-  # matching turns a token the pattern was built to reject into one it accepts.
-  # A receipt with whitespace in it is not a receipt, so it is refused rather
-  # than repaired.
-  evidence_ref="$(head -c 4096 -- "$EVIDENCE_REF_FILE" 2>/dev/null | head -n 1 | tr -d '\r')"
-  # grep, not a zsh glob: the `##` form that expresses "one or more" needs
-  # EXTENDED_GLOB, which is NOT set in this script, and an unset option would
-  # have made `##` literal and the test silently wrong in the permissive
-  # direction. A pattern that fails open is worse than no pattern.
-  if [ -n "$evidence_ref" ] && [ "${#evidence_ref}" -le 128 ] \
-      && print -r -- "$evidence_ref" | grep -qE '^[A-Za-z0-9:._-]+$'; then
-    evid=(--evidence-ref "$evidence_ref")
-  else
-    evidence_ref=""
+evidence_ref=""
+
+# The closed union of privileged words the 2026-09-11 standing rule names, swept
+# as a lowercase substring against the minted token before that token can reach
+# the recorder or the provenance line. It passes by construction today — the
+# token is a fixed prefix, digits and hex — and that is exactly the point: the
+# day someone puts a caller's own run key back into it, THIS refuses the token,
+# rather than a reviewer catching it on round nine.
+RECEIPT_FORBIDDEN=(
+  allow commit prompt suppress release read covered drafted proposed queued
+  healthy passing ok pass satisfied complete admitted resumed attended verified
+  present equivalent operational active green favorable joins_exactly
+  coverage_complete would_ _if_authoritative
+)
+
+# ONE VALUE, WHOLE, AGAINST THE WHITELIST — no line splitting, no stripping, no
+# repair. `${v//[set]/}` deletes every admitted byte and whatever survives is a
+# byte the shape does not admit; one such byte refuses the value. A carriage
+# return, a newline, a tab, a space and a NUL all survive that deletion, which
+# is what makes this REJECT rather than normalize. grep would have read the
+# first line of a two-line value and matched it, which is the same fail-open
+# shape as stripping.
+receipt_token_ok() {
+  local v="$1"
+  [ -n "$v" ] || return 1
+  [ "${#v}" -le 128 ] || return 1
+  case "$v" in [A-Za-z0-9]*) ;; *) return 1 ;; esac
+  [ -z "${v//[A-Za-z0-9:._-]/}" ] || return 1
+  return 0
+}
+
+# sha256 of $1's bytes, truncated to $2 hex characters. No hasher on the machine
+# is a refusal like any other, not a reason to fall back to something weaker.
+receipt_hash() {
+  if (( $+commands[shasum] )); then
+    print -rn -- "$1" | shasum -a 256 2>/dev/null | cut -c1-"$2"
+  elif (( $+commands[sha256sum] )); then
+    print -rn -- "$1" | sha256sum 2>/dev/null | cut -c1-"$2"
   fi
-else
-  evidence_ref=""
+}
+
+if receipt_token_ok "$SERVICE" && receipt_token_ok "$RUN_KEY"; then
+  # ONE READ of the clock, snapshotted: $EPOCHREALTIME advances on every
+  # access, so reading it twice gives the seconds of one instant and the
+  # milliseconds of another. strftime runs inside a subshell that EXPORTS
+  # TZ, because the module formats in local time and a receipt in local time
+  # compared against a UTC started_at is a silent hour of drift.
+  zmodload zsh/datetime 2>/dev/null
+  minted_at=""
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    now_real="$EPOCHREALTIME"
+    now_frac="${now_real#*.}000"
+    minted_at="$( (export TZ=UTC; strftime '%Y%m%dT%H%M%S' "${now_real%%.*}") 2>/dev/null ).${now_frac[1,3]}Z"
+  else
+    minted_at="$(date -u '+%Y%m%dT%H%M%S').000Z"
+  fi
+  # The shape is checked rather than assumed: a strftime that printed nothing
+  # would otherwise leave a stub like `.000Z` looking like a timestamp.
+  case "$minted_at" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9].[0-9][0-9][0-9]Z) ;;
+    *) minted_at="" ;;
+  esac
+  nonce="$( (LC_ALL=C od -An -tx1 -N8 /dev/urandom) 2>/dev/null | tr -d ' \n')"
+  run_key_hash="$(receipt_hash "$RUN_KEY" 32)"
+  service_hash="$(receipt_hash "$SERVICE" 16)"
+  if [ -n "$minted_at" ] && [ "${#nonce}" -eq 16 ] \
+      && [ "${#run_key_hash}" -eq 32 ] && [ "${#service_hash}" -eq 16 ]; then
+    candidate="carr-run-receipt:v1:$minted_at:$nonce:$run_key_hash"
+    lowered="${candidate:l}"
+    forbidden=0
+    for word in $RECEIPT_FORBIDDEN; do
+      case "$lowered" in *$word*) forbidden=1 ;; esac
+    done
+    # The path is derived from the two hashes, so no caller byte is in it
+    # either. A symlink is refused BEFORE it is followed, and anything that
+    # exists and is not a regular file — FIFO, device, directory, socket — is
+    # refused without being opened, so nothing here can block on a reader that
+    # never comes.
+    RECEIPT_FILE="$RECEIPT_DIR/$service_hash.$run_key_hash.receipt"
+    if [ "$forbidden" -eq 0 ] && receipt_token_ok "$candidate" \
+        && [ ! -L "$RECEIPT_FILE" ] \
+        && { [ ! -e "$RECEIPT_FILE" ] || [ -f "$RECEIPT_FILE" ]; }; then
+      mkdir -p "$RECEIPT_DIR" 2>/dev/null
+      if ( print -r -- "$candidate" > "$RECEIPT_FILE" ) 2>/dev/null; then
+        # READ BACK WHAT LANDED and require it to equal what was written, in
+        # content AND in length. A short write, a file something else rewrote
+        # between the write and the read, one trailing carriage return: each
+        # leaves the two unequal, and nothing is trimmed to make them agree.
+        landed="$( (cat -- "$RECEIPT_FILE") 2>/dev/null )"
+        landed_bytes="$( (wc -c < "$RECEIPT_FILE") 2>/dev/null | tr -d ' ' )"
+        if [ "$landed" = "$candidate" ] \
+            && [ "$landed_bytes" = "$(( ${#candidate} + 1 ))" ]; then
+          evidence_ref="$candidate"
+          evid=(--evidence-ref "$candidate")
+        fi
+      fi
+    fi
+  fi
 fi
 
 # ── throttle a high-frequency SUCCEEDED row ──────────────────────────────────
 # Inert when HEARTBEAT_INTERVAL is 0 (the default, and every existing job's
 # real invocation today): should_record is always 1 below, so this is a no-op
 # for the six jobs that never pass the flag.
-# Overridable so the selftest can point state at a throwaway dir instead of
-# littering (and once, poisoning) the shared one — out/ is symlinked into
-# every worktree, so a test that writes here writes to production state.
-STATE_DIR="${CARR_RUN_SCHEDULED_STATE_DIR:-$REPO/out/run-scheduled-state}"
 STATE_FILE="$STATE_DIR/$SERVICE.$RUN_KEY.last-success"
 should_record=1
 if [ "$state" = "succeeded" ] && [ "${HEARTBEAT_INTERVAL:-0}" -gt 0 ] 2>/dev/null; then

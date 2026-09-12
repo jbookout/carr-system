@@ -272,13 +272,18 @@ const OUTCOME_HASH = /^sha256:[0-9a-f]{64}$/;
  * source_ref is that script. An `operator` row is a hand-run and a `collector`
  * row is a probe; neither is a dispatch this clause will speak for.
  *
- * AND THE HONEST CONSEQUENCE, stated here because it is the reader's most
- * likely real answer on the day a ruling lands: bin/run-scheduled.sh passes no
- * `--evidence-ref`, so the ops.run rows it writes today carry evidence_ref
- * null. Pointed at a live scheduled job right now, this reader answers
- * `scheduler_canary_not_bound_to_receipt` — truthfully. Binding a canary to its
- * receipt is a change to the wrapper, and it is owed; it is not something a
- * reader can supply, and this one does not pretend otherwise.
+ * AND A RECEIPT IS NOT A STRING THE LEDGER HAPPENED TO HOLD. Until 2026-09-11
+ * bin/run-scheduled.sh passed no `--evidence-ref` at all, so every row it wrote
+ * carried evidence_ref null and this clause could not be met by any scheduled
+ * run in the ledger's history. The wrapper now MINTS its own receipt after its
+ * child exits — no flag, no path, nothing a caller or the child can hand it —
+ * and that receipt carries, in its own bytes, which run it is for and when it
+ * was minted. So "bound to a receipt" is three questions and not one: the ref
+ * is there, it is FOR THIS RUN (the run-key hash the receipt carries equals the
+ * hash of the row's own run key), and it was minted AFTER the row's dispatch. A
+ * receipt file left on disk by an earlier run, or minted for a different job,
+ * answers the second or the third with a mismatch. Mere presence would have
+ * accepted both.
  */
 const SCHEDULER_SOURCE_KIND = "wrapper";
 const SCHEDULER_SOURCE_REF = "bin/run-scheduled.sh";
@@ -512,15 +517,24 @@ function derivePredecessorOutcome(rows, outcomeHash) {
 // THE THREE CLAUSES GATE ZERO NAMES, each answered from a real ops.run row and
 // its timestamps, and a missing row refusing rather than defaulting.
 //
-//   receipt_binding             the dispatch row names its receipt: its evidence
-//                               ref is there at all, and its source kind and
-//                               source ref are the ones bin/run-scheduled.sh
+//   receipt_binding             the dispatch row names A RECEIPT OF ITS OWN, and
+//                               five facts have to agree for it to hold: the
+//                               evidence ref is there at all; the source kind
+//                               and source ref are the ones bin/run-scheduled.sh
 //                               writes — `wrapper` and the script's own path —
-//                               not a hand-run's `operator` row and not a probe's
-//                               `collector` row. Every one of those five fields
-//                               arrives as a digest, and every question asked of
-//                               them is an equality, so the clause is unchanged
-//                               and no ledger text is in the answer.
+//                               not a hand-run's `operator` row and not a
+//                               probe's `collector` row; the run-key hash the
+//                               receipt CARRIES equals the hash of this row's
+//                               own run key; and the receipt was MINTED AFTER
+//                               this row's `started_at`. The last two are what
+//                               separate a receipt this run produced from one
+//                               that was merely lying around: a stale file the
+//                               child never refreshed predates the dispatch, and
+//                               a receipt minted for another job names another
+//                               run. Every one of those fields arrives as a
+//                               digest or an instant, and every question asked
+//                               of them is an equality or a comparison, so no
+//                               ledger text is in the answer.
 //   observation_after_dispatch  the observation's `observed_at` is STRICTLY after
 //                               the dispatch row's `started_at`. Equal instants
 //                               fail: rows written in one transaction share now().
@@ -551,9 +565,21 @@ function deriveSchedulerCanary(rows) {
   if (observed.length === 0) return derived("scheduler_observation_absent", { ...blank });
   const observation = observed.reduce((a, b) => (instant(b.observed_at) > instant(a.observed_at) ? b : a));
 
+  // Two of these read fields the STORE derived from the receipt's own bytes:
+  // what run the receipt says it is for, and when the wrapper minted it. A ref
+  // the store could not parse as this wrapper's mint arrives as null in both,
+  // which fails the clause rather than defaulting it.
+  const receiptNamesThisRun = text(dispatch.receipt_run_key_digest) !== null
+    && text(dispatch.receipt_run_key_digest) === text(dispatch.run_key_receipt_digest);
+  // STRICTLY after, for the reason the observation clause is strict: an instant
+  // equal to the dispatch is an instant that proves no ordering at all.
+  const mintedAfterDispatch = instant(dispatch.receipt_minted_at) !== null
+    && instant(dispatch.started_at) !== null
+    && instant(dispatch.receipt_minted_at) > instant(dispatch.started_at);
   const boundToReceipt = text(dispatch.evidence_ref_digest) !== null
     && text(dispatch.source_kind_digest) === SCHEDULER_SOURCE_KIND_DIGEST
-    && text(dispatch.source_ref_digest) === SCHEDULER_SOURCE_REF_DIGEST;
+    && text(dispatch.source_ref_digest) === SCHEDULER_SOURCE_REF_DIGEST
+    && receiptNamesThisRun && mintedAfterDispatch;
   const afterDispatch = instant(observation.observed_at) > instant(dispatch.started_at);
   const canaryMatch = text(observation.run_key_digest) !== null
     && text(observation.run_key_digest) === text(dispatch.run_key_digest)

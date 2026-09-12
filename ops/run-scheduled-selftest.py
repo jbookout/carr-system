@@ -63,6 +63,7 @@ RUN IT:
     python3 ops/run-scheduled-selftest.py
     tools/db-tap.py --project staging run ops/run-scheduled-selftest.py
 """
+import hashlib
 import json
 import os
 import re
@@ -932,33 +933,62 @@ def tier2() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TIER 1 — THE RECEIPT BINDING (--evidence-ref-file), added 2026-09-11.
+# TIER 1 — THE RECEIPT THIS WRAPPER MINTS FOR ITSELF, added 2026-09-11 and
+# rewritten 2026-09-12 after review.
 #
 # WHY THIS SECTION EXISTS. Gate Zero's fourth predecessor step,
 # `step:scheduler-active-receipt`, is read by
 # mcp-server/src/gate-zero-seam-readers.v5.js, whose `receipt_binding` clause
-# wants a run row with a NON-NULL ops.run.evidence_ref written by this wrapper.
-# Measured against production on 2026-09-11: 28,309 rows in ops.run, 21,894 of
-# them written by bin/run-scheduled.sh, and ZERO carrying an evidence_ref. The
-# clause was unsatisfiable by construction, and --evidence-ref-file is the flag
-# that makes it satisfiable.
+# wants a run row bound to a receipt. Measured against production on
+# 2026-09-11: 28,309 rows in ops.run, 21,894 of them written by
+# bin/run-scheduled.sh, and ZERO carrying an evidence_ref. The clause was
+# unsatisfiable by construction.
 #
-# WHAT THESE CHECKS DEFEND, and both halves matter equally:
+# WHAT THE FIRST DRAFT GOT WRONG, and it is the reason for half these checks.
+# It took `--evidence-ref-file PATH` and promoted whatever that file held. A
+# stale file from last week's run, or a file the child wrote whatever it liked
+# into, was then indistinguishable from a receipt minted during THIS run — and
+# a binding whose evidence the bound party supplies is not a binding. The
+# wrapper now mints the receipt itself: its own clock read after the child
+# exits, its own entropy, and the HASH of the run key rather than the key.
 #
-#   THE FLAG NEVER FAILS A JOB. It is an observation channel bolted to a
-#   wrapper whose founding property is that it cannot break the thing it
-#   watches. Absent file, unreadable file, empty file, bad token, oversized
-#   token — every one of them records exactly what the wrapper recorded before
-#   this flag existed, and the child's exit code is untouched.
+# WHAT THESE CHECKS DEFEND:
 #
-#   THE WHITELIST DOES NOT FAIL OPEN. The first draft of the guard normalized
-#   the line with `tr -d '[:space:]'` BEFORE matching, so `--state failed
-#   --exit-code 1` lost its spaces and was accepted as
-#   `--statefailed--exit-code1` — every surviving character is in the
-#   whitelist. That is the exact shape of a check that reports green over a
-#   broken substrate, and case (c) below is its regression test. A receipt
-#   containing whitespace is REFUSED, never repaired.
+#   NOTHING OUTSIDE THE WRAPPER CAN SUPPLY A RECEIPT. There is no flag and no
+#   path. A file pre-seeded at the exact path the wrapper computes is
+#   overwritten by this run's mint and its content never reaches the row.
+#
+#   ONLY THE WRAPPER'S OWN REGULAR FILE IS READ. A symlink, a FIFO or a
+#   directory at that path mints nothing, follows nothing, and blocks on
+#   nothing.
+#
+#   REJECT, NEVER REPAIR. A run key or service key carrying a carriage return,
+#   a newline, a tab, a space or any other byte outside [A-Za-z0-9:._-] mints
+#   NO receipt. It is not stripped down to an acceptable shape first: the
+#   earliest draft normalized with `tr -d '[:space:]'`, which turned
+#   `--state failed --exit-code 1` into a token the whitelist accepted. That is
+#   the exact shape of a check that reports green over a broken substrate.
+#
+#   NO CALLER WORD TRAVELS. A run key of `complete` or `allow-commit-green`
+#   yields a receipt of a fixed prefix and hex, in the recorder's argv AND in
+#   the provenance line — swept here against the closed privileged-word union.
+#
+#   AND IT STILL CANNOT FAIL A JOB. Every refusal above records exactly the row
+#   this wrapper recorded before receipts existed, and returns the child's own
+#   exit code.
 # ─────────────────────────────────────────────────────────────────────────────
+
+RECEIPT_SHAPE = re.compile(
+    r"^carr-run-receipt:v1:(\d{8}T\d{6}\.\d{3})Z:[0-9a-f]{16}:([0-9a-f]{32})$")
+
+# The closed union the 2026-09-11 standing rule names, swept as a substring.
+PRIVILEGED_WORDS = (
+    "allow", "commit", "prompt", "suppress", "release", "read", "covered",
+    "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
+    "satisfied", "complete", "admitted", "resumed", "attended", "verified",
+    "present", "equivalent", "operational", "active", "green", "joins_exactly",
+    "coverage_complete", "favorable", "would_", "_if_authoritative",
+)
 
 
 def recorded_argv(run_key: str, db: str) -> list:
@@ -973,102 +1003,229 @@ def evidence_ref_of(run_key: str, db: str):
     return argv[argv.index("--evidence-ref") + 1] if "--evidence-ref" in argv else None
 
 
-def tier1_evidence_ref() -> None:
+def argv_value(run_key: str, db: str, flag: str):
+    argv = recorded_argv(run_key, db)
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+def receipt_path(state_dir: str, service: str, run_key: str) -> str:
+    """The exact path bin/run-scheduled.sh computes for a receipt:
+    $STATE_DIR/receipts/<sha256(service)[:16]>.<sha256(run key)[:32]>.receipt."""
+    return os.path.join(
+        state_dir, "receipts",
+        hashlib.sha256(service.encode()).hexdigest()[:16] + "."
+        + hashlib.sha256(run_key.encode()).hexdigest()[:32] + ".receipt")
+
+
+def carries_privileged_word(value: str) -> str:
+    lowered = value.lower()
+    return next((w for w in PRIVILEGED_WORDS if w in lowered), "")
+
+
+def tier1_receipt_mint() -> None:
     print()
-    print("TIER 1 — the receipt binding (--evidence-ref-file)")
+    print("TIER 1 — the receipt this wrapper mints for itself")
 
     work = tempfile.mkdtemp(prefix="carr-selftest-receipt-")
-    state_dir = os.path.join(work, "state")
-    os.makedirs(state_dir, exist_ok=True)
+    service = "carr-selftest-probe"
 
-    def run(flags: list, content=None, filename: str = "receipt"):
-        """One wrapper run over a trivial child. `content` None means the
-        receipt file is never created at all."""
-        run_key = "selftest.evidence." + uuid.uuid4().hex[:8]
-        db = os.path.join(work, run_key + ".sqlite3")
-        path = os.path.join(work, run_key + "." + filename)
-        if content is not None:
-            with open(path, "w") as fh:
-                fh.write(content)
+    def run(run_key=None, state_dir=None, argv_prefix=(), timeout=120):
+        """One wrapper run over a trivial child, in its own spool and its own
+        state directory unless the caller wants to prepare one first."""
+        run_key = run_key or ("selftest.receipt." + uuid.uuid4().hex[:8])
+        db = os.path.join(work, uuid.uuid4().hex + ".sqlite3")
+        state_dir = state_dir or tempfile.mkdtemp(prefix="carr-selftest-state-", dir=work)
         env = unreachable_env()
         env["CARR_RUN_SPOOL_DB"] = db
         env["CARR_RUN_SCHEDULED_STATE_DIR"] = state_dir
-        resolved = [path if f == "@RECEIPT@" else f for f in flags]
-        proc = subprocess.run(
-            [WRAPPER, *resolved, "carr-selftest-probe", run_key, "/bin/sh", "-c", "exit 0"],
-            capture_output=True, text=True, timeout=120, env=env, cwd=REPO)
-        return proc, run_key, db
+        # A TIMEOUT IS A RESULT HERE, not a crash. Drop the guard that refuses a
+        # FIFO at the receipt path and the wrapper blocks forever opening it for
+        # write, AFTER the child has already exited — the exact shape a wrapper
+        # whose founding property is "cannot fail a job" must never take. An
+        # uncaught TimeoutExpired would abort the suite and take every later
+        # check with it, so it is caught and reported as the failure it is.
+        try:
+            proc = subprocess.run(
+                [WRAPPER, *argv_prefix, service, run_key, "/bin/sh", "-c", "exit 0"],
+                capture_output=True, text=True, timeout=timeout, env=env, cwd=REPO)
+        except subprocess.TimeoutExpired:
+            proc = subprocess.CompletedProcess([], 99, "", f"timed out after {timeout}s")
+        return proc, run_key, db, state_dir
 
-    # (a) THE DEFAULT PATH IS BYTE-FOR-BYTE UNCHANGED. Every job in
-    #     ops/launchd/ today passes no such flag, so this is the case that
-    #     must not have moved at all.
-    proc, rk, db = run([])
-    check("no --evidence-ref-file: the recorder is called with NO "
-          "--evidence-ref, exactly as before the flag existed",
-          evidence_ref_of(rk, db) is None, repr(recorded_argv(rk, db)))
-    check("no --evidence-ref-file: the child's exit code is still its own",
-          proc.returncode == 0, f"got {proc.returncode}")
+    # (a) THE DEFAULT PATH NOW CARRIES A RECEIPT, which is the whole change.
+    #     Every plist in ops/launchd/ passes no flag — there is no flag to pass
+    #     — so this is the case that covers the entire fleet.
+    proc, rk, db, state_dir = run()
+    minted = evidence_ref_of(rk, db)
+    shape = RECEIPT_SHAPE.match(minted or "")
+    check("an ordinary run — no flags, the way every plist calls this — passes "
+          "the recorder a minted --evidence-ref", shape is not None, repr(minted))
+    check("the child's exit code is still its own", proc.returncode == 0,
+          f"got {proc.returncode}")
+    if shape:
+        check("the receipt carries the HASH of THIS run key, so the reader can "
+              "tell it apart from a receipt minted for another job",
+              shape.group(2) == hashlib.sha256(rk.encode()).hexdigest()[:32],
+              f"{shape.group(2)} vs {hashlib.sha256(rk.encode()).hexdigest()[:32]}")
+        started = argv_value(rk, db, "--started-at")
+        check("the receipt was minted STRICTLY AFTER the dispatch this row "
+              "records, which is what the reader's clause requires",
+              shape.group(1).replace(".", "") >
+              started.replace("-", "").replace(":", "").rstrip("Z") + "000",
+              f"minted {shape.group(1)} vs started {started}")
+        check("the receipt is at most 128 characters", len(minted) <= 128,
+              f"{len(minted)}")
+        check("the wrapper's own receipt file holds exactly what reached the "
+              "recorder", open(receipt_path(state_dir, service, rk)).read()
+              == minted + "\n", receipt_path(state_dir, service, rk))
 
-    # (b) THE HAPPY PATH. A well-formed token reaches the recorder verbatim.
-    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"],
-                       content="gatezero.canary:20260911T000000Z:abcdef0123456789\n")
-    check("a well-formed receipt is passed through verbatim as --evidence-ref",
-          evidence_ref_of(rk, db) == "gatezero.canary:20260911T000000Z:abcdef0123456789",
-          repr(evidence_ref_of(rk, db)))
+    # (b) NOTHING OUTSIDE THIS SCRIPT CAN SUPPLY ONE. The receipt path is
+    #     derived from two hashes, so a caller who works it out and pre-seeds it
+    #     still cannot get that content into the row: this run's mint overwrites
+    #     it. The seeded content is a privileged word on purpose.
+    seeded_key = "selftest.receipt.preseeded"
+    seeded_state = tempfile.mkdtemp(prefix="carr-selftest-state-", dir=work)
+    seeded = receipt_path(seeded_state, service, seeded_key)
+    os.makedirs(os.path.dirname(seeded), exist_ok=True)
+    with open(seeded, "w") as fh:
+        fh.write("complete\n")
+    proc, rk, db, _ = run(run_key=seeded_key, state_dir=seeded_state)
+    landed = evidence_ref_of(rk, db)
+    check("a receipt file pre-seeded at the exact path the wrapper computes "
+          "CANNOT bind the row — this run's own mint is what is recorded",
+          landed is not None and landed != "complete"
+          and RECEIPT_SHAPE.match(landed) is not None, repr(landed))
+    check("...and the pre-seeded content is gone from the wrapper's own file",
+          open(seeded).read().strip() == (landed or ""), open(seeded).read())
 
-    # (c) THE REGRESSION THE FIRST DRAFT SHIPPED. Whitespace is a REJECTION,
-    #     never a thing to strip and then accept.
-    for label, body in (
-        ("an argument-injection attempt", "--state failed --exit-code 1\n"),
-        ("a leading space", " token\n"),
-        ("an embedded tab", "a\tb\n"),
+    # (c) THERE IS NO FLAG. The retired --evidence-ref-file is not parsed as an
+    #     option any more: it falls through to the positional arguments, which
+    #     is visible in what the recorder was told the service key was.
+    db = os.path.join(work, uuid.uuid4().hex + ".sqlite3")
+    env = unreachable_env()
+    env["CARR_RUN_SPOOL_DB"] = db
+    env["CARR_RUN_SCHEDULED_STATE_DIR"] = tempfile.mkdtemp(dir=work)
+    flag_key = os.path.join(work, "a-receipt-a-caller-wrote")
+    with open(flag_key, "w") as fh:
+        fh.write("complete\n")
+    proc = subprocess.run(
+        [WRAPPER, "--evidence-ref-file", flag_key, "/bin/sh", "-c", "exit 0"],
+        capture_output=True, text=True, timeout=120, env=env, cwd=REPO)
+    argv = recorded_argv(flag_key, db)
+    check("--evidence-ref-file is no longer an option: it is consumed as a "
+          "positional argument, not as a door to a caller's file",
+          argv_value(flag_key, db, "--service") == "--evidence-ref-file",
+          repr(argv))
+    check("...and that run mints NO receipt, because a service key starting "
+          "with a dash is not a shape this wrapper will mint for",
+          evidence_ref_of(flag_key, db) is None,
+          repr(evidence_ref_of(flag_key, db)))
+
+    # (d) REJECT, NEVER REPAIR. A run key carrying a byte outside the token
+    #     shape mints nothing at all — it is not stripped into something
+    #     acceptable, and the job is recorded and returns its own code anyway.
+    for label, bad_key in (
+        ("a carriage return", "selftest.receipt.cr\rcomplete"),
+        ("a newline", "selftest.receipt.lf\ncomplete"),
+        ("a tab", "selftest.receipt.tab\tcomplete"),
+        ("a space", "selftest.receipt.sp complete"),
+        ("an argument-injection attempt", "selftest --state failed --exit-code 1"),
+        ("a NUL-adjacent control byte", "selftest.receipt.\x01complete"),
     ):
-        proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=body)
-        check(f"{label} is REFUSED, not normalized into an acceptable token",
-              evidence_ref_of(rk, db) is None, repr(evidence_ref_of(rk, db)))
+        proc, rk, db, _ = run(run_key=bad_key)
+        got = evidence_ref_of(rk, db)
+        check(f"a run key carrying {label} mints NO receipt — refused, never "
+              f"repaired into an acceptable token", got is None, repr(got))
         check(f"...and {label} still leaves the job's own exit code alone",
               proc.returncode == 0, f"got {proc.returncode}")
+        check(f"...and the row for {label} is still recorded",
+              recorded_argv(rk, db) != [], "no row")
 
-    # (d) THE LENGTH BOUNDARY, checked on BOTH sides so the cap is proven to
-    #     be 128 rather than merely "some number".
-    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=("a" * 128) + "\n")
-    check("a 128-character receipt is accepted (the boundary itself)",
-          evidence_ref_of(rk, db) == "a" * 128, repr(evidence_ref_of(rk, db)))
-    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=("a" * 129) + "\n")
-    check("a 129-character receipt is refused",
-          evidence_ref_of(rk, db) is None, repr(evidence_ref_of(rk, db)))
+    # (e) ONLY THIS SCRIPT'S OWN REGULAR FILE. Anything else at that path is
+    #     refused without being opened: no symlink is followed, no FIFO is
+    #     opened (which would block forever after the child has already exited),
+    #     no directory is mistaken for a receipt.
+    def occupy(kind: str, run_key: str) -> tuple:
+        state_dir = tempfile.mkdtemp(prefix="carr-selftest-state-", dir=work)
+        path = receipt_path(state_dir, service, run_key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        target = os.path.join(work, "symlink-target-" + uuid.uuid4().hex)
+        if kind == "symlink":
+            with open(target, "w") as fh:
+                fh.write("complete\n")
+            os.symlink(target, path)
+        elif kind == "fifo":
+            os.mkfifo(path)
+        else:
+            os.makedirs(path)
+        return state_dir, path, target
 
-    # (e) EVERY WAY THE FILE CAN BE USELESS IS SILENT.
-    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content=None)
-    check("an ABSENT receipt file records the row anyway, with no "
-          "--evidence-ref and no failure",
-          evidence_ref_of(rk, db) is None and proc.returncode == 0,
-          f"{evidence_ref_of(rk, db)!r} rc={proc.returncode}")
-    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content="")
-    check("an EMPTY receipt file records the row anyway, with no "
-          "--evidence-ref and no failure",
-          evidence_ref_of(rk, db) is None and proc.returncode == 0,
-          f"{evidence_ref_of(rk, db)!r} rc={proc.returncode}")
+    for kind, label in (("symlink", "a symlink"), ("fifo", "a FIFO"),
+                        ("dir", "a directory")):
+        rk = f"selftest.receipt.{kind}"
+        state_dir, path, target = occupy(kind, rk)
+        proc, rk, db, _ = run(run_key=rk, state_dir=state_dir, timeout=60)
+        got = evidence_ref_of(rk, db)
+        check(f"{label} at the receipt path mints NO receipt", got is None, repr(got))
+        check(f"...and {label} still leaves the job's own exit code alone",
+              proc.returncode == 0, f"got {proc.returncode}")
+        check(f"...and the row is still recorded over {label}",
+              recorded_argv(rk, db) != [], "no row")
+        if kind == "symlink":
+            check("...and the symlink was not followed: its target is untouched",
+                  open(target).read() == "complete\n", open(target).read())
+        if kind == "fifo":
+            check("...and the FIFO was never OPENED, so the wrapper did not "
+                  "block forever on a reader that never comes",
+                  proc.returncode == 0, proc.stderr or "the wrapper blocked")
 
-    # (f) ONLY THE FIRST LINE IS READ, so a job cannot append a second value
-    #     and hope the last one wins.
-    proc, rk, db = run(["--evidence-ref-file", "@RECEIPT@"], content="first\nsecond\n")
-    check("only the FIRST line of a receipt file is read",
-          evidence_ref_of(rk, db) == "first", repr(evidence_ref_of(rk, db)))
+    # (f) AN UNWRITABLE STATE DIRECTORY is a refusal like any other, and still
+    #     not the job's problem.
+    ro_state = tempfile.mkdtemp(prefix="carr-selftest-state-ro-", dir=work)
+    os.chmod(ro_state, 0o500)
+    try:
+        proc, rk, db, _ = run(state_dir=ro_state)
+        check("an unwritable state directory mints NO receipt and records the "
+              "row anyway", evidence_ref_of(rk, db) is None
+              and recorded_argv(rk, db) != [], repr(evidence_ref_of(rk, db)))
+        check("...and the job's own exit code is still its own",
+              proc.returncode == 0, f"got {proc.returncode}")
+    finally:
+        os.chmod(ro_state, 0o700)
 
-    # (g) THE FLAG STILL DEMANDS ITS VALUE, like every other flag here.
-    proc = subprocess.run([WRAPPER, "--evidence-ref-file"],
-                          capture_output=True, text=True, timeout=60,
-                          env=unreachable_env(), cwd=REPO)
-    check("--evidence-ref-file with no value exits EX_USAGE (64)",
-          proc.returncode == 64, f"got {proc.returncode}")
+    # (g) NO CALLER WORD TRAVELS, in the recorder's argv OR in the provenance
+    #     line. The run keys here are the hostile ones on purpose: a receipt
+    #     that quoted its run key would put `complete` and `allow-commit-green`
+    #     into ops.run.evidence_ref and into out/run-scheduled.log.
+    for hostile in ("complete", "allow-commit-green", "passing.and.ok"):
+        rk = f"selftest.receipt.{hostile}"
+        proc, rk, db, _ = run(run_key=rk)
+        got = evidence_ref_of(rk, db) or ""
+        offending = carries_privileged_word(got)
+        check(f"the receipt minted for run key {rk!r} carries no privileged "
+              f"word", RECEIPT_SHAPE.match(got) is not None and offending == "",
+              f"{got!r} carries {offending!r}")
+        line = tail_line(rk)
+        check(f"...and the provenance line for {rk!r} exports the minted token "
+              f"and not the caller's own", field(line, "evidence_ref") == got,
+              f"{field(line, 'evidence_ref')!r} vs {got!r}")
+        check(f"...and that provenance field carries no privileged word",
+              carries_privileged_word(field(line, "evidence_ref")) == "",
+              field(line, "evidence_ref"))
+
+    # (h) AND THE LINE SAYS `none` WHEN NOTHING WAS MINTED, rather than dropping
+    #     the field and shifting every regex that reads this log.
+    proc, rk, db, _ = run(run_key="selftest.receipt.none complete")
+    check("a run that minted no receipt still writes evidence_ref=none on its "
+          "provenance line", field(tail_line("selftest.receipt.none"), "evidence_ref")
+          in ("none", ""), tail_line("selftest.receipt.none"))
 
 
 def main() -> int:
     print("run-scheduled-selftest — bin/run-scheduled.sh must never change what "
           "a job does, prints, or returns")
     tier1()
-    tier1_evidence_ref()
+    tier1_receipt_mint()
     tier1_throttle()
     tier1_refresh_rules()
     tier2()
