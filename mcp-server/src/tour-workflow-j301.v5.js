@@ -284,6 +284,10 @@ function assertInstant(value, path) {
 // ef34aa54740dd56508b7cebf05a2a95851aacedbbe4f2e4865a39ffede28f0ad). They are
 // identity, not configuration, and they are hashed into the policy preimage
 // below so a drifted copy moves the digest instead of quietly disagreeing.
+// SUPERSEDED DIGEST, kept because it is the packet these rows were copied from:
+// the 2026-09-12 Gate Zero amendment re-froze r7 to
+// ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6. It changed
+// exactly one decision row, Q036.D1's consumer_gates, and none of the rows below.
 // ---------------------------------------------------------------------------
 
 const SETTLED_DECISIONS = deepFreeze({

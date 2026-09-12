@@ -98,6 +98,10 @@
 // identity, not configuration: a caller holding a different subset is refused by
 // assertA03DecisionBinding, which throws or returns nothing and never hands back
 // an affirmative.
+// SUPERSEDED DIGEST, kept because it is the packet these rows were copied from:
+// the 2026-09-12 Gate Zero amendment re-froze r7 to
+// ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6. It changed
+// exactly one decision row, Q036.D1's consumer_gates, and none of the rows below.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";

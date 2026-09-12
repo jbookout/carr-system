@@ -315,9 +315,22 @@ const TRUSTED_SHAPE = {
     "denial_rule"
   ]
 };
-const FROZEN = Object.freeze({
+// Re-frozen 2026-09-12 by the card-10 Gate Zero amendment (decision
+// 311a9af5-3685-4c47-a158-f8dd70870ca1, applied under Joe's ruling on loop 589).
+// The amendment admits `gate-zero-read-only-accepted`, the
+// `step:gate-zero-read-only-outcome` producer row and its
+// `independent_control_plane_oracle` role. `requirements` is unchanged: the
+// amendment touches no source row. The superseded digests are kept beside the
+// current ones because the recorded semantic review — PASS, 0 P0 / 0 P1 — was
+// bound to those bytes and a fresh semantic review of the amended packet is
+// owed.
+const SUPERSEDED = Object.freeze({
   "design": "9bbdc2f5124fc3939c883e572f5c9077b347804b030f313e60756c28dfab07a6",
-  "constitution": "925f501cc155fd48f320ea7a7cf66cc5d4a90738838a93a3506010199c6ad505",
+  "constitution": "925f501cc155fd48f320ea7a7cf66cc5d4a90738838a93a3506010199c6ad505"
+});
+const FROZEN = Object.freeze({
+  "design": "10df2a65e598011335abeeb09f6bc794b326e696717e080db0806f2efbc68413",
+  "constitution": "63114d726d9ea54fb8159e324351bf6e578df7280ca337632fea83d1d3a43c73",
   "requirements": "51e0a89442fda95e537738e8321f9301af8ef48cf79d5ddb979c63421e8990ec"
 });
 const DEADLINE = {
@@ -901,7 +914,23 @@ for (const producer of producers.values()) {
     }
   }
 }
-const externalPreV5ProducerSteps = new Set(["step:gate-zero-read-only-outcome"]);
+// The steps a producer may depend on WITHOUT an r7 producer row of its own.
+// Before the card-10 amendment this was Gate Zero itself, because nothing in
+// r7 produced it. Gate Zero now has a row, so the external boundary moved down
+// to its four predecessors: they are portfolio master steps — accepted
+// work-request outcomes and a scheduler receipt — and r7 registers no producer
+// for any of them. The membership assertion below is what stops this list
+// becoming a hole: an entry that is not a portfolio master step is refused.
+const externalPreV5ProducerSteps = new Set([
+  "step:scheduler-active-receipt",
+  "step:wr40-repository-outcome",
+  "step:wr46-dissolution-outcome",
+  "step:wr54-backup-recovery-outcome",
+]);
+for (const stepRef of externalPreV5ProducerSteps) {
+  assert(portfolioSteps.has(stepRef), `external producer-free step is not a portfolio step ${stepRef}`);
+  assert(!producers.has(stepRef), `external producer-free step now has a producer ${stepRef}`);
+}
 for (const producer of producers.values()) {
   for (const dependency of producer.depends_on_step_refs) {
     assert(

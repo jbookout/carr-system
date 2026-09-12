@@ -18,30 +18,35 @@
 // same KIND of artifact as MINIMUM_REQUIRED_MEMBERS in benchmark-minimum.v5.js,
 // which is likewise a hand-copied constant table of r7 registrations.
 //
+// WHAT CHANGED ON 2026-09-12, and it is the reason nothing below says "null"
+// any more. Joe ruled loop 589 and the amendment was applied to the frozen
+// packet itself: r7 now carries the `gate-zero-read-only-accepted` gate, the
+// `step:gate-zero-read-only-outcome` producer row, and the
+// `independent_control_plane_oracle` role its row resolves through. Re-freezing
+// moved the packet's digest from `ef34aa54…` to `ea40f61a…` and the doctrine pin
+// in section 5882b0cd-16f4-4896-b567-eb0fca6554f7 moved with it. r7 IS
+// reachable, contrary to what this header said before: it is 62 base64 chunk
+// sections behind manifest section 6ac54e7b-0965-41f6-88c3-da187a8b5d23 in
+// doctrine document `doctorcre-v5-design-basis`, and
+// tools/doctorcre-v5-review.cjs validates the reconstructed pair.
+//
 // WHAT THIS FILE IS NOT, said plainly because the whole slice exists to refuse
 // exactly these things:
 //
-//   * It is NOT an r7 entry. r7 — the frozen design packet — is not a file in
-//     this repository and is not a section of the doctrine store. It is fed to
-//     tools/doctorcre-v5-review.cjs on STDIN, and that validator's header says
-//     the database remains the design authority. Registering this producer in
-//     r7 ITSELF is a design write on the frozen packet, owed to whoever holds
-//     it, and it has not happened. `R7_ENTRY_PRESENT` is false and stays false
-//     until it does.
 //   * It is NOT a bound producer. Nothing implements this role. No seat holds
-//     the oracle. gate-zero-assurance.v5.js's producer seam stays unbound and
-//     its answer stays `passable: false`.
+//     the oracle — card 9 named the reviewer CHARTER, and naming a charter is
+//     not staffing a desk. gate-zero-assurance.v5.js's producer seam stays
+//     unbound and its answer stays `passable: false`.
 //   * It is NOT a Gate Zero receipt, and nothing here can become one.
-//
-// THREE FIELDS CANNOT BE FILLED FROM ANYTHING REACHABLE HERE, and they are null
-// rather than guessed. r7's `target_dag_registry`, `causal_phase_registry` and
-// the gate-id vocabulary its `consumer_gate_registry` closes are validated by
-// tools/doctorcre-v5-review.cjs against the packet it is handed — this
-// repository never states their members. A plausible-looking string in any of
-// the three would be indistinguishable from a real one to every later reader,
-// which is the defect this slice was built to make impossible. They are listed
-// in `UNRESOLVED_WITHOUT_R7` and are the concrete missing facts a reviewer
-// should ask about.
+//   * `r7_entry_present` is NOT a flag a caller can set and NOT a boolean typed
+//     in by hand. It is derived, in `r7EntryPresence()` below, from the pinned
+//     packet digest and the completeness of the registry entry: pin the
+//     superseded digest, or leave any field of the entry null, and it reads
+//     false again. `v5A02GateZeroR7Presence()` in gate-zero-assurance.v5.js is
+//     the stronger check a reader or a test runs against the real packet bytes;
+//     it lives there because THIS module exports nothing callable, deliberately
+//     — an exported function is the shape that could hand back an authority-
+//     stamped record over references a caller chose (the PR 990 defect).
 
 import { CONSUMER_GATE_RECEIPT_SCHEMA, GATE_ZERO_STEP_REF } from "./benchmark-minimum.v5.js";
 
@@ -54,14 +59,47 @@ export const V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION =
 export const V5_A02_GATE_ZERO_PRODUCER_DECISION_REF = "20c83902-f150-4d59-beca-915c5c871f95";
 
 /**
- * "provisional" — adopted by the orchestrator under the ruling above and open
- * to Joe's override. Never "accepted", never "active": no partner has signed
- * this, and a word that implied one would be the invention this slice refuses.
+ * "registered" — the role was ruled provisionally by 20c83902, and on
+ * 2026-09-12 the frozen r7 packet was amended to carry it, so the registration
+ * is no longer an orchestrator's reading of a ruling: it is in the packet the
+ * validator checks. Still NOT "accepted" and still NOT "active": no partner has
+ * signed a Gate Zero receipt, no seat holds the oracle, and a word that implied
+ * either would be the invention this slice refuses.
  */
-export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS = "provisional";
+export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS = "registered";
 
-/** False until the frozen r7 packet itself carries the entry below. */
-export const V5_A02_GATE_ZERO_R7_ENTRY_PRESENT = false;
+/**
+ * THE PACKET THIS REGISTRATION IS A COPY OF, by digest.
+ *
+ * `ea40f61a…` is the sha256 of the amended r7 design packet's bytes — the value
+ * doctrine now pins as `normalized_r7_sha256`. `ef34aa54…` is the packet as it
+ * stood before the amendment, kept because it is the one digest that proves a
+ * reader is looking at a packet WITHOUT the Gate Zero entry.
+ */
+export const V5_A02_GATE_ZERO_R7_PACKET_SHA256 =
+  "ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6";
+export const V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256 =
+  "ef34aa54740dd56508b7cebf05a2a95851aacedbbe4f2e4865a39ffede28f0ad";
+
+/** The amendment that put the entry into r7 (card 10, applied on loop 589). */
+export const V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF = "311a9af5-3685-4c47-a158-f8dd70870ca1";
+
+/**
+ * Is the entry in r7? Derived, never asserted. Three ways this returns false,
+ * and each is a real failure mode rather than a formality:
+ *
+ *   1. the pinned digest is the superseded packet — the amendment did not land;
+ *   2. the pinned digest is not a digest at all — someone typed a label;
+ *   3. any field of the registry entry is still null — the entry exists in
+ *      name but carries one of the four facts only r7 could supply as a hole,
+ *      and a row with a null closed-registry field is refused by
+ *      tools/doctorcre-v5-review.cjs anyway.
+ */
+function r7EntryPresence(entry, pinnedPacketSha256) {
+  if (pinnedPacketSha256 === V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256) return false;
+  if (!/^[0-9a-f]{64}$/.test(pinnedPacketSha256 || "")) return false;
+  return Object.values(entry).every((value) => value !== null);
+}
 
 /** The role, in the family of the seven independent boundary-receipt oracles. */
 export const V5_A02_GATE_ZERO_PRODUCER_ROLE = "independent_control_plane_oracle";
@@ -121,8 +159,8 @@ function deepFreeze(value) {
 /**
  * The r7 `receipt_producer_step_registry` entry this ruling calls for, in r7's
  * own thirteen declared fields and in r7's own field order
- * (tools/doctorcre-v5-review.cjs:235-249). Three are null because this
- * repository cannot know them; see UNRESOLVED_WITHOUT_R7.
+ * (tools/doctorcre-v5-review.cjs:235-249). Nothing is null any more: the four
+ * values that were, and where each was read from, are in RESOLVED_FROM_R7.
  *
  * `depends_on_step_refs` is NOT restated here as a literal — it is read from
  * gate-zero-assurance.v5.js's frozen predecessor list, which the V5-A02 test
@@ -137,48 +175,62 @@ function v5A02GateZeroProducerRegistryEntry(predecessorStepRefs) {
     produces_gate_ids: [V5_A02_GATE_ZERO_GATE_ID],
     produces_receipt_refs: [V5_A02_GATE_ZERO_RECEIPT_REF],
     depends_on_step_refs: [...predecessorStepRefs].sort(),
-    // Gate Zero consumes accepted predecessor OUTCOMES, not gates. Whether r7
-    // expresses that as an empty list or refuses one is a property of the
-    // packet's validation_invariants, which this repository does not hold.
-    consumes_gate_ids: null,
+    // Gate Zero consumes accepted predecessor OUTCOMES, not gates. r7 answers
+    // that an empty list is legal rather than refused: six of its thirty-eight
+    // producer rows carried one before this amendment, and invariant
+    // `phase-specific-registration-and-outcome-evaluation` makes only a
+    // producer's DECLARED consumes_gate_ids required earlier evidence.
+    consumes_gate_ids: [],
     producer_role: V5_A02_GATE_ZERO_PRODUCER_ROLE,
     oracle_ref: V5_A02_GATE_ZERO_ORACLE_REF,
     oracle_version: V5_A02_GATE_ZERO_ORACLE_VERSION,
     evidence_scope: "candidate-and-test",
     subject_environment: "candidate",
     output_schema_ref: CONSUMER_GATE_RECEIPT_SCHEMA,
-    target_dag: null,
-    causal_phase: null,
+    // Both read from r7's closed registries. `assurance` because Q036.D1 — the
+    // decision that settled Gate Zero, and the obligation the new gate carries
+    // — has target `assurance_fabric`; `pre_activation` because every producer
+    // that depends on Gate Zero sits in that phase or later.
+    target_dag: "assurance",
+    causal_phase: "pre_activation",
   });
 }
 
 /**
- * The fields above that are null, each with the exact reason. A reviewer should
- * read this list as the question set, not as a formality.
+ * The four fields that were null until the amendment, each with the answer r7
+ * itself gave and where in the packet it was read. A reviewer should read this
+ * list as the audit trail for the four values above, not as a formality.
+ * `UNRESOLVED_WITHOUT_R7` is deliberately kept as an EMPTY exported array
+ * rather than deleted: a reader who imports it and finds it empty learns that
+ * the questions were answered, where a missing export would only look like a
+ * refactor.
  */
-export const UNRESOLVED_WITHOUT_R7 = deepFreeze([
+export const RESOLVED_FROM_R7 = deepFreeze([
   {
     field: "consumes_gate_ids",
-    owed_from: "r7 validation_invariants",
-    missing_fact: "whether a producer that consumes no gate declares an empty list or is refused",
+    read_from: "r7 validation_invariants + the six of thirty-eight producer rows that carry an empty list",
+    answer: "[] — an empty list is legal, not refused",
   },
   {
     field: "target_dag",
-    owed_from: "r7 target_dag_registry",
-    missing_fact: "the closed member set of the target DAG registry, which this repository never states",
+    read_from: "r7 target_dag_registry (closed set of 10) via Q036.D1's target assurance_fabric",
+    answer: "assurance",
   },
   {
     field: "causal_phase",
-    owed_from: "r7 causal_phase_registry",
-    missing_fact: "the closed member set of the causal phase registry, which this repository never states",
+    read_from: "r7 causal_phase_registry (closed set of 8)",
+    answer: "pre_activation",
   },
   {
     field: "produces_gate_ids[0]",
-    owed_from: "r7 consumer_gate_registry",
-    missing_fact:
-      "whether `gate-zero-read-only-accepted` is the id r7 would accept; the name follows the seven siblings' convention and is not read from r7",
+    read_from: "r7 consumer_gate_registry, which the amendment grew from 27 members to 28",
+    answer:
+      "gate-zero-read-only-accepted — admitted by the amendment under Joe's ruling on loop 589; it was NOT in the registry before, and the sibling naming convention is why that is the id that was admitted",
   },
 ]);
+
+/** Empty since 2026-09-12. See RESOLVED_FROM_R7 for what each answer was. */
+export const UNRESOLVED_WITHOUT_R7 = deepFreeze([]);
 
 /**
  * Retry policy, from the ruling: a failed Gate Zero run is retryable, and every
@@ -201,11 +253,15 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
     schema_version: V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION,
     registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
     decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
-    r7_entry_present: V5_A02_GATE_ZERO_R7_ENTRY_PRESENT,
+    r7_entry_present: r7EntryPresence(
+      v5A02GateZeroProducerRegistryEntry(predecessorStepRefs), V5_A02_GATE_ZERO_R7_PACKET_SHA256),
+    r7_packet_sha256: V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
     registry_entry: v5A02GateZeroProducerRegistryEntry(predecessorStepRefs),
     combiner: V5_A02_GATE_ZERO_COMBINER,
     retry_policy: V5_A02_GATE_ZERO_RETRY_POLICY,
     unresolved_without_r7: [...UNRESOLVED_WITHOUT_R7],
+    resolved_from_r7: [...RESOLVED_FROM_R7],
     // The seat. Registering a role does not staff one.
     oracle_seat_bound: false,
     oracle_seat_owed:
@@ -221,3 +277,11 @@ function v5A02GateZeroProducerRegistration(predecessorStepRefs) {
  */
 export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION = deepFreeze(
   v5A02GateZeroProducerRegistration(V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));
+
+/**
+ * `r7_entry_present` as a module-level constant, for the readers that want the
+ * one boolean. It is the SAME derivation the registration carries — read off
+ * the registration rather than re-derived, so the two can never disagree.
+ */
+export const V5_A02_GATE_ZERO_R7_ENTRY_PRESENT =
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.r7_entry_present;

@@ -39,6 +39,10 @@ import { GATE_ZERO_STEP_REF } from "../src/benchmark-minimum.v5.js";
 import * as surface from "../src/gate-zero-assurance.v5.js";
 import * as producerModule from "../src/gate-zero-producer-registration.v5.js";
 import {
+  V5_A02_GATE_ZERO_GATE_ID,
+  V5_A02_GATE_ZERO_PRODUCER_ROLE,
+} from "../src/gate-zero-producer-registration.v5.js";
+import {
   V5_A02_GATE_ZERO_SCHEMA_VERSION,
   V5_A02_POLICY_VERSION,
   V5_A02_DECISION_IDS,
@@ -61,6 +65,9 @@ import {
   v5A02GateZeroPolicyPreimage,
   v5A02GateZeroPolicyDigest,
   v5A02GateZeroPolicyCanonicalBytes,
+  v5A02GateZeroR7Presence,
+  V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+  V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256,
 } from "../src/gate-zero-assurance.v5.js";
 
 import {
@@ -159,6 +166,8 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
   "V5_A02_GATE_ZERO_PRODUCER_SEAM",
+  "V5_A02_GATE_ZERO_R7_PACKET_SHA256",
+  "V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256",
   "V5_A02_GATE_ZERO_REASON_IDS",
   "V5_A02_GATE_ZERO_SCHEMA_VERSION",
   "V5_A02_OBSERVATION_STATES",
@@ -173,6 +182,7 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "v5A02GateZeroPolicyCanonicalBytes",
   "v5A02GateZeroPolicyDigest",
   "v5A02GateZeroPolicyPreimage",
+  "v5A02GateZeroR7Presence",
 ];
 
 /** The words a consumer would act on. None may come back from this surface. */
@@ -280,6 +290,7 @@ test("SURFACE: the public export list is exactly the unavailable surface", () =>
  */
 const EXPECTED_PRODUCER_EXPORTS = [
   "GATE_ZERO_STEP_REF",
+  "RESOLVED_FROM_R7",
   "UNRESOLVED_WITHOUT_R7",
   "V5_A02_GATE_ZERO_COMBINER",
   "V5_A02_GATE_ZERO_GATE_ID",
@@ -290,7 +301,10 @@ const EXPECTED_PRODUCER_EXPORTS = [
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
   "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS",
   "V5_A02_GATE_ZERO_PRODUCER_ROLE",
+  "V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF",
   "V5_A02_GATE_ZERO_R7_ENTRY_PRESENT",
+  "V5_A02_GATE_ZERO_R7_PACKET_SHA256",
+  "V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256",
   "V5_A02_GATE_ZERO_RECEIPT_REF",
   "V5_A02_GATE_ZERO_RETRY_POLICY",
   "V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION",
@@ -393,7 +407,7 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", () =>
   }
 });
 
-test("SURFACE: the producer contract is reported as RULED, never as read from r7", () => {
+test("SURFACE: the producer contract is reported as REGISTERED, and registered is not staffed", () => {
   const result = emitGateZeroOutcome(cleanJoin());
   // The five the 2026-09-11 ruling settled are reported, and each one matches
   // the registration rather than a literal typed twice.
@@ -403,25 +417,99 @@ test("SURFACE: the producer contract is reported as RULED, never as read from r7
   assert.equal(result.output_schema_ref, entry.output_schema_ref);
   assert.equal(result.evidence_scope, entry.evidence_scope);
   assert.equal(result.produced_gate_id, entry.produces_gate_ids[0]);
-  // And each one is reported beside the fact that r7 does not carry it.
-  assert.equal(result.producer_registration_status, "provisional");
+  assert.equal(result.producer_registration_status, "registered");
   assert.equal(result.producer_registration_decision_ref,
     "20c83902-f150-4d59-beca-915c5c871f95");
-  assert.equal(result.r7_entry_present, false);
+  // r7 now carries the entry, and the seat is still empty. Those are separate
+  // facts and the refusal depends on the second one, not the first.
+  assert.equal(result.r7_entry_present, true);
   assert.equal(result.producer_registration.oracle_seat_bound, false);
   // No run has happened, so no outcome exists to report.
   for (const field of ["outcome_digest", "observed_at"])
     assert.equal(result[field], null, `${field} must be null, not invented`);
-  // The three fields the ruling could not settle stay null and stay named.
-  for (const field of ["consumes_gate_ids", "target_dag", "causal_phase"])
-    assert.equal(entry[field], null, `${field} is not knowable here and must stay null`);
+  // Every field of the entry is now a value read from r7; a null would mean the
+  // amendment left a hole, and tools/doctorcre-v5-review.cjs refuses such a row.
+  for (const [field, value] of Object.entries(entry))
+    assert.notEqual(value, null, `${field} must carry r7's answer, not a hole`);
+  assert.deepEqual(V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7, []);
   assert.deepEqual(
-    V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7.map(item => item.field).sort(),
+    V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.resolved_from_r7.map(item => item.field).sort(),
     ["causal_phase", "consumes_gate_ids", "produces_gate_ids[0]", "target_dag"]);
   assert.ok(result.undecided_governance_questions.includes(
     "which store an accepted predecessor outcome is read from"));
-  assert.ok(result.undecided_governance_questions.includes(
-    "whether r7 itself carries the registration, which today it does not"));
+  assert.ok(!result.undecided_governance_questions.some(
+    question => question.includes("whether r7 itself carries the registration")),
+  "r7 carries it; the question must not still be listed as open");
+});
+
+/**
+ * THE R7 ENTRY IS PROVEN BY DIGEST, NOT BY A FLAG. `r7_entry_present` is
+ * derived in the registration module; these cases are the derivation's
+ * falsifiers. The strong check `v5A02GateZeroR7Presence` takes packet BYTES —
+ * the only argument that can make it answer true — and it is exercised here
+ * against a packet built to carry the entry, against one that does not, and
+ * against the superseded digest.
+ */
+function r7PacketLike(overrides = {}) {
+  const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
+  return JSON.stringify({
+    receipt_producer_step_registry: [{ ...entry }],
+    consumer_gate_registry: [{
+      gate_id: V5_A02_GATE_ZERO_GATE_ID,
+      receipt_producer_step_refs: [GATE_ZERO_STEP_REF],
+    }],
+    producer_role_registry: [V5_A02_GATE_ZERO_PRODUCER_ROLE],
+    ...overrides,
+  });
+}
+
+test("PRODUCER: r7 presence is read from the packet, and no argument short of it answers true", () => {
+  assert.throws(() => v5A02GateZeroR7Presence(true), V5BoundaryError);
+  assert.throws(() => v5A02GateZeroR7Presence({ r7_entry_present: true }), V5BoundaryError);
+  assert.throws(() => v5A02GateZeroR7Presence(), V5BoundaryError);
+  // A packet whose CONTENT is right but whose bytes are not the pinned packet:
+  // every content finding passes and `present` is still false.
+  const lookalike = v5A02GateZeroR7Presence(r7PacketLike());
+  assert.equal(lookalike.entry_matches, true);
+  assert.equal(lookalike.gate_registered, true);
+  assert.equal(lookalike.role_registered, true);
+  assert.equal(lookalike.digest_matches, false);
+  assert.equal(lookalike.present, false, "content without the pinned digest is not the packet");
+  // Each content finding fails on its own mutation.
+  const noRole = v5A02GateZeroR7Presence(r7PacketLike({ producer_role_registry: [] }));
+  assert.equal(noRole.role_registered, false);
+  const noGate = v5A02GateZeroR7Presence(r7PacketLike({ consumer_gate_registry: [] }));
+  assert.equal(noGate.gate_registered, false);
+  const drifted = JSON.parse(r7PacketLike());
+  drifted.receipt_producer_step_registry[0].causal_phase = "production_outcome";
+  assert.equal(v5A02GateZeroR7Presence(JSON.stringify(drifted)).entry_matches, false,
+    "a row that differs by one closed-registry value is not this registration");
+  // Unparseable bytes deny rather than throw.
+  assert.equal(v5A02GateZeroR7Presence("not json").present, false);
+  // The two pins are different packets, and the superseded one is named.
+  assert.notEqual(V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256);
+  for (const sha of [V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256])
+    assert.match(sha, /^[0-9a-f]{64}$/);
+});
+
+/**
+ * THE SAME CHECK AGAINST THE REAL PACKET. r7 is not a file in this repository —
+ * it is 62 base64 chunk sections in the doctrine store, 740KB reassembled — so
+ * this case runs only when a reviewer points CARR_R7_DESIGN_PACKET at bytes
+ * they reconstructed and verified themselves. It is skipped, never faked: a
+ * fixture standing in for the packet would proves nothing about the pin.
+ */
+test("PRODUCER: the real r7 packet, when a reviewer supplies it, carries the registration", (t) => {
+  const path = process.env.CARR_R7_DESIGN_PACKET;
+  if (!path) return t.skip("set CARR_R7_DESIGN_PACKET to the reconstructed r7 design packet");
+  const finding = v5A02GateZeroR7Presence(readFileSync(path));
+  assert.equal(finding.digest_matches, true, `these bytes are not the pinned packet: ${finding.observed_sha256}`);
+  assert.equal(finding.entry_matches, true);
+  assert.equal(finding.gate_registered, true);
+  assert.equal(finding.role_registered, true);
+  assert.equal(finding.present, true);
 });
 
 test("SURFACE: a ruled producer role does not make the gate passable", () => {
