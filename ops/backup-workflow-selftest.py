@@ -1140,7 +1140,10 @@ def dispatch_door_contract() -> None:
     # THE HAPPY PATH, and the only one that may reach the vendor.
     env, state_path, log_path = fixture()
     result = invoke(env, dispatch, *proof_args())
-    dispatched = read_json(state_path).get("dispatches") or []
+    raw_dispatched = read_json(state_path).get("dispatches")
+    dispatched: list[dict[str, object]] = [
+        row for row in raw_dispatched if isinstance(row, dict)
+    ] if isinstance(raw_dispatched, list) else []
     body = dispatched[0].get("body") if dispatched else {}
     inputs = body.get("inputs") if isinstance(body, dict) else {}
     check(
