@@ -2352,6 +2352,32 @@ test("STAGING CONTROL: a planted label door in every export class has been seen 
         askedFor(query, "checkName") === DOOR
           ? readers.readPredecessorOutcomeEvidence({})
           : readers.readGateConclusionEvidence(query)) }],
+    // A DOOR THAT IS NOT AT THE TOP OF THE OBJECT, twice, because "every
+    // argument position" is a claim about depth as well as arity and a template
+    // no plant can reach is an untested template. Neither of these is addressed
+    // by any query key the readers use: the first is reachable only by the word
+    // as a KEY one level down, the second only by the word as a key AND as a
+    // LEAF three levels down.
+    ["a door under the word as a nested key", "fixtureStores", LABEL_CLAUSE, {
+      ...fixtureStores,
+      fetchCheckConclusionRows: planted(async query => {
+        let opened = false;
+        try { opened = Object.hasOwn(Object(askedFor(query, "wrapped")), DOOR); }
+        catch { opened = false; }
+        return opened
+          ? { store_ref: "github:checks", rows: [{ planted: 1 }] }
+          : fixtureStores.fetchCheckConclusionRows(query);
+      }) }],
+    ["a door on the word as a nested leaf", "fixtureStores", LABEL_CLAUSE, {
+      ...fixtureStores,
+      fetchPredecessorOutcomeRows: planted(async query => {
+        let opened = false;
+        try { opened = askedFor(askedFor(askedFor(query, "nested")?.[0], DOOR), "leaf") === DOOR; }
+        catch { opened = false; }
+        return opened
+          ? { store_ref: "record-layer:work-request-outcome-feedback", rows: [{ planted: 1 }] }
+          : fixtureStores.fetchPredecessorOutcomeRows(query);
+      }) }],
     // THE RULING LOOKUP — the one export of its module, and the one whose door
     // would open the seam outright: a ruling where the record has none.
     ["the ruling lookup", "rulings", LABEL_CLAUSE, { ...rulings,
