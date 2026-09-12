@@ -8,6 +8,7 @@ cannot reach success, and a separate observer for the terminal provider state.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -19,40 +20,43 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import ModuleType
 
 
-ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "backup-nightly.yml"
-STATUS_HELPER = ROOT / "ops" / "backup-workflow-status.py"
-SERVICES = ROOT / "ops" / "config" / "services.json"
-METERING_POLICY = ROOT / "ops" / "config" / "platform-metering.v1.json"
+_ROOT = Path(__file__).resolve().parents[1]
+_WORKFLOW = _ROOT / ".github" / "workflows" / "backup-nightly.yml"
+_STATUS_HELPER = _ROOT / "ops" / "backup-workflow-status.py"
+_SERVICES = _ROOT / "ops" / "config" / "services.json"
+_METERING_POLICY = _ROOT / "ops" / "config" / "platform-metering.v1.json"
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(_ROOT))
 
-from lib.platform_metering import authorize_metered_execution  # noqa: E402
+from lib.platform_metering import (  # noqa: E402
+    authorize_metered_execution as _authorize_metered_execution,
+)
 
-passed = 0
-failed: list[str] = []
+_passed = 0
+_failed: list[str] = []
 
 
-def check(label: str, condition: bool, detail: str) -> None:
-    global passed
+def _check(label: str, condition: bool, detail: str) -> None:
+    global _passed
     if condition:
-        passed += 1
+        _passed += 1
         print(f"PASS  {label}")
     else:
-        failed.append(label)
+        _failed.append(label)
         print(f"FAIL  {label}: {detail}")
 
 
-def executable(path: Path, body: str) -> None:
+def _executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def fake_gh(path: Path) -> None:
+def _fake_gh(path: Path) -> None:
     """A stateful local implementation of the exact gh api boundary."""
-    executable(path, f"""#!{sys.executable}
+    _executable(path, f"""#!{sys.executable}
 import json, os, pathlib, sys
 state_path = pathlib.Path(os.environ['CARR_TEST_GH_STATE'])
 log_path = pathlib.Path(os.environ['CARR_TEST_GH_LOG'])
@@ -129,7 +133,7 @@ else:
 """)
 
 
-def identity() -> dict[str, object]:
+def _identity() -> dict[str, object]:
     return {
         "repository": "jbookout/carr-system",
         "run_id": 101,
@@ -138,7 +142,7 @@ def identity() -> dict[str, object]:
     }
 
 
-def artifact() -> dict[str, object]:
+def _artifact() -> dict[str, object]:
     return {
         "id": 7001,
         "name": "carr-backup-run-101-attempt-2",
@@ -154,7 +158,7 @@ def artifact() -> dict[str, object]:
     }
 
 
-def run_state(*, conclusion: str = "success") -> dict[str, object]:
+def _run_state(*, conclusion: str = "success") -> dict[str, object]:
     return {
         "id": 101,
         "run_attempt": 2,
@@ -164,15 +168,15 @@ def run_state(*, conclusion: str = "success") -> dict[str, object]:
     }
 
 
-def named_check(conclusion: str, *, bound: bool = True) -> dict[str, object]:
-    bound_identity = identity()
+def _named_check(conclusion: str, *, bound: bool = True) -> dict[str, object]:
+    bound_identity = _identity()
     if not bound:
         bound_identity["head_sha"] = "d" * 40
     summary: dict[str, object] = {}
     if conclusion == "failure":
         summary = {"signal": "backup-failure", "reason": "synthetic dump failure"}
     elif conclusion == "success":
-        item = artifact()
+        item = _artifact()
         summary = {
             "artifact_id": item["id"],
             "artifact_name": item["name"],
@@ -193,14 +197,14 @@ def named_check(conclusion: str, *, bound: bool = True) -> dict[str, object]:
     }
 
 
-def fixture_env(
+def _fixture_env(
     root: Path,
     state: dict[str, object],
     overrides: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], Path, Path]:
     bin_dir = root / "bin"
     bin_dir.mkdir()
-    fake_gh(bin_dir / "gh")
+    _fake_gh(bin_dir / "gh")
     state_path = root / "provider-state.json"
     log_path = root / "provider-calls.jsonl"
     state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
@@ -227,12 +231,12 @@ def fixture_env(
     return env, state_path, log_path
 
 
-def invoke(env: dict[str, str], *args: str, timeout: float = 8) -> subprocess.CompletedProcess[str]:
-    if not STATUS_HELPER.is_file():
-        return subprocess.CompletedProcess(args, 127, "", f"missing {STATUS_HELPER}")
+def _invoke(env: dict[str, str], *args: str, timeout: float = 8) -> subprocess.CompletedProcess[str]:
+    if not _STATUS_HELPER.is_file():
+        return subprocess.CompletedProcess(args, 127, "", f"missing {_STATUS_HELPER}")
     return subprocess.run(
-        [sys.executable, str(STATUS_HELPER), *args],
-        cwd=ROOT,
+        [sys.executable, str(_STATUS_HELPER), *args],
+        cwd=_ROOT,
         env=env,
         text=True,
         capture_output=True,
@@ -241,24 +245,24 @@ def invoke(env: dict[str, str], *args: str, timeout: float = 8) -> subprocess.Co
     )
 
 
-def read_json(path: Path) -> dict[str, object]:
+def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def calls(path: Path) -> list[dict[str, object]]:
+def _calls(path: Path) -> list[dict[str, object]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def parsed_output(run: subprocess.CompletedProcess[str]) -> dict[str, object]:
+def _parsed_output(run: subprocess.CompletedProcess[str]) -> dict[str, object]:
     try:
         return json.loads(run.stdout)
     except (json.JSONDecodeError, TypeError):
         return {}
 
 
-def behavioral_contract() -> None:
+def _behavioral_contract() -> None:
     artifact_args = (
         "--artifact-id", "7001",
         "--artifact-name", "carr-backup-run-101-attempt-2",
@@ -269,34 +273,34 @@ def behavioral_contract() -> None:
     )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-status-complete-") as raw:
-        env, state_path, log_path = fixture_env(
+        env, state_path, log_path = _fixture_env(
             Path(raw),
             {
-                "run": run_state(),
-                "artifacts": [artifact()],
+                "run": _run_state(),
+                "artifacts": [_artifact()],
                 "check_runs": [],
                 "check_requires_filter_all": True,
             },
         )
-        started = invoke(env, "producer-start")
-        after_start = read_json(state_path)
+        started = _invoke(env, "producer-start")
+        after_start = _read_json(state_path)
         start_checks = after_start.get("check_runs", [])
         start_item = start_checks[0] if isinstance(start_checks, list) and start_checks else {}
         try:
             start_identity = json.loads(start_item.get("external_id", ""))
         except (json.JSONDecodeError, TypeError):
             start_identity = {}
-        check(
+        _check(
             "producer-start creates one in-progress Check with exact immutable identity",
             started.returncode == 0
             and start_item.get("name") == "Backup artifact"
             and start_item.get("status") == "in_progress"
-            and start_identity == identity(),
+            and start_identity == _identity(),
             started.stderr,
         )
 
-        completed = invoke(env, "producer-complete", *artifact_args)
-        after_complete = read_json(state_path)
+        completed = _invoke(env, "producer-complete", *artifact_args)
+        after_complete = _read_json(state_path)
         complete_checks = after_complete.get("check_runs", [])
         complete_item = (
             complete_checks[0]
@@ -309,46 +313,46 @@ def behavioral_contract() -> None:
             summary = json.loads(summary_raw) if isinstance(summary_raw, str) else summary_raw
         except json.JSONDecodeError:
             summary = {}
-        check(
+        _check(
             "producer-complete readbacks exact artifact metadata before one success Check",
             completed.returncode == 0
             and complete_item.get("conclusion") == "success"
             and summary.get("artifact_id") == 7001
-            and summary.get("artifact_name") == artifact()["name"]
-            and summary.get("artifact_digest") == artifact()["digest"]
-            and summary.get("artifact_bytes") == artifact()["size_in_bytes"]
-            and summary.get("artifact_created_at") == artifact()["created_at"]
-            and summary.get("artifact_expires_at") == artifact()["expires_at"]
+            and summary.get("artifact_name") == _artifact()["name"]
+            and summary.get("artifact_digest") == _artifact()["digest"]
+            and summary.get("artifact_bytes") == _artifact()["size_in_bytes"]
+            and summary.get("artifact_created_at") == _artifact()["created_at"]
+            and summary.get("artifact_expires_at") == _artifact()["expires_at"]
             and summary.get("required_steps") == ["dump", "encrypt", "upload", "readback"]
-            and any("/actions/artifacts/7001" in str(call.get("url", "")) for call in calls(log_path)),
+            and any("/actions/artifacts/7001" in str(call.get("url", "")) for call in _calls(log_path)),
             completed.stderr,
         )
-        check(
+        _check(
             "producer uses all Checks and exact run-attempt readback",
             any(
                 isinstance(args := call.get("args"), list) and "filter=all" in args
-                for call in calls(log_path)
+                for call in _calls(log_path)
             )
             and any(
                 str(call.get("url", "")).endswith("/actions/runs/101/attempts/2")
-                for call in calls(log_path)
+                for call in _calls(log_path)
             ),
-            json.dumps(calls(log_path), sort_keys=True),
+            json.dumps(_calls(log_path), sort_keys=True),
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-status-mismatch-") as raw:
-        wrong = artifact()
+        wrong = _artifact()
         wrong["size_in_bytes"] = 17
-        env, state_path, _ = fixture_env(
+        env, state_path, _ = _fixture_env(
             Path(raw),
-            {"run": run_state(), "artifacts": [wrong], "check_runs": []},
+            {"run": _run_state(), "artifacts": [wrong], "check_runs": []},
         )
-        invoke(env, "producer-start")
-        mismatched = invoke(env, "producer-complete", *artifact_args)
-        mismatch_checks = read_json(state_path).get("check_runs", [])
-        check(
+        _invoke(env, "producer-start")
+        mismatched = _invoke(env, "producer-complete", *artifact_args)
+        mismatch_checks = _read_json(state_path).get("check_runs", [])
+        _check(
             "artifact metadata mismatch cannot publish backup success",
-            STATUS_HELPER.is_file()
+            _STATUS_HELPER.is_file()
             and mismatched.returncode != 0
             and isinstance(mismatch_checks, list)
             and all(item.get("conclusion") != "success" for item in mismatch_checks),
@@ -356,14 +360,14 @@ def behavioral_contract() -> None:
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-status-attempt-name-") as raw:
-        wrong_attempt = artifact()
+        wrong_attempt = _artifact()
         wrong_attempt["name"] = "carr-backup-run-101-attempt-20"
-        env, state_path, _ = fixture_env(
+        env, state_path, _ = _fixture_env(
             Path(raw),
-            {"run": run_state(), "artifacts": [wrong_attempt], "check_runs": []},
+            {"run": _run_state(), "artifacts": [wrong_attempt], "check_runs": []},
         )
-        invoke(env, "producer-start")
-        embedded_attempt = invoke(
+        _invoke(env, "producer-start")
+        embedded_attempt = _invoke(
             env,
             "producer-complete",
             "--artifact-id", "7001",
@@ -373,8 +377,8 @@ def behavioral_contract() -> None:
             "--artifact-created-at", "2026-09-06T12:00:00Z",
             "--artifact-expires-at", "2026-12-05T12:00:00Z",
         )
-        attempt_checks = read_json(state_path).get("check_runs", [])
-        check(
+        attempt_checks = _read_json(state_path).get("check_runs", [])
+        _check(
             "producer attempt 2 rejects an artifact whose exact name says attempt 20",
             embedded_attempt.returncode != 0
             and isinstance(attempt_checks, list)
@@ -383,38 +387,38 @@ def behavioral_contract() -> None:
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-status-fail-") as raw:
-        env, state_path, _ = fixture_env(
+        env, state_path, _ = _fixture_env(
             Path(raw),
-            {"run": run_state(conclusion="failure"), "artifacts": [], "check_runs": []},
+            {"run": _run_state(conclusion="failure"), "artifacts": [], "check_runs": []},
         )
-        failed_run = invoke(env, "producer-fail", "--reason", "synthetic dump failure")
-        failure_checks = read_json(state_path).get("check_runs", [])
+        failed_run = _invoke(env, "producer-fail", "--reason", "synthetic dump failure")
+        failure_checks = _read_json(state_path).get("check_runs", [])
         failure_item = failure_checks[0] if isinstance(failure_checks, list) and failure_checks else {}
         try:
             failure_identity = json.loads(failure_item.get("external_id", ""))
             failure_summary = json.loads(failure_item.get("output", {}).get("summary", "{}"))
         except (json.JSONDecodeError, TypeError, AttributeError):
             failure_identity, failure_summary = {}, {}
-        check(
+        _check(
             "producer-fail writes only an exact-bound backup-failure Check",
             failed_run.returncode == 0
             and failure_item.get("name") == "Backup artifact"
             and failure_item.get("conclusion") == "failure"
-            and failure_identity == identity()
+            and failure_identity == _identity()
             and failure_summary.get("signal") == "backup-failure",
             failed_run.stderr,
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-status-neutral-") as raw:
-        env, state_path, log_path = fixture_env(
+        env, state_path, log_path = _fixture_env(
             Path(raw),
-            {"run": run_state(conclusion="cancelled"), "artifacts": [], "check_runs": []},
+            {"run": _run_state(conclusion="cancelled"), "artifacts": [], "check_runs": []},
         )
         proc: subprocess.Popen[str] | None = None
-        if STATUS_HELPER.is_file():
+        if _STATUS_HELPER.is_file():
             proc = subprocess.Popen(
-                [sys.executable, str(STATUS_HELPER), "neutral-cancel"],
-                cwd=ROOT,
+                [sys.executable, str(_STATUS_HELPER), "neutral-cancel"],
+                cwd=_ROOT,
                 env=env,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -422,7 +426,7 @@ def behavioral_contract() -> None:
             )
             deadline = time.monotonic() + 4
             while time.monotonic() < deadline:
-                observed = calls(log_path)
+                observed = _calls(log_path)
                 if any(str(call.get("url", "")).endswith("/actions/runs/101/cancel")
                        for call in observed):
                     break
@@ -438,10 +442,10 @@ def behavioral_contract() -> None:
                 proc.communicate()
         else:
             alive_after_cancel = False
-        neutral_state = read_json(state_path)
+        neutral_state = _read_json(state_path)
         neutral_checks = neutral_state.get("check_runs", [])
         neutral_item = neutral_checks[0] if isinstance(neutral_checks, list) and neutral_checks else {}
-        neutral_calls = calls(log_path)
+        neutral_calls = _calls(log_path)
         cancel_urls = [
             str(item.get("url", ""))
             for item in neutral_calls
@@ -463,7 +467,7 @@ def behavioral_contract() -> None:
              if str(item.get("url", "")).endswith("/actions/runs/101/cancel")),
             -1,
         )
-        check(
+        _check(
             "neutral path creates and reads back neutral, cancels only its run, then waits for kill",
             neutral_item.get("conclusion") == "neutral"
             and create_index >= 0 < readback_index < cancel_index
@@ -473,19 +477,19 @@ def behavioral_contract() -> None:
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-status-cancel-error-") as raw:
-        env, state_path, log_path = fixture_env(
+        env, state_path, log_path = _fixture_env(
             Path(raw),
             {
-                "run": run_state(conclusion="cancelled"),
+                "run": _run_state(conclusion="cancelled"),
                 "artifacts": [],
                 "check_runs": [],
                 "cancel_error": True,
             },
         )
-        if STATUS_HELPER.is_file():
+        if _STATUS_HELPER.is_file():
             proc = subprocess.Popen(
-                [sys.executable, str(STATUS_HELPER), "neutral-cancel"],
-                cwd=ROOT,
+                [sys.executable, str(_STATUS_HELPER), "neutral-cancel"],
+                cwd=_ROOT,
                 env=env,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -493,7 +497,7 @@ def behavioral_contract() -> None:
             )
             deadline = time.monotonic() + 4
             while time.monotonic() < deadline and proc.poll() is None:
-                if any(str(call.get("url", "")).endswith("/cancel") for call in calls(log_path)):
+                if any(str(call.get("url", "")).endswith("/cancel") for call in _calls(log_path)):
                     time.sleep(0.1)
                     break
                 time.sleep(0.05)
@@ -504,8 +508,8 @@ def behavioral_contract() -> None:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate()
-        cancel_error_checks = read_json(state_path).get("check_runs", [])
-        check(
+        cancel_error_checks = _read_json(state_path).get("check_runs", [])
+        _check(
             "cancel API failure cannot turn a neutral Check into success or backup-failure",
             isinstance(cancel_error_checks, list)
             and len(cancel_error_checks) == 1
@@ -522,73 +526,176 @@ def behavioral_contract() -> None:
         expected_rc: int | None,
     ) -> None:
         with tempfile.TemporaryDirectory(prefix="carr-wr54-status-observe-") as raw:
-            env, _, log_path = fixture_env(Path(raw), state)
-            observed = invoke(env, "observe")
-            result = parsed_output(observed)
+            env, _, log_path = _fixture_env(Path(raw), state)
+            observed = _invoke(env, "observe")
+            result = _parsed_output(observed)
             ok = (
                 (expected_rc is None or observed.returncode == expected_rc)
                 and (expected_state is None or result.get("state") == expected_state)
                 and result.get("signal") == expected_signal
                 and any("/actions/runs/101" in str(call.get("url", ""))
-                        for call in calls(log_path))
+                        for call in _calls(log_path))
             )
-            check(label, ok, f"rc={observed.returncode} out={observed.stdout!r} err={observed.stderr!r}")
+            _check(label, ok, f"rc={observed.returncode} out={observed.stdout!r} err={observed.stderr!r}")
 
     observe_case(
         "observer accepts exact cancelled neutral run with zero artifacts as disabled",
-        {"run": run_state(conclusion="cancelled"), "artifacts": [], "check_runs": [named_check("neutral")]},
+        {"run": _run_state(conclusion="cancelled"), "artifacts": [], "check_runs": [_named_check("neutral")]},
         "disabled",
         None,
         0,
     )
     observe_case(
         "observer refuses mismatched neutral provenance without backup-failure",
-        {"run": run_state(conclusion="cancelled"), "artifacts": [], "check_runs": [named_check("neutral", bound=False)]},
+        {"run": _run_state(conclusion="cancelled"), "artifacts": [], "check_runs": [_named_check("neutral", bound=False)]},
         "unknown",
         None,
         2,
     )
     observe_case(
         "infrastructure cancellation without neutral Check cannot signal backup-failure",
-        {"run": run_state(conclusion="cancelled"), "artifacts": [], "check_runs": []},
+        {"run": _run_state(conclusion="cancelled"), "artifacts": [], "check_runs": []},
         "unknown",
         None,
         2,
     )
     observe_case(
         "observer emits backup-failure for the exact-bound failure Check",
-        {"run": run_state(conclusion="cancelled"), "artifacts": [], "check_runs": [named_check("failure")]},
+        {"run": _run_state(conclusion="cancelled"), "artifacts": [], "check_runs": [_named_check("failure")]},
         "failure",
         "backup-failure",
         1,
     )
     observe_case(
         "observer suppresses backup-failure for mismatched failure provenance",
-        {"run": run_state(conclusion="failure"), "artifacts": [], "check_runs": [named_check("failure", bound=False)]},
+        {"run": _run_state(conclusion="failure"), "artifacts": [], "check_runs": [_named_check("failure", bound=False)]},
         "unknown",
         None,
         2,
     )
     observe_case(
         "observer accepts success only with exact artifact metadata",
-        {"run": run_state(), "artifacts": [artifact()], "check_runs": [named_check("success")]},
+        {"run": _run_state(), "artifacts": [_artifact()], "check_runs": [_named_check("success")]},
         "success",
         None,
         0,
     )
 
 
-PROOF_ID = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
-PROOF_HEAD = "a" * 40
-PROOF_REASON = "approved WR54 controlled failure before dump"
-CONTROLLED_FAILURE_EXIT = 9
+_PROOF_ID = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+_PROOF_HEAD = "a" * 40
+_PROOF_REASON = "approved WR54 controlled failure before dump"
+_CONTROLLED_FAILURE_EXIT = 9
+# A proof spent on this head by an EARLIER run. Registered, never derived from
+# anything a caller passes: the positive control below needs a head that has
+# already seeded one failure, because that is the situation the seam's own
+# exclusion exists for.
+_EARLIER_PROOF_ID = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+# ── registered check-run fixture shapes ─────────────────────────────────────
+# NOTHING A CALLER PASSES TO _ci_check REACHES THE RETURNED ROW. Every argument
+# is a KEY into one of these registries, an unregistered key raises, and only
+# the registered VALUE is ever placed in the fixture. That is the closed shape
+# the standing authority rule asks of a registry lookup keyed by caller input:
+# the key selects, it never supplies. The helper is module-private for the same
+# rule -- its rows carry GitHub's "completed"/"success" vocabulary, and an
+# exported builder that took that vocabulary from its caller would be a
+# privileged outcome minted from caller input under a fixture's name.
+_CHECK_STATES: dict[str, dict[str, object]] = {
+    "concluded_clean": {"status": "completed", "conclusion": "success"},
+    "unconcluded": {"status": "in_progress", "conclusion": None},
+    "concluded_red": {"status": "completed", "conclusion": "failure"},
+}
+# "seam_label" is the exact label the retired name-only exclusion trusted. It
+# is registered here precisely so the controls below can attach it to rows the
+# seam did not write.
+_CHECK_LABELS = {"ordinary_ci": "gates", "seam_label": "Backup artifact"}
+_CHECK_PRODUCERS: dict[str, dict[str, object] | None] = {
+    # The producer the door authenticates: GitHub's own Actions app, which is
+    # what stamps a Check created with a workflow run's GITHUB_TOKEN.
+    "actions_app": {"id": 15368, "slug": "github-actions"},
+    # Any other installation. It has the same free text available to it -- name,
+    # title, output, external_id -- and a different stamp.
+    "foreign_app": {"id": 99001, "slug": "impostor-checks"},
+    "unattributed": None,
+}
+_CHECK_ENVELOPES: dict[str, dict[str, object] | None] = {
+    "absent": None,
+    "seam_this_head": {
+        "repository": "jbookout/carr-system", "run_id": 99,
+        "run_attempt": 1, "head_sha": _PROOF_HEAD,
+    },
+    "seam_other_head": {
+        "repository": "jbookout/carr-system", "run_id": 99,
+        "run_attempt": 1, "head_sha": "d" * 40,
+    },
+}
+_CHECK_SUMMARIES: dict[str, dict[str, object] | None] = {
+    "absent": None,
+    "earlier_proof": {
+        "signal": "backup-failure", "reason": _PROOF_REASON,
+        "proof_id": _EARLIER_PROOF_ID,
+    },
+}
+# One registered ID per (producer, label) pair. Distinct IDs matter: the helper
+# that reads a head's Checks de-duplicates by ID, so two fixture rows sharing
+# one would silently collapse into a single Check and a control would pass
+# while proving nothing.
+_CHECK_IDS = {
+    ("actions_app", "ordinary_ci"): 7300,
+    ("actions_app", "seam_label"): 7301,
+    ("foreign_app", "ordinary_ci"): 7400,
+    ("foreign_app", "seam_label"): 7401,
+    ("unattributed", "ordinary_ci"): 7500,
+    ("unattributed", "seam_label"): 7501,
+}
 
 
-def proof_args(*, proof_id: str = PROOF_ID, head: str = PROOF_HEAD) -> tuple[str, ...]:
+def _ci_check(
+    state: str,
+    *,
+    label: str = "ordinary_ci",
+    producer: str = "actions_app",
+    envelope: str = "absent",
+    summary: str = "absent",
+) -> dict[str, object]:
+    """One check-run on the proof head, assembled only from registered values.
+
+    The default is the ordinary case the door must be able to stand on: a
+    concluded, clean CI Check stamped by the Actions app and carrying no seam
+    envelope -- which is what every real gates run on the head looks like.
+    """
+    key = (producer, label)
+    if (state not in _CHECK_STATES or label not in _CHECK_LABELS
+            or producer not in _CHECK_PRODUCERS or envelope not in _CHECK_ENVELOPES
+            or summary not in _CHECK_SUMMARIES or key not in _CHECK_IDS):
+        raise ValueError("unregistered check-run fixture shape")
+    row: dict[str, object] = {
+        "id": _CHECK_IDS[key],
+        "name": _CHECK_LABELS[label],
+        "head_sha": _PROOF_HEAD,
+        **_CHECK_STATES[state],
+    }
+    stamp = _CHECK_PRODUCERS[producer]
+    if stamp is not None:
+        row["app"] = dict(stamp)
+    carried = _CHECK_ENVELOPES[envelope]
+    if carried is not None:
+        row["external_id"] = json.dumps(carried, sort_keys=True, separators=(",", ":"))
+    reported = _CHECK_SUMMARIES[summary]
+    if reported is not None:
+        row["output"] = {
+            "title": _CHECK_LABELS[label],
+            "summary": json.dumps(reported, sort_keys=True),
+        }
+    return row
+
+
+def _proof_args(*, proof_id: str = _PROOF_ID, head: str = _PROOF_HEAD) -> tuple[str, ...]:
     return ("--proof-id", proof_id, "--expected-head", head)
 
 
-def spent_proof_check(proof_id: str = PROOF_ID) -> dict[str, object]:
+def _spent_proof_check(proof_id: str = _PROOF_ID) -> dict[str, object]:
     """A proof Check left on this head by an EARLIER run.
 
     Its run identity is 99/1, not this fixture's 101/2, on purpose: the reuse
@@ -599,31 +706,35 @@ def spent_proof_check(proof_id: str = PROOF_ID) -> dict[str, object]:
         "repository": "jbookout/carr-system",
         "run_id": 99,
         "run_attempt": 1,
-        "head_sha": PROOF_HEAD,
+        "head_sha": _PROOF_HEAD,
     }
-    summary = {"signal": "backup-failure", "reason": PROOF_REASON, "proof_id": proof_id}
+    summary = {"signal": "backup-failure", "reason": _PROOF_REASON, "proof_id": proof_id}
     return {
         "id": 8500,
         "name": "Backup artifact",
-        "head_sha": PROOF_HEAD,
+        "head_sha": _PROOF_HEAD,
         "status": "completed",
         "conclusion": "failure",
+        # The provider stamp a real seam Check carries, from the one registered
+        # spelling of it. Without it this fixture would be an impostor row, and
+        # the refusal it proves would be the wrong refusal.
+        "app": dict(_CHECK_PRODUCERS["actions_app"] or {}),
         "external_id": json.dumps(earlier, sort_keys=True, separators=(",", ":")),
         "output": {"title": "Backup artifact", "summary": json.dumps(summary, sort_keys=True)},
     }
 
 
-def controlled_failure_contract() -> None:
+def _controlled_failure_contract() -> None:
     """The WR54 seam: refuse loudly, or fail exactly once with a bound proof."""
 
     # ── the read-only validation passes on an exact request, writing nothing ──
     with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-validate-") as raw:
-        env, state_path, _ = fixture_env(
-            Path(raw), {"run": run_state(), "artifacts": [], "check_runs": []},
+        env, state_path, _ = _fixture_env(
+            Path(raw), {"run": _run_state(), "artifacts": [], "check_runs": []},
         )
-        validated = invoke(env, "validate-controlled-failure", *proof_args())
-        after_validate = read_json(state_path)
-        check(
+        validated = _invoke(env, "validate-controlled-failure", *_proof_args())
+        after_validate = _read_json(state_path)
+        _check(
             "validate-controlled-failure accepts an exact request and writes nothing",
             validated.returncode == 0
             and after_validate.get("check_runs") == []
@@ -636,183 +747,183 @@ def controlled_failure_contract() -> None:
     refusals: list[tuple[str, dict[str, object], dict[str, str], tuple[str, ...]]] = [
         (
             "a wrong actor cannot spend a controlled failure",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {"GITHUB_ACTOR": "someone-else"},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "a wrong triggering actor cannot spend a controlled failure",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {"GITHUB_TRIGGERING_ACTOR": "someone-else"},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "a scheduled event can never reach the controlled failure",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {"GITHUB_EVENT_NAME": "schedule"},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "a non-main ref cannot spend a controlled failure",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {"GITHUB_REF": "refs/heads/topic"},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "another repository cannot spend a controlled failure",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {"GITHUB_REPOSITORY": "someone-else/carr-system"},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "an expected head that is not this run's GITHUB_SHA refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {},
-            proof_args(head="b" * 40),
+            _proof_args(head="b" * 40),
         ),
         (
             "a short expected head refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {},
-            proof_args(head="abc123"),
+            _proof_args(head="abc123"),
         ),
         (
             "an uppercase expected head refuses rather than being normalised",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {},
-            proof_args(head="A" * 40),
+            _proof_args(head="A" * 40),
         ),
         (
             "a malformed proof ID refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {},
-            proof_args(proof_id="not-a-uuid"),
+            _proof_args(proof_id="not-a-uuid"),
         ),
         (
             "an uppercase proof ID is not canonical and refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"run": _run_state(), "artifacts": [], "check_runs": []},
             {},
-            proof_args(proof_id=PROOF_ID.upper()),
+            _proof_args(proof_id=_PROOF_ID.upper()),
         ),
         (
             "a proof ID already spent on this head refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": [spent_proof_check()]},
+            {"run": _run_state(), "artifacts": [], "check_runs": [_spent_proof_check()]},
             {},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "an artifact already on this run refuses before any Check write",
-            {"run": run_state(), "artifacts": [artifact()], "check_runs": []},
+            {"run": _run_state(), "artifacts": [_artifact()], "check_runs": []},
             {},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "exhausted Check pagination fails closed instead of reporting a clean head",
             {
-                "run": run_state(),
+                "run": _run_state(),
                 "artifacts": [],
                 "check_runs": [],
                 "check_pagination_exhausted": True,
             },
             {},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "a provider Check-listing failure refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": [], "check_list_error": True},
+            {"run": _run_state(), "artifacts": [], "check_runs": [], "check_list_error": True},
             {},
-            proof_args(),
+            _proof_args(),
         ),
         (
             "a provider artifact-listing failure refuses",
-            {"run": run_state(), "artifacts": [], "check_runs": [], "artifact_list_error": True},
+            {"run": _run_state(), "artifacts": [], "check_runs": [], "artifact_list_error": True},
             {},
-            proof_args(),
+            _proof_args(),
         ),
     ]
     for label, state, overrides, args in refusals:
         for command in ("validate-controlled-failure", "controlled-failure"):
             with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-refuse-") as raw:
-                env, state_path, _ = fixture_env(Path(raw), dict(state), overrides)
-                before = json.dumps(read_json(state_path).get("check_runs"), sort_keys=True)
-                refused = invoke(env, command, *args)
-                after = json.dumps(read_json(state_path).get("check_runs"), sort_keys=True)
-                check(
+                env, state_path, _ = _fixture_env(Path(raw), dict(state), overrides)
+                before = json.dumps(_read_json(state_path).get("check_runs"), sort_keys=True)
+                refused = _invoke(env, command, *args)
+                after = json.dumps(_read_json(state_path).get("check_runs"), sort_keys=True)
+                _check(
                     f"{command}: {label}",
                     refused.returncode != 0
-                    and refused.returncode != CONTROLLED_FAILURE_EXIT
+                    and refused.returncode != _CONTROLLED_FAILURE_EXIT
                     and after == before,
                     f"rc={refused.returncode} err={refused.stderr!r} checks={after}",
                 )
 
     # ── the exact proof: one Check, flipped once, and a failing exit ─────────
     with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-write-") as raw:
-        env, state_path, log_path = fixture_env(
+        env, state_path, log_path = _fixture_env(
             Path(raw),
-            {"run": run_state(conclusion="failure"), "artifacts": [], "check_runs": []},
+            {"run": _run_state(conclusion="failure"), "artifacts": [], "check_runs": []},
         )
-        started = invoke(env, "producer-start")
-        proved = invoke(env, "controlled-failure", *proof_args())
-        rows = read_json(state_path).get("check_runs", [])
+        started = _invoke(env, "producer-start")
+        proved = _invoke(env, "controlled-failure", *_proof_args())
+        rows = _read_json(state_path).get("check_runs", [])
         item = rows[0] if isinstance(rows, list) and len(rows) == 1 else {}
         try:
             summary = json.loads(item.get("output", {}).get("summary", "{}"))
             bound = json.loads(item.get("external_id", ""))
         except (json.JSONDecodeError, TypeError, AttributeError):
             summary, bound = {}, {}
-        check(
+        _check(
             "controlled-failure flips only this run's Check to a structured proof failure",
             started.returncode == 0
-            and proved.returncode == CONTROLLED_FAILURE_EXIT
+            and proved.returncode == _CONTROLLED_FAILURE_EXIT
             and item.get("name") == "Backup artifact"
             and item.get("status") == "completed"
             and item.get("conclusion") == "failure"
-            and bound == identity()
+            and bound == _identity()
             and summary == {
                 "signal": "backup-failure",
-                "reason": PROOF_REASON,
-                "proof_id": PROOF_ID,
+                "reason": _PROOF_REASON,
+                "proof_id": _PROOF_ID,
             },
             f"rc={proved.returncode} err={proved.stderr!r} checks={json.dumps(rows, sort_keys=True)}",
         )
-        check(
+        _check(
             "the controlled proof reads no credential and creates no artifact",
-            read_json(state_path).get("artifacts") == []
+            _read_json(state_path).get("artifacts") == []
             and not any(
                 "/actions/artifacts" in str(call.get("url", ""))
-                for call in calls(log_path)
+                for call in _calls(log_path)
             ),
-            json.dumps(calls(log_path), sort_keys=True),
+            json.dumps(_calls(log_path), sort_keys=True),
         )
-        observed = invoke(env, "observe")
-        result = parsed_output(observed)
-        check(
+        observed = _invoke(env, "observe")
+        result = _parsed_output(observed)
+        _check(
             "the observer reports the proof failure with its structured proof_id",
             observed.returncode == 1
             and result.get("state") == "failure"
             and result.get("signal") == "backup-failure"
-            and result.get("proof_id") == PROOF_ID
-            and result.get("detail") == PROOF_REASON,
+            and result.get("proof_id") == _PROOF_ID
+            and result.get("detail") == _PROOF_REASON,
             f"rc={observed.returncode} out={observed.stdout!r}",
         )
-        replayed = invoke(env, "validate-controlled-failure", *proof_args())
-        check(
+        replayed = _invoke(env, "validate-controlled-failure", *_proof_args())
+        _check(
             "the same proof ID cannot be spent twice on the same head",
-            replayed.returncode != 0 and replayed.returncode != CONTROLLED_FAILURE_EXIT,
+            replayed.returncode != 0 and replayed.returncode != _CONTROLLED_FAILURE_EXIT,
             f"rc={replayed.returncode} err={replayed.stderr!r}",
         )
 
     # ── the write boundary needs this attempt's own in-progress Check ────────
     with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-no-check-") as raw:
-        env, state_path, _ = fixture_env(
-            Path(raw), {"run": run_state(), "artifacts": [], "check_runs": []},
+        env, state_path, _ = _fixture_env(
+            Path(raw), {"run": _run_state(), "artifacts": [], "check_runs": []},
         )
-        orphan = invoke(env, "controlled-failure", *proof_args())
-        check(
+        orphan = _invoke(env, "controlled-failure", *_proof_args())
+        _check(
             "controlled-failure without a started Check refuses and creates none",
             orphan.returncode != 0
-            and orphan.returncode != CONTROLLED_FAILURE_EXIT
-            and read_json(state_path).get("check_runs") == [],
+            and orphan.returncode != _CONTROLLED_FAILURE_EXIT
+            and _read_json(state_path).get("check_runs") == [],
             f"rc={orphan.returncode} err={orphan.stderr!r}",
         )
 
@@ -820,18 +931,18 @@ def controlled_failure_contract() -> None:
     # conclusion guard alone does NOT cover: it carries no conclusion, so only
     # the status guard can refuse it. A mutation run found this uncovered.
     with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-queued-") as raw:
-        queued = named_check("neutral")
+        queued = _named_check("neutral")
         queued["status"] = "queued"
         queued["conclusion"] = None
-        env, state_path, _ = fixture_env(
-            Path(raw), {"run": run_state(), "artifacts": [], "check_runs": [queued]},
+        env, state_path, _ = _fixture_env(
+            Path(raw), {"run": _run_state(), "artifacts": [], "check_runs": [queued]},
         )
-        premature = invoke(env, "controlled-failure", *proof_args())
-        rows = read_json(state_path).get("check_runs", [])
-        check(
+        premature = _invoke(env, "controlled-failure", *_proof_args())
+        rows = _read_json(state_path).get("check_runs", [])
+        _check(
             "controlled-failure refuses a Check that has not reached in_progress",
             premature.returncode != 0
-            and premature.returncode != CONTROLLED_FAILURE_EXIT
+            and premature.returncode != _CONTROLLED_FAILURE_EXIT
             and isinstance(rows, list)
             and all(
                 row.get("status") == "queued" and row.get("conclusion") is None
@@ -841,45 +952,45 @@ def controlled_failure_contract() -> None:
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-success-") as raw:
-        env, state_path, _ = fixture_env(
+        env, state_path, _ = _fixture_env(
             Path(raw),
-            {"run": run_state(), "artifacts": [artifact()], "check_runs": [named_check("success")]},
+            {"run": _run_state(), "artifacts": [_artifact()], "check_runs": [_named_check("success")]},
         )
-        over_success = invoke(env, "controlled-failure", *proof_args())
-        rows = read_json(state_path).get("check_runs", [])
-        check(
+        over_success = _invoke(env, "controlled-failure", *_proof_args())
+        rows = _read_json(state_path).get("check_runs", [])
+        _check(
             "controlled-failure refuses to overwrite an artifact-backed success Check",
             over_success.returncode != 0
-            and over_success.returncode != CONTROLLED_FAILURE_EXIT
+            and over_success.returncode != _CONTROLLED_FAILURE_EXIT
             and isinstance(rows, list)
             and all(row.get("conclusion") == "success" for row in rows),
             f"rc={over_success.returncode} err={over_success.stderr!r} checks={json.dumps(rows, sort_keys=True)}",
         )
 
     with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-ambiguous-") as raw:
-        second = named_check("neutral")
+        second = _named_check("neutral")
         second["id"] = 8002
-        env, state_path, _ = fixture_env(
+        env, state_path, _ = _fixture_env(
             Path(raw),
             {
-                "run": run_state(),
+                "run": _run_state(),
                 "artifacts": [],
-                "check_runs": [named_check("neutral"), second],
+                "check_runs": [_named_check("neutral"), second],
             },
         )
-        ambiguous = invoke(env, "controlled-failure", *proof_args())
-        rows = read_json(state_path).get("check_runs", [])
-        check(
+        ambiguous = _invoke(env, "controlled-failure", *_proof_args())
+        rows = _read_json(state_path).get("check_runs", [])
+        _check(
             "two exact Checks make the proof ambiguous and it refuses",
             ambiguous.returncode != 0
-            and ambiguous.returncode != CONTROLLED_FAILURE_EXIT
+            and ambiguous.returncode != _CONTROLLED_FAILURE_EXIT
             and isinstance(rows, list)
             and all(row.get("conclusion") == "neutral" for row in rows),
             f"rc={ambiguous.returncode} err={ambiguous.stderr!r}",
         )
 
 
-def workflow_mode_contract(source: str, backup_job: str) -> None:
+def _workflow_mode_contract(source: str, backup_job: str) -> None:
     """The gate resolves three modes, and every effect step names exactly one."""
     dispatch = re.search(
         r"(?ms)^  workflow_dispatch:\s*\n(?P<body>.*?)(?=^\S|^concurrency:|\Z)", source
@@ -907,14 +1018,14 @@ def workflow_mode_contract(source: str, backup_job: str) -> None:
         and re.search(r"(?m)^        required: false\s*$", block)
         and re.search(r"(?m)^        default: \"\"\s*$", block)
     }
-    check(
+    _check(
         "both proof inputs are optional and default to empty",
         len(optional) == 2,
         "an ordinary manual dispatch must stay byte-for-behavior unchanged, which "
         "means both inputs optional with an empty default; satisfied: "
         + json.dumps(sorted(optional)),
     )
-    check(
+    _check(
         "the gate resolves exactly the three declared modes",
         all(f"MODE={mode}" in backup_job for mode in ("backup", "disabled", "failure-proof"))
         and 'echo "mode=$MODE" >> "$GITHUB_OUTPUT"' in backup_job
@@ -927,14 +1038,14 @@ def workflow_mode_contract(source: str, backup_job: str) -> None:
     start_call = "backup-workflow-status.py producer-start"
     validate_call = "backup-workflow-status.py validate-controlled-failure"
     convert_call = "backup-workflow-status.py controlled-failure"
-    check(
+    _check(
         "a half-filled proof request is refused at the gate, before producer-start",
         "refusing before producer-start" in backup_job
         and start_call in backup_job
         and backup_job.index("refusing before producer-start") < backup_job.index(start_call),
         "the refusal must precede the first durable write, so nothing needs unwinding",
     )
-    check(
+    _check(
         "a non-dispatch event carrying proof inputs is refused rather than downgraded",
         bool(re.search(
             r'\[ "\$EVENT_NAME" != "workflow_dispatch" \][^\n]*\\\n[^\n]*'
@@ -944,7 +1055,7 @@ def workflow_mode_contract(source: str, backup_job: str) -> None:
         "a scheduled event must never enter failure-proof mode, and must not fall back to backup",
     )
 
-    steps = workflow_steps(backup_job)
+    steps = _workflow_steps(backup_job)
     effect_tokens = (
         "secrets.BACKUP_DATABASE_URL",
         "secrets.R2_ACCESS_KEY_ID",
@@ -964,7 +1075,7 @@ def workflow_mode_contract(source: str, backup_job: str) -> None:
         if any(token in step for token in effect_tokens)
         and "steps.gate.outputs.mode == 'backup'" not in step
     ]
-    check(
+    _check(
         "every credential, dependency, dump, upload and R2 step is gated to mode=backup",
         bool(steps) and not ungated,
         "ungated effect steps: " + json.dumps(ungated),
@@ -976,12 +1087,12 @@ def workflow_mode_contract(source: str, backup_job: str) -> None:
                      "backup-workflow-status.py neutral-cancel")
     }
     proof_steps = invoking[validate_call] + invoking[convert_call]
-    check(
+    _check(
         "validation runs read-only before producer-start, and the write step after it",
         len(invoking[validate_call]) == 1
         and len(invoking[convert_call]) == 1
         and all(
-            step_condition(step) == "steps.gate.outputs.mode == 'failure-proof'"
+            _step_condition(step) == "steps.gate.outputs.mode == 'failure-proof'"
             for step in proof_steps
         )
         and backup_job.index(validate_call)
@@ -990,33 +1101,33 @@ def workflow_mode_contract(source: str, backup_job: str) -> None:
         "expected exactly one failure-proof-gated validate step and one convert step, "
         "in validate/start/convert order",
     )
-    check(
+    _check(
         "producer-start is the one step shared by backup and failure-proof",
         len(invoking[start_call]) == 1
-        and step_condition(invoking[start_call][0])
+        and _step_condition(invoking[start_call][0])
         == "steps.gate.outputs.mode == 'backup' || steps.gate.outputs.mode == 'failure-proof'",
         "the proof needs a real in-progress Check to convert, and nothing else in common",
     )
     recorder = invoking["backup-workflow-status.py producer-fail"]
-    check(
+    _check(
         "the generic pipeline-failure recorder stays mode=backup only",
         len(recorder) == 1
-        and "steps.gate.outputs.mode == 'backup'" in step_condition(recorder[0])
-        and "failure-proof" not in step_condition(recorder[0]),
+        and "steps.gate.outputs.mode == 'backup'" in _step_condition(recorder[0])
+        and "failure-proof" not in _step_condition(recorder[0]),
         "a generic recorder reachable in proof mode could overwrite or duplicate the "
-        "proof Check: " + json.dumps([step_condition(s) for s in recorder]),
+        "proof Check: " + json.dumps([_step_condition(s) for s in recorder]),
     )
     canceller = invoking["backup-workflow-status.py neutral-cancel"]
-    check(
+    _check(
         "the disabled scheduled branch keeps its neutral self-cancel path",
         len(canceller) == 1
-        and step_condition(canceller[0]) == "steps.gate.outputs.mode == 'disabled'"
+        and _step_condition(canceller[0]) == "steps.gate.outputs.mode == 'disabled'"
         and 'CLOUD_BACKUP_ENABLED:-}" = "true"' in backup_job,
         "the reviewed disabled predicate and its neutral/self-cancel semantics are unchanged",
     )
 
 
-def workflow_steps(job_body: str) -> list[str]:
+def _workflow_steps(job_body: str) -> list[str]:
     """Split a job body into its step blocks on the six-space list markers.
 
     A run of comment lines directly above a marker belongs to the step it
@@ -1045,25 +1156,25 @@ def workflow_steps(job_body: str) -> list[str]:
     return blocks
 
 
-def step_condition(step: str) -> str:
+def _step_condition(step: str) -> str:
     """The step's own `if:` expression, or empty when it has none."""
     match = re.search(r"(?m)^        if: (?P<expr>.*)$", step)
     return match.group("expr").strip() if match else ""
 
 
-def service_identity_contract() -> None:
+def _service_identity_contract() -> None:
     """One cloud-backup service identity, and it aliases neither neighbour."""
     try:
-        catalog = json.loads(SERVICES.read_text(encoding="utf-8"))
+        catalog = json.loads(_SERVICES.read_text(encoding="utf-8"))
         services = catalog.get("services", [])
     except (OSError, json.JSONDecodeError) as exc:
-        check("service catalog parses", False, str(exc))
+        _check("service catalog parses", False, str(exc))
         return
     rows = [row for row in services if row.get("key") == "backup-nightly-cloud"]
     row = rows[0] if len(rows) == 1 else {}
     environments = row.get("environments", []) if isinstance(row, dict) else []
     production = [e for e in environments if e.get("environment") == "production"]
-    check(
+    _check(
         "the catalog declares exactly one backup-nightly-cloud production identity",
         len(rows) == 1
         and len(environments) == 1
@@ -1074,7 +1185,7 @@ def service_identity_contract() -> None:
         json.dumps(rows, sort_keys=True),
     )
     environment = production[0] if production else {}
-    check(
+    _check(
         "the cloud backup declares no CARR cadence and says why in its own notes",
         "expected_cadence_seconds" not in environment
         and "cadence_grace_seconds" not in environment
@@ -1085,7 +1196,7 @@ def service_identity_contract() -> None:
         "unknown-state limit and must not claim the failure email detects a missed schedule: "
         + json.dumps(environment, sort_keys=True),
     )
-    check(
+    _check(
         "the cloud backup never aliases nightly-record-layer or restore-rehearse-weekly",
         row.get("key") == "backup-nightly-cloud"
         and row.get("repo_path") not in ("bin/nightly.sh",)
@@ -1101,7 +1212,7 @@ def service_identity_contract() -> None:
 # The closed union of privileged words from the standing authority rule, swept
 # as exact match AND substring. A receipt key or value that lands inside it is a
 # label pretending to be authority, which is why this suite refuses one.
-PRIVILEGED_WORDS = (
+_PRIVILEGED_WORDS = (
     "allow", "commit", "prompt", "suppress", "release", "read", "covered",
     "drafted", "proposed", "queued", "healthy", "passing", "ok", "pass",
     "satisfied", "complete", "admitted", "resumed", "attended", "verified",
@@ -1110,40 +1221,30 @@ PRIVILEGED_WORDS = (
 )
 
 
-def privileged_hits(value: object, path: str = "") -> list[str]:
+def _privileged_hits(value: object, path: str = "") -> list[str]:
     """Every place a privileged word appears in a receipt's keys or string values."""
     hits: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
             text = str(key).lower()
-            hits.extend(f"{path}{key} (key: {word})" for word in PRIVILEGED_WORDS
+            hits.extend(f"{path}{key} (key: {word})" for word in _PRIVILEGED_WORDS
                         if word in text)
             if re.search(r"^would_|_if_authoritative", text):
                 hits.append(f"{path}{key} (key: reserved prefix or suffix)")
-            hits.extend(privileged_hits(item, f"{path}{key}."))
+            hits.extend(_privileged_hits(item, f"{path}{key}."))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            hits.extend(privileged_hits(item, f"{path}{index}."))
+            hits.extend(_privileged_hits(item, f"{path}{index}."))
     elif isinstance(value, str):
         text = value.lower()
-        hits.extend(f"{path} (value {value!r}: {word})" for word in PRIVILEGED_WORDS
+        hits.extend(f"{path} (value {value!r}: {word})" for word in _PRIVILEGED_WORDS
                     if word in text)
         if re.search(r"^would_|_if_authoritative", text):
             hits.append(f"{path} (value {value!r}: reserved prefix or suffix)")
     return hits
 
 
-def green_ci_check(check_id: int = 7300, name: str = "gates",
-                   conclusion: str | None = "success",
-                   status: str = "completed") -> dict[str, object]:
-    """One ordinary CI Check on the head, in the shape GitHub returns."""
-    return {
-        "id": check_id, "name": name, "head_sha": PROOF_HEAD,
-        "status": status, "conclusion": conclusion,
-    }
-
-
-def paused_policy_tree() -> Path:
+def _paused_policy_tree() -> Path:
     """A copy of the door's own tree whose metering policy re-imposes the pause.
 
     The door resolves its policy from its OWN resolved location, not from an
@@ -1155,16 +1256,16 @@ def paused_policy_tree() -> Path:
     root = Path(tempfile.mkdtemp(prefix="carr-dispatch-paused-"))
     (root / "ops" / "config").mkdir(parents=True)
     (root / "lib").mkdir()
-    shutil.copy2(STATUS_HELPER, root / "ops" / STATUS_HELPER.name)
-    shutil.copy2(ROOT / "lib" / "platform_metering.py", root / "lib" / "platform_metering.py")
-    policy = json.loads(METERING_POLICY.read_text(encoding="utf-8"))
+    shutil.copy2(_STATUS_HELPER, root / "ops" / _STATUS_HELPER.name)
+    shutil.copy2(_ROOT / "lib" / "platform_metering.py", root / "lib" / "platform_metering.py")
+    policy = json.loads(_METERING_POLICY.read_text(encoding="utf-8"))
     policy["temporary_controls"]["github_actions_pause"]["repository_actions_enabled"] = False
     (root / "ops" / "config" / "platform-metering.v1.json").write_text(
         json.dumps(policy, indent=2), encoding="utf-8")
     return root
 
 
-def dispatch_door_contract() -> None:
+def _dispatch_door_contract() -> None:
     """The reviewed dispatch door: admit the spend, or reach no vendor at all.
 
     The door exists because hooks/guard-unattended.py refuses a session-issued
@@ -1176,13 +1277,13 @@ def dispatch_door_contract() -> None:
     is established from the head's own Checks rather than asserted.
     """
     dispatch = "dispatch-controlled-failure"
-    status_source = STATUS_HELPER.read_text(encoding="utf-8")
+    status_source = _STATUS_HELPER.read_text(encoding="utf-8")
     # The door's exact signature is the anchor for everything below, so it is
     # asserted first and the later reads are written to report FAIL rather than
     # raise when it is gone. A renamed door used to take this whole function down
     # with a traceback, which reads as a broken suite instead of a missing door.
     signature = "def _dispatch_controlled_failure(proof_id: str, head: str) -> int:"
-    check(
+    _check(
         "the dispatch door is module-private and takes no caller object",
         signature in status_source
         and "\ndef dispatch_controlled_failure" not in status_source,
@@ -1195,19 +1296,19 @@ def dispatch_door_contract() -> None:
     # been deleted outright.
     door_body = (status_source.split(signature, 1)[-1].split("\ndef ", 1)[0]
                  if signature in status_source else "")
-    check(
+    _check(
         "the dispatch door admits the metered spend in its own body",
         "authorize_metered_execution(" in door_body
         and '"github-actions-remote-ci"' in door_body,
         "a dispatcher that skips admission is the bypass the metering gate exists to stop",
     )
-    check(
+    _check(
         "the dispatch door admits BEFORE it reaches the vendor",
         "authorize_metered_execution(" in door_body and "/dispatches" in door_body
         and door_body.index("authorize_metered_execution(") < door_body.index("/dispatches"),
         "admitting after the POST spends the minutes the admission was guarding",
     )
-    check(
+    _check(
         "the dispatch door establishes green local checks before it admits",
         "_require_head_checks_clean(identity)" in door_body
         and "authorize_metered_execution(" in door_body
@@ -1215,7 +1316,44 @@ def dispatch_door_contract() -> None:
         < door_body.index("authorize_metered_execution("),
         "handing the budget gate a literal True makes the admission decorative",
     )
-    check(
+    # HOW the head evidence is scoped, read off the two functions that decide
+    # it. A source read rather than a behavioural one because the behavioural
+    # controls below can only prove the outcome for the shapes they seed; this
+    # proves the DECISION never consults the Check's name at all.
+    clean_signature = "def _require_head_checks_clean(identity: Identity) -> None:"
+    clean_body = (status_source.split(clean_signature, 1)[-1].split("\ndef ", 1)[0]
+                  if clean_signature in status_source else "")
+    predicate_signature = (
+        "def _is_seam_producer_check(item: dict[str, Any], identity: Identity) -> bool:"
+    )
+    predicate_body = (status_source.split(predicate_signature, 1)[-1].split("\ndef ", 1)[0]
+                      if predicate_signature in status_source else "")
+    _check(
+        "the head-evidence scan excludes by authenticated producer, not by Check name",
+        "_is_seam_producer_check(item, identity)" in clean_body
+        and "CHECK_NAME" not in clean_body,
+        "excluding by name lets anyone who can attach that label hide a red Check "
+        "from the evidence the budget admission stands on",
+    )
+    _check(
+        "the producer predicate reads the provider's stamp and the seam's envelope, never the name",
+        "BACKUP_CHECK_APP_ID" in predicate_body
+        and "BACKUP_CHECK_APP_SLUG" in predicate_body
+        and "check_identity(item)" in predicate_body
+        and "BACKUP_CHECK_ENVELOPE_KEYS" in predicate_body
+        and "CHECK_NAME" not in predicate_body
+        and '.get("name")' not in predicate_body,
+        "both halves are required: external_id is text any creator can copy, and the "
+        "app stamp is shared with every other Actions Check on the head",
+    )
+    _check(
+        "the registered producer identity is a literal pair, not a caller argument",
+        "BACKUP_CHECK_APP_ID = 15368" in status_source
+        and 'BACKUP_CHECK_APP_SLUG = "github-actions"' in status_source
+        and "BACKUP_CHECK_APP_ID" not in door_body,
+        "a producer identity taken from the caller would authenticate nothing",
+    )
+    _check(
         "the dispatch door can start exactly one named workflow",
         'BACKUP_WORKFLOW_FILE = "backup-nightly.yml"' in status_source
         and "BACKUP_WORKFLOW_FILE" in door_body
@@ -1226,23 +1364,23 @@ def dispatch_door_contract() -> None:
     def fixture(state_extra: dict[str, object] | None = None):
         root = Path(tempfile.mkdtemp(prefix="carr-dispatch-door-"))
         state: dict[str, object] = {
-            "run": run_state(), "artifacts": [],
-            "check_runs": [green_ci_check()],
-            "branch_head": {"sha": PROOF_HEAD},
+            "run": _run_state(), "artifacts": [],
+            "check_runs": [_ci_check("concluded_clean")],
+            "branch_head": {"sha": _PROOF_HEAD},
         }
         state.update(state_extra or {})
-        return fixture_env(root, state)
+        return _fixture_env(root, state)
 
     # THE HAPPY PATH, and the only one that may reach the vendor.
     env, state_path, log_path = fixture()
-    result = invoke(env, dispatch, *proof_args())
-    raw_dispatched = read_json(state_path).get("dispatches")
+    result = _invoke(env, dispatch, *_proof_args())
+    raw_dispatched = _read_json(state_path).get("dispatches")
     dispatched: list[dict[str, object]] = [
         row for row in raw_dispatched if isinstance(row, dict)
     ] if isinstance(raw_dispatched, list) else []
     body = dispatched[0].get("body") if dispatched else {}
     inputs = body.get("inputs") if isinstance(body, dict) else {}
-    check(
+    _check(
         f"{dispatch}: an admitted request dispatches the seeded inputs on main",
         result.returncode == 0
         and len(dispatched) == 1
@@ -1250,39 +1388,39 @@ def dispatch_door_contract() -> None:
             "/actions/workflows/backup-nightly.yml/dispatches")
         and isinstance(body, dict) and body.get("ref") == "main"
         and isinstance(inputs, dict)
-        and inputs.get("wr54_failure_proof_id") == PROOF_ID
-        and inputs.get("wr54_failure_proof_expected_head") == PROOF_HEAD,
+        and inputs.get("wr54_failure_proof_id") == _PROOF_ID
+        and inputs.get("wr54_failure_proof_expected_head") == _PROOF_HEAD,
         f"expected one dispatch carrying both proof inputs, got rc={result.returncode} "
         f"{result.stderr.strip()} {dispatched!r}",
     )
-    receipt = parsed_output(result)
+    receipt = _parsed_output(result)
     digest = receipt.get("metering_gate_digest")
-    check(
+    _check(
         f"{dispatch}: the receipt records WHICH admission it stands on, opaquely",
         receipt.get("state") == "dispatched"
         and receipt.get("metering_gate") == "github-actions-remote-ci"
         and isinstance(digest, str) and bool(re.fullmatch(r"[0-9a-f]{16}", digest)),
         f"expected an opaque 16-hex admission digest beside the gate key, got {receipt!r}",
     )
-    check(
+    _check(
         f"{dispatch}: no receipt key or value is a privileged word",
-        not privileged_hits(receipt),
+        not _privileged_hits(receipt),
         f"a receipt an auditor can read as the outcome is a label wearing authority: "
-        f"{privileged_hits(receipt)}",
+        f"{_privileged_hits(receipt)}",
     )
     # The digest is EVIDENCE, not decoration: it must reproduce from the gate's
     # own answer for this same request, and must not be some constant the door
     # could print without ever calling the gate.
-    expected = authorize_metered_execution(
-        json.loads(METERING_POLICY.read_text(encoding="utf-8")),
+    expected = _authorize_metered_execution(
+        json.loads(_METERING_POLICY.read_text(encoding="utf-8")),
         "github-actions-remote-ci",
-        {"candidate_sha": PROOF_HEAD, "local_checks_green": True},
+        {"candidate_sha": _PROOF_HEAD, "local_checks_green": True},
     )
     recomputed = hashlib.sha256(json.dumps({
         key: expected.get(key)
         for key in ("admitted", "authority", "gate", "platform", "policy_schema_version")
     }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
-    check(
+    _check(
         f"{dispatch}: the receipt's digest reproduces from the gate's own answer",
         digest == recomputed,
         f"expected {recomputed}, got {digest!r}",
@@ -1291,76 +1429,251 @@ def dispatch_door_contract() -> None:
     # EVERY REFUSAL MUST LEAVE THE VENDOR UNTOUCHED. A door that refuses after
     # the POST has already spent the minutes it was guarding.
     refusals: list[tuple[str, dict[str, object], tuple[str, ...]]] = [
-        ("a malformed proof ID refuses", {}, proof_args(proof_id="not-a-uuid")),
+        ("a malformed proof ID refuses", {}, _proof_args(proof_id="not-a-uuid")),
         ("an uppercase proof ID refuses rather than being normalised", {},
-         proof_args(proof_id=PROOF_ID.upper())),
-        ("a short expected head refuses", {}, proof_args(head="abc123")),
+         _proof_args(proof_id=_PROOF_ID.upper())),
+        ("a short expected head refuses", {}, _proof_args(head="abc123")),
         ("an uppercase expected head refuses rather than being normalised", {},
-         proof_args(head="A" * 40)),
+         _proof_args(head="A" * 40)),
         ("an expected head that is not the live main head refuses",
-         {"branch_head": {"sha": "b" * 40}}, proof_args()),
+         {"branch_head": {"sha": "b" * 40}}, _proof_args()),
         ("an unreadable main head refuses rather than dispatching blind",
-         {"branch_head_error": True}, proof_args()),
+         {"branch_head_error": True}, _proof_args()),
         ("a proof ID already spent on this head refuses",
-         {"check_runs": [spent_proof_check()]}, proof_args()),
+         {"check_runs": [_spent_proof_check()]}, _proof_args()),
         ("exhausted Check pagination fails closed instead of dispatching",
-         {"check_pagination_exhausted": True}, proof_args()),
+         {"check_pagination_exhausted": True}, _proof_args()),
         # The fact the budget gate requires is READ, not asserted: these three
         # are the head states that cannot support it.
         ("a head carrying no Checks at all refuses rather than claiming green",
-         {"check_runs": []}, proof_args()),
+         {"check_runs": []}, _proof_args()),
         ("a head whose Check has not concluded refuses",
-         {"check_runs": [green_ci_check(status="in_progress", conclusion=None)]},
-         proof_args()),
+         {"check_runs": [_ci_check("unconcluded")]},
+         _proof_args()),
         ("a head carrying a failed Check refuses",
-         {"check_runs": [green_ci_check(conclusion="failure")]}, proof_args()),
+         {"check_runs": [_ci_check("concluded_red")]}, _proof_args()),
+        # ── THE MUTATION CONTROL for the producer-identity exclusion ────────
+        # Each of these four seeds a CONCLUDED-RED row carrying the seam's own
+        # label "Backup artifact" -- the exact label the retired name-only
+        # exclusion trusted -- beside one ordinary green Check. None of them is
+        # the seam's own row: they miss the provider stamp, or the envelope, or
+        # bind the envelope to another head. Under the old exclusion all four
+        # dispatched on a red head; every one of them must refuse now.
+        ("a failed Check merely NAMED like the seam's own still counts as red",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label")]},
+         _proof_args()),
+        ("a failed seam-labelled Check from a foreign app counts as red even with a "
+         "copied envelope",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label",
+                                   producer="foreign_app",
+                                   envelope="seam_this_head")]},
+         _proof_args()),
+        ("a failed seam-labelled Check with no producer stamp at all counts as red",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label",
+                                   producer="unattributed",
+                                   envelope="seam_this_head")]},
+         _proof_args()),
+        ("a seam envelope bound to another head counts as red on this one",
+         {"check_runs": [_ci_check("concluded_clean"),
+                         _ci_check("concluded_red", label="seam_label",
+                                   envelope="seam_other_head")]},
+         _proof_args()),
+        # The excluded row is not evidence, so a head carrying ONLY the seam's
+        # own authentic failure has nothing left to stand on and refuses rather
+        # than reading as clean.
+        ("an authentic seam failure alone leaves no evidence to stand on",
+         {"check_runs": [_ci_check("concluded_red", label="seam_label",
+                                   envelope="seam_this_head",
+                                   summary="earlier_proof")]},
+         _proof_args()),
     ]
     for label, extra, args in refusals:
         env, state_path, log_path = fixture(extra)
-        result = invoke(env, dispatch, *args)
+        result = _invoke(env, dispatch, *args)
         posted = [
-            row for row in calls(log_path)
+            row for row in _calls(log_path)
             if str(row.get("url", "")).endswith("/dispatches")
         ]
-        check(
+        _check(
             f"{dispatch}: {label}",
             result.returncode != 0 and not posted
-            and not (read_json(state_path).get("dispatches") or []),
+            and not (_read_json(state_path).get("dispatches") or []),
             f"expected a refusal with no dispatch POST, got rc={result.returncode} "
             f"posted={posted!r} stderr={result.stderr.strip()}",
         )
 
+    # THE OTHER HALF OF THE MUTATION CONTROL. The exclusion has to still WORK
+    # for the one row it was built for, or the door refuses every head that
+    # ever seeded a proof -- which is the reason it exists. An authentic seam
+    # failure, provider-stamped and carrying this seam's envelope for this head
+    # with an EARLIER proof ID in its summary, is excluded; the ordinary green
+    # Check beside it carries the admission and a fresh proof dispatches.
+    env, state_path, log_path = fixture({"check_runs": [
+        _ci_check("concluded_clean"),
+        _ci_check("concluded_red", label="seam_label", envelope="seam_this_head",
+                  summary="earlier_proof"),
+    ]})
+    seeded = _invoke(env, dispatch, *_proof_args())
+    raw_after_seed = _read_json(state_path).get("dispatches")
+    after_seed = [row for row in raw_after_seed if isinstance(row, dict)] \
+        if isinstance(raw_after_seed, list) else []
+    _check(
+        f"{dispatch}: a head whose only red Check is the seam's own still dispatches",
+        seeded.returncode == 0 and len(after_seed) == 1,
+        "if the seam's own seeded failure is not excluded, the first proof on a head "
+        "poisons every later one: "
+        f"rc={seeded.returncode} {seeded.stderr.strip()} {after_seed!r}",
+    )
+
     # THE ONE REFUSAL THE SOURCE SEARCHES ABOVE CANNOT PROVE: the BUDGET GATE
     # itself saying no. Run the door's own bytes from a tree whose sealed policy
     # re-imposes the Actions pause, and watch it reach no vendor at all.
-    paused_root = paused_policy_tree()
+    paused_root = _paused_policy_tree()
     env, state_path, log_path = fixture()
     refused = subprocess.run(
-        [sys.executable, str(paused_root / "ops" / STATUS_HELPER.name), dispatch, *proof_args()],
+        [sys.executable, str(paused_root / "ops" / _STATUS_HELPER.name), dispatch, *_proof_args()],
         cwd=paused_root, env=env, text=True, capture_output=True, timeout=8, check=False,
     )
-    posted = [row for row in calls(log_path) if str(row.get("url", "")).endswith("/dispatches")]
-    check(
+    posted = [row for row in _calls(log_path) if str(row.get("url", "")).endswith("/dispatches")]
+    _check(
         f"{dispatch}: a refusing budget gate stops the dispatch before the vendor",
         refused.returncode != 0
         and "metered execution refused" in refused.stderr
         and not posted
-        and not (read_json(state_path).get("dispatches") or []),
+        and not (_read_json(state_path).get("dispatches") or []),
         f"expected the metering refusal to reach no vendor, got rc={refused.returncode} "
         f"posted={posted!r} stderr={refused.stderr.strip()}",
     )
 
 
+def _module_level_names(text: str) -> set[str]:
+    """Every module-level name a source binds, read with a real parser.
+
+    ast, not a regex: the standing authority rule requires a real parser for a
+    static surface guard, and a regex over ``def`` lines cannot tell a
+    module-level function from a nested one or see an annotated assignment.
+    Import statements are deliberately not counted -- an imported name is
+    upstream vocabulary, and question 2 of the sweep covers what this suite
+    re-exports at runtime instead.
+    """
+    bound: set[str] = set()
+    for node in ast.parse(text).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.Assign):
+            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bound.add(node.target.id)
+    return bound
+
+
+def _public_surface_contract() -> None:
+    """This suite's own public surface, swept for the closed union.
+
+    WHY THE SURFACE AND NOT THE FIXTURES. The standing authority rule forbids an
+    EXPORTED function that returns a privileged outcome built from caller input.
+    The fixtures in this file legitimately carry GitHub's own vocabulary --
+    "completed", "success" -- which is upstream text the suite reports rather
+    than authority it mints. The closeable property is therefore the surface: if
+    the only public name this file defines is main(), which returns a process
+    exit code, then no caller-input-to-privileged-outcome path is exported at
+    all, under ANY name. A previous revision exported green_ci_check(name=...,
+    status=...) and privileged_hits(), which is the shape this sweep now catches.
+
+    THE ORDERED QUESTIONS:
+      1. Statically, what module-level names does this file bind, and is the
+         public subset exactly {"main"} with an int return?
+      2. At runtime, does the module expose anything of its own -- or anything
+         re-exported from this repository's modules -- beyond main()?
+      3. Does the closed union of privileged words appear anywhere in that
+         public surface?
+      4. MUTATION CONTROL: does question 1's reader actually see the shape the
+         re-review flagged, when it is given one?
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    public = {name for name in _module_level_names(source) if not name.startswith("_")}
+    _check(
+        "the selftest binds exactly one public module-level name, main()",
+        public == {"main"},
+        "a public test helper is an export: it can be imported and called with "
+        f"caller input, whatever its docstring says. Public: {sorted(public)}",
+    )
+    returns = [
+        node.returns for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    ]
+    _check(
+        "the one public name returns a process exit code, not a classification",
+        len(returns) == 1
+        and isinstance(returns[0], ast.Name) and returns[0].id == "int",
+        "an exported callable that can return a verdict object is the privileged "
+        "outcome the standing rule closes, whatever it is named",
+    )
+
+    module = sys.modules[__name__]
+    this_file = str(Path(__file__).resolve())
+    own: set[str] = set()
+    reexported: set[str] = set()
+    for name, value in vars(module).items():
+        if name.startswith("_") or isinstance(value, ModuleType):
+            continue
+        code = getattr(value, "__code__", None)
+        if code is not None and str(Path(code.co_filename).resolve()) == this_file:
+            own.add(name)
+            continue
+        origin = str(getattr(value, "__module__", "") or "")
+        if origin and (_ROOT / (origin.replace(".", "/") + ".py")).is_file():
+            reexported.add(name)
+    _check(
+        "at runtime the suite exposes only main() from its own body",
+        own == {"main"},
+        f"a name bound some other way is still an export: {sorted(own)}",
+    )
+    _check(
+        "the suite re-exports nothing from this repository's own modules",
+        not reexported,
+        "importing authorize_metered_execution under a public name would re-export "
+        f"the gate's verdict through this file: {sorted(reexported)}",
+    )
+    _check(
+        "no privileged word appears in the suite's public surface",
+        not _privileged_hits(sorted(public)),
+        f"the closed union reached the exported surface: "
+        f"{_privileged_hits(sorted(public))}",
+    )
+
+    flagged = _module_level_names(
+        "import json\n"
+        "PRIVILEGED_WORDS = ('pass',)\n"
+        "def green_ci_check(name='gates', status='completed'):\n"
+        "    return {'name': name, 'status': status}\n"
+        "def _private():\n"
+        "    def green_ci_check():\n"
+        "        return {}\n"
+    )
+    _check(
+        "the surface reader sees the exact shape the re-review flagged",
+        {"green_ci_check", "PRIVILEGED_WORDS", "_private"} == flagged
+        and bool(_privileged_hits(
+            [n for n in sorted(flagged) if not n.startswith("_")])),
+        "a reader that cannot find a public green_ci_check in a source that "
+        f"defines one is measuring nothing: saw {sorted(flagged)}",
+    )
+
+
 def main() -> int:
-    source = WORKFLOW.read_text(encoding="utf-8")
-    status_source = STATUS_HELPER.read_text(encoding="utf-8") if STATUS_HELPER.is_file() else ""
+    source = _WORKFLOW.read_text(encoding="utf-8")
+    status_source = _STATUS_HELPER.read_text(encoding="utf-8") if _STATUS_HELPER.is_file() else ""
     backup_match = re.search(
         r"(?ms)^  backup:\s*\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)",
         source,
     )
     backup_job = backup_match.group("body") if backup_match else ""
 
-    check(
+    _check(
         "workflow grants only the additional provider permissions its status contract needs",
         bool(re.search(r"(?m)^    permissions:\s*$", backup_job))
         and bool(re.search(r"(?m)^      checks:\s*write\s*$", backup_job))
@@ -1369,12 +1682,12 @@ def main() -> int:
         and not bool(re.search(r"(?m)^  (?:checks|actions):\s*write\s*$", source)),
         "expected job-scoped checks:write/actions:write with contents:read",
     )
-    check(
+    _check(
         "producer writes the named Backup artifact Check",
         "backup-workflow-status.py" in source and "Backup artifact" in status_source,
         "workflow must call the narrow status adapter and name the Check",
     )
-    check(
+    _check(
         "Check identity binds repository, run, attempt and head",
         all(token in status_source for token in (
             "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA",
@@ -1382,7 +1695,7 @@ def main() -> int:
         and "external_id" in status_source,
         "a green Check without all four immutable producer locators is ambiguous",
     )
-    check(
+    _check(
         "successful status carries exact artifact evidence",
         all(token in status_source for token in (
             "artifact_id", "artifact_name", "artifact_digest", "artifact_bytes",
@@ -1390,7 +1703,7 @@ def main() -> int:
         )),
         "run success alone is not a backup receipt",
     )
-    check(
+    _check(
         "disabled scheduled path records neutral before cancelling only itself",
         "neutral" in status_source.lower()
         and "GITHUB_RUN_ID" in status_source
@@ -1398,7 +1711,7 @@ def main() -> int:
         and "gh run list" not in status_source,
         "disabled flow must not search for or cancel another run",
     )
-    check(
+    _check(
         "disabled cancellation has no success continuation",
         bool(re.search(
             r"(?s)neutral.{0,4000}(?:while\s+true|while\s+True|sleep\s*\(.{0,100}(?:\n|$))",
@@ -1407,17 +1720,17 @@ def main() -> int:
         )),
         "after requesting cancellation the producing job must wait until killed",
     )
-    check(
+    _check(
         "producer workflow does not recursively observe its own workflow_run",
         not bool(re.search(r"(?m)^\s*workflow_run:\s*$", source)),
         "post-terminal verification is a separate consumer invocation, not a recursive workflow trigger",
     )
-    check(
+    _check(
         "status adapter exposes separate post-terminal cancelled/zero-artifact observation",
         all(token in status_source.lower() for token in ("observer", "cancelled", "artifact")),
         "the terminating producer cannot certify its own terminal provider state",
     )
-    check(
+    _check(
         "disabled neutral is excluded from backup-failure alerting",
         "Backup artifact" in status_source
         and "backup-failure" in status_source
@@ -1425,22 +1738,23 @@ def main() -> int:
         and bool(re.search(r"conclusion[^\n]{0,100}(?:failure|failed)", status_source, re.I)),
         "adapter must consume named Check failure and explicitly exclude neutral/cancel infrastructure states; overall red is insufficient",
     )
-    check(
+    _check(
         "artifact name binds producer run and attempt",
         "GITHUB_RUN_ID" in source
         and "GITHUB_RUN_ATTEMPT" in source
         and bool(re.search(r"artifact[^\n]{0,200}(?:run|RUN_ID)[^\n]{0,200}(?:attempt|RUN_ATTEMPT)", source, re.I)),
         "reruns must not overwrite or inherit another attempt's artifact identity",
     )
-    workflow_mode_contract(source, backup_job)
-    service_identity_contract()
-    behavioral_contract()
-    controlled_failure_contract()
-    dispatch_door_contract()
+    _workflow_mode_contract(source, backup_job)
+    _service_identity_contract()
+    _behavioral_contract()
+    _controlled_failure_contract()
+    _dispatch_door_contract()
+    _public_surface_contract()
 
-    print(f"\nbackup-workflow-selftest: {passed}/{passed + len(failed)} passed")
-    if failed:
-        print("missing contract: " + ", ".join(failed), file=sys.stderr)
+    print(f"\nbackup-workflow-selftest: {_passed}/{_passed + len(_failed)} passed")
+    if _failed:
+        print("missing contract: " + ", ".join(_failed), file=sys.stderr)
         return 1
     return 0
 

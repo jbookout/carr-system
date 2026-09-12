@@ -77,6 +77,29 @@ BACKUP_WORKFLOW_FILE = "backup-nightly.yml"
 # from a rejected one in the step log. 9 means the opposite: the Check WAS
 # written and this process failed the run on purpose.
 CONTROLLED_FAILURE_EXIT = 9
+# ── who may be excluded from the head's own Check evidence ──────────────────
+# The seam's own Check is written by THIS file, running inside a backup-nightly
+# job, authenticating with that run's GITHUB_TOKEN. GitHub therefore stamps the
+# resulting check-run with the GitHub Actions app as its producer, and that
+# stamp is the PROVIDER's attribution of who created the row -- unlike the
+# Check's name, title and output, which are the creator's free text. These two
+# literals are the registered producer identity; re-verify them with
+#   gh api /repos/jbookout/carr-system/commits/<sha>/check-runs \
+#     --jq '.check_runs[] | select(.name=="Backup artifact") | .app | {id, slug}'
+# IF EITHER LITERAL IS WRONG THE EXCLUSION SIMPLY NEVER FIRES: the seam's own
+# earlier failure then counts as red and a later proof refuses. That is the
+# fail-closed direction on purpose -- a stale producer id costs a refusal, it
+# never admits a spend.
+BACKUP_CHECK_APP_ID = 15368
+BACKUP_CHECK_APP_SLUG = "github-actions"
+# The exact key set this file writes into external_id (Identity.value()). A row
+# is the seam's own only if it carries this envelope AND the producer stamp
+# above; neither half alone is enough, because the envelope is text any creator
+# can copy and the app stamp is shared with every other Actions Check on the
+# head.
+BACKUP_CHECK_ENVELOPE_KEYS = frozenset(
+    {"repository", "run_id", "run_attempt", "head_sha"}
+)
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -450,6 +473,55 @@ def _parse_proof_request(args: argparse.Namespace) -> tuple[str, str]:
     return proof_id, head
 
 
+def _is_seam_producer_check(item: dict[str, Any], identity: Identity) -> bool:
+    """Is this check-run the backup seam's OWN outcome, by authenticated producer?
+
+    THE ORDERED QUESTIONS. The answer must be yes at every one; the first no
+    ends it and the row stays in the head's evidence.
+
+      1. Did the provider stamp a producer app object on the row at all? A row
+         with no app is unattributed and is never excluded.
+      2. Is that app the registered producer -- BOTH id and slug? The app stamp
+         is GitHub's own attribution of which installation created the Check.
+      3. Does ``external_id`` parse as this file's identity envelope: exactly
+         the four keys Identity.value() writes, no more and no fewer?
+      4. Does that envelope name THIS repository and THIS head, with a positive
+         integer run id and attempt?
+
+    THE CHECK'S NAME IS DELIBERATELY NOT ONE OF THE QUESTIONS, and that is the
+    whole point of this predicate. Excluding by name meant a failed Check
+    called "Backup artifact" was ignored no matter who wrote it, so any creator
+    who could attach that label could hide a red Check from the head evidence
+    the budget admission stands on. A label is not access control. A row
+    carrying the seam's name from any other producer is now ordinary head
+    evidence, and if it failed, the head is red.
+
+    THE BOUNDARY CASE THAT IS EASY TO GET WRONG: the envelope alone is not
+    authority either. ``external_id`` is a string the creator supplies, so a
+    foreign app can copy this seam's envelope byte for byte; question 2 is what
+    stops that. Conversely the app stamp alone is not enough, because every
+    ordinary Actions Check on the head -- gates, db-acceptance -- carries the
+    same app; question 3 is what stops THAT. Both halves, or no exclusion.
+    """
+    app = item.get("app")
+    if not isinstance(app, dict):
+        return False
+    if app.get("id") != BACKUP_CHECK_APP_ID or app.get("slug") != BACKUP_CHECK_APP_SLUG:
+        return False
+    envelope = check_identity(item)
+    if not isinstance(envelope, dict) or set(envelope) != set(BACKUP_CHECK_ENVELOPE_KEYS):
+        return False
+    if envelope.get("repository") != identity.repository:
+        return False
+    if str(envelope.get("head_sha", "")).lower() != identity.head_sha:
+        return False
+    for key in ("run_id", "run_attempt"):
+        value = envelope.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return False
+    return True
+
+
 def _require_head_checks_clean(identity: Identity) -> None:
     """Establish the fact the budget gate asks for, rather than assert it.
 
@@ -462,13 +534,18 @@ def _require_head_checks_clean(identity: Identity) -> None:
     for this one too, and REFUSES rather than returning a verdict anyone could
     pass around.
 
-    THE SEAM'S OWN CHECK IS EXCLUDED BY NAME. "Backup artifact" is the nightly
-    backup's outcome on that commit, not evidence about the commit; a head that
-    already carries an earlier seeded failure would otherwise refuse every later
-    proof forever. ``checks`` fails closed on exhausted pagination, so an
-    incomplete answer refuses here rather than reading as a clean head.
+    THE SEAM'S OWN CHECK IS EXCLUDED BY AUTHENTICATED PRODUCER IDENTITY, never
+    by its name -- see _is_seam_producer_check for the four questions and why
+    the name is not among them. The exclusion exists because the nightly
+    backup's own outcome on a commit is not evidence ABOUT that commit, and a
+    head already carrying an earlier seeded failure would otherwise refuse
+    every later proof forever. ``checks`` fails closed on exhausted pagination,
+    so an incomplete answer refuses here rather than reading as a clean head.
     """
-    observed = [item for item in checks(identity) if item.get("name") != CHECK_NAME]
+    observed = [
+        item for item in checks(identity)
+        if not _is_seam_producer_check(item, identity)
+    ]
     if not observed:
         raise StatusError(
             f"{identity.head_sha} carries no concluded checks to stand on")
@@ -556,9 +633,11 @@ def _dispatch_controlled_failure(proof_id: str, head: str) -> int:
             json.loads(policy_path.read_text(encoding="utf-8")),
             "github-actions-remote-ci",
             # Established immediately above by _require_head_checks_clean,
-            # which refuses unless every check GitHub holds for this head has
-            # concluded and none of them failed. Never a literal standing in
-            # for a fact nobody checked.
+            # which refuses unless every check GitHub holds for this head --
+            # excluding only rows the provider itself attributes to the backup
+            # producer, never rows merely NAMED like one -- has concluded and
+            # none of them failed. Never a literal standing in for a fact
+            # nobody checked.
             {"candidate_sha": head, "local_checks_green": True},
         )
     except (MeteringRefusal, ValueError, TypeError) as exc:
