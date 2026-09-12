@@ -76,6 +76,20 @@ def refuses(call: Callable[[], Any]) -> bool:
     return False
 
 
+def admits(call: Callable[[], Any]) -> Any:
+    """The admission decision, or None when the gate refused.
+
+    A check that expects admission must be able to report FAIL when the gate
+    refuses instead. Calling authorize_metered_execution bare inside main lets
+    one unexpected refusal abort the whole suite with a traceback, which reads
+    as a broken selftest rather than as the policy change it actually is.
+    """
+    try:
+        return call()
+    except MeteringRefusal:
+        return None
+
+
 def main() -> int:
     print("platform-metering-gate-selftest — paid dispatch is admitted before execution\n")
 
@@ -92,12 +106,16 @@ def main() -> int:
     # proved against a synthetic policy rather than by leaving a retired control
     # switched on.  Deleting the first assertion without adding the second would
     # have removed all coverage of lib/platform_metering.py's two pause clauses.
-    admitted_actions = authorize_metered_execution(POLICY, "github-actions-remote-ci", {
-        "candidate_sha": "a" * 40, "local_checks_green": True,
-    }, today=date(2026, 9, 12))
+    # admits() rather than a bare call: a re-imposed pause must FAIL this check
+    # by name, not crash the process before the twenty later checks run.
+    admitted_actions = admits(lambda: authorize_metered_execution(
+        POLICY, "github-actions-remote-ci", {
+            "candidate_sha": "a" * 40, "local_checks_green": True,
+        }, today=date(2026, 9, 12)))
     check("GitHub Actions is admitted once the pause is cleared and the contract is met",
-          admitted_actions["admitted"] is True
-          and admitted_actions["gate"] == "github-actions-remote-ci")
+          isinstance(admitted_actions, dict)
+          and admitted_actions.get("admitted") is True
+          and admitted_actions.get("gate") == "github-actions-remote-ci")
     check("GitHub Actions without green local checks is still refused", refuses(
         lambda: authorize_metered_execution(POLICY, "github-actions-remote-ci", {
             "candidate_sha": "a" * 40,
