@@ -51,7 +51,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,8 @@ import { fetchCandidateBuildRecordRows, isSeamStoreUnreachable }
   from "../src/gate-zero-seam-stores.v5.js";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
+const VENV_PYTHON = join(REPO, ".venv", "bin", "python");
+const PYTHON = process.env.CARR_TEST_PYTHON || (existsSync(VENV_PYTHON) ? VENV_PYTHON : "python");
 const DSN = process.env.CARR_GATE_ZERO_RACE_DSN || process.env.DATABASE_URL || "";
 const REQUIRED = process.env.CARR_GATE_ZERO_RACE_REQUIRED === "1";
 const LOOPBACK = /@(localhost|127\.0\.0\.1)[:/]|^postgres(ql)?:\/\/(localhost|\/)/;
@@ -76,7 +78,7 @@ const PROVIDER_VERSION_WRITER = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
  * blinding the names the tool reads.
  */
 function credentialNames() {
-  const out = execFileSync(join(REPO, ".venv", "bin", "python"), ["-c", `
+  const out = execFileSync(PYTHON, ["-c", `
 import importlib.util, json, pathlib
 spec = importlib.util.spec_from_file_location("r", pathlib.Path(${JSON.stringify(REPO)}) / "tools" / "ops-record.py")
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -170,7 +172,7 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     const blinded = Object.fromEntries(credentialNames().map(name =>
       [name, "postgresql://nobody@127.0.0.1:1/absent"]));
     const opsRecord = (env, ...args) => spawnSync(
-      join(REPO, ".venv", "bin", "python"), [join(REPO, "tools", "ops-record.py"), ...args],
+      PYTHON, [join(REPO, "tools", "ops-record.py"), ...args],
       { cwd: REPO, encoding: "utf8", timeout: 300000,
         env: { ...process.env, ...blinded, HOME: blindHome, ...env } });
 
@@ -184,7 +186,7 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     // was reached, which would prove nothing about the credential.
     const head = execFileSync("git", ["-C", REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const buildManifest = versionId => {
-      const source = spawnSync(join(REPO, ".venv", "bin", "python"),
+      const source = spawnSync(PYTHON,
         [join(REPO, "tools", "release-manifest.py"), "build", "--sha", head,
           "--environment", "production",
           "--performance-budget-ref", "runbook:worker-performance-v1",
@@ -196,7 +198,7 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
         `the source manifest did not build: ${(source.stderr || "").slice(-400)}`);
       const sourcePath = join(work, `source-${versionId}.json`);
       writeFileSync(sourcePath, source.stdout);
-      const bound = spawnSync(join(REPO, ".venv", "bin", "python"),
+      const bound = spawnSync(PYTHON,
         [join(REPO, "tools", "release-manifest.py"), "bind-provider",
           "--manifest", sourcePath, "--provider", PROVIDER,
           "--provider-version-id", versionId],
