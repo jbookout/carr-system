@@ -426,13 +426,14 @@ begin
        ops.portfolio_canonical_json('{"a":1}'::jsonb), 'UTF8'), 'sha256'), 'hex') then
     raise exception '0505 FAILED: the outcome digest still equals the untagged digest r7 refuses';
   end if;
-  -- AND THE CANDIDATE KEY IS STILL UNTAGGED, on purpose: it digests a projection
-  -- that is not a consumer-gate-receipt.v1 and that r7's rule does not cover.
+  -- AND THE INFORMATIONAL CANDIDATE-SCOPED DIGEST IS STILL UNTAGGED, on purpose:
+  -- it digests a projection that is not a consumer-gate-receipt.v1 and that
+  -- r7's rule does not cover.
   if ops.gate_zero_outcome_candidate_digest('{"observed_at":"x","ttl_expires_at":"y","s":1}'::jsonb) <>
      'sha256:' || encode(public.digest(convert_to(
        ops.portfolio_canonical_json(ops.gate_zero_outcome_candidate_projection(
          '{"observed_at":"x","ttl_expires_at":"y","s":1}'::jsonb)), 'UTF8'), 'sha256'), 'hex') then
-    raise exception '0505 FAILED: the candidate comparison key stopped being the plain digest over the projection';
+    raise exception '0505 FAILED: the informational candidate-scoped digest stopped being the plain digest over the projection';
   end if;
 
   -- 2. THE WRITER IS STILL THE SEAT'S AND NOTHING ELSE'S. CREATE OR REPLACE
