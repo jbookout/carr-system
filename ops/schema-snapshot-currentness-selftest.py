@@ -2,8 +2,7 @@
 """Exact boundary tests for schema-snapshot production-currentness comparison."""
 from __future__ import annotations
 
-import subprocess
-import sys
+import importlib.util
 import tempfile
 from pathlib import Path
 
@@ -14,6 +13,11 @@ GENERATOR = ROOT / "bin" / "schema-snapshot.sh"
 EXACT_77 = "select pg_catalog.setval('ops.work_request_ref_seq', 77, true);"
 EXACT_78 = "select pg_catalog.setval('ops.work_request_ref_seq', 78, true);"
 
+SPEC = importlib.util.spec_from_file_location("schema_snapshot_currentness", COMPARATOR)
+assert SPEC and SPEC.loader
+currentness = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(currentness)
+
 
 def compare(left: str, right: str) -> int:
     with tempfile.TemporaryDirectory() as directory:
@@ -22,12 +26,7 @@ def compare(left: str, right: str) -> int:
         observed = root / "observed.sql"
         expected.write_text(left, encoding="utf-8")
         observed.write_text(right, encoding="utf-8")
-        return subprocess.run(
-            [sys.executable, str(COMPARATOR), str(expected), str(observed)],
-            check=False,
-            capture_output=True,
-            text=True,
-        ).returncode
+        return 0 if currentness.snapshots_match(expected, observed) else 1
 
 
 def snapshot(line: str = EXACT_77, suffix: str = "") -> str:
@@ -62,6 +61,6 @@ for expected, observed in refusals:
 
 generator = GENERATOR.read_text(encoding="utf-8")
 assert 'CURRENTNESS_PY="$REPO/ops/schema-snapshot-currentness.py"' in generator
-assert '"$CATALOG_PY" "$CURRENTNESS_PY" "$OUT" "$TMP"' in generator
+assert 'module.snapshots_match(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))' in generator
 
 print("schema snapshot currentness selftest: exact volatile-value boundary pinned")

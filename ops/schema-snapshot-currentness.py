@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
 """Compare two schema snapshots while ignoring one operational sequence value."""
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 
@@ -29,13 +27,8 @@ def normalized(path: Path) -> bytes | None:
     )
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
-        return 2
-    expected = normalized(Path(sys.argv[1]))
-    observed = normalized(Path(sys.argv[2]))
-    return 0 if expected is not None and expected == observed else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+def snapshots_match(expected_path: Path, observed_path: Path) -> bool:
+    """Return whether snapshots differ only in the admitted sequence value."""
+    expected = normalized(expected_path)
+    observed = normalized(observed_path)
+    return expected is not None and expected == observed

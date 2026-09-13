@@ -1941,7 +1941,19 @@ if [ "$CHECK" = "1" ]; then
   # schema. Ignore only that exact statement's decimal current value. The
   # comparator requires one exact statement in each file and compares every
   # other byte, so a missing line or altered sequence/call shape still refuses.
-  if "$CATALOG_PY" "$CURRENTNESS_PY" "$OUT" "$TMP"; then
+  if "$CATALOG_PY" - "$CURRENTNESS_PY" "$OUT" "$TMP" <<'CURRENTNESS_PYTHON'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("schema_snapshot_currentness", sys.argv[1])
+if spec is None or spec.loader is None:
+    raise SystemExit(1)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+raise SystemExit(0 if module.snapshots_match(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])) else 1)
+CURRENTNESS_PYTHON
+  then
     echo "schema snapshot: current"
     exit 0
   fi
