@@ -2006,7 +2006,7 @@ test("STORES: a revision with two authenticated candidate rows is refused, not p
     // still two rows: nothing in the reader was deciding that a revision has one
     // authenticated candidate, so nothing was enforcing it either.
     //
-    // Migration 0502 enforces it in the database, with a partial unique index over
+    // Migration 0504 enforces it in the database, with a partial unique index over
     // `maker_authority_verified`. This is the OTHER half — what the reader does in
     // a database where that index is absent — because a control that exists only
     // in the schema is a control this file cannot claim.

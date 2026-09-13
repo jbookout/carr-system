@@ -306,8 +306,8 @@ fi
 # an_approved_release_carries_its_evidence constraint exempts `candidate` and
 # nothing beyond it, and no verb attaches evidence to a candidate afterwards: a
 # row filed without these two can never be approved, so filing one is filing a
-# dead key. The maker is NOT among these arguments and cannot be — it is derived
-# from the authority connection identity inside tools/ops-record.py.
+# dead key. The maker is NOT among these arguments and cannot be — migration 0504
+# records the login role that files the row and derives the maker from it.
 if [ "$VERSION_MODE" = "upload" ]; then
   [ -n "$REQUESTED_RELEASE_KEY" ] \
     || fail "--upload-version files the release-candidate record itself and needs --release-key <canonical key>."
@@ -943,12 +943,19 @@ if [ "$VERSION_MODE" = "upload" ]; then
   # the row has to be written by the thing that made the candidate, on a
   # credential, in the same run that uploaded it.
   #
-  # THE MAKER IS NOT AN ARGUMENT HERE. tools/ops-record.py derives it from the
-  # authority connection identity (ops.authority_actor_slug(), the same function
-  # `release approve` opens with) and refuses --maker outright, so this wrapper
-  # cannot name a maker even by mistake. What it supplies is the exact target:
-  # the key, the environment, the provider and its immutable version id, and the
-  # provider-bound manifest whose plan hash Joe will approve.
+  # THE MAKER IS NOT AN ARGUMENT HERE. tools/ops-record.py refuses --maker
+  # outright and names no maker column in the insert; migration 0504's trigger
+  # records the login role the connection authenticated as and derives the maker
+  # from it, so this wrapper cannot name a maker even by mistake. What it supplies
+  # is the exact target: the key, the environment, the provider and its immutable
+  # version id, and the provider-bound manifest whose plan hash Joe will approve.
+  #
+  # AND WHAT THAT MAKER IS TODAY, said here because a deploy log should not imply
+  # more than it has. The row is filed on the ledger writer, which is the only
+  # credential holding INSERT on ops.release — the authority bundle holds none and
+  # granting it one is the capability open loop #594 carries. So this record is an
+  # honest UNAUTHENTICATED one until that grant lands, and the line printed below
+  # reports what the database recorded rather than what anyone intended.
   echo "== release candidate record =="
   "$PY" "$REPO/tools/ops-record.py" release candidate \
     --key "$RELEASE_KEY" --service carr-mcp --environment production \
@@ -959,9 +966,9 @@ if [ "$VERSION_MODE" = "upload" ]; then
     ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
     ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
     >/dev/null \
-    || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no approval can name $PROVIDER_VERSION_ID until the record exists; the maker comes from the authority credential, so check CARR_DB_AUTHORITY_JOE_URL."
+    || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no approval can name $PROVIDER_VERSION_ID until the record exists."
   echo "  filed release candidate $RELEASE_KEY for $HEAD_SHA"
-  echo "  maker: derived from the authority connection identity, not asserted"
+  echo "  maker: recorded by the database from the filing login, not asserted"
   echo ""
   echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"
   echo "  rollback: bin/deploy-worker.sh --env staging --recovery-step current_before|prior|current_after ..."

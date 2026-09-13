@@ -1332,91 +1332,103 @@ test("PROVENANCE: the store admits only the row the database itself named a make
     // git_sha alone — caller-asserted metadata wearing a record's clothes.
     //
     // TWO THINGS CHANGED AND BOTH ARE CHECKED HERE. The recorder refuses --maker
-    // and --maker-verification outright and derives both columns from
-    // `ops.authority_actor_slug()` over the authority connection — the same
-    // function `release approve` opens with — and this store will only return a
-    // row that carries that derivation's own marker. A row somebody typed a maker
-    // into cannot satisfy the pair, so it is not a row this producer can read.
+    // and --maker-verification outright and asserts neither column, and migration
+    // 0504 writes the pair itself from the login role the session authenticated
+    // as. A row somebody typed a maker into cannot satisfy the store's pair, so it
+    // is not a row this producer can read.
     const storeSource = readFileSync(join(SRC, STORES_FILE), "utf8");
     const recorder = readFileSync(join(REPO, "tools", "ops-record.py"), "utf8");
     const migration = readFileSync(
-      join(REPO, "migrations", "0502_release_candidate_authority_provenance.sql"), "utf8");
+      join(REPO, "migrations", "0504_release_maker_session_provenance.sql"), "utf8");
     const candidateQuery = storeSource.slice(storeSource.indexOf("from ops.release r"));
     assert.match(candidateQuery, /and r\.source_kind = 'wrapper'/,
       "the candidate store no longer requires the one writer's own source kind");
     assert.match(candidateQuery,
       /and r\.maker_verification_ref = '\$\{MAKER_AUTHORITY_PREFIX\}' \|\| r\.maker_actor/,
       "the candidate store reads a maker without requiring the authenticated derivation");
-    // And the marker that predicate stands on is the spelling the recorder
-    // writes, asserted as a literal so the two files cannot drift apart in
+    // And the marker that predicate stands on is the spelling the DATABASE writes,
+    // asserted as a literal on both sides so the two files cannot drift apart in
     // silence — a prefix that moved on one side would return every row or none.
+    // The pairing moved off the recorder deliberately: the recorder no longer
+    // writes either column, so it is no longer a party to the spelling.
     assert.match(storeSource,
       /const MAKER_AUTHORITY_PREFIX = "ops\.authority-principal:";/,
-      "the store's authenticated-maker marker is not the recorder's spelling");
-    assert.match(recorder,
-      /MAKER_AUTHORITY_PREFIX = "ops\.authority-principal:"/,
-      "the recorder's authenticated-maker marker is not the store's spelling");
+      "the store's authenticated-maker marker is not the derivation's spelling");
+    assert.match(migration,
+      /new\.maker_verification_ref := 'ops\.authority-principal:' \|\| v_slug;/,
+      "the migration's derived marker is not the store's spelling");
 
-    // AND THE SEVENTH ROUND'S HALF, which is the one that makes the two text
-    // columns above believable rather than merely conventional. The store keys on
-    // a column no caller and no ordinary writer can set.
+    // AND THE COLUMN THE STORE KEYS ON IS ONE NO ROLE CAN WRITE, which is what
+    // makes the two text columns above believable rather than merely conventional.
     assert.match(candidateQuery, /and r\.maker_authority_verified/,
       "the candidate store trusts the two text columns without the database's own mark");
 
-    // THE RECORDER FILES THE ROW ON THE CREDENTIAL THAT NAMED ITS MAKER. The
-    // sixth round derived the maker on the authority connection, closed it, and
-    // inserted over the generic ledger writer — an honest derivation whose row
-    // any writer could have forged. There is now ONE call, and the candidate
-    // branch opens no other connection kind.
-    assert.match(recorder, /from ops\.record_release_candidate\(/,
-      "the recorder no longer files the candidate through the authority door");
+    // THE RECORDER FILES THE ROW ON THE CREDENTIAL THAT MAY WRITE IT, and asserts
+    // nothing about who made it. The seventh round put the insert behind a
+    // SECURITY DEFINER door on the authority connection; the door could not be
+    // granted under the moratorium and carr_authority holds no insert on
+    // ops.release either, so that shape stopped the wrapper filing at all. One
+    // statement now, on the writer connection, naming no maker column.
+    assert.equal(recorder.includes("ops.record_release_candidate("), false,
+      "the recorder still files the candidate through the withdrawn authority door");
+    assert.match(recorder, /CANDIDATE_INSERT = "{3}\n\s*insert into ops\.release/,
+      "the recorder no longer files the candidate with one named insert");
     assert.match(recorder,
-      /connection_kind = \("authority"\s*\n\s*if args\.action in \("candidate", "approve", "staging-approve"\)/,
-      "the candidate branch no longer runs on the authority connection");
+      /connection_kind = "authority" if args\.action in \("approve", "staging-approve"\) else "write"/,
+      "the candidate branch still reaches for a connection that cannot file the row");
     assert.match(recorder,
       /the release candidate's maker is not a caller field/,
       "the recorder no longer refuses a caller-asserted maker");
-    assert.equal(recorder.includes("insert into ops.release\n"), false,
-      "the recorder still holds a direct candidate insert beside the door");
     assert.equal(recorder.includes("args.maker, args.maker_verification"), false,
       "the candidate insert still reads the caller's maker flags");
+    assert.match(recorder,
+      /returning id, release_key, maker_actor, maker_session_user,\n\s*maker_authority_verified/,
+      "the recorder no longer reads the row's recorded provenance back");
 
-    // AND THE DATABASE IS WHERE THE MARK IS DEFENDED, not the wrapper. Three
-    // clauses, each asserted against the migration that installs them: the door
-    // derives rather than accepts a maker, only the authority may open it, and
-    // one revision may carry one authenticated candidate.
-    assert.match(migration, /v_slug := ops\.authority_actor_slug\(\);/,
-      "the door no longer derives the maker from the session's own credential");
-    assert.match(migration, /revoke all on function ops\.record_release_candidate\(/,
-      "the door is left executable by public");
-    // AND THE ONE LINE IT DOES NOT CARRY IS A DECISION, asserted so it cannot
-    // become drift. The EXECUTE grant to carr_authority is a new DB mutation
-    // capability; SIEP-11 admits one only through a mutation-registry successor,
-    // which this branch may not spawn. Measured on a disposable PostgreSQL: with
-    // the grant, secdef_execute goes 462 -> 463 and three gates refuse against
-    // the v25 seal; without it, every census category is byte-identical. The
-    // forgery is closed either way — nothing can mint the marker — so what waits
-    // on the successor is writing a genuine row, not trusting a forged one.
+    // AND THE DATABASE IS WHERE THE MARK IS DEFENDED, not the wrapper. Four
+    // clauses, each asserted against the migration that installs them: the filing
+    // login is recorded from session_user and not from a caller field, the column
+    // the store keys on is GENERATED and therefore unwritable by any role, a
+    // session that is not a human authority is refused the marker in words, and
+    // one revision may carry one authority-filed row.
+    assert.match(migration, /new\.maker_session_user := session_user;/,
+      "the filing login is no longer recorded from the session's own credential");
+    assert.match(migration,
+      /add column if not exists maker_authority_verified boolean\s*\n\s*generated always as \(ops\.authority_login_slug\(maker_session_user\) is not null\)\s*\n\s*stored;/,
+      "the authenticated-maker column is writable by somebody");
+    assert.match(migration,
+      /the authority-derivation marker is written by the '\s*\n?\s*'database from session_user, never by a caller/,
+      "a typed derivation marker is no longer refused in words");
+    assert.match(migration,
+      /create unique index if not exists release_authority_candidate_sha_uniq\s*\n\s*on ops\.release \(git_sha\) where maker_authority_verified;/,
+      "one revision may still carry two authority-filed rows");
+
+    // AND THE ONE LINE THIS MIGRATION DOES NOT CARRY IS A DECISION, asserted so it
+    // cannot become drift. Neither spelling of the capability is here: not the
+    // withdrawn door's EXECUTE grant and not `grant insert on ops.release to
+    // carr_authority`, which is what "file the candidate on the authority
+    // connection" would actually require. Measured on a disposable PostgreSQL: the
+    // column, the generated column, the trigger and the index move every census
+    // category by zero rows; either grant moves the sealed projection and
+    // ops/siep11-, siep12- and siep18-*-local-pg-gate.py refuse it against the v25
+    // seal. The forgery is closed either way — nothing can mint the marker — so
+    // what waits on the successor is writing a GENUINE row, not trusting a forged
+    // one, and open loop #594 carries it.
     const grantOutsideAComment = migration
       .split("\n")
       .filter(line => !line.trimStart().startsWith("--"))
       .join("\n");
-    assert.equal(
-      /grant execute on function ops\.record_release_candidate\(/.test(grantOutsideAComment),
-      false,
-      "0502 grants the candidate door's capability without a registry successor admitting it");
+    assert.equal(/grant\s+insert[^;]*on\s+table\s+ops\.release[^;]*to\s+carr_authority/i
+      .test(grantOutsideAComment), false,
+      "0504 grants the authority role a table capability no successor admitted");
+    assert.equal(/grant\s+execute\s+on\s+function\s+ops\.record_release_candidate/i
+      .test(grantOutsideAComment), false,
+      "0504 grants the withdrawn door's capability");
     assert.match(migration,
-      /db-function-acl:ops\.record_release_candidate\(\.\.\.\):carr_authority:execute/,
-      "0502 does not name the exact ingress key its successor has to admit");
-    assert.match(migration,
-      /if has_function_privilege\('carr_authority', v_sig, 'execute'\) then/,
-      "0502 does not prove the door is still closed to the authority role");
-    assert.match(migration,
-      /create unique index if not exists release_authority_candidate_sha_uniq\s*\n\s*on ops\.release \(git_sha\) where maker_authority_verified;/,
-      "one revision may still carry two authenticated candidate rows");
-    assert.match(migration,
-      /a release candidate is filed through '\s*\n?\s*'ops\.record_release_candidate\(\)/,
-      "a direct candidate insert by the ledger writer is no longer refused");
+      /db-relation-acl:ops\.release:carr_authority:insert/,
+      "0504 does not name the exact ingress key its successor has to admit");
+    assert.match(migration, /open loop #594/,
+      "0504 does not point at the record that carries the deferred admission");
   });
 
 test("ABSENCE: a revision with no AUTHENTICATED release candidate on record IS the absent ruled row",

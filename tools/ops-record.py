@@ -2233,34 +2233,50 @@ def cmd_deployment(args) -> int:
 
 
 # ── release ──────────────────────────────────────────────────────────────────
-# The exact shape a derived maker_verification_ref takes, and the marker the Gate
-# Zero seam store reads the row back by: `ops.authority-principal:<slug>` beside a
-# `maker_actor` of that same slug. Both halves are written here, from one
-# authenticated answer, and no caller flag can reach either column — so a row
-# satisfying `maker_verification_ref = 'ops.authority-principal:' || maker_actor`
-# is a row whose maker the DATABASE named on a human authority credential.
-MAKER_AUTHORITY_PREFIX = "ops.authority-principal:"
-
-
-# THE ONE DOOR ONTO A CANDIDATE ROW, and the only statement this tool runs to
-# file one. Migration 0502 defines it SECURITY DEFINER, executable by
-# carr_authority and by nobody else; it opens with `ops.authority_actor_slug()`
-# — the same function `release approve` opens with — and inserts the row in the
-# SAME call, so the derived maker and the row it lands in cannot come apart.
+# THE CANDIDATE ROW CARRIES NO MAKER THIS TOOL TYPED. Migration 0504 records the
+# filing login role on ops.release from `session_user`, derives
+# `maker_verification_ref = 'ops.authority-principal:<slug>'` itself when that
+# login is an admitted human authority principal, and REFUSES that marker to
+# every session that is not one. So the two columns the Gate Zero seam store
+# reads a maker back by are written by the database or not at all, and the column
+# it actually keys on — `maker_authority_verified` — is generated and has no
+# writable surface for any role.
 #
-# WHAT THE SEVENTH REVIEW ROUND CORRECTED. This tool used to derive the maker on
-# the authority connection, CLOSE it, and insert over the generic ledger writer.
-# The derivation was honest and the row's provenance still was not: any role
-# holding INSERT on ops.release could write the same two text columns itself, and
-# the Gate Zero seam store trusted exactly that pair. 0502 moves the insert onto
-# the credential that derived the maker, adds the unforgeable
-# `maker_authority_verified` column the store now keys on, and refuses a direct
-# candidate insert from carr_writer outright.
-RECORD_CANDIDATE_CALL = """
-    select candidate_id, candidate_key, candidate_maker, candidate_verification_ref
-      from ops.record_release_candidate(
-        %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::text[], %s,
-        %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz)
+# WHAT THE SEVENTH ROUND GOT RIGHT AND THE EIGHTH HAD TO REPLACE. The seventh
+# round put this insert behind one SECURITY DEFINER door in the ops schema, so
+# the derivation and the row could not come apart. It was withdrawn in the eighth
+# and is named nowhere in this file on purpose — the paired selftests assert its
+# absence. A door needs an EXECUTE grant, that grant is a new DB mutation
+# capability, and SIEP-11 admits one only through a SCAC mutation-registry
+# successor — so the door shipped ungranted and `release candidate` could not
+# file anything at all. Moving the insert onto the authority connection instead
+# fails the same way: carr_authority holds no INSERT on ops.release (0161 built
+# it deliberately without one) and granting it moves the identical seal.
+#
+# SO THE ROW IS FILED ON THE CREDENTIAL THAT MAY FILE IT, and the database
+# records which one that was. A candidate filed on the ledger writer is an honest
+# UNAUTHENTICATED record, read by nobody who needs an authenticated maker; a
+# candidate filed on a human authority credential is the authenticated one Gate
+# Zero's subject-maker seat reads. The wrapper's log prints what the database
+# recorded rather than what anybody meant.
+CANDIDATE_INSERT = """
+    insert into ops.release
+        (correlation_id, release_key, service_id, environment,
+         state, git_sha, provider, provider_version_id,
+         performance_budget_ref, performance_budget_ms, recovery_strategy,
+         artifact_digest, dependency_lock_digest,
+         sbom_ref, migration_set, schema_highest_migration,
+         schema_applied_count, schema_ledger_sha256,
+         config_fingerprint, declared_env_differences,
+         asset_versions, verifier_actor, verifier_evidence_ref,
+         test_evidence_ref, security_evidence_ref,
+         rollback_ready, rollback_plan_ref, work_request_ref,
+         plan_hash, source_kind, source_ref, expires_at)
+    values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
+            'tools/release-manifest.py', %s)
+    returning id, release_key, maker_actor, maker_session_user,
+              maker_authority_verified
 """
 
 
@@ -2383,9 +2399,10 @@ def cmd_release(args) -> int:
     # they prove the pre-connection refusals without a database at all.
     if args.action == "candidate" and (getattr(args, "maker", None) is not None
                                        or getattr(args, "maker_verification", None) is not None):
-        print("ops-record: the release candidate's maker is not a caller field; it is "
-              "derived from the authority connection identity the same way `release "
-              "approve` derives its approver. Drop --maker and --maker-verification.",
+        print("ops-record: the release candidate's maker is not a caller field. "
+              "Migration 0504 records the filing login role from session_user and "
+              "derives the maker from it, the same identity `release approve` "
+              "derives its approver from. Drop --maker and --maker-verification.",
               file=sys.stderr)
         return 2
     if args.action in ("approve", "staging-approve") and args.actor:
@@ -2422,23 +2439,19 @@ def cmd_release(args) -> int:
             return 2
 
     try:
-        # THE CANDIDATE IS FILED ON THE CREDENTIAL THAT NAMES ITS MAKER. There is
-        # no second connection in this branch and no writer DSN is opened for it:
-        # the derivation and the insert are one call on the authority connection,
-        # which is the whole point of migration 0502's door.
-        connection_kind = ("authority"
-                           if args.action in ("candidate", "approve", "staging-approve")
-                           else "write")
+        # ONE CONNECTION, AND IT IS THE ONE ALLOWED TO WRITE THE ROW. The
+        # candidate no longer opens an authority connection at all: there is
+        # nothing left for it to derive there, because migration 0504 derives the
+        # maker inside the INSERT from the session's own login role. An approval
+        # still runs on the authority connection, where a human's identity is the
+        # thing being recorded.
+        connection_kind = "authority" if args.action in ("approve", "staging-approve") else "write"
         with connect(connection_kind) as conn, conn.cursor() as cur:
             if args.action == "candidate":
                 corr = correlation_of(getattr(args, "correlation", None))
-                # THE SERVICE IS RESOLVED INSIDE THE DOOR, not out here: the
-                # authority role holds no select on ops.service, and a candidate
-                # whose service key is a typo should be refused by the same
-                # statement that would have written the row, in the same
-                # transaction, rather than by a lookup that ran first.
-                cur.execute(RECORD_CANDIDATE_CALL,
-                    (corr, args.key, args.service, args.environment,
+                sid = service_id(cur, args.service)
+                cur.execute(CANDIDATE_INSERT,
+                    (corr, args.key, sid, args.environment,
                      manifest.get("git_sha"), args.provider, args.provider_version_id,
                      manifest.get("performance_budget_ref"),
                      manifest.get("performance_budget_ms"),
@@ -2469,11 +2482,14 @@ def cmd_release(args) -> int:
                      args.work_request, manifest.get("plan_hash"),
                      parse_ts(args.expires_at) if args.expires_at else None))
                 row = cur.fetchone()
-                # The maker comes back OUT of the door rather than going into it,
-                # and it is printed so a wrapper's log names the principal the
-                # database authenticated rather than the one somebody meant.
                 print(f"{row[0]} {row[1]}")
-                print(f"maker {row[2]} {row[3]}", file=sys.stderr)
+                # THE PROVENANCE COMES BACK OUT OF THE ROW rather than going into
+                # it. A wrapper's log then names the login the database recorded
+                # and says, in words, whether that login is one Gate Zero's
+                # subject-maker seat may read a maker from.
+                print(f"maker {row[2]} filed by {row[3]} "
+                      f"({'authority-verified' if row[4] else 'not authority-verified'})",
+                      file=sys.stderr)
                 return 0
 
             if args.action == "require":
@@ -2744,22 +2760,6 @@ def cmd_release(args) -> int:
         raise
     except Exception as e:                                       # noqa: BLE001
         detail = str(e).splitlines()[0][:300]
-        # THE ONE REFUSAL THAT IS NOT A DEFECT, said in words rather than as a
-        # raw driver line. Migration 0502 defines the candidate door and leaves
-        # it ungranted on purpose: the EXECUTE grant is a new DB mutation
-        # capability, and SIEP-11 admits one only through a mutation-registry
-        # successor. Until that successor lands this is the expected answer, and
-        # a wrapper reading it should land the admission, never reach for a
-        # connection that could forge the maker instead.
-        if args.action == "candidate" and "record_release_candidate" in detail \
-                and "permission denied" in detail.lower():
-            print("ops-record: the release-candidate door exists and this authority "
-                  "credential may not open it yet. Its capability -- "
-                  "db-function-acl:ops.record_release_candidate(...):carr_authority:"
-                  "execute -- has not been admitted by a SCAC mutation-registry "
-                  "successor. No candidate was filed and nothing fell back to a "
-                  "connection that could assert a maker.", file=sys.stderr)
-            return 1
         print(f"ops-record: could not record the release: {detail}", file=sys.stderr)
         return 1
 
@@ -2978,12 +2978,12 @@ def main() -> int:
                      choices=["local", "rehearsal", "staging", "production"],
                      default="production")
     rel.add_argument("--correlation")
-    rel.add_argument("--maker", help="REFUSED for `candidate`: the maker is derived "
-                                     "from the authority connection identity, never "
-                                     "asserted by the caller")
+    rel.add_argument("--maker", help="REFUSED for `candidate`: the maker is the "
+                                     "login role that filed the row, recorded by "
+                                     "the database, never asserted by the caller")
     rel.add_argument("--maker-verification", help="REFUSED for `candidate`: derived "
                                                   "beside the maker from the same "
-                                                  "authenticated identity")
+                                                  "recorded login")
     rel.add_argument("--test-evidence", help="ref to the test run, e.g. ops/ci.sh#<run>")
     rel.add_argument("--security-evidence", help="ref to the security/scan run")
     rel.add_argument("--rollback-ready", action="store_true")

@@ -78,14 +78,18 @@ def psql(dsn, *args):
                           capture_output=True, text=True, timeout=1800)
 
 
-# The authority DSN `release candidate` derives its maker from, provisioned on
-# whatever throwaway cluster this run was handed. It is set by
+# The authority DSN every ops-record call in this test is pinned to, provisioned
+# on whatever throwaway cluster this run was handed. It is set by
 # provision_authority_principal() below and is deliberately a module global: a
-# candidate call that inherited the DEVELOPER's real CARR_DB_AUTHORITY_JOE_URL
-# from ~/.config/carr/db.env would derive its maker — and file its row — against
-# PRODUCTION. tools/ops-record.py loads db.env with setdefault, so an explicitly
-# set value wins; this is the same class of accident that wrote 46 fabricated run
-# rows into production in 2026-08 (see credential_names() there).
+# call that inherited the DEVELOPER's real CARR_DB_AUTHORITY_JOE_URL from
+# ~/.config/carr/db.env would reach PRODUCTION. tools/ops-record.py loads db.env
+# with setdefault, so an explicitly set value wins; this is the same class of
+# accident that wrote 46 fabricated run rows into production in 2026-08 (see
+# credential_names() there). `release candidate` no longer opens this connection
+# at all — migration 0504 records the filing login inside the insert, and
+# carr_authority holds no insert on ops.release to open it with — but the pin
+# stays, because what it protects against is an ops-record call reaching the wrong
+# database, not one command's own DSN choice.
 AUTHORITY_DSN: str | None = None
 
 
@@ -98,15 +102,18 @@ def record(dsn, *args):
 
 
 def provision_authority_principal(dsn: str) -> None:
-    """Give this cluster the human-authority login role `release candidate` now
-    derives its maker from, and point AUTHORITY_DSN at it.
+    """Give this cluster a real human-authority login role, and point
+    AUTHORITY_DSN at it.
 
     `ops.authority_actor_slug()` maps `session_user` to a partner slug and admits
     only carr_authority_joe and carr_authority_dell, and EXECUTE on it is granted
     to the carr_authority bundle — so the role has to exist, have login, and hold
-    that membership before a candidate can name a maker. Its password is the base
-    DSN's own, so nothing about the throwaway cluster's credentials is written
-    down here.
+    that membership for any authority-connection command to work here. Its
+    password is the base DSN's own, so nothing about the throwaway cluster's
+    credentials is written down here. This role is deliberately NOT given insert
+    on ops.release: that grant is the capability open loop #594 carries, and a
+    test that granted it to itself would report a green candidate path this
+    database's Production twin does not have.
     """
     global AUTHORITY_DSN
     params = psycopg.conninfo.conninfo_to_dict(dsn)

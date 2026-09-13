@@ -164,7 +164,8 @@ def main() -> int:
     # release-candidate row, so a --maker somebody typed would be
     # caller-asserted metadata inside a receipt that claims provenance. Both
     # halves of the pair are refused, before any credential is opened, and the
-    # refusal names where the identity comes from instead.
+    # refusal names where the identity comes from instead: migration 0504's
+    # record of the login role that filed the row.
     for flag, value in (("--maker", "joe"), ("--maker-verification", "ref:anything")):
         asserted = run_record(
             "release", "candidate", "--key", "selftest", "--environment", "production",
@@ -172,7 +173,8 @@ def main() -> int:
         check(f"4aa. a candidate asserting {flag} is refused",
               asserted.returncode == 2
               and "not a caller field" in (asserted.stdout + asserted.stderr)
-              and "authority connection identity" in (asserted.stdout + asserted.stderr),
+              and "records the filing login role from session_user"
+                  in (asserted.stdout + asserted.stderr),
               f"rc={asserted.returncode} err={(asserted.stderr or asserted.stdout)[:160]}")
     filed_at = deploy.find('ops-record.py" release candidate')
     filed_command = deploy[filed_at:deploy.find("|| fail", filed_at)] if filed_at != -1 else ""
@@ -292,21 +294,23 @@ def main() -> int:
     # correction): the manifest is verified first, and the row is then filed on
     # the authority connection that derives its maker. So this asks the stronger
     # question the old one was reaching for — the verification precedes the ONE
-    # connection the candidate branch opens, and that connection is not a
-    # writer's.
+    # connection the candidate branch opens, and that connection is the writer's:
+    # carr_authority holds no insert on ops.release, so a candidate that opened
+    # the authority connection could not file its row at all.
     candidate_verify_at = record.find("release-manifest.py")
-    candidate_connect_at = record.find("connection_kind = (\"authority\"", candidate_verify_at)
-    check("5e. candidate verification runs before the authority connection opens",
+    candidate_connect_at = record.find("connection_kind = \"authority\" if", candidate_verify_at)
+    check("5e. candidate verification runs before the connection opens",
           candidate_verify_at != -1 and candidate_connect_at > candidate_verify_at)
-    check("5e-i. and the candidate branch never reaches for a writer connection",
-          'if args.action in ("candidate", "approve", "staging-approve")' in record)
+    check("5e-i. and the candidate branch reaches for no authority connection",
+          'connection_kind = "authority" if args.action in ("approve", "staging-approve")'
+          in record)
 
     check("5f. Cloudflare UUIDs normalize to lowercase at both boundaries",
           "args.provider_version_id = version_id.lower()" in record
           and "tr 'A-F' 'a-f'" in deploy)
 
     check("6. release candidate persists both provider identity fields",
-          re.search(r"ops\.record_release_candidate\(.*?args\.provider, "
+          re.search(r"CANDIDATE_INSERT,.*?args\.provider, "
                     r"args\.provider_version_id", record, re.DOTALL) is not None)
     check("6a. Production candidate verifies the manifest carries the exact pair",
           "manifest_identity != requested_identity" in record

@@ -886,31 +886,47 @@ async function checkConclusionRows(query) {
  * they are in the WHERE clause rather than in the consumer, because a row this
  * reader cannot vouch for is not a row it should hand anybody.
  *
- *   `maker_authority_verified` — THE ONE PREDICATE THAT IS NOT TEXT, added by
- *   migration 0502 after the seventh review round found the other two forgeable.
- *   A trigger sets it only for a row inserted from a session whose session_user
- *   is an admitted human authority principal, and refuses every update that
- *   would move it; carr_writer cannot file a candidate row at all any more, and
- *   could not mark one if it could. The two text columns below are what the row
- *   SAYS; this column is why a reader may believe it.
+ *   `maker_authority_verified` — THE ONE PREDICATE NO ROLE CAN WRITE, added by
+ *   migration 0504 after the seventh review round found the other two forgeable.
+ *   It is a STORED GENERATED column over `maker_session_user`, which a BEFORE
+ *   trigger writes from `session_user` on every insert and which no update may
+ *   move. PostgreSQL refuses any statement that so much as NAMES a generated
+ *   column, so this is not a guarded field but an unwritable one: it is true
+ *   exactly when the login role that filed the row is carr_authority_joe or
+ *   carr_authority_dell. The two text columns below are what the row SAYS; this
+ *   column is why a reader may believe it.
  *
  *   `source_kind = 'wrapper'` — the one writer of a release candidate,
  *   tools/ops-record.py, writes that literal and nothing else ever does.
  *
  *   `maker_verification_ref = 'ops.authority-principal:' || maker_actor` — the
- *   MARKER OF THE DERIVATION. Those two columns are no longer reachable from any
- *   caller flag: `release candidate` refuses --maker and --maker-verification and
- *   writes both halves itself from one answer to `ops.authority_actor_slug()`
- *   over the authority connection, which is how `release approve` derives its
- *   approver. So a row satisfying this pair carries a maker the DATABASE named on
- *   a human authority credential, and a row whose maker somebody typed does not
- *   satisfy it and is not returned.
+ *   MARKER OF THE DERIVATION. Neither column is reachable from a caller flag:
+ *   `release candidate` refuses --maker and --maker-verification, and 0504's
+ *   trigger writes both halves itself from the recorded login for an authority
+ *   session and REFUSES the marker (42501) to every session that is not one. So a
+ *   row satisfying this pair carries a maker the DATABASE named from a human
+ *   authority credential, and a row whose maker somebody typed does not satisfy
+ *   it and is not returned.
  *
- * WHAT THIS DOES NOT CLAIM, said plainly: every row written before migration 0502
- * — including the ones the previous round's recorder derived honestly and then
- * inserted over the generic ledger writer — carries `maker_authority_verified`
- * false and is NOT read here, because at the moment it was written any role with
- * INSERT on the table could have written the same two columns. The predicate is
+ * WHY THIS READER IS EMPTY TODAY, AND WHAT FILLS IT, because a reader that
+ * returns nothing should say which fact is missing rather than look broken.
+ * Filing a row on a human authority credential needs that credential to hold
+ * INSERT on ops.release, and it does not: migration 0161 built carr_authority as
+ * a privilege bundle carrying no business-record table grant, 0273 made the two
+ * partner logins members of exactly that bundle, and adding the grant is a new DB
+ * mutation capability that SIEP-11 admits only through a SCAC mutation-registry
+ * successor — the one thing PR #1013 may not spawn under Joe's 2026-09-08
+ * moratorium. So every row the wrapper files today is an honest UNAUTHENTICATED
+ * record and this store reads none of them, which makes the subject-maker seat
+ * unreachable rather than wrong. Open loop #594 carries the admission; the day it
+ * lands, this reader starts answering with no change to this file.
+ *
+ * WHAT THIS DOES NOT CLAIM, said plainly: every row written before migration 0504
+ * — including the ones an earlier round's recorder derived honestly and then
+ * inserted over the generic ledger writer — has no recorded filing login at all,
+ * carries `maker_authority_verified` false, and is NOT read here, because at the
+ * moment it was written any role with INSERT on the table could have written the
+ * same two columns. The predicate is
  * therefore exact about the rows it admits rather than trusting the table's
  * history, and it is state-INDEPENDENT on purpose: the release this
  * producer judges is usually approved or complete by the time it is deployed, so
@@ -935,7 +951,7 @@ async function candidateBuildRecordRows(query) {
        and r.maker_verification_ref = '${MAKER_AUTHORITY_PREFIX}' || r.maker_actor
      order by r.observed_at desc nulls last`, params: [gitSha] }]);
   const answered = Array.isArray(raw) ? raw : [];
-  // EXACTLY ONE, OR NOBODY. Migration 0502's partial unique index is what makes
+  // EXACTLY ONE, OR NOBODY. Migration 0504's partial unique index is what makes
   // this the normal case rather than a hope, and this is the reader's own half of
   // the same rule: a second row for one revision would leave the producer
   // CHOOSING which authenticated maker to name, and a store that hands its

@@ -207,7 +207,7 @@ def main() -> int:
           and "for share" in record_source
           and "successor.service_id = target.service_id" in record_source
           and "successor.environment = target.environment" in record_source)
-    candidate_call = record_source[record_source.index("cur.execute(RECORD_CANDIDATE_CALL,"):]
+    candidate_call = record_source[record_source.index("cur.execute(CANDIDATE_INSERT,"):]
     candidate_call = candidate_call[:candidate_call.index("row = cur.fetchone()")]
     check("10. persisted rollback evidence comes from the verified manifest",
           'manifest.get("rollback_ready")' in candidate_call
@@ -215,20 +215,25 @@ def main() -> int:
           and "else args.rollback_ready" not in candidate_call
           and "else args.rollback_plan" not in candidate_call)
 
-    # ── the seventh review round: the row is written on the credential that
-    #    named its maker, and on no other ────────────────────────────────────
+    # ── the eighth review round: the row carries no maker this tool typed ───
     #
     # The sixth round derived the maker over the authority connection, CLOSED it,
-    # and inserted the row over the generic ledger writer. The derivation was
-    # honest and the row's provenance still was not, because any role holding
-    # INSERT on ops.release could write the same two text columns. Migration 0502
-    # moves the insert into a SECURITY DEFINER door only carr_authority may open;
-    # what is checked here is the wrapper's half — that `release candidate` opens
-    # the authority connection, calls that door, and opens no writer connection at
-    # all on this path.
-    check("11. the recorder holds no direct release-candidate insert beside the door",
-          "insert into ops.release" not in record_source
-          and "ops.record_release_candidate(" in record_source)
+    # and inserted the row over the generic ledger writer: the derivation was
+    # honest and the row's provenance was not, because any role holding INSERT on
+    # ops.release could write the same two text columns. The seventh round answered
+    # with a SECURITY DEFINER door and could not grant EXECUTE on it under the
+    # moratorium, so `release candidate` stopped filing anything at all. The eighth
+    # moves the fact into the database instead of into the permissions: migration
+    # 0504 records the filing login from session_user, derives the maker from it,
+    # and makes the column the Gate Zero seam store keys on GENERATED, so no role
+    # can write it. What is checked here is the wrapper's half — that it asserts
+    # neither half of the maker and reads the provenance back out of the row.
+    check("11. the recorder asserts no maker and reads the recorded one back",
+          "ops.record_release_candidate(" not in record_source
+          and "CANDIDATE_INSERT" in record_source
+          and "maker_actor, maker_session_user" in record_source
+          and "args.maker" not in record_source.split("def main(")[0]
+          and "returning id, release_key, maker_actor" in record_source)
 
     opened: list[str] = []
 
@@ -246,8 +251,12 @@ def main() -> int:
             self.statements.append(statement)
 
         def fetchone(self) -> tuple[Any, ...]:
+            # service_id() resolves first on this connection, then the insert
+            # returns the row's own recorded provenance.
+            if len(self.statements) == 1:
+                return ("22222222-2222-4222-8222-222222222222",)
             return ("11111111-1111-4111-8111-111111111111",
-                    "candidate-production", "joe", "ops.authority-principal:joe")
+                    "candidate-production", "app_writer", "app_writer", False)
 
     class FakeConnection:
         def __init__(self, kind: str) -> None:
@@ -296,16 +305,25 @@ def main() -> int:
             idempotency_key=None,
         ))
 
-    check("12. an exact candidate is filed on the authority connection and no other",
-          candidate_rc == 0 and opened == ["authority"],
+    # ONE CONNECTION, AND NOT THE AUTHORITY'S. carr_authority holds no insert on
+    # ops.release and cannot be granted one without the registry successor this
+    # branch may not start, so a candidate that opened the authority connection
+    # would be a candidate that could not be filed — which is exactly the outage
+    # the seventh round shipped.
+    check("12. an exact candidate is filed on the writer connection and no other",
+          candidate_rc == 0 and opened == ["write"],
           f"rc={candidate_rc} connections={opened}")
     filed = [statement for conn in connection_objects
              for statement in conn.cursor_object.statements]
-    check("13. the one statement it runs is the authority door, not an insert",
-          len(filed) == 1
-          and "ops.record_release_candidate(" in filed[0]
-          and "insert into" not in filed[0].lower(),
-          f"statements={filed}")
+    candidate_statements = [statement for statement in filed
+                            if "ops.release" in statement]
+    check("13. the one release statement names no maker column of its own",
+          len(candidate_statements) == 1
+          and "insert into ops.release" in candidate_statements[0]
+          and "maker_actor," not in candidate_statements[0].split("returning")[0]
+          and "maker_verification_ref" not in candidate_statements[0].split("returning")[0]
+          and "maker_session_user" not in candidate_statements[0].split("returning")[0],
+          f"statements={candidate_statements}")
 
     if FAILURES:
         print(f"release-candidate-manifest-admission-selftest: {len(FAILURES)} FAILED")

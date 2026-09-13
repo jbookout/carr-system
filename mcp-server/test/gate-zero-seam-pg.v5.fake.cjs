@@ -216,7 +216,7 @@ const LEDGER_NEAR_MISS_RECEIPT_ROWS = [{
  * THE CANDIDATE-BUILD WORLD, and it exists to ask ONE question of the real store:
  * what does it do when a revision resolves to two authenticated candidate rows?
  *
- * Migration 0502's partial unique index is what stops that happening in a
+ * Migration 0504's partial unique index is what stops that happening in a
  * database that has it. This fake is a database that does NOT — an older
  * production, a restored dump, a hand-repaired row — because a reader whose
  * safety depends entirely on an index it cannot see is a reader with no answer

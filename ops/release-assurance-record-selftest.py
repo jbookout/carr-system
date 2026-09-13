@@ -274,19 +274,22 @@ def main() -> int:
     # and why: this selftest runs in CI, which must never hold a production
     # credential, and the columns in question are only observable through a
     # write nobody should be doing from a test run.
-    # The candidate is no longer an insert in this file: PR 1013's seventh
-    # correction moved it behind migration 0502's authority door, so the columns
-    # 0169 says a candidate may collect are asserted on the door's own signature
-    # and on the arguments this tool passes it.
-    candidate_call = source[source.index("RECORD_CANDIDATE_CALL = "):]
+    # The candidate insert lives in one named statement now: PR 1013's eighth
+    # correction withdrew the seventh's SECURITY DEFINER door — it could not be
+    # granted under the moratorium, so it stopped the wrapper filing anything —
+    # and moved the provenance into migration 0504's trigger and generated column
+    # instead. The columns 0169 says a candidate may collect are asserted on that
+    # statement and on the arguments this tool passes it.
+    candidate_call = source[source.index("CANDIDATE_INSERT = "):]
     candidate_call = candidate_call[:candidate_call.index("row = cur.fetchone()")]
-    door = (REPO / "migrations" /
-            "0502_release_candidate_authority_provenance.sql").read_text(encoding="utf-8")
+    provenance = (REPO / "migrations" /
+                  "0504_release_maker_session_provenance.sql").read_text(encoding="utf-8")
     check("8. the CANDIDATE can collect the verifier, which 0169 says it may",
           "args.verifier, args.verifier_evidence" in candidate_call
-          and "p_verifier_actor            text," in door
-          and "p_verifier_evidence_ref     text," in door
-          and "verifier_actor, verifier_evidence_ref," in door)
+          and "verifier_actor, verifier_evidence_ref," in candidate_call
+          and "new.maker_session_user := session_user;" in provenance
+          and "generated always as (ops.authority_login_slug(maker_session_user) is not null)"
+              in provenance)
 
     approval_migration = (REPO / "migrations" /
                           "0205_program5_approval_verifier.sql").read_text(encoding="utf-8")
