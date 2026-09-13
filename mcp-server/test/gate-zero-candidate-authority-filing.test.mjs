@@ -90,11 +90,10 @@ print(json.dumps(list(m.credential_names())))
   return names;
 }
 
-/** The DSN with its user replaced — trust auth on the throwaway cluster. */
+/** The DSN with its user replaced, retaining the throwaway cluster password. */
 function asUser(dsn, user) {
   const url = new URL(dsn);
   url.username = encodeURIComponent(user);
-  url.password = "";
   return url.toString();
 }
 
@@ -128,8 +127,10 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     // create: it is provisioned in the database provider's console, and minting
     // one in a snapshot would manufacture a login that authenticates as Joe's
     // authority principal on every machine that rebuilds. On a throwaway cluster
-    // with trust auth it is made here, passwordless, and joined to the bundle
-    // exactly as migration 0273 joins it in production.
+    // it is made here, given the base fixture's ephemeral password when one is
+    // present, and joined to the bundle exactly as migration 0273 joins it in
+    // production. Keeping that password makes this proof work both with the
+    // local trust-auth cluster and GitHub's password-authenticated service.
     await client.query(`
       do $$
       begin
@@ -141,6 +142,13 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
       end $$;`);
     await client.query(`grant carr_authority to ${AUTHORITY_LOGIN}`);
     await client.query(`grant carr_writer to ${AUTHORITY_LOGIN}`);
+    const authorityPassword = decodeURIComponent(new URL(DSN).password);
+    if (authorityPassword) {
+      const passwordStatement = (await client.query(
+        "select format('alter role %I login password %L', $1, $2) as sql",
+        [AUTHORITY_LOGIN, authorityPassword])).rows[0].sql;
+      await client.query(passwordStatement);
+    }
 
     // THE GRANTS 0503 AND 0505 CARRY, asked of the database rather than assumed
     // from the files. If 0505 did not apply, this is where the proof stops and
