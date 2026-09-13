@@ -2,6 +2,21 @@
 # Secrets (via `wrangler secret put`, never in this file, never in git):
 #   DATABASE_URL_READER — Neon login role granted carr_reader (views only)
 #   DATABASE_URL_WRITER — Neon login role granted carr_writer (write path; set when verbs land)
+#   DATABASE_URL_GATE_ZERO_WRITER
+#                       — Neon login role carr_gate_zero_producer, created by
+#                         migration 0502 and granted NOTHING else. It is
+#                         the ONLY role holding EXECUTE on
+#                         ops.gate_zero_record_read_only_outcome (migration 0502
+#                         revokes it from carr_writer), and the record layer
+#                         derives the producing seat from session_user rather
+#                         than from any session setting — standing-rule
+#                         amendment 9, 2026-09-14: seat-only write is enforced by
+#                         CONNECTION ROLE. Used by exactly one verb,
+#                         record-gate-zero-read-only-outcome, and by nothing else;
+#                         never widen it and never point it at app_writer.
+#                         Provisioned as the third LoginProfile in
+#                         tools/provision-staging-app-writer.py, which publishes
+#                         all three DSNs in one atomic bulk cutover.
 #   INGEST_TOKENS       — JSON map { "<source>": "<token>" } for the ingest socket
 #   PROBE_TOKENS        — JSON map { "<slug>": "<token>" } for the smoke suite ONLY
 #                         (loop #192, 2026-08-06). Authenticates as one locked-

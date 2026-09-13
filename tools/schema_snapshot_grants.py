@@ -428,18 +428,62 @@ def _migration_acl_operation(statement: str, role: str):
     return groups["action"], objects, privileges
 
 
+# A dollar-quoted body: `$$ ... $$` or `$tag$ ... $tag$`. The tag alternative
+# includes the empty string so the bare form matches its own closing delimiter.
+DOLLAR_QUOTED = re.compile(
+    r"\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*|)\$(?P<body>.*?)\$(?P=tag)\$", re.DOTALL
+)
+
+# EVERY SPELLING THIS COMPOSER KNOWS OF THAT COULD MOVE AUTHORITY. A dollar-
+# quoted body carrying one of these outside a statement the composer parsed is
+# authority it cannot see, and stays a review stop. A body carrying none of them
+# names the role without conferring anything -- `create role`, a `rolname = '...'`
+# probe, a function returning the bundle's name as a literal -- and those are
+# forgiven, because counting them as unparsed authority made the first bundle
+# introduced by a still-pending migration impossible to compose (2026-09-14).
+AUTHORITY_VERB = re.compile(
+    r"\b(?:grant|revoke|reassign\s+owned|set\s+role|security\s+definer)\b"
+    r"|\balter\s+(?:default\s+privileges|role|table[\s\S]*?\bowner\s+to)\b"
+    r"|\bowner\s+to\b",
+    re.IGNORECASE,
+)
+
+
 def _migration_acl_statements(sql: str, role: str) -> list[str]:
     scrubbed = _scrub_sql(sql)
     statements = [match.group(0) for match in ACL_STATEMENT.finditer(scrubbed)]
     # Every uncommented occurrence naming the target must belong to a complete
     # semicolon-terminated ACL statement. This turns new syntax into a review
     # stop instead of silently omitting authority from the plan.
+    #
+    # THE ONE EXEMPTION, AND ITS TEST. An occurrence inside a dollar-quoted body
+    # is forgiven when that body, with its parsed ACL statements removed, names
+    # no authority verb at all. That is the shape of a migration CREATING a
+    # capability bundle and of a function returning the bundle's name: neither
+    # confers anything. A body that still carries an authority verb after its
+    # parsed statements are removed is the hidden-authority case this check
+    # exists for, and it stops review exactly as before.
+    forgiven = 0
+    for match in DOLLAR_QUOTED.finditer(scrubbed):
+        body = match.group("body")
+        occurrences = len(re.findall(rf"\b{re.escape(role)}\b", body))
+        if not occurrences:
+            continue
+        parsed = [one.group(0) for one in ACL_STATEMENT.finditer(body)]
+        remainder = body
+        for statement in parsed:
+            remainder = remainder.replace(statement, " ", 1)
+        if AUTHORITY_VERB.search(remainder):
+            continue
+        forgiven += occurrences - sum(
+            len(re.findall(rf"\b{re.escape(role)}\b", statement)) for statement in parsed
+        )
     named_occurrences = len(re.findall(rf"\b{re.escape(role)}\b", scrubbed))
     statement_occurrences = sum(
         len(re.findall(rf"\b{re.escape(role)}\b", statement))
         for statement in statements
     )
-    if named_occurrences != statement_occurrences:
+    if named_occurrences - forgiven != statement_occurrences:
         raise SnapshotGrantError(
             f"pending migration mentions {role} outside a parsed ACL statement"
         )
@@ -469,7 +513,23 @@ def compose_grants_to_role(
                     f"{name} digest differs from the schema snapshot ledger"
                 )
 
-    facts = set(acl_facts(grants_to_role(schema_text, role)))
+    # A BUNDLE WHOSE MIGRATION IS STILL PENDING HAS NO SNAPSHOT ACLs, BY DESIGN.
+    # bin/schema-snapshot.sh's role preamble deliberately creates capability
+    # bundles ahead of the migration that grants to them, so a pending migration
+    # can grant on a fresh cluster; tools/test-schema-snapshot-grants.py's
+    # ROLE_GRANT_MIGRATIONS map records exactly which bundles are in that state.
+    # For those, the snapshot is CORRECT to be silent -- it is production truth,
+    # and in production the role holds nothing yet -- so composition starts from
+    # an empty fact set and the pending series supplies the whole plan. It still
+    # refuses to return nothing: a role no committed SQL grants to anywhere is a
+    # typo, not a pending bundle. (2026-09-14, carr_gate_zero_producer, the
+    # first role introduced by a migration pending at composition time.)
+    try:
+        facts = set(acl_facts(grants_to_role(schema_text, role)))
+    except SnapshotGrantError as exc:
+        if f"CARR GRANTS contains no statements for {role}" != str(exc):
+            raise
+        facts = set()
     for name, sql in ordered:
         if name in applied:
             continue
@@ -495,6 +555,10 @@ def compose_grants_to_role(
                         facts.add(fact)
                     else:
                         facts.discard(fact)
+    if not facts:
+        raise SnapshotGrantError(
+            f"neither the schema snapshot nor any pending migration grants to {role}"
+        )
     return render_acl_facts(facts, role)
 
 

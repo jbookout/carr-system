@@ -20,6 +20,7 @@ import { actorFromProps, authorizationClassForActor, organizationTenantForActor,
 import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
+import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -627,6 +628,15 @@ export async function callTool(env, actor, name, args, profile = "full") {
   const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
+  // THE ORACLE SEAT WRITES ON ITS OWN CREDENTIAL, under standing-rule amendment
+  // 9 (2026-09-14): seat-only write is enforced by connection role, not by a
+  // session setting. `client` above authenticates as the ordinary writer, whose
+  // EXECUTE on ops.gate_zero_record_read_only_outcome migration 0502 revokes; the
+  // seat's own login role holds it and nothing else does. This attaches the door
+  // rather than opening it — nothing connects unless the handler calls it, and a
+  // Worker with no such secret gets null, which the handler refuses by name
+  // instead of silently falling back to the writer connection.
+  if (tool.oracleSeatOnly) client.seatConnection = gateZeroSeatConnection(env, Pool);
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);

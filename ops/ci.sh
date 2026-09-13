@@ -1230,6 +1230,24 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   #
   # NOTHING AFTER THIS POINT READS ops.gate_zero_read_only_outcome, so it runs
   # last among the proofs rather than first.
+  # THE GATE ZERO SEAT BOUNDARY, added 2026-09-14 (PR 1014 third correction).
+  # Standing-rule amendment 9: seat-only write is enforced by CONNECTION ROLE.
+  # Whether carr_writer is refused, whether the dedicated login role is admitted,
+  # and whether re-granting carr_writer turns the privilege proof red are three
+  # properties of real grants and a real session_user -- none of which a mock can
+  # show. It runs BEFORE the race proof: it creates the dedicated login role that
+  # proof now needs, and its own mutation control restores the revoke before it
+  # returns, which it asserts rather than assumes.
+  if [ -f mcp-server/test/gate-zero-outcome-role-boundary.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-role-boundary.log" \
+         node --test mcp-server/test/gate-zero-outcome-role-boundary.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-role-boundary.log" >&2
+      bad migration "the Gate Zero producer seat/connection-role boundary proof failed"
+      return
+    fi
+  fi
+
   if [ -f mcp-server/test/gate-zero-outcome-record-race.test.mjs ]; then
     if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
          run_quiet "$LOGDIR/gate-zero-outcome-race.log" \

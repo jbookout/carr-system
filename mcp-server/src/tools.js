@@ -38,6 +38,7 @@ import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRe
 import { assertGateZeroReceipt, deriveGateZeroProducerSeat, gateZeroOracleSeatLane,
          gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest,
          GATE_ZERO_RECEIPT_SCHEMA } from "./gate-zero-outcome-store.v5.js";
+import { GATE_ZERO_WRITER_SECRET_NAME } from "./gate-zero-seat-connection.v5.js";
 // THE RECEIPT'S ONE SOURCE. The gate's producer seam is bound to Step A's
 // zero-argument producer, so this is how a receipt enters the write path: by
 // being produced, inside this call, from rows three ruled readers took from
@@ -7594,35 +7595,64 @@ export const TOOLS = {
       // trusted because it is ours.
       const receipt = assertGateZeroReceipt(emitted.receipt, seat);
 
-      const recordedId = (await c.query(
-        `select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id`,
-        [args.idempotency_key, JSON.stringify(receipt)])).rows[0].id;
-
-      // READ THE DIGEST BACK OUT OF THE ROW rather than reporting the one this
-      // process computed. The database recomputes it from the persisted receipt
-      // with ops.gate_zero_outcome_digest(); reporting our own value would let a
-      // caller believe a number the record layer never agreed to. The locally
-      // computed digest is compared, not returned, so a divergence between the
-      // two canonicalizations is a refusal here instead of a silent mismatch
-      // that only surfaces when a benchmark acceptance binds the wrong value.
+      // THE WRITE RUNS ON THE SEAT'S OWN CONNECTION, NOT ON `c` (2026-09-14,
+      // PR 1014 third correction, standing-rule amendment 9).
       //
-      // THE STORED RECEIPT COMES BACK TOO, AND THE CHECK IS AGAINST IT rather
-      // than against this call's object (PR 1014, second correction). On a
-      // RETRY the row is the earlier run's -- same candidate, different
-      // session_ref, different instants -- so comparing the row's digest with a
-      // digest of THIS call's receipt refused every genuine second call, which
-      // was the gateway half of Sol's finding 3. Recomputing from the persisted
-      // receipt asks the question the check was always meant to ask: do the
-      // record layer's canonical JSON and artifact-trust.js's agree about the
-      // bytes that are actually stored? That holds on a first call and a retry
-      // alike, and it is the stronger of the two readings.
-      const row = (await c.query(
-        `select id, outcome_digest, candidate_scoped_digest, candidate_digest, status,
-                producing_seat_ref, receipt,
-                to_char(observed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as observed_at,
-                to_char(recorded_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as recorded_at
-           from ops.gate_zero_read_only_outcome where id = $1::uuid`,
-        [recordedId])).rows[0];
+      // `c` is the ordinary writer connection every other verb uses, and that is
+      // exactly why this call may not travel on it. Sol's finding 2: the record
+      // layer's seat test read carr.acting_actor_slug, a GUC any session can set
+      // on itself, so any carr_writer connection could have named the staffed
+      // lane and been believed. Migration 0502 now revokes EXECUTE from
+      // carr_writer, grants it to one capability bundle reachable by one login
+      // role, and derives the seat from session_user. This opens a connection
+      // that AUTHENTICATES as that role, with a secret used for nothing else.
+      //
+      // NO FALLBACK, BY DESIGN. A Worker that carries no such secret refuses here
+      // by name. Falling back to `c` would be a deployment in which the whole
+      // amendment is off and nothing said so — which is the failure this correction
+      // exists to close, not a degradation worth tolerating.
+      if (typeof c.seatConnection !== "function") {
+        throw new ToolError({ error: "gate_zero_seat_connection_unavailable",
+          required_secret: GATE_ZERO_WRITER_SECRET_NAME,
+          hint: "recording a Gate Zero outcome requires the dedicated producer connection. The ordinary " +
+                "writer connection is refused by the record layer and is not used as a fallback: provision " +
+                "the login role and its secret before this verb can record anything." });
+      }
+      // ONE TRANSACTION ON THAT CONNECTION, carrying the write and the readback
+      // together. The readback has to be inside it: on a FIRST call the row is
+      // this transaction's own and is not visible to any other connection until
+      // it commits.
+      const row = await c.seatConnection(async seat => {
+        const recordedId = (await seat.query(
+          `select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id`,
+          [args.idempotency_key, JSON.stringify(receipt)])).rows[0].id;
+
+        // READ THE DIGEST BACK OUT OF THE ROW rather than reporting the one this
+        // process computed. The database recomputes it from the persisted receipt
+        // with ops.gate_zero_outcome_digest(); reporting our own value would let a
+        // caller believe a number the record layer never agreed to. The locally
+        // computed digest is compared, not returned, so a divergence between the
+        // two canonicalizations is a refusal here instead of a silent mismatch
+        // that only surfaces when a benchmark acceptance binds the wrong value.
+        //
+        // THE STORED RECEIPT COMES BACK TOO, AND THE CHECK IS AGAINST IT rather
+        // than against this call's object (PR 1014, second correction). On a
+        // RETRY the row is the earlier run's -- same candidate, different
+        // session_ref, different instants -- so comparing the row's digest with a
+        // digest of THIS call's receipt refused every genuine second call, which
+        // was the gateway half of Sol's finding 3. Recomputing from the persisted
+        // receipt asks the question the check was always meant to ask: do the
+        // record layer's canonical JSON and artifact-trust.js's agree about the
+        // bytes that are actually stored? That holds on a first call and a retry
+        // alike, and it is the stronger of the two readings.
+        return (await seat.query(
+          `select id, outcome_digest, candidate_scoped_digest, candidate_digest, status,
+                  producing_seat_ref, receipt,
+                  to_char(observed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as observed_at,
+                  to_char(recorded_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as recorded_at
+             from ops.gate_zero_read_only_outcome where id = $1::uuid`,
+          [recordedId])).rows[0];
+      });
       const localDigest = gateZeroOutcomeDigest(row.receipt);
       if (row.outcome_digest !== localDigest) {
         throw new ToolError({ error: "gate_zero_outcome_digest_divergence",

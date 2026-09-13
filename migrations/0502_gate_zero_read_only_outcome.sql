@@ -31,14 +31,17 @@
 -- sponsored agent, and this one is neither. ops.gate_zero_producer_actor_id()
 -- below is the record layer's half of it. The gateway's half is in
 -- mcp-server/src/tools.js, and the two are deliberately independent: a handler
--- bug cannot step around the database, and a direct writer connection cannot
--- step around the gateway's derivation either, because this function re-derives
--- the seat from the server-established transaction context rather than trusting
--- anything sent to it.
+-- bug cannot step around the database, and no ordinary writer connection can
+-- step around the gateway's derivation either, because under standing-rule
+-- amendment 9 (2026-09-14) the record layer admits ONE dedicated login role for
+-- this write and derives the seat from session_user -- the role the connection
+-- authenticated as -- rather than from anything the session can set on itself.
 --
 -- NOTHING HERE IS A CALLER'S WORD FOR ANYTHING.
---   * The producing seat is DERIVED from carr.acting_actor_slug, which only
---     mcp.js's setWriterActorContext sets, and is never a parameter.
+--   * The producing seat is DERIVED from session_user, the role this connection
+--     authenticated as, checked against the capability bundle below. It is not a
+--     parameter, and -- since amendment 9 -- not a session setting either:
+--     carr.acting_actor_slug is informational on this path and is not read.
 --   * The outcome digest is RECOMPUTED from the stored receipt with
 --     ops.portfolio_canonical_json, which matches artifact-trust.js's
 --     canonicalJson byte for byte. No caller-supplied digest is accepted, and
@@ -100,6 +103,79 @@ end $v5_a02_gate_zero_outcome_preflight$;
 -- a seat is an edit somebody makes and reviews, in both places, or it does not
 -- happen. Put a different lane in either half and the two disagree, which the
 -- test suite reads as a defect rather than as a configuration.
+-- THE CONNECTION ROLE IS THE SEAT, AND THAT IS STANDING-RULE AMENDMENT 9.
+--
+-- The first version of this file derived the producing seat from
+-- current_setting('carr.acting_actor_slug'), the GUC mcp.js sets on a writer
+-- transaction. Sol's re-review of PR 1014 was right about it: a GUC is a
+-- two-part custom parameter any session may set on itself, so any connection
+-- holding carr_writer could have named the staffed lane and walked straight
+-- through the record layer's half of the gate. Joe's amendment 9 (logged
+-- 2026-09-14) settles the general rule this migration now obeys: SEAT-ONLY
+-- WRITE IS ENFORCED BY CONNECTION ROLE, NEVER BY A SESSION SETTING.
+--
+-- So the seat is a LOGIN ROLE with its own credential, and it is the only role
+-- on this database that may execute the writer below. carr_writer -- the role
+-- every ordinary verb runs on -- is revoked from it at the bottom of this file.
+-- The GUC survives and is still set by mcp.js for every other verb; here it is
+-- INFORMATIONAL ONLY and this function does not read it. Nothing a session can
+-- set on itself decides anything on this path any more.
+--
+-- ONE ROLE, AND WHY IT IS A LOGIN ROLE RATHER THAN THE USUAL BUNDLE PAIR.
+--
+-- Every other capability in this database is a NOLOGIN `carr_*` bundle with a
+-- separate login role granted into it (0315's forward-fix verifier is the
+-- model). This one is deliberately not, and the reason is measured rather than
+-- preferred: the SCAC sealed catalog's role_authority projection enumerates
+-- exactly the `carr_*` NOLOGIN closure, and PostgreSQL roles are CLUSTER-wide
+-- while db/schema.sql is a DATABASE artifact. A new NOLOGIN bundle therefore
+-- makes ops.scac_mutation_catalog_v25_current() false for every OTHER database
+-- in the same cluster -- including the pristine snapshot databases the
+-- migration-class gates build -- until the snapshot is regenerated from
+-- production truth after this migration lands. Measured on a disposable
+-- cluster, 2026-09-14: with a NOLOGIN bundle created, a second schema.sql load
+-- in the same cluster refuses with 'restored SCAC registry failed exact
+-- historical, current, or per-entry contract seals'; with the LOGIN role below,
+-- it loads.
+--
+-- A `carr_`-prefixed LOGIN role is the shape that keeps both halves true. The
+-- function-ACL projection's runtime-role closure takes every `carr_*` role,
+-- login or not, so the EXECUTE grant below STAYS inside the sealed catalog and
+-- a change of grantee still moves the receipt. The role_authority projection
+-- takes only the NOLOGIN ones, so this role is invisible to it and no other
+-- database in the cluster is disturbed. Nothing is traded away: the grant is
+-- sealed, and the seat boundary is proved directly against pg_proc by
+-- mcp-server/test/gate-zero-outcome-role-boundary.test.mjs.
+--
+-- THE ROLE IS CREATED HERE AND ITS CREDENTIAL IS NOT. `create role ... login`
+-- with no password cannot authenticate to a managed provider; the password, and
+-- the DSN the Worker carries as DATABASE_URL_GATE_ZERO_WRITER, are minted out of
+-- band by tools/provision-staging-app-writer.py, which carries this seat as a
+-- third LoginProfile beside the reader and the writer. A rebuilt schema still
+-- mints no secret.
+do $v5_a02_gate_zero_producer_role$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'carr_gate_zero_producer') then
+    create role carr_gate_zero_producer login;
+  elsif exists (select 1 from pg_roles
+                 where rolname = 'carr_gate_zero_producer'
+                   and (not rolcanlogin or rolsuper or rolcreaterole or rolcreatedb
+                        or rolreplication or rolbypassrls)) then
+    raise exception '0502 FAILED: the Gate Zero producer seat must be a plain LOGIN role with no powerful attributes';
+  end if;
+end $v5_a02_gate_zero_producer_role$;
+grant usage on schema ops, public to carr_gate_zero_producer;
+
+-- The role name, as a literal, for the same reason the seat holder ref below is
+-- a literal: staffing is an edit somebody makes and reviews, not a row.
+create or replace function ops.gate_zero_producer_login_role()
+returns text language sql immutable
+set search_path = pg_catalog
+as $$ select 'carr_gate_zero_producer'::text $$;
+
+comment on function ops.gate_zero_producer_login_role() is
+  'The ONE role admitted to record a Gate Zero read-only outcome, and the only holder of EXECUTE on ops.gate_zero_record_read_only_outcome. Created here without a credential; its password and DSN are provisioned out of band by tools/provision-staging-app-writer.py and reach the Worker as DATABASE_URL_GATE_ZERO_WRITER, which is used for nothing else.';
+
 create or replace function ops.gate_zero_producer_seat_holder_ref()
 returns text language sql immutable
 set search_path = pg_catalog
@@ -110,19 +186,26 @@ comment on function ops.gate_zero_producer_seat_holder_ref() is
 
 -- THE ONE AUTHORITY TEST, AND IT IS NARROWER THAN EVERY OTHER ONE HERE.
 --
--- Four ordered questions, each answering "refuse":
---   1. Is a server-established acting actor set on this transaction? Only
---      mcp.js's setWriterActorContext sets it. No -> refuse.
---   2. Is that actor the LANE of the staffed seat -- the middle segment of the
---      holder ref -- and nothing else? A different review-token seat
---      (grok-reviewer authenticates identically and derives the same
---      review_agent class) is refused here by name.
---   3. Is the actor an ACTIVE, NON-HUMAN actor row? A human slug reaching this
+-- Three ordered questions, each answering "refuse":
+--   1. Did this transaction AUTHENTICATE as the dedicated Gate Zero producer
+--      login role? session_user is the role the connection logged in as. It is
+--      not a GUC, not a parameter, and not reachable by SET ROLE -- only
+--      SET SESSION AUTHORIZATION moves it, and that is superuser-only. A
+--      carr_writer connection naming the staffed lane in any setting it likes
+--      fails HERE, which is the clause Sol's finding 2 was about.
+--   2. Is the seat still staffed in the registration this file mirrors -- that
+--      is, does the holder ref still carry a lane? An unstaffed seat has no
+--      actor to attribute the row to.
+--   3. Is that lane an ACTIVE, NON-HUMAN actor row? A human slug reaching this
 --      function would mean a partner signing an oracle's receipt, which is the
 --      exact thing the independent-oracle design exists to prevent, and Joe's
 --      ruling put the human act downstream instead.
---   4. Is the seat still staffed in the registration this file mirrors? That is
---      the literal above; an unstaffed seat has no lane to match in (2).
+--
+-- WHAT IS DELIBERATELY NOT ASKED: carr.acting_actor_slug. The GUC is still set
+-- by mcp.js on ordinary writer transactions and is still how every other verb
+-- derives its actor, but on THIS path it is informational and unread. Under
+-- amendment 9 the connection role is the authority, and a value a session can
+-- set on itself is not one.
 --
 -- IT DOES NOT ANSWER "WHO IS THIS", it answers "may THIS transaction record a
 -- Gate Zero outcome". Nothing else in this database calls it.
@@ -130,33 +213,30 @@ create or replace function ops.gate_zero_producer_actor_id()
 returns uuid language plpgsql stable
 set search_path = pg_catalog, ops, public
 as $$
-declare v_slug text; v_lane text; v_id uuid; v_human boolean;
+declare v_login text; v_lane text; v_id uuid; v_human boolean;
 begin
-  v_slug := nullif(current_setting('carr.acting_actor_slug', true), '');
-  if v_slug is null then
-    raise exception 'recording a Gate Zero read-only outcome requires the server-established actor context; none is set on this transaction';
+  v_login := session_user;
+  if v_login is distinct from ops.gate_zero_producer_login_role() then
+    raise exception 'recording a Gate Zero read-only outcome requires the dedicated producer connection: the record layer admits % and this transaction authenticated as %',
+      ops.gate_zero_producer_login_role(), coalesce(v_login, '(none)');
   end if;
   v_lane := split_part(ops.gate_zero_producer_seat_holder_ref(), ':', 2);
   if v_lane = '' then
     raise exception 'the Gate Zero oracle seat is unstaffed; no actor may record an outcome';
   end if;
-  if v_slug <> v_lane then
-    raise exception 'only the staffed Gate Zero oracle seat may record a read-only outcome: the seat is held by %, and this transaction acts as %',
-      ops.gate_zero_producer_seat_holder_ref(), v_slug;
-  end if;
-  select id, kind = 'human' into v_id, v_human from public.actor where slug = v_slug and active;
+  select id, kind = 'human' into v_id, v_human from public.actor where slug = v_lane and active;
   if not found then
-    raise exception 'the Gate Zero oracle seat lane % is not an active actor', v_slug;
+    raise exception 'the Gate Zero oracle seat lane % is not an active actor', v_lane;
   end if;
   if v_human then
-    raise exception 'the Gate Zero oracle seat must be a machine identity; actor % is a human actor, and the human act in this chain is the benchmark acceptance downstream', v_slug;
+    raise exception 'the Gate Zero oracle seat must be a machine identity; actor % is a human actor, and the human act in this chain is the benchmark acceptance downstream', v_lane;
   end if;
   return v_id;
 end;
 $$;
 
 comment on function ops.gate_zero_producer_actor_id() is
-  'Refuses every transaction except one acting as the staffed, active, non-human Gate Zero oracle seat lane. Derived from carr.acting_actor_slug; never a parameter. This is the record layer half of Joe''s 2026-09-13 ruling d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70; the gateway half is in mcp-server/src/tools.js and neither substitutes for the other.';
+  'Refuses every transaction except one that AUTHENTICATED as the dedicated Gate Zero producer login role and whose staffed seat lane is an active, non-human actor. Derived from session_user; carr.acting_actor_slug is informational and is not read here. This is the record layer half of Joe''s 2026-09-13 ruling d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70 as amended by standing-rule amendment 9 (2026-09-14, seat-only write is enforced by connection role); the gateway half is in mcp-server/src/tools.js and neither substitutes for the other.';
 
 -- ---------------------------------------------------------------------------
 -- The record.
@@ -620,23 +700,26 @@ comment on function ops.benchmark_gate_zero_outcome() is
 -- Grants. Reads reach the ordinary bundles; DIRECT INSERT IS GRANTED TO NOBODY.
 -- No role is created here.
 -- ---------------------------------------------------------------------------
-grant select on ops.gate_zero_read_only_outcome to carr_reader, carr_writer, carr_authority;
+grant select on ops.gate_zero_read_only_outcome to carr_reader, carr_writer, carr_authority,
+  carr_gate_zero_producer;
 -- THE GRANT HALF OF APPEND-ONLY. It does not bind the owner -- the whole-table
 -- wipe privilege cannot be revoked from it -- which is what the statement-level
 -- trigger above is for. Both halves are kept.
 revoke insert, update, delete, truncate on ops.gate_zero_read_only_outcome
-  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority, carr_gate_zero_producer;
 
 revoke all on function ops.gate_zero_producer_seat_holder_ref(),
+  ops.gate_zero_producer_login_role(),
   ops.gate_zero_outcome_digest(jsonb),
   ops.gate_zero_outcome_candidate_projection(jsonb),
   ops.gate_zero_outcome_candidate_digest(jsonb)
-  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority, carr_gate_zero_producer;
 grant execute on function ops.gate_zero_producer_seat_holder_ref(),
+  ops.gate_zero_producer_login_role(),
   ops.gate_zero_outcome_digest(jsonb),
   ops.gate_zero_outcome_candidate_projection(jsonb),
   ops.gate_zero_outcome_candidate_digest(jsonb)
-  to carr_reader, carr_writer, carr_jobs, carr_authority;
+  to carr_reader, carr_writer, carr_jobs, carr_authority, carr_gate_zero_producer;
 
 -- THE AUTHORITY TEST AND THE PRIVATE READER ARE GRANTED TO NOBODY. Exposing
 -- either would turn a boundary into a callable question: the first would let a
@@ -646,12 +729,27 @@ grant execute on function ops.gate_zero_producer_seat_holder_ref(),
 -- they need.
 revoke all on function ops.gate_zero_producer_actor_id(),
   ops.benchmark_gate_zero_outcome()
-  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority, carr_gate_zero_producer;
 
--- THE WRITER REACHES carr_writer ONLY. Not carr_authority: this row is
--- deliberately NOT a partner act, and granting it to the authority bundle would
--- put an oracle's signature within reach of the connection a partner's own acts
--- run on. Not carr_jobs: an unattended schedule does not hold this seat.
+-- THE WRITER REACHES THE DEDICATED PRODUCER SEAT AND NOTHING ELSE, and that is
+-- the privilege half of amendment 9.
+--
+-- NOT carr_writer. It held this EXECUTE in the first version of this file, and
+-- that was Sol's finding 2: every ordinary verb runs on carr_writer, so the
+-- record layer's authority test was the only thing between a routine writer
+-- connection and an oracle's signature -- and that test read a GUC the same
+-- connection could set. Now the privilege is gone AND the derivation is by
+-- connection role, so a slip in either one alone opens nothing. The two halves
+-- are proved separately by mcp-server/test/gate-zero-outcome-role-boundary.test.mjs,
+-- whose mutation control puts this EXECUTE back and turns the privilege proof red.
+-- Revoking the grant below is also how this seat is DECOMMISSIONED: the role
+-- keeps its name and stops being able to record anything.
+--
+-- NOT carr_authority: this row is deliberately NOT a partner act, and granting
+-- it to the authority bundle would put an oracle's signature within reach of the
+-- connection a partner's own acts run on. NOT carr_jobs: an unattended schedule
+-- does not hold this seat. NOT carr_reader, and not PUBLIC.
 revoke all on function ops.gate_zero_record_read_only_outcome(uuid,jsonb)
-  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
-grant execute on function ops.gate_zero_record_read_only_outcome(uuid,jsonb) to carr_writer;
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority, carr_gate_zero_producer;
+grant execute on function ops.gate_zero_record_read_only_outcome(uuid,jsonb)
+  to carr_gate_zero_producer;

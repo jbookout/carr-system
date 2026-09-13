@@ -498,23 +498,41 @@ export const V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE = Object.fre
 // and its writer -- so the state this successor must find is v25's forward
 // state PLUS that migration's effect.
 //
-// THAT EFFECT IS EXACTLY ONE SECURITY-DEFINER GRANT, predicted before it was
-// measured and then measured: ops.gate_zero_record_read_only_outcome(uuid,jsonb)
-// granted to carr_writer. The other three functions 0502 creates are either not
-// security definer (the seat holder ref and the digest helper are immutable
-// sql) or granted to no role at all (the authority test and the private Gate
-// Zero reader), so none of them can appear in a category that counts granted
-// definer execute. relation_dml is unchanged because 0502 revokes every direct
-// DML on its table and grants none; column_dml, role_authority,
-// runtime_dml_grants and job_definitions are unchanged because it creates no
-// role, no column grant and no job.
+// THAT EFFECT IS EXACTLY ONE SECURITY-DEFINER GRANT AND ONE NEW ROLE, predicted
+// before it was measured and then measured.
 //
-// 462 -> 463 is that one row. Read back from a clean disposable Postgres
-// carrying db/schema.sql and every migration through 0502, exactly as every
-// baseline above it was, and never from Production or from a caller.
+//   * secdef_execute 462 -> 463, one row:
+//     ops.gate_zero_record_read_only_outcome(uuid,jsonb) granted to exactly one
+//     role. Standing-rule amendment 9 (2026-09-14) moved that grantee off
+//     carr_writer and onto the dedicated carr_gate_zero_producer seat, which
+//     leaves the COUNT where it was and moves the DIGEST -- the grantee is part
+//     of the projected row, which is precisely why a privilege change owes a
+//     receipt rather than a comment. The other four functions 0502 creates are
+//     either not security definer (the seat holder ref, the role-name literal
+//     and the digest helpers are immutable sql) or granted to no role at all
+//     (the authority test and the private Gate Zero reader), so none of them can
+//     appear in a category that counts granted definer execute.
+//   * role_authority is UNCHANGED at 12, and that is a designed property rather
+//     than an accident. This projection enumerates the `carr_*` NOLOGIN closure;
+//     the function-ACL projection above takes every `carr_*` role, login or not.
+//     The seat is therefore a carr_-prefixed LOGIN role: its EXECUTE grant stays
+//     sealed while the role itself stays out of role_authority. It has to, since
+//     PostgreSQL roles are cluster-wide and db/schema.sql is a database
+//     artifact -- a NOLOGIN bundle here would make every OTHER database in the
+//     same cluster fail ops.scac_mutation_catalog_v25_current() until the
+//     snapshot was regenerated. Measured on a disposable cluster, both ways.
+//   * relation_dml is unchanged because 0502 revokes every direct DML on its
+//     table and grants none; its one new grant to the seat is SELECT, which that
+//     category does not count. column_dml, runtime_dml_grants and
+//     job_definitions are unchanged because it creates no column grant, no
+//     runtime DML grant and no job.
+//
+// Read back from a clean disposable Postgres carrying db/schema.sql and every
+// migration through 0502, exactly as every baseline above it was, and never from
+// Production or from a caller.
 export const GATE_ZERO_OUTCOME_PRE_V26_DB_CATALOG_BASELINE = Object.freeze({
   ...V5_SCHEDULED_JOB_ADMISSION_FORWARD_DB_CATALOG_BASELINE,
-  secdef_execute: { count: 463, digest: "sha256:c4e0e4c28df3968495ee7245cdd5db899e2dddf646dd37f6360ed91d426c80ed" },
+  secdef_execute: { count: 463, digest: "sha256:c7e6e69635ff4663c51f7bf86c85b24b4ef02b561417c780f39f7001e84bb0e3" },
 });
 
 export const GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
@@ -528,7 +546,7 @@ export const GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   // functions this successor installs for itself, exactly as the v20, v21, v23
   // and v25 registry-only successors before it. Every other category is
   // unchanged for the same reason.
-  secdef_execute: { count: 467, digest: "sha256:d521f356734abe17c4c47f0d8ffc2edf3bfd522bb0ac61d17dc6db5cb1d7c7a4" },
+  secdef_execute: { count: 467, digest: "sha256:1800f076650126201edac1af8b28a7a98377a6818731b0520fd630b054841883" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

@@ -39,6 +39,21 @@ APP_ROLE = "app_writer"
 BUNDLE_ROLE = "carr_writer"
 READER_ROLE = "app_reader"
 READER_BUNDLE_ROLE = "carr_reader"
+# The Gate Zero producer seat. Standing-rule amendment 9 (2026-09-14): seat-only
+# write is enforced by CONNECTION ROLE, so the one verb that records a Gate Zero
+# read-only outcome runs on its own login role rather than on app_writer.
+# migrations/0502_gate_zero_read_only_outcome.sql creates the NOLOGIN bundle,
+# grants it the sole EXECUTE on ops.gate_zero_record_read_only_outcome, and
+# derives the producing seat from session_user. The LOGIN role and its secret are
+# provisioned HERE, out of band, because a rebuilt schema must never mint a
+# credential -- the same split 0315 uses for the forward-fix verifier.
+# It is a LOGIN role with NO bundle, which is the one departure from the pair
+# above and is measured rather than preferred: a NOLOGIN `carr_*` bundle enters
+# the SCAC sealed role_authority projection, and PostgreSQL roles are cluster-
+# wide while db/schema.sql is a database artifact, so a new bundle invalidates
+# the snapshot seal for every other database in the same cluster until the
+# snapshot is regenerated. The migration's header carries the measurement.
+GATE_ZERO_PRODUCER_ROLE = "carr_gate_zero_producer"
 LOCK_KEY = 7301961134306001
 BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
@@ -118,7 +133,9 @@ replacement = load_module(
 
 REPLACEMENT_VERIFIER_KEY = "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL"
 REPLACEMENT_VERIFIER_ROLE = "carr_program5_forward_fix_verifier"
-WORKER_DATABASE_SECRET_NAMES = ("DATABASE_URL_READER", "DATABASE_URL_WRITER")
+WORKER_DATABASE_SECRET_NAMES = (
+    "DATABASE_URL_READER", "DATABASE_URL_WRITER", "DATABASE_URL_GATE_ZERO_WRITER",
+)
 WORKER_ENV_ALLOWLIST = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "CLOUDFLARE_API_TOKEN",
@@ -212,20 +229,34 @@ class RoleAuthority:
 class LoginProfile:
     label: str
     login_role: str
-    bundle_role: str
+    # None for a DIRECT-GRANT profile: the canonical grants attach to the login
+    # role itself rather than to a NOLOGIN capability bundle it is a member of.
+    bundle_role: str | None
     secret_name: str
+
+    @property
+    def grant_role(self) -> str:
+        """The role the canonical grant plan is read for and validated against."""
+        return self.bundle_role or self.login_role
 
 
 @dataclass(frozen=True)
 class ProfileClosure:
     login: RoleAuthority
-    bundle: RoleAuthority
+    # None for a DIRECT-GRANT profile, which has no bundle behind its login role.
+    bundle: RoleAuthority | None
     creator_edges: tuple[tuple[str, bool, bool, bool, int], ...]
 
 
+# Reader first, then writer, then the seat: run_profile_sequence relies on this
+# order so each completed profile stays recoverable if the next boundary refuses.
+# The Gate Zero seat is LAST because it is the narrowest and the newest; nothing
+# else in the Worker reads its secret.
 PROFILES = (
     LoginProfile("reader", READER_ROLE, READER_BUNDLE_ROLE, "DATABASE_URL_READER"),
     LoginProfile("writer", APP_ROLE, BUNDLE_ROLE, "DATABASE_URL_WRITER"),
+    LoginProfile("gate_zero_producer", GATE_ZERO_PRODUCER_ROLE,
+                 None, "DATABASE_URL_GATE_ZERO_WRITER"),
 )
 
 
@@ -914,7 +945,7 @@ def role_exists(cur: Any, role: str) -> bool:
 def collect_profile_closure(cur: Any, profile: LoginProfile) -> ProfileClosure:
     return ProfileClosure(
         collect_role_authority(cur, profile.login_role),
-        collect_role_authority(cur, profile.bundle_role),
+        collect_role_authority(cur, profile.bundle_role) if profile.bundle_role else None,
         collect_creator_edges(cur, profile.login_role),
     )
 
@@ -927,14 +958,17 @@ def validate_profile_closure(
     bundle = closure.bundle
     if not login.can_login or not login.inherits_privileges or login.powerful_attributes:
         raise ProvisioningRefusal(f"{profile.login_role} is not a plain inheriting LOGIN role")
-    if bundle.can_login or not bundle.inherits_privileges or bundle.powerful_attributes:
-        raise ProvisioningRefusal(f"{profile.bundle_role} is not a plain NOLOGIN privilege bundle")
-    if login.owned_objects or bundle.owned_objects:
+    if bundle is not None:
+        if bundle.can_login or not bundle.inherits_privileges or bundle.powerful_attributes:
+            raise ProvisioningRefusal(f"{profile.bundle_role} is not a plain NOLOGIN privilege bundle")
+        if bundle.owned_objects:
+            raise ProvisioningRefusal("staging login/bundle roles must not own objects")
+        if login.direct_acl_facts:
+            raise ProvisioningRefusal(f"{profile.login_role} has forbidden direct ACLs")
+        if bundle.memberships or bundle.reachable_roles or bundle.role_config:
+            raise ProvisioningRefusal(f"{profile.bundle_role} inherits or configures extra authority")
+    if login.owned_objects:
         raise ProvisioningRefusal("staging login/bundle roles must not own objects")
-    if login.direct_acl_facts:
-        raise ProvisioningRefusal(f"{profile.login_role} has forbidden direct ACLs")
-    if bundle.memberships or bundle.reachable_roles or bundle.role_config:
-        raise ProvisioningRefusal(f"{profile.bundle_role} inherits or configures extra authority")
     if closure.creator_edges != (
         (expected_creator, True, False, False, BOOTSTRAP_SUPERUSER_OID),
     ):
@@ -945,12 +979,19 @@ def validate_profile_closure(
     allowed_config = tuple(sorted((
         "idle_in_transaction_session_timeout=120s", "statement_timeout=60s",
     )))
+    # A DIRECT-GRANT PROFILE REACHES NOTHING, which is stricter than the bundle
+    # pair rather than looser: the exact membership check below becomes "no
+    # membership at all", and the canonical ACLs are validated on the login role
+    # itself because that is where the migration granted them.
+    expected_memberships = () if profile.bundle_role is None \
+        else ((profile.bundle_role, False, True, True),)
+    expected_reachable = () if profile.bundle_role is None else (profile.bundle_role,)
     if exact:
         if login.role_config != allowed_config:
             raise ProvisioningRefusal(f"{profile.login_role} timeouts/config are not exact")
-        if login.memberships != ((profile.bundle_role, False, True, True),):
+        if login.memberships != expected_memberships:
             raise ProvisioningRefusal(f"{profile.login_role} bundle membership is not exact")
-        if login.reachable_roles != (profile.bundle_role,):
+        if login.reachable_roles != expected_reachable:
             raise ProvisioningRefusal(f"{profile.login_role} reaches an unexpected role")
     else:
         if login.role_config and login.role_config != allowed_config:
@@ -960,14 +1001,16 @@ def validate_profile_closure(
         if any(name != profile.bundle_role for name in login.reachable_roles):
             raise ProvisioningRefusal(f"reused {profile.login_role} reaches an extra role")
     expected_acl = set(snapshot_grants.acl_facts(canonical_grants))
-    actual_acl = set(bundle.direct_acl_facts)
+    actual_acl = set((bundle or login).direct_acl_facts)
     if actual_acl - expected_acl:
-        raise ProvisioningRefusal(f"{profile.bundle_role} has excess or grantable authority")
+        raise ProvisioningRefusal(f"{profile.grant_role} has excess or grantable authority")
     if exact and expected_acl - actual_acl:
-        raise ProvisioningRefusal(f"{profile.bundle_role} is missing canonical authority")
+        raise ProvisioningRefusal(f"{profile.grant_role} is missing canonical authority")
 
 
 def _profile_membership_sql(profile: LoginProfile) -> tuple[str, ...]:
+    if profile.bundle_role is None:
+        return ()
     return (
         f"grant {profile.bundle_role} to {profile.login_role} with admin false",
         f"grant {profile.bundle_role} to {profile.login_role} with inherit true",
@@ -991,16 +1034,17 @@ def apply_login_profile(
                 exact=True, expected_creator=expected_creator,
             )
         else:
-            bundle = collect_role_authority(cur, profile.bundle_role)
-            if (
-                bundle.can_login or not bundle.inherits_privileges
-                or bundle.powerful_attributes or bundle.owned_objects
-                or bundle.memberships or bundle.reachable_roles or bundle.role_config
-            ):
-                raise ProvisioningRefusal(f"{profile.bundle_role} is not a closed bundle role")
-            expected_acl = set(snapshot_grants.acl_facts(grants))
-            if set(bundle.direct_acl_facts) - expected_acl:
-                raise ProvisioningRefusal(f"{profile.bundle_role} has excess authority")
+            if profile.bundle_role is not None:
+                bundle = collect_role_authority(cur, profile.bundle_role)
+                if (
+                    bundle.can_login or not bundle.inherits_privileges
+                    or bundle.powerful_attributes or bundle.owned_objects
+                    or bundle.memberships or bundle.reachable_roles or bundle.role_config
+                ):
+                    raise ProvisioningRefusal(f"{profile.bundle_role} is not a closed bundle role")
+                expected_acl = set(snapshot_grants.acl_facts(grants))
+                if set(bundle.direct_acl_facts) - expected_acl:
+                    raise ProvisioningRefusal(f"{profile.bundle_role} has excess authority")
             cur.execute("set local createrole_self_grant = ''")
             cur.execute("select current_setting('createrole_self_grant')")
             if cur.fetchone() != ("",):
@@ -1244,7 +1288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.candidate_operation_id, args.receipt_id, args.sha)
         plans = {
             profile.label: snapshot_grants.load_current_grants_to_role(
-                SCHEMA, MIGRATIONS, profile.bundle_role
+                SCHEMA, MIGRATIONS, profile.grant_role
             ) for profile in PROFILES
         }
         binding = resolve_replacement_binding(target, environ=os.environ)

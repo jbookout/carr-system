@@ -61,6 +61,8 @@ import { gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest }
   from "../src/gate-zero-outcome-store.v5.js";
 import { cleanupStagedTrees, moduleOfTree, recordedReviewerActor, stageTree }
   from "./gate-zero-candidate-tree.testhelper.mjs";
+import { authorizeAs, ensureProducerRoles }
+  from "./gate-zero-producer-role.testhelper.mjs";
 
 const DSN = process.env.CARR_GATE_ZERO_RACE_DSN || process.env.DATABASE_URL || "";
 // A SKIP THAT NOBODY NOTICES IS A TEST COLLECTED BY NOBODY. The migration class
@@ -77,26 +79,62 @@ const SEAT_SLUG = "codex-reviewer";
 after(cleanupStagedTrees);
 
 /**
- * ONE REAL CONNECTION, in an open transaction, carrying the server-established
- * actor context mcp.js sets. It is not a parameter of the writer and never was.
+ * TWO REAL CONNECTIONS PER CALLER, WHICH IS WHAT PRODUCTION OPENS
+ * (2026-09-14, PR 1014 third correction, standing-rule amendment 9).
  *
- * The returned object is a PASSTHROUGH RECORDER: `query` forwards every
- * statement to PostgreSQL and answers with what PostgreSQL answered, and keeps
- * the receipt this connection's call sent to the writer so the two calls can be
- * compared afterwards. It answers nothing on its own.
+ *   * `client` is the ordinary writer connection every verb runs on. It carries
+ *     the actor lookup and the audit event, and it still sets the server-
+ *     established actor context mcp.js sets -- which on this path is now
+ *     INFORMATIONAL: the record layer stopped reading it.
+ *   * `seat` AUTHENTICATES AS THE DEDICATED PRODUCER LOGIN ROLE, and it is the
+ *     only connection here that may execute the writer at all. carr_writer's
+ *     EXECUTE is revoked; session_user is what the record layer derives the
+ *     producing seat from.
+ *
+ * THE SEAT'S TRANSACTION IS THE TEST'S, not gateZeroSeatConnection's, and that
+ * is the point of this file: the production door begins and commits its own
+ * transaction, which would settle the race before it could be staged. Handing
+ * the handler a conforming door whose transaction stays open is what makes the
+ * interleaving deterministic rather than hoped for.
+ *
+ * The returned object is a PASSTHROUGH RECORDER: every statement reaches
+ * PostgreSQL and answers with what PostgreSQL answered, and the receipt this
+ * caller sent to the writer is kept so the two calls can be compared afterwards.
  */
-async function seatedClient(pg) {
+async function seatedClient(pg, producerLoginRole) {
   const client = new pg.Client({ connectionString: DSN });
   await client.connect();
   await client.query("begin");
   await client.query("select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
+
+  const seat = new pg.Client({ connectionString: DSN });
+  await seat.connect();
+  await authorizeAs(seat, producerLoginRole);
+
   const recorder = {
     client,
+    seat,
     sent: null,
-    query: async (sql, params = []) => {
-      if (typeof sql === "string" && sql.includes("ops.gate_zero_record_read_only_outcome"))
-        recorder.sent = JSON.parse(params[1]);
-      return client.query(sql, params);
+    query: async (sql, params = []) => client.query(sql, params),
+    // THE TRANSACTION OPENS HERE, NOT AT CONNECT, and that is not a detail.
+    // ops.gate_zero_read_only_outcome.recorded_at defaults to now(), which is
+    // TRANSACTION START, and the constraint is recorded_at >= observed_at. The
+    // production door begins its transaction immediately before the write, after
+    // the producer has stamped observed_at, so the order holds by construction.
+    // A transaction opened at connect time -- before staging a candidate tree
+    // and running the producer, which takes well over a second -- makes now()
+    // EARLIER than observed_at and the row is refused. What this file needs is
+    // only that the transaction stay OPEN afterwards, which it does: nothing
+    // commits it but the test.
+    seatConnection: async run => {
+      await seat.query("begin");
+      return run({
+        query: async (sql, params = []) => {
+          if (typeof sql === "string" && sql.includes("ops.gate_zero_record_read_only_outcome"))
+            recorder.sent = JSON.parse(params[1]);
+          return seat.query(sql, params);
+        },
+      });
     },
   };
   return recorder;
@@ -114,17 +152,31 @@ test("two authenticated calls for one candidate converge on one durable row", as
 
   let a;
   let b;
+  let setup;
   try {
-    a = await seatedClient(pg.default ?? pg);
-    b = await seatedClient(pg.default ?? pg);
+    // The dedicated producer login role 0502 deliberately does not create. On a
+    // throwaway database this helper makes it; in production the provisioner
+    // does, as a third LoginProfile with its own secret.
+    setup = new (pg.default ?? pg).Client({ connectionString: DSN });
+    await setup.connect();
+    const roles = await ensureProducerRoles(setup);
+    a = await seatedClient(pg.default ?? pg, roles.login);
+    b = await seatedClient(pg.default ?? pg, roles.login);
   } catch (error) {
-    if (a) await a.client.end().catch(() => {});
-    if (b) await b.client.end().catch(() => {});
+    if (setup) await setup.end().catch(() => {});
+    for (const one of [a, b]) {
+      if (one) await one.client.end().catch(() => {});
+      if (one) await one.seat.end().catch(() => {});
+    }
     assert.equal(REQUIRED, false, `this proof was required and Postgres was unreachable: ${error.message}`);
     return t.skip(`no reachable Postgres: ${error.message}`);
   }
   t.after(async () => {
-    for (const one of [a, b]) await one.client.end().catch(() => {});
+    await setup.end().catch(() => {});
+    for (const one of [a, b]) {
+      await one.client.end().catch(() => {});
+      await one.seat.end().catch(() => {});
+    }
   });
 
   // THE ACTOR ROW IS THE DATABASE'S, read rather than asserted into existence.
@@ -175,8 +227,11 @@ test("two authenticated calls for one candidate converge on one durable row", as
     "the second writer did not block on the first, so the candidate key is not arbitrating");
 
   // (3) A commits, which releases B. (4) B answers with the row that exists.
-  await a.client.query("commit");
+  //     The transaction that matters is the SEAT's: that is where the insert is.
+  await a.seat.query("commit");
   const secondResult = await pending;
+  await b.seat.query("commit");
+  await a.client.query("commit");
   await b.client.query("commit");
 
   // BOTH CALLERS RECEIVED THE SAME DURABLE ROW.
@@ -240,31 +295,35 @@ test("two authenticated calls for one candidate converge on one durable row", as
     .replace(CANDIDATE_KEY, "v_digest := ops.gate_zero_outcome_digest(p_receipt);")
     .replace(CANDIDATE_COMPARE, "v_existing.outcome_digest <> v_digest");
 
-  // THE ACTOR CONTEXT IS TRANSACTION-LOCAL, so it is set again here: A's first
-  // transaction committed above and took its setting with it, and the writer
-  // refuses a transaction that has none long before it reaches any comparison.
-  await a.client.query("begin");
-  await a.client.query("select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
-  await a.client.query(mutant);
+  // THE MUTANT RUNS ON THE SEAT'S CONNECTION, because that is the only
+  // connection the record layer admits at all now. It is CREATED with the
+  // connection's own authenticated identity rather than the seat's -- a SECURITY
+  // DEFINER function owned by the producer login role would reach neither the
+  // authority test nor the table -- and then the session is put back to the seat
+  // before it is called, so the mutant is exercised under exactly the identity
+  // the real writer is.
+  await a.seat.query("reset session authorization");
+  await a.seat.query(mutant);
+  await authorizeAs(a.seat, (await ensureProducerRoles(setup)).login);
+  await a.seat.query("begin");
   await assert.rejects(
-    a.client.query(
+    a.seat.query(
       "select pg_temp.gate_zero_record_read_only_outcome_full_digest_key($1::uuid, $2::jsonb)",
       [randomUUID(), JSON.stringify(sentB)]),
     /a different Gate Zero outcome is already recorded/,
     "the full-digest key accepted the second real call, so this control proves nothing");
-  await a.client.query("rollback");
+  await a.seat.query("rollback");
 
   // ===================================================================
   // AND THE NARROWER KEY STILL REFUSES A DIFFERENT OUTCOME.
   // ===================================================================
   // The same candidate, a different verdict. A retry may not change this, and
   // the record is append-only, so the writer must raise rather than keep either.
-  await a.client.query("begin");
-  await a.client.query("select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
+  await a.seat.query("begin");
   await assert.rejects(
-    a.client.query("select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb)",
+    a.seat.query("select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb)",
       [randomUUID(), JSON.stringify({ ...sentB, status: "fail" })]),
     /a different Gate Zero outcome is already recorded/,
     "a different verdict for one candidate was accepted as a retry");
-  await a.client.query("rollback");
+  await a.seat.query("rollback");
 });

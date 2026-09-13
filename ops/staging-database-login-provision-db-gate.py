@@ -87,7 +87,7 @@ def main() -> int:
     profiles = {profile.label: profile for profile in provision.PROFILES}
     plans = {
         label: provision.snapshot_grants.load_current_grants_to_role(
-            provision.SCHEMA, provision.MIGRATIONS, profile.bundle_role
+            provision.SCHEMA, provision.MIGRATIONS, profile.grant_role
         ) for label, profile in profiles.items()
     }
     passwords = {"reader": "reader-fixture-" + "r" * 48,
@@ -156,7 +156,7 @@ def main() -> int:
                 for profile in profiles.values():
                     cur.execute(sql.SQL(
                         "grant {} to neondb_owner with admin true"
-                    ).format(sql.Identifier(profile.bundle_role)))
+                    ).format(sql.Identifier(profile.grant_role)))
             admin.commit()
             setup_committed = True
 
@@ -173,12 +173,12 @@ def main() -> int:
                     if cur.fetchall():
                         raise RuntimeError("disposable login roles already exist before gate")
                     for label, profile in profiles.items():
-                        bundle = provision.collect_role_authority(cur, profile.bundle_role)
+                        bundle = provision.collect_role_authority(cur, profile.grant_role)
                         if set(bundle.direct_acl_facts) != set(
                             provision.snapshot_grants.acl_facts(plans[label])
                         ):
                             raise RuntimeError(
-                                f"{profile.bundle_role} must already be exact; gate will not repair it"
+                                f"{profile.grant_role} must already be exact; gate will not repair it"
                             )
                 owner.rollback()
 
@@ -237,7 +237,7 @@ def main() -> int:
                     for profile in profiles.values():
                         cur.execute(sql.SQL(
                             "revoke admin option for {} from neondb_owner"
-                        ).format(sql.Identifier(profile.bundle_role)))
+                        ).format(sql.Identifier(profile.grant_role)))
                     cur.execute("alter role neondb_owner nologin nocreaterole password null")
                 admin.commit()
                 with admin.cursor() as cur:

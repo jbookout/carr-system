@@ -104,6 +104,55 @@ grant insert, select on table ops.work_request to carr_writer;
               ("table", "ops.work_request", "select", False),
               ("function", "ops.capture_v2(text, uuid)", "execute", False),
           })
+    # THE PENDING CAPABILITY BUNDLE, AND THE EXEMPTION THAT LETS IT COMPOSE
+    # (2026-09-14, carr_gate_zero_producer). A migration that CREATES a role
+    # names the role in a DO block and in a literal-returning function, neither
+    # of which confers anything. Those occurrences are forgiven; the grants in
+    # the same migration still compose.
+    bundle_pending = """begin;
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'carr_writer') then
+    create role carr_writer nologin;
+  end if;
+end $$;
+create or replace function ops.bundle_name() returns text language sql immutable
+as $fn$ select 'carr_writer'::text $fn$;
+grant execute on function ops.bundle_name() to carr_writer;
+commit;
+"""
+    bundle_plan = snapshot.compose_grants_to_role(
+        synthetic_schema,
+        (("0001_base.sql", synthetic_applied), ("0002_bundle.sql", bundle_pending)),
+        "carr_writer",
+    )
+    check("a pending migration may create the bundle it grants to",
+          set(snapshot.acl_facts(bundle_plan)) == {
+              ("table", "ops.work_request", "insert", False),
+              ("table", "ops.work_request", "select", False),
+              ("function", "ops.bundle_name()", "execute", False),
+          })
+    # AND THE EXEMPTION IS NARROW, proved by its falsifier rather than described:
+    # the same DO block carrying an authority verb the composer did not parse is
+    # still a review stop. Without this case the exemption above would forgive
+    # every unparsed mention inside a dollar-quoted body.
+    hidden_authority = """begin;
+do $$ begin
+  alter role carr_writer set statement_timeout = '5s';
+end $$;
+grant select on table public.actor to carr_writer;
+commit;
+"""
+    try:
+        snapshot.compose_grants_to_role(
+            synthetic_schema,
+            (("0001_base.sql", synthetic_applied), ("0002_hidden.sql", hidden_authority)),
+            "carr_writer",
+        )
+    except snapshot.SnapshotGrantError:
+        check("an authority verb hidden in a dollar-quoted body is still a review stop", True)
+    else:
+        raise AssertionError("unparsed authority inside a dollar-quoted body was accepted")
+
     try:
         snapshot.compose_grants_to_role(
             synthetic_schema,
@@ -314,10 +363,11 @@ grant insert, select on table ops.work_request to carr_writer;
     candidate_root = provision.replacement_credential_root(CANDIDATE_OPERATION_ID)
     candidate_profiles = {
         label: provision.credential.profile(label, config_root=candidate_root)
-        for label in ("reader", "writer")
+        for label in tuple(one.label for one in provision.PROFILES)
     }
     canonical_profiles = {
-        label: provision.credential.profile(label) for label in ("reader", "writer")
+        label: provision.credential.profile(label)
+        for label in tuple(one.label for one in provision.PROFILES)
     }
     check("candidate app credentials live under the candidate operation private root",
           all(profile.paths.final.parent == candidate_root
@@ -437,18 +487,16 @@ grant insert, select on table ops.work_request to carr_writer;
             if "bulk" in args:
                 return subprocess.CompletedProcess(args, 0, "bulk complete", "")
             return subprocess.CompletedProcess(
-                args, 0, json.dumps([
-                    {"name": "CARR_MCP_TOKEN", "type": "secret_text"},
-                    {"name": "DATABASE_URL_WRITER", "type": "secret_text"},
-                    {"name": "DATABASE_URL_READER", "type": "secret_text"},
-                ]), ""
+                args, 0, json.dumps(
+                    [{"name": "CARR_MCP_TOKEN", "type": "secret_text"}]
+                    + [{"name": name, "type": "secret_text"}
+                       for name in provision.WORKER_DATABASE_SECRET_NAMES]
+                ), ""
             )
 
     worker_runner = WorkerRunner()
-    future_values = {
-        "DATABASE_URL_READER": "future-reader-secret",
-        "DATABASE_URL_WRITER": "future-writer-secret",
-    }
+    future_values = {name: f"future-secret-for-{name}"
+                     for name in provision.WORKER_DATABASE_SECRET_NAMES}
     provision.bulk_worker_database_secrets(
         future_values, wrangler="wrangler", run=worker_runner,
         environ={"PATH": "/safe/bin", "HOME": "/safe/home",
@@ -516,15 +564,13 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.verify_worker_database_secret_bindings(
             wrangler="wrangler", run=WrongBindingRunner(), environ={})
     except provision.ProvisioningRefusal:
-        check("Worker readback requires the exact two DATABASE_URL names", True)
+        check("Worker readback requires the exact declared DATABASE_URL name set", True)
     else:
         raise AssertionError("wrong Worker database secret name list was accepted")
 
     rollback_events: list[tuple[str, Any]] = []
-    old_values = {
-        "DATABASE_URL_READER": "old-reader-secret",
-        "DATABASE_URL_WRITER": "old-writer-secret",
-    }
+    old_values = {name: f"old-secret-for-{name}"
+                  for name in provision.WORKER_DATABASE_SECRET_NAMES}
     preservation_calls = 0
     def preservation() -> None:
         nonlocal preservation_calls
@@ -699,10 +745,25 @@ grant insert, select on table ops.work_request to carr_writer;
     writer_candidate = (
         f"postgresql://app_writer:candidate-writer-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
     )
+    # THE GATE ZERO PRODUCER SEAT'S OWN CREDENTIAL (standing-rule amendment 9,
+    # 2026-09-14). It is a third profile rather than a reuse of the writer's,
+    # because the record layer admits exactly one login role for that write and
+    # revokes it from carr_writer.
+    gate_zero_candidate = (
+        f"postgresql://carr_gate_zero_producer:candidate-gate-zero-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
+    candidate_by_role = {
+        provision.READER_ROLE: reader_candidate,
+        provision.APP_ROLE: writer_candidate,
+        provision.GATE_ZERO_PRODUCER_ROLE: gate_zero_candidate,
+    }
     expected_candidate_values = {
         "DATABASE_URL_READER": reader_candidate,
         "DATABASE_URL_WRITER": writer_candidate,
+        "DATABASE_URL_GATE_ZERO_WRITER": gate_zero_candidate,
     }
+    assert set(expected_candidate_values) == set(provision.WORKER_DATABASE_SECRET_NAMES), (
+        "this suite and the tool disagree about which Worker database secrets exist")
     saved_main_dependencies = {
         "reject_unsafe_environment": provision.reject_unsafe_environment,
         "replacement_target": provision.replacement_target,
@@ -779,7 +840,7 @@ grant insert, select on table ops.work_request to carr_writer;
             profile_roots.append(config_root)
             return real_profile(label, config_root=config_root)
         def load_candidate_credential(_paths, *, role_name, **_kwargs):
-            value = reader_candidate if role_name == provision.READER_ROLE else writer_candidate
+            value = candidate_by_role[role_name]
             return provision.credential.StoredCredential(
                 "final", pathlib.Path("/fixture/final"), value, "fixture-password",
                 candidate.endpoint_host, 5432, "neondb")
@@ -827,10 +888,10 @@ grant insert, select on table ops.work_request to carr_writer;
                 "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
             ])
         apply_output = json.loads(stdout.getvalue())
-        check("main apply routes both credentials only through the candidate root",
-              profile_roots == [candidate_root, candidate_root]
+        check("main apply routes every credential only through the candidate root",
+              profile_roots == [candidate_root] * len(provision.PROFILES)
               and all(root != pathlib.Path.home() / ".config/carr" for root in profile_roots))
-        check("main apply performs one atomic candidate pair with provider pre/post proof",
+        check("main apply performs one atomic candidate set with provider pre/post proof",
               rc == 0 and orchestration_events == [
                   ("seed", 1), ("preserve", None), ("preserve", None),
                   ("bulk", expected_candidate_values), ("verify", None),
@@ -1047,20 +1108,27 @@ grant insert, select on table ops.work_request to carr_writer;
     profiles = {profile.label: profile for profile in provision.PROFILES}
     plans = {
         label: snapshot.load_current_grants_to_role(
-            REPO / "db/schema.sql", REPO / "migrations", profile.bundle_role
+            REPO / "db/schema.sql", REPO / "migrations", profile.grant_role
         ) for label, profile in profiles.items()
     }
 
+    # A DIRECT-GRANT PROFILE HAS NO BUNDLE BEHIND IT: the canonical ACLs sit on
+    # the login role, and the login role is a member of nothing. Building the
+    # fixture from the profile rather than from a fixed pair is what lets this
+    # suite cover both shapes without a second copy of it.
     def profile_closure(profile, facts=None, creator="neondb_owner"):
         facts = tuple(facts if facts is not None else snapshot.acl_facts(plans[profile.label]))
+        direct = profile.bundle_role is None
         return provision.ProfileClosure(
             login=provision.RoleAuthority(
                 True, True, (), ("idle_in_transaction_session_timeout=120s",
                                  "statement_timeout=60s"),
-                ((profile.bundle_role, False, True, True),),
-                (profile.bundle_role,), (), (),
+                () if direct else ((profile.bundle_role, False, True, True),),
+                () if direct else (profile.bundle_role,),
+                facts if direct else (), (),
             ),
-            bundle=provision.RoleAuthority(False, True, (), (), (), (), facts, ()),
+            bundle=None if direct
+                else provision.RoleAuthority(False, True, (), (), (), (), facts, ()),
             creator_edges=((creator, True, False, False,
                             provision.BOOTSTRAP_SUPERUSER_OID),),
         )
@@ -1154,9 +1222,12 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.PROFILES, converge,
         lambda profile, _value: events.append("resume-publish:" + profile.label),
     )
-    check("rerun resumes both profiles in the same deterministic order",
-          events == ["converge:reader", "resume-publish:reader",
-                     "converge:writer", "resume-publish:writer"])
+    # THE ORDER IS THE TOOL'S OWN, so a profile added later is covered here the
+    # day it is added rather than the day someone remembers to retype this list.
+    check("rerun resumes every profile in the same deterministic order",
+          events == [f"{verb}:{profile.label}"
+                     for profile in provision.PROFILES
+                     for verb in ("converge", "resume-publish")])
 
     class Cursor:
         def __init__(self, fail_secret=None):

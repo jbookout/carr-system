@@ -63,6 +63,7 @@ import { CANARY_ABSENT, REVISION_FAILED_ANCESTOR }
 after(cleanupStagedTrees);
 
 const STORE_FILE = "gate-zero-outcome-store.v5.js";
+const SEAT_FILE = "gate-zero-seat-connection.v5.js";
 const VERB = "record-gate-zero-read-only-outcome";
 const OUTCOME_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const KEY = "11111111-2222-4333-8444-555555555555";
@@ -117,11 +118,21 @@ const PROBE = { slug: "smoke-probe", human: false, probe: true, via: "probe-toke
  * It keeps the receipt it was handed, which is how the cases below compare what
  * was PERSISTED against what the producer EMITTED.
  */
-function mockDatabase({ existing = null } = {}) {
+function mockDatabase({ existing = null, seatConnection = true } = {}) {
   const calls = [];
-  const state = { recorded: existing, persisted: null };
-  return {
+  const state = { recorded: existing, persisted: null, seatCalls: 0 };
+  const db = {
     calls, state,
+    // THE SEAT'S DOOR, WHICH THE VERB NOW REQUIRES (amendment 9). In production
+    // this is gateZeroSeatConnection(env, Pool) and it opens a connection
+    // authenticated as the dedicated producer login role; the ROLE BOUNDARY is
+    // proved against a real database in gate-zero-outcome-role-boundary.test.mjs,
+    // because no mock can prove a grant. What this stands in for is the SHAPE:
+    // the write and its readback travel through the door rather than on the
+    // ordinary writer connection, and `state.seatCalls` counts that they did.
+    seatConnection: seatConnection
+      ? async run => { state.seatCalls += 1; return run({ query: db.query }); }
+      : undefined,
     query: async (sql, params = []) => {
       calls.push({ sql, params });
       if (sql.includes("ops.gate_zero_record_read_only_outcome")) {
@@ -165,6 +176,7 @@ function mockDatabase({ existing = null } = {}) {
       throw new Error(`mock database has no declared response for: ${sql}`);
     },
   };
+  return db;
 }
 
 async function refusal(promise) {
@@ -814,4 +826,69 @@ test("nothing in src but this suite's own helper reaches a candidate tree", () =
     assert.equal(source.includes("gate-zero-candidate-tree.testhelper"), false,
       `${name} names the staging helper`);
   }
+});
+
+// ===========================================================================
+// THE SEAT'S OWN CONNECTION (2026-09-14, PR 1014 third correction)
+// ===========================================================================
+// Standing-rule amendment 9: seat-only write is enforced by CONNECTION ROLE, so
+// the verb stops sending its write down the ordinary writer connection and opens
+// one authenticated as the dedicated producer login role. The BOUNDARY is proved
+// against a real database in gate-zero-outcome-role-boundary.test.mjs; what is
+// proved here is the seam itself -- that the door is absent without the secret,
+// that it commits on success and rolls back on failure, and that it never sets
+// the actor context the record layer stopped reading.
+
+function fakePool(log) {
+  return class FakePool {
+    constructor({ connectionString }) { log.push(["pool", connectionString]); }
+    async connect() {
+      return {
+        query: async (text) => { log.push(["query", text]); if (text === "boom") throw new Error("boom"); return { rows: [] }; },
+        release: () => log.push(["release"]),
+      };
+    }
+    async end() { log.push(["end"]); }
+  };
+}
+
+test("no secret, no door — and the verb refuses rather than falling back", async () => {
+  const store = await import(pathToFileURL(join(SRC, SEAT_FILE)).href);
+  assert.equal(store.GATE_ZERO_WRITER_SECRET_NAME, "DATABASE_URL_GATE_ZERO_WRITER");
+  assert.equal(store.gateZeroSeatConnection({}, fakePool([])), null);
+  assert.equal(store.gateZeroSeatConnection({ DATABASE_URL_WRITER: "x" }, fakePool([])), null,
+    "the ordinary writer secret opened the seat's door");
+  assert.equal(store.gateZeroSeatConnection({ DATABASE_URL_GATE_ZERO_WRITER: "x" }, null), null);
+});
+
+test("the seat connection commits on success, and never sets the actor context", async () => {
+  const store = await import(pathToFileURL(join(SRC, SEAT_FILE)).href);
+  const log = [];
+  const door = store.gateZeroSeatConnection(
+    { DATABASE_URL_GATE_ZERO_WRITER: "postgres://seat@localhost/x" }, fakePool(log));
+  assert.equal(typeof door, "function");
+  const answer = await door(async seat => {
+    await seat.query("select 1");
+    return "answered";
+  });
+  assert.equal(answer, "answered");
+  assert.deepEqual(log.map(entry => entry[0]),
+    ["pool", "query", "query", "query", "release", "end"]);
+  assert.deepEqual(log.filter(entry => entry[0] === "query").map(entry => entry[1]),
+    ["begin", "select 1", "commit"]);
+  assert.equal(log.some(entry => String(entry[1]).includes("acting_actor_slug")), false,
+    "the seat connection set the GUC the record layer deliberately stopped reading");
+  assert.equal(log[0][1], "postgres://seat@localhost/x",
+    "the seat connection did not use its own secret");
+});
+
+test("the seat connection rolls back and re-raises when the write fails", async () => {
+  const store = await import(pathToFileURL(join(SRC, SEAT_FILE)).href);
+  const log = [];
+  const door = store.gateZeroSeatConnection(
+    { DATABASE_URL_GATE_ZERO_WRITER: "postgres://seat@localhost/x" }, fakePool(log));
+  await assert.rejects(() => door(async seat => { await seat.query("boom"); }), /boom/);
+  assert.deepEqual(log.filter(entry => entry[0] === "query").map(entry => entry[1]),
+    ["begin", "boom", "rollback"]);
+  assert.equal(log.at(-1)[0], "end", "the failed seat connection leaked its pool");
 });
