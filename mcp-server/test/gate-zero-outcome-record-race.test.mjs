@@ -218,8 +218,8 @@ test("two identical concurrent writes for one candidate return one durable row",
   assert.equal(firstResult.status, "pass");
 
   // (2) B offers the EXACT receipt A wrote and is left in flight. It blocks
-  //     inside the insert on A's uncommitted candidate-key entry. This is the
-  //     only replay RETRY-IDEMPOTENT permits to converge.
+  //     inside the insert on A's uncommitted candidate-key entry. Later tests
+  //     separately prove that non-identical same-candidate retries converge too.
   const sentA = a.sent;
   assert.ok(sentA, "the first call never reached the writer");
   await b.seat.query("begin");

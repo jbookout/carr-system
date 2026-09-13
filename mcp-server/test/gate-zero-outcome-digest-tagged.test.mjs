@@ -285,9 +285,8 @@ test("SQL and the gateway compute the same TAGGED outcome digest, and the plain 
 
     // ── (4) THE UNTAGGED DIGEST IS NOT ACCEPTED ─────────────────────────────
     // A FIRST call for a separate candidate, with the readback's digest replaced
-    // by the plain one. A different receipt for the candidate above is now
-    // correctly refused by RETRY-IDEMPOTENT before readback, so the digest
-    // falsifier needs its own candidate to reach the comparison it tests.
+    // by the plain one. Its own candidate makes this corruption control test a
+    // newly inserted row rather than converge onto the intact row above.
     corruptReadback = true;
     const corruptTree = stageTree({
       candidateEdit: "the tagged-digest corruption control's own candidate" });

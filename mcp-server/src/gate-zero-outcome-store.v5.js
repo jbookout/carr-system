@@ -98,7 +98,7 @@
 // payload r7's rule speaks about at all. Tagging a projection with the schema
 // name of the thing it is not would be the misstatement, so it stays plain, on
 // both sides of the seam. It is an informational comparison aid, never evidence
-// and never the key that admits a replay; exact receipt equality is that key.
+// and never an admission key; candidate_digest arbitrates the immutable row.
 
 import { digest } from "./artifact-trust.js";
 import { authenticatedIdentity, authorizationClassForActor } from "./identity.js";
@@ -484,10 +484,10 @@ export const gateZeroOutcomeDigest =
  *     remains visible in the offered projection and metadata.
  *   * every digest, constant, status, comparator and evidence ref stays, so a
  *     run that read different rows remains visible in that offered projection.
- * RETRY-IDEMPOTENT nevertheless compares the full receipt digest: an exact
- * replay returns the immutable first row, while any changed receipt is refused.
- * This projection may explain how two observations differ; it cannot authorize
- * either observation to stand in for the other.
+ * RETRY CONVERGENCE is decided by candidate_digest, not this projection: any
+ * later observation of that candidate receives the immutable first row so the
+ * caller can heal a missing audit event. This value only helps report how the
+ * offered and recorded observations differ; it authorizes neither one.
  *
  * NOTHING IS LOST BY IT. The dropped values are inside the receipt this projects
  * from, which is stored whole, and inside the full outcome digest stored beside

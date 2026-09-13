@@ -117,6 +117,14 @@ comment on column ops.gate_zero_read_only_outcome.outcome_digest is
 comment on column ops.gate_zero_read_only_outcome.candidate_scoped_digest is
   'Informational comparison value: ops.gate_zero_outcome_candidate_digest(receipt), the canonical-JSON sha256 over the receipt minus observed_at, ttl_expires_at and each identity''s per-call session_ref. It is not evidence and not an admission or idempotency key. The unique candidate_digest column arbitrates one immutable row per candidate; a later call returns that recorded row unchanged and reports whether its offered receipt differed.';
 
+-- Forward-correct 0502's installed descriptions as well as its behavior. The
+-- functions still compute the same values; only their stated authority changes.
+comment on function ops.gate_zero_outcome_candidate_projection(jsonb) is
+  'One consumer-gate-receipt.v1 reduced by removing observed_at, ttl_expires_at and each identity''s per-call session_ref. It is an informational view used to explain differences between offered and recorded observations. It is not evidence and does not admit or refuse a retry; candidate_digest arbitrates the immutable row.';
+
+comment on function ops.gate_zero_outcome_candidate_digest(jsonb) is
+  'Canonical-JSON sha256 over ops.gate_zero_outcome_candidate_projection(receipt). This informational digest can show whether non-time, non-session evidence differs between an offered and recorded observation. It is not evidence or an idempotency key and does not admit or refuse a retry; candidate_digest arbitrates the immutable row.';
+
 -- THE SQL CONSUMER RECOMPUTES TOO. 0502's reader selected the stored digest and
 -- returned it unchanged. The accepted plan requires both readers to derive the
 -- tagged value from the stored receipt and compare before answering, so this
@@ -177,7 +185,7 @@ as $$
 declare
   v_actor uuid; v_slug text; v_seat text; v_id uuid;
   v_existing ops.gate_zero_read_only_outcome%rowtype;
-  v_digest text; v_candidate_digest text;
+  v_digest text; v_candidate_scoped_digest text;
   v_field text; v_keys integer; v_identity jsonb; v_identity_keys integer;
 begin
   if p_idempotency_key is null then
@@ -355,11 +363,11 @@ begin
   -- recomputes and labels recorded versus offered digests before healing exactly
   -- one event under an advisory lock.
   v_digest := ops.gate_zero_outcome_digest(p_receipt);
-  v_candidate_digest := ops.gate_zero_outcome_candidate_digest(p_receipt);
+  v_candidate_scoped_digest := ops.gate_zero_outcome_candidate_digest(p_receipt);
   if v_existing.outcome_digest <> v_digest then
     raise notice 'candidate % already has an immutable outcome; returning it unchanged (recorded full %, offered full %, recorded projection %, offered projection %)',
       v_existing.candidate_digest, v_existing.outcome_digest, v_digest,
-      v_existing.candidate_scoped_digest, v_candidate_digest;
+      v_existing.candidate_scoped_digest, v_candidate_scoped_digest;
   end if;
   return v_existing.id;
 end;
