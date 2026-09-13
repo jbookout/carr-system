@@ -544,12 +544,19 @@ test("PRODUCED: with every row present the gate is passable, with a real digest 
   assert.deepEqual(emitted.owed_seams, []);
   assert.equal(emitted.receipt_status, "pass");
 
-  // A REAL DIGEST, by the stated recipe, over the receipt that is right there —
-  // recomputed here rather than trusted, so a producer that stamped a constant
-  // or hashed something else is red.
+  // A REAL DIGEST, by the recipe r7 DECLARES — the TAGGED preimage, over the
+  // receipt that is right there, recomputed here rather than trusted, so a
+  // producer that stamped a constant or hashed something else is red.
   assert.match(emitted.outcome_digest, /^sha256:[0-9a-f]{64}$/);
-  assert.equal(emitted.outcome_digest, digest(emitted.receipt));
-  assert.equal(emitted.outcome_digest_recipe.domain_tag, null);
+  assert.equal(emitted.outcome_digest,
+    digest([CONSUMER_GATE_RECEIPT_SCHEMA, emitted.receipt]));
+  // AND IT IS NOT THE PLAIN ONE. r7's amended receipt_payload_digest_rule says
+  // in its own words that a digest over the receipt alone does not satisfy it,
+  // and the accepted plan names a plain digest by either reader as a failure
+  // condition — so the refusal is asserted rather than implied by the positive.
+  assert.notEqual(emitted.outcome_digest, digest(emitted.receipt),
+    "the producer still emits the untagged digest r7 refuses");
+  assert.equal(emitted.outcome_digest_recipe.domain_tag, CONSUMER_GATE_RECEIPT_SCHEMA);
   assert.equal(emitted.outcome_digest_recipe.schema_ref, CONSUMER_GATE_RECEIPT_SCHEMA);
   assert.equal(emitted.outcome_digest_recipe.self_digest_excluded, true);
   assert.equal(Object.hasOwn(emitted.receipt, "outcome_digest"), false,
@@ -1265,7 +1272,8 @@ test("PROPAGATION: an injected failure produces a FAILING outcome, kept and dige
   assert.equal(emitted.receipt_status, "fail");
   assert.equal(emitted.receipt.status, "fail");
   assert.match(emitted.outcome_digest, /^sha256:[0-9a-f]{64}$/);
-  assert.equal(emitted.outcome_digest, digest(emitted.receipt));
+  assert.equal(emitted.outcome_digest,
+    digest([CONSUMER_GATE_RECEIPT_SCHEMA, emitted.receipt]));
   assert.match(emitted.observed_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
 
   // AND THE DENIALS WERE OBSERVED, which is the field's whole claim.
@@ -1363,19 +1371,22 @@ test("PROVENANCE: the store admits only the row the database itself named a make
     assert.match(candidateQuery, /and r\.maker_authority_verified/,
       "the candidate store trusts the two text columns without the database's own mark");
 
-    // THE RECORDER FILES THE ROW ON THE CREDENTIAL THAT MAY WRITE IT, and asserts
+    // THE RECORDER FILES THE ROW ON THE AUTHORITY CREDENTIAL, and asserts
     // nothing about who made it. The seventh round put the insert behind a
-    // SECURITY DEFINER door on the authority connection; the door could not be
-    // granted under the moratorium and carr_authority holds no insert on
-    // ops.release either, so that shape stopped the wrapper filing at all. One
-    // statement now, on the writer connection, naming no maker column.
+    // SECURITY DEFINER door on the authority connection; a door needs an EXECUTE
+    // grant, so it stopped the wrapper filing at all. ONE STATEMENT NOW, on the
+    // authority connection, naming no maker column — which is what standing
+    // amendment 9(c) requires and what this store's predicate needs, because a
+    // row filed on the ledger writer is marked unauthenticated by 0504 and read
+    // by nobody. The capability that makes it possible is 0503's admitted insert
+    // plus migration 0505's two column-scoped reads.
     assert.equal(recorder.includes("ops.record_release_candidate("), false,
       "the recorder still files the candidate through the withdrawn authority door");
     assert.match(recorder, /CANDIDATE_INSERT = "{3}\n\s*insert into ops\.release/,
       "the recorder no longer files the candidate with one named insert");
     assert.match(recorder,
-      /connection_kind = "authority" if args\.action in \("approve", "staging-approve"\) else "write"/,
-      "the candidate branch still reaches for a connection that cannot file the row");
+      /connection_kind = \("authority"\s*\n\s*if args\.action in \("candidate", "approve", "staging-approve"\)\s*\n\s*else "write"\)/,
+      "the candidate branch no longer files on the authority connection, so its row is unauthenticated");
     assert.match(recorder,
       /the release candidate's maker is not a caller field/,
       "the recorder no longer refuses a caller-asserted maker");

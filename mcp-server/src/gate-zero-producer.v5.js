@@ -66,24 +66,31 @@
 // whoever read it next.
 //
 // ---------------------------------------------------------------------------
-// THE DIGEST RECIPE, AND THE ONE GAP THE SEAM STUDY NAMED.
+// THE DIGEST RECIPE, AND THE GAP THAT HAS SINCE BEEN CLOSED.
 //
 // r7's canonicalization contract is JCS over UTF-8, SHA-256, no trailing
-// newline, and its receipt-payload rule names domain tags for
+// newline. Its receipt-payload rule named domain tags for
 // `benchmark-manifest.v1`, `attended-effect-capability.v1`,
 // `attended-effect-consumption-receipt.v2` and
-// `attended-effect-outcome-receipt.v1` — AND NOT FOR `consumer-gate-receipt.v1`.
-// Two readings are available and they produce different digests: a plain
-// `digest(receipt)`, or a tagged `digest([schema_version, receipt])`.
+// `attended-effect-outcome-receipt.v1` — and, until 2026-09-13, NOT for
+// `consumer-gate-receipt.v1`. Two readings were available and they produce
+// different digests: a plain `digest(receipt)`, or a tagged
+// `digest([schema_version, receipt])`.
 //
-// THIS MODULE FOLLOWS THE REPOSITORY'S OWN PRECEDENT — plain `digest(receipt)`,
-// JCS SHA-256 over the receipt object with no domain tag, which is what
-// `benchmark-minimum.v5.js:1597` already does for a consumer-gate receipt it
-// proposes. The choice is STATED rather than buried, as
-// `V5_A02_GATE_ZERO_RECEIPT_DIGEST_RECIPE`, so a reviewer can overturn it in one
-// line. If a reviewer prefers the tagged reading it becomes an r7 amendment, and
-// an r7 amendment reseals all sixty-two chunks — which is precisely why the
-// choice is on the surface instead of inside a function.
+// THIS MODULE TOOK THE PLAIN READING AND PUT THE CHOICE ON THE SURFACE, as
+// `V5_A02_GATE_ZERO_RECEIPT_DIGEST_RECIPE`, so a reviewer could overturn it in
+// one line — noting that doing so would be an r7 amendment resealing all
+// sixty-two chunks.
+//
+// A REVIEWER DID, AND THE AMENDMENT LANDED. Act 5 of accepted plan
+// PLAN-a5059eb52474-v3 amended r7's `receipt_payload_digest_rule` on 2026-09-13
+// to declare this schema's payload digest as the TAGGED preimage — sha256 over
+// the JCS serialization of `["consumer-gate-receipt.v1", <receipt>]` — stating
+// that a plain digest over the receipt alone does not satisfy it. The packet was
+// resealed across all sixty-two chunks and is pinned at `4379c60e…`. So this
+// module computes the tagged digest, the recipe constant carries the tag as a
+// VALUE, and `ops.gate_zero_outcome_digest()` computes the identical preimage in
+// SQL from migration 0505 forward.
 //
 // And the rule's closing clause is obeyed either way: no artifact includes its
 // own whole-byte digest as input to that digest. The receipt carries
@@ -162,6 +169,7 @@ import {
   V5_A02_GATE_ZERO_ORACLE_VERSION,
   V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
   V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+  V5_A02_GATE_ZERO_R7_PACKET_SHA256,
   V5_A02_GATE_ZERO_PRODUCER_ROLE,
   V5_A02_SCHEDULER_STEP_REF,
 } from "./gate-zero-producer-registration.v5.js";
@@ -176,18 +184,26 @@ export const V5_A02_GATE_ZERO_PRODUCER_SCHEMA_VERSION =
   "doctorcre-v5-a02-gate-zero-producer.v1";
 
 /**
- * THE STATED DIGEST RECIPE. See the header: r7 names no domain tag for
- * `consumer-gate-receipt.v1`, so this follows the repository's own precedent
- * and says so out loud, on the surface, where one line overturns it.
+ * THE DECLARED DIGEST RECIPE — no longer a stated assumption, because r7 now
+ * rules it. The earlier revision of this constant carried `domain_tag: null` and
+ * named the tagged reading as "the alternative if overturned". It was overturned:
+ * the 2026-09-13 r7 amendment (act 5 of accepted plan PLAN-a5059eb52474-v3,
+ * packet `4379c60e…`) declared `consumer-gate-receipt.v1`'s payload digest to be
+ * the TAGGED preimage and said in its own words that a plain digest over the
+ * receipt alone does not satisfy the rule. So the tag is a value here, and the
+ * fields that described the gap describe how it closed.
  */
 export const V5_A02_GATE_ZERO_RECEIPT_DIGEST_RECIPE = deepFreeze({
   schema_ref: CONSUMER_GATE_RECEIPT_SCHEMA,
   canonicalization: "jcs_utf8_sha256_no_trailing_newline",
-  domain_tag: null,
-  recipe: "sha256 over the JCS canonicalization of the twenty-one-field receipt object",
-  gap_in_r7: "r7's receipt_payload_digest_rule names domain tags for four schemas and not for this one",
-  chosen_because: "benchmark-minimum.v5.js takes a plain digest over the consumer-gate receipt it proposes",
-  alternative_if_overturned: "a tagged digest over [schema_ref, receipt], which would be an r7 amendment",
+  domain_tag: CONSUMER_GATE_RECEIPT_SCHEMA,
+  recipe: "sha256 over the JCS canonicalization of the two-element array " +
+    "[\"consumer-gate-receipt.v1\", <the twenty-one-field receipt object>]",
+  declared_by_r7: "receipt_payload_digest_rule, amended 2026-09-13 to name this schema's tagged preimage",
+  r7_packet_sha256: V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+  refused_recipe: "a plain digest over the receipt object alone, which r7 states does not satisfy the rule",
+  computed_identically_in_sql_by:
+    "ops.gate_zero_outcome_digest(jsonb), replaced with this preimage by migration 0505",
   self_digest_excluded: true,
 });
 
@@ -1256,9 +1272,13 @@ async function produce() {
     reason_id: failed === null ? null : failed.reason_id,
     unavailable_because: failed === null ? null
       : "a clause this run stands on was not held by the rows the ruled evidence seams returned",
-    // THE DIGEST, by the stated recipe: JCS SHA-256 over the twenty-one-field
-    // receipt, no domain tag, and the digest is not one of the fields it covers.
-    outcome_digest: digest(receipt),
+    // THE DIGEST, by the recipe r7 declares: JCS SHA-256 over the two-element
+    // array ["consumer-gate-receipt.v1", <the twenty-one-field receipt>]. The
+    // rule's closing clause still holds — the digest is not one of the fields it
+    // covers. This is the value the record layer independently recomputes with
+    // ops.gate_zero_outcome_digest(); the two preimages are byte-identical, and
+    // the gateway refuses rather than reports if they ever diverge.
+    outcome_digest: digest([CONSUMER_GATE_RECEIPT_SCHEMA, receipt]),
     outcome_digest_recipe: V5_A02_GATE_ZERO_RECEIPT_DIGEST_RECIPE,
     observed_at: observedAt,
     receipt,

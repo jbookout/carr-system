@@ -74,18 +74,30 @@
 //     required fields, and gives `session_ref` a LOWERCASE pattern with a
 //     minimum length. All three clauses are enforced here and again in SQL.
 //
-// THE DIGEST RECIPE IS A NAMED ASSUMPTION. r7's `receipt_payload_digest_rule`
-// names domain tags for `benchmark-manifest.v1`, `attended-effect-capability.v1`,
-// `attended-effect-consumption-receipt.v2` and
+// THE DIGEST RECIPE IS NO LONGER AN ASSUMPTION; r7 DECLARES IT. Until 2026-09-13
+// r7's `receipt_payload_digest_rule` named domain tags for `benchmark-manifest.v1`,
+// `attended-effect-capability.v1`, `attended-effect-consumption-receipt.v2` and
 // `attended-effect-outcome-receipt.v1` -- and NOT for `consumer-gate-receipt.v1`.
-// This follows the repository's existing precedent for a consumer-gate receipt
-// digest: plain canonical-JSON sha256 over the receipt object with no domain tag
-// (benchmark-minimum.v5.js:1480). The consistent-with-the-named-four reading
-// would be `digest(["consumer-gate-receipt.v1", receipt])`, and THE TWO PRODUCE
-// DIFFERENT VALUES. The digest is what a benchmark acceptance binds forever, so
-// the choice is stated here rather than made silently: a reviewer who disagrees
-// overturns it in one line, and if they do it becomes an r7 amendment, which
-// reseals all 62 packet chunks.
+// This file took the plain reading under that silence and said so out loud, on
+// the record, precisely so one line could overturn it.
+//
+// THAT LINE WAS WRITTEN. The r7 amendment of 2026-09-13 -- act 5 of accepted
+// plan PLAN-a5059eb52474-v3, landed in the packet now pinned at
+// `4379c60e9a4fefbcf044f4bc5a34e5a95c90f77b9adf348b6da7475e17d5e6d7` -- declares
+// this schema's payload digest to be THE TAGGED PREIMAGE: sha256 over the
+// RFC8785/JCS serialization of the two-element array whose first element is the
+// domain-tag string `consumer-gate-receipt.v1` and whose second is the
+// twenty-one-field receipt. The rule says in its own words that a plain digest
+// over the receipt alone does not satisfy it. So `gateZeroOutcomeDigest` below
+// computes `digest([GATE_ZERO_RECEIPT_SCHEMA, receipt])`, and migration 0505's
+// `ops.gate_zero_outcome_digest()` computes the same preimage byte for byte.
+//
+// WHAT IS NOT TAGGED, AND WHY THAT IS NOT AN INCONSISTENCY. The candidate-scoped
+// digest below is computed over a PROJECTION of the receipt -- five fields
+// removed -- which is not a `consumer-gate-receipt.v1` and therefore not a
+// payload r7's rule speaks about at all. Tagging a projection with the schema
+// name of the thing it is not would be the misstatement, so it stays plain, on
+// both sides of the seam. It is an idempotency comparison key, never evidence.
 
 import { digest } from "./artifact-trust.js";
 import { authenticatedIdentity, authorizationClassForActor } from "./identity.js";
@@ -431,16 +443,25 @@ export const assertGateZeroReceipt = closedCallable((receipt, seat) => {
 });
 
 /**
- * THE DIGEST, computed the way the repository already computes a consumer-gate
- * receipt digest. See the header for why this recipe is a named assumption.
+ * THE DIGEST r7 DECLARES: the TAGGED preimage, not the receipt alone.
+ *
+ * `digest([GATE_ZERO_RECEIPT_SCHEMA, receipt])` is sha256 over the canonical
+ * JSON of that exact two-element array — `["consumer-gate-receipt.v1",{…}]` —
+ * which is what r7's `receipt_payload_digest_rule` has required for this schema
+ * since the 2026-09-13 amendment. See the header: the plain `digest(receipt)`
+ * this file used to compute is now a value r7 says does not satisfy the rule.
  *
  * IT IS NOT AUTHORITATIVE HERE. The recorded value is the one the DATABASE
  * recomputes from the persisted receipt with ops.gate_zero_outcome_digest(); this
  * function exists so the verb can report back the digest a caller can check, and
  * so a test can assert the two sides agree. If they ever disagreed, the database
- * would win and the row would carry its value, not this one.
+ * would win and the row would carry its value, not this one. The cross-
+ * implementation proof that they do agree — over the SAME tagged preimage — is
+ * mcp-server/test/gate-zero-outcome-digest-tagged.test.mjs, which also asserts
+ * that the plain digest is NOT accepted.
  */
-export const gateZeroOutcomeDigest = closedCallable(receipt => digest(receipt));
+export const gateZeroOutcomeDigest =
+  closedCallable(receipt => digest([GATE_ZERO_RECEIPT_SCHEMA, receipt]));
 
 /**
  * THE SAME RECEIPT, REDUCED TO WHAT THE CANDIDATE DECIDES — the value a retry is

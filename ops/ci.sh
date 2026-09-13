@@ -1258,6 +1258,42 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # THE TAGGED OUTCOME DIGEST, added 2026-09-13 (the third release candidate's
+  # refusal, finding 2). r7's amended receipt_payload_digest_rule declares the
+  # payload digest of consumer-gate-receipt.v1 as digest(["consumer-gate-receipt.v1",
+  # receipt]) and states that a plain digest over the receipt does not satisfy
+  # it. Whether ops.gate_zero_outcome_digest() and artifact-trust.js produce the
+  # SAME BYTES over that preimage is a question about two canonicalizers, one in
+  # plpgsql; a mock that called the JS one would agree with it by construction and
+  # prove nothing. It runs after the race proof because it records a row.
+  if [ -f mcp-server/test/gate-zero-outcome-digest-tagged.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-digest-tagged.log" \
+         node --test mcp-server/test/gate-zero-outcome-digest-tagged.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-digest-tagged.log" >&2
+      bad migration "the Gate Zero tagged outcome-digest cross-implementation proof failed"
+      return
+    fi
+  fi
+
+  # THE AUTHORITY-FILED RELEASE CANDIDATE, added 2026-09-13 (same refusal,
+  # finding 1). Standing amendment 9(c) has the deploy wrapper file the
+  # release-candidate record under the AUTHORITY identity; migration 0504 marks a
+  # row filed on any other login unauthenticated and the Gate Zero seam store
+  # ignores it. Whether carr_authority actually holds the reads that filing path
+  # performs -- ops.service by key, and the ops.release columns its insert returns
+  # -- is a property of real grants, and it runs the REAL tools/ops-record.py over
+  # a REAL manifest so a missing one fails here instead of in production.
+  if [ -f mcp-server/test/gate-zero-candidate-authority-filing.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-candidate-filing.log" \
+         node --test mcp-server/test/gate-zero-candidate-authority-filing.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-candidate-filing.log" >&2
+      bad migration "the authority-filed release-candidate provenance proof failed"
+      return
+    fi
+  fi
+
   # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
   # for months this class built a database where the app roles existed and held
   # NOTHING — has_table_privilege() false for every table, every role — and ran
