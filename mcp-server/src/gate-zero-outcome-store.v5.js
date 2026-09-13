@@ -97,7 +97,8 @@
 // removed -- which is not a `consumer-gate-receipt.v1` and therefore not a
 // payload r7's rule speaks about at all. Tagging a projection with the schema
 // name of the thing it is not would be the misstatement, so it stays plain, on
-// both sides of the seam. It is an idempotency comparison key, never evidence.
+// both sides of the seam. It is an informational comparison aid, never evidence
+// and never an admission key; candidate_digest arbitrates the immutable row.
 
 import { digest } from "./artifact-trust.js";
 import { authenticatedIdentity, authorizationClassForActor } from "./identity.js";
@@ -464,10 +465,10 @@ export const gateZeroOutcomeDigest =
   closedCallable(receipt => digest([GATE_ZERO_RECEIPT_SCHEMA, receipt]));
 
 /**
- * THE SAME RECEIPT, REDUCED TO WHAT THE CANDIDATE DECIDES — the value a retry is
- * compared on, and the gateway's copy of ops.gate_zero_outcome_candidate_digest.
+ * THE SAME RECEIPT, REDUCED TO WHAT THE CANDIDATE DECIDES — an informational
+ * comparison aid, and the gateway's copy of ops.gate_zero_outcome_candidate_digest.
  *
- * WHY IT IS NOT THE FULL DIGEST (PR 1014, Sol's finding 3). Five values of a
+ * WHY IT IS NOT THE IDEMPOTENCY KEY. Five values of a
  * consumer-gate receipt legitimately move between two GENUINE authenticated runs
  * of one candidate: `observed_at` and `ttl_expires_at`, stamped when each run
  * happened, and the `session_ref` inside ALL THREE identities, every one of
@@ -483,13 +484,14 @@ export const gateZeroOutcomeDigest =
  *     remains visible in the offered projection and metadata.
  *   * every digest, constant, status, comparator and evidence ref stays, so a
  *     run that read different rows remains visible in that offered projection.
- * A repeated candidate still converges unconditionally onto the immutable first
- * recorded outcome; these kept fields describe the offered run, not a conflict
- * branch that can replace or refuse the recorded row.
+ * RETRY CONVERGENCE is decided by candidate_digest, not this projection: any
+ * later observation of that candidate receives the immutable first row so the
+ * caller can heal a missing audit event. This value only helps report how the
+ * offered and recorded observations differ; it authorizes neither one.
  *
  * NOTHING IS LOST BY IT. The dropped values are inside the receipt this projects
  * from, which is stored whole, and inside the full outcome digest stored beside
- * it. This narrows the comparison key; it narrows nothing that is kept.
+ * it. This projection narrows an explanatory view, not the write-once key.
  */
 export const gateZeroOutcomeCandidateDigest = closedCallable(receipt => {
   const { observed_at, ttl_expires_at, ...rest } = receipt;
