@@ -7611,6 +7611,29 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // connection or driver fault) still surfaces as-is for the transport's own
   // generic handling.
   try {
+    // THE AUTHENTICATED CALL IS NOT ESTABLISHED HERE ANY MORE (amendment 9,
+    // 2026-09-14). It used to be: this line asked identity.js for THIS actor's
+    // dispatcher and ran the handler inside it. The fifth review round found
+    // what that required identity.js to publish — `dispatchFor(actor)`, a
+    // callable that enters a context — and that a probe composing it with the
+    // equally public review door ran its own code as `review_agent`.
+    //
+    // SO THE ENTRY MOVED INTO identity.js, where the bearer is matched and the
+    // context entered in one module-internal act — and since the sixth
+    // correction round (2026-09-15) what runs inside it is named rather than
+    // handed over: `serveAuthenticatedCall(bearer, correlationId, entryName)`
+    // resolves the name in a frozen map of the server's own entries. No verb
+    // dispatched through this function runs inside that context, including this
+    // one; nothing is threaded through here, so there is nothing here for a
+    // caller to aim.
+    //
+    // WHAT THAT NARROWS, stated rather than discovered later: a verb reached
+    // through any OTHER door — the OAuth grant path, the agent, Hermes,
+    // continuity and local bearers, `./run.sh call`, a direct import — runs with
+    // NO authenticated call at all, so r7's receipt surfaces refuse. That is
+    // correct for the Gate Zero producer, whose candidate is the deployed
+    // Worker's own build stamp (build-stamp.js) and which has nothing to say
+    // about a local checkout.
     return await tool.handler(client, actor, args);
   } catch (e) {
     if (e instanceof ToolError) throw e;

@@ -74,6 +74,13 @@
 #      BEING ABSENT IS THE HONEST SIGNAL THAT THIS SCRIPT WAS BYPASSED,
 #      which is exactly what /release reports (see mcp-server/src/release.js
 #      — null value, "not stamped: deployed outside bin/deploy-worker.sh").
+#   1b. THE CANDIDATE MANIFEST IS STAMPED THE SAME WAY (standing-rule
+#      amendment 9, 2026-09-14) — `--var CANDIDATE_MANIFEST:<jcs>` and
+#      `--var CANDIDATE_MANIFEST_DIGEST:<sha256>`, sealed by
+#      mcp-server/bin/seal-candidate-manifest.mjs on the same invocation, for the
+#      same reason and with the same honest absence when this script is
+#      bypassed. The Gate Zero producer binds its candidate to those two stamps
+#      because the deployed Worker cannot read a repository at request time.
 #   2. THE MARKER WRITE IS PART OF THIS SAME STEP (see postflight below) —
 #      it always was, but that only protects a deploy that goes THROUGH this
 #      script. Grep the repo: `wrangler deploy` is also called directly
@@ -111,6 +118,10 @@ PERFORMANCE_BUDGET_MS=""
 RECOVERY_STRATEGY=""
 ROLLBACK_PLAN_REF=""
 REQUESTED_RELEASE_KEY=""
+RELEASE_TEST_EVIDENCE=""
+RELEASE_SECURITY_EVIDENCE=""
+RELEASE_VERIFIER=""
+RELEASE_VERIFIER_EVIDENCE=""
 RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
@@ -171,6 +182,18 @@ while [ "$#" -gt 0 ]; do
     --release-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --release-key needs a canonical key" >&2; exit 64; }
       REQUESTED_RELEASE_KEY="$2"; shift ;;
+    --test-evidence)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --test-evidence needs a reference" >&2; exit 64; }
+      RELEASE_TEST_EVIDENCE="$2"; shift ;;
+    --security-evidence)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --security-evidence needs a reference" >&2; exit 64; }
+      RELEASE_SECURITY_EVIDENCE="$2"; shift ;;
+    --verifier)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --verifier needs an actor slug" >&2; exit 64; }
+      RELEASE_VERIFIER="$2"; shift ;;
+    --verifier-evidence)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --verifier-evidence needs a reference" >&2; exit 64; }
+      RELEASE_VERIFIER_EVIDENCE="$2"; shift ;;
     --recovery-attempt-id)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
@@ -274,6 +297,26 @@ prepare_typed_recovery_shrink() {
 
 if [ "$VERSION_MODE" != "ordinary" ] && [ "$TARGET_ENV" != "production" ]; then
   fail "provider-version operations are Production-only; staging is a source rehearsal and receives its own build."
+fi
+# THE UPLOAD FILES ITS OWN RELEASE-CANDIDATE RECORD (standing-rule amendment 9),
+# so what that record needs is checked HERE — before a version exists — rather
+# than after Cloudflare holds an immutable object nobody can account for.
+#
+# WHY THE EVIDENCE REFS ARE REQUIRED RATHER THAN OPTIONAL. ops.release's
+# an_approved_release_carries_its_evidence constraint exempts `candidate` and
+# nothing beyond it, and no verb attaches evidence to a candidate afterwards: a
+# row filed without these two can never be approved, so filing one is filing a
+# dead key. The maker is NOT among these arguments and cannot be — migration 0504
+# records the login role that files the row and derives the maker from it.
+if [ "$VERSION_MODE" = "upload" ]; then
+  [ -n "$REQUESTED_RELEASE_KEY" ] \
+    || fail "--upload-version files the release-candidate record itself and needs --release-key <canonical key>."
+  [ -n "$RELEASE_TEST_EVIDENCE" ] && [ -n "$RELEASE_SECURITY_EVIDENCE" ] \
+    || fail "--upload-version needs --test-evidence and --security-evidence; a candidate filed without them can never be approved."
+  if [ -n "$RELEASE_VERIFIER$RELEASE_VERIFIER_EVIDENCE" ]; then
+    [ -n "$RELEASE_VERIFIER" ] && [ -n "$RELEASE_VERIFIER_EVIDENCE" ] \
+      || fail "--verifier and --verifier-evidence are an atomic pair."
+  fi
 fi
 case "$RECOVERY_STEP" in
   standalone)
@@ -793,6 +836,67 @@ fi
   --release-candidate-count 1 >/dev/null \
   || fail "cloudflare-worker-release metering admission refused."
 
+# THE SEALER IS IMPORTED, NOT EXECUTED, and that is a registry fact rather than a
+# preference: ops/scac-mutation-inventory.mjs enumerates every tracked file with a
+# shebang or a command-line main as a script ENTRYPOINT, and an entrypoint is an
+# ingress whose admission only a sealed registry successor may perform. So
+# mcp-server/bin/seal-candidate-manifest.mjs carries neither, and this one
+# evaluation imports `sealCandidateManifest` and prints the field it is asked for.
+# Every input travels as an environment variable, so no path or revision is ever
+# spliced into the evaluated source.
+seal_candidate_field() {
+  CARR_SEALER="$SEALER" CARR_SEAL_REPO="$SOURCE_ROOT" CARR_SEAL_REV="$HEAD_SHA" \
+  CARR_SEAL_FIELD="$1" node --input-type=module -e '
+    const sealer = await import(new URL("file://" + process.env.CARR_SEALER).href);
+    const sealed = sealer.sealCandidateManifest(process.env.CARR_SEAL_REPO,
+                                                process.env.CARR_SEAL_REV);
+    process.stdout.write(process.env.CARR_SEAL_FIELD === "digest"
+      ? sealed.digest : sealed.manifest_text);
+  '
+}
+
+# ---------- seal the candidate manifest (standing-rule amendment 9) ----------
+#
+# WHY THIS STEP EXISTS. The Gate Zero producer used to derive the candidate it
+# judges by reading `.git` at request time, inside the Worker. The deployed
+# Worker has no checkout — Cloudflare serves the bundled modules over a read-only
+# virtual filesystem and supplies no `.git` — so that derivation could only ever
+# refuse in production. The work belongs where a checkout exists, which is here.
+#
+# WHAT IS STAMPED, and it is stamped exactly the way GIT_SHA already is: two more
+# `--var` values on the SAME wrangler invocation, scoped to this upload, absent
+# from any deploy that bypasses this script. `CANDIDATE_MANIFEST` is the sealed
+# manifest's own JCS text — the candidate tree id, the file count and byte
+# length, the digest of the blob ids the revision sealed, the digest of those
+# blobs' contents, and the environment-manifest and fixture-set digests —
+# and `CANDIDATE_MANIFEST_DIGEST` is its digest, computed by the same recipe. The
+# producer re-digests the manifest and refuses unless the two agree, so a var
+# edited after the seal is a refusal rather than a signature.
+#
+# THE REVISION IS $HEAD_SHA, which is whatever this run is actually deploying:
+# the checkout's own HEAD on an ordinary deploy, and the SHA the approver signed
+# on a promotion. The sealer resolves it in the object store and fails visibly if
+# that object is not present, so a manifest is never sealed for a revision this
+# machine cannot read.
+#
+# SKIPPED ON A PROMOTION, deliberately: an immutable provider promotion uploads
+# no new version, so there is no invocation to stamp — the vars the version
+# carries are the ones its own upload wrote.
+CANDIDATE_MANIFEST=""
+CANDIDATE_MANIFEST_DIGEST=""
+if [ "$VERSION_MODE" != "promote" ]; then
+  SEALER="$WORKER_DIR/bin/seal-candidate-manifest.mjs"
+  [ -f "$SEALER" ] \
+    || fail "the candidate sealer is missing at $SEALER; the Gate Zero producer would ship unable to name its candidate."
+  CANDIDATE_MANIFEST="$(seal_candidate_field manifest)" \
+    || fail "could not seal the candidate manifest for $HEAD_SHA."
+  CANDIDATE_MANIFEST_DIGEST="$(seal_candidate_field digest)" \
+    || fail "could not digest the sealed candidate manifest for $HEAD_SHA."
+  [ -n "$CANDIDATE_MANIFEST" ] && [ -n "$CANDIDATE_MANIFEST_DIGEST" ] \
+    || fail "the candidate sealer produced an empty manifest or digest for $HEAD_SHA."
+  echo "  sealed candidate manifest $CANDIDATE_MANIFEST_DIGEST for $HEAD_SHA"
+fi
+
 # ---------- deploy ----------
 echo ""
 echo "== deploy =="
@@ -800,7 +904,9 @@ cd "$WORKER_DIR"
 # -- provider-version upload --
 if [ "$VERSION_MODE" = "upload" ]; then
   set +e
-  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" 2>&1)"
+  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" \
+    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
   VERSION_UPLOAD_RC=$?
   set -e
   printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
@@ -828,10 +934,42 @@ if [ "$VERSION_MODE" = "upload" ]; then
   echo "  git SHA: $HEAD_SHA"
   echo "  plan hash: $RELEASE_PLAN_HASH"
   echo ""
-  echo "Record this exact candidate before Joe approves its plan hash:"
-  echo "  .venv/bin/python tools/ops-record.py release candidate --key <key> \\"
-  echo "    --environment production --provider $PROVIDER \\"
-  echo "    --provider-version-id $PROVIDER_VERSION_ID --manifest $RELEASE_MANIFEST ..."
+  # ---------- the release-candidate record (standing-rule amendment 9) ------
+  #
+  # THE WRAPPER FILES IT, NOT A HUMAN RUNNING A PRINTED LINE. What stood here
+  # was an `echo` of the command somebody ought to run next, which made the
+  # record's maker whatever that person typed — and the Gate Zero producer reads
+  # its SUBJECT MAKER out of this row. A printed instruction is not provenance:
+  # the row has to be written by the thing that made the candidate, on a
+  # credential, in the same run that uploaded it.
+  #
+  # THE MAKER IS NOT AN ARGUMENT HERE. tools/ops-record.py refuses --maker
+  # outright and names no maker column in the insert; migration 0504's trigger
+  # records the login role the connection authenticated as and derives the maker
+  # from it, so this wrapper cannot name a maker even by mistake. What it supplies
+  # is the exact target: the key, the environment, the provider and its immutable
+  # version id, and the provider-bound manifest whose plan hash Joe will approve.
+  #
+  # AND WHAT THAT MAKER IS TODAY, said here because a deploy log should not imply
+  # more than it has. The row is filed on the ledger writer, which is the only
+  # credential holding INSERT on ops.release — the authority bundle holds none and
+  # granting it one is the capability open loop #594 carries. So this record is an
+  # honest UNAUTHENTICATED one until that grant lands, and the line printed below
+  # reports what the database recorded rather than what anyone intended.
+  echo "== release candidate record =="
+  "$PY" "$REPO/tools/ops-record.py" release candidate \
+    --key "$RELEASE_KEY" --service carr-mcp --environment production \
+    --provider "$PROVIDER" --provider-version-id "$PROVIDER_VERSION_ID" \
+    --manifest "$RELEASE_MANIFEST" \
+    --test-evidence "$RELEASE_TEST_EVIDENCE" \
+    --security-evidence "$RELEASE_SECURITY_EVIDENCE" \
+    ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
+    ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
+    >/dev/null \
+    || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no approval can name $PROVIDER_VERSION_ID until the record exists."
+  echo "  filed release candidate $RELEASE_KEY for $HEAD_SHA"
+  echo "  maker: recorded by the database from the filing login, not asserted"
+  echo ""
   echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"
   echo "  rollback: bin/deploy-worker.sh --env staging --recovery-step current_before|prior|current_after ..."
   echo "  forward_fix: bin/deploy-worker.sh --env staging --recovery-step forward_fix --release-key <key> ..."
@@ -1007,10 +1145,14 @@ else
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \
         || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
-      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" --tag "$DEPLOY_TAG"
+      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+        --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+        --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" --tag "$DEPLOY_TAG"
     fi
   else
-    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST"
   fi
 fi
 
@@ -1191,6 +1333,9 @@ else
   echo "  promoted immutable $PROVIDER version $PROVIDER_VERSION_ID"
 fi
 echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
+if [ -n "$CANDIDATE_MANIFEST_DIGEST" ]; then
+  echo "  stamped CANDIDATE_MANIFEST_DIGEST=$CANDIDATE_MANIFEST_DIGEST (Gate Zero's candidate)"
+fi
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"

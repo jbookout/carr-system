@@ -521,15 +521,18 @@ export const BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT = deepFreeze({
   resolved: false,
   // SCOPED TO THIS RECORD LAYER, DELIBERATELY. Every clause below is a statement
   // about what is bindable HERE. None of them says Gate Zero produced no
-  // outcome: it is an external pre-v5 step, it runs outside this system, and
-  // what it did or did not produce is not something this module can observe or
-  // is entitled to assert.
+  // outcome: since the 2026-09-12 amendment it is a v5 step with a registered
+  // producer, and what that producer did or did not emit is not something this
+  // module can observe or is entitled to assert.
   scope: "the binding available in this record layer, not the existence of a Gate Zero outcome anywhere",
-  external_producer_is_intentional: true,
+  // FALSE SINCE 2026-09-12, and it is a correction rather than a ruling: r7
+  // carries the producer row, so a Gate Zero outcome is a v5 producer's output
+  // and not an external arrival this record layer is merely receiving.
+  external_producer_is_intentional: false,
   why_unresolved: [
     "This record layer holds no authenticated Gate Zero outcome: no outcome digest and no observed instant, so an acceptance has nothing here to bind to.",
-    "step:gate-zero-read-only-outcome is an external pre-v5 step admitted as such by tools/doctorcre-v5-review.cjs, and r7 registers no v5 producer for it. That is intentional and no producer registry entry is requested; it is stated only to explain why the outcome would have to arrive from outside and be authenticated on the way in.",
-    "Whether Gate Zero has produced an outcome externally is unknown to this module and is not claimed either way.",
+    "step:gate-zero-read-only-outcome HAS a v5 producer registered in r7 as of the 2026-09-12 amendment (decision 311a9af5-3685-4c47-a158-f8dd70870ca1, applied under Joe's ruling on loop 589): the producer row, the gate-zero-read-only-accepted gate and the independent_control_plane_oracle role. tools/doctorcre-v5-review.cjs says the same in its own words — the external pre-v5 set moved down to Gate Zero's four predecessors, and Gate Zero left it. The earlier text here said the opposite, and it was the sentence most likely to send a reader looking for a human outcome that arrives from outside; what is still true, and all that is still true, is that THIS RECORD LAYER holds no row for it.",
+    "Whether the registered producer has emitted an outcome is unknown to this module and is not claimed either way.",
   ],
   required_to_resolve: [
     "Record an authenticated Gate Zero read-only outcome in this record layer, carrying the exact outcome digest and the trusted instant it was observed.",

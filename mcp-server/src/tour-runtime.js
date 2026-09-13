@@ -91,11 +91,14 @@ export function projectTourDetail(raw) {
 }
 
 async function invoke({ env, ctx, actor }, verb, args) {
-  const runtimeActor = {
-    ...actor,
+  // In place, not a copy: identity.js's authentication brand is object identity
+  // (amendment 8, 2026-09-13), and a spread here would hand callTool an actor
+  // that authenticates as nobody. Both fields keep whatever the actor already
+  // carried; this only fills them in when the surface arrived without them.
+  const runtimeActor = Object.assign(actor ?? {}, {
     authorization_class: actor?.authorization_class || authorizationClassForActor(actor),
     organization_tenant_id: actor?.organization_tenant_id || organizationTenantForActor(actor),
-  };
+  });
   return toolData(await callTool({ ...env, ctx }, runtimeActor, verb, args));
 }
 

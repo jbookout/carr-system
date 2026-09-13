@@ -12,7 +12,7 @@ import {
   randomString,
   verifyGoogleIdToken,
 } from "./google-oidc.js";
-import { actorFromProps, personalScopeForActor, propsForSlug, slugForEmail } from "./identity.js";
+import { authenticatedIdentity, personalScopeForActor, propsForSlug, slugForEmail } from "./identity.js";
 import { normalizeRoomPaging, ROOM_BODY_MAX } from "./partner-room.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
@@ -763,7 +763,10 @@ export function createDealroomHandler(overrides = {}) {
     verifyGoogleIdTokenFn: verifyGoogleIdToken,
     slugForEmailFn: slugForEmail,
     propsForSlugFn: propsForSlug,
-    actorFromPropsFn: actorFromProps,
+    // The Deal Room session surface builds an actor from grant props and needs
+    // no receipt identity, so it presents no server witness and the actor it
+    // gets back is deliberately unbranded (identity.js, amendment 8).
+    actorFromPropsFn: props => authenticatedIdentity.connectionForGrant(props),
     // The business read ships with its own production adapter so the Clients
     // and Vendors views work wherever this handler is mounted; a test replaces
     // the whole reader rather than reaching past it to a database.

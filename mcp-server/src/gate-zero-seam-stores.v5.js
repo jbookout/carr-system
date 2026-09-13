@@ -79,14 +79,24 @@
  * assemble a message out of it and hand it back in.
  */
 import { digest } from "./artifact-trust.js";
+import { closedCallable } from "./closed-callable.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 
 const STORE_TOKENS = Object.freeze({
   predecessorOutcome: "record-layer:work-request-outcome-feedback",
   schedulerLedger: "control-plane:ops.service+ops.run",
   checkConclusion: "github:checks",
+  candidateBuildRecord: "control-plane:ops.candidate-build-record",
   unregistered: "a-store-this-file-does-not-serve",
 });
+
+/**
+ * THE MARKER OF AN AUTHENTICATED MAKER, in the one spelling tools/ops-record.py
+ * writes. It is a literal here rather than a parameter for the same reason the
+ * store tokens are: a reader whose admission predicate a caller could choose
+ * admits whatever that caller chose.
+ */
+const MAKER_AUTHORITY_PREFIX = "ops.authority-principal:";
 
 const UNREACHABLE_REASONS = Object.freeze({
   answerDidNotParse: "the checks source answer did not parse",
@@ -100,6 +110,8 @@ const UNREACHABLE_REASONS = Object.freeze({
   foreignRepository: "the configured checks repository is not the one this file serves",
   callDidNotFinish: "the call did not finish",
   shaNotAddressed: "the addressed head sha is not the shape this file serves",
+  candidateRecordAmbiguous:
+    "more than one authenticated candidate build row answers this head sha",
   notRegistered: "the reason this store was unreachable is not a registered one",
 });
 
@@ -150,36 +162,16 @@ function own(target, key, value, enumerable) {
   Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
 }
 
-/**
- * EVERY EXPORTED CALLABLE OF THIS MODULE ANSWERS `instanceof` WITH FALSE, AND
- * ANSWERS IT WITHOUT LOOKING AT THE OPERAND. Amendment 2 of 2026-09-12, clause
- * (b), and the reason is the fifth round's second finding: without an own
- * `Symbol.hasInstance` the intrinsic one walks the LEFT OPERAND'S prototype
- * chain, so `hostile instanceof anExportedFetcher` ran the caller's own
- * getPrototypeOf trap and let the caller's own thrown text out of an exported
- * callable.
- *
- * The guard is an ARROW that ignores its argument — it cannot be constructed,
- * carries no `prototype`, and has no branch a caller can steer — installed as a
- * NON-WRITABLE, NON-CONFIGURABLE DATA property, so it can neither be replaced
- * nor redefined as an accessor. A membership question about this module's type
- * has one honest answer, `isSeamStoreUnreachable`, and it is not this one.
- */
-function closedCallable(callable) {
-  // AND IT IS BOUND, NOT BARE. Clause (a) of the amendment names an arrow OR a
-  // bound function, and the difference is only visible in what the ENGINE says
-  // when somebody constructs one: its refusal for a bare arrow quotes the
-  // function's own SOURCE TEXT back, and this file would rather the engine's
-  // sentence carry no line of this module at all. A bound arrow is still not a
-  // constructor and still has no `prototype`; the refusal names
-  // `function () { [native code] }` and nothing else. Binding is lexical-`this`
-  // neutral for an arrow, so no behaviour moves.
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return closed;
-}
+// AMENDMENT 2'S CLOSED SHAPE COMES FROM ./closed-callable.js (amendment 9, fifth
+// correction round, 2026-09-14). This file used to define its own copy, on the
+// argument that a self-contained module is worth a duplicated primitive. The
+// review measured that argument against the copies and it failed: the local
+// copies had already DIVERGED from the shared one — they never froze the
+// callable, which is clause (c), the clause the first shape enumeration added
+// after finding it missing — so the file whose whole job is to close a probe was
+// running the unhardened version of the shape. A security primitive that exists
+// five times is hardened in one of five places. There is one definition now, and
+// the enumeration control walks every export against it.
 
 class SeamStoreUnreachableType extends Error {
   constructor(storeRef, because, cause) {
@@ -410,6 +402,10 @@ function configured(name, storeRef, because) {
 const OUTCOME_HASH = /^sha256:[0-9a-f]{64}$/;
 /** A commit sha, in the one shape GitHub writes them. */
 const HEAD_SHA = /^[0-9a-f]{40}$/;
+/** An actor slug, in the one shape this system registers them. */
+const ACTOR_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** A correlation id, in the one shape the ops recorder writes them. */
+const CORRELATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A value that matched a total pattern owned here, or nothing. */
 function matchedText(value, pattern) {
@@ -664,10 +660,35 @@ function runKeyReceiptHash(value) {
     : null;
 }
 
+/**
+ * THE LATEST SCHEDULER-MINTED RUN FOR A SERVICE, as a SQL address rather than a
+ * value a caller supplies (2026-09-12, PR 1013 correction round).
+ *
+ * An absent `canaryRunKey` no longer refuses: it means "the run this service's
+ * scheduler wrapper most recently minted a receipt for", which the ledger can
+ * answer on its own and no human has to look up and paste. The predicate is the
+ * receipt shape SCHEDULED_RECEIPT parses plus the wrapper's own source kind, so
+ * an operator row, a collector row or a pre-receipt row is not a candidate; the
+ * run key selected is still never returned as text, only as a digest, and the
+ * derivation over the rows is byte-for-byte the one it always was.
+ */
+const LATEST_MINTED_RUN_KEY = `
+      and r.run_key = (
+        select r2.run_key from ops.run r2
+         where r2.service_id = s.id
+           and r2.source_kind = 'wrapper'
+           and r2.evidence_ref like 'carr-run-receipt:v1:%'
+         order by r2.started_at desc nulls last, r2.run_key desc
+         limit 1)`;
+
 async function schedulerLedgerRows(query) {
   const storeRef = STORE_TOKENS.schedulerLedger;
   const serviceKey = addressed(storeRef, query, "serviceKey");
-  const canaryRunKey = addressed(storeRef, query, "canaryRunKey");
+  // OPTIONAL, and the only optional address in this file. Absent is a REQUEST
+  // for the derivation above, not a malformed query; a present-but-unusable
+  // value is still refused by `addressed`.
+  const named = cell(query, "canaryRunKey") !== undefined;
+  const canaryRunKey = named ? addressed(storeRef, query, "canaryRunKey") : null;
   const [raw] = await readOnlyStatements(storeRef, [{ text: `
     select s.key            as service_key,
            r.run_key,
@@ -678,7 +699,8 @@ async function schedulerLedgerRows(query) {
            r.source_kind,
            r.source_ref
       from ops.service s
-      left join ops.run r on r.service_id = s.id and r.run_key = $2
+      left join ops.run r on r.service_id = s.id
+       and ${named ? "r.run_key = $2" : "$2::text is null" + LATEST_MINTED_RUN_KEY}
      where s.key = $1
      order by r.observed_at desc nulls last`, params: [serviceKey, canaryRunKey] }]);
   const rows = (Array.isArray(raw) ? raw : []).map(row => {
@@ -818,9 +840,140 @@ async function checkConclusionRows(query) {
 }
 
 // ---------------------------------------------------------------------------
-// THE PUBLIC SURFACE. Three fetchers and one error type, and every fetcher
-// passes through the same boundary — there is no second copy of it to forget to
-// apply, and no export that bypasses it.
+// The candidate-build record store — `ops.release`, the row the deploy wrapper
+// filed for the build this Worker is running (standing-rule amendment 9,
+// 2026-09-14).
+//
+// THE TOKEN IS SPELLED `control-plane:ops.candidate-build-record` RATHER THAN
+// NAMING THE TABLE, and that is deliberate rather than vague. Store refs travel:
+// they come back on every answer and into the receipt's own reasoning, and the
+// v5 privileged-word sweep closes over its union AS SUBSTRINGS — `release`
+// among them. A token carrying that word would put a privileged outcome word
+// into every answer this store touches, for no reason but naming a table in a
+// place the table's name is not the question. It is the same reason the
+// producer's absence fields are `head_revision_object` rather than the obvious
+// spelling. The table is `ops.release`, state `candidate`, written by
+// `tools/ops-record.py release candidate`; the query below is the exact address.
+// ---------------------------------------------------------------------------
+
+/**
+ * THE CANDIDATE-BUILD ROWS FOR ONE REVISION: who made the candidate, and the
+ * correlation the recorder stamped on the row that says so.
+ *
+ * WHY THIS STORE EXISTS. The receipt's subject maker is the person who built
+ * what is being judged. Three shapes of that have now been tried and two were
+ * wrong: a static seat declaration (the first round — a constant, authenticating
+ * nobody), the committer line of HEAD's commit object (the third — a git
+ * attribution, which authenticates nobody either, and which the deployed Worker
+ * cannot read at all). Amendment 9 names the third: the RELEASE-CANDIDATE RECORD
+ * `tools/ops-record.py release candidate` filed for that exact sha, which is an
+ * authenticated authority write into the Control Plane. This reads it back.
+ *
+ * TWO COLUMNS LEAVE THIS FILE AS TEXT, WHICH IS TWO MORE THAN ANY OTHER READER
+ * HERE GETS, and both are total patterns owned by this module. `maker_actor` is
+ * matched against the actor-slug shape and `correlation_id` against the uuid the
+ * recorder writes; anything else is absence. The consumer then has to find that
+ * slug in its OWN registry of partners before it can name one, so the widest
+ * value this path can carry into a receipt is a registered partner's slug. A
+ * digest would not do here — a receipt has to NAME its subject maker, and a hash
+ * names nobody.
+ *
+ * EVERYTHING ELSE IS DIGESTED or reduced, exactly as the other stores do it: the
+ * state and environment words come back as digests, because the derivation asks
+ * equality of them and nothing else.
+ *
+ * TWO PREDICATES DECIDE WHETHER A ROW IS THE AUTHENTICATED RECORD AT ALL, and
+ * they are in the WHERE clause rather than in the consumer, because a row this
+ * reader cannot vouch for is not a row it should hand anybody.
+ *
+ *   `maker_authority_verified` — THE ONE PREDICATE NO ROLE CAN WRITE, added by
+ *   migration 0504 after the seventh review round found the other two forgeable.
+ *   It is a STORED GENERATED column over `maker_session_user`, which a BEFORE
+ *   trigger writes from `session_user` on every insert and which no update may
+ *   move. PostgreSQL refuses any statement that so much as NAMES a generated
+ *   column, so this is not a guarded field but an unwritable one: it is true
+ *   exactly when the login role that filed the row is carr_authority_joe or
+ *   carr_authority_dell. The two text columns below are what the row SAYS; this
+ *   column is why a reader may believe it.
+ *
+ *   `source_kind = 'wrapper'` — the one writer of a release candidate,
+ *   tools/ops-record.py, writes that literal and nothing else ever does.
+ *
+ *   `maker_verification_ref = 'ops.authority-principal:' || maker_actor` — the
+ *   MARKER OF THE DERIVATION. Neither column is reachable from a caller flag:
+ *   `release candidate` refuses --maker and --maker-verification, and 0504's
+ *   trigger writes both halves itself from the recorded login for an authority
+ *   session and REFUSES the marker (42501) to every session that is not one. So a
+ *   row satisfying this pair carries a maker the DATABASE named from a human
+ *   authority credential, and a row whose maker somebody typed does not satisfy
+ *   it and is not returned.
+ *
+ * WHY THIS READER IS EMPTY TODAY, AND WHAT FILLS IT, because a reader that
+ * returns nothing should say which fact is missing rather than look broken.
+ * Filing a row on a human authority credential needs that credential to hold
+ * INSERT on ops.release, and it does not: migration 0161 built carr_authority as
+ * a privilege bundle carrying no business-record table grant, 0273 made the two
+ * partner logins members of exactly that bundle, and adding the grant is a new DB
+ * mutation capability that SIEP-11 admits only through a SCAC mutation-registry
+ * successor — the one thing PR #1013 may not spawn under Joe's 2026-09-08
+ * moratorium. So every row the wrapper files today is an honest UNAUTHENTICATED
+ * record and this store reads none of them, which makes the subject-maker seat
+ * unreachable rather than wrong. Open loop #594 carries the admission; the day it
+ * lands, this reader starts answering with no change to this file.
+ *
+ * WHAT THIS DOES NOT CLAIM, said plainly: every row written before migration 0504
+ * — including the ones an earlier round's recorder derived honestly and then
+ * inserted over the generic ledger writer — has no recorded filing login at all,
+ * carries `maker_authority_verified` false, and is NOT read here, because at the
+ * moment it was written any role with INSERT on the table could have written the
+ * same two columns. The predicate is
+ * therefore exact about the rows it admits rather than trusting the table's
+ * history, and it is state-INDEPENDENT on purpose: the release this
+ * producer judges is usually approved or complete by the time it is deployed, so
+ * filtering on `state = 'candidate'` would hide the record of every build that
+ * actually shipped.
+ */
+async function candidateBuildRecordRows(query) {
+  const storeRef = STORE_TOKENS.candidateBuildRecord;
+  const gitSha = addressedShape(storeRef, query, "gitSha", HEAD_SHA,
+    UNREACHABLE_REASONS.shaNotAddressed);
+  const [raw] = await readOnlyStatements(storeRef, [{ text: `
+    select r.git_sha,
+           r.state,
+           r.environment,
+           r.maker_actor,
+           r.correlation_id::text as correlation_id,
+           r.observed_at
+      from ops.release r
+     where r.git_sha = $1
+       and r.maker_authority_verified
+       and r.source_kind = 'wrapper'
+       and r.maker_verification_ref = '${MAKER_AUTHORITY_PREFIX}' || r.maker_actor
+     order by r.observed_at desc nulls last`, params: [gitSha] }]);
+  const answered = Array.isArray(raw) ? raw : [];
+  // EXACTLY ONE, OR NOBODY. Migration 0504's partial unique index is what makes
+  // this the normal case rather than a hope, and this is the reader's own half of
+  // the same rule: a second row for one revision would leave the producer
+  // CHOOSING which authenticated maker to name, and a store that hands its
+  // consumer an ambiguity has already made that choice for it. So the ambiguity
+  // is the refusal, and it says which store it is about.
+  if (answered.length > 1)
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.candidateRecordAmbiguous);
+  const rows = answered.map(row => ({
+    git_sha_digest: opaque(cell(row, "git_sha")),
+    state_digest: opaque(cell(row, "state")),
+    environment_digest: opaque(cell(row, "environment")),
+    maker_actor: matchedText(cell(row, "maker_actor"), ACTOR_SLUG),
+    correlation_id: matchedText(cell(row, "correlation_id"), CORRELATION_UUID),
+    observed_at: instantText(cell(row, "observed_at")),
+  }));
+  return { store_ref: storeRef, rows };
+}
+
+// ---------------------------------------------------------------------------
+// THE PUBLIC SURFACE. Four fetchers and one error type, and every fetcher passes
+// through the same boundary — there is no second copy of it to forget to apply,
+// and no export that bypasses it.
 // ---------------------------------------------------------------------------
 
 export const fetchPredecessorOutcomeRows =
@@ -829,3 +982,5 @@ export const fetchSchedulerLedgerRows =
   guarded(STORE_TOKENS.schedulerLedger, schedulerLedgerRows);
 export const fetchCheckConclusionRows =
   guarded(STORE_TOKENS.checkConclusion, checkConclusionRows);
+export const fetchCandidateBuildRecordRows =
+  guarded(STORE_TOKENS.candidateBuildRecord, candidateBuildRecordRows);

@@ -371,10 +371,24 @@ test("the portfolio prerequisite reports what it proves and refuses to claim lin
 
 test("the Gate Zero requirement is scoped to this record layer, not to Gate Zero itself", () => {
   const requirement = BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT;
-  // The external pre-v5 producer is intentional and nothing here asks for a
-  // registry entry, so the requirement says so in a field rather than treating
-  // the absent producer as the defect.
-  assert.equal(requirement.external_producer_is_intentional, true);
+  // FALSE SINCE 2026-09-12, AND THE FLIP IS THE CORRECTION. The clause beside it
+  // used to say r7 registers no v5 producer for Gate Zero and that this was
+  // intentional. The loop-589 amendment (decision 311a9af5) wrote the producer
+  // row into the frozen packet, and tools/doctorcre-v5-review.cjs now says so in
+  // its own comment: the external pre-v5 set moved down to Gate Zero's four
+  // predecessors, and Gate Zero left it. A stale sentence inside a frozen
+  // constant is the single most likely thing to send the next reader looking for
+  // a human outcome arriving from outside, which is why it is corrected here
+  // rather than left to be rediscovered.
+  assert.equal(requirement.external_producer_is_intentional, false);
+  assert.ok(requirement.why_unresolved.some(clause => /311a9af5/.test(clause)),
+    "the corrected clause no longer cites the amendment that settled it");
+  assert.equal(requirement.why_unresolved.some(clause =>
+    /r7 registers no v5 producer/i.test(clause)), false,
+    "the stale clause is back");
+  // AND THE PART THAT IS STILL TRUE IS UNCHANGED: this record layer holds no
+  // row, which is what the requirement is scoped to and all it ever claimed.
+  assert.equal(requirement.resolved, false);
   assert.ok(/record layer/i.test(requirement.scope));
   // No clause may assert that Gate Zero produced no outcome anywhere. What this
   // module can observe is what is bindable here.
