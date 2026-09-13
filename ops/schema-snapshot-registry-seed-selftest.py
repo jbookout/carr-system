@@ -144,9 +144,9 @@ assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
 # frontier while keeping its history -- the failure mode a substring-presence
 # test is otherwise blind to.
 assert "SCAC_CURRENT_NUMBER=26" in GENERATOR
-assert "SCAC_TOTAL_ENTRY_COUNT=38670" in GENERATOR
-assert "SCAC_CURRENT_ENTRY_COUNT=1615" in GENERATOR
-assert "SCAC_CURRENT_SOURCE_COUNT=841" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=38671" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1616" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=842" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=25" in GENERATOR
 assert "ops.scac_mutation_catalog_v26_current()" in GENERATOR
 assert "0503_gate_zero_outcome_and_scac_successor.sql" in GENERATOR

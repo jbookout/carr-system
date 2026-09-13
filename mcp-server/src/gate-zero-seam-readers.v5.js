@@ -116,6 +116,7 @@
 // whatever row they are pointed at. Pointing them is the producer's job.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
+import { closedCallable } from "./closed-callable.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import {
@@ -920,35 +921,16 @@ async function gateConclusionEvidence(query) {
 // at all.
 // ---------------------------------------------------------------------------
 
-/**
- * EVERY EXPORTED CALLABLE HERE ANSWERS `instanceof` WITH FALSE, AND ANSWERS IT
- * WITHOUT LOOKING AT THE OPERAND. Amendment 2 of 2026-09-12, clause (b), and the
- * reason is the fifth review round's second finding: without an own
- * `Symbol.hasInstance` the intrinsic one walks the LEFT OPERAND'S prototype
- * chain, so `hostile instanceof readGateConclusionEvidence` ran the caller's own
- * getPrototypeOf trap and let the caller's own thrown text back out of an
- * exported callable. A reader has no membership question to answer anyway — it
- * is a function, and nothing is an instance of it.
- *
- * The guard is an ARROW that ignores its argument, installed as a NON-WRITABLE,
- * NON-CONFIGURABLE DATA property: it cannot be constructed, carries no
- * `prototype`, cannot be replaced, and cannot be redefined as an accessor.
- */
-function closedCallable(callable) {
-  // AND IT IS BOUND, NOT BARE. Clause (a) of the amendment names an arrow OR a
-  // bound function, and the difference is only visible in what the ENGINE says
-  // when somebody constructs one: its refusal for a bare arrow quotes the
-  // function's own SOURCE TEXT back, and this file would rather the engine's
-  // sentence carry no line of this module at all. A bound arrow is still not a
-  // constructor and still has no `prototype`; the refusal names
-  // `function () { [native code] }` and nothing else. Binding is lexical-`this`
-  // neutral for an arrow, so no behaviour moves.
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return closed;
-}
+// AMENDMENT 2'S CLOSED SHAPE COMES FROM ./closed-callable.js (amendment 9, fifth
+// correction round, 2026-09-14). This file used to define its own copy, on the
+// argument that a self-contained module is worth a duplicated primitive. The
+// review measured that argument against the copies and it failed: the local
+// copies had already DIVERGED from the shared one — they never froze the
+// callable, which is clause (c), the clause the first shape enumeration added
+// after finding it missing — so the file whose whole job is to close a probe was
+// running the unhardened version of the shape. A security primitive that exists
+// five times is hardened in one of five places. There is one definition now, and
+// the enumeration control walks every export against it.
 
 // AND THE BOUNDARY HAS TO COVER `new`, WHICH IT DOES BY LEAVING NOTHING TO
 // CONSTRUCT. The fourth review round found that an async function has no

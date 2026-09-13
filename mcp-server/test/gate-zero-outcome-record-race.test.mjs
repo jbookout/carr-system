@@ -59,7 +59,7 @@ import { randomUUID } from "node:crypto";
 
 import { gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest }
   from "../src/gate-zero-outcome-store.v5.js";
-import { cleanupStagedTrees, moduleOfTree, recordedReviewerActor, stageTree }
+import { cleanupStagedTrees, inServedReview, moduleOfTree, stageTree, withStamps }
   from "./gate-zero-candidate-tree.testhelper.mjs";
 import { authorizeAs, ensureProducerRoles }
   from "./gate-zero-producer-role.testhelper.mjs";
@@ -193,33 +193,45 @@ test("two authenticated calls for one candidate converge on one durable row", as
   // candidate, so they must reach the same candidate digest; what differs is
   // the correlation id, which is what differs between two real requests.
   //
-  // BOTH ACTORS ARE MINTED BY THE STAGED identity.js, through the real review
-  // door, from the recorded bearer and the recorded shape of the server's sealed
-  // token map. Under amendment 8 the brand is object identity, so the actor is
-  // DECORATED in place with the correlation id and the audit id rather than
-  // spread into a copy -- a copy would authenticate as nobody, which is the
-  // whole design.
-  const { target } = stageTree({});
-  const identity = await moduleOfTree(target, "identity.js");
+  // NEITHER ACTOR IS CHOSEN HERE, and since PR 1013's fifth correction there is
+  // no way one could be. The staged identity.js exports no minter and no
+  // dispatcher; `inServedReview` hands the staged review door the recorded
+  // Authorization header and the server's per-request correlation id, and the
+  // door authenticates, derives and enters the call itself. What the
+  // continuation receives is that call's own actor, decorated IN PLACE with the
+  // audit row id the way index.js decorates it -- so the two calls below differ
+  // by exactly what two real requests differ by.
+  const FIRST_CALL = "2c8f5a91-7d3e-4b06-9a14-6e0d8b5f37c2";
+  const SECOND_CALL = "9e14b7d2-035a-4c68-b1f7-4a2d6c90e8b3";
+  assert.notEqual(FIRST_CALL, SECOND_CALL);
+  const { target, stamps } = stageTree({});
   const tools = await moduleOfTree(target, "tools.js");
-  const first = Object.assign(
-    recordedReviewerActor(identity, "2c8f5a91-7d3e-4b06-9a14-6e0d8b5f37c2"), { id: seatRow.id });
-  const second = Object.assign(
-    recordedReviewerActor(identity, "9e14b7d2-035a-4c68-b1f7-4a2d6c90e8b3"), { id: seatRow.id });
-  assert.notEqual(first.correlation_id, second.correlation_id);
+  // UNDER THIS DEPLOY'S BUILD STAMPS (amendment 9). The producer derives its
+  // candidate from the three vars bin/deploy-worker.sh writes at build time, not
+  // from a repository at request time, and `stageTree` seals the tree it just
+  // staged into exactly those vars. `withStamps` is `wrangler --var` for the
+  // duration of the call: without it a staged tree is a deploy that carries no
+  // candidate stamp, which is its own refusal.
+  const callVerb = (correlationId, client) => withStamps(stamps,
+    () => inServedReview(target, { correlationId },
+      actor => tools.executeRegisteredTool(client, Object.assign(actor, { id: seatRow.id }),
+        VERB, { idempotency_key: randomUUID() })));
 
   // (1) A calls the verb and does NOT commit: its candidate-key entry is
   //     speculative, and its receipt was produced inside this call.
-  const firstResult = await tools.executeRegisteredTool(a, first, VERB,
-    { idempotency_key: randomUUID() });
+  const firstServed = await callVerb(FIRST_CALL, a);
+  assert.equal(firstServed.served, true, "the recorded review bearer was not served");
+  const firstResult = firstServed.answered;
   assert.equal(firstResult.ok, true);
   assert.match(firstResult.outcome_id, /^[0-9a-f-]{36}$/);
   assert.equal(firstResult.status, "pass");
 
   // (2) B's call goes out and is left in flight. It blocks inside the insert,
   //     on A's uncommitted index entry.
-  const pending = tools.executeRegisteredTool(b, second, VERB,
-    { idempotency_key: randomUUID() });
+  const pending = callVerb(SECOND_CALL, b).then(served => {
+    assert.equal(served.served, true, "the recorded review bearer was not served");
+    return served.answered;
+  });
   let settledEarly = false;
   pending.then(() => { settledEarly = true; }, () => { settledEarly = true; });
   await new Promise(resolve => setTimeout(resolve, 500));
@@ -255,8 +267,8 @@ test("two authenticated calls for one candidate converge on one durable row", as
   const sentA = a.sent;
   const sentB = b.sent;
   assert.ok(sentA && sentB, "one of the two calls never reached the writer");
-  assert.equal(sentA.producer_identity.session_ref, `session:${first.correlation_id}`);
-  assert.equal(sentB.producer_identity.session_ref, `session:${second.correlation_id}`);
+  assert.equal(sentA.producer_identity.session_ref, `session:${FIRST_CALL}`);
+  assert.equal(sentB.producer_identity.session_ref, `session:${SECOND_CALL}`);
   assert.notEqual(sentB.producer_identity.session_ref, sentA.producer_identity.session_ref);
   assert.equal(sentA.candidate_digest, sentB.candidate_digest);
   assert.notEqual(gateZeroOutcomeDigest(sentB), gateZeroOutcomeDigest(sentA),

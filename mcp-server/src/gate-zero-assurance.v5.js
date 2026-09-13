@@ -125,6 +125,7 @@
 // knowledge of their text and derives no behaviour from a guess at it.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
+import { closedCallable } from "./closed-callable.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { GATE_ZERO_STEP_REF } from "./benchmark-minimum.v5.js";
@@ -182,35 +183,16 @@ function fail(code, message, detail) {
   throw new V5BoundaryError(code, message, detail);
 }
 
-/**
- * AMENDMENT 2's CLOSED SHAPE FOR AN EXPORTED CALLABLE, and every export of this
- * module wears it. It is the same helper gate-zero-seam-readers.v5.js uses, for
- * the same two reasons.
- *
- * (a) NOT CONSTRUCTABLE, AND WITHOUT QUOTING THIS FILE. A bound function is not
- * a constructor and carries no `prototype`, so `new` and `Reflect.construct` are
- * refused by the ENGINE before a line here runs; binding also means the engine's
- * refusal names `function () { [native code] }` rather than reciting this
- * module's own source text back to whoever probed it. Binding is neutral for an
- * arrow, so no behaviour moves.
- *
- * (b) `instanceof` ANSWERS FALSE WITHOUT TOUCHING THE OPERAND. Without an own
- * `Symbol.hasInstance` the intrinsic one walks the LEFT operand's prototype
- * chain, which runs the CALLER's `getPrototypeOf` trap and can hand the caller's
- * own thrown text back out of an exported callable. These exports have no
- * membership question to answer: they are functions, and nothing is an instance
- * of one. The guard is an arrow that ignores its argument, installed as a
- * NON-WRITABLE, NON-CONFIGURABLE DATA property, on a FROZEN callable — so it
- * cannot be replaced, cannot be redefined as an accessor, and no property of the
- * export can be written over afterwards.
- */
-function closedCallable(callable) {
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return Object.freeze(closed);
-}
+// AMENDMENT 2'S CLOSED SHAPE COMES FROM closed-callable.js (amendment 9, fifth
+// correction round, 2026-09-14). This file used to define its own copy, on the
+// argument that a self-contained module is worth a duplicated primitive. The
+// review measured that argument against the copies and it failed: the local
+// copies had already DIVERGED from the shared one — they never froze the
+// callable, which is clause (c), the clause the first shape enumeration added
+// after finding it missing — so the file whose whole job is to close a probe was
+// running the unhardened version of the shape. A security primitive that exists
+// five times is hardened in one of five places. There is one definition now, and
+// the enumeration control walks every export against it.
 
 // ---------------------------------------------------------------------------
 // The frozen plan's four bound predecessors, and the scheduler among them.

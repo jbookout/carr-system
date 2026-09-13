@@ -233,16 +233,23 @@ function answerAboutAnotherStore() {
  * nothing from a caller; the fetchers it returns declare no parameter at all, so
  * there is no query value for a fault to depend on even by accident.
  */
-function faultedStore(onPredecessorFetch, onSchedulerFetch, onChecksFetch) {
+function faultedStore(onPredecessorFetch, onSchedulerFetch, onChecksFetch,
+                     onCandidateRecordFetch) {
   return Object.freeze({
     fetchPredecessorOutcomeRows: closedCallable(async () => onPredecessorFetch()),
     fetchSchedulerLedgerRows: closedCallable(async () => onSchedulerFetch()),
     fetchCheckConclusionRows: closedCallable(async () => onChecksFetch()),
+    fetchCandidateBuildRecordRows: closedCallable(async () => onCandidateRecordFetch()),
   });
 }
 
-const FAULTED = faultedStore(answerWhoseGettersThrow, throwARawValue, answerAboutAnotherStore);
+const FAULTED = faultedStore(answerWhoseGettersThrow, throwARawValue, answerAboutAnotherStore,
+                             throwARawValue);
 
 export const fetchPredecessorOutcomeRows = FAULTED.fetchPredecessorOutcomeRows;
 export const fetchSchedulerLedgerRows = FAULTED.fetchSchedulerLedgerRows;
 export const fetchCheckConclusionRows = FAULTED.fetchCheckConclusionRows;
+// AND THE FOURTH STORE, which is not a card's (amendment 9): the producer reads
+// the candidate-build record directly, so a fault there must be proved not to
+// escape either — it throws the same raw value the scheduler fault throws.
+export const fetchCandidateBuildRecordRows = FAULTED.fetchCandidateBuildRecordRows;

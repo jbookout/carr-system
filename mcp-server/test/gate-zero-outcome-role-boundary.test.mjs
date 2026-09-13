@@ -47,7 +47,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { cleanupStagedTrees, moduleOfTree, recordedReviewerActor, stageTree }
+import { cleanupStagedTrees, inServedReview, moduleOfTree, stageTree, withStamps }
   from "./gate-zero-candidate-tree.testhelper.mjs";
 import { authorizeAs, ensureProducerRoles, resetAuthorization }
   from "./gate-zero-producer-role.testhelper.mjs";
@@ -214,11 +214,20 @@ test("the record layer enforces seat-only write by connection role, not by a ses
     // which is how the race stopped racing the first time these ran together).
     // One appended comment in the staged src is one byte the candidate tree did
     // not have, and nothing else about the run moves.
-    const { target } = stageTree({ candidateEdit: "the seat/connection-role boundary proof" });
-    const identity = await moduleOfTree(target, "identity.js");
+    const { target, stamps } =
+      stageTree({ candidateEdit: "the seat/connection-role boundary proof" });
     const tools = await moduleOfTree(target, "tools.js");
-    const actor = Object.assign(
-      recordedReviewerActor(identity, "4b7c1e05-9a62-4d38-8f10-3c5e7d2b6a94"), { id: seatRow.id });
+    // THE CALL IS SERVED, NOT ASSEMBLED. `inServedReview` hands the staged
+    // review door the recorded Authorization header and this request's
+    // correlation id; the door authenticates it, derives the receipt identity
+    // and enters the call, and the continuation runs inside it with that call's
+    // own actor. Nothing here chooses an identity, because since PR 1013's fifth
+    // correction identity.js exports nothing that could.
+    const CALL = "4b7c1e05-9a62-4d38-8f10-3c5e7d2b6a94";
+    const dispatch = client => withStamps(stamps,
+      () => inServedReview(target, { correlationId: CALL },
+        actor => tools.executeRegisteredTool(client, Object.assign(actor, { id: seatRow.id }),
+          VERB, { idempotency_key: randomUUID() })));
 
     // THE GUC IS SET TO SOMETHING WRONG ON PURPOSE. If it still decided anything,
     // this call would be refused; it is not, and the row names the staffed seat.
@@ -241,8 +250,9 @@ test("the record layer enforces seat-only write by connection role, not by a ses
         }
       },
     };
-    const result = await tools.executeRegisteredTool(client, actor, VERB,
-      { idempotency_key: randomUUID() });
+    const served = await dispatch(client);
+    assert.equal(served.served, true, "the recorded review bearer was not served");
+    const result = served.answered;
     await owner.query("commit");
 
     assert.equal(result.ok, true);
@@ -261,8 +271,7 @@ test("the record layer enforces seat-only write by connection role, not by a ses
     // exists. A deployment missing the secret must say so, not quietly record an
     // oracle's signature over the ordinary writer connection.
     await assert.rejects(
-      () => tools.executeRegisteredTool({ query: (sql, params = []) => owner.query(sql, params) },
-        actor, VERB, { idempotency_key: randomUUID() }),
+      () => dispatch({ query: (sql, params = []) => owner.query(sql, params) }),
       error => {
         assert.equal(error.payload?.error, "gate_zero_seat_connection_unavailable");
         assert.equal(error.payload?.required_secret, "DATABASE_URL_GATE_ZERO_WRITER");

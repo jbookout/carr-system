@@ -144,6 +144,8 @@ const READERS_FILE = "gate-zero-seam-readers.v5.js";
 /** The internal path the shared ruling predicate moved to, relative to src. */
 const BINDING_FILE = "internal/gate-zero-seam-binding.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
+/** The one module outside the readers that opens a store — see ISOLATION below. */
+const PRODUCER_FILE = "gate-zero-producer.v5.js";
 const GATE_FILE = "gate-zero-assurance.v5.js";
 const REGISTRATION_FILE = "gate-zero-producer-registration.v5.js";
 
@@ -668,6 +670,12 @@ const EXPECTED_EXPORTS = Object.freeze({
   // The internal surface: one predicate, reachable only by importing the path.
   binding: ["ruledCardBinding"],
   stores: [
+    // The three CARD stores, and one more that is not a card: the
+    // candidate-build record the producer reads its subject maker out of
+    // (amendment 9, 2026-09-14). Its token is spelled without the table's name
+    // on purpose — see the store module's own note — because the sweep below
+    // closes over `release` as a substring.
+    "fetchCandidateBuildRecordRows",
     "fetchCheckConclusionRows",
     "fetchPredecessorOutcomeRows",
     "fetchSchedulerLedgerRows",
@@ -907,7 +915,7 @@ test("SURFACE: every exported callable of all four modules is a guarded one", ()
     .map(([, name, tail]) => [name, tail.trimStart().startsWith("guarded(")]);
   const storeExports = guardedExports(stores_);
   assert.deepEqual(storeExports.filter(([name]) => name.startsWith("fetch")).map(([, ok]) => ok),
-    [true, true, true], "a store fetcher is exported without its boundary");
+    [true, true, true, true], "a store fetcher is exported without its boundary");
   assert.deepEqual(guardedExports(readers_).filter(([name]) => name.startsWith("read"))
     .map(([, ok]) => ok), [true, true, true], "a reader is exported without its boundary");
 
@@ -925,8 +933,19 @@ test("SURFACE: every exported callable of all four modules is a guarded one", ()
   const sources = [["stores", stores_], ["readers", readers_], ["rulings", rulings_],
     ["binding", binding_]];
   for (const [name, source] of sources) {
-    assert.equal((source.match(/^function closedCallable\(/gm) ?? []).length, 1,
-      `${name} has no single closed-callable helper, or has more than one`);
+    // ONE DEFINITION IN THE TREE, AND IT IS NOT IN THESE FILES (amendment 9,
+    // 2026-09-14). This line used to require exactly one LOCAL definition per
+    // module, on the argument that a self-contained module is worth a duplicated
+    // primitive. The fifth review round measured that against the copies: all
+    // five had drifted from src/closed-callable.js in the same way — none of
+    // them froze the callable, which is clause (c) — so the by-source assertion
+    // was proving that a copy existed, not that it was the hardened shape. Each
+    // module now IMPORTS the one definition, and this asserts the local copies
+    // are gone rather than that they are present.
+    assert.equal((source.match(/^function closedCallable\(/gm) ?? []).length, 0,
+      `${name} defines closedCallable locally again instead of importing the one definition`);
+    assert.ok(/^import \{ closedCallable \} from "\.\.?\/?[\w.-]*closed-callable\.js";$/m
+      .test(source), `${name} does not import the one closed-callable definition`);
     assert.equal(/new Proxy\(/.test(source), false, `${name} wraps a value in a Proxy again`);
     assert.equal(/^export (function|class) /m.test(source), false,
       `${name} exports a function declaration or a class, which are both constructors`);
@@ -1702,11 +1721,12 @@ test("SURFACE: no export can be constructed, and none reads a caller's newTarget
         callables += 1;
         assertClosedCallable(`${label}.${name}`, value);
       }
-    // The six readers and fetchers, the factory, the store predicate, the lookup
-    // and — since the PR 1004 re-review — the ruling predicate the gate binds
-    // its seams on: an export that stopped being one of them fails here rather
-    // than quietly skipping the loop above.
-    assert.equal(callables, 10, "the callable surface moved without this count following it");
+    // The SEVEN readers and fetchers — three readers, three card fetchers and the
+    // candidate-build record fetcher amendment 9 added — the factory, the store
+    // predicate, the lookup and, since the PR 1004 re-review, the ruling
+    // predicate the gate binds its seams on: an export that stopped being one of
+    // them fails here rather than quietly skipping the loop above.
+    assert.equal(callables, 11, "the callable surface moved without this count following it");
 
     // AND THE CALLING DOOR STILL ANSWERS, which is the thing the construction
     // door must not have cost. Before Joe's paste this was pinned to the gate's
@@ -2538,9 +2558,10 @@ test("STAGING: both fixture namespaces hold the closed shape the real module doe
         if (typeof value === "function") callables += 1;
       await assertFixtureSurfaceClosed(label, namespace);
     }
-    // Two factories, two predicates and six fetchers. A fixture that grows a
+    // Two factories, two predicates and eight fetchers — four per fixture since
+    // amendment 9 added the candidate-build record store. A fixture that grows a
     // callable fails here rather than quietly skipping the loop above.
-    assert.equal(callables, 10,
+    assert.equal(callables, 12,
       "a fixture's callable surface moved without this count following it");
   } finally {
     restoreEnv(saved);
@@ -4352,8 +4373,25 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   const importersOf = module => Object.entries(imports)
     .filter(([name, specifiers]) => specifiers.some(one => resolveFrom(name, one) === module))
     .map(([name]) => name).sort();
-  assert.deepEqual(importersOf(STORES_FILE), [READERS_FILE],
-    "the stores module has an importer other than the reader");
+  // TWO IMPORTERS, NAMED, AND THE SECOND IS A DELIBERATE ADDITION (standing-rule
+  // amendment 9, 2026-09-14). The readers open the three CARD stores, and that
+  // is still the whole of the card evidence path. The producer opens ONE store
+  // and one only — the candidate-build record it takes its subject maker from —
+  // and it is not card evidence: no clause reads it, no ruling names it, and it
+  // decides no verdict. It is the run binding, which this slice has always
+  // derived rather than ruled.
+  //
+  // WHY IT IS NOT A FOURTH CARD, stated plainly because it is the judgment call
+  // in this diff. A card is a RULING, and a ruling in this system is a decision
+  // id Joe pasted onto a line in gate-zero-seam-rulings.v5.js. A session cannot
+  // write one — inventing a decision id would be inventing a human ruling, which
+  // is the exact class of thing this slice refuses everywhere else — and a card
+  // added with `decision_id: null` would leave the producer permanently dark. So
+  // the subject maker is read through the same read-only store surface, with the
+  // store's own `store_ref` statement checked by the consumer, and the closed
+  // set below is what keeps a THIRD importer from appearing quietly.
+  assert.deepEqual(importersOf(STORES_FILE), [PRODUCER_FILE, READERS_FILE].sort(),
+    "the stores module has an importer that is neither the reader nor the producer");
 
   // THE RULING TABLE HAS EXACTLY ONE IMPORTER, and that is the PR 1004
   // re-review's finding turned into a structural invariant. The gate used to
@@ -4378,8 +4416,9 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   // deliberately internal surface becomes a public one by accident.
   assert.deepEqual(importersOf(BINDING_FILE), [GATE_FILE, READERS_FILE].sort(),
     "the shared predicate has an importer other than the two modules that ask it");
-  assert.deepEqual(imports[BINDING_FILE], [`../${RULINGS_FILE}`],
-    "the shared predicate imports something other than the ruling table it narrows");
+  assert.deepEqual(imports[BINDING_FILE].sort(),
+    ["../closed-callable.js", `../${RULINGS_FILE}`].sort(),
+    "the shared predicate imports something other than the ruling table it narrows and the one closed shape");
   // NO MODULE PUTS IT BACK ON A PUBLIC SURFACE, asked of the linker and then of
   // the values themselves. BY NAME first, over every module in src: the binding
   // file is the one place the name may be exported from.
@@ -4406,9 +4445,11 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
     "the gate no longer imports the readers it binds");
   assert.equal(imports[GATE_FILE].includes(`./${STORES_FILE}`), false,
     "the gate opens a store directly instead of going through a ruled reader");
-  // The stores module statically imports ONE thing, the tenant constant. `pg`
-  // is dynamic on purpose, so the Worker bundle never pulls it in through here.
-  assert.deepEqual(imports[STORES_FILE], ["./artifact-trust.js", "./identity.js"]);
+  // The stores module statically imports the tenant constant, the digest recipe
+  // and — since amendment 9 — the one closed-callable definition. `pg` is
+  // dynamic on purpose, so the Worker bundle never pulls it in through here.
+  assert.deepEqual(imports[STORES_FILE],
+    ["./artifact-trust.js", "./closed-callable.js", "./identity.js"]);
 
   const strays = readdirSync(SRC).filter(name => /\.(testonly|testhelper|fixture)\./.test(name));
   assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");

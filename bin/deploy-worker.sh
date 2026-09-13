@@ -74,6 +74,13 @@
 #      BEING ABSENT IS THE HONEST SIGNAL THAT THIS SCRIPT WAS BYPASSED,
 #      which is exactly what /release reports (see mcp-server/src/release.js
 #      — null value, "not stamped: deployed outside bin/deploy-worker.sh").
+#   1b. THE CANDIDATE MANIFEST IS STAMPED THE SAME WAY (standing-rule
+#      amendment 9, 2026-09-14) — `--var CANDIDATE_MANIFEST:<jcs>` and
+#      `--var CANDIDATE_MANIFEST_DIGEST:<sha256>`, sealed by
+#      mcp-server/bin/seal-candidate-manifest.mjs on the same invocation, for the
+#      same reason and with the same honest absence when this script is
+#      bypassed. The Gate Zero producer binds its candidate to those two stamps
+#      because the deployed Worker cannot read a repository at request time.
 #   2. THE MARKER WRITE IS PART OF THIS SAME STEP (see postflight below) —
 #      it always was, but that only protects a deploy that goes THROUGH this
 #      script. Grep the repo: `wrangler deploy` is also called directly
@@ -793,6 +800,48 @@ fi
   --release-candidate-count 1 >/dev/null \
   || fail "cloudflare-worker-release metering admission refused."
 
+# ---------- seal the candidate manifest (standing-rule amendment 9) ----------
+#
+# WHY THIS STEP EXISTS. The Gate Zero producer used to derive the candidate it
+# judges by reading `.git` at request time, inside the Worker. The deployed
+# Worker has no checkout — Cloudflare serves the bundled modules over a read-only
+# virtual filesystem and supplies no `.git` — so that derivation could only ever
+# refuse in production. The work belongs where a checkout exists, which is here.
+#
+# WHAT IS STAMPED, and it is stamped exactly the way GIT_SHA already is: two more
+# `--var` values on the SAME wrangler invocation, scoped to this upload, absent
+# from any deploy that bypasses this script. `CANDIDATE_MANIFEST` is the sealed
+# manifest's own JCS text — the candidate tree id, the file count and byte
+# length, the digest of the blob ids the revision sealed, the digest of those
+# blobs' contents, and the environment-manifest and fixture-set digests —
+# and `CANDIDATE_MANIFEST_DIGEST` is its digest, computed by the same recipe. The
+# producer re-digests the manifest and refuses unless the two agree, so a var
+# edited after the seal is a refusal rather than a signature.
+#
+# THE REVISION IS $HEAD_SHA, which is whatever this run is actually deploying:
+# the checkout's own HEAD on an ordinary deploy, and the SHA the approver signed
+# on a promotion. The sealer resolves it in the object store and fails visibly if
+# that object is not present, so a manifest is never sealed for a revision this
+# machine cannot read.
+#
+# SKIPPED ON A PROMOTION, deliberately: an immutable provider promotion uploads
+# no new version, so there is no invocation to stamp — the vars the version
+# carries are the ones its own upload wrote.
+CANDIDATE_MANIFEST=""
+CANDIDATE_MANIFEST_DIGEST=""
+if [ "$VERSION_MODE" != "promote" ]; then
+  SEALER="$WORKER_DIR/bin/seal-candidate-manifest.mjs"
+  [ -f "$SEALER" ] \
+    || fail "the candidate sealer is missing at $SEALER; the Gate Zero producer would ship unable to name its candidate."
+  CANDIDATE_MANIFEST="$(node "$SEALER" --repo "$SOURCE_ROOT" --rev "$HEAD_SHA" --field manifest)" \
+    || fail "could not seal the candidate manifest for $HEAD_SHA."
+  CANDIDATE_MANIFEST_DIGEST="$(node "$SEALER" --repo "$SOURCE_ROOT" --rev "$HEAD_SHA" --field digest)" \
+    || fail "could not digest the sealed candidate manifest for $HEAD_SHA."
+  [ -n "$CANDIDATE_MANIFEST" ] && [ -n "$CANDIDATE_MANIFEST_DIGEST" ] \
+    || fail "the candidate sealer produced an empty manifest or digest for $HEAD_SHA."
+  echo "  sealed candidate manifest $CANDIDATE_MANIFEST_DIGEST for $HEAD_SHA"
+fi
+
 # ---------- deploy ----------
 echo ""
 echo "== deploy =="
@@ -800,7 +849,9 @@ cd "$WORKER_DIR"
 # -- provider-version upload --
 if [ "$VERSION_MODE" = "upload" ]; then
   set +e
-  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" 2>&1)"
+  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" \
+    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
   VERSION_UPLOAD_RC=$?
   set -e
   printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
@@ -1007,10 +1058,14 @@ else
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \
         || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
-      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" --tag "$DEPLOY_TAG"
+      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+        --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+        --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" --tag "$DEPLOY_TAG"
     fi
   else
-    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST"
   fi
 fi
 
@@ -1191,6 +1246,9 @@ else
   echo "  promoted immutable $PROVIDER version $PROVIDER_VERSION_ID"
 fi
 echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
+if [ -n "$CANDIDATE_MANIFEST_DIGEST" ]; then
+  echo "  stamped CANDIDATE_MANIFEST_DIGEST=$CANDIDATE_MANIFEST_DIGEST (Gate Zero's candidate)"
+fi
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"

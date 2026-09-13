@@ -21,7 +21,10 @@
 //   git_sha              — the ONE field with no runtime source: a Worker
 //                          cannot read git at request time. Stamped in at
 //                          deploy time as env.GIT_SHA (bin/deploy-worker.sh:
-//                          `wrangler deploy --var GIT_SHA:<sha>`). Missing
+//                          `wrangler deploy --var GIT_SHA:<sha>`), and read
+//                          through build-stamp.js's `stampedGitSha` — the one
+//                          read, shared with the Gate Zero producer, which binds
+//                          its candidate to this same stamp. Missing
 //                          means a deploy happened OUTSIDE that script —
 //                          reported as null + a reason, never guessed or
 //                          left silently absent.
@@ -72,12 +75,16 @@
 // absent value must be visibly absent, per the honesty requirement this was
 // built against.
 
+import { stampedGitSha } from "./build-stamp.js";
 import { mutationManifestIdentity } from "./mutation-registry.js";
 import { program6ActionPosture } from "./program6-feature-flag.js";
 import { workspaceCommandCenterPosture } from "./workspace-feature-flag.js";
 
 export async function buildRelease({ env, sql, verbCount, now = () => new Date() }) {
-  const sha = (env && env.GIT_SHA) || null;
+  // THE SAME READ THE GATE ZERO PRODUCER BINDS ITS CANDIDATE TO, and it is the
+  // same function rather than the same expression written twice — amendment 9,
+  // 2026-09-14. See build-stamp.js for why the producer cannot read git.
+  const sha = stampedGitSha(env);
   const versionMetadata = env && env.CF_VERSION_METADATA;
   const versionId = versionMetadata && typeof versionMetadata.id === "string"
     ? versionMetadata.id.trim()

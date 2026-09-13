@@ -1193,13 +1193,22 @@ test("v26 admits the Gate Zero outcome verb and preserves the v25 predecessor", 
   // NO ARGUMENT, the same closed shape every successor renderer carries.
   assert.equal(v26Migration, renderGateZeroOutcomeAdmissionForwardRegistrySql());
 
-  // ONE NEW INGRESS, and it is an MCP tool rather than a script or an agent —
-  // the first successor in this chain whose admission is a verb.
-  assert.equal(rows.length, 841);
+  // TWO NEW INGRESSES, AND THE SECOND ARRIVED WITH A MERGE (2026-09-14, PR 1014
+  // third correction). The first is this slice's own: an MCP tool rather than a
+  // script or an agent, the first successor in this chain whose admission is a
+  // verb. The second came in with origin/v5-producer-step-a —
+  // mcp-server/bin/seal-candidate-manifest.mjs, the build-time candidate sealer
+  // amendment 9 moved the producer onto. It is a tracked .mjs carrying a
+  // shebang, so isScriptEntrypoint() admits it whatever anyone intended; Step
+  // A's own fixture still reads 840 and does not carry the row, which is why
+  // that branch fails --check-source-inventory-frontier standing alone. This
+  // seal is measured from the merged tree, so it carries both.
+  assert.equal(rows.length, 842);
   assert.equal(frozenInventory(REGISTRY_V25_VERSION).length, 840);
   const before = new Set(frozenInventory(REGISTRY_V25_VERSION).map(row => row.ingress_key));
   assert.deepEqual(rows.filter(row => !before.has(row.ingress_key)).map(row => row.ingress_key),
-    ["mcp-tool:record-gate-zero-read-only-outcome"]);
+    ["mcp-tool:record-gate-zero-read-only-outcome",
+     "script-entrypoint:mcp-server/bin/seal-candidate-manifest.mjs"]);
 
   // THE PREDECESSOR IS SEALED, NOT REWRITTEN.
   assert.match(v26Migration,
@@ -1399,11 +1408,22 @@ test("the v26 admission provenance is measured from the row sets and binds every
   assert.deepEqual([...provenance.admitted_ingress_keys],
     admitted.map(row => row.ingress_key).sort((left, right) => left.localeCompare(right)));
   assert.deepEqual([...provenance.removed_ingress_keys], removed.map(row => row.ingress_key));
-  // DERIVED FROM THE COMPOSITION, not from last generation's sentence shape:
-  // exactly one MCP tool, so the singular noun and the singular verb.
-  assert.equal(provenance.admitted_description,
-    `${words[mcpTools]} MCP ${mcpTools === 1 ? "tool" : "tools"}`);
-  assert.equal(launchAgents + scripts, 0, "v26 admits no agent or script");
+  // DERIVED FROM THE COMPOSITION, not from last generation's sentence shape.
+  // The buckets are recomputed above and joined here in the module's own noun
+  // order — LaunchAgents, then script entrypoints, then MCP tools — so the
+  // sentence is checked against the ROWS rather than against a phrase anybody
+  // typed. It reads "one script entrypoint and one MCP tool" at this head, and
+  // it will read whatever the next composition is without this line moving.
+  const phrase = [
+    launchAgents > 0 && `${words[launchAgents]} LaunchAgent ` +
+      `${launchAgents === 1 ? "definition" : "definitions"}`,
+    scripts > 0 && `${words[scripts]} script ${scripts === 1 ? "entrypoint" : "entrypoints"}`,
+    mcpTools > 0 && `${words[mcpTools]} MCP ${mcpTools === 1 ? "tool" : "tools"}`,
+  ].filter(Boolean);
+  const joined = phrase.length === 1 ? phrase[0]
+    : `${phrase.slice(0, -1).join(", ")} and ${phrase.at(-1)}`;
+  assert.equal(provenance.admitted_description, joined);
+  assert.equal(launchAgents, 0, "v26 admits no agent");
 
   // The fixture is read as bytes here, not through the module that also
   // renders the paragraph: the file on disk is the artifact a reviewer reads.
@@ -2093,7 +2113,10 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // gate that runs it end to end, ops/gate-zero-scheduler-canary-gate.py. The
   // three new LaunchAgents are workflow_entrypoint rows and are filtered out
   // above.
-  assert.equal(rows.length, 547);
+  // 547 before origin/v5-producer-step-a merged in: its build-time sealer,
+  // mcp-server/bin/seal-candidate-manifest.mjs, is a tracked .mjs with a
+  // shebang and is therefore a script entrypoint by the predicate's own test.
+  assert.equal(rows.length, 548);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2102,8 +2125,11 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   }
   const scripts = discoverScriptEntrypoints();
   // 534 before the portfolio tail, 536 before v25; two new executables,
-  // bin/gate-zero-canary.sh and ops/gate-zero-scheduler-canary-gate.py.
-  assert.equal(scripts.length, 538);
+  // bin/gate-zero-canary.sh and ops/gate-zero-scheduler-canary-gate.py. 538
+  // before origin/v5-producer-step-a merged in its build-time candidate sealer,
+  // mcp-server/bin/seal-candidate-manifest.mjs.
+  assert.equal(scripts.length, 539);
+  assert.equal(scripts.some(path => path === "mcp-server/bin/seal-candidate-manifest.mjs"), true);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

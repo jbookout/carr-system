@@ -49,13 +49,12 @@ import {
   gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest,
 } from "../src/gate-zero-outcome-store.v5.js";
 import { V5_A02_GATE_ZERO_PRODUCER_REGISTRATION } from "../src/gate-zero-producer-registration.v5.js";
-import { actorFromProps, authenticatedIdentity, propsForSlug } from "../src/identity.js";
+import { authenticatedIdentity, propsForSlug } from "../src/identity.js";
 import { TOOLS, executeRegisteredTool } from "../src/tools.js";
 import { WHOLE_WALK, pathToValue } from "./gate-zero-reachability-walk.testhelper.mjs";
 import {
-  CORRELATION_ID, RECORDED_REVIEW_TOKEN, RECORDED_REVIEW_TOKENS, SRC,
-  cleanupStagedTrees, fabricatedReviewerActor, inDispatchedVerb, moduleImports, moduleOfTree,
-  recordedPartnerActor, recordedReviewerActor, stageTree,
+  CORRELATION_ID, GATE_FILE, REVIEWING_SEAT_ACTOR, SRC, TOOLS_FILE,
+  cleanupStagedTrees, inServedReview, moduleImports, moduleOfTree, stageTree, withStamps,
 } from "./gate-zero-candidate-tree.testhelper.mjs";
 import { CANARY_ABSENT, REVISION_FAILED_ANCESTOR }
   from "./gate-zero-producer-stores.v5.fixture.mjs";
@@ -71,38 +70,35 @@ const SECOND_KEY = "99999999-8888-4777-8666-555555555555";
 const MIGRATION = readFileSync(
   new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
 
-// --- actors, every one of them server-derived ---------------------------------
+// --- actors, and the one thing that can no longer be one ----------------------
 //
-// NOTHING HERE IS A LITERAL ANY MORE (PR 1013's third correction, amendment 8).
-// identity.js brands the actors it mints with membership of a module-private
-// WeakSet, so an object written out here — however exactly it copies the fields
-// index.js sets — authenticates as nobody. The seat is minted by the real review
-// door from a recorded bearer and the recorded shape of the server's sealed
-// token map, and the partner by the real OAuth-props path. `correlation_id` is
-// what correlation.js stamps per request, and it is the only per-call identifier
-// in this system no caller writes — which is why the receipt's session refs are
-// built from it, and it is DECORATED on to the authenticated object rather than
-// spread into a copy, because the brand is object identity.
+// WHAT CHANGED, AND WHY THESE ARE LITERALS AGAIN (PR 1013's fifth correction,
+// amendment 9). identity.js used to export `reviewActorForToken`, which minted a
+// branded actor, and `dispatchFor`, which turned one into a context — so this
+// file minted its seat from the real door and ran inside the call that door
+// established. NEITHER EXPORT EXISTS NOW. The two acts are one act,
+// `serveReviewRequestAuthenticated`, which takes the request's own Authorization
+// header rather than an actor; there is nothing left to hand an actor to.
 //
-// A TREE'S ACTORS ARE THAT TREE'S. Every staged tree is its own module graph
-// with its own WeakSet, so an actor minted from the root identity.js is not
-// authenticated inside a staged one. Each case mints from the module it will
-// dispatch through.
-function rootReviewerActor(correlationId = CORRELATION_ID) {
-  authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS);
-  const actor = authenticatedIdentity.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
-  assert.notEqual(actor, null, "the recorded review context authenticated no actor");
-  return Object.assign(actor, { correlation_id: correlationId });
-}
-/** Run `fn` inside the authenticated call this actor establishes, root modules. */
-const inRootCall = (actor, fn) => authenticatedIdentity.dispatchFor(actor)(fn);
-
-function rootPartnerActor(correlationId = CORRELATION_ID) {
-  return recordedPartnerActor({ actorFromProps, propsForSlug }, correlationId);
-}
-
-const SEAT = rootReviewerActor();
-const PARTNER = rootPartnerActor();
+// SO THE TWO QUESTIONS SEPARATE, and the separation is the design rather than a
+// concession. The AUTHORITY question — may this identity reach this verb — is
+// asked of the actor's derived class by tools.js's dispatch, and an object is a
+// perfectly honest stand-in for it, because in production the actor reaching
+// that line came from a door that had already authenticated it. The IDENTITY
+// question — is this receipt this call's — is asked of the authenticated call
+// itself, and NOTHING below can fabricate one: every case that needs a call goes
+// through `inServedReview` in a staged tree, where the staged review door
+// authenticates a recorded bearer and enters the context itself.
+//
+// `correlation_id` is what correlation.js stamps per request, and it is the only
+// per-call identifier in this system no caller writes — which is why the
+// receipt's session refs are built from it.
+const SEAT = { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+  human: false, review: true, via: "review-token", correlation_id: CORRELATION_ID };
+/** A verified partner, from identity.js's own OAuth-grant path. NOT this class. */
+const PARTNER = Object.assign(
+  authenticatedIdentity.connectionForGrant(propsForSlug("joe", { via: "oauth-google" })),
+  { correlation_id: CORRELATION_ID });
 const OTHER_REVIEWER = { slug: "grok-reviewer", human: false, review: true,
   via: "review-token", correlation_id: CORRELATION_ID };
 const SPONSORED = { slug: "claude", human: false, sponsoring_human_slug: "joe",
@@ -203,23 +199,30 @@ function thrownBy(fn) {
  * dispatch actually entered, and what the contract compares it against is that
  * same derivation. `options` is the world the tree is staged in.
  */
-async function recordIn(options = {}, mint = recordedReviewerActor,
-  args = { idempotency_key: KEY }, db = null) {
-  const { target } = stageTree(options);
-  const identity = await moduleOfTree(target, "identity.js");
-  const tools = await moduleOfTree(target, "tools.js");
+async function recordIn(options = {}, call = {}, args = { idempotency_key: KEY }, db = null) {
+  const { target, stamps } = stageTree(options);
+  const tools = await moduleOfTree(target, TOOLS_FILE);
   const client = db ?? mockDatabase();
-  const actor = typeof mint === "function" ? mint(identity) : mint;
-  const result = await tools.executeRegisteredTool(client, actor, VERB, args);
-  return { result, client, target, tools, actor };
+  // UNDER THIS DEPLOY'S BUILD STAMPS (amendment 9). The producer derives its
+  // candidate from the three vars bin/deploy-worker.sh writes at build time, not
+  // from a repository at request time, and `stageTree` seals the tree it just
+  // staged into exactly those vars. `withStamps` is `wrangler --var` for the
+  // duration of the call: without it a staged tree is a deploy that carries no
+  // candidate stamp, which is its own refusal.
+  const served = await withStamps(stamps, () => inServedReview(target, call,
+    actor => tools.executeRegisteredTool(client, actor, VERB, args)));
+  assert.equal(served.served, true, "the recorded review bearer was not served");
+  return { result: served.answered, client, target, tools };
 }
 
 /** What the bound producer emits in a tree staged the same way, for comparison. */
-async function emittedIn(options = {}, mint = recordedReviewerActor) {
-  const { target } = stageTree(options);
-  const gate = await moduleOfTree(target, "gate-zero-assurance.v5.js");
-  const identity = await moduleOfTree(target, "identity.js");
-  return inDispatchedVerb(target, mint(identity), () => gate.emitGateZeroOutcome());
+async function emittedIn(options = {}, call = {}) {
+  const { target, stamps } = stageTree(options);
+  const gate = await moduleOfTree(target, GATE_FILE);
+  const served = await withStamps(stamps,
+    () => inServedReview(target, call, () => gate.emitGateZeroOutcome()));
+  assert.equal(served.served, true, "the recorded review bearer was not served");
+  return served.answered;
 }
 
 // ===========================================================================
@@ -409,10 +412,11 @@ test("CONTROL 5 — a second AUTHENTICATED call for the same candidate is idempo
   // held equal — same candidate tree, same seat — so the only thing that moved
   // between the two calls is what the server stamps per request.
   const client = mockDatabase();
-  const retrying = identity => recordedReviewerActor(identity, "5a0b7c33-41de-4f9a-8e26-1c7b93d0af45");
-  assert.notEqual(retrying.correlation_id, SEAT.correlation_id);
-  const first = await recordIn({}, recordedReviewerActor, { idempotency_key: KEY }, client);
-  const second = await recordIn({}, retrying, { idempotency_key: SECOND_KEY }, client);
+  const RETRY_CALL = "5a0b7c33-41de-4f9a-8e26-1c7b93d0af45";
+  assert.notEqual(RETRY_CALL, CORRELATION_ID);
+  const first = await recordIn({}, {}, { idempotency_key: KEY }, client);
+  const second = await recordIn({}, { correlationId: RETRY_CALL },
+    { idempotency_key: SECOND_KEY }, client);
 
   assert.equal(second.result.outcome_id, first.result.outcome_id, "a retry minted a second outcome");
   assert.equal(second.result.candidate_digest, first.result.candidate_digest);
@@ -443,7 +447,7 @@ test("MUTATION — a second run that read DIFFERENT rows for one candidate still
   // under it, so the producer reaches a different verdict: the record layer must
   // refuse rather than silently keep either one.
   const client = mockDatabase();
-  await recordIn({}, recordedReviewerActor, { idempotency_key: KEY }, client);
+  await recordIn({}, {}, { idempotency_key: KEY }, client);
   const recorded = client.state.recorded;
 
   // The same candidate digest, a different verdict — assembled by bending what
@@ -497,12 +501,11 @@ test("a producer that refuses records NOTHING, and says which reason refused it"
   // is nothing a caller can supply when the producer declines, so a run over a
   // canary row that does not exist writes no row at all — and the refusal
   // carries the producer's own reason rather than a generic one.
-  const { target } = stageTree({ ledgerCanary: CANARY_ABSENT });
-  const identity = await moduleOfTree(target, "identity.js");
-  const tools = await moduleOfTree(target, "tools.js");
+  const { target, stamps } = stageTree({ ledgerCanary: CANARY_ABSENT });
+  const tools = await moduleOfTree(target, TOOLS_FILE);
   const client = mockDatabase();
-  const refused = await refusal(tools.executeRegisteredTool(
-    client, recordedReviewerActor(identity), VERB, { idempotency_key: KEY }));
+  const refused = await refusal(withStamps(stamps, () => inServedReview(target, {},
+    actor => tools.executeRegisteredTool(client, actor, VERB, { idempotency_key: KEY }))));
   assert.equal(refused.error, "gate_zero_outcome_not_produced");
   assert.equal(refused.reason_id, "gate_zero_evidence_unavailable");
   assert.equal(refused.producer_bound, true, "the seam is bound; the ROWS were not there");
@@ -515,11 +518,35 @@ test("a producer that refuses records NOTHING, and says which reason refused it"
 // P1 — THE NESTED IDENTITIES ARE THE AUTHENTICATED CALL'S.
 // ===========================================================================
 
-/** One real producer receipt, emitted in a staged tree, to bend after the fact. */
-async function producedReceipt() {
-  const emitted = await emittedIn({});
-  assert.equal(emitted.status, "outcome_produced");
-  return emitted.receipt;
+/**
+ * ONE REAL PRODUCER RECEIPT AND THE TREE THAT EMITTED IT, to bend after the fact.
+ *
+ * THE CONTRACT IS ASKED OF THE STAGED MODULE, not the root one, and that is
+ * amendment 9's doing rather than a preference. `assertGateZeroReceipt`'s
+ * identity clauses compare the receipt against `receiptIdentity()` — the
+ * authenticated call this code is running inside — and the ONLY thing that
+ * enters such a call is `serveReviewRequestAuthenticated`, which reads the
+ * server's own review credentials at module initialisation. A staged tree's
+ * identity.js has them; the root one, imported before this file wrote anything
+ * into its process environment, does not. So the module under test and the call
+ * it is asked inside are one module graph, which is also what production is.
+ */
+async function producedIn(options = {}) {
+  const { target, stamps } = stageTree(options);
+  const store = await moduleOfTree(target, STORE_FILE);
+  const gate = await moduleOfTree(target, GATE_FILE);
+  const served = await withStamps(stamps,
+    () => inServedReview(target, {}, () => gate.emitGateZeroOutcome()));
+  assert.equal(served.served, true, "the recorded review bearer was not served");
+  assert.equal(served.answered.status, "outcome_produced");
+  return { target, store, receipt: served.answered.receipt };
+}
+
+/** `thrownBy` inside a served call in that same tree. */
+async function thrownInCall(target, call, fn) {
+  const served = await inServedReview(target, call, () => thrownBy(fn));
+  assert.equal(served.served, true, "the recorded review bearer was not served");
+  return served.answered;
 }
 
 test("MUTATION — a receipt with a foreign session_ref is refused, though the seat is right", async () => {
@@ -528,66 +555,69 @@ test("MUTATION — a receipt with a foreign session_ref is refused, though the s
   // call this seat ever makes, so only the session ref can tell one call from
   // another. The receipt below is the producer's own, with one field moved to
   // another run's session.
-  const receipt = await producedReceipt();
-  const seat = deriveGateZeroProducerSeat(SEAT);
+  const { target, store, receipt } = await producedIn();
+  const seat = store.deriveGateZeroProducerSeat(SEAT);
   const foreign = {
     ...receipt,
     producer_identity: { ...receipt.producer_identity,
       session_ref: "session:11111111-2222-4333-8444-555555555555" },
   };
-  const refused = inRootCall(SEAT,
-    () => thrownBy(() => assertGateZeroReceipt(foreign, seat)));
+  const refused = await thrownInCall(target, {},
+    () => store.assertGateZeroReceipt(foreign, seat));
   assert.equal(refused.error, "gate_zero_receipt_identity_not_this_call");
   assert.equal(refused.field, "producer_identity");
   assert.deepEqual(refused.differing_fields, ["session_ref"]);
 
   // AND UNBENT, THE SAME RECEIPT IN THE SAME CALL IS ACCEPTED — so the refusal
   // above is the moved field and not the harness.
-  assert.equal(inRootCall(SEAT, () => assertGateZeroReceipt(receipt, seat)), receipt);
+  const accepted = await inServedReview(target, {},
+    () => store.assertGateZeroReceipt(receipt, seat));
+  assert.equal(accepted.answered, receipt);
 });
 
 test("MUTATION — a receipt from another seat's call is refused in both identity fields", async () => {
-  const receipt = await producedReceipt();
-  const seat = deriveGateZeroProducerSeat(SEAT);
+  const { target, store, receipt } = await producedIn();
+  const seat = store.deriveGateZeroProducerSeat(SEAT);
   // A DIFFERENT CORRELATION ID IS A DIFFERENT CALL, which is the honest shape of
-  // "this receipt was produced somewhere else and carried here".
-  const elsewhere = rootReviewerActor("7c9d2a41-6b35-4f82-9e13-0a4b8d6f2c57");
-  const refused = inRootCall(elsewhere,
-    () => thrownBy(() => assertGateZeroReceipt(receipt, seat)));
+  // "this receipt was produced somewhere else and carried here". The server
+  // stamps it per request, so a second served request is a second call.
+  const refused = await thrownInCall(target,
+    { correlationId: "7c9d2a41-6b35-4f82-9e13-0a4b8d6f2c57" },
+    () => store.assertGateZeroReceipt(receipt, seat));
   assert.equal(refused.error, "gate_zero_receipt_identity_not_this_call");
   assert.deepEqual(refused.differing_fields, ["session_ref"]);
 });
 
 test("with no authenticated call there is no identity to compare against, and nothing is accepted", async () => {
-  const receipt = await producedReceipt();
-  const seat = deriveGateZeroProducerSeat(SEAT);
-  const refused = thrownBy(() => assertGateZeroReceipt(receipt, seat));
+  const { store, receipt } = await producedIn();
+  const seat = store.deriveGateZeroProducerSeat(SEAT);
+  const refused = thrownBy(() => store.assertGateZeroReceipt(receipt, seat));
   assert.equal(refused.error, "gate_zero_receipt_unauthenticated_call");
   assert.match(refused.hint, /tools\.js's verb dispatch/);
 });
 
 test("the identity object is closed: a fourth key, a capital and a short ref each deny", async () => {
-  const receipt = await producedReceipt();
-  const seat = deriveGateZeroProducerSeat(SEAT);
-  const bend = identity => inRootCall(SEAT, () => thrownBy(() =>
-    assertGateZeroReceipt({ ...receipt, producer_identity: identity }, seat)));
+  const { target, store, receipt } = await producedIn();
+  const seat = store.deriveGateZeroProducerSeat(SEAT);
+  const bend = identity => thrownInCall(target, {},
+    () => store.assertGateZeroReceipt({ ...receipt, producer_identity: identity }, seat));
 
-  const extra = bend({ ...receipt.producer_identity, note: "an extra field" });
+  const extra = await bend({ ...receipt.producer_identity, note: "an extra field" });
   assert.equal(extra.error, "gate_zero_receipt_identity_fields");
   assert.deepEqual(extra.unknown, ["note"]);
   assert.equal(extra.schema, GATE_ZERO_IDENTITY_SCHEMA);
 
-  const short = bend({ ...receipt.producer_identity, session_ref: "session:a" });
+  const short = await bend({ ...receipt.producer_identity, session_ref: "session:a" });
   assert.equal(short.error, "gate_zero_receipt_session_ref_malformed");
 
   // A SINGLE CAPITAL DENIES, exactly as it does in a safe: ref — r7's pattern is
   // lowercase, and this is the trap that has cost a real debugging session.
-  const shouted = bend({ ...receipt.producer_identity,
+  const shouted = await bend({ ...receipt.producer_identity,
     session_ref: receipt.producer_identity.session_ref.toUpperCase().replace("SESSION:", "session:") });
   assert.equal(shouted.error, "gate_zero_receipt_session_ref_malformed");
   assert.match(shouted.hint, /lowercase/);
 
-  const missing = bend({ actor_id: "codex-reviewer", authority_class: "review_agent" });
+  const missing = await bend({ actor_id: "codex-reviewer", authority_class: "review_agent" });
   assert.deepEqual(missing.missing, ["session_ref"]);
 });
 
@@ -779,7 +809,7 @@ test("the reviewer capability profile admits the verb, and admitting it is not t
 // ===========================================================================
 
 test("MUTATION — an unstaffed seat closes the verb to everyone, including the seat", async () => {
-  const { target } = stageTree({ staffedSeat: false });
+  const { target, stamps } = stageTree({ staffedSeat: false });
   const mutated = await import(pathToFileURL(join(target, STORE_FILE)).href);
   assert.equal(mutated.gateZeroOracleSeatLane(), null);
   const thrown = thrownBy(() => mutated.deriveGateZeroProducerSeat(SEAT));
@@ -789,11 +819,10 @@ test("MUTATION — an unstaffed seat closes the verb to everyone, including the 
   const strangerToo = thrownBy(() => mutated.deriveGateZeroProducerSeat(PARTNER));
   assert.equal(strangerToo.error, "gate_zero_oracle_seat_unstaffed");
   // AND THE WHOLE WRITE PATH GOES DARK WITH IT, through the real dispatch.
-  const identity = await moduleOfTree(target, "identity.js");
-  const tools = await moduleOfTree(target, "tools.js");
+  const tools = await moduleOfTree(target, TOOLS_FILE);
   const client = mockDatabase();
-  const refused = await refusal(tools.executeRegisteredTool(
-    client, recordedReviewerActor(identity), VERB, { idempotency_key: KEY }));
+  const refused = await refusal(withStamps(stamps, () => inServedReview(target, {},
+    actor => tools.executeRegisteredTool(client, actor, VERB, { idempotency_key: KEY }))));
   assert.equal(refused.error, "oracle_seat_verb_requires_the_staffed_seat");
   assert.deepEqual(client.calls, []);
 });

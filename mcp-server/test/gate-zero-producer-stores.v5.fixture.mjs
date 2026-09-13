@@ -262,6 +262,39 @@ const CHECK_ROWS = Object.freeze({
 const LEDGER_CANARY = CANARY_JOINING;
 /** Which predecessor world the record layer holds: clean | receipt-card-mismatch. */
 const PREDECESSOR_WORLD = "clean";
+/**
+ * Which release-candidate world ops.release holds for the revision asked about
+ * (standing-rule amendment 9): filed | absent | ambiguous | unregistered-maker.
+ *
+ *   filed              one candidate row, made by a registered partner.
+ *   absent             no row for that revision — a build nobody filed for.
+ *   ambiguous          two rows naming two makers; a receipt would have to pick.
+ *   unregistered-maker a slug-shaped maker identity.js does not register.
+ *   same-session       a candidate filed in the SESSION THAT IS NOW REVIEWING —
+ *                      r7's self-review denial, reachable because the release
+ *                      row's correlation and the evaluator's are the same value.
+ */
+const CANDIDATE_BUILD_RECORD_WORLD = "filed";
+
+/** The maker and correlation the recorder stamped on the candidate row. */
+export const CANDIDATE_MAKER_ACTOR = "joe";
+export const CANDIDATE_BUILD_CORRELATION_ID = "8c41d2ae-6f30-4a1b-9e57-2b6c0f4d81a3";
+/** The correlation the SUITE's served request carries, for the self-review case. */
+const REVIEWING_CORRELATION_ID = "3f2a6c18-9b4d-4e7a-8c11-5d0e2f7a6b93";
+const SECOND_MAKER = "dell";
+const SECOND_CORRELATION = "1d9f77b2-0c45-4d82-a3e6-90bb5e1c47f0";
+const UNREGISTERED_MAKER = "carr-release-bot";
+
+function candidateRecordRow(maker, correlationId, observedAt) {
+  return Object.freeze({
+    git_sha_digest: digest("release"),
+    state_digest: digest("candidate"),
+    environment_digest: digest("production"),
+    maker_actor: maker,
+    correlation_id: correlationId,
+    observed_at: observedAt,
+  });
+}
 
 /**
  * The receipt hash and the card's own proposal hash DISAGREE, which is the
@@ -294,3 +327,31 @@ export const fetchCheckConclusionRows = closedCallable(async query => ({
   store_ref: "github:checks",
   rows: rowsFor(CHECK_ROWS, `${cell(query, "headSha")}|${cell(query, "checkName")}`),
 }));
+
+/**
+ * ops.release, for the revision the producer stamped. The rows carry the maker
+ * and the correlation as TEXT — the two columns the real store lets through as
+ * text, because a receipt has to NAME its subject maker and a digest names
+ * nobody — and everything else as a digest, exactly as the real store does.
+ */
+export const fetchCandidateBuildRecordRows = closedCallable(async query => {
+  const storeRef = "control-plane:ops.candidate-build-record";
+  void cell(query, "gitSha");
+  if (CANDIDATE_BUILD_RECORD_WORLD === "absent") return { store_ref: storeRef, rows: [] };
+  if (CANDIDATE_BUILD_RECORD_WORLD === "ambiguous")
+    return { store_ref: storeRef, rows: [
+      candidateRecordRow(CANDIDATE_MAKER_ACTOR, CANDIDATE_BUILD_CORRELATION_ID, "2026-09-12T08:00:00.000Z"),
+      candidateRecordRow(SECOND_MAKER, SECOND_CORRELATION, "2026-09-12T07:00:00.000Z"),
+    ] };
+  if (CANDIDATE_BUILD_RECORD_WORLD === "same-session")
+    return { store_ref: storeRef, rows: [
+      candidateRecordRow(CANDIDATE_MAKER_ACTOR, REVIEWING_CORRELATION_ID, "2026-09-12T08:00:00.000Z"),
+    ] };
+  if (CANDIDATE_BUILD_RECORD_WORLD === "unregistered-maker")
+    return { store_ref: storeRef, rows: [
+      candidateRecordRow(UNREGISTERED_MAKER, CANDIDATE_BUILD_CORRELATION_ID, "2026-09-12T08:00:00.000Z"),
+    ] };
+  return { store_ref: storeRef, rows: [
+    candidateRecordRow(CANDIDATE_MAKER_ACTOR, CANDIDATE_BUILD_CORRELATION_ID, "2026-09-12T08:00:00.000Z"),
+  ] };
+});
