@@ -846,6 +846,7 @@ fi
 # SQL list; the count is asserted separately so a silently empty list cannot pass.
 CATALOG_PY="$REPO/.venv/bin/python"
 [ -x "$CATALOG_PY" ] || CATALOG_PY=python3
+CURRENTNESS_PY="$REPO/ops/schema-snapshot-currentness.py"
 if ! DECLARED_KEYS="$("$CATALOG_PY" - "$REPO" <<'DECLARED_CONTROL_KEYS'
 import importlib.util, pathlib, sys
 repo = pathlib.Path(sys.argv[1])
@@ -1935,7 +1936,24 @@ if [ "$CHECK" = "1" ]; then
     echo "schema-snapshot: $OUT does not exist — run bin/schema-snapshot.sh" >&2
     exit 1
   fi
-  if diff -q "$OUT" "$TMP" >/dev/null; then
+  # The snapshot preserves the live work-request allocator so a rebuild remains
+  # monotonic, but ordinary Work Request creation advances it independently of
+  # schema. Ignore only that exact statement's decimal current value. The
+  # comparator requires one exact statement in each file and compares every
+  # other byte, so a missing line or altered sequence/call shape still refuses.
+  if "$CATALOG_PY" - "$CURRENTNESS_PY" "$OUT" "$TMP" <<'CURRENTNESS_PYTHON'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("schema_snapshot_currentness", sys.argv[1])
+if spec is None or spec.loader is None:
+    raise SystemExit(1)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+raise SystemExit(0 if module.snapshots_match(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])) else 1)
+CURRENTNESS_PYTHON
+  then
     echo "schema snapshot: current"
     exit 0
   fi
