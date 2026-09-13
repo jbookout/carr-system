@@ -7875,12 +7875,14 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
     // callable that enters a context — and that a probe composing it with the
     // equally public review door ran its own code as `review_agent`.
     //
-    // SO THE ENTRY MOVED UP TO THE REQUEST, and into identity.js, where the
-    // bearer is matched and the context entered in one module-internal act:
-    // index.js's /mcp route calls `serveReviewRequestAuthenticated`, and every
-    // verb dispatched inside that request — this one included — runs under the
-    // context it established. Nothing is threaded through here, so there is
-    // nothing here for a caller to aim.
+    // SO THE ENTRY MOVED INTO identity.js, where the bearer is matched and the
+    // context entered in one module-internal act — and since the sixth
+    // correction round (2026-09-15) what runs inside it is named rather than
+    // handed over: `serveAuthenticatedCall(bearer, correlationId, entryName)`
+    // resolves the name in a frozen map of the server's own entries. No verb
+    // dispatched through this function runs inside that context, including this
+    // one; nothing is threaded through here, so there is nothing here for a
+    // caller to aim.
     //
     // WHAT THAT NARROWS, stated rather than discovered later: a verb reached
     // through any OTHER door — the OAuth grant path, the agent, Hermes,

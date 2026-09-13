@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // seal-candidate-manifest.mjs — THE SEALED CANDIDATE MANIFEST FOR ONE REVISION,
 // computed at BUILD TIME, where a git checkout exists.
 //
@@ -39,11 +38,18 @@
 // NOTHING HERE IS SHIPPED. This file is a build tool; the Worker bundle never
 // imports it. What reaches production is the manifest's TEXT and its DIGEST, as
 // two Worker vars.
+//
+// IT IS A LIBRARY, NOT AN ENTRYPOINT, and that is a registry fact rather than a
+// style choice. ops/scac-mutation-inventory.mjs enumerates every TRACKED file
+// that carries a shebang or a command-line main as a script entrypoint, and an
+// entrypoint is an INGRESS: admitting one moves the frozen source inventory,
+// which only a sealed registry successor and its migration may do. This module
+// therefore has no shebang and no command-line main; the one thing that runs it
+// is bin/deploy-worker.sh, which imports `sealCandidateManifest` in a single
+// `node --input-type=module` evaluation and stamps what comes back. The same
+// shape lib/canonical_freshness.py already carries for the same reason.
 
 import { execFileSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { CANDIDATE_MANIFEST_SCHEMA } from "../src/build-stamp.js";
 
@@ -150,26 +156,4 @@ export function sealCandidateManifest(repo, rev = "HEAD") {
     fixture_set_digest: digest(canonicalJson(fixtureDigests)),
   };
   return { manifest, manifest_text: canonicalJson(manifest), digest: digest(manifest) };
-}
-
-function main(argv) {
-  const args = new Map();
-  for (let at = 0; at < argv.length; at += 2) args.set(argv[at], argv[at + 1]);
-  const repo = resolve(args.get("--repo")
-    ?? resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."));
-  const sealed = sealCandidateManifest(repo, args.get("--rev") ?? "HEAD");
-  const field = args.get("--field");
-  if (field === "manifest") process.stdout.write(`${sealed.manifest_text}\n`);
-  else if (field === "digest") process.stdout.write(`${sealed.digest}\n`);
-  else process.stdout.write(`${JSON.stringify(sealed, null, 2)}\n`);
-  return 0;
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  try {
-    process.exit(main(process.argv.slice(2)));
-  } catch (error) {
-    process.stderr.write(`seal-candidate-manifest: ${String(error.message || error)}\n`);
-    process.exit(1);
-  }
 }

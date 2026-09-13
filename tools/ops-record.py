@@ -2233,6 +2233,53 @@ def cmd_deployment(args) -> int:
 
 
 # ── release ──────────────────────────────────────────────────────────────────
+# THE CANDIDATE ROW CARRIES NO MAKER THIS TOOL TYPED. Migration 0504 records the
+# filing login role on ops.release from `session_user`, derives
+# `maker_verification_ref = 'ops.authority-principal:<slug>'` itself when that
+# login is an admitted human authority principal, and REFUSES that marker to
+# every session that is not one. So the two columns the Gate Zero seam store
+# reads a maker back by are written by the database or not at all, and the column
+# it actually keys on — `maker_authority_verified` — is generated and has no
+# writable surface for any role.
+#
+# WHAT THE SEVENTH ROUND GOT RIGHT AND THE EIGHTH HAD TO REPLACE. The seventh
+# round put this insert behind one SECURITY DEFINER door in the ops schema, so
+# the derivation and the row could not come apart. It was withdrawn in the eighth
+# and is named nowhere in this file on purpose — the paired selftests assert its
+# absence. A door needs an EXECUTE grant, that grant is a new DB mutation
+# capability, and SIEP-11 admits one only through a SCAC mutation-registry
+# successor — so the door shipped ungranted and `release candidate` could not
+# file anything at all. Moving the insert onto the authority connection instead
+# fails the same way: carr_authority holds no INSERT on ops.release (0161 built
+# it deliberately without one) and granting it moves the identical seal.
+#
+# SO THE ROW IS FILED ON THE CREDENTIAL THAT MAY FILE IT, and the database
+# records which one that was. A candidate filed on the ledger writer is an honest
+# UNAUTHENTICATED record, read by nobody who needs an authenticated maker; a
+# candidate filed on a human authority credential is the authenticated one Gate
+# Zero's subject-maker seat reads. The wrapper's log prints what the database
+# recorded rather than what anybody meant.
+CANDIDATE_INSERT = """
+    insert into ops.release
+        (correlation_id, release_key, service_id, environment,
+         state, git_sha, provider, provider_version_id,
+         performance_budget_ref, performance_budget_ms, recovery_strategy,
+         artifact_digest, dependency_lock_digest,
+         sbom_ref, migration_set, schema_highest_migration,
+         schema_applied_count, schema_ledger_sha256,
+         config_fingerprint, declared_env_differences,
+         asset_versions, verifier_actor, verifier_evidence_ref,
+         test_evidence_ref, security_evidence_ref,
+         rollback_ready, rollback_plan_ref, work_request_ref,
+         plan_hash, source_kind, source_ref, expires_at)
+    values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
+            'tools/release-manifest.py', %s)
+    returning id, release_key, maker_actor, maker_session_user,
+              maker_authority_verified
+"""
+
+
 def release_candidate_manifest_refusal(args, manifest: dict) -> str | None:
     """Return a fail-closed candidate-manifest refusal, or ``None``.
 
@@ -2347,6 +2394,17 @@ def cmd_release(args) -> int:
     elif not args.key:
         print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
         return 2
+    # getattr, not attribute access: the paired selftests call this function with
+    # a SimpleNamespace carrying only the fields their case is about, which is how
+    # they prove the pre-connection refusals without a database at all.
+    if args.action == "candidate" and (getattr(args, "maker", None) is not None
+                                       or getattr(args, "maker_verification", None) is not None):
+        print("ops-record: the release candidate's maker is not a caller field. "
+              "Migration 0504 records the filing login role from session_user and "
+              "derives the maker from it, the same identity `release approve` "
+              "derives its approver from. Drop --maker and --maker-verification.",
+              file=sys.stderr)
+        return 2
     if args.action in ("approve", "staging-approve") and args.actor:
         print("ops-record: approval identity is not a caller field; Joe is derived "
               "from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
@@ -2381,30 +2439,18 @@ def cmd_release(args) -> int:
             return 2
 
     try:
+        # ONE CONNECTION, AND IT IS THE ONE ALLOWED TO WRITE THE ROW. The
+        # candidate no longer opens an authority connection at all: there is
+        # nothing left for it to derive there, because migration 0504 derives the
+        # maker inside the INSERT from the session's own login role. An approval
+        # still runs on the authority connection, where a human's identity is the
+        # thing being recorded.
         connection_kind = "authority" if args.action in ("approve", "staging-approve") else "write"
         with connect(connection_kind) as conn, conn.cursor() as cur:
             if args.action == "candidate":
-                sid = service_id(cur, args.service)
                 corr = correlation_of(getattr(args, "correlation", None))
-                cur.execute(
-                    """insert into ops.release
-                           (correlation_id, release_key, service_id, environment,
-                            state, git_sha, provider, provider_version_id,
-                            performance_budget_ref, performance_budget_ms,
-                            recovery_strategy,
-                            artifact_digest, dependency_lock_digest,
-                            sbom_ref, migration_set, schema_highest_migration,
-                            schema_applied_count, schema_ledger_sha256,
-                            config_fingerprint, declared_env_differences,
-                            asset_versions, maker_actor, maker_verification_ref,
-                            verifier_actor, verifier_evidence_ref,
-                            test_evidence_ref, security_evidence_ref,
-                            rollback_ready, rollback_plan_ref, work_request_ref,
-                            plan_hash, source_kind, source_ref, expires_at)
-                       values (%s,%s,%s,%s,'candidate',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                               %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'wrapper',
-                               'tools/release-manifest.py', %s)
-                       returning id, release_key""",
+                sid = service_id(cur, args.service)
+                cur.execute(CANDIDATE_INSERT,
                     (corr, args.key, sid, args.environment,
                      manifest.get("git_sha"), args.provider, args.provider_version_id,
                      manifest.get("performance_budget_ref"),
@@ -2419,7 +2465,6 @@ def cmd_release(args) -> int:
                      manifest.get("config_fingerprint"),
                      manifest.get("declared_env_differences"),
                      json.dumps(manifest.get("asset_versions")) if manifest.get("asset_versions") else None,
-                     args.maker, args.maker_verification,
                      # COLLECTED AT CANDIDACY, which is exactly what migration
                      # 0169's own comment says should be possible: "drafts and
                      # candidates may still collect it." Until this line existed
@@ -2438,6 +2483,13 @@ def cmd_release(args) -> int:
                      parse_ts(args.expires_at) if args.expires_at else None))
                 row = cur.fetchone()
                 print(f"{row[0]} {row[1]}")
+                # THE PROVENANCE COMES BACK OUT OF THE ROW rather than going into
+                # it. A wrapper's log then names the login the database recorded
+                # and says, in words, whether that login is one Gate Zero's
+                # subject-maker seat may read a maker from.
+                print(f"maker {row[2]} filed by {row[3]} "
+                      f"({'authority-verified' if row[4] else 'not authority-verified'})",
+                      file=sys.stderr)
                 return 0
 
             if args.action == "require":
@@ -2707,8 +2759,8 @@ def cmd_release(args) -> int:
     except SystemExit:
         raise
     except Exception as e:                                       # noqa: BLE001
-        print(f"ops-record: could not record the release: "
-              f"{str(e).splitlines()[0][:300]}", file=sys.stderr)
+        detail = str(e).splitlines()[0][:300]
+        print(f"ops-record: could not record the release: {detail}", file=sys.stderr)
         return 1
 
 
@@ -2926,8 +2978,12 @@ def main() -> int:
                      choices=["local", "rehearsal", "staging", "production"],
                      default="production")
     rel.add_argument("--correlation")
-    rel.add_argument("--maker", default=os.environ.get("CARR_ACTOR", "claude"))
-    rel.add_argument("--maker-verification", help="ref to the maker's own evidence")
+    rel.add_argument("--maker", help="REFUSED for `candidate`: the maker is the "
+                                     "login role that filed the row, recorded by "
+                                     "the database, never asserted by the caller")
+    rel.add_argument("--maker-verification", help="REFUSED for `candidate`: derived "
+                                                  "beside the maker from the same "
+                                                  "recorded login")
     rel.add_argument("--test-evidence", help="ref to the test run, e.g. ops/ci.sh#<run>")
     rel.add_argument("--security-evidence", help="ref to the security/scan run")
     rel.add_argument("--rollback-ready", action="store_true")

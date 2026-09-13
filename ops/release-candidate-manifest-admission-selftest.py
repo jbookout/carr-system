@@ -207,13 +207,123 @@ def main() -> int:
           and "for share" in record_source
           and "successor.service_id = target.service_id" in record_source
           and "successor.environment = target.environment" in record_source)
-    candidate_insert = record_source[record_source.index("insert into ops.release"):]
-    candidate_insert = candidate_insert[:candidate_insert.index("row = cur.fetchone()")]
+    candidate_call = record_source[record_source.index("cur.execute(CANDIDATE_INSERT,"):]
+    candidate_call = candidate_call[:candidate_call.index("row = cur.fetchone()")]
     check("10. persisted rollback evidence comes from the verified manifest",
-          'manifest.get("rollback_ready")' in candidate_insert
-          and 'manifest.get("rollback_plan_ref")' in candidate_insert
-          and "else args.rollback_ready" not in candidate_insert
-          and "else args.rollback_plan" not in candidate_insert)
+          'manifest.get("rollback_ready")' in candidate_call
+          and 'manifest.get("rollback_plan_ref")' in candidate_call
+          and "else args.rollback_ready" not in candidate_call
+          and "else args.rollback_plan" not in candidate_call)
+
+    # ── the eighth review round: the row carries no maker this tool typed ───
+    #
+    # The sixth round derived the maker over the authority connection, CLOSED it,
+    # and inserted the row over the generic ledger writer: the derivation was
+    # honest and the row's provenance was not, because any role holding INSERT on
+    # ops.release could write the same two text columns. The seventh round answered
+    # with a SECURITY DEFINER door and could not grant EXECUTE on it under the
+    # moratorium, so `release candidate` stopped filing anything at all. The eighth
+    # moves the fact into the database instead of into the permissions: migration
+    # 0504 records the filing login from session_user, derives the maker from it,
+    # and makes the column the Gate Zero seam store keys on GENERATED, so no role
+    # can write it. What is checked here is the wrapper's half — that it asserts
+    # neither half of the maker and reads the provenance back out of the row.
+    check("11. the recorder asserts no maker and reads the recorded one back",
+          "ops.record_release_candidate(" not in record_source
+          and "CANDIDATE_INSERT" in record_source
+          and "maker_actor, maker_session_user" in record_source
+          and "args.maker" not in record_source.split("def main(")[0]
+          and "returning id, release_key, maker_actor" in record_source)
+
+    opened: list[str] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def execute(self, statement: str, params: Any = None) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self) -> tuple[Any, ...]:
+            # service_id() resolves first on this connection, then the insert
+            # returns the row's own recorded provenance.
+            if len(self.statements) == 1:
+                return ("22222222-2222-4222-8222-222222222222",)
+            return ("11111111-1111-4111-8111-111111111111",
+                    "candidate-production", "app_writer", "app_writer", False)
+
+    class FakeConnection:
+        def __init__(self, kind: str) -> None:
+            self.kind = kind
+            self.cursor_object = FakeCursor()
+
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_object
+
+    connection_objects: list[FakeConnection] = []
+
+    def recording_connect(kind: str) -> FakeConnection:
+        opened.append(kind)
+        conn = FakeConnection(kind)
+        connection_objects.append(conn)
+        return conn
+
+    provider_version = "11111111-2222-4333-8444-555555555555"
+    with tempfile.TemporaryDirectory() as raw_authority:
+        authority_tmp = Path(raw_authority)
+        exact_path = authority_tmp / "production.json"
+        build("production", exact_path)
+        bound_exact = run_manifest(
+            "bind-provider", "--manifest", str(exact_path),
+            "--provider", "cloudflare-workers",
+            "--provider-version-id", provider_version,
+        )
+        if bound_exact.returncode != 0:
+            raise RuntimeError((bound_exact.stderr or bound_exact.stdout).strip())
+        exact_path.write_text(bound_exact.stdout, encoding="utf-8")
+        module.connect = recording_connect
+        candidate_rc = module.cmd_release(args_for(
+            "production", exact_path,
+            key="candidate-production",
+            provider="cloudflare-workers",
+            provider_version_id=provider_version,
+            correlation=None, verifier=None, verifier_evidence=None,
+            test_evidence="evidence:tests", security_evidence="evidence:security",
+            work_request=None, expires_at=None, actor=None, plan_hash=None,
+            idempotency_key=None,
+        ))
+
+    # ONE CONNECTION, AND NOT THE AUTHORITY'S. carr_authority holds no insert on
+    # ops.release and cannot be granted one without the registry successor this
+    # branch may not start, so a candidate that opened the authority connection
+    # would be a candidate that could not be filed — which is exactly the outage
+    # the seventh round shipped.
+    check("12. an exact candidate is filed on the writer connection and no other",
+          candidate_rc == 0 and opened == ["write"],
+          f"rc={candidate_rc} connections={opened}")
+    filed = [statement for conn in connection_objects
+             for statement in conn.cursor_object.statements]
+    candidate_statements = [statement for statement in filed
+                            if "ops.release" in statement]
+    check("13. the one release statement names no maker column of its own",
+          len(candidate_statements) == 1
+          and "insert into ops.release" in candidate_statements[0]
+          and "maker_actor," not in candidate_statements[0].split("returning")[0]
+          and "maker_verification_ref" not in candidate_statements[0].split("returning")[0]
+          and "maker_session_user" not in candidate_statements[0].split("returning")[0],
+          f"statements={candidate_statements}")
 
     if FAILURES:
         print(f"release-candidate-manifest-admission-selftest: {len(FAILURES)} FAILED")

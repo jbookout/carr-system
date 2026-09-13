@@ -78,11 +78,61 @@ def psql(dsn, *args):
                           capture_output=True, text=True, timeout=1800)
 
 
+# The authority DSN every ops-record call in this test is pinned to, provisioned
+# on whatever throwaway cluster this run was handed. It is set by
+# provision_authority_principal() below and is deliberately a module global: a
+# call that inherited the DEVELOPER's real CARR_DB_AUTHORITY_JOE_URL from
+# ~/.config/carr/db.env would reach PRODUCTION. tools/ops-record.py loads db.env
+# with setdefault, so an explicitly set value wins; this is the same class of
+# accident that wrote 46 fabricated run rows into production in 2026-08 (see
+# credential_names() there). `release candidate` no longer opens this connection
+# at all — migration 0504 records the filing login inside the insert, and
+# carr_authority holds no insert on ops.release to open it with — but the pin
+# stays, because what it protects against is an ops-record call reaching the wrong
+# database, not one command's own DSN choice.
+AUTHORITY_DSN: str | None = None
+
+
 def record(dsn, *args):
     return subprocess.run(
         [sys.executable, str(REPO / "tools" / "ops-record.py"), *args],
         capture_output=True, text=True, timeout=300,
-        env={**os.environ, "DATABASE_URL": dsn})
+        env={**os.environ, "DATABASE_URL": dsn,
+             "CARR_DB_AUTHORITY_JOE_URL": AUTHORITY_DSN or "postgresql://carr_authority_joe@127.0.0.1:1/absent"})
+
+
+def provision_authority_principal(dsn: str) -> None:
+    """Give this cluster a real human-authority login role, and point
+    AUTHORITY_DSN at it.
+
+    `ops.authority_actor_slug()` maps `session_user` to a partner slug and admits
+    only carr_authority_joe and carr_authority_dell, and EXECUTE on it is granted
+    to the carr_authority bundle — so the role has to exist, have login, and hold
+    that membership for any authority-connection command to work here. Its
+    password is the base DSN's own, so nothing about the throwaway cluster's
+    credentials is written down here. This role is deliberately NOT given insert
+    on ops.release: that grant is the capability open loop #594 carries, and a
+    test that granted it to itself would report a green candidate path this
+    database's Production twin does not have.
+    """
+    global AUTHORITY_DSN
+    params = psycopg.conninfo.conninfo_to_dict(dsn)
+    password = params.get("password")
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select 1 from pg_roles where rolname = 'carr_authority_joe'")
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    sql.SQL("create role carr_authority_joe login password {}")
+                       .format(sql.Literal(password)))
+            else:
+                cursor.execute(
+                    sql.SQL("alter role carr_authority_joe login password {}")
+                       .format(sql.Literal(password)))
+            cursor.execute("grant carr_authority to carr_authority_joe")
+            cursor.execute("grant usage on schema ops to carr_authority_joe")
+    AUTHORITY_DSN = psycopg.conninfo.make_conninfo(dsn, user="carr_authority_joe")
 
 
 @contextmanager
@@ -125,6 +175,7 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
 
 
 def _cases(dsn: str) -> None:
+    provision_authority_principal(dsn)
     record(dsn, "sync-registry")
     # Candidate intake verifies every environment before opening the database,
     # so the abandonment fixtures use one real staging manifest rather than a
@@ -148,7 +199,6 @@ def _cases(dsn: str) -> None:
     for k in ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor"):
         record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
                "--service", "carr-mcp", "--environment", "staging",
-               "--maker", "selftest", "--maker-verification", "ref",
                "--test-evidence", "ref", "--security-evidence", "ref")
     # Production candidate intake now rebuilds the manifest before it opens a
     # DB connection. Build and bind the fixture through the canonical tool so
@@ -181,9 +231,9 @@ def _cases(dsn: str) -> None:
     production_mpath.write_text(bound.stdout)
     candidate = record(dsn, "release", "candidate", "--key", "rel-shipped",
                        "--manifest", str(production_mpath), "--service", "carr-mcp",
-                       "--environment", "production", "--maker", "selftest",
+                       "--environment", "production",
                        "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION,
-                       "--maker-verification", "ref", "--test-evidence", "ref",
+                       "--test-evidence", "ref",
                        "--security-evidence", "ref")
     check("0ab. verified Production candidate reaches the ledger",
           candidate.returncode == 0,
