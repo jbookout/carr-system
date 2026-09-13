@@ -153,7 +153,8 @@ import {
   BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS, BENCHMARK_COMBINER, BENCHMARK_COST_VARIANCE_THRESHOLDS,
   BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_GATE_ID, BENCHMARK_MANIFEST_SCHEMA,
   BENCHMARK_PAYLOAD_DOMAIN_TAG, BENCHMARK_PAYLOAD_FIELDS, BENCHMARK_PRODUCER_ROLE,
-  BENCHMARK_SLO_THRESHOLDS, BENCHMARK_STEP_REF, GATE_ZERO_STEP_REF,
+  BENCHMARK_SLO_THRESHOLDS, BENCHMARK_STEP_REF, CONSUMER_GATE_RECEIPT_SCHEMA,
+  GATE_ZERO_STEP_REF,
   benchmarkPayloadDigest, evaluateBenchmarkAdmissibility, evaluateBenchmarkWorkloadCoverage,
   validateBenchmarkPayload,
 } from "./benchmark-minimum.v5.js";
@@ -718,14 +719,14 @@ async function readGateZeroOutcome(c) {
   // stored digest is evidence only after this consumer independently derives
   // the same value from the stored receipt; otherwise the reader refuses before
   // the acceptance path reaches its next prerequisite or any write.
-  const recomputed = digest(["consumer-gate-receipt.v1", row.receipt]);
+  const recomputed = digest([CONSUMER_GATE_RECEIPT_SCHEMA, row.receipt]);
   if (row.outcome_digest !== recomputed) {
     refuse("gate_zero_outcome_digest_divergence",
       "the current Gate Zero outcome digest does not match the tagged digest recomputed from its stored receipt",
       {
         recorded: row.outcome_digest,
         recomputed_here: recomputed,
-        digest_recipe: 'digest(["consumer-gate-receipt.v1", receipt])',
+        digest_recipe: `digest(["${CONSUMER_GATE_RECEIPT_SCHEMA}", receipt])`,
       });
   }
 

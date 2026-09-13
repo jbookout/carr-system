@@ -72,11 +72,11 @@ const MIGRATION = readFileSync(
 const CONVERGENCE_MIGRATION = readFileSync(
   new URL("../../migrations/0505_gate_zero_tagged_digest_and_candidate_reads.sql", import.meta.url), "utf8");
 
-test("the public verb description promises exact replay and divergent-receipt refusal", () => {
+test("the public verb description promises immutable, transparent convergence", () => {
   const description = TOOLS[VERB].description;
-  assert.match(description, /exact receipt replay.*returns the immutable row/i);
-  assert.match(description, /different receipt.*changed evidence, verdict.*is refused/i);
-  assert.doesNotMatch(description, /changed evidence or a changed verdict.*converges/i);
+  assert.match(description, /any later call for the same candidate returns the row already recorded/i);
+  assert.match(description, /explicitly separates recorded and offered/i);
+  assert.doesNotMatch(description, /different receipt.*is refused/i);
 });
 
 // --- actors, and the one thing that can no longer be one ----------------------
@@ -143,12 +143,8 @@ function mockDatabase({ existing = null, seatConnection = true } = {}) {
       if (sql.includes("ops.gate_zero_record_read_only_outcome")) {
         const offered = JSON.parse(params[1]);
         state.persisted = offered;
-        // Mirror the record layer's write-once candidate key: exact receipt
-        // bytes replay, but a second observation for the candidate is refused.
-        if (state.recorded?.candidate_digest === offered.candidate_digest
-            && digest([GATE_ZERO_RECEIPT_SCHEMA, state.recorded])
-              !== digest([GATE_ZERO_RECEIPT_SCHEMA, offered]))
-          throw new Error(`candidate ${offered.candidate_digest} already has a different receipt`);
+        // Mirror the record layer's one immutable row per candidate. A later
+        // observation returns that row; it never replaces the stored receipt.
         if (!state.recorded || state.recorded.candidate_digest !== offered.candidate_digest)
           state.recorded = offered;
         return { rows: [{ id: OUTCOME_ID }] };
@@ -414,25 +410,31 @@ test("CONTROL 4 — the bound seat writes, and what it writes is the producer's 
   assert.equal(result.effects.benchmark_accepted, false);
 });
 
-test("CONTROL 5 — a second authenticated run is not an exact receipt replay", async () => {
-  // A new authenticated request has its own session_ref (and may have new
-  // instants), so even for the same candidate it is a different receipt. The
-  // write-once criterion requires that conflict to be visible, not converged.
+test("CONTROL 5 — a second authenticated run converges transparently", async () => {
+  // A new authenticated request has its own session_ref and instant, so exact
+  // receipt replay is not a viable healing contract. It must receive the first
+  // immutable row while the result labels both recorded and offered digests.
   const client = mockDatabase();
   const RETRY_CALL = "5a0b7c33-41de-4f9a-8e26-1c7b93d0af45";
   assert.notEqual(RETRY_CALL, CORRELATION_ID);
-  await recordIn({}, {}, { idempotency_key: KEY }, client);
-  await assert.rejects(
-    recordIn({}, { correlationId: RETRY_CALL },
-      { idempotency_key: SECOND_KEY }, client),
-    /already has a different receipt/);
+  const first = await recordIn({}, {}, { idempotency_key: KEY }, client);
+  const second = await recordIn({}, { correlationId: RETRY_CALL },
+    { idempotency_key: SECOND_KEY }, client);
   assert.notEqual(client.state.persisted.producer_identity.session_ref,
     client.state.recorded.producer_identity.session_ref);
   assert.equal(client.state.recorded.producer_identity.session_ref,
     `session:${CORRELATION_ID}`);
+  assert.equal(second.result.outcome_id, first.result.outcome_id);
+  assert.equal(second.result.converged_onto_recorded_outcome, true);
+  assert.equal(second.result.outcome_digest, first.result.outcome_digest);
+  assert.equal(second.result.offered_outcome_digest,
+    gateZeroOutcomeDigest(client.state.persisted));
+  assert.notEqual(second.result.offered_outcome_digest, second.result.outcome_digest);
+  assert.equal(second.result.receipt_status, client.state.recorded.status);
+  assert.equal(second.result.offered_receipt_status, client.state.persisted.status);
 });
 
-test("MUTATION — a second run with a different verdict is refused and replaces nothing", async () => {
+test("MUTATION — a second run with a different verdict converges and replaces nothing", async () => {
   const client = mockDatabase();
   await recordIn({}, {}, { idempotency_key: KEY }, client);
   const recorded = client.state.recorded;
@@ -448,11 +450,10 @@ test("MUTATION — a second run with a different verdict is refused and replaces
   assert.notEqual(gateZeroOutcomeCandidateDigest(divergent),
     gateZeroOutcomeCandidateDigest(recorded),
     "the divergent receipt projects to the same value, so this proves nothing");
-  await assert.rejects(
-    client.query(
-      "select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
-      [SECOND_KEY, JSON.stringify(divergent)]),
-    /already has a different receipt/);
+  const converged = await client.query(
+    "select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
+    [SECOND_KEY, JSON.stringify(divergent)]);
+  assert.equal(converged.rows[0].id, OUTCOME_ID);
 
   // NOTHING WAS REPLACED. The stored receipt is the first one, byte for byte,
   // and so is the digest read back off the row.
@@ -653,14 +654,15 @@ test("the writer is ONE insert arbitrated by the candidate key, not a lookup the
     "the candidate lookup still runs before the insert, which is the race");
   assert.equal(MIGRATION.split("select * into v_existing").length - 1, 1,
     "there is more than one candidate lookup in the writer");
-  // AND THE FALLBACK CONTRACT DISTINGUISHES an exact receipt replay from a
-  // different observation of the same candidate.
+  // AND THE FALLBACK CONTRACT IS THE IMMUTABLE FIRST ROW, UNCONDITIONALLY.
+  // Different offered bytes are logged and reported by the gateway, not
+  // transformed into a refusal that strands the outer audit event.
   assert.match(CONVERGENCE_MIGRATION,
-    /v_digest := ops\.gate_zero_outcome_digest\(p_receipt\)/);
+    /RETURN THE IMMUTABLE FIRST ROW UNCONDITIONALLY/);
   assert.match(CONVERGENCE_MIGRATION,
-    /v_existing\.outcome_digest <> v_digest/);
-  assert.match(CONVERGENCE_MIGRATION,
-    /already has a different receipt/);
+    /returning it unchanged \(recorded full %, offered full %/);
+  assert.doesNotMatch(CONVERGENCE_MIGRATION,
+    /raise exception 'candidate % already has a different receipt/);
 });
 
 // ===========================================================================

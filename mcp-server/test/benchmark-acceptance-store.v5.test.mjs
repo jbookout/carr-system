@@ -437,7 +437,7 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
   assert.match(moduleSource, /async function readGateZeroOutcome\(c\) \{/);
   assert.match(moduleSource, /from ops\.gate_zero_read_only_outcome/);
   assert.match(moduleSource, /select step_ref, receipt, outcome_digest,/);
-  assert.match(moduleSource, /digest\(\["consumer-gate-receipt\.v1", row\.receipt\]\)/);
+  assert.match(moduleSource, /digest\(\[CONSUMER_GATE_RECEIPT_SCHEMA, row\.receipt\]\)/);
   assert.equal(/function readGateZeroOutcome\(\) \{/.test(moduleSource), false,
     "the module reader reverted to the parameterless stub while the SQL half still reads");
 
@@ -452,6 +452,14 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
     assert.match(sql, /ops\.gate_zero_outcome_digest\(v_row\.receipt\)/, name);
     assert.match(sql, /Gate Zero outcome digest divergence/, name);
   }
+  const normalizedDefinition = sql => {
+    const definition = sql.match(
+      /create or replace function ops\.benchmark_gate_zero_outcome\(\)[\s\S]*?\n\$\$;/i)?.[0];
+    assert.ok(definition, "the current Gate Zero SQL reader definition is absent");
+    return definition.replace(/--[^\n]*/g, " ").replace(/\s+/g, " ").trim();
+  };
+  assert.equal(normalizedDefinition(correction), normalizedDefinition(candidate),
+    "the migration and candidate SQL readers drifted in executable body");
 
   // (c) AND BOTH STILL FAIL CLOSED. Implementing them was not the same as
   // opening them: each still raises when no current passing outcome exists, and

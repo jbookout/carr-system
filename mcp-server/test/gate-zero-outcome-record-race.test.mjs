@@ -27,13 +27,10 @@
 //      a new snapshot -- and answers with the same id. Against a
 //      lookup-then-insert writer this fails with a unique_violation.
 //   3. IMMUTABLE UNDER A DIFFERENT OUTCOME. A later different receipt for the
-//      same candidate is refused and cannot replace the immutable first row.
+//      same candidate converges to, and cannot replace, the immutable first row.
 //
-// AND THE MUTATION CONTROL IS EXECUTED, NOT DESCRIBED. The writer's own
-// definition is read back out of the catalog with pg_get_functiondef, the ONE
-// full-receipt comparison is narrowed to the candidate projection, and the
-// mutant is proved to accept a receipt whose per-call identity moved. The
-// function it mutates is the one the database is actually carrying.
+// The writer's own definition is read back from the catalog and checked for the
+// unconditional fallback; the different-outcome case then executes that path.
 //
 // THE CLIENTS ARE REAL, and the recorder around them is a passthrough: every
 // statement reaches PostgreSQL, and the wrapper keeps a copy of the receipt each
@@ -73,17 +70,6 @@ const VERB = "record-gate-zero-read-only-outcome";
 const SEAT_SLUG = "codex-reviewer";
 
 after(cleanupStagedTrees);
-
-async function withFrozenDate(instant, run) {
-  const NativeDate = globalThis.Date;
-  const fixed = NativeDate.parse(instant);
-  class FrozenDate extends NativeDate {
-    constructor(...args) { super(...(args.length === 0 ? [fixed] : args)); }
-    static now() { return fixed; }
-  }
-  globalThis.Date = FrozenDate;
-  try { return await run(); } finally { globalThis.Date = NativeDate; }
-}
 
 /**
  * TWO REAL CONNECTIONS PER CALLER, WHICH IS WHAT PRODUCTION OPENS
@@ -277,60 +263,22 @@ test("two identical concurrent writes for one candidate return one durable row",
   assert.equal(digests.rows[0].full, gateZeroOutcomeDigest(sentA));
   assert.equal(digests.rows[0].candidate, gateZeroOutcomeCandidateDigest(sentA));
 
-  // ===================================================================
-  // MUTATION CONTROL — narrow equality to the candidate projection and a
-  // changed verdict is silently accepted.
-  // ===================================================================
-  // The writer's own definition, read out of the catalog rather than retyped, so
-  // the thing being mutated is what the database is carrying.
+  // THE FALLBACK IS UNCONDITIONAL, read out of the live catalog rather than
+  // trusted from source. It may log changed bytes, but it may not raise before
+  // returning the immutable row: that is what leaves outer event healing
+  // reachable after the world or per-call identity has moved.
   const def = (await a.query(
     `select pg_get_functiondef(p.oid) as def
        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'ops' and p.proname = 'gate_zero_record_read_only_outcome'`)).rows[0].def;
-  const NAME = "ops.gate_zero_record_read_only_outcome(";
-  const FULL_KEY = "v_digest := ops.gate_zero_outcome_digest(p_receipt);";
-  const FULL_COMPARE = "v_existing.outcome_digest <> v_digest";
-  for (const [anchor, what] of [[NAME, "the writer's name"],
-    [FULL_KEY, "the retry comparison value"], [FULL_COMPARE, "the retry comparison"]])
-    assert.equal(def.split(anchor).length - 1, 1,
-      `the mutation anchor no longer matches ${what}`);
-  const mutant = def
-    .replace(NAME, "pg_temp.gate_zero_record_read_only_outcome_candidate_key(")
-    .replace(FULL_KEY, "v_digest := ops.gate_zero_outcome_candidate_digest(p_receipt);")
-    .replace(FULL_COMPARE, "v_existing.candidate_scoped_digest <> v_digest");
-
-  // THE MUTANT RUNS ON THE SEAT'S CONNECTION, because that is the only
-  // connection the record layer admits at all now. It is CREATED with the
-  // connection's own authenticated identity rather than the seat's -- a SECURITY
-  // DEFINER function owned by the producer login role would reach neither the
-  // authority test nor the table -- and then the session is put back to the seat
-  // before it is called, so the mutant is exercised under exactly the identity
-  // the real writer is.
-  await a.seat.query("reset session authorization");
-  await a.seat.query(mutant);
-  await authorizeAs(a.seat, (await ensureProducerRoles(setup)).login);
-  const projectionCollision = { ...sentA,
-    producer_identity: { ...sentA.producer_identity,
-      session_ref: "session:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" } };
-  assert.equal(projectionCollision.candidate_digest, sentA.candidate_digest);
-  assert.notEqual(gateZeroOutcomeDigest(projectionCollision), gateZeroOutcomeDigest(sentA));
-  assert.equal(gateZeroOutcomeCandidateDigest(projectionCollision),
-    gateZeroOutcomeCandidateDigest(sentA));
-  await a.seat.query("begin");
-  const mutantId = (await a.seat.query(
-    "select pg_temp.gate_zero_record_read_only_outcome_candidate_key($1::uuid, $2::jsonb) as id",
-    [randomUUID(), JSON.stringify(projectionCollision)])).rows[0].id;
-  assert.equal(mutantId, firstResult.outcome_id,
-    "the narrowed comparison did not silently accept the divergent receipt, so this control proves nothing");
-  await a.seat.query("rollback");
+  assert.match(def, /RETURN THE IMMUTABLE FIRST ROW UNCONDITIONALLY/);
+  assert.doesNotMatch(def, /raise exception 'candidate % already has a different receipt/);
 
   // ===================================================================
-  // AND A DIFFERENT OUTCOME FOR ONE CANDIDATE IS REFUSED, REPLACING NOTHING.
+  // AND A DIFFERENT OUTCOME CONVERGES, REPLACING NOTHING.
   // ===================================================================
-  // RETRY-IDEMPOTENT is write-once in both directions: the same receipt returns
-  // the row already recorded, while a different receipt for the same candidate
-  // is a conflict. Returning the earlier row for this changed verdict would make
-  // the call look successful even though none of the offered evidence landed.
+  // The caller receives the earlier row, while the stored receipt and both
+  // digests remain byte-for-byte those of the first run.
   const before = (await a.query(
     `select outcome_digest, candidate_scoped_digest, status, receipt
        from ops.gate_zero_read_only_outcome where id = $1::uuid`,
@@ -338,18 +286,17 @@ test("two identical concurrent writes for one candidate return one durable row",
   await a.seat.query("begin");
   const divergent = { ...sentA, status: "fail" };
   assert.equal(divergent.candidate_digest, sentA.candidate_digest);
-  await assert.rejects(
-    a.seat.query(
-      "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb) as id",
-      [randomUUID(), JSON.stringify(divergent)]),
-    /already has a different receipt/,
-    "a different verdict for one candidate was silently accepted");
-  await a.seat.query("rollback");
+  const convergedId = (await a.seat.query(
+    "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb) as id",
+    [randomUUID(), JSON.stringify(divergent)])).rows[0].id;
+  assert.equal(convergedId, firstResult.outcome_id,
+    "a different verdict did not converge onto the recorded row");
+  await a.seat.query("commit");
 
   const after = (await a.query(
     `select count(*)::int as n from ops.gate_zero_read_only_outcome where candidate_digest = $1`,
     [firstResult.candidate_digest])).rows[0];
-  assert.equal(after.n, 1, "the refused write minted a second outcome for one candidate");
+  assert.equal(after.n, 1, "the converging write minted a second outcome for one candidate");
   const unchanged = (await a.query(
     `select outcome_digest, candidate_scoped_digest, status, receipt
        from ops.gate_zero_read_only_outcome where id = $1::uuid`,
@@ -359,7 +306,7 @@ test("two identical concurrent writes for one candidate return one durable row",
   assert.equal(unchanged.status, "pass");
 });
 
-test("an exact replay heals a missing event, while a changed receipt cannot",
+test("a normal changed-evidence retry heals a missing event exactly once",
   async t => {
     // FINDING 3 OF THE THIRD RELEASE CANDIDATE'S REFUSAL, RUN RATHER THAN
     // ARGUED. Standing-rule amendment 9 puts the outcome write on the seat's own
@@ -421,14 +368,10 @@ test("an exact replay heals a missing event, while a changed receipt cannot",
     globalThis[DYNAMIC_PREDECESSOR_WORLD] = "clean";
     t.after(() => { delete globalThis[DYNAMIC_PREDECESSOR_WORLD]; });
     const tools = await moduleOfTree(target, "tools.js");
-    // Freeze only the producer's public clock so repeating the same authenticated
-    // request below is a byte-exact receipt replay rather than a new observation.
-    const fixedObservedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    const callVerb = correlationId => withFrozenDate(fixedObservedAt,
-      () => withStamps(stamps,
-        () => inServedReview(target, { correlationId },
-          actor => tools.executeRegisteredTool(caller,
-            Object.assign(actor, { id: seatRow.id }), VERB, { idempotency_key: randomUUID() }))));
+    const callVerb = correlationId => withStamps(stamps,
+      () => inServedReview(target, { correlationId },
+        actor => tools.executeRegisteredTool(caller,
+          Object.assign(actor, { id: seatRow.id }), VERB, { idempotency_key: randomUUID() })));
 
     const eventsFor = async outcomeId => (await setup.query(
       `select count(*)::int as n from event
@@ -457,37 +400,44 @@ test("an exact replay heals a missing event, while a changed receipt cannot",
     assert.equal(await eventsFor(first.outcome_id), 0,
       "the outer rollback did not remove the audit event, so this proof is not staging the failure it claims");
 
-    // (3) AN EXACT REPLAY HEALS THE EVENT. Same authenticated session, same
-    //     fixed instant and same evidence means the full tagged digest matches.
-    await caller.client.query("begin");
-    await caller.client.query(
-      "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
-    const healed = (await callVerb(FIRST_CALL)).answered;
-    assert.equal(healed.outcome_id, first.outcome_id);
-    await caller.seat.query("commit");
-    await caller.client.query("commit");
-    assert.equal(await eventsFor(first.outcome_id), 1,
-      "the exact replay did not heal the missing audit event");
-
-    // (4) A LATER RUN AFTER THE WORLD MOVES IS NOT A REPLAY OF THIS RECEIPT. It
-    //     reaches the same candidate with changed evidence and a changed verdict,
-    //     so RETRY-IDEMPOTENT requires refusal. A lost audit event does not make
-    //     it valid to label this new run as the old one.
+    // (3) A NORMAL RETRY AFTER THE WORLD MOVES. It has a new correlation id,
+    //     new time bytes, changed evidence and a changed verdict. Those offered
+    //     bytes must remain visible, while the immutable recorded row wins.
     globalThis[DYNAMIC_PREDECESSOR_WORLD] = "receipt-card-mismatch";
     await caller.client.query("begin");
     await caller.client.query(
       "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
-    await assert.rejects(
-      callVerb("2a8d5b31-7c46-4d9e-8f53-1b2c8e6a49b7"),
-      /already has a different receipt/,
-      "changed evidence was silently accepted as an idempotent retry");
-    await caller.seat.query("rollback");
-    await caller.client.query("rollback");
+    const healed = (await callVerb("2a8d5b31-7c46-4d9e-8f53-1b2c8e6a49b7")).answered;
+    assert.equal(healed.ok, true);
+    assert.equal(healed.outcome_id, first.outcome_id,
+      "the changed-evidence retry did not converge on the eventless row");
+    assert.equal(healed.converged_onto_recorded_outcome, true);
+    assert.notEqual(healed.offered_outcome_digest, healed.outcome_digest,
+      "the retry accidentally reproduced the stored receipt bytes");
+    assert.notEqual(healed.offered_candidate_scoped_digest, healed.candidate_scoped_digest,
+      "the retry did not actually move the evidence projection");
+    assert.equal(healed.receipt_status, "pass");
+    assert.equal(healed.offered_receipt_status, "fail");
+    assert.equal(healed.producer_reason_id, null);
+    assert.ok(healed.offered_producer_reason_id);
+    await caller.seat.query("commit");
+    await caller.client.query("commit");
+    assert.equal(await eventsFor(first.outcome_id), 1,
+      "the changed-evidence retry did not heal the missing audit event");
 
-    // (5) THE FIRST ROW AND ITS ONE HEALED EVENT STILL STAND. The changed run
-    //     neither writes a row nor duplicates the exact replay's audit event.
+    // (4) A THIRD NORMAL CALL CONVERGES BUT WRITES NO SECOND EVENT.
+    await caller.client.query("begin");
+    await caller.client.query(
+      "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
+    const thrice = (await callVerb("3b9e6c42-8d57-4e0f-9a64-2c3d9f7b5ac8")).answered;
+    assert.equal(thrice.outcome_id, first.outcome_id);
+    assert.equal(thrice.converged_onto_recorded_outcome, true);
+    await caller.seat.query("commit");
+    await caller.client.query("commit");
+
+    // (5) THE FIRST ROW AND ITS ONE HEALED EVENT STILL STAND.
     assert.equal(await outcomesFor(first.candidate_digest), 1,
       "the retry minted a second outcome for one candidate");
     assert.equal(await eventsFor(first.outcome_id), 1,
-      "a refused changed receipt altered the exact replay's audit event count");
+      "a third retry wrote a duplicate audit event");
   });

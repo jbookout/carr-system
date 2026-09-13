@@ -40,17 +40,17 @@
 -- that projection is not a consumer-gate-receipt.v1, so r7's rule does not speak
 -- about it. Tagging a projection with the schema name of the thing it is not
 -- would be the misstatement. It stays plain here and plain in the gateway as an
--- informational comparison aid; the full receipt digest is the idempotency key.
+-- informational comparison aid; the candidate digest is the row arbiter.
 --
--- ── (2) EXACT REPLAY OR VISIBLE CONFLICT ────────────────────────────────────
+-- ── (2) THE RETRY CONVERGES (review finding 3) ───────────────────────────────
 --
 -- The outcome row and its audit event are written by two different login roles
 -- and therefore two different transactions; the seat's commits first. An outer
--- failure after it can leave an outcome with no event. That does not permit a
--- later, different observation to pose as the recorded receipt: only an exact
--- replay returns the first row and may reach event healing. Changed evidence,
--- verdict, identity or instants are refused. Nothing is replaced and no trigger
--- is weakened.
+-- failure after it leaves an outcome with no event. A normal retry necessarily
+-- carries a new session and instant, and its evidence may have moved, so exact
+-- receipt matching strands that row. The fallback therefore returns the
+-- immutable recorded row for the candidate and lets the outer transaction heal
+-- the event. It reports convergence explicitly; nothing is replaced.
 --
 -- ── (3) THE READS A CANDIDATE FILING NEEDS (review finding 1) ────────────────
 --
@@ -114,6 +114,9 @@ comment on function ops.gate_zero_outcome_digest(jsonb) is
 comment on column ops.gate_zero_read_only_outcome.outcome_digest is
   'Recomputed from `receipt` with ops.gate_zero_outcome_digest, which is sha256 over the canonical JSON of the TAGGED two-element array ["consumer-gate-receipt.v1", receipt] as r7''s receipt_payload_digest_rule declares (amended 2026-09-13). Never supplied by a caller. ops.portfolio_canonical_json matches artifact-trust.js canonicalJson byte for byte, over that same array.';
 
+comment on column ops.gate_zero_read_only_outcome.candidate_scoped_digest is
+  'Informational comparison value: ops.gate_zero_outcome_candidate_digest(receipt), the canonical-JSON sha256 over the receipt minus observed_at, ttl_expires_at and each identity''s per-call session_ref. It is not evidence and not an admission or idempotency key. The unique candidate_digest column arbitrates one immutable row per candidate; a later call returns that recorded row unchanged and reports whether its offered receipt differed.';
+
 -- THE SQL CONSUMER RECOMPUTES TOO. 0502's reader selected the stored digest and
 -- returned it unchanged. The accepted plan requires both readers to derive the
 -- tagged value from the stored receipt and compare before answering, so this
@@ -156,10 +159,10 @@ $$;
 comment on function ops.benchmark_gate_zero_outcome() is
   'PRIVATE reader for the latest passing, unexpired Gate Zero outcome. Before returning the closed { step_ref, outcome_digest, observed_at } object it recomputes sha256 over canonical JSON ["consumer-gate-receipt.v1", receipt] and refuses if that tagged digest differs from the stored value.';
 
--- ── (2) the writer, with exact-replay fallback ───────────────────────────────
+-- ── (2) the writer, with the fallback that converges ─────────────────────────
 -- LIFTED FROM 0502 RATHER THAN RETYPED. Every line below except the fallback
--- branch is the text migration 0502 applied to Production; the fallback now
--- compares the tagged full-receipt digest explicitly.
+-- branch is the text migration 0502 applied to Production; only the fallback
+-- answer changes so a retry can heal the separately committed audit event.
 -- The signature, the SECURITY DEFINER property, the owner and the EXECUTE grant
 -- are unchanged, so this admits no capability: CREATE OR REPLACE keeps the
 -- function's ACL, and the carr_gate_zero_producer-only closure 0502 established
@@ -174,7 +177,8 @@ as $$
 declare
   v_actor uuid; v_slug text; v_seat text; v_id uuid;
   v_existing ops.gate_zero_read_only_outcome%rowtype;
-  v_digest text; v_field text; v_keys integer; v_identity jsonb; v_identity_keys integer;
+  v_digest text; v_candidate_digest text;
+  v_field text; v_keys integer; v_identity jsonb; v_identity_keys integer;
 begin
   if p_idempotency_key is null then
     raise exception 'recording a Gate Zero read-only outcome requires an idempotency key';
@@ -282,13 +286,12 @@ begin
   -- the DO NOTHING branch and reads the committed row in the fallback select --
   -- which sees it, because each statement in READ COMMITTED takes a fresh
   -- snapshot. If the first transaction rolls back instead, the second inserts.
-  -- When both offered receipts are exact replays, either way both callers receive
-  -- the same durable row and neither receives an error.
+  -- Either way both callers receive the same durable row and neither receives an
+  -- error.
   --
-  -- AND A DIFFERENT RECEIPT FOR A RECORDED CANDIDATE IS A CONFLICT. The
-  -- candidate key arbitrates concurrent inserts, but it does not turn a later
-  -- observation into a successful write. Only an exact receipt replay receives
-  -- the immutable first row; changed evidence or verdict is refused.
+  -- A later receipt cannot replace the recorded row. If its bytes differ, the
+  -- fallback returns the first row and logs both full and projected digests so
+  -- the caller can report the convergence rather than mistake it for a write.
   insert into ops.gate_zero_read_only_outcome (
     idempotency_key, step_ref, receipt_producer_step_ref, gate_id, receipt_schema,
     producer_role, independent_oracle_ref, oracle_version, evidence_scope,
@@ -343,23 +346,27 @@ begin
     raise exception 'the Gate Zero outcome for candidate % was neither inserted nor found; the record layer is in a state this writer cannot account for',
       p_receipt ->> 'candidate_digest';
   end if;
-  -- RETRY-IDEMPOTENT IS EXACTLY WRITE-ONCE. The candidate key makes the insert
-  -- race-safe; the full receipt digest decides whether the loser was an exact
-  -- replay or a different observation. A changed receipt is refused rather than
-  -- silently reported as successful. This also means a missing outer audit event
-  -- is healed only by an exact replay; changed evidence cannot be relabelled as
-  -- the recorded run merely to reach the event writer.
+  -- RETURN THE IMMUTABLE FIRST ROW UNCONDITIONALLY. The outcome and its audit
+  -- event use different authenticated connections and transactions; the seat
+  -- commits first, so a later outer failure can leave this row eventless. Every
+  -- normal retry has new per-call identity and time bytes, and its evidence may
+  -- also have moved. Refusing those bytes prevents the retry from reaching the
+  -- event write. Returning the existing row changes no state here: the gateway
+  -- recomputes and labels recorded versus offered digests before healing exactly
+  -- one event under an advisory lock.
   v_digest := ops.gate_zero_outcome_digest(p_receipt);
+  v_candidate_digest := ops.gate_zero_outcome_candidate_digest(p_receipt);
   if v_existing.outcome_digest <> v_digest then
-    raise exception 'candidate % already has a different receipt (recorded %, offered %)',
-      v_existing.candidate_digest, v_existing.outcome_digest, v_digest;
+    raise notice 'candidate % already has an immutable outcome; returning it unchanged (recorded full %, offered full %, recorded projection %, offered projection %)',
+      v_existing.candidate_digest, v_existing.outcome_digest, v_digest,
+      v_existing.candidate_scoped_digest, v_candidate_digest;
   end if;
   return v_existing.id;
 end;
 $$;
 
 comment on function ops.gate_zero_record_read_only_outcome(uuid,jsonb) is
-  'The only way to record a Gate Zero read-only outcome. The producing seat, the actor and the outcome digest are all derived; the receipt and an idempotency key are the only parameters. Refuses every transaction except the staffed non-human oracle seat, refuses a receipt whose producer or evaluator is not that seat, refuses same-actor or same-session self-review, enforces authenticated-receipt-identity.v1''s closed three-field shape on each of the three identities, and is idempotent on the candidate digest ATOMICALLY -- one insert arbitrated by the candidate key, with a fallback select -- so two writers racing the same candidate with the exact same receipt both receive the same durable row rather than one of them receiving a unique_violation. A different receipt for a recorded candidate is refused and never replaces the first. The full outcome_digest stored beside the row is the TAGGED digest r7 declares.';
+  'The only way to record a Gate Zero read-only outcome. The producing seat, actor and outcome digest are derived; the receipt and idempotency key are the only parameters. It admits only the staffed non-human oracle seat and validates the closed receipt and identity schemas. One insert is arbitrated by candidate_digest; its fallback always returns the immutable first row, including when later evidence, identity or time bytes differ, so the caller can report convergence and heal a missing outer audit event. No receipt is replaced. outcome_digest is the tagged digest r7 declares; candidate_scoped_digest is informational only.';
 
 -- ── (3) the two column-scoped reads a candidate filing performs ──────────────
 -- ops.service, read by tools/ops-record.py's service_id() to resolve --service.
