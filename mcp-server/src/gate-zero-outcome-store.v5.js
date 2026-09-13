@@ -479,10 +479,13 @@ export const gateZeroOutcomeDigest =
  * fixture, not a retry — so the second real call for one candidate was refused.
  *
  * WHAT IS DROPPED IS EXACTLY THE PER-CALL VALUES, and what is kept is the point:
- *   * every identity's actor_id and authority_class stay. A receipt naming a
- *     different maker, producer or evaluator for one candidate still conflicts.
- *   * every digest, constant, status, comparator and evidence ref stays. A run
- *     that read different rows for one candidate is a real conflict.
+ *   * every identity's actor_id and authority_class stay, so a changed identity
+ *     remains visible in the offered projection and metadata.
+ *   * every digest, constant, status, comparator and evidence ref stays, so a
+ *     run that read different rows remains visible in that offered projection.
+ * A repeated candidate still converges unconditionally onto the immutable first
+ * recorded outcome; these kept fields describe the offered run, not a conflict
+ * branch that can replace or refuse the recorded row.
  *
  * NOTHING IS LOST BY IT. The dropped values are inside the receipt this projects
  * from, which is stored whole, and inside the full outcome digest stored beside

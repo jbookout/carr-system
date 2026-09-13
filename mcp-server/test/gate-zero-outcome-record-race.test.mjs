@@ -28,14 +28,15 @@
 //      reads the committed row in its fallback select -- a new statement and so
 //      a new snapshot -- and answers with the same id. Against a
 //      lookup-then-insert writer this fails with a unique_violation.
-//   3. STILL REFUSING A GENUINELY DIFFERENT OUTCOME. Narrowing what a retry is
-//      compared on is only safe if a run that reached a different verdict for
-//      one candidate still raises. It does.
+//   3. IMMUTABLE UNDER A GENUINELY DIFFERENT OUTCOME. A later run that reaches
+//      a different verdict for the same candidate still receives the first
+//      recorded row; it cannot replace or merge into that immutable outcome.
 //
 // AND THE MUTATION CONTROL IS EXECUTED, NOT DESCRIBED. The writer's own
 // definition is read back out of the catalog with pg_get_functiondef, the ONE
 // comparison is put back to the full receipt digest, and the result is created
-// in pg_temp and called with the second call's real receipt. It raises. So
+// in pg_temp and called with the second call's real receipt. The mutant emits a
+// divergence NOTICE that the real candidate-scoped comparison does not. So
 // "keying on the full digest again turns this red" is a statement this file
 // makes by running it, and the function it mutates is the one the database is
 // actually carrying rather than a retyped copy of it.

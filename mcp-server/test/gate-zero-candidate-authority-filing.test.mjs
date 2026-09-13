@@ -145,7 +145,7 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     const authorityPassword = decodeURIComponent(new URL(DSN).password);
     if (authorityPassword) {
       const passwordStatement = (await client.query(
-        "select format('alter role %I login password %L', $1, $2) as sql",
+        "select format('alter role %I login password %L', $1::text, $2::text) as sql",
         [AUTHORITY_LOGIN, authorityPassword])).rows[0].sql;
       await client.query(passwordStatement);
     }

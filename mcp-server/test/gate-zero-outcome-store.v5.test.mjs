@@ -69,6 +69,8 @@ const KEY = "11111111-2222-4333-8444-555555555555";
 const SECOND_KEY = "99999999-8888-4777-8666-555555555555";
 const MIGRATION = readFileSync(
   new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
+const CONVERGENCE_MIGRATION = readFileSync(
+  new URL("../../migrations/0505_gate_zero_tagged_digest_and_candidate_reads.sql", import.meta.url), "utf8");
 
 test("the public verb description promises immutable convergence, not the retired refusal", () => {
   const description = TOOLS[VERB].description;
@@ -697,8 +699,13 @@ test("the writer is ONE insert arbitrated by the candidate key, not a lookup the
     "the candidate lookup still runs before the insert, which is the race");
   assert.equal(MIGRATION.split("select * into v_existing").length - 1, 1,
     "there is more than one candidate lookup in the writer");
-  // AND A DIFFERENT RECEIPT FOR A RECORDED CANDIDATE IS STILL A CONFLICT.
-  assert.match(MIGRATION, /a different Gate Zero outcome is already recorded for candidate/);
+  // AND THE FALLBACK CONTRACT IS THE IMMUTABLE FIRST ROW, UNCONDITIONALLY.
+  // Changed evidence is reported by the gateway, not turned back into the
+  // retired record-layer refusal this migration exists to remove.
+  assert.match(CONVERGENCE_MIGRATION,
+    /fallback returns the recorded row UNCONDITIONALLY/);
+  assert.doesNotMatch(CONVERGENCE_MIGRATION,
+    /a different Gate Zero outcome is already recorded for candidate/);
 });
 
 // ===========================================================================

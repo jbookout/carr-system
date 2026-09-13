@@ -244,10 +244,11 @@ begin
   -- Either way both callers receive the same durable row and neither receives an
   -- error.
   --
-  -- AND A DIFFERENT RECEIPT FOR A RECORDED CANDIDATE IS STILL A CONFLICT, not a
-  -- silent replace: the fallback select compares the recorded digest with the
-  -- one offered and raises when they differ. The table is append-only and the
-  -- first digest may already be bound by an acceptance.
+  -- AND A DIFFERENT RECEIPT FOR A RECORDED CANDIDATE STILL CANNOT REPLACE IT.
+  -- The fallback returns the immutable first row unconditionally; the gateway
+  -- separately reports the recorded and offered projections so changed evidence
+  -- remains visible and a retry can heal an audit event the outer transaction
+  -- failed to write.
   insert into ops.gate_zero_read_only_outcome (
     idempotency_key, step_ref, receipt_producer_step_ref, gate_id, receipt_schema,
     producer_role, independent_oracle_ref, oracle_version, evidence_scope,
