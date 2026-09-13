@@ -1576,17 +1576,22 @@ commit;
     # The ordering is a named function precisely so it can be executed here
     # rather than read off the call site.
     class SeatConn:
-        def __init__(self):
+        def __init__(self, commit_raises=None):
             self.commits = 0
+            self._commit_raises = commit_raises
         def commit(self):
             self.commits += 1
+            if self._commit_raises is not None:
+                raise self._commit_raises
 
+    seat_entry = provision.AdoptedSeat("profile", "file", "stored")
     order: list[str] = []
     settled = SeatConn()
     provision.settle_adopted_seats(
-        settled, [("profile", "file", "stored")],
+        settled, [seat_entry],
         publish=lambda: order.append("publish"),
-        prove=lambda *entry: order.append("prove:" + entry[0]),
+        prove=lambda seat: order.append("prove:" + seat.profile),
+        compensate=lambda: order.append("compensate"),
     )
     check("the Worker secret is published and read back before the password commits",
           order == ["publish", "prove:profile"] and settled.commits == 1)
@@ -1595,16 +1600,73 @@ commit;
     order.clear()
     try:
         provision.settle_adopted_seats(
-            refused, [("profile", "file", "stored")],
+            refused, [seat_entry],
             publish=lambda: (_ for _ in ()).throw(
                 provision.ProvisioningRefusal("Worker credential cutover refused")),
-            prove=lambda *entry: order.append("prove"),
+            prove=lambda seat: order.append("prove"),
+            compensate=lambda: order.append("compensate"),
         )
     except provision.ProvisioningRefusal:
         check("a failed publication leaves the adopted password uncommitted and unproven",
               refused.commits == 0 and not order)
     else:
         raise AssertionError("the seat password committed after a failed publication")
+
+    # ---- AND WHEN THE COMMIT ITSELF FAILS, THE WORKER IS TAKEN BACK ---------
+    # Publication has already succeeded here, so ordering cannot help: the
+    # database rolls the password away and the Worker is left holding a DSN
+    # that authenticates as nothing. The only answer is compensation, and this
+    # injects the commit failure to prove it runs and that nothing is proven
+    # afterwards.
+    published: list[str] = []
+    crashed = SeatConn(commit_raises=RuntimeError("connection lost mid-commit"))
+    worker_binding = ["candidate"]
+    def publish_candidate() -> None:
+        worker_binding[0] = "candidate"
+        published.append("publish")
+    def restore_prior() -> None:
+        worker_binding[0] = "prior"
+        published.append("compensate")
+    try:
+        provision.settle_adopted_seats(
+            crashed, [seat_entry],
+            publish=publish_candidate,
+            prove=lambda seat: published.append("prove"),
+            compensate=restore_prior,
+        )
+    except provision.ProvisioningRefusal as exc:
+        check("a failed commit after publication restores the prior Worker bindings "
+              "rather than leaving the Worker on an unusable DSN",
+              published == ["publish", "compensate"]
+              and worker_binding[0] == "prior"
+              and crashed.commits == 1
+              and "prior Worker bindings restored" in str(exc)
+              and "connection lost mid-commit" not in str(exc))
+    else:
+        raise AssertionError(
+            "a failed commit reported success and left the Worker on the candidate DSN")
+
+    # A compensation that cannot restore is UNCERTAIN, and says so by name.
+    uncertain = SeatConn(commit_raises=RuntimeError("connection lost mid-commit"))
+    try:
+        provision.settle_adopted_seats(
+            uncertain, [seat_entry],
+            publish=lambda: None,
+            prove=lambda seat: (_ for _ in ()).throw(
+                AssertionError("proved an adopted seat whose password never committed")),
+            compensate=lambda: (_ for _ in ()).throw(
+                provision.ProvisioningRefusal("Worker secret readback failed")),
+        )
+    except provision.ProvisioningRefusal as exc:
+        check("a failed commit whose restoration also refuses is named uncertain, not restored",
+              "restoration outcome is uncertain" in str(exc))
+    else:
+        raise AssertionError("an unrestored Worker cutover reported success")
+
+    check("the deferred adoption entry is a named seat rather than a bare triple",
+          seat_entry.profile == "profile" and seat_entry.credential_file == "file"
+          and seat_entry.stored == "stored"
+          and not isinstance(seat_entry, tuple))
 
     check("no production project, worker, secret or credential path exists in this tool",
           not any(hasattr(provision, name) for name in (

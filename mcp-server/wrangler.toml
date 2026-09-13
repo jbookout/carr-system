@@ -14,22 +14,40 @@
 #                         CONNECTION ROLE. Used by exactly one verb,
 #                         record-gate-zero-read-only-outcome, and by nothing else;
 #                         never widen it and never point it at app_writer.
-#                         STAGING is provisioned as the third LoginProfile in
-#                         tools/provision-staging-app-writer.py, which publishes
-#                         all three DSNs in one atomic bulk cutover.
+#                         THIS SECRET IS ONE OF A FAMILY. It moves together with
+#                         DATABASE_URL_READER and DATABASE_URL_WRITER, because a
+#                         Worker holding the new value of one and the old value
+#                         of another authenticates as the wrong identity. The
+#                         family is therefore published in ONE atomic bulk call
+#                         and read back, never one `wrangler secret put` at a
+#                         time. STAGING is provisioned as the third LoginProfile
+#                         in tools/provision-staging-app-writer.py, which
+#                         publishes all three DSNs in exactly that one atomic
+#                         bulk cutover and reads the bound names back before the
+#                         password commits.
 #                         PRODUCTION is JOE'S OWN ACT and no tool in this
 #                         repository performs it: that provisioner refuses the
 #                         Production project by design, and no session holds the
 #                         Cloudflare token or the Production owner credential.
-#                         Joe sets the role's password per the Neon Database
-#                         SOP, section `01-connections-and-roles`, then sets this
-#                         secret on the production Worker and verifies it from
-#                         the consumer per the Cloudflare Edge SOP, section
-#                         `02-secrets-and-tokens` (its per-secret procedure).
-#                         He does both between bin/migrate-prod.sh and
-#                         bin/deploy-worker.sh --promote-version: a Worker
-#                         promoted before this secret exists refuses every write
-#                         and names required_secret.
+#                         It is RELEASE ACT (9) of PLAN-a5059eb52474-v3 -- AFTER
+#                         PR #1013 and PR #1014 have merged (acts 6 and 8) and
+#                         BEFORE bin/migrate-prod.sh applies 0502 and 0503 as one
+#                         group (act 10), and so before the third Worker
+#                         promotion (act 12). Joe sets the role's password per
+#                         the Neon Database SOP, section
+#                         `01-connections-and-roles`, proving from pg_authid that
+#                         the role is still passwordless first and leaving that
+#                         transaction uncommitted; then publishes the whole
+#                         DATABASE_URL* family to the production Worker in one
+#                         `wrangler secret bulk` call with the payload on stdin,
+#                         reads the bound names back with `wrangler secret list
+#                         --format json`, and verifies from the CONSUMER rather
+#                         than from an exit code, per the Cloudflare Edge SOP,
+#                         section `02-secrets-and-tokens` -- the same atomic
+#                         bulk-plus-readback shape the staging provisioner uses.
+#                         Only then does the password commit. A Worker promoted
+#                         before this secret exists refuses every write and names
+#                         required_secret.
 #   INGEST_TOKENS       — JSON map { "<source>": "<token>" } for the ingest socket
 #   PROBE_TOKENS        — JSON map { "<slug>": "<token>" } for the smoke suite ONLY
 #                         (loop #192, 2026-08-06). Authenticates as one locked-

@@ -263,6 +263,22 @@ class LoginProfile:
 
 
 @dataclass(frozen=True)
+class AdoptedSeat:
+    """One migration-created seat whose password is prepared but not committed.
+
+    It was a bare three-tuple until 2026-09-13, which is the shape that made the
+    commit-failure gap easy to miss: `(profile, file_profile, stored)` says
+    nothing about which member carries the DSN that has already been published
+    to the Worker, so the reader cannot see what a failed commit strands. Named
+    fields say it.
+    """
+
+    profile: LoginProfile
+    credential_file: Any
+    stored: Any
+
+
+@dataclass(frozen=True)
 class ProfileClosure:
     login: RoleAuthority
     # None for a DIRECT-GRANT profile, which has no bundle behind its login role.
@@ -1327,8 +1343,9 @@ def publish_worker_cutover(
 
 
 def settle_adopted_seats(
-    conn: Any, deferred: Sequence[tuple[Any, Any, Any]], *,
-    publish: Callable[[], None], prove: Callable[[Any, Any, Any], None],
+    conn: Any, deferred: Sequence[AdoptedSeat], *,
+    publish: Callable[[], None], prove: Callable[[AdoptedSeat], None],
+    compensate: Callable[[], None],
 ) -> None:
     """Publish the Worker secrets FIRST, then commit the adopted seats' passwords.
 
@@ -1341,11 +1358,34 @@ def settle_adopted_seats(
     second is the shape that leaves a ROTATED role behind a Worker still holding
     the DSN that no longer authenticates, which is the state nothing in this tool
     can repair from the outside.
+
+    THE COMMIT ITSELF CAN FAIL, and until 2026-09-13 nothing here answered for
+    that. Publication has already succeeded at that point, so the Worker is
+    holding the CANDIDATE DSN while the database has rolled the matching password
+    away: the seat is passwordless again and the Worker's value authenticates as
+    nothing. Ordering cannot close this one -- the window is the commit -- so it
+    is closed by COMPENSATION: `compensate` restores the previously serving
+    secret set through the same atomic bulk-plus-readback door the publication
+    used, and only then is the failure reported. A compensation that cannot read
+    its own restoration back is an uncertain state and says so by name rather
+    than being retried.
     """
     publish()
-    conn.commit()
+    try:
+        conn.commit()
+    except Exception as exc:
+        try:
+            compensate()
+        except Exception as compensate_exc:
+            raise ProvisioningRefusal(
+                "adopted seat commit refused and the Worker secret restoration outcome "
+                "is uncertain; output suppressed"
+            ) from compensate_exc
+        raise ProvisioningRefusal(
+            "adopted seat commit refused; prior Worker bindings restored; output suppressed"
+        ) from exc
     for entry in deferred:
-        prove(*entry)
+        prove(entry)
 
 
 def rollback_worker_to_prior(
@@ -1536,9 +1576,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # THE ADOPT PATH'S OPEN TRANSACTION. A migration-created seat's password
         # change is prepared here and COMMITTED ONLY AFTER the Worker secret is
         # published and read back, so a publication that fails rolls the change
-        # away and leaves the seat exactly as its migration left it. Each entry
-        # is (profile, file_profile, stored) awaiting that commit.
-        deferred_seats: list[tuple[LoginProfile, Any, Any]] = []
+        # away and leaves the seat exactly as its migration left it. A commit
+        # that fails AFTER publication is compensated instead: the prior Worker
+        # bindings are restored through the same atomic door.
+        deferred_seats: list[AdoptedSeat] = []
         with credential.exclusive_lock(lock_path):
             owner = psycopg.connect(owner_dsn.value)
             try:
@@ -1610,7 +1651,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             owner, login_profile, plans[login_profile.label], stored.password,
                             expected_creator=expected_creator, adopt=True, commit=False,
                         )
-                        deferred_seats.append((login_profile, file_profile, stored))
+                        deferred_seats.append(
+                            AdoptedSeat(login_profile, file_profile, stored))
                         return stored.value, "adopting"
                     else:
                         apply_login_profile(
@@ -1651,23 +1693,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                             postflight=verify_final_candidate_state,
                         )
 
-                def prove_adopted_seat(login_profile, file_profile, stored) -> None:
+                def prove_adopted_seat(seat: AdoptedSeat) -> None:
                     validate_profile_login(
-                        stored.value, login_profile, plans[login_profile.label],
+                        seat.stored.value, seat.profile, plans[seat.profile.label],
                         expected_creator=expected_creator,
                     )
-                    if stored.state == "pending":
+                    if seat.stored.state == "pending":
                         credential.promote_pending(
-                            file_profile.paths, key=file_profile.key,
-                            expected_value=stored.value,
+                            seat.credential_file.paths, key=seat.credential_file.key,
+                            expected_value=seat.stored.value,
                         )
-                    outcomes[login_profile.label] = "adopted"
+                    outcomes[seat.profile.label] = "adopted"
+
+                def restore_prior_cutover() -> None:
+                    # The SAME door the publication used, under the SAME lock:
+                    # a compensation that took a different path would not be
+                    # proof that the Worker is back on the bindings it had.
+                    with credential.exclusive_lock(worker_cutover_lock_path()):
+                        rollback_worker_to_prior(
+                            rollback_values,
+                            preserve=preserve_provider_scopes,
+                            bulk=lambda values: bulk_worker_database_secrets(values),
+                            verify=lambda: verify_worker_database_secret_bindings(),
+                        )
 
                 # Publication happens while the adopt transaction is STILL OPEN;
                 # any refusal reaches the `finally` unwind, which rolls it back.
+                # A refusal of the COMMIT is past that point, so it compensates.
                 settle_adopted_seats(
                     owner, deferred_seats,
-                    publish=publish_cutover, prove=prove_adopted_seat)
+                    publish=publish_cutover, prove=prove_adopted_seat,
+                    compensate=restore_prior_cutover)
             finally:
                 try:
                     owner.rollback()

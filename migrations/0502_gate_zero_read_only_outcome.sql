@@ -165,22 +165,57 @@ end $v5_a02_gate_zero_outcome_preflight$;
 -- Production owner credential, and no numbered file mints a password. The
 -- production credential for carr_gate_zero_producer and the production Worker
 -- secret DATABASE_URL_GATE_ZERO_WRITER are JOE'S OWN ACT at a console he
--- controls, through the equivalent production path already written down:
+-- controls, and that act has ONE position in the release: it is act (9) of the
+-- thirteen ordered acts of PLAN-a5059eb52474-v3, the plan Joe accepted
+-- 2026-09-13. The surrounding acts are named here because the position is the
+-- procedure:
 --
---   1. Neon Database SOP, section `01-connections-and-roles` -- set the
---      password on this login role at the production project.
---   2. Cloudflare Edge SOP, section `02-secrets-and-tokens` -- its per-secret
---      procedure: set DATABASE_URL_GATE_ZERO_WRITER on the production Worker,
---      update every other holder the secrets inventory lists, and verify from
---      the consumer rather than from an exit code.
+--   (8)  PR #1014 merges -- after PR #1013 merged at act (6) and this branch
+--        was restacked on that FINAL 1013 head with fresh hosted checks at (7).
+--   (9)  JOE PROVISIONS THE PRODUCTION CREDENTIAL AND THE WORKER SECRET, WITH
+--        READBACK. Two halves, both his, in this order.
+--        (a) Neon Database SOP, section `01-connections-and-roles`, under
+--            "Setting the password on a migration-created passwordless login
+--            role": connect as the branch owner on the DIRECT string; prove
+--            from pg_authid that carr_gate_zero_producer still holds no
+--            password BEFORE the ALTER and re-read that under the advisory lock
+--            immediately before it; set the password on the OPEN transaction;
+--            and commit only after half (b) has read back. A role that already
+--            holds a password stops the act rather than being rotated.
+--        (b) Cloudflare Edge SOP, section `02-secrets-and-tokens`, under
+--            "Setting a production Worker secret family: the atomic
+--            bulk-plus-readback shape": the whole DATABASE_URL* family --
+--            DATABASE_URL_READER, DATABASE_URL_WRITER and
+--            DATABASE_URL_GATE_ZERO_WRITER -- is published to the production
+--            Worker in ONE `wrangler secret bulk` call with the JSON payload on
+--            stdin and never in argv; the bound NAMES are read back with
+--            `wrangler secret list --format json` and asserted to be exactly
+--            that set; and the value is then verified FROM THE CONSUMER rather
+--            than from an exit code. This is the SAME atomic bulk-plus-readback
+--            shape tools/provision-staging-app-writer.py uses for its
+--            gate_zero_producer profile on staging. A per-secret
+--            `wrangler secret put` is the wrong door for this family: published
+--            one call at a time it leaves the Worker holding a mixed set -- some
+--            new values, some old -- which no rollback expresses. Any refusal
+--            restores the previous set through the same bulk call and reads
+--            that back too, and so does a failure of half (a)'s commit.
+--  (10)  bin/migrate-prod.sh applies THIS migration and 0503 to Production as
+--        one declared atomic group.
+--  (11)  The db/schema.sql refresh that run produces is committed through its
+--        own reviewed pull request.
+--  (12)  bin/deploy-worker.sh --upload-version produces the immutable candidate
+--        and its approved release, and --promote-version puts that version in
+--        front of traffic, with the three-leg rollback rehearsal.
+--  (13)  One live Gate Zero run writes the first row, read back through both
+--        readers.
 --
--- There is no wrapper to name here because none exists: bin/staging-secrets.sh
--- is staging's, and production Worker secrets are a human procedure in that SOP.
--- ORDER: bin/migrate-prod.sh applies this migration, bin/deploy-worker.sh
--- --upload-version produces the immutable candidate and its approved release,
--- THEN Joe performs the two steps above, THEN --promote-version puts that
--- version in front of traffic. The order matters because a Worker promoted
--- before its secret exists is a verb that refuses every write.
+-- There is no wrapper to name for act (9) because none exists:
+-- bin/staging-secrets.sh is staging's, and the production credential and Worker
+-- secret are a human procedure written down in those two SOP sections. Act (9)
+-- stands where the accepted plan puts it, between the merge at (8) and the
+-- apply at (10), and it precedes the promotion at (12) because a Worker
+-- promoted before this secret exists is a verb that refuses every write and
+-- names required_secret.
 do $v5_a02_gate_zero_producer_role$
 begin
   if not exists (select 1 from pg_roles where rolname = 'carr_gate_zero_producer') then
