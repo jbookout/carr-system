@@ -8989,6 +8989,25 @@ ${preflightBody}end $gate_zero_outcome_admission_preflight$;
 -- do, before this grant and after it, is produce a row whose marker is true.
 grant insert on table ops.release to carr_authority;
 
+-- AND THE TWO READS THE TRIGGER NEEDS, in this same migration because that is
+-- where they belong. ops.release carries an INVOKER-RIGHTS trigger,
+-- release_completion_requires_a_read_back, which fires BEFORE INSERT and runs AS
+-- THE CALLER. Its body short-circuits unless the row is 'complete', so the
+-- candidate this grant exists for never reaches the reads -- but a role that can
+-- write the table and cannot SELECT what the trigger reads is a write path that
+-- dies in production and passes every rehearsal, because grants never fire for
+-- the owner. ops/trigger-read-grant-gate is exactly this check and it named
+-- these two relations and these exact columns; the grant is COLUMN-SCOPED to
+-- what the body reads and nothing wider. Neither grant is an ingress: the SIEP
+-- census counts only the row-changing privileges, so select moves no category --
+-- measured, not assumed.
+grant select (correlation_id, service_id, environment, state, git_sha,
+              read_back_at, release_id, provider, provider_version_id)
+  on ops.deployment to carr_authority;
+grant select (correlation_id, service_id, environment, run_key, state,
+              duration_ms, evidence_ref, release_id, budget_ms)
+  on ops.run to carr_authority;
+
 do $gate_zero_release_candidate_authority_admission$
 begin
   -- THE ADMISSION READS ITSELF BACK. A grant that silently did not take would
