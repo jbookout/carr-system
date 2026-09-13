@@ -1215,6 +1215,49 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  # THE GATE ZERO CANDIDATE-KEY RACE, added 2026-09-13 (PR 1014 correction).
+  # ops.gate_zero_record_read_only_outcome collapses a retry onto the row that
+  # exists, and whether it does so under CONCURRENCY is a property of one unique
+  # index and two transactions -- a mock can show what the handler sends and
+  # nothing about that. Two connections, one candidate, one durable row; the
+  # earlier lookup-then-insert shape fails this with a unique_violation, which is
+  # what makes it a falsifier rather than a demonstration.
+  #
+  # IT COMMITS, deliberately: an uncommitted race proves nothing, and the record
+  # is append-only by trigger so the rows stay. This class already builds and
+  # removes a throwaway database, which is the only place that is acceptable --
+  # and the proof refuses a DSN that is not loopback on its own account.
+  #
+  # NOTHING AFTER THIS POINT READS ops.gate_zero_read_only_outcome, so it runs
+  # last among the proofs rather than first.
+  # THE GATE ZERO SEAT BOUNDARY, added 2026-09-14 (PR 1014 third correction).
+  # Standing-rule amendment 9: seat-only write is enforced by CONNECTION ROLE.
+  # Whether carr_writer is refused, whether the dedicated login role is admitted,
+  # and whether re-granting carr_writer turns the privilege proof red are three
+  # properties of real grants and a real session_user -- none of which a mock can
+  # show. It runs BEFORE the race proof: it creates the dedicated login role that
+  # proof now needs, and its own mutation control restores the revoke before it
+  # returns, which it asserts rather than assumes.
+  if [ -f mcp-server/test/gate-zero-outcome-role-boundary.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-role-boundary.log" \
+         node --test mcp-server/test/gate-zero-outcome-role-boundary.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-role-boundary.log" >&2
+      bad migration "the Gate Zero producer seat/connection-role boundary proof failed"
+      return
+    fi
+  fi
+
+  if [ -f mcp-server/test/gate-zero-outcome-record-race.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-outcome-race.log" \
+         node --test mcp-server/test/gate-zero-outcome-record-race.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-outcome-race.log" >&2
+      bad migration "the Gate Zero outcome candidate-key race proof failed"
+      return
+    fi
+  fi
+
   # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
   # for months this class built a database where the app roles existed and held
   # NOTHING — has_table_privilege() false for every table, every role — and ran

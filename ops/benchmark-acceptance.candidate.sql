@@ -98,21 +98,25 @@
 --     none is invented: r7 makes the portfolio ACCEPTANCE STEP a prerequisite,
 --     not a lineage relation, so adding a lineage rule here would be a policy
 --     this slice does not hold. The claim is simply not made.
---   GATE ZERO -- NO AUTHENTICATED BINDING IN THIS RECORD LAYER. r7 references
---     step:gate-zero-read-only-outcome and tools/doctorcre-v5-review.cjs admits
---     it as an external pre-v5 step. THAT IS INTENTIONAL and nothing here asks
---     for a producer registry entry or a v5 producer for it: Gate Zero is
---     produced outside this system, and this file makes NO claim about whether a
---     Gate Zero outcome exists out there -- it very likely does. The only thing
---     this file is entitled to say is about itself: THIS database holds no
---     authenticated record of a Gate Zero outcome digest and the instant it was
---     observed, so there is nothing HERE for an acceptance to bind to.
---     ops.benchmark_gate_zero_outcome() below is a PRIVATE fail-closed reader:
---     it is granted to no role, it is reachable only from the definer functions
---     here, and it always raises. Consequently EVERY benchmark acceptance refuses
---     today. That is the honest state, and it is preferred to a caller-selected
---     work-request reference, a synthetic fixture digest or a new Gate Zero
---     policy invented in this file.
+--   GATE ZERO -- BOUND AS OF MIGRATION 0502, AND THE OLD READING IS RETIRED BY
+--     THE PACKET RATHER THAN BY PREFERENCE. This block used to say r7 registers
+--     no v5 producer for step:gate-zero-read-only-outcome and that the outcome
+--     is produced outside this system. The card-10 amendment (decision
+--     311a9af5-3685-4c47-a158-f8dd70870ca1) added the producer row, and
+--     tools/doctorcre-v5-review.cjs's own comment now says the external boundary
+--     moved down to the four predecessors. Gate Zero is a v5 producer with the
+--     role independent_control_plane_oracle, and the seat that holds it -- the
+--     independent Codex reviewer lane -- records the outcome itself under Joe's
+--     2026-09-13 ruling d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70, with no partner
+--     countersign. ops.gate_zero_read_only_outcome holds those rows.
+--     ops.benchmark_gate_zero_outcome() below is STILL a PRIVATE reader granted
+--     to no role and reachable only from the definer functions here, and it
+--     STILL raises when no current passing outcome exists -- so an acceptance
+--     attempted before one is recorded refuses exactly as it always did. What
+--     changed is that the refusal is now about the rows, not about the absence
+--     of a place to put them. A caller-selected work-request reference, a
+--     synthetic fixture digest and a Gate Zero policy invented in this file are
+--     all still refused.
 --   MEASUREMENT COVERAGE -- BOUND, TO EXACTLY WHAT IT PROVES AND NO MORE. A
 --     review row carries the digest of the measurement set its writer read (see
 --     2 above). Beside it, ops.benchmark_measurement_coverage_attestation now
@@ -142,10 +146,12 @@
 -- unwritable. This database does not become an independent verifier of benchmark
 -- coverage, and nothing below should be read as saying that it does.
 --
--- AND ACCEPTANCE STILL REFUSES. Landing this attestation clears ONE of the two
--- unbound acceptance bindings. ops.benchmark_gate_zero_outcome() still raises,
--- it is still read first, and no acceptance receipt can exist until an
--- authenticated Gate Zero outcome is recorded here by someone who observed it.
+-- AND ACCEPTANCE STILL REFUSES UNTIL BOTH ANSWER. The attestation cleared one
+-- binding on its own evidence; migration 0502 cleared the other by landing the
+-- Gate Zero outcome record and implementing its reader.
+-- ops.benchmark_gate_zero_outcome() is still read FIRST and still raises when no
+-- current passing outcome exists, so no acceptance receipt can exist until an
+-- independent oracle seat has recorded one.
 --
 -- Acceptance is strictly after both r7 prerequisites and the review it rests on:
 -- an acceptance recorded AT the Gate Zero instant, at the portfolio acceptance
@@ -585,13 +591,13 @@ create table if not exists ops.benchmark_manifest_acceptance_receipt (
   portfolio_revision_id   uuid not null references ops.portfolio_revision(id),
   portfolio_accepted_digest text not null check (portfolio_accepted_digest ~ '^sha256:[0-9a-f]{64}$'),
   portfolio_accepted_at   timestamptz not null,
-  -- PREREQUISITE TWO: the Gate Zero read-only outcome, as authenticated HERE.
-  -- Both columns are filled only from ops.benchmark_gate_zero_outcome(), which
-  -- always raises today because this record layer holds no authenticated Gate
-  -- Zero outcome -- a statement about this database, not about whether the
-  -- external pre-v5 producer ran. No row can exist in this table yet. The
-  -- columns are here so that the receipt binds the exact outcome the moment that
-  -- reader is implemented.
+  -- PREREQUISITE TWO: the Gate Zero read-only outcome, as authenticated HERE,
+  -- AND IT IS NOW BOUND. Both columns are filled only from
+  -- ops.benchmark_gate_zero_outcome(), which since migration 0502 reads the
+  -- current passing, unexpired row of ops.gate_zero_read_only_outcome and still
+  -- raises when there is none. So the receipt binds the exact outcome an
+  -- independent oracle seat recorded, and an acceptance attempted before any
+  -- outcome exists still fails closed exactly as it did while this was a stub.
   gate_zero_step_ref      text not null check (gate_zero_step_ref = 'step:gate-zero-read-only-outcome'),
   gate_zero_outcome_digest text not null check (gate_zero_outcome_digest ~ '^sha256:[0-9a-f]{64}$'),
   gate_zero_observed_at   timestamptz not null,
@@ -604,7 +610,7 @@ create table if not exists ops.benchmark_manifest_acceptance_receipt (
 );
 
 comment on table ops.benchmark_manifest_acceptance_receipt is
-  'Private verified-partner receipt accepting one exact benchmark payload digest, strictly after both r7 prerequisites: the portfolio constitution the acceptor named (accepted and intact, not a lineage claim) and the Gate Zero read-only outcome as authenticated in this record layer. It grants no dispatch, activation or execution authority and starts no clock; it only makes that draft the accepted benchmark contract. No row can exist until BOTH the Gate Zero reader and the measurement coverage proof binding are implemented.';
+  'Private verified-partner receipt accepting one exact benchmark payload digest, strictly after both r7 prerequisites: the portfolio constitution the acceptor named (accepted and intact, not a lineage claim) and the Gate Zero read-only outcome as authenticated in this record layer. It grants no dispatch, activation or execution authority and starts no clock; it only makes that draft the accepted benchmark contract. Both bindings are implemented as of migration 0502: the coverage attestation and the Gate Zero outcome record. A row can exist only when both answer, and each still refuses on its own grounds.';
 
 -- ---------------------------------------------------------------------------
 -- Append-only, and the freeze that follows acceptance.
@@ -1009,36 +1015,53 @@ $$;
 comment on function ops.benchmark_portfolio_prerequisite(text) is
   'The accepted portfolio constitution NAMED BY THE ACCEPTOR, resolved through the existing 0496 rail and verified against digests recomputed from its rows. Proves that the named portfolio is accepted and intact; it does not prove that the benchmark descends from it, because no benchmark-to-portfolio lineage is recorded anywhere. Refuses when no portfolio is accepted; invents none.';
 
--- PREREQUISITE TWO, UNBOUND HERE. THE PRIVATE FAIL-CLOSED GATE ZERO READER.
+-- PREREQUISITE TWO, NOW BOUND. THE PRIVATE GATE ZERO READER.
 --
--- This is the whole of the Gate Zero binding, and it is a stub on purpose.
+-- THIS BLOCK WAS A STUB FROM V5-A00 UNTIL migration 0502. What it said then was
+-- true then: no table in this database held an authenticated Gate Zero outcome,
+-- so an acceptance had nothing here to bind to. Migration
+-- 0502_gate_zero_read_only_outcome.sql lands that table, and this reader is
+-- implemented against it in the same change -- which the stub's own integration
+-- requirement demanded, because either half alone opens the gate without a
+-- record on the other side. The module-side twin, readGateZeroOutcome in
+-- mcp-server/src/benchmark-acceptance-store.v5.js, landed with it.
 --
--- WHAT IS MISSING, PRECISELY, AND WHAT IS NOT. Missing: any AUTHENTICATED RECORD
--- IN THIS DATABASE of a Gate Zero outcome digest and the instant it was
--- observed. No table holds one, so there is nothing here for an acceptance to
--- bind to.
+-- ONE CLAUSE OF THE OLD BLOCK WAS ALSO WRONG BY THE TIME IT WAS DELETED, and it
+-- is worth naming rather than quietly dropping. It said r7 registers no v5
+-- producer for step:gate-zero-read-only-outcome and that this is intentional.
+-- The card-10 amendment (decision 311a9af5-3685-4c47-a158-f8dd70870ca1, applied
+-- under Joe's ruling on open loop #589) added the producer row, and
+-- tools/doctorcre-v5-review.cjs's own comment now says the external boundary
+-- moved down to the four predecessors. Gate Zero is a v5 producer with a
+-- registered role, oracle, output schema, evidence scope and gate.
 --
--- NOT missing, and not being asked for: a Gate Zero producer. r7 references
--- step:gate-zero-read-only-outcome without registering a producer for it, and
--- tools/doctorcre-v5-review.cjs admits it as an EXTERNAL PRE-V5 step. That is
--- intentional, it is settled, and this file neither asks for a producer registry
--- entry nor implies the step is defective. Gate Zero runs outside this system;
--- an outcome very likely exists out there. This function makes no claim either
--- way. It refuses because THIS record layer cannot authenticate that outcome,
--- which is a statement about the binding available here and about nothing else.
+-- WHO PRODUCES ONE. The independent oracle seat -- the Codex reviewer lane,
+-- staffed under charter ruling 8a1dad08-8707-4bb0-a159-c2831a00cea2 and Joe's
+-- blanket approval 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84 -- writing through
+-- ops.gate_zero_record_read_only_outcome under Joe's 2026-09-13 ruling
+-- d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70. No partner countersign. The human act
+-- in this chain stays where the provisional ruling put it: downstream, on the
+-- benchmark manifest acceptance, which is unchanged by all of this.
 --
--- WHAT THIS FUNCTION REFUSES TO DO INSTEAD. It does not accept an outcome digest
+-- WHAT THIS FUNCTION STILL REFUSES TO DO. It does not accept an outcome digest
 -- from the caller, read one out of configuration, derive one from a synthetic
--- fixture, select a work-request reference, or treat "the reader is not built"
--- as "the gate is open". Each of those would manufacture the exact authority the
--- absent record is supposed to carry.
+-- fixture, select a work-request reference, or treat a recorded non-passing run
+-- as a binding. Each of those would manufacture the exact authority the record
+-- is supposed to carry. It reads one row and returns three fields.
 --
--- INTEGRATION REQUIREMENT, so this is a named gap and not a silent one: land an
--- authenticated record of the external Gate Zero outcome carrying (a) the exact
--- outcome digest and (b) the trusted instant it was observed, then replace this
--- body with a read of that record. Until that exists, every benchmark acceptance
--- fails closed here, and ops.benchmark_manifest_acceptance_receipt necessarily
--- has zero rows.
+-- WHICH ROW IS CURRENT, as an ordered procedure rather than a description:
+-- status must be 'pass'; the expiry must not have passed; of what remains the
+-- latest observed_at wins, tie-broken on outcome_digest descending so the order
+-- is total; and none left raises, which is the same fail-closed posture the stub
+-- had. The two refusals are distinguished -- nothing ever recorded, versus
+-- everything recorded being expired or non-passing -- because those are
+-- different problems for whoever hits them.
+--
+-- IT IS DEFINED IN TWO PLACES ON PURPOSE, AND THEY MUST NOT DRIFT. Migration
+-- 0502 carries the definition that binds in a database; this file is candidate
+-- source and is still not in public.schema_migrations. The bodies are
+-- deliberately identical, and mcp-server/test/benchmark-acceptance-store.v5.test.mjs
+-- asserts so by reading both files.
 --
 -- PRIVATE means private: this function is granted to no role below. It is
 -- reachable only from the security-definer write path in this file, which runs
@@ -1048,22 +1071,32 @@ create or replace function ops.benchmark_gate_zero_outcome()
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
 as $$
+declare v_row ops.gate_zero_read_only_outcome%rowtype; v_any boolean;
 begin
-  raise exception 'benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and this record layer holds none: no table here records a step:gate-zero-read-only-outcome outcome digest or the instant it was observed. This says nothing about whether the external pre-v5 Gate Zero step produced an outcome elsewhere -- it is not registered as a v5 producer, by design, and none is being asked for. INTEGRATION REQUIREMENT: record an authenticated Gate Zero outcome digest and its observed instant here, then implement this reader against that record. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
-  -- Unreachable. Present so the shape the implemented reader must return is
-  -- stated in code rather than only in prose. The nulls are deliberate: if a
-  -- future edit deletes the raise above without implementing the read, every
-  -- member arrives null and ops.benchmark_assert_bound() refuses each one, so
-  -- the failure mode of a half-finished implementation is still a refusal.
+  select * into v_row from ops.gate_zero_read_only_outcome
+   where status = 'pass' and ttl_expires_at > now()
+   order by observed_at desc, outcome_digest collate "C" desc
+   limit 1;
+  if not found then
+    select exists (select 1 from ops.gate_zero_read_only_outcome) into v_any;
+    if v_any then
+      raise exception 'benchmark acceptance requires a current passing Gate Zero read-only outcome; every outcome recorded here is non-passing or past its expiry. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
+    end if;
+    raise exception 'benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and none has been recorded here yet. The record exists (ops.gate_zero_read_only_outcome) and the independent oracle seat writes it; until it does, acceptance fails closed. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
+  end if;
+  -- THE CLOSED THREE-FIELD OBJECT the whole foundation join hangs on
+  -- (benchmark-minimum.v5.js:435, :1449-1453). Nothing else is returned: a
+  -- fourth field here is a value some future reader consumes as something it
+  -- is not.
   return jsonb_build_object(
-    'step_ref', 'step:gate-zero-read-only-outcome',
-    'outcome_digest', null,
-    'observed_at', null);
+    'step_ref', v_row.step_ref,
+    'outcome_digest', v_row.outcome_digest,
+    'observed_at', to_char(v_row.observed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
 end;
 $$;
 
 comment on function ops.benchmark_gate_zero_outcome() is
-  'PRIVATE fail-closed reader for the Gate Zero read-only outcome. Always raises: this record layer holds no authenticated Gate Zero outcome to bind, which is a statement about what is available here and not about whether the external pre-v5 step produced an outcome. Granted to no role; reachable only from the definer write path in this file.';
+  'PRIVATE reader for the current Gate Zero read-only outcome: the latest passing, unexpired row in ops.gate_zero_read_only_outcome (migration 0502), as the closed { step_ref, outcome_digest, observed_at }. Raises when there is none, which is the same fail-closed posture this reader had while it was a stub. Granted to no role; reachable only from the definer write path in this file.';
 
 -- THE THIRD BINDING, NOW BOUND, AND DELIBERATELY STILL INDEPENDENT OF THE
 -- SECOND. THE PRIVATE MEASUREMENT COVERAGE PROOF READER.
@@ -1098,9 +1131,13 @@ comment on function ops.benchmark_gate_zero_outcome() is
 -- auditable, and makes an unattested pass unwritable. It does not make this
 -- database a verifier of coverage.
 --
--- IT IS SEPARATE FROM GATE ZERO ON PURPOSE, in both directions. This binding
--- resolving does not resolve Gate Zero: ops.benchmark_gate_zero_outcome() still
--- raises, is still read first, and acceptance still fails closed there.
+-- IT IS SEPARATE FROM GATE ZERO ON PURPOSE, in both directions, and it stayed
+-- separate when Gate Zero landed. This binding resolving did not resolve Gate
+-- Zero, and Gate Zero landing in migration 0502 does not upgrade this one:
+-- ops.benchmark_gate_zero_outcome() is still read first and still raises when
+-- there is no current passing outcome, and this reader still refuses on its own
+-- grounds afterwards. That is the fourth thing the coverage requirement
+-- explicitly refuses -- silently upgrading the assertion when Gate Zero lands.
 create or replace function ops.benchmark_measurement_coverage_binding(p_review_id uuid)
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
@@ -1908,7 +1945,7 @@ end;
 $$;
 
 comment on function ops.benchmark_accept_manifest_draft(uuid,uuid,text,uuid,text) is
-  'The only way to accept a benchmark manifest draft. The acceptor, the portfolio binding, the Gate Zero outcome and the measurement coverage proof are all derived, never parameters. It takes FOR UPDATE on the draft row, which the content freeze trigger''s FOR SHARE conflicts with. It cannot succeed until BOTH an authenticated Gate Zero outcome record and a measurement coverage attestation exist here; landing only the first still leaves it refusing.';
+  'The only way to accept a benchmark manifest draft. The acceptor, the portfolio binding, the Gate Zero outcome and the measurement coverage proof are all derived, never parameters. It takes FOR UPDATE on the draft row, which the content freeze trigger''s FOR SHARE conflicts with. It cannot succeed unless BOTH a current passing Gate Zero outcome record and a measurement coverage attestation exist here; either one missing still leaves it refusing.';
 
 -- ---------------------------------------------------------------------------
 -- Grants. Reads reach the ordinary bundles. DIRECT INSERT IS GRANTED TO NOBODY:

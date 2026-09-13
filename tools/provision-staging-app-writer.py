@@ -5,6 +5,19 @@ Read-only planning is the default. ``--apply`` is the only mutating path. The
 caller must supply the full candidate-operation UUID, immutable receipt UUID,
 and merged source SHA; provider scopes, roles, DSNs, grants, and Worker names
 remain server- and repository-derived authority rather than caller choices.
+
+STAGING ONLY, AND THAT IS THE DESIGN RATHER THAN A GAP. Every scope this tool
+resolves is refused if it lands on the Production project id. Migration 0502
+creates the Gate Zero producer seat WITHOUT a password, and this tool ADOPTS
+that state for STAGING as its third login profile. The production credential
+for ``carr_gate_zero_producer`` and the production Worker secret
+DATABASE_URL_GATE_ZERO_WRITER are Joe's own act at a console he controls,
+through the equivalent production path already written down: Neon Database SOP
+section `01-connections-and-roles` for the role's password, then Cloudflare Edge
+SOP section `02-secrets-and-tokens` for the per-secret procedure that sets it on
+the production Worker and verifies it from the consumer. No session, subagent or
+scheduled lane holds the Cloudflare token or the Production owner credential,
+and nothing in this branch provisions Production.
 """
 
 from __future__ import annotations
@@ -39,6 +52,21 @@ APP_ROLE = "app_writer"
 BUNDLE_ROLE = "carr_writer"
 READER_ROLE = "app_reader"
 READER_BUNDLE_ROLE = "carr_reader"
+# The Gate Zero producer seat. Standing-rule amendment 9 (2026-09-14): seat-only
+# write is enforced by CONNECTION ROLE, so the one verb that records a Gate Zero
+# read-only outcome runs on its own login role rather than on app_writer.
+# migrations/0502_gate_zero_read_only_outcome.sql creates the NOLOGIN bundle,
+# grants it the sole EXECUTE on ops.gate_zero_record_read_only_outcome, and
+# derives the producing seat from session_user. The LOGIN role and its secret are
+# provisioned HERE, out of band, because a rebuilt schema must never mint a
+# credential -- the same split 0315 uses for the forward-fix verifier.
+# It is a LOGIN role with NO bundle, which is the one departure from the pair
+# above and is measured rather than preferred: a NOLOGIN `carr_*` bundle enters
+# the SCAC sealed role_authority projection, and PostgreSQL roles are cluster-
+# wide while db/schema.sql is a database artifact, so a new bundle invalidates
+# the snapshot seal for every other database in the same cluster until the
+# snapshot is regenerated. The migration's header carries the measurement.
+GATE_ZERO_PRODUCER_ROLE = "carr_gate_zero_producer"
 LOCK_KEY = 7301961134306001
 BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
@@ -55,6 +83,7 @@ FORBIDDEN_ENV = (
     "CARR_DB_AUTHORITY_URL",
     "CARR_DB_STAGING_WRITER_URL",
     "CARR_DB_STAGING_READER_URL",
+    "CARR_DB_STAGING_GATE_ZERO_WRITER_URL",
     "PGHOST",
     "PGPORT",
     "PGDATABASE",
@@ -118,7 +147,9 @@ replacement = load_module(
 
 REPLACEMENT_VERIFIER_KEY = "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL"
 REPLACEMENT_VERIFIER_ROLE = "carr_program5_forward_fix_verifier"
-WORKER_DATABASE_SECRET_NAMES = ("DATABASE_URL_READER", "DATABASE_URL_WRITER")
+WORKER_DATABASE_SECRET_NAMES = (
+    "DATABASE_URL_READER", "DATABASE_URL_WRITER", "DATABASE_URL_GATE_ZERO_WRITER",
+)
 WORKER_ENV_ALLOWLIST = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "CLOUDFLARE_API_TOKEN",
@@ -212,20 +243,58 @@ class RoleAuthority:
 class LoginProfile:
     label: str
     login_role: str
-    bundle_role: str
+    # None for a DIRECT-GRANT profile: the canonical grants attach to the login
+    # role itself rather than to a NOLOGIN capability bundle it is a member of.
+    bundle_role: str | None
     secret_name: str
+    # True for a role a MIGRATION creates with no password. That is the one
+    # state `create role` cannot reach and `reuse` cannot describe: the role is
+    # already there and no credential has ever existed for it. Such a profile
+    # may be ADOPTED -- the owner connection sets the password itself -- and no
+    # other profile may be, because for a role this tool created, role-present
+    # and credential-absent means a credential was lost rather than never
+    # minted, and silently rotating it would cut off whatever is still using it.
+    created_by_migration: bool = False
+
+    @property
+    def grant_role(self) -> str:
+        """The role the canonical grant plan is read for and validated against."""
+        return self.bundle_role or self.login_role
+
+
+@dataclass(frozen=True)
+class AdoptedSeat:
+    """One migration-created seat whose password is prepared but not committed.
+
+    It was a bare three-tuple until 2026-09-13, which is the shape that made the
+    commit-failure gap easy to miss: `(profile, file_profile, stored)` says
+    nothing about which member carries the DSN that has already been published
+    to the Worker, so the reader cannot see what a failed commit strands. Named
+    fields say it.
+    """
+
+    profile: LoginProfile
+    credential_file: Any
+    stored: Any
 
 
 @dataclass(frozen=True)
 class ProfileClosure:
     login: RoleAuthority
-    bundle: RoleAuthority
+    # None for a DIRECT-GRANT profile, which has no bundle behind its login role.
+    bundle: RoleAuthority | None
     creator_edges: tuple[tuple[str, bool, bool, bool, int], ...]
 
 
+# Reader first, then writer, then the seat: run_profile_sequence relies on this
+# order so each completed profile stays recoverable if the next boundary refuses.
+# The Gate Zero seat is LAST because it is the narrowest and the newest; nothing
+# else in the Worker reads its secret.
 PROFILES = (
     LoginProfile("reader", READER_ROLE, READER_BUNDLE_ROLE, "DATABASE_URL_READER"),
     LoginProfile("writer", APP_ROLE, BUNDLE_ROLE, "DATABASE_URL_WRITER"),
+    LoginProfile("gate_zero_producer", GATE_ZERO_PRODUCER_ROLE,
+                 None, "DATABASE_URL_GATE_ZERO_WRITER", created_by_migration=True),
 )
 
 
@@ -914,7 +983,7 @@ def role_exists(cur: Any, role: str) -> bool:
 def collect_profile_closure(cur: Any, profile: LoginProfile) -> ProfileClosure:
     return ProfileClosure(
         collect_role_authority(cur, profile.login_role),
-        collect_role_authority(cur, profile.bundle_role),
+        collect_role_authority(cur, profile.bundle_role) if profile.bundle_role else None,
         collect_creator_edges(cur, profile.login_role),
     )
 
@@ -927,14 +996,17 @@ def validate_profile_closure(
     bundle = closure.bundle
     if not login.can_login or not login.inherits_privileges or login.powerful_attributes:
         raise ProvisioningRefusal(f"{profile.login_role} is not a plain inheriting LOGIN role")
-    if bundle.can_login or not bundle.inherits_privileges or bundle.powerful_attributes:
-        raise ProvisioningRefusal(f"{profile.bundle_role} is not a plain NOLOGIN privilege bundle")
-    if login.owned_objects or bundle.owned_objects:
+    if bundle is not None:
+        if bundle.can_login or not bundle.inherits_privileges or bundle.powerful_attributes:
+            raise ProvisioningRefusal(f"{profile.bundle_role} is not a plain NOLOGIN privilege bundle")
+        if bundle.owned_objects:
+            raise ProvisioningRefusal("staging login/bundle roles must not own objects")
+        if login.direct_acl_facts:
+            raise ProvisioningRefusal(f"{profile.login_role} has forbidden direct ACLs")
+        if bundle.memberships or bundle.reachable_roles or bundle.role_config:
+            raise ProvisioningRefusal(f"{profile.bundle_role} inherits or configures extra authority")
+    if login.owned_objects:
         raise ProvisioningRefusal("staging login/bundle roles must not own objects")
-    if login.direct_acl_facts:
-        raise ProvisioningRefusal(f"{profile.login_role} has forbidden direct ACLs")
-    if bundle.memberships or bundle.reachable_roles or bundle.role_config:
-        raise ProvisioningRefusal(f"{profile.bundle_role} inherits or configures extra authority")
     if closure.creator_edges != (
         (expected_creator, True, False, False, BOOTSTRAP_SUPERUSER_OID),
     ):
@@ -945,12 +1017,19 @@ def validate_profile_closure(
     allowed_config = tuple(sorted((
         "idle_in_transaction_session_timeout=120s", "statement_timeout=60s",
     )))
+    # A DIRECT-GRANT PROFILE REACHES NOTHING, which is stricter than the bundle
+    # pair rather than looser: the exact membership check below becomes "no
+    # membership at all", and the canonical ACLs are validated on the login role
+    # itself because that is where the migration granted them.
+    expected_memberships = () if profile.bundle_role is None \
+        else ((profile.bundle_role, False, True, True),)
+    expected_reachable = () if profile.bundle_role is None else (profile.bundle_role,)
     if exact:
         if login.role_config != allowed_config:
             raise ProvisioningRefusal(f"{profile.login_role} timeouts/config are not exact")
-        if login.memberships != ((profile.bundle_role, False, True, True),):
+        if login.memberships != expected_memberships:
             raise ProvisioningRefusal(f"{profile.login_role} bundle membership is not exact")
-        if login.reachable_roles != (profile.bundle_role,):
+        if login.reachable_roles != expected_reachable:
             raise ProvisioningRefusal(f"{profile.login_role} reaches an unexpected role")
     else:
         if login.role_config and login.role_config != allowed_config:
@@ -960,14 +1039,16 @@ def validate_profile_closure(
         if any(name != profile.bundle_role for name in login.reachable_roles):
             raise ProvisioningRefusal(f"reused {profile.login_role} reaches an extra role")
     expected_acl = set(snapshot_grants.acl_facts(canonical_grants))
-    actual_acl = set(bundle.direct_acl_facts)
+    actual_acl = set((bundle or login).direct_acl_facts)
     if actual_acl - expected_acl:
-        raise ProvisioningRefusal(f"{profile.bundle_role} has excess or grantable authority")
+        raise ProvisioningRefusal(f"{profile.grant_role} has excess or grantable authority")
     if exact and expected_acl - actual_acl:
-        raise ProvisioningRefusal(f"{profile.bundle_role} is missing canonical authority")
+        raise ProvisioningRefusal(f"{profile.grant_role} is missing canonical authority")
 
 
 def _profile_membership_sql(profile: LoginProfile) -> tuple[str, ...]:
+    if profile.bundle_role is None:
+        return ()
     return (
         f"grant {profile.bundle_role} to {profile.login_role} with admin false",
         f"grant {profile.bundle_role} to {profile.login_role} with inherit true",
@@ -975,32 +1056,125 @@ def _profile_membership_sql(profile: LoginProfile) -> tuple[str, ...]:
     )
 
 
+def role_is_passwordless(cur: Any, role: str) -> bool:
+    """Ask the DATABASE whether this role has ever been credentialed.
+
+    ``pg_authid`` is the only place the answer lives: ``pg_roles`` reports every
+    role's ``rolpassword`` as a fixed mask, so it cannot tell a passwordless role
+    from a credentialed one. A connection that cannot read ``pg_authid`` gets no
+    answer here and no benefit of the doubt -- the caller refuses.
+
+    WHO CAN READ IT, measured rather than assumed: on Neon the owner connection
+    authenticates as ``neondb_owner``, which reaches ``neon_superuser``, which
+    reaches ``pg_read_all_data`` -- the predefined role that confers SELECT on
+    every table, ``pg_authid`` included. That reachability is the same list
+    tools/cleanup-staging-app-writer.py pins as EXPECTED_PROVIDER_REACHABLE_ROLES,
+    and ops/staging-database-login-provision-db-gate.py proves BOTH halves
+    against a real PostgreSQL: with the grant the adoption succeeds, without it
+    the adoption refuses instead of assuming.
+    """
+    cur.execute("select rolpassword is null from pg_authid where rolname=%s", (role,))
+    rows = cur.fetchall()
+    if len(rows) != 1:
+        raise ProvisioningRefusal(f"{role} has no single pg_authid row on this database")
+    return rows[0][0] is True
+
+
+def require_passwordless_seat(cur: Any, role: str) -> None:
+    """The guard on adoption, and it reads the database rather than a local file.
+
+    THE FAILURE THIS CLOSES (2026-09-13). Adoption used to be decided by role
+    existence plus the ABSENCE OF A LOCAL CREDENTIAL FILE, and that file lives
+    under the running machine's home directory. A deleted file, a fresh clone, or
+    a run from a second machine is therefore indistinguishable from first
+    provisioning -- and the answer to first provisioning is `alter role ...
+    password`, which on a seat that is already credentialed silently ROTATES it
+    and cuts off whatever is still connected as it.
+
+    A migration-created seat is adopted from exactly one honest state: the role
+    is present and no password has ever been set on it, which is the state
+    migration 0502 leaves behind. Anything else is a lost local file, not a
+    passwordless role, and the fix for a lost file is a deliberate rotation with
+    its own approval -- never a side effect of a provisioning run.
+    """
+    try:
+        passwordless = role_is_passwordless(cur, role)
+    except ProvisioningRefusal:
+        raise
+    except psycopg.Error as exc:
+        raise ProvisioningRefusal(
+            f"could not read from pg_authid whether {role} is still passwordless; "
+            "this connection cannot see it, so adoption refuses"
+        ) from exc
+    if not passwordless:
+        raise ProvisioningRefusal(
+            f"{role} already holds a password; adopting it would rotate a credential that "
+            "is still in use. The credential file is missing on this machine, not on the "
+            "database -- rotate deliberately or restore the file"
+        )
+
+
 def apply_login_profile(
     conn: Any, profile: LoginProfile, grants: Sequence[str], password: str,
-    *, expected_creator: str, commit: bool = True,
+    *, expected_creator: str, commit: bool = True, adopt: bool = False,
 ) -> bool:
-    """Create/converge one login profile in one advisory-locked transaction."""
+    """Create/converge one login profile in one advisory-locked transaction.
+
+    ``adopt`` is the migration-created seat's path: the role is already there
+    with no password, so this sets one rather than creating the role. It is
+    refused for any other profile; it re-reads pg_authid UNDER THE ADVISORY LOCK
+    and refuses a role that already holds a password; and the same exact-closure
+    validation runs at the end of both paths, so an adopted role is held to the
+    identical bar.
+
+    ``commit=False`` is how the adopt path stays reversible: the caller publishes
+    the Worker secret and reads it back while this transaction is still open, and
+    a publication failure rolls the password change away rather than leaving a
+    rotated role behind a Worker that never received the new DSN.
+    """
     cur = conn.cursor()
     created = False
+    if adopt and not profile.created_by_migration:
+        raise ProvisioningRefusal(
+            f"{profile.login_role} is not a migration-created seat and may not be adopted")
     try:
         cur.execute("select pg_advisory_xact_lock(%s)", (LOCK_KEY,))
         exists = role_exists(cur, profile.login_role)
-        if exists:
+        if exists and adopt:
+            authority = collect_role_authority(cur, profile.login_role)
+            if (
+                not authority.can_login or not authority.inherits_privileges
+                or authority.powerful_attributes or authority.owned_objects
+            ):
+                raise ProvisioningRefusal(
+                    f"{profile.login_role} is not a plain inheriting LOGIN role that owns nothing")
+            # UNDER THE LOCK, immediately before the only statement that can
+            # rotate a live credential. The caller's decision read happened
+            # before this transaction existed; this one cannot be skipped by any
+            # path that reaches the ALTER.
+            require_passwordless_seat(cur, profile.login_role)
+            cur.execute(sql.SQL("alter role {} with password {}").format(
+                sql.Identifier(profile.login_role), sql.Literal(password)))
+        elif exists:
             validate_profile_closure(
                 collect_profile_closure(cur, profile), profile, grants,
                 exact=True, expected_creator=expected_creator,
             )
+        elif adopt:
+            raise ProvisioningRefusal(
+                f"{profile.login_role} does not exist; its migration has not applied here")
         else:
-            bundle = collect_role_authority(cur, profile.bundle_role)
-            if (
-                bundle.can_login or not bundle.inherits_privileges
-                or bundle.powerful_attributes or bundle.owned_objects
-                or bundle.memberships or bundle.reachable_roles or bundle.role_config
-            ):
-                raise ProvisioningRefusal(f"{profile.bundle_role} is not a closed bundle role")
-            expected_acl = set(snapshot_grants.acl_facts(grants))
-            if set(bundle.direct_acl_facts) - expected_acl:
-                raise ProvisioningRefusal(f"{profile.bundle_role} has excess authority")
+            if profile.bundle_role is not None:
+                bundle = collect_role_authority(cur, profile.bundle_role)
+                if (
+                    bundle.can_login or not bundle.inherits_privileges
+                    or bundle.powerful_attributes or bundle.owned_objects
+                    or bundle.memberships or bundle.reachable_roles or bundle.role_config
+                ):
+                    raise ProvisioningRefusal(f"{profile.bundle_role} is not a closed bundle role")
+                expected_acl = set(snapshot_grants.acl_facts(grants))
+                if set(bundle.direct_acl_facts) - expected_acl:
+                    raise ProvisioningRefusal(f"{profile.bundle_role} has excess authority")
             cur.execute("set local createrole_self_grant = ''")
             cur.execute("select current_setting('createrole_self_grant')")
             if cur.fetchone() != ("",):
@@ -1014,10 +1188,22 @@ def apply_login_profile(
             # The exact edge (including its grantor) is proved below by the
             # same fail-closed closure validation used for reused roles.
             created = True
-        for statement in grants:
-            cur.execute(statement)
-        for statement in _profile_membership_sql(profile):
-            cur.execute(statement)
+        if not adopt:
+            # THE ADOPT PATH VERIFIES THE MIGRATION'S GRANTS AND DOES NOT RE-ISSUE
+            # THEM. For a role this tool creates, the canonical plan is what
+            # brings the role into existence with its authority. For a
+            # migration-created seat the numbered file already made every grant,
+            # and re-running them here would be a credentialing tool quietly
+            # re-granting authority it does not own -- which moves the GRANTOR on
+            # the sealed function-ACL projection and, worse, would let a seat
+            # whose grants had drifted be silently repaired by a password change
+            # instead of refusing. The exact-closure validation below is
+            # unchanged and still runs on both paths, so an adopted seat missing
+            # any canonical grant fails here rather than being fixed here.
+            for statement in grants:
+                cur.execute(statement)
+            for statement in _profile_membership_sql(profile):
+                cur.execute(statement)
         cur.execute(f"alter role {profile.login_role} set statement_timeout = '60s'")
         cur.execute(
             f"alter role {profile.login_role} set idle_in_transaction_session_timeout = '120s'"
@@ -1156,6 +1342,52 @@ def publish_worker_cutover(
         ) from exc
 
 
+def settle_adopted_seats(
+    conn: Any, deferred: Sequence[AdoptedSeat], *,
+    publish: Callable[[], None], prove: Callable[[AdoptedSeat], None],
+    compensate: Callable[[], None],
+) -> None:
+    """Publish the Worker secrets FIRST, then commit the adopted seats' passwords.
+
+    The order is the whole point, which is why this is a named function rather
+    than three statements inline. A migration-created seat's `alter role ...
+    password` is prepared in an OPEN transaction; if publication or its readback
+    refuses, this raises before the commit and the caller's unwind rolls that
+    password change away, leaving the seat exactly as its migration left it --
+    passwordless, and reachable by nothing. Committing first and publishing
+    second is the shape that leaves a ROTATED role behind a Worker still holding
+    the DSN that no longer authenticates, which is the state nothing in this tool
+    can repair from the outside.
+
+    THE COMMIT ITSELF CAN FAIL, and until 2026-09-13 nothing here answered for
+    that. Publication has already succeeded at that point, so the Worker is
+    holding the CANDIDATE DSN while the database has rolled the matching password
+    away: the seat is passwordless again and the Worker's value authenticates as
+    nothing. Ordering cannot close this one -- the window is the commit -- so it
+    is closed by COMPENSATION: `compensate` restores the previously serving
+    secret set through the same atomic bulk-plus-readback door the publication
+    used, and only then is the failure reported. A compensation that cannot read
+    its own restoration back is an uncertain state and says so by name rather
+    than being retried.
+    """
+    publish()
+    try:
+        conn.commit()
+    except Exception as exc:
+        try:
+            compensate()
+        except Exception as compensate_exc:
+            raise ProvisioningRefusal(
+                "adopted seat commit refused and the Worker secret restoration outcome "
+                "is uncertain; output suppressed"
+            ) from compensate_exc
+        raise ProvisioningRefusal(
+            "adopted seat commit refused; prior Worker bindings restored; output suppressed"
+        ) from exc
+    for entry in deferred:
+        prove(entry)
+
+
 def rollback_worker_to_prior(
     rollback_values: Mapping[str, str], *, preserve: Callable[[], None],
     bulk: Callable[[Mapping[str, str]], None], verify: Callable[[], None],
@@ -1182,15 +1414,52 @@ def require_direct_owner_identity(cur: Any) -> str:
     return "neondb_owner"
 
 
-def decide_profile_action(*, role_exists_now: bool, credential_state: str) -> str:
+def decide_profile_action(
+    *, role_exists_now: bool, credential_state: str,
+    role_created_by_migration: bool = False, role_passwordless: bool | None = None,
+) -> str:
+    """Name the one safe action for an observed role/credential/password state.
+
+    THE ADOPT ROW IS NARROW, AND SINCE 2026-09-13 IT IS DECIDED BY THE DATABASE.
+    For an ordinary profile this tool creates the role and mints its credential
+    in the same operation, so role-present/credential-absent means a credential
+    was LOST and the only safe answer is to refuse. The Gate Zero producer seat
+    is different by design: migration 0502 creates `carr_gate_zero_producer` with
+    NO password, so role-present/credential-absent is its NORMAL starting state
+    and refusing it left the declared DATABASE_URL_GATE_ZERO_WRITER with no way
+    to exist.
+
+    What separates those two cases is NOT the local file -- that file lives under
+    one machine's home directory and its absence proves nothing -- it is whether
+    the role still has no password. So `role_passwordless` is the observed
+    `pg_authid` answer, and adoption is available only when it is True:
+
+    - passwordless and credential absent  -> adopt: first provisioning.
+    - passwordless and credential pending -> adopt: a run crashed before the
+      password change committed, so re-applying the pending password is what
+      makes the file and the role agree.
+    - NOT passwordless and credential pending -> resume, the ordinary row: the
+      password is already set, so the pending value is proved by logging in
+      with it rather than re-applied.
+    - NOT passwordless and credential absent -> no row at all, which refuses.
+      That is the lost-local-file case, and refusing it is the point.
+    """
     matrix = {
         (False, "absent"): "prepare_create",
         (False, "pending"): "create",
         (True, "pending"): "resume",
         (True, "final"): "reuse",
     }
+    if role_created_by_migration and role_passwordless is True:
+        matrix[(True, "absent")] = "adopt"
+        matrix[(True, "pending")] = "adopt"
     action = matrix.get((role_exists_now, credential_state))
     if action is None:
+        if role_created_by_migration and role_exists_now and credential_state == "absent":
+            raise ProvisioningRefusal(
+                "the migration-created seat already holds a password and has no credential "
+                "file here; that is a lost local file, not a seat waiting to be provisioned"
+            )
         raise ProvisioningRefusal(
             f"unsafe role/credential state: role_exists={role_exists_now}, credential={credential_state}"
         )
@@ -1244,7 +1513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.candidate_operation_id, args.receipt_id, args.sha)
         plans = {
             profile.label: snapshot_grants.load_current_grants_to_role(
-                SCHEMA, MIGRATIONS, profile.bundle_role
+                SCHEMA, MIGRATIONS, profile.grant_role
             ) for profile in PROFILES
         }
         binding = resolve_replacement_binding(target, environ=os.environ)
@@ -1304,6 +1573,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         lock_path = config_root / ".staging-role-operation.lock"
         outcomes: dict[str, str] = {}
         candidate_values: dict[str, str] = {}
+        # THE ADOPT PATH'S OPEN TRANSACTION. A migration-created seat's password
+        # change is prepared here and COMMITTED ONLY AFTER the Worker secret is
+        # published and read back, so a publication that fails rolls the change
+        # away and leaves the seat exactly as its migration left it. A commit
+        # that fails AFTER publication is compensated instead: the prior Worker
+        # bindings are restored through the same atomic door.
+        deferred_seats: list[AdoptedSeat] = []
         with credential.exclusive_lock(lock_path):
             owner = psycopg.connect(owner_dsn.value)
             try:
@@ -1319,6 +1595,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     cur.execute("select exists(select 1 from pg_roles where rolname=%s)",
                                 (login_profile.login_role,))
                     exists = cur.fetchone() == (True,)
+                    # The DATABASE decides whether a migration-created seat is
+                    # still uncredentialed; the local file cannot answer it.
+                    passwordless = (
+                        role_is_passwordless(cur, login_profile.login_role)
+                        if exists and login_profile.created_by_migration else None
+                    )
                     try:
                         stored = credential.load_existing(
                             file_profile.paths, key=file_profile.key,
@@ -1331,7 +1613,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if "is absent" not in str(exc):
                             raise
                         action = decide_profile_action(
-                            role_exists_now=exists, credential_state="absent"
+                            role_exists_now=exists, credential_state="absent",
+                            role_created_by_migration=login_profile.created_by_migration,
+                            role_passwordless=passwordless,
                         )
                         stored = credential.prepare_pending(
                             file_profile.paths, key=file_profile.key,
@@ -1343,7 +1627,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     else:
                         action = decide_profile_action(
-                            role_exists_now=exists, credential_state=stored.state
+                            role_exists_now=exists, credential_state=stored.state,
+                            role_created_by_migration=login_profile.created_by_migration,
+                            role_passwordless=passwordless,
                         )
                     if action in {"resume", "reuse"}:
                         validate_profile_login(
@@ -1351,6 +1637,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                             expected_creator=expected_creator,
                         )
                         outcome = "resumed" if action == "resume" else "reused"
+                    elif action == "adopt":
+                        # ADOPT is the migration-created seat's row: the role is
+                        # already there without a password, so the owner sets one
+                        # rather than creating a role that exists -- and the
+                        # change is NOT committed here. The seat is proved by
+                        # logging in as it, and its credential file is promoted,
+                        # only after the Worker secret carrying that same DSN is
+                        # published and read back. Until then this transaction is
+                        # the undo, so a failed publication cannot leave a rotated
+                        # seat behind a Worker that never got the new value.
+                        apply_login_profile(
+                            owner, login_profile, plans[login_profile.label], stored.password,
+                            expected_creator=expected_creator, adopt=True, commit=False,
+                        )
+                        deferred_seats.append(
+                            AdoptedSeat(login_profile, file_profile, stored))
+                        return stored.value, "adopting"
                     else:
                         apply_login_profile(
                             owner, login_profile, plans[login_profile.label], stored.password,
@@ -1371,6 +1674,56 @@ def main(argv: Sequence[str] | None = None) -> int:
                     value, outcome = converge(login_profile)
                     candidate_values[login_profile.secret_name] = value
                     outcomes[login_profile.label] = outcome
+
+                final_state: dict[str, SeedState] = {}
+                def verify_final_candidate_state() -> None:
+                    observed = read_seed_state(owner_dsn.value)
+                    if observed != before:
+                        raise ProvisioningRefusal(
+                            "provisioning changed proposals, doctrine targets, or batches")
+                    final_state["after"] = observed
+
+                def publish_cutover() -> None:
+                    with credential.exclusive_lock(worker_cutover_lock_path()):
+                        publish_worker_cutover(
+                            candidate_values, rollback_values,
+                            preserve=preserve_provider_scopes,
+                            bulk=lambda values: bulk_worker_database_secrets(values),
+                            verify=lambda: verify_worker_database_secret_bindings(),
+                            postflight=verify_final_candidate_state,
+                        )
+
+                def prove_adopted_seat(seat: AdoptedSeat) -> None:
+                    validate_profile_login(
+                        seat.stored.value, seat.profile, plans[seat.profile.label],
+                        expected_creator=expected_creator,
+                    )
+                    if seat.stored.state == "pending":
+                        credential.promote_pending(
+                            seat.credential_file.paths, key=seat.credential_file.key,
+                            expected_value=seat.stored.value,
+                        )
+                    outcomes[seat.profile.label] = "adopted"
+
+                def restore_prior_cutover() -> None:
+                    # The SAME door the publication used, under the SAME lock:
+                    # a compensation that took a different path would not be
+                    # proof that the Worker is back on the bindings it had.
+                    with credential.exclusive_lock(worker_cutover_lock_path()):
+                        rollback_worker_to_prior(
+                            rollback_values,
+                            preserve=preserve_provider_scopes,
+                            bulk=lambda values: bulk_worker_database_secrets(values),
+                            verify=lambda: verify_worker_database_secret_bindings(),
+                        )
+
+                # Publication happens while the adopt transaction is STILL OPEN;
+                # any refusal reaches the `finally` unwind, which rolls it back.
+                # A refusal of the COMMIT is past that point, so it compensates.
+                settle_adopted_seats(
+                    owner, deferred_seats,
+                    publish=publish_cutover, prove=prove_adopted_seat,
+                    compensate=restore_prior_cutover)
             finally:
                 try:
                     owner.rollback()
@@ -1379,21 +1732,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except (psycopg.Error, ValueError):
                     pass
                 owner.close()
-        final_state: dict[str, SeedState] = {}
-        def verify_final_candidate_state() -> None:
-            observed = read_seed_state(owner_dsn.value)
-            if observed != before:
-                raise ProvisioningRefusal(
-                    "provisioning changed proposals, doctrine targets, or batches")
-            final_state["after"] = observed
-
-        with credential.exclusive_lock(worker_cutover_lock_path()):
-            publish_worker_cutover(
-                candidate_values, rollback_values, preserve=preserve_provider_scopes,
-                bulk=lambda values: bulk_worker_database_secrets(values),
-                verify=lambda: verify_worker_database_secret_bindings(),
-                postflight=verify_final_candidate_state,
-            )
         after = final_state.get("after")
         if after is None:
             raise ProvisioningRefusal("final candidate state readback is absent")

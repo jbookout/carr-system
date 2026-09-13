@@ -229,6 +229,25 @@ def main() -> int:
     check("writer and reader profiles use separate files and keys",
           credential.profile("writer").key != credential.profile("reader").key
           and credential.profile("writer").paths.final != credential.profile("reader").paths.final)
+    # THE SEAT ROLE NAME IS CLUSTER-WIDE AND SAYS NOTHING ABOUT ENVIRONMENT, so
+    # the key and the filename are what keep a staging DSN out of a production
+    # Worker. Both must name staging, and this module must offer NO production
+    # counterpart to reach for: the production credential is Joe's own act.
+    staging_seat = credential.profile("gate_zero_producer")
+    check("the Gate Zero seat credential names staging in both its key and its file",
+          staging_seat.role_name == "carr_gate_zero_producer"
+          and "STAGING" in staging_seat.key
+          and staging_seat.paths.final.name.startswith("staging-")
+          and staging_seat.key != credential.profile("writer").key
+          and staging_seat.paths.final != credential.profile("writer").paths.final)
+    for absent in ("production_gate_zero_producer", "production", "gate_zero"):
+        try:
+            credential.profile(absent)
+        except credential.CredentialRefusal:
+            pass
+        else:
+            raise AssertionError(f"a credential profile exists for {absent!r}")
+    check("this module offers no production credential profile to reach for", True)
     print(f"PASS: staging database credential self-test ({checked} checks)")
     return 0
 

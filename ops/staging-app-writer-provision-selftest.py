@@ -13,6 +13,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import uuid
 from typing import Any
 
@@ -104,6 +105,55 @@ grant insert, select on table ops.work_request to carr_writer;
               ("table", "ops.work_request", "select", False),
               ("function", "ops.capture_v2(text, uuid)", "execute", False),
           })
+    # THE PENDING CAPABILITY BUNDLE, AND THE EXEMPTION THAT LETS IT COMPOSE
+    # (2026-09-14, carr_gate_zero_producer). A migration that CREATES a role
+    # names the role in a DO block and in a literal-returning function, neither
+    # of which confers anything. Those occurrences are forgiven; the grants in
+    # the same migration still compose.
+    bundle_pending = """begin;
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'carr_writer') then
+    create role carr_writer nologin;
+  end if;
+end $$;
+create or replace function ops.bundle_name() returns text language sql immutable
+as $fn$ select 'carr_writer'::text $fn$;
+grant execute on function ops.bundle_name() to carr_writer;
+commit;
+"""
+    bundle_plan = snapshot.compose_grants_to_role(
+        synthetic_schema,
+        (("0001_base.sql", synthetic_applied), ("0002_bundle.sql", bundle_pending)),
+        "carr_writer",
+    )
+    check("a pending migration may create the bundle it grants to",
+          set(snapshot.acl_facts(bundle_plan)) == {
+              ("table", "ops.work_request", "insert", False),
+              ("table", "ops.work_request", "select", False),
+              ("function", "ops.bundle_name()", "execute", False),
+          })
+    # AND THE EXEMPTION IS NARROW, proved by its falsifier rather than described:
+    # the same DO block carrying an authority verb the composer did not parse is
+    # still a review stop. Without this case the exemption above would forgive
+    # every unparsed mention inside a dollar-quoted body.
+    hidden_authority = """begin;
+do $$ begin
+  alter role carr_writer set statement_timeout = '5s';
+end $$;
+grant select on table public.actor to carr_writer;
+commit;
+"""
+    try:
+        snapshot.compose_grants_to_role(
+            synthetic_schema,
+            (("0001_base.sql", synthetic_applied), ("0002_hidden.sql", hidden_authority)),
+            "carr_writer",
+        )
+    except snapshot.SnapshotGrantError:
+        check("an authority verb hidden in a dollar-quoted body is still a review stop", True)
+    else:
+        raise AssertionError("unparsed authority inside a dollar-quoted body was accepted")
+
     try:
         snapshot.compose_grants_to_role(
             synthetic_schema,
@@ -314,10 +364,11 @@ grant insert, select on table ops.work_request to carr_writer;
     candidate_root = provision.replacement_credential_root(CANDIDATE_OPERATION_ID)
     candidate_profiles = {
         label: provision.credential.profile(label, config_root=candidate_root)
-        for label in ("reader", "writer")
+        for label in tuple(one.label for one in provision.PROFILES)
     }
     canonical_profiles = {
-        label: provision.credential.profile(label) for label in ("reader", "writer")
+        label: provision.credential.profile(label)
+        for label in tuple(one.label for one in provision.PROFILES)
     }
     check("candidate app credentials live under the candidate operation private root",
           all(profile.paths.final.parent == candidate_root
@@ -437,18 +488,16 @@ grant insert, select on table ops.work_request to carr_writer;
             if "bulk" in args:
                 return subprocess.CompletedProcess(args, 0, "bulk complete", "")
             return subprocess.CompletedProcess(
-                args, 0, json.dumps([
-                    {"name": "CARR_MCP_TOKEN", "type": "secret_text"},
-                    {"name": "DATABASE_URL_WRITER", "type": "secret_text"},
-                    {"name": "DATABASE_URL_READER", "type": "secret_text"},
-                ]), ""
+                args, 0, json.dumps(
+                    [{"name": "CARR_MCP_TOKEN", "type": "secret_text"}]
+                    + [{"name": name, "type": "secret_text"}
+                       for name in provision.WORKER_DATABASE_SECRET_NAMES]
+                ), ""
             )
 
     worker_runner = WorkerRunner()
-    future_values = {
-        "DATABASE_URL_READER": "future-reader-secret",
-        "DATABASE_URL_WRITER": "future-writer-secret",
-    }
+    future_values = {name: f"future-secret-for-{name}"
+                     for name in provision.WORKER_DATABASE_SECRET_NAMES}
     provision.bulk_worker_database_secrets(
         future_values, wrangler="wrangler", run=worker_runner,
         environ={"PATH": "/safe/bin", "HOME": "/safe/home",
@@ -489,8 +538,14 @@ grant insert, select on table ops.work_request to carr_writer;
               for secret in future_values.values())
           and all(secret in serialized for secret in future_values.values()))
     source = PROVISIONER.read_text(encoding="utf-8")
-    check("sequential Worker secret put is absent from the provisioner source",
-          '"secret", "put"' not in source and "put_worker_database_secret" not in source)
+    # THE CUTOVER MOVES A MATCHED SET, so a sequential `secret put` is forbidden
+    # outright: three DSNs published one at a time can leave the Worker serving
+    # half of one project and half of another. There is exactly one publication
+    # door in this tool and it is the atomic bulk.
+    check("no sequential Worker secret put exists anywhere in this tool",
+          '"secret", "put"' not in source
+          and "put_worker_database_secret" not in source
+          and source.count('"secret", "bulk"') == 1)
 
     class SecretFailureRunner:
         def __call__(self, args, **_kwargs):
@@ -516,15 +571,13 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.verify_worker_database_secret_bindings(
             wrangler="wrangler", run=WrongBindingRunner(), environ={})
     except provision.ProvisioningRefusal:
-        check("Worker readback requires the exact two DATABASE_URL names", True)
+        check("Worker readback requires the exact declared DATABASE_URL name set", True)
     else:
         raise AssertionError("wrong Worker database secret name list was accepted")
 
     rollback_events: list[tuple[str, Any]] = []
-    old_values = {
-        "DATABASE_URL_READER": "old-reader-secret",
-        "DATABASE_URL_WRITER": "old-writer-secret",
-    }
+    old_values = {name: f"old-secret-for-{name}"
+                  for name in provision.WORKER_DATABASE_SECRET_NAMES}
     preservation_calls = 0
     def preservation() -> None:
         nonlocal preservation_calls
@@ -659,14 +712,28 @@ grant insert, select on table ops.work_request to carr_writer;
           and worker_lock != candidate_root / ".staging-role-operation.lock")
 
     class FakeOwnerCursor:
+        # ``seat_passwordless`` is what pg_authid answers for the migrated Gate
+        # Zero seat. True is a fresh database, where 0502 has created the role
+        # and nothing has credentialed it; False is the same local state after
+        # the credential file was lost, which must never adopt.
+        seat_passwordless = True
+
         def __init__(self):
             self.statements: list[str] = []
+            self._rows: list[tuple[Any, ...]] = []
 
         def execute(self, statement, _params=None) -> None:
             self.statements.append(str(statement))
+            self._rows = (
+                [(type(self).seat_passwordless,)]
+                if "pg_authid" in str(statement) else []
+            )
 
         def fetchone(self):
             return (True,)
+
+        def fetchall(self):
+            return list(self._rows)
 
     class FakeOwner:
         def __init__(self):
@@ -699,10 +766,25 @@ grant insert, select on table ops.work_request to carr_writer;
     writer_candidate = (
         f"postgresql://app_writer:candidate-writer-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
     )
+    # THE GATE ZERO PRODUCER SEAT'S OWN CREDENTIAL (standing-rule amendment 9,
+    # 2026-09-14). It is a third profile rather than a reuse of the writer's,
+    # because the record layer admits exactly one login role for that write and
+    # revokes it from carr_writer.
+    gate_zero_candidate = (
+        f"postgresql://carr_gate_zero_producer:candidate-gate-zero-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
+    candidate_by_role = {
+        provision.READER_ROLE: reader_candidate,
+        provision.APP_ROLE: writer_candidate,
+        provision.GATE_ZERO_PRODUCER_ROLE: gate_zero_candidate,
+    }
     expected_candidate_values = {
         "DATABASE_URL_READER": reader_candidate,
         "DATABASE_URL_WRITER": writer_candidate,
+        "DATABASE_URL_GATE_ZERO_WRITER": gate_zero_candidate,
     }
+    assert set(expected_candidate_values) == set(provision.WORKER_DATABASE_SECRET_NAMES), (
+        "this suite and the tool disagree about which Worker database secrets exist")
     saved_main_dependencies = {
         "reject_unsafe_environment": provision.reject_unsafe_environment,
         "replacement_target": provision.replacement_target,
@@ -779,7 +861,7 @@ grant insert, select on table ops.work_request to carr_writer;
             profile_roots.append(config_root)
             return real_profile(label, config_root=config_root)
         def load_candidate_credential(_paths, *, role_name, **_kwargs):
-            value = reader_candidate if role_name == provision.READER_ROLE else writer_candidate
+            value = candidate_by_role[role_name]
             return provision.credential.StoredCredential(
                 "final", pathlib.Path("/fixture/final"), value, "fixture-password",
                 candidate.endpoint_host, 5432, "neondb")
@@ -827,10 +909,10 @@ grant insert, select on table ops.work_request to carr_writer;
                 "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
             ])
         apply_output = json.loads(stdout.getvalue())
-        check("main apply routes both credentials only through the candidate root",
-              profile_roots == [candidate_root, candidate_root]
+        check("main apply routes every credential only through the candidate root",
+              profile_roots == [candidate_root] * len(provision.PROFILES)
               and all(root != pathlib.Path.home() / ".config/carr" for root in profile_roots))
-        check("main apply performs one atomic candidate pair with provider pre/post proof",
+        check("main apply performs one atomic candidate set with provider pre/post proof",
               rc == 0 and orchestration_events == [
                   ("seed", 1), ("preserve", None), ("preserve", None),
                   ("bulk", expected_candidate_values), ("verify", None),
@@ -843,6 +925,14 @@ grant insert, select on table ops.work_request to carr_writer;
               and apply_output["target_count"] == 3 and apply_output["batch_count"] == 4
               and all(secret not in stdout.getvalue()
                       for secret in expected_candidate_values.values()))
+        # A SEAT THAT ALREADY HAS A FINAL CREDENTIAL IS NEVER ADOPTED. This
+        # fixture seeds all three credential files, so the run must prove each
+        # role by logging in as it and rotate nothing -- the `adopted` outcome
+        # appearing here would mean an existing credential had been replaced.
+        check("an already-credentialed seat is reused, never adopted",
+              apply_output["role_outcomes"] == {
+                  "reader": "reused", "writer": "reused",
+                  "gate_zero_producer": "reused"})
 
         # Every field in the readable business-state snapshot is immutable
         # across credential publication. Any drift restores the prior pair.
@@ -1047,20 +1137,27 @@ grant insert, select on table ops.work_request to carr_writer;
     profiles = {profile.label: profile for profile in provision.PROFILES}
     plans = {
         label: snapshot.load_current_grants_to_role(
-            REPO / "db/schema.sql", REPO / "migrations", profile.bundle_role
+            REPO / "db/schema.sql", REPO / "migrations", profile.grant_role
         ) for label, profile in profiles.items()
     }
 
+    # A DIRECT-GRANT PROFILE HAS NO BUNDLE BEHIND IT: the canonical ACLs sit on
+    # the login role, and the login role is a member of nothing. Building the
+    # fixture from the profile rather than from a fixed pair is what lets this
+    # suite cover both shapes without a second copy of it.
     def profile_closure(profile, facts=None, creator="neondb_owner"):
         facts = tuple(facts if facts is not None else snapshot.acl_facts(plans[profile.label]))
+        direct = profile.bundle_role is None
         return provision.ProfileClosure(
             login=provision.RoleAuthority(
                 True, True, (), ("idle_in_transaction_session_timeout=120s",
                                  "statement_timeout=60s"),
-                ((profile.bundle_role, False, True, True),),
-                (profile.bundle_role,), (), (),
+                () if direct else ((profile.bundle_role, False, True, True),),
+                () if direct else (profile.bundle_role,),
+                facts if direct else (), (),
             ),
-            bundle=provision.RoleAuthority(False, True, (), (), (), (), facts, ()),
+            bundle=None if direct
+                else provision.RoleAuthority(False, True, (), (), (), (), facts, ()),
             creator_edges=((creator, True, False, False,
                             provision.BOOTSTRAP_SUPERUSER_OID),),
         )
@@ -1133,6 +1230,68 @@ grant insert, select on table ops.work_request to carr_writer;
             raise AssertionError(f"unsafe state accepted: {bad}")
     check("orphan final, uncredentialed role and unknown state refuse", True)
 
+    # THE MIGRATION-CREATED SEAT'S ROWS, DECIDED BY THE DATABASE. Adoption is
+    # available only while pg_authid still says the role has no password; the
+    # same local state with a password already set is a LOST FILE and refuses.
+    check("a passwordless migrated seat adopts from absent and from pending",
+          provision.decide_profile_action(
+              role_exists_now=True, credential_state="absent",
+              role_created_by_migration=True, role_passwordless=True) == "adopt"
+          and provision.decide_profile_action(
+              role_exists_now=True, credential_state="pending",
+              role_created_by_migration=True, role_passwordless=True) == "adopt")
+    check("a credentialed migrated seat resumes a pending file rather than re-minting",
+          provision.decide_profile_action(
+              role_exists_now=True, credential_state="pending",
+              role_created_by_migration=True, role_passwordless=False) == "resume")
+    for missing_witness in (False, None):
+        try:
+            provision.decide_profile_action(
+                role_exists_now=True, credential_state="absent",
+                role_created_by_migration=True, role_passwordless=missing_witness)
+        except provision.ProvisioningRefusal as exc:
+            if missing_witness is False and "lost local file" not in str(exc):
+                raise AssertionError("the lost-file refusal does not name what happened")
+        else:
+            raise AssertionError(
+                f"a migrated seat was adopted with role_passwordless={missing_witness!r}")
+    check("a lost credential file never becomes a rotation, and an unknown state refuses", True)
+
+    # ---- THE MIGRATION-CREATED SEAT'S OTHER ROWS ---------------------------
+    check("adoption does not loosen the other rows",
+          provision.decide_profile_action(
+              role_exists_now=True, credential_state="final",
+              role_created_by_migration=True, role_passwordless=False) == "reuse"
+          and provision.decide_profile_action(
+              role_exists_now=False, credential_state="absent",
+              role_created_by_migration=True, role_passwordless=None) == "prepare_create")
+    for bad in ((False, "final"), (True, "unknown")):
+        try:
+            provision.decide_profile_action(
+                role_exists_now=bad[0], credential_state=bad[1],
+                role_created_by_migration=True, role_passwordless=True)
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError(f"unsafe migration-created state accepted: {bad}")
+    check("an adopting profile still refuses orphan-final and unknown states", True)
+    # MUTATION CONTROL for the adopt row: the SAME state, on a passwordless role,
+    # asked for a profile this tool creates itself, must still refuse. If
+    # adoption ever widens to every profile, this check goes red rather than the
+    # suite staying green.
+    try:
+        provision.decide_profile_action(
+            role_exists_now=True, credential_state="absent",
+            role_created_by_migration=False, role_passwordless=True)
+    except provision.ProvisioningRefusal:
+        check("mutation control: a tool-created role with a lost credential still refuses",
+              True)
+    else:
+        raise AssertionError("adoption widened to a tool-created profile")
+    check("exactly one profile is marked migration-created",
+          {profile.label for profile in provision.PROFILES
+           if profile.created_by_migration} == {"gate_zero_producer"})
+
     events: list[str] = []
     def converge(profile):
         events.append("converge:" + profile.label)
@@ -1154,23 +1313,43 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.PROFILES, converge,
         lambda profile, _value: events.append("resume-publish:" + profile.label),
     )
-    check("rerun resumes both profiles in the same deterministic order",
-          events == ["converge:reader", "resume-publish:reader",
-                     "converge:writer", "resume-publish:writer"])
+    # THE ORDER IS THE TOOL'S OWN, so a profile added later is covered here the
+    # day it is added rather than the day someone remembers to retype this list.
+    check("rerun resumes every profile in the same deterministic order",
+          events == [f"{verb}:{profile.label}"
+                     for profile in provision.PROFILES
+                     for verb in ("converge", "resume-publish")])
 
     class Cursor:
-        def __init__(self, fail_secret=None):
+        # ``passwordless`` is what pg_authid answers for the adopt guard: True
+        # (never credentialed), False (already holds one), or None to model a
+        # connection that cannot read pg_authid at all.
+        def __init__(self, fail_secret=None, passwordless=True):
             self.statements = []
             self.fail_secret = fail_secret
+            self.passwordless = passwordless
+            self.password_probe_index = None
+            self._rows = []
         def execute(self, statement, params=None):
+            if "pg_authid" in str(statement):
+                self.password_probe_index = len(self.statements)
+                self.statements.append(statement)
+                if self.passwordless is None:
+                    raise provision.psycopg.errors.InsufficientPrivilege(
+                        "permission denied for table pg_authid")
+                self._rows = [(self.passwordless,)]
+                return
             self.statements.append(statement)
+            self._rows = []
             if self.fail_secret:
                 raise RuntimeError("database rejected " + self.fail_secret)
         def fetchone(self):
             return ("",)
+        def fetchall(self):
+            return list(self._rows)
     class Connection:
-        def __init__(self, fail_secret=None):
-            self.cur = Cursor(fail_secret)
+        def __init__(self, fail_secret=None, passwordless=True):
+            self.cur = Cursor(fail_secret, passwordless)
             self.commits = 0
             self.rollbacks = 0
         def cursor(self): return self.cur
@@ -1233,6 +1412,298 @@ grant insert, select on table ops.work_request to carr_writer;
         provision.role_exists = original_exists
         provision.collect_role_authority = original_bundle
         provision.collect_profile_closure = original_closure
+
+    # ======================================================================
+    # THE MIGRATION-CREATED GATE ZERO SEAT, AND THE ONE STATE IT MAY BE
+    # ADOPTED FROM
+    # ======================================================================
+    # Migration 0502 creates carr_gate_zero_producer with NO password, so
+    # role-present/credential-absent is where a fresh database actually starts.
+    # The dangerous neighbour of that state, and the one the fourth correction
+    # could not tell apart from it, is role-present/credential-absent because the
+    # LOCAL FILE WAS LOST -- a deleted file, a fresh clone, another machine. The
+    # database is the only witness that separates them, and these checks are that
+    # separation, executed.
+    seat = profiles["gate_zero_producer"]
+    seat_plan = plans["gate_zero_producer"]
+    seat_facts = tuple(snapshot.acl_facts(seat_plan))
+    check("the Gate Zero seat is a migration-created direct-grant profile",
+          seat.created_by_migration and seat.bundle_role is None
+          and seat.login_role == "carr_gate_zero_producer" and len(seat_plan) >= 5
+          and not any(other.created_by_migration
+                      for other in provision.PROFILES if other.label != seat.label))
+
+    holder: dict[str, Any] = {}
+
+    def migrated_closure(_cur, _profile):
+        """What the role actually looks like: converged once the timeouts are set."""
+        issued = any("statement_timeout" in str(statement)
+                     for statement in holder["conn"].cur.statements)
+        if issued:
+            return profile_closure(seat, seat_facts)
+        return provision.ProfileClosure(
+            login=provision.RoleAuthority(True, True, (), (), (), (), seat_facts, ()),
+            bundle=None,
+            creator_edges=(("neondb_owner", True, False, False,
+                            provision.BOOTSTRAP_SUPERUSER_OID),),
+        )
+
+    original_exists = provision.role_exists
+    original_authority = provision.collect_role_authority
+    original_closure = provision.collect_profile_closure
+    try:
+        provision.role_exists = lambda _cur, _role: True
+        provision.collect_role_authority = lambda _cur, _role: provision.RoleAuthority(
+            True, True, (), (), (), (), seat_facts, ())
+        provision.collect_profile_closure = migrated_closure
+
+        holder["conn"] = Connection(passwordless=True)
+        created = provision.apply_login_profile(
+            holder["conn"], seat, seat_plan, "a" * 64,
+            expected_creator="neondb_owner", adopt=True)
+        adopted_statements = [repr(statement).lower()
+                              for statement in holder["conn"].cur.statements]
+        check("adopting sets a password on the existing role and creates no role",
+              not created and holder["conn"].commits == 1
+              and any("alter role" in statement and "password" in statement
+                      for statement in adopted_statements)
+              and not any("create role" in statement for statement in adopted_statements))
+        check("an adopted role is still held to the exact canonical closure",
+              any("statement_timeout" in statement for statement in adopted_statements)
+              and any("idle_in_transaction_session_timeout" in statement
+                      for statement in adopted_statements))
+        check("adoption verifies the migration's grants and re-issues none of them",
+              seat_plan and not any(
+                  statement.lstrip().startswith(("grant ", "revoke "))
+                  for statement in map(str, holder["conn"].cur.statements)))
+        check("the passwordless proof is read from pg_authid before the ALTER, not after",
+              holder["conn"].cur.password_probe_index is not None
+              and holder["conn"].cur.password_probe_index < next(
+                  index for index, statement in enumerate(holder["conn"].cur.statements)
+                  if "alter role" in repr(statement).lower()
+                  and "password" in repr(statement).lower()))
+
+        # THE LOST LOCAL FILE. Same role, same absent credential, and the ONE
+        # difference that matters: pg_authid says the seat already holds a
+        # password. Adoption must refuse, and it must not issue the ALTER.
+        holder["conn"] = Connection(passwordless=False)
+        try:
+            provision.apply_login_profile(
+                holder["conn"], seat, seat_plan, "b" * 64,
+                expected_creator="neondb_owner", adopt=True)
+        except provision.ProvisioningRefusal as exc:
+            check("a seat that already holds a password is never silently rotated",
+                  "already holds a password" in str(exc)
+                  and holder["conn"].commits == 0 and holder["conn"].rollbacks == 1
+                  and not any("alter role" in repr(statement).lower()
+                              and "password" in repr(statement).lower()
+                              for statement in holder["conn"].cur.statements))
+        else:
+            raise AssertionError("adoption rotated a credential that was still in use")
+
+        # A connection that cannot READ pg_authid gets no benefit of the doubt.
+        holder["conn"] = Connection(passwordless=None)
+        try:
+            provision.apply_login_profile(
+                holder["conn"], seat, seat_plan, "b" * 64,
+                expected_creator="neondb_owner", adopt=True)
+        except provision.ProvisioningRefusal as exc:
+            check("an unreadable pg_authid refuses adoption instead of assuming",
+                  "cannot see it" in str(exc)
+                  and not any("alter role" in repr(statement).lower()
+                              and "password" in repr(statement).lower()
+                              for statement in holder["conn"].cur.statements))
+        else:
+            raise AssertionError("adoption proceeded without proving the seat passwordless")
+
+        # commit=False is the reversible shape the cutover depends on.
+        holder["conn"] = Connection(passwordless=True)
+        provision.apply_login_profile(
+            holder["conn"], seat, seat_plan, "e" * 64,
+            expected_creator="neondb_owner", adopt=True, commit=False)
+        check("an adopted seat's password change is left uncommitted when asked",
+              holder["conn"].commits == 0 and holder["conn"].rollbacks == 0
+              and any("alter role" in repr(statement).lower()
+                      and "password" in repr(statement).lower()
+                      for statement in holder["conn"].cur.statements))
+
+        # MUTATION CONTROL. The same role in the same state, converged the way
+        # every other profile is (adopt=False), REFUSES -- which is exactly the
+        # P0 an earlier round shipped. If the adopt path is ever deleted, this
+        # refusal is what a fresh database would be left with.
+        holder["conn"] = Connection(passwordless=True)
+        try:
+            provision.apply_login_profile(
+                holder["conn"], seat, seat_plan, "b" * 64,
+                expected_creator="neondb_owner")
+        except provision.ProvisioningRefusal:
+            check("mutation control: the pre-adopt path cannot converge a migrated seat",
+                  holder["conn"].commits == 0 and holder["conn"].rollbacks == 1
+                  and not any("alter role" in repr(statement).lower()
+                              and "password" in repr(statement).lower()
+                              for statement in holder["conn"].cur.statements))
+        else:
+            raise AssertionError("the pre-adopt path silently accepted a migrated seat")
+
+        holder["conn"] = Connection(passwordless=True)
+        try:
+            provision.apply_login_profile(
+                holder["conn"], profiles["writer"], tiny_plan, "c" * 64,
+                expected_creator="neondb_owner", adopt=True)
+        except provision.ProvisioningRefusal as exc:
+            check("adoption is refused for a profile this tool creates itself",
+                  "may not be adopted" in str(exc))
+        else:
+            raise AssertionError("adoption widened past the migration-created seat")
+
+        provision.role_exists = lambda _cur, _role: False
+        holder["conn"] = Connection(passwordless=True)
+        try:
+            provision.apply_login_profile(
+                holder["conn"], seat, seat_plan, "d" * 64,
+                expected_creator="neondb_owner", adopt=True)
+        except provision.ProvisioningRefusal as exc:
+            check("adoption refuses when the seat migration has not applied here",
+                  "does not exist" in str(exc))
+        else:
+            raise AssertionError("adoption invented a role the migration never created")
+    finally:
+        provision.role_exists = original_exists
+        provision.collect_role_authority = original_authority
+        provision.collect_profile_closure = original_closure
+
+    # ---- PUBLISH FIRST, COMMIT SECOND, AND THE FAILURE IS THE UNDO ---------
+    # The ordering is a named function precisely so it can be executed here
+    # rather than read off the call site.
+    class SeatConn:
+        def __init__(self, commit_raises=None):
+            self.commits = 0
+            self._commit_raises = commit_raises
+        def commit(self):
+            self.commits += 1
+            if self._commit_raises is not None:
+                raise self._commit_raises
+
+    seat_entry = provision.AdoptedSeat("profile", "file", "stored")
+    order: list[str] = []
+    settled = SeatConn()
+    provision.settle_adopted_seats(
+        settled, [seat_entry],
+        publish=lambda: order.append("publish"),
+        prove=lambda seat: order.append("prove:" + seat.profile),
+        compensate=lambda: order.append("compensate"),
+    )
+    check("the Worker secret is published and read back before the password commits",
+          order == ["publish", "prove:profile"] and settled.commits == 1)
+
+    refused = SeatConn()
+    order.clear()
+    try:
+        provision.settle_adopted_seats(
+            refused, [seat_entry],
+            publish=lambda: (_ for _ in ()).throw(
+                provision.ProvisioningRefusal("Worker credential cutover refused")),
+            prove=lambda seat: order.append("prove"),
+            compensate=lambda: order.append("compensate"),
+        )
+    except provision.ProvisioningRefusal:
+        check("a failed publication leaves the adopted password uncommitted and unproven",
+              refused.commits == 0 and not order)
+    else:
+        raise AssertionError("the seat password committed after a failed publication")
+
+    # ---- AND WHEN THE COMMIT ITSELF FAILS, THE WORKER IS TAKEN BACK ---------
+    # Publication has already succeeded here, so ordering cannot help: the
+    # database rolls the password away and the Worker is left holding a DSN
+    # that authenticates as nothing. The only answer is compensation, and this
+    # injects the commit failure to prove it runs and that nothing is proven
+    # afterwards.
+    published: list[str] = []
+    crashed = SeatConn(commit_raises=RuntimeError("connection lost mid-commit"))
+    worker_binding = ["candidate"]
+    def publish_candidate() -> None:
+        worker_binding[0] = "candidate"
+        published.append("publish")
+    def restore_prior() -> None:
+        worker_binding[0] = "prior"
+        published.append("compensate")
+    try:
+        provision.settle_adopted_seats(
+            crashed, [seat_entry],
+            publish=publish_candidate,
+            prove=lambda seat: published.append("prove"),
+            compensate=restore_prior,
+        )
+    except provision.ProvisioningRefusal as exc:
+        check("a failed commit after publication restores the prior Worker bindings "
+              "rather than leaving the Worker on an unusable DSN",
+              published == ["publish", "compensate"]
+              and worker_binding[0] == "prior"
+              and crashed.commits == 1
+              and "prior Worker bindings restored" in str(exc)
+              and "connection lost mid-commit" not in str(exc))
+    else:
+        raise AssertionError(
+            "a failed commit reported success and left the Worker on the candidate DSN")
+
+    # A compensation that cannot restore is UNCERTAIN, and says so by name.
+    uncertain = SeatConn(commit_raises=RuntimeError("connection lost mid-commit"))
+    try:
+        provision.settle_adopted_seats(
+            uncertain, [seat_entry],
+            publish=lambda: None,
+            prove=lambda seat: (_ for _ in ()).throw(
+                AssertionError("proved an adopted seat whose password never committed")),
+            compensate=lambda: (_ for _ in ()).throw(
+                provision.ProvisioningRefusal("Worker secret readback failed")),
+        )
+    except provision.ProvisioningRefusal as exc:
+        check("a failed commit whose restoration also refuses is named uncertain, not restored",
+              "restoration outcome is uncertain" in str(exc))
+    else:
+        raise AssertionError("an unrestored Worker cutover reported success")
+
+    check("the deferred adoption entry is a named seat rather than a bare triple",
+          seat_entry.profile == "profile" and seat_entry.credential_file == "file"
+          and seat_entry.stored == "stored"
+          and not isinstance(seat_entry, tuple))
+
+    check("no production project, worker, secret or credential path exists in this tool",
+          not any(hasattr(provision, name) for name in (
+              "PRODUCTION_GATE_ZERO_PROFILE", "PRODUCTION_WORKER_NAME",
+              "PRODUCTION_GATE_ZERO_SECRET_NAME", "put_production_gate_zero_secret",
+              "verify_production_gate_zero_secret_binding",
+              "provision_production_gate_zero_writer", "production_owner_dsn",
+              "require_production_gate_zero_target", "require_production_release_binding"))
+          and all(profile.secret_name in provision.WORKER_DATABASE_SECRET_NAMES
+                  for profile in provision.PROFILES))
+
+    for bad_argv in (
+        # every staging input is required, there is no production mode to ask
+        # for, and the rollback still cannot run without --apply
+        ["--sha", EXPECTED_SHA, "--apply"],
+        ["--candidate-operation-id", str(CANDIDATE_OPERATION_ID), "--apply"],
+        ["--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+         "--receipt-id", str(RECEIPT_ID), "--apply"],
+        ["--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+         "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA,
+         "--rollback-to-prior-staging"],
+        ["--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+         "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+         "--production-gate-zero-writer"],
+        ["--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+         "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+         "--provider", "cloudflare-workers"],
+    ):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                provision.parse_args(bad_argv)
+        except SystemExit as exc:
+            if exc.code != 2:
+                raise AssertionError(f"wrong exit for {bad_argv}")
+        else:
+            raise AssertionError(f"an incoherent argument set was accepted: {bad_argv}")
+    check("every staging input is required and no production mode can be asked for", True)
 
     check("Production project id is imported from the canonical db-tap pin",
           provision.PRODUCTION_PROJECT_ID

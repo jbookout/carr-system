@@ -55,9 +55,21 @@ EXCLUDED = {
 }
 
 # role -> why it must be known but absent from the current active preamble.
-# Keep this explicit for the next role-bearing pending migration. There are no
-# pending role bundles after production applied 0249 and regenerated the snapshot.
-PENDING: dict[str, str] = {}
+# Keep this explicit for the next role-bearing pending migration.
+PENDING: dict[str, str] = {
+    "carr_gate_zero_producer": (
+        "the Gate Zero producer seat. It is a LOGIN role, not a NOLOGIN "
+        "capability bundle, so the snapshot's role preamble -- which creates "
+        "bundles -- is the wrong place for it, and 0502 creates it itself. "
+        "Measured on a disposable cluster 2026-09-14: a NOLOGIN bundle here "
+        "would enter the SCAC sealed role_authority projection, and because "
+        "PostgreSQL roles are cluster-wide while db/schema.sql is a database "
+        "artifact, every later schema.sql load in the same cluster would refuse. "
+        "A carr_-prefixed LOGIN role keeps the EXECUTE grant inside the sealed "
+        "function-ACL projection and out of role_authority, which is the whole "
+        "reason for the shape."
+    ),
+}
 
 CREATE_ROLE = re.compile(r"\bcreate\s+role\s+([a-z_][a-z0-9_]*)", re.IGNORECASE)
 

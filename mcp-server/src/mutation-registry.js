@@ -4,12 +4,13 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v22 is the runtime selector. R06's v21 re-digested existing non-MCP sources
-// and correctly left the selector on v20, because it registered no new verb.
-// This change does: the four portfolio verbs are unknown to v20 and v21, and an
-// unregistered operation is refused at the door, so the runtime has to read the
-// registry that knows them.
-} from "./scac-mutation-registry.v22.generated.js";
+// v26 is the runtime selector, and the rule that moves it has not changed since
+// v22: the selector follows the MCP CONTRACT, not the frontier. v23, v24 and v25
+// each re-digested non-MCP sources and correctly left the selector where it was,
+// because none of them registered a verb. v26 does — record-gate-zero-read-only-outcome
+// is unknown to v22 through v25, and an unregistered operation is refused at the
+// door — so the runtime has to read the registry that knows it.
+} from "./scac-mutation-registry.v26.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
