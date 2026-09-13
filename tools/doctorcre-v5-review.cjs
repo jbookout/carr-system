@@ -315,17 +315,40 @@ const TRUSTED_SHAPE = {
     "denial_rule"
   ]
 };
-// Re-frozen 2026-09-12 by the card-10 Gate Zero amendment (decision
-// 311a9af5-3685-4c47-a158-f8dd70870ca1, applied under Joe's ruling on loop 589).
-// The amendment admits `gate-zero-read-only-accepted`, the
-// `step:gate-zero-read-only-outcome` producer row and its
-// `independent_control_plane_oracle` role. `requirements` is unchanged: the
-// amendment touches no source row. The recorded semantic review — PASS,
-// 0 P0 / 0 P1 — was bound to the pre-amendment design and constitution bytes,
-// so a fresh semantic review of the amended packet is owed.
+// Re-frozen 2026-09-13 by the consumer-gate-receipt digest amendment, act 5 of
+// accepted plan PLAN-a5059eb52474-v3 (Joe's acceptance of that plan, 2026-09-13,
+// WR-000075 ready v4, IS the approval; paragraph 12 names the amendment so that
+// accepting the plan accepts it knowingly).
+//
+// WHAT THE AMENDMENT CHANGED, and it is one string. r7's
+// `canonicalization_contract.receipt_payload_digest_rule` named domain tags for
+// four payload schemas and NOT for `consumer-gate-receipt.v1`, which left two
+// readings of a Gate Zero outcome digest producing different values. The rule
+// now declares that schema's payload digest as THE TAGGED PREIMAGE: sha256 over
+// the RFC8785/JCS serialization of the two-element array whose first element is
+// the domain-tag string `consumer-gate-receipt.v1` and whose second is the
+// twenty-one-field receipt. A plain digest over the receipt object alone no
+// longer satisfies the rule. No field was added or removed, so
+// `canonicalization_contract_fields` above is unchanged.
+//
+// The constitution moved because it had to: `master_plan.architecture[0]` (P00)
+// cites the design's JCS digest and validateConstitutionRelations asserts it, so
+// re-rendering the design re-renders the constitution. Its bytes stayed 55,582.
+//
+// `requirements` is unchanged — the amendment touches no source row, and the
+// 157 rows / 191 decisions counts do not move.
+//
+// Previously re-frozen 2026-09-12 by the card-10 Gate Zero amendment (decision
+// 311a9af5-3685-4c47-a158-f8dd70870ca1, Joe's ruling on loop 589), which admitted
+// `gate-zero-read-only-accepted`, the `step:gate-zero-read-only-outcome` producer
+// row and its `independent_control_plane_oracle` role. That pair was
+// design 10df2a65…/ea40f61a… and constitution 63114d72…/8a36fcba….
+//
+// THE SEMANTIC REVIEW IS STILL OWED, and is now two amendments stale: the
+// recorded PASS, 0 P0 / 0 P1 was bound to the pre-loop-589 bytes.
 const FROZEN = Object.freeze({
-  "design": "10df2a65e598011335abeeb09f6bc794b326e696717e080db0806f2efbc68413",
-  "constitution": "63114d726d9ea54fb8159e324351bf6e578df7280ca337632fea83d1d3a43c73",
+  "design": "e0380dfd48fce1cb491e51f78006ba5be08a56048925009d74948d3492778c12",
+  "constitution": "eb0785d4fb7f7c0c6b6048085f8c0b23b9d081a3eb94c91d815b79783b47bfc8",
   "requirements": "51e0a89442fda95e537738e8321f9301af8ef48cf79d5ddb979c63421e8990ec"
 });
 const DEADLINE = {
