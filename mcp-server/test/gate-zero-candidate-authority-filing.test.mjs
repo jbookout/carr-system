@@ -25,7 +25,9 @@
 // WHAT THIS FILE ESTABLISHES, end to end and against a real database:
 //
 //   1. The REAL command files the row over a connection that authenticated as
-//      carr_authority_joe. Not a re-implementation of its SQL: the actual
+//      carr_authority_joe, holding only carr_authority and explicitly not the
+//      forbidden carr_writer bundle. Not a re-implementation of its SQL: the
+//      actual
 //      tools/ops-record.py, over a manifest the actual tools/release-manifest.py
 //      built, so a grant this path needs and does not hold is a failure here.
 //   2. The row's 0504 provenance columns mark it AUTHENTICATED — the filing
@@ -141,7 +143,6 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
         end if;
       end $$;`);
     await client.query(`grant carr_authority to ${AUTHORITY_LOGIN}`);
-    await client.query(`grant carr_writer to ${AUTHORITY_LOGIN}`);
     const authorityPassword = decodeURIComponent(new URL(DSN).password);
     if (authorityPassword) {
       const passwordStatement = (await client.query(
@@ -150,24 +151,57 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
       await client.query(passwordStatement);
     }
 
-    // THE GRANTS 0503 AND 0505 CARRY, asked of the database rather than assumed
-    // from the files. If 0505 did not apply, this is where the proof stops and
-    // says which privilege is missing, instead of failing later inside a
-    // subprocess whose stderr a reader has to decode.
+    // THE EXACT ROLE AND GRANTS 0503 AND 0505 CARRY, asked of the database
+    // rather than assumed from the files. The login holds only carr_authority,
+    // and all seven columns the real command reads are named here. If any 0505
+    // column grant is absent, or a broad grant masks it, this is where the proof
+    // stops instead of passing on carr_writer and failing later in production.
+    const memberships = (await client.query(`
+      select granted.rolname
+        from pg_auth_members membership
+        join pg_roles granted on granted.oid = membership.roleid
+        join pg_roles member on member.oid = membership.member
+       where member.rolname = $1
+       order by granted.rolname`, [AUTHORITY_LOGIN])).rows.map(row => row.rolname);
+    assert.deepEqual(memberships, ["carr_authority"],
+      "the synthetic authority login must hold only the production authority bundle");
+
     const acl = (await client.query(`
-      select has_table_privilege('carr_authority','ops.release','insert') as release_insert,
-             has_column_privilege('carr_authority','ops.service','key','select') as service_key,
-             has_column_privilege('carr_authority','ops.service','id','select') as service_id,
-             has_column_privilege('carr_authority','ops.release','maker_authority_verified','select')
+      select pg_has_role($1, 'carr_authority', 'member') as authority_member,
+             pg_has_role($1, 'carr_writer', 'member') as forbidden_writer_member,
+             has_table_privilege($1,'ops.release','insert') as release_insert,
+             has_column_privilege($1,'ops.service','key','select') as service_key,
+             has_column_privilege($1,'ops.service','id','select') as service_id,
+             has_table_privilege($1,'ops.service','select') as service_whole_table,
+             has_column_privilege($1,'ops.release','id','select') as release_id,
+             has_column_privilege($1,'ops.release','release_key','select') as release_key,
+             has_column_privilege($1,'ops.release','maker_actor','select') as release_maker,
+             has_column_privilege($1,'ops.release','maker_session_user','select')
+               as release_session_user,
+             has_column_privilege($1,'ops.release','maker_authority_verified','select')
                as release_marker,
-             has_table_privilege('carr_authority','ops.release','select') as release_whole_table`))
+             has_table_privilege($1,'ops.release','select') as release_whole_table,
+             has_column_privilege($1,'ops.release','plan_hash','select')
+               as release_outside_column`, [AUTHORITY_LOGIN]))
       .rows[0];
+    assert.equal(acl.authority_member, true, "the synthetic login lacks carr_authority");
+    assert.equal(acl.forbidden_writer_member, false,
+      "the synthetic authority login inherits the forbidden carr_writer bundle");
     assert.equal(acl.release_insert, true, "0503's insert on ops.release is absent");
     assert.equal(acl.service_key, true, "0505's ops.service.key read is absent");
     assert.equal(acl.service_id, true, "0505's ops.service.id read is absent");
+    assert.equal(acl.service_whole_table, false,
+      "the ops.service read is a whole-table grant, which 0505 deliberately did not give");
+    assert.equal(acl.release_id, true, "0505's ops.release.id read is absent");
+    assert.equal(acl.release_key, true, "0505's ops.release.release_key read is absent");
+    assert.equal(acl.release_maker, true, "0505's ops.release.maker_actor read is absent");
+    assert.equal(acl.release_session_user, true,
+      "0505's ops.release.maker_session_user read is absent");
     assert.equal(acl.release_marker, true, "0505's ops.release provenance read is absent");
     assert.equal(acl.release_whole_table, false,
       "the ops.release read is a whole-table grant, which 0505 deliberately did not give");
+    assert.equal(acl.release_outside_column, false,
+      "the ops.release read reaches a column outside 0505's five-column grant");
 
     // A HOME WITH NO db.env IN IT. This is the blind, not a convenience: with
     // HOME pointed here, _load_db_env() finds nothing and cannot re-supply a

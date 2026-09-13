@@ -371,6 +371,8 @@ declare
   v_col        text;
   v_row_count  integer;
   v_attgenerated char;
+  v_acl_probe  text;
+  v_forbidden_execute boolean;
 begin
   -- 0. THE ROW THIS MIGRATION EXISTS TO MAKE READABLE IS STILL UNWRITTEN, so
   --    the digest replaced above has no persisted value to contradict. Asserted,
@@ -416,17 +418,34 @@ begin
         'ops.gate_zero_record_read_only_outcome(uuid,jsonb)', 'execute') then
     raise exception '0505 FAILED: the producer seat lost EXECUTE on its own writer';
   end if;
-  if exists (
-    select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-    cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-    join pg_roles g on g.oid = acl.grantee
-    where n.nspname = 'ops' and p.proname = 'gate_zero_record_read_only_outcome'
-      and acl.privilege_type = 'EXECUTE'
-      and g.rolname <> 'carr_gate_zero_producer'
-      and g.rolname <> (select rolname from pg_roles where oid = p.proowner)
-  ) then
-    raise exception '0505 FAILED: a role other than the producer seat holds EXECUTE on the writer';
-  end if;
+  -- Run the same census over its clean state, a real catalog mutation, and the
+  -- restored state. PUBLIC is not a pg_roles row: aclexplode represents it as
+  -- grantee OID 0, which is why the LEFT JOIN and explicit zero test below are
+  -- load-bearing rather than stylistic.
+  foreach v_acl_probe in array array['baseline', 'public-mutation', 'restored'] loop
+    if v_acl_probe = 'public-mutation' then
+      execute 'grant execute on function ops.gate_zero_record_read_only_outcome(uuid,jsonb) to public';
+    elsif v_acl_probe = 'restored' then
+      execute 'revoke execute on function ops.gate_zero_record_read_only_outcome(uuid,jsonb) from public';
+    end if;
+    select exists (
+      select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+      left join pg_roles g on g.oid = acl.grantee
+      where n.nspname = 'ops' and p.proname = 'gate_zero_record_read_only_outcome'
+        and acl.privilege_type = 'EXECUTE'
+        and (
+          acl.grantee = 0 -- PUBLIC has no pg_roles row; aclexplode uses OID 0.
+          or g.oid is null -- Fail closed if any other ACL grantee is unresolved.
+          or (g.rolname <> 'carr_gate_zero_producer' and acl.grantee <> p.proowner)
+        )
+    ) into v_forbidden_execute;
+    if v_acl_probe in ('baseline', 'restored') and v_forbidden_execute then
+      raise exception '0505 FAILED: a role other than the producer seat or owner holds EXECUTE on the writer';
+    elsif v_acl_probe = 'public-mutation' and not v_forbidden_execute then
+      raise exception '0505 FAILED: the writer EXECUTE census did not catch its GRANT EXECUTE TO PUBLIC mutation';
+    end if;
+  end loop;
   -- AND IT IS STILL SECURITY DEFINER, which is what makes session_user the
   -- connection's own login rather than the definer's.
   if not exists (
