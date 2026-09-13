@@ -60,6 +60,30 @@ export const STORES_FILE = "gate-zero-seam-stores.v5.js";
 export const GATE_FILE = "gate-zero-assurance.v5.js";
 export const IDENTITY_FILE = "identity.js";
 export const TOOLS_FILE = "tools.js";
+export const MCP_FILE = "mcp.js";
+
+/**
+ * THE ONE LINE A STAGED TREE GAINS, and the smallest one that could work.
+ *
+ * WHY IT IS NEEDED AT ALL (Step B, 2026-09-13). The authenticated call is
+ * entered by identity.js, around THE SERVER'S OWN DISPATCH, which identity.js
+ * resolves itself through `await import("./mcp.js")`. A suite therefore cannot
+ * be handed the actor and cannot be handed the context: both live behind that
+ * import, which is exactly the property amendment 8 exists to create. What a
+ * suite CAN do is stage the tree it drives, and the seam goes in the one place
+ * that keeps every part under test real -- the bearer match, the seat
+ * narrowing and the context entry all run as they ship, and only the JSON-RPC
+ * parse and the Neon pool, neither of which this slice is about, are skipped.
+ *
+ * IT IS OFF UNLESS A CASE TURNS IT ON: the edited line does nothing at all
+ * unless the global is a function, so a staged tree behaves exactly like the
+ * shipped one for every case that does not install one.
+ */
+const DISPATCH_ANCHOR = "export async function dispatch(request, env, ctx, actor) {\n";
+const DISPATCH_SEAM = "__carrStagedDispatchSeam";
+const DISPATCH_SEAMED = DISPATCH_ANCHOR
+  + `  if (typeof globalThis[${JSON.stringify(DISPATCH_SEAM)}] === "function")\n`
+  + `    return globalThis[${JSON.stringify(DISPATCH_SEAM)}](actor);\n`;
 /**
  * THE VERB EVERY CASE IS DISPATCHED THROUGH. Any registered read verb would do —
  * what is under test is that the producer runs inside a real dispatched call —
@@ -324,6 +348,14 @@ export function stageTree({
   cpSync(join(REPO, "mcp-server", "assets"), join(base, "mcp-server", "assets"),
     { recursive: true });
 
+  // THE DISPATCH SEAM, on every staged tree and inert on all of them until a case
+  // installs the global. See DISPATCH_SEAMED above for why it exists; it is
+  // applied HERE, before the seal, so the manifest the stamps describe covers the
+  // bytes the case actually runs -- a seam sealed out of the manifest would be a
+  // tree whose digest describes a different tree than the one under test.
+  editOnce(join(target, MCP_FILE), DISPATCH_ANCHOR, DISPATCH_SEAMED,
+    "mcp.js's dispatch entry");
+
   // THE TWO SEALED ARTIFACTS, copied as bytes. A case that mutates one mutates
   // the bytes, which is the whole point of asserting the digest moves.
   const stagedTest = join(base, "mcp-server", "test");
@@ -407,55 +439,25 @@ export function stageTree({
 export const moduleOfTree = (target, file) => import(pathToFileURL(join(target, file)).href);
 
 /**
- * RUN `fn` INSIDE A REAL SERVED REQUEST in a staged tree.
- *
- * THIS IS THE ONLY WAY AN AUTHENTICATED CALL EXISTS NOW, and that is the fifth
- * correction round's whole point. `serveReviewRequestAuthenticated` is the one
- * export that reaches identity.js's context entry; it takes the request's own
- * Authorization header rather than an actor, so this helper cannot choose an
- * identity any more than a caller could. Inside it, the continuation goes
- * through the staged tools.js's `executeRegisteredTool` — the dispatch every
- * verb funnels through — and the stub database client calls `fn` from within the
- * handler, which is the only seam Step A has into a dispatched verb.
- *
- * Answers `{ served: false }` when the bearer matched nothing, which is the
- * server's "this was not a review request" and the next door's turn.
- */
-export async function inServedRequest(target, { bearer = RECORDED_REVIEW_TOKEN,
-                                         correlationId = CORRELATION_ID } = {}, fn) {
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const tools = await moduleOfTree(target, TOOLS_FILE);
-  let answered;
-  let ran = false;
-  const client = { query: async () => {
-    if (!ran) { ran = true; answered = await fn(); }
-    return { rows: [] };
-  } };
-  const served = identity.serveReviewRequestAuthenticated(
-    bearer === null ? "" : `Bearer ${bearer}`, correlationId,
-    actor => tools.executeRegisteredTool(client, actor, DISPATCHED_VERB, {}));
-  if (served === null) return { served: false, answered: null };
-  await served;
-  assert.equal(ran, true, "the dispatched verb never reached its client");
-  return { served: true, answered };
-}
-
-/**
  * RUN `fn(actor)` INSIDE A REAL SERVED REVIEW REQUEST in a staged tree, and
  * answer what it returned.
  *
- * THIS IS THE ONE DOOR ONTO AN AUTHENTICATED CALL, and since PR 1013's fifth
- * correction it is the only one there is: `serveReviewRequestAuthenticated`
- * takes the request's own Authorization header rather than an actor, so neither
- * this helper nor a caller can CHOOSE an identity - what `fn` receives is
- * whatever that header authenticated a moment earlier, inside the context the
- * same call entered. Nothing here mints, brands or dispatches anything.
+ * THIS IS THE ONE DOOR ONTO AN AUTHENTICATED CALL, and since PR 1013's SIXTH
+ * correction round it no longer takes one. `serveReviewRequestAuthenticated`
+ * took a continuation, and a callback parameter on an exported door is the
+ * exported context entry amendment 8 forbids however the identity behind it is
+ * derived. It is gone, and this helper does not reach for a replacement door:
+ * it drives `serveReviewRequest`, the SAME export index.js's /mcp route calls,
+ * with a request that carries the bearer and an env that carries the server's
+ * correlation id.
  *
- * `inServedRequest` above is this door with the server's own continuation
- * already written in: it dispatches a read verb and hands the seam to `fn`.
- * Step B's suites dispatch their OWN verb with their own client, so they take
- * the actor and call `executeRegisteredTool` themselves - which is exactly what
- * index.js's /mcp route does with the actor this call hands it.
+ * SO NOTHING HERE CHOOSES AN IDENTITY OR A CONTEXT. The staged identity.js
+ * matches the bearer itself, asks the staged registration who the staffed Gate
+ * Zero oracle is, and enters the authenticated call only when what it matched IS
+ * that seat. `fn` receives the actor from the server's own dispatch, inside
+ * whatever context the server decided to enter -- which for a second review lane,
+ * and for an unstaffed seat, is no context at all. That is the behaviour under
+ * test, not a limitation of the harness.
  *
  * Answers `{ served: false }` when the bearer matched nothing, which is the
  * server's "this was not a review request" and the next door's turn.
@@ -463,10 +465,25 @@ export async function inServedRequest(target, { bearer = RECORDED_REVIEW_TOKEN,
 export async function inServedReview(target, { bearer = RECORDED_REVIEW_TOKEN,
                                                correlationId = CORRELATION_ID } = {}, fn) {
   const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const served = identity.serveReviewRequestAuthenticated(
-    bearer === null ? "" : `Bearer ${bearer}`, correlationId, actor => fn(actor));
-  if (served === null) return { served: false, answered: null };
-  return { served: true, answered: await served };
+  const authorization = bearer === null ? "" : `Bearer ${bearer}`;
+  const request = { headers: { get: name =>
+    (typeof name === "string" && name.toLowerCase() === "authorization") ? authorization : null } };
+  let answered = null;
+  let ran = false;
+  globalThis[DISPATCH_SEAM] = async actor => {
+    ran = true;
+    answered = await fn(actor);
+    return answered;
+  };
+  try {
+    const served = await identity.serveReviewRequest(
+      request, { CORRELATION_ID: correlationId }, {});
+    if (served === null) return { served: false, answered: null };
+    assert.equal(ran, true, "the served request never reached the server's dispatch");
+    return { served: true, answered };
+  } finally {
+    delete globalThis[DISPATCH_SEAM];
+  }
 }
 
 /**

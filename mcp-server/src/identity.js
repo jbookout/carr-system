@@ -990,18 +990,71 @@ export const serveAuthenticatedCall = closedCallable(
  * privately, and the server's own dispatch — resolved by this file, never passed
  * in — runs the request as what it matched.
  *
- * IT ENTERS NO CONTEXT, deliberately. Every verb reached through this door runs
- * with no authenticated call at all, so no receipt can be minted through the
- * council's ordinary verb surface; the authenticated call is reached only by
- * name, through `serveAuthenticatedCall` above.
+ * IT ENTERS A CONTEXT FOR EXACTLY ONE SEAT, AND FOR NOBODY ELSE (Step B,
+ * 2026-09-13). What stood here entered no context at all, on the reasoning that
+ * the authenticated call should be reached only by name through
+ * `serveAuthenticatedCall`. That reasoning carried its own expiry date, written
+ * a few lines above it: the Gate Zero oracle was not a registered verb yet, and
+ * "when the oracle becomes a verb, its entry becomes a registry lookup and the
+ * door's signature does not move". Step B is that verb. It is dispatched through
+ * this door, like every other verb, and the producer it invokes signs its receipt
+ * with the identity derived for THIS call — so a door that entered no context
+ * would ship a verb that can only ever refuse, in production, while every suite
+ * stayed green.
+ *
+ * SO THE ENTRY IS NARROWED BY SEAT RATHER THAN REMOVED, and the narrowing is
+ * tighter than the shape the fifth correction round replaced. That shape gave
+ * EVERY review-council bearer a context. This one asks the frozen Gate Zero
+ * producer registration who the staffed oracle is and enters the context only
+ * when the bearer this door just matched IS that seat:
+ *
+ *   - a second review lane (`grok-reviewer`) authenticates, dispatches, and runs
+ *     with NO context, so it can mint no receipt however it is registered;
+ *   - the OAuth grant path, the agent, Hermes, continuity and the local doors are
+ *     untouched and still enter nothing;
+ *   - returning `oracle_seat_holder_ref` to null unstaffs the seat and closes
+ *     this entry with it, which is control 6's "the whole slice goes dark" read
+ *     one layer further out than it used to reach.
+ *
+ * NO CALLER CODE CROSSES, which is what amendment 8 actually forbids and the
+ * reason this is not the callback door under another name. There is no function
+ * parameter here to carry a caller's code, nothing is handed back that enters a
+ * call, and what runs inside the context is the server's OWN dispatch, resolved
+ * by this file through an import written here. The widest thing a caller can
+ * express is a REGISTERED VERB NAME in a JSON-RPC body — a name the server
+ * resolves in its own registry, which is the same contract `serveAuthenticatedCall`
+ * keeps over SERVER_ENTRIES, over the registry instead of over a map of two.
+ *
+ * THE SEAT IS READ, NOT CACHED. The registration is resolved per request through
+ * a dynamic import, so a suite that stages a tree with the seat unstaffed gets an
+ * unstaffed answer from that tree's own module rather than from whatever this
+ * process imported first.
  */
+async function staffedOracleLane() {
+  try {
+    const { gateZeroOracleSeatLane } = await import("./gate-zero-outcome-store.v5.js");
+    return gateZeroOracleSeatLane();
+  } catch {
+    // THE SEAT IS UNREACHABLE, WHICH IS UNSTAFFED AND NOT AN ERROR. A tree that
+    // does not carry the outcome store at all (an older revision, a staged
+    // fixture) has no staffed oracle by definition, and a router door is the
+    // wrong place to turn that into a failed request.
+    return null;
+  }
+}
+
 export const serveReviewRequest = closedCallable(async (request, env, ctx) => {
   if (callerCode(request) || callerCode(env) || callerCode(ctx)) return null;
   const header = request?.headers?.get?.("authorization");
   const actor = reviewActorForToken(typeof header === "string" ? header : "");
   if (actor === null) return null;
   const { dispatch } = await import("./mcp.js");
-  return dispatch(request, env, ctx, actor);
+  const lane = await staffedOracleLane();
+  if (lane === null || actor.slug !== lane) return dispatch(request, env, ctx, actor);
+  const correlationId = env?.CORRELATION_ID;
+  return enterAuthenticatedCall(
+    deriveCallIdentity(actor, typeof correlationId === "string" ? correlationId : null),
+    () => dispatch(request, env, ctx, actor));
 });
 
 /**
