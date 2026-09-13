@@ -10,7 +10,9 @@
 // on 2026-09-12 the amendment ruled on loop 589 wrote it into the packet: r7
 // carries the producer row, the `gate-zero-read-only-accepted` gate and the
 // `independent_control_plane_oracle` role, and the packet re-froze from
-// `ef34aa54…` to `ea40f61a…`. gate-zero-producer-registration.v5.js pins that
+// `ef34aa54…` to `ea40f61a…`, and the 2026-09-13 consumer-gate-receipt digest
+// amendment re-froze it again to `4379c60e…`.
+// gate-zero-producer-registration.v5.js pins that
 // digest; whether a given packet IS it is decided by that module's byte
 // verifier, `v5A02GateZeroR7Presence(<bytes>)`, re-exported here. The
 // registration's own `r7_entry_witness` is NULL, because the packet's bytes are

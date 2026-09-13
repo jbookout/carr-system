@@ -723,11 +723,24 @@ test("PRODUCER: r7 presence is read from the packet, and no argument short of it
  * They are skipped, never faked: a fixture standing in for the packet would
  * prove nothing about the pin, which is the entire point of a pin.
  *
- * Run on this branch 2026-09-12 against the packets read back out of the
- * doctrine store after the loop-589 amendment:
+ * Run on this branch 2026-09-13 against the packet read back out of the doctrine
+ * store after the consumer-gate-receipt digest amendment:
  *
- *   amended    sha256 ea40f61a…  digest_matches true   witness_conjunction true
- *   superseded sha256 ef34aa54…  digest_matches false  witness_conjunction false
+ *   amended    sha256 4379c60e…  digest_matches true   witness_conjunction true
+ *
+ * THE SUPERSEDED LEG WAS NOT SUPPLIED ON THAT RUN, and it is worth saying why
+ * rather than leaving a reader to assume it passed. `ef34aa54…` is the packet
+ * from BEFORE the loop-589 amendment, and the store no longer serves those
+ * bytes: the 62 chunk sections were overwritten in place by that amendment, so
+ * the only way to hand this test `ef34aa54…` is to hold a copy of the file. A
+ * caller who has one still runs the leg; a caller who does not gets the skip
+ * this test was built to give rather than a reconstruction standing in for the
+ * packet. The amended leg is the one that proves the pin, and it ran.
+ *
+ * The control that WAS available ran out of band on 2026-09-13: `ea40f61a…`, the
+ * packet carrying the Gate Zero entry but predating the digest rule, answered
+ * digest_matches false with entry_matches, gate_registered and role_registered
+ * all true — right entry, wrong bytes, conjunction false.
  */
 test("PRODUCER: the amended r7 packet witnesses the registration and the superseded one does not", (t) => {
   const amendedPath = process.env.CARR_R7_DESIGN_PACKET;
@@ -925,6 +938,38 @@ function atPrePrPolicyVersion(answer) {
   assert.notEqual(V5_A02_POLICY_VERSION, PRE_PR_POLICY_VERSION,
     "the policy version did not move, so this normalization is hiding nothing and must go");
   return { ...answer, policy_version: PRE_PR_POLICY_VERSION };
+}
+
+/**
+ * THE r7 PACKET DIGEST, PUT BACK TO THE PRE-PR COMMIT'S, AND WHY THIS IS THE
+ * SAME KIND OF NORMALIZATION AS THE POLICY VERSION ABOVE RATHER THAN A RE-PIN.
+ *
+ * The 2026-09-13 consumer-gate-receipt digest amendment — act 5 of accepted plan
+ * PLAN-a5059eb52474-v3 — re-froze the r7 packet, so
+ * `V5_A02_GATE_ZERO_R7_PACKET_SHA256` moved and with it the one byte of
+ * `producer_registration` that carries it. That is card 10's value moving again,
+ * which is precisely what `withoutCards9And10` exists to lift out; it did not
+ * lift this field because on the pre-PR commit the field was not moving.
+ *
+ * THE ALTERNATIVE WAS WORSE, and it is worth saying which one was rejected.
+ * Re-pinning `MAIN_ANSWER_DIGESTS.emitGateZeroOutcome` would have forgiven EVERY
+ * other byte at the same time, and editing the committed baseline snapshot is the
+ * defect that file's own header warns about. Setting back one named field keeps
+ * the pin's property: a change to anything else is still red.
+ *
+ * IT IS GUARDED THE SAME WAY. If the two digests are ever equal the normalization
+ * is hiding nothing and must go, and the assertion below says so.
+ */
+const PRE_PR_R7_PACKET_SHA256 =
+  "ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6";
+function atPrePrR7PacketDigest(answer) {
+  assert.equal(answer.producer_registration.r7_packet_sha256,
+    V5_A02_GATE_ZERO_R7_PACKET_SHA256,
+    "the answer does not carry this branch's r7 packet digest, so the normalization is wrong");
+  assert.notEqual(V5_A02_GATE_ZERO_R7_PACKET_SHA256, PRE_PR_R7_PACKET_SHA256,
+    "the r7 packet digest did not move, so this normalization is hiding nothing and must go");
+  return { ...answer, producer_registration: {
+    ...answer.producer_registration, r7_packet_sha256: PRE_PR_R7_PACKET_SHA256 } };
 }
 
 /**
@@ -1183,7 +1228,8 @@ test("SWITCH: with the three rulings back to null, the answers are main's bytes"
     assert.equal(digest(atPrePrPolicyVersion(unruled[name]())), MAIN_ANSWER_DIGESTS[name],
       `${name} no longer answers what main answered while unruled`);
   // And the emission, with cards 9 and 10 lifted out: every other byte is main's.
-  assert.equal(digest(atPrePrPolicyVersion(withoutCards9And10(await unruled.emitGateZeroOutcome()))),
+  assert.equal(digest(atPrePrR7PacketDigest(
+      atPrePrPolicyVersion(withoutCards9And10(await unruled.emitGateZeroOutcome())))),
     MAIN_ANSWER_DIGESTS.emitGateZeroOutcome,
     "the emitted answer moved for a reason other than cards 9 and 10");
 
@@ -1987,6 +2033,12 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "gate_zero_run_binding_unnamed",
   "gate_zero_scheduler_clause_failed",
   "gate_zero_sealed_artifact_absent",
+  // THE RE-FROZEN r7 PACKET DIGEST, added 2026-09-13 by the consumer-gate-receipt
+  // digest amendment. It is a VALUE and not a field name, and it is declared for
+  // the same reason every other addition is: it stands on the unruled surface as
+  // `producer_registration.r7_packet_sha256` and it did not stand in the pre-PR
+  // baseline, whose copy of that field is the packet before this amendment.
+  "4379c60e9a4fefbcf044f4bc5a34e5a95c90f77b9adf348b6da7475e17d5e6d7",
 ]);
 
 /**
