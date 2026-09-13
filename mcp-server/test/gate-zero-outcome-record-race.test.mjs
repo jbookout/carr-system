@@ -59,7 +59,7 @@ import { randomUUID } from "node:crypto";
 
 import { gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest }
   from "../src/gate-zero-outcome-store.v5.js";
-import { cleanupStagedTrees, moduleOfTree, reviewerActor, stageTree }
+import { cleanupStagedTrees, moduleOfTree, recordedReviewerActor, stageTree }
   from "./gate-zero-candidate-tree.testhelper.mjs";
 
 const DSN = process.env.CARR_GATE_ZERO_RACE_DSN || process.env.DATABASE_URL || "";
@@ -140,10 +140,20 @@ test("two authenticated calls for one candidate converge on one durable row", as
   // ONE CANDIDATE TREE, ONE MODULE GRAPH, TWO CALLS. Both calls read the same
   // candidate, so they must reach the same candidate digest; what differs is
   // the correlation id, which is what differs between two real requests.
-  const target = stageTree({});
+  //
+  // BOTH ACTORS ARE MINTED BY THE STAGED identity.js, through the real review
+  // door, from the recorded bearer and the recorded shape of the server's sealed
+  // token map. Under amendment 8 the brand is object identity, so the actor is
+  // DECORATED in place with the correlation id and the audit id rather than
+  // spread into a copy -- a copy would authenticate as nobody, which is the
+  // whole design.
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, "identity.js");
   const tools = await moduleOfTree(target, "tools.js");
-  const first = { ...reviewerActor("2c8f5a91-7d3e-4b06-9a14-6e0d8b5f37c2"), id: seatRow.id };
-  const second = { ...reviewerActor("9e14b7d2-035a-4c68-b1f7-4a2d6c90e8b3"), id: seatRow.id };
+  const first = Object.assign(
+    recordedReviewerActor(identity, "2c8f5a91-7d3e-4b06-9a14-6e0d8b5f37c2"), { id: seatRow.id });
+  const second = Object.assign(
+    recordedReviewerActor(identity, "9e14b7d2-035a-4c68-b1f7-4a2d6c90e8b3"), { id: seatRow.id });
   assert.notEqual(first.correlation_id, second.correlation_id);
 
   // (1) A calls the verb and does NOT commit: its candidate-key entry is

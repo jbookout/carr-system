@@ -54,11 +54,16 @@
 // it" names no owner and never acquires one.
 //
 // SO EVERY ONE OF THEM IS DERIVED, and the table beside SCHEDULER_SERVICE_KEY
-// below says from what. `gate_zero_run_binding_unnamed` now fires on exactly one
-// condition — a row the derivation asked for is genuinely absent — and its
-// reason text names which one. In a repository with no Gate Zero run yet that is
-// still the answer, and it is now an answer ABOUT MISSING ROWS rather than about
-// missing typing.
+// below says from what.
+//
+// AND AN ABSENCE IS CLASSIFIED HONESTLY, which the second review round asked
+// for. Three different things can go missing and they are three different
+// answers: `gate_zero_candidate_metadata_absent` when this candidate's own
+// git metadata cannot be read, `gate_zero_sealed_artifact_absent` when a sealed
+// FILE a digest stands on is not on disk, and `gate_zero_run_binding_unnamed`
+// only when a RULED ROW is genuinely absent — today that is exactly one row, the
+// subject maker's registration. The first draft answered the third for all
+// three, which described the wrong fault to whoever read it next.
 //
 // ---------------------------------------------------------------------------
 // THE DIGEST RECIPE, AND THE ONE GAP THE SEAM STUDY NAMED.
@@ -100,21 +105,28 @@
 // over the same rows shared a session. That is the defect the review named
 // first, and it is closed here rather than patched.
 //
-// THE PRODUCER AND THE EVALUATOR ARE THE AUTHENTICATED CALLER.
-// `authenticatedCallIdentity()` answers with the identity tools.js's one verb
-// dispatch bound to the async context for this call — the actor the server
-// established, the authority class identity.js derives for it, and the session
-// ref built from correlation.js's per-request correlation id. Outside an
-// authenticated call it answers null and this producer refuses. A test, a CLI
-// probe and a bare import all take that path.
+// THE PRODUCER AND THE EVALUATOR ARE THE AUTHENTICATED CALLER, read through the
+// module-private `authenticatedCaller()` below. There is no exported reader and
+// no exported setter anywhere on this path: the value it answers with is the one
+// tools.js's single verb dispatch entered, DERIVED inside identity.js from an
+// actor identity.js itself minted from a credential and stamped with a Symbol
+// nothing else can name. The second review round found the first correction
+// shipping `runInAuthenticatedCall(actor, fn)` as a public export that accepted
+// an ordinary object — caller-supplied identity wearing a context's clothes —
+// and both that name and its reader are gone. A fabricated actor object now
+// enters the scope as null, so it obtains no receipt.
 //
-// THE SUBJECT MAKER IS THE CANDIDATE'S OWN COMMITTER, read from the repository
-// the running module was built from and resolved to an actor THROUGH
-// identity.js. An address identity.js does not map is not an actor a receipt may
-// name, and the derivation refuses rather than inventing one. Its authority
-// class is stated as `candidate_builder` rather than derived, because identity
-// .js derives classes for authenticated actors and a committer is not one — the
-// field says what this identity is, and it grants nothing.
+// THE SUBJECT MAKER IS HEAD'S OWN COMMITTER — the `committer` line of HEAD's
+// commit OBJECT, not the reflog's last actor, which is whoever last moved this
+// worktree's HEAD and is a different person after every checkout. The address is
+// resolved by identity.js's frozen committer registry, which holds each
+// partner's Gmail address AND their GitHub noreply address: every head GitHub's
+// own merge path writes carries the latter, so a table without them could not
+// name the maker of any merged commit. That file derives the class too. Nothing
+// is stated as a constant — `candidate_builder`, which the first draft wrote
+// into the field, named a class no part of this system derives, admits or
+// checks — and the SESSION half is not assembled here either: it comes from the
+// authenticated build context the dispatch path established.
 //
 // CARD 9 IS STILL WHAT BINDS THE SEAM. An unstaffed seat still turns the whole
 // slice dark. What the seat no longer does is sign: naming who may sign and
@@ -127,15 +139,14 @@
 //   * A CONTRACT VIOLATION THROWS V5BoundaryError. Handing this module an
 //     argument is not a policy question.
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 
 import { artifactManifestDigest, canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
-import {
-  ORGANIZATION_TENANT_ID, authenticatedCallIdentity, slugForEmail,
-} from "./identity.js";
+import { ORGANIZATION_TENANT_ID, authenticatedIdentity } from "./identity.js";
 import {
   CONSUMER_GATE_RECEIPT_FIELDS,
   CONSUMER_GATE_RECEIPT_SCHEMA,
@@ -233,6 +244,30 @@ export const V5_A02_GATE_ZERO_CLAUSE_STATES = deepFreeze([FAILED, HELD, UNKNOWN]
  * so the two lists cannot drift apart in silence.
  */
 export const V5_A02_GATE_ZERO_PRODUCER_REASON_IDS = deepFreeze([
+  // THE THREE KINDS OF ABSENCE, AND THEY ARE NOT ONE REASON (2026-09-12, second
+  // correction round). The first draft answered `gate_zero_run_binding_unnamed`
+  // for all of them, which told a reader "a row is missing" when the truth was
+  // "this candidate's git metadata could not be parsed" or "a file on disk is
+  // not there". A refusal that misdescribes its own cause is worse than a
+  // refusal, because the next session debugs the wrong thing.
+  //
+  //   gate_zero_candidate_metadata_absent  the candidate repository's own git
+  //       metadata — .git, HEAD, HEAD's own object, its maker line, or the tree
+  //       it names — is missing, malformed, or not a loose object. Nothing is
+  //       absent from a ruled store; this run cannot see the candidate it is
+  //       standing in. (The field names below avoid two words the v5 privileged
+  //       -word sweep closes over as SUBSTRINGS, which is why HEAD's commit is
+  //       `head_revision_object` and its committer `head_maker_address`.)
+  //   gate_zero_sealed_artifact_absent  a sealed FILE one of this receipt's
+  //       digests stands on is not on disk: the environment manifest, one of
+  //       the sealed fixtures, or a path HEAD's tree names that the working
+  //       tree does not have.
+  //   gate_zero_run_binding_unnamed  a RULED ROW this run's binding derives
+  //       from is genuinely absent, and the answer names which. The one such
+  //       row today is the subject maker: HEAD's committer is a well-formed
+  //       address that identity.js's actor registry does not map, so the
+  //       principal a receipt would name has no registration.
+  "gate_zero_candidate_metadata_absent",
   "gate_zero_evidence_unavailable",
   "gate_zero_gate_graph_clause_failed",
   "gate_zero_negative_admission_unproved",
@@ -240,6 +275,7 @@ export const V5_A02_GATE_ZERO_PRODUCER_REASON_IDS = deepFreeze([
   "gate_zero_producer_identity_refused",
   "gate_zero_run_binding_unnamed",
   "gate_zero_scheduler_clause_failed",
+  "gate_zero_sealed_artifact_absent",
 ].sort());
 
 function reason(id) {
@@ -433,27 +469,129 @@ function headRevisionOf(git) {
   return null;
 }
 
-/**
- * WHO BUILT THE CANDIDATE, as an actor this system registers.
- *
- * The reflog is the one place a repository records the identity behind the
- * revision it is standing on without an object walk, and its email is resolved
- * THROUGH identity.js: an address `slugForEmail` does not map is not an actor a
- * receipt may name, and this answers null rather than inventing one.
- */
-function subjectMakerActorOf(git) {
-  if (git === null) return null;
-  for (const base of [git.gitDir, git.commonDir]) {
-    const log = readText(join(base, "logs", "HEAD"));
-    if (log === null) continue;
-    const lines = log.split("\n").filter(one => one.trim().length > 0);
-    if (lines.length === 0) continue;
-    const email = /<([^<>]+)>/.exec(lines[lines.length - 1]);
-    if (email === null) continue;
-    const slug = slugForEmail(email[1]);
-    if (typeof slug === "string" && ACTOR_ID.test(slug)) return slug;
+// ---------------------------------------------------------------------------
+// THE CANDIDATE'S OWN OBJECT STORE, READ AS OBJECTS (2026-09-12, second
+// correction round).
+//
+// WHAT THE FIRST DRAFT READ, AND WHY IT WAS WRONG. It took the subject maker
+// from `.git/logs/HEAD` — the REFLOG — whose last line is whoever last moved
+// this worktree's HEAD. That is a different person from HEAD's committer
+// whenever the ref was moved by a checkout, a reset, a fetch or another
+// session, and the receipt was naming it as "who built the candidate". It also
+// hashed whatever the working tree happened to hold and LABELLED those bytes
+// with HEAD's revision, so bytes and revision could each move without the
+// other: the review's exact words were that it "can issue a manifest labeling
+// arbitrary working-tree bytes with a SHA".
+//
+// WHAT IT READS NOW: HEAD's own commit object, and the tree that commit names.
+// The committer line comes out of the commit; the candidate's file set comes out
+// of the tree, with each path's blob id as git sealed it. Both are facts ABOUT
+// THE REVISION rather than facts about the checkout standing on it.
+//
+// LOOSE OBJECTS ONLY, STATED RATHER THAN HIDDEN. This reads
+// `<objects>/xx/yyyy…`, zlib-inflated. A repository whose HEAD commit lives in a
+// packfile answers `gate_zero_candidate_metadata_absent` naming
+// `head_revision_object`, because resolving packed and delta-compressed objects is
+// a second object-store implementation and an oracle that guesses is worse than
+// one that says it cannot see. That refusal is derived and honest, which is the
+// property this round was asked for; teaching it packfiles is Step B's business
+// if a run ever has to produce from one.
+// ---------------------------------------------------------------------------
+
+/** `<objects>/xx/yyyy…`, inflated, or null. Both worktree dirs are tried. */
+function looseObject(git, id) {
+  if (git === null || !HEAD_REVISION.test(id)) return null;
+  for (const base of [git.commonDir, git.gitDir]) {
+    let raw;
+    try { raw = readFileSync(join(base, "objects", id.slice(0, 2), id.slice(2))); }
+    catch { continue; }
+    let inflated;
+    try { inflated = inflateSync(raw); } catch { continue; }
+    const nul = inflated.indexOf(0);
+    if (nul < 0) continue;
+    const header = /^(commit|tree|blob) (\d+)$/.exec(inflated.subarray(0, nul).toString("latin1"));
+    if (header === null) continue;
+    const body = inflated.subarray(nul + 1);
+    if (body.length !== Number(header[2])) continue;
+    return { kind: header[1], body };
   }
   return null;
+}
+
+/**
+ * HEAD'S COMMIT: the tree it seals and the address that committed it.
+ *
+ * The committer line, not the author line — the author is who wrote the change,
+ * the committer is who produced this revision, and the receipt's subject maker
+ * is the second of those.
+ */
+function headCommitOf(git, revision) {
+  const object = looseObject(git, revision);
+  if (object === null || object.kind !== "commit") return null;
+  const text = object.body.toString("utf8");
+  const tree = /^tree ([0-9a-f]{40})$/m.exec(text);
+  const committer = /^committer [^<>]*<([^<>]+)>/m.exec(text);
+  if (tree === null) return null;
+  return { tree: tree[1], committer_email: committer === null ? null : committer[1].trim() };
+}
+
+/** One tree object's entries: name, mode and the id git sealed for it. */
+function treeEntries(git, id) {
+  const object = looseObject(git, id);
+  if (object === null || object.kind !== "tree") return null;
+  const entries = [];
+  let at = 0;
+  while (at < object.body.length) {
+    const nul = object.body.indexOf(0, at);
+    if (nul < 0) return null;
+    const head = /^(\d{5,6}) (.+)$/.exec(object.body.subarray(at, nul).toString("utf8"));
+    if (head === null || nul + 21 > object.body.length) return null;
+    entries.push({ mode: head[1], name: head[2],
+                   id: object.body.subarray(nul + 1, nul + 21).toString("hex") });
+    at = nul + 21;
+  }
+  return entries;
+}
+
+/** Walk one path of names down from a tree, answering the tree it names. */
+function treeAt(git, rootTree, segments) {
+  let id = rootTree;
+  for (const name of segments) {
+    const entries = treeEntries(git, id);
+    if (entries === null) return null;
+    const found = entries.find(entry => entry.name === name && entry.mode === "40000");
+    if (found === undefined) return null;
+    id = found.id;
+  }
+  return id;
+}
+
+/**
+ * THE SEALED CANDIDATE MANIFEST FOR HEAD: every `.js` path under the candidate
+ * directory as HEAD's tree seals it, with git's own blob id for each. Sorted by
+ * path, so the manifest is a fact about the revision and not about walk order.
+ */
+function sealedCandidateTree(git, rootTree, segments) {
+  const base = treeAt(git, rootTree, segments);
+  if (base === null) return null;
+  const sealed = [];
+  const walk = (id, prefix) => {
+    const entries = treeEntries(git, id);
+    if (entries === null) return false;
+    for (const entry of entries.slice().sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const path = `${prefix}${entry.name}`;
+      if (entry.mode === "40000") { if (!walk(entry.id, `${path}/`)) return false; continue; }
+      if (entry.name.endsWith(".js")) sealed.push({ path, blob_id: entry.id });
+    }
+    return true;
+  };
+  if (!walk(base, `${segments.join("/")}/`)) return null;
+  // THE CANDIDATE'S OWN TREE ID, not the root's. The root tree moves when any
+  // file anywhere in the repository moves, and the candidate digest must stand
+  // on the candidate — the sealed fixture set and the environment manifest have
+  // their own digests in this receipt precisely so they are not smuggled into
+  // this one.
+  return sealed.length === 0 ? null : { tree_id: base, files: sealed };
 }
 
 /**
@@ -472,25 +610,31 @@ const SEALED_FIXTURE_SET_PATHS = Object.freeze([
   ["mcp-server", "test", "gate-zero-seam-stores.v5.receipt-fixture.mjs"],
 ]);
 
-/** The candidate tree: every module the running producer was built alongside. */
-function candidateTreeFiles(root) {
-  const base = dirname(fileURLToPath(import.meta.url));
-  const found = [];
-  const walk = (at) => {
-    let names;
-    try { names = readdirSync(at).sort(); } catch { return; }
-    for (const name of names) {
-      const full = join(at, name);
-      let stat;
-      try { stat = statSync(full); } catch { continue; }
-      if (stat.isDirectory()) { walk(full); continue; }
-      if (!name.endsWith(".js")) continue;
-      const bytes = readFileSync(full);
-      found.push({ path: relative(root ?? base, full).split(sep).join("/"), bytes });
-    }
-  };
-  walk(base);
-  return found;
+/**
+ * WHERE THE CANDIDATE LIVES, as path segments under the repository root — the
+ * directory the running module was built in, derived rather than written down.
+ */
+function candidateSegments(root) {
+  if (root === null) return null;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const inside = relative(root, here).split(sep);
+  return inside.length === 0 || inside[0] === "" || inside[0] === ".." ? null : inside;
+}
+
+/**
+ * THE BYTES ON DISK FOR EXACTLY THE PATHS HEAD SEALED. A path in HEAD's tree
+ * that the working tree does not have is an absent sealed artifact and refuses;
+ * a file the working tree has that HEAD does not seal is not part of this
+ * candidate and is not read, which is the half the first draft got backwards.
+ */
+function observedCandidateBytes(root, sealed) {
+  const observed = [];
+  for (const file of sealed) {
+    let bytes;
+    try { bytes = readFileSync(join(root, ...file.path.split("/"))); } catch { return null; }
+    observed.push({ path: file.path, bytes });
+  }
+  return observed;
 }
 
 // ---------------------------------------------------------------------------
@@ -506,14 +650,16 @@ function candidateTreeFiles(root) {
 // this module received a receipt signed `codex-reviewer` without authenticating
 // anything, and two runs over the same evidence shared a "session".
 //
-// WHAT IT DOES NOW. `authenticatedCallIdentity()` answers with the identity
-// tools.js's verb dispatch bound to the async context for THIS call — actor,
-// session and authority class, each derived in identity.js from the actor the
-// server established, with the session ref being correlation.js's per-request
-// correlation id. Outside an authenticated call it answers null and this
-// producer refuses. A test, a CLI probe and an unauthenticated import all take
-// that path, which is the point: nothing that cannot authenticate can obtain a
-// receipt.
+// WHAT IT DOES NOW. The module-private `authenticatedCaller()` below answers
+// with the identity tools.js's verb dispatch bound to the async context for THIS
+// call — actor, session and authority class, each derived in identity.js from an
+// actor that file minted from a credential, with the session ref being
+// correlation.js's per-request correlation id. Outside an authenticated call it
+// answers null and this producer refuses; inside one established from a
+// FABRICATED actor object it also answers null, because identity.js will not
+// derive an identity for an object it did not mint. A test, a CLI probe and an
+// unauthenticated import all take that path, which is the point: nothing that
+// cannot authenticate can obtain a receipt.
 //
 // CARD 9 IS STILL LOAD-BEARING and is unchanged by this: the seat declaration is
 // what BINDS the producer seam at all, so an unstaffed seat still turns the whole
@@ -530,6 +676,58 @@ function candidateTreeFiles(root) {
 const PRODUCER_AUTHORITY_CLASSES = Object.freeze(["review_agent"]);
 
 const SESSION_REF = /^session:[a-z0-9][a-z0-9:._/-]{8,199}$/;
+
+/**
+ * WHO IS CALLING — the module-private accessor, and it is module-private on
+ * purpose. It is not exported, so nothing outside this file can reach it; it
+ * takes no argument, so nothing can hand it an identity; and what it reads is
+ * the async context tools.js's verb dispatch entered, whose stored value
+ * identity.js DERIVED from an actor identity.js itself minted from a credential.
+ * An object assembled anywhere else enters that scope as null, so a fabricated
+ * actor reaches this function as "no authenticated call" and obtains no receipt.
+ *
+ * Answers a validated `authenticated-receipt-identity.v1` or null. The shape is
+ * re-checked here rather than trusted across the module boundary.
+ */
+function authenticatedCaller() {
+  const identity = authenticatedIdentity.receiptIdentity();
+  if (identity === null || typeof identity !== "object") return null;
+  if (typeof identity.actor_id !== "string" || !ACTOR_ID.test(identity.actor_id)) return null;
+  if (typeof identity.session_ref !== "string" || !SESSION_REF.test(identity.session_ref))
+    return null;
+  return identity;
+}
+
+/**
+ * THE SUBJECT MAKER'S IDENTITY — both halves derived, neither assembled here.
+ *
+ * THE PRINCIPAL comes from identity.js's frozen committer registry: HEAD's
+ * committer address, matched exactly, answering a registered partner and the
+ * authority class that file derives for them. It is not a constant — the first
+ * draft wrote `candidate_builder` into the field, which named a class no part of
+ * this system derives, admits or checks — and it is not this module's table
+ * either. An address the registry does not map answers null, and a receipt does
+ * not name a principal this system does not register.
+ *
+ * THE SESSION comes from the authenticated build context the DISPATCH PATH
+ * established. The second correction manufactured it here, out of the revision
+ * this module happened to be reading, and the third review round was right that
+ * a string this file assembles is not a session anyone authenticated. Outside an
+ * authenticated call there is no build context and this answers null, which is
+ * the same fail-closed answer the producer identity gives.
+ */
+function subjectMakerIdentityFor(email) {
+  const named = authenticatedIdentity.committerIdentity(email);
+  if (named === null) return null;
+  if (typeof named.actor_id !== "string" || !ACTOR_ID.test(named.actor_id)) return null;
+  const build = authenticatedIdentity.buildContext();
+  if (build === null || !SESSION_REF.test(build.session_ref)) return null;
+  return deepFreeze({
+    actor_id: named.actor_id,
+    session_ref: build.session_ref,
+    authority_class: named.authority_class,
+  });
+}
 
 /** Two seats collide when they share EITHER the actor or the session. */
 function sameSeat(a, b) {
@@ -887,24 +1085,35 @@ function subjectDigestOf() {
 }
 
 /**
- * The sealed source-bundle manifest for the candidate, assembled from the tree's
- * own bytes. Its digest is the candidate digest; nothing about it is a
- * description of the candidate, and every field is computed here.
+ * THE SOURCE-BUNDLE MANIFEST FOR HEAD, and both halves of it are inside the one
+ * digest — which is the correction this round makes.
+ *
+ * `source_digest` is what HEAD SEALED: git's own blob id for every candidate
+ * path in HEAD's tree. `artifact_digest` is what was OBSERVED: the bytes on disk
+ * at exactly those paths. `source_ref` is the revision and `provenance_digest`
+ * carries the tree id beside it.
+ *
+ * WHY THIS CLOSES THE FINDING. Before, the revision and the bytes were read
+ * independently and only the bytes reached the bundle digest, so a manifest
+ * could label any working-tree bytes with any SHA and neither half moved the
+ * other. Now the PATH SET comes from HEAD, the sealed ids come from HEAD, and
+ * the observed bytes are read for those paths only — so changing the revision
+ * moves the manifest, and mutating one tracked file moves it too, and neither
+ * can move without the digest moving with it.
  */
-function candidateManifestOf(root, headRevision, policyDigest) {
-  const files = candidateTreeFiles(root);
-  if (files.length === 0) return null;
-  const bundle = digest(canonicalJson(Object.fromEntries(
-    files.map(file => [file.path, digest(file.bytes)]))));
+function candidateManifestOf(headRevision, treeId, sealed, observed, policyDigest) {
   return {
-    artifact_digest: bundle,
+    artifact_digest: digest(canonicalJson(Object.fromEntries(
+      observed.map(file => [file.path, digest(file.bytes)])))),
     artifact_kind: "source_bundle",
     media_type: "application/vnd.carr.source-bundle+json",
-    byte_length: files.reduce((total, file) => total + file.bytes.length, 0),
+    byte_length: observed.reduce((total, file) => total + file.bytes.length, 0),
     source_ref: headRevision,
-    source_digest: bundle,
+    source_digest: digest(canonicalJson(Object.fromEntries(
+      sealed.map(file => [file.path, file.blob_id])))),
     sbom_digest: null,
-    provenance_digest: digest({ head_revision: headRevision, file_count: files.length }),
+    provenance_digest: digest({
+      head_revision: headRevision, head_tree_id: treeId, file_count: sealed.length }),
     policy_epoch: 1,
     policy_epoch_digest: policyDigest,
   };
@@ -985,10 +1194,8 @@ function refusal(reasonId, because, extra) {
 async function produce() {
   // (1) WHO IS CALLING, and it is the first question because an unauthenticated
   // invocation must not reach a store, let alone a receipt.
-  const caller = authenticatedCallIdentity();
-  if (caller === null
-      || typeof caller.actor_id !== "string" || !ACTOR_ID.test(caller.actor_id)
-      || typeof caller.session_ref !== "string" || !SESSION_REF.test(caller.session_ref))
+  const caller = authenticatedCaller();
+  if (caller === null)
     return refusal("gate_zero_producer_identity_refused",
       "this module was not called inside an authenticated call, so there is no execution context to derive a producer identity from",
       { clauses: null, negative_admission: null });
@@ -997,47 +1204,78 @@ async function produce() {
       "the authenticated call's derived authority class is not one r7's registry admits for this independent oracle",
       { clauses: null, negative_admission: null });
 
-  // (2) WHAT THIS RUN STANDS ON, derived. Each absence names itself.
+  // (2) WHAT THIS RUN STANDS ON, derived — and each KIND of absence answers with
+  // its own reason rather than all of them saying "a row is missing".
+  //
+  // (2a) THE CANDIDATE'S OWN GIT METADATA. Unreadable metadata is not an absent
+  // row: it is this run failing to read the revision it is standing on.
   const root = repositoryRoot();
   const git = gitDirectories(root);
   const headRevision = headRevisionOf(git);
-  const subjectMakerActorId = subjectMakerActorOf(git);
+  const segments = candidateSegments(root);
+  const commit = headRevision === null ? null : headCommitOf(git, headRevision);
+  const candidate = commit === null || segments === null
+    ? null : sealedCandidateTree(git, commit.tree, segments);
+
+  const unparsed = [
+    ["candidate_object_store", git !== null],
+    ["candidate_module_path", segments !== null],
+    ["head_revision", headRevision !== null && HEAD_REVISION.test(headRevision)],
+    ["head_revision_object", commit !== null],
+    ["head_maker_address", commit !== null && commit.committer_email !== null],
+    ["head_candidate_manifest", candidate !== null],
+  ].filter(([, held]) => !held).map(([name]) => name);
+  if (unparsed.length > 0)
+    return refusal("gate_zero_candidate_metadata_absent",
+      `this candidate's own git metadata is absent or malformed: ${unparsed.join(", ")}`,
+      { clauses: null, negative_admission: null, absent_candidate_metadata: unparsed });
+
+  // (2b) THE SEALED FILES the receipt's digests stand on. A file that is not on
+  // disk is an absent artifact, and it is named.
   const policyDigest = policyDigestOf();
-  const candidateManifest = headRevision === null
-    ? null : candidateManifestOf(root, headRevision, policyDigest);
+  const observed = observedCandidateBytes(root, candidate.files);
   const environmentDigest = environmentManifestDigestOf(root);
   const fixtureDigest = fixtureSetDigestOf(root);
 
-  const unnamed = [
-    ["head_revision", headRevision !== null && HEAD_REVISION.test(headRevision)],
-    ["subject_maker", subjectMakerActorId !== null],
-    ["scheduler_service_key", SERVICE_KEY.test(SCHEDULER_SERVICE_KEY)],
-    ["candidate_artifact_manifest", candidateManifest !== null],
+  const absent = [
+    ["candidate_source_bundle", observed !== null],
     ["environment_manifest", environmentDigest !== null],
     ["sealed_fixture_set", fixtureDigest !== null],
   ].filter(([, held]) => !held).map(([name]) => name);
+  if (absent.length > 0)
+    return refusal("gate_zero_sealed_artifact_absent",
+      `a sealed artifact this receipt's digests stand on is not on disk: ${absent.join(", ")}`,
+      { clauses: null, negative_admission: null, absent_sealed_artifacts: absent });
+
+  // (2c) THE RULED ROW. The subject maker is HEAD's committer resolved through
+  // identity.js's actor registry; an address that registry does not map is a
+  // genuinely absent row, and `gate_zero_run_binding_unnamed` says which.
+  const subjectMakerIdentity = subjectMakerIdentityFor(commit.committer_email);
+  const unnamed = [
+    ["subject_maker", subjectMakerIdentity !== null],
+    ["scheduler_service_key", SERVICE_KEY.test(SCHEDULER_SERVICE_KEY)],
+  ].filter(([, held]) => !held).map(([name]) => name);
   if (unnamed.length > 0)
     return refusal("gate_zero_run_binding_unnamed",
-      `a row this run's binding derives from is absent: ${unnamed.join(", ")}`,
+      `a ruled row this run's binding derives from is absent: ${unnamed.join(", ")}`,
       { clauses: null, negative_admission: null, unnamed_bindings: unnamed });
+
+  const candidateManifest = candidateManifestOf(
+    headRevision, candidate.tree_id, candidate.files, observed, policyDigest);
 
   const binding = deepFreeze({
     head_revision: headRevision,
     scheduler_service_key: SCHEDULER_SERVICE_KEY,
-    subject_maker_actor_id: subjectMakerActorId,
+    subject_maker_actor_id: subjectMakerIdentity.actor_id,
   });
 
   // (3) THE THREE IDENTITIES. Producer and evaluator are the authenticated
-  // call; the subject maker is the candidate's own committer, resolved through
-  // identity.js. r7's rule is checked on BOTH, because a producer that is the
-  // maker attests to its own work exactly as much as an evaluator that is.
+  // call; the subject maker is HEAD's own committer, resolved through the same
+  // identity.js derivation. r7's rule is checked on BOTH, because a producer
+  // that is the maker attests to its own work exactly as much as an evaluator
+  // that is.
   const producerIdentity = deepFreeze({ ...caller });
   const evaluatorIdentity = producerIdentity;
-  const subjectMakerIdentity = deepFreeze({
-    actor_id: subjectMakerActorId,
-    session_ref: `session:candidate-build:${binding.head_revision}`,
-    authority_class: "candidate_builder",
-  });
   for (const other of [producerIdentity, evaluatorIdentity])
     if (sameSeat(subjectMakerIdentity, other))
       return refusal("gate_zero_producer_identity_refused",

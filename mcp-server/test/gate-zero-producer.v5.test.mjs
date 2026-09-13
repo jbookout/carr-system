@@ -13,8 +13,15 @@
 //
 // SO EVERY CASE BELOW IS A STAGED TREE under node_modules/.cache, holding:
 //
-//   * .git/HEAD and .git/logs/HEAD — the candidate's revision and its committer,
-//     which is where the head revision and the subject maker are DERIVED from;
+//   * A REAL OBJECT STORE. `.git/HEAD` names the case's revision and
+//     `.git/objects` holds the loose commit and tree objects for it, written
+//     here: the trees are content-addressed exactly as git writes them, so the
+//     path set and the blob ids the producer reads out of HEAD are the real
+//     sealing of the staged bytes. Only the COMMIT object is filed under the
+//     fixture's chosen revision rather than under its own hash — the producer
+//     does not re-hash what it inflates, and a case has to be able to say which
+//     revision it is standing on. The committer line is where the subject maker
+//     comes from, and the reflog is not written at all any more;
 //   * mcp-server/src — a copy, with the store module replaced by
 //     ./gate-zero-producer-stores.v5.fixture.mjs, and with card 9's seat
 //     declaration or the three `decision_id:` lines edited when a case asks;
@@ -24,11 +31,28 @@
 // Nothing in src reaches those trees, no argument selects one, and no environment
 // variable points at one. What runs in each is the real producer, the real
 // clauses, the real readers and the real ruling gate over known rows — invoked
-// inside a real authenticated call established through the STAGED identity.js.
+// inside a REAL VERB DISPATCH.
+//
+// HOW THE AUTHENTICATED CALL IS OBTAINED, and this is the second correction
+// round's subject. Nothing here fabricates an actor. The reviewer seat is minted
+// by the staged identity.js's own `reviewActorForToken` from a recorded
+// Authorization header and the recorded shape of the server's REVIEW_TOKENS map
+// — the same door index.js now delegates to — and the correlation id is
+// decorated on the way mcp.js decorates it. That actor then goes through the
+// staged tools.js's `executeRegisteredTool`, the one dispatch every verb funnels
+// through, and the producer runs INSIDE a real verb call: the stub database
+// client the verb is handed calls the gate from within the handler, which is the
+// only seam Step A has into a dispatched verb (binding Gate Zero to a verb of
+// its own is Step B). An object that identity.js did not mint is refused by the
+// derivation, so the fabricated `codex-reviewer` literal the first correction
+// round's tests used obtains no identity and no receipt — control 11.
 //
 // THE CONTROLS, and each is named where it is asserted:
 //   1. an authenticated call + every row present  -> passable, a digest, an instant
 //   2. an UNAUTHENTICATED invocation              -> refused, and no receipt
+//  11. a FABRICATED actor object                  -> no identity, and no receipt
+//  12. the real verb dispatch                     -> is what establishes the
+//                                                    identity the producer reads
 //   3. the receipt's producer identity            -> equals the authenticated actor
 //   4. each of the three clauses turned off       -> the gate refuses or fails
 //   5. each digest against its own artifact       -> one byte moves it
@@ -46,6 +70,8 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
   writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -68,42 +94,50 @@ import {
 
 /**
  * THE STAGING IS SHARED (2026-09-13). Every constant, the candidate-tree
- * builder, the one-match line editor, the tree-module importer and the module
- * parser moved to gate-zero-candidate-tree.testhelper.mjs when Step B's write
- * verb came to owe the same staging. They are IMPORTED rather than retyped, for
- * the reason the reachability walk gives in its own header: a retyped harness is
- * a second implementation that passes because it was written from the same
- * misunderstanding as the code it checks. Nothing below changed; the trees these
- * cases stand on are built by the same bytes they were built by before.
+ * builder, the loose-object writer, the one-match line editor, the recorded
+ * authentication doors, the tree-module importer, the dispatched-verb seam and
+ * the module parser live in gate-zero-candidate-tree.testhelper.mjs, because
+ * Step B's write verb owes the SAME staging. They are IMPORTED rather than
+ * retyped, for the reason the reachability walk gives in its own header: a
+ * retyped harness is a second implementation that passes because it was written
+ * from the same misunderstanding as the code it checks. Nothing below changed;
+ * the trees these cases stand on are built by the same bytes they were built by
+ * before, and a correction to the staging corrects both suites at once.
  */
 import {
   CORRELATION_ID, ENVIRONMENT_MANIFEST, FIXTURE_FILE, GATE_FILE, IDENTITY_FILE,
-  MAKER_EMAIL, PRODUCER_FILE, REGISTRATION_FILE, REPO, REVIEWING_SEAT_ACTOR,
-  RULINGS_FILE, SEALED_FIXTURES, SRC, STORES_FILE, SUBJECT_MAKER_ACTOR, TEST_DIR,
-  cleanupStagedTrees, editOnce, moduleImports, moduleOfTree, partnerActor,
-  reviewerActor, stageTree,
+  MAKER_GMAIL_EMAIL, MAKER_NOREPLY_EMAIL, PRODUCER_FILE, REGISTRATION_FILE, REPO,
+  REVIEWING_SEAT_ACTOR, RULINGS_FILE, SEALED_FIXTURES, SRC, STORES_FILE,
+  SUBJECT_MAKER_ACTOR, TEST_DIR, TOOLS_FILE,
+  RECORDED_REVIEW_TOKEN, RECORDED_REVIEW_TOKENS,
+  cleanupStagedTrees, editOnce, fabricatedReviewerActor, inDispatchedVerb,
+  moduleImports, moduleOfTree, objectId, recordedPartnerActor, recordedReviewerActor,
+  stageTree,
 } from "./gate-zero-candidate-tree.testhelper.mjs";
 
 after(cleanupStagedTrees);
 
 /**
- * What the gate answers in a staged tree, INSIDE an authenticated call.
+ * What the gate answers in a staged tree, inside a real dispatched verb call.
  *
- * The call is established through the STAGED identity.js — the same module
- * instance the staged producer imports — so what the producer reads is the
- * context this test actually entered, not a value handed across a boundary.
- * `actor: null` runs the same gate with no call established at all.
+ * `mint` builds the actor from the staged identity.js; `mint: null` runs the
+ * same gate with no dispatch and no call established at all.
  */
-async function emitFrom(options = {}, actor = reviewerActor()) {
-  const target = stageTree(options);
+async function emitFrom(options = {}, mint = recordedReviewerActor) {
+  const { target } = stageTree(options);
   const gate = await moduleOfTree(target, GATE_FILE);
-  if (actor === null) return gate.emitGateZeroOutcome();
+  if (mint === null) return gate.emitGateZeroOutcome();
   const identity = await moduleOfTree(target, IDENTITY_FILE);
-  return identity.runInAuthenticatedCall(actor, () => gate.emitGateZeroOutcome());
+  return inDispatchedVerb(target, mint(identity), () => gate.emitGateZeroOutcome());
 }
 
-/** The candidate digest recomputed here, from the staged tree's own bytes. */
-function candidateDigestOfTree(target, revision, policyDigest) {
+/**
+ * THE CANDIDATE DIGEST RECOMPUTED HERE, over both halves the manifest binds: the
+ * blob ids HEAD's tree sealed for each candidate path, and the bytes on disk at
+ * those same paths. Computed from the staged tree independently of the module
+ * under test, so a producer that hashed something else is red.
+ */
+function candidateDigestOfTree(target, revision, treeId, policyDigest) {
   const files = [];
   const walk = (at) => {
     for (const name of readdirSync(at).sort()) {
@@ -115,17 +149,19 @@ function candidateDigestOfTree(target, revision, policyDigest) {
     }
   };
   walk(target);
-  const bundle = digest(canonicalJson(Object.fromEntries(
-    files.map(file => [file.path, digest(file.bytes)]))));
+  files.sort((a, b) => (a.path < b.path ? -1 : 1));
   return artifactManifestDigest({
-    artifact_digest: bundle,
+    artifact_digest: digest(canonicalJson(Object.fromEntries(
+      files.map(file => [file.path, digest(file.bytes)])))),
     artifact_kind: "source_bundle",
     media_type: "application/vnd.carr.source-bundle+json",
     byte_length: files.reduce((total, file) => total + file.bytes.length, 0),
     source_ref: revision,
-    source_digest: bundle,
+    source_digest: digest(canonicalJson(Object.fromEntries(
+      files.map(file => [file.path, objectId("blob", file.bytes)])))),
     sbom_digest: null,
-    provenance_digest: digest({ head_revision: revision, file_count: files.length }),
+    provenance_digest: digest({
+      head_revision: revision, head_tree_id: treeId, file_count: files.length }),
     policy_epoch: 1,
     policy_epoch_digest: policyDigest,
   });
@@ -226,12 +262,22 @@ test("RECEIPT: all twenty-one fields of consumer-gate-receipt.v1, and nothing el
   // gets a second session; the old design gave both the same one.
   assert.equal(receipt.producer_identity.session_ref, `session:${CORRELATION_ID}`);
   const elsewhere = "7b1c9d40-2e55-4a61-9f03-8ac4be21d7e6";
-  const second = await emitFrom({}, reviewerActor(elsewhere));
+  const second = await emitFrom({}, identity => recordedReviewerActor(identity, elsewhere));
   assert.equal(second.receipt.producer_identity.session_ref, `session:${elsewhere}`);
 
-  // THE SUBJECT MAKER IS THE CANDIDATE'S COMMITTER, resolved through
-  // identity.js's own ALLOW_LIST, and it differs from the seat that reviews it.
+  // THE SUBJECT MAKER IS HEAD'S OWN COMMITTER — the committer line of the commit
+  // object the staged HEAD names, not the reflog, which this staging no longer
+  // writes at all. Resolved through identity.js's own registry, and its AUTHORITY
+  // CLASS IS DERIVED THERE TOO: the first draft wrote the constant
+  // `candidate_builder` into this field, which named a class nothing in this
+  // system derives, admits or checks.
   assert.equal(receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
+  assert.equal(receipt.subject_maker_identity.authority_class, "verified_partner");
+  // THE SESSION IS DERIVED, NOT MANUFACTURED: it is the candidate-build seat
+  // within the authenticated call the dispatch path established, so it moves
+  // with the server's correlation id and not with the revision.
+  assert.equal(receipt.subject_maker_identity.session_ref,
+    `session:${CORRELATION_ID}:candidate-build`);
   assert.notEqual(receipt.subject_maker_identity.actor_id, receipt.producer_identity.actor_id);
   assert.notEqual(receipt.subject_maker_identity.session_ref, receipt.producer_identity.session_ref);
 });
@@ -284,15 +330,177 @@ test("IDENTITY: an authenticated actor of the wrong derived class is refused", a
   // class r7's registry admits for an independent control-plane oracle. The
   // class is DERIVED by identity.js from the live actor; this module only checks
   // membership, so widening it is an edit somebody reviews.
-  const emitted = await emitFrom({}, partnerActor());
+  const emitted = await emitFrom({}, recordedPartnerActor);
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emitted.producer_answer.receipt, null);
 });
 
 test("IDENTITY: an actor with no server-stamped correlation id has no session, and is refused", async () => {
-  const noSession = { ...reviewerActor(), correlation_id: null };
-  const emitted = await emitFrom({}, noSession);
+  const emitted = await emitFrom({},
+    identity => Object.assign(recordedReviewerActor(identity), { correlation_id: null }));
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.producer_answer.receipt, null);
+});
+
+// ===========================================================================
+// CONTROL 11 — a FABRICATED actor object obtains no receipt.
+//
+// THE MUTATION CONTROL FOR THE WHOLE IDENTITY DESIGN, and the one the second
+// review round asked for by name. The first correction shipped
+// `runInAuthenticatedCall(actor, fn)` as a public export that took an ordinary
+// object, and the reviewer obtained `authority_class: "review_agent"` out of a
+// literal. Both that name and its reader are gone; what replaces them derives
+// an identity only for an actor identity.js itself minted from a credential.
+// ===========================================================================
+
+test("IDENTITY: a fabricated actor object obtains no identity and no receipt", async () => {
+  const fabricated = fabricatedReviewerActor();
+  const minted = recordedReviewerActor(await import("../src/identity.js"));
+  // NON-VACUOUS: the fabricated object is field-for-field what the real door
+  // mints, so what refuses it below is provenance and nothing else.
+  assert.deepEqual(Object.keys(fabricated).sort(), Object.keys(minted).sort());
+  for (const key of Object.keys(fabricated)) assert.equal(fabricated[key], minted[key], key);
+
+  const emitted = await emitFrom({}, () => fabricated);
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.outcome_digest, null);
+  assert.equal(emitted.producer_answer.receipt, null);
+  assert.equal(emitted.producer_answer.clauses, null);
+  assert.equal(JSON.stringify(emitted).includes("session:"), false,
+    "a session ref was minted for a fabricated actor");
+
+  // AND THE SAME OBJECT THROUGH THE SAME DISPATCH DERIVES NOTHING AT ALL, asked
+  // of identity.js directly from inside a real dispatched verb call: the real
+  // door's actor answers a three-field identity there, the fabricated one null.
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  const read = () => identity.authenticatedIdentity.receiptIdentity();
+  assert.deepEqual(await inDispatchedVerb(target, recordedReviewerActor(identity), read), {
+    actor_id: REVIEWING_SEAT_ACTOR,
+    session_ref: `session:${CORRELATION_ID}`,
+    authority_class: "review_agent",
+  });
+  assert.equal(await inDispatchedVerb(target, fabricatedReviewerActor(), read), null);
+
+  // AND EVERY SURFACE A PREVIOUS ROUND SHIPPED IS GONE BY NAME, so nothing can
+  // quietly go back to one. The last two are amendment 8's: the door that took
+  // the token map as an argument, and the exported context entry.
+  for (const gone of ["runInAuthenticatedCall", "authenticatedCallIdentity",
+    "reviewActorForToken", "dispatchAuthenticatedCall", "authenticatedCallReceiptIdentity"])
+    assert.equal(Object.hasOwn(identity, gone), false, `${gone} is still exported`);
+});
+
+// ===========================================================================
+// CONTROL 13 — THE COPY, AND THE WRITE-OVER. Amendment 8's subject, and the
+// reviewer's own probe of the second correction round.
+//
+// The brand it replaced was an ENUMERABLE property, so it survived `{ ...actor }`
+// — including the forger's. The reviewer took a branded partner actor, spread
+// it, rewrote the copy as `codex-reviewer`, put it through the REAL
+// `executeRegisteredTool`, and was signed for as a review agent. The brand is
+// now membership of a module-private WeakSet, so the copy is simply a different
+// object; and the fields the identity is built from are pinned at the moment the
+// credential was verified, so writing over the ORIGINAL does not move them
+// either. Both halves are asserted, and both are asserted non-vacuously.
+// ===========================================================================
+
+test("IDENTITY: a spread copy of a branded actor, rewritten as the reviewer, is refused", async () => {
+  const rewrittenCopy = identity => ({
+    ...recordedPartnerActor(identity),
+    slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+    human: false, review: true, via: "review-token",
+  });
+
+  const emitted = await emitFrom({}, rewrittenCopy);
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.outcome_digest, null);
+  assert.equal(emitted.producer_answer.receipt, null);
+  assert.equal(JSON.stringify(emitted).includes("session:"), false,
+    "a session ref was minted for a copied actor");
+
+  // NON-VACUOUS, asked of identity.js from inside the SAME real dispatch: the
+  // object the copy was made FROM derives an identity, and the copy derives
+  // none. So what refuses above is the copying and nothing else.
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  const read = () => identity.authenticatedIdentity.receiptIdentity();
+  const branded = recordedPartnerActor(identity);
+  assert.deepEqual(await inDispatchedVerb(target, branded, read), {
+    actor_id: "joe",
+    session_ref: `session:${CORRELATION_ID}`,
+    authority_class: "verified_partner",
+  });
+  assert.equal(await inDispatchedVerb(target, rewrittenCopy(identity), read), null);
+});
+
+test("IDENTITY: writing the reviewer's fields onto a branded actor does not move what it is", async () => {
+  // THE OTHER HALF. Object identity alone would not stop this: the server now
+  // decorates actors IN PLACE, so a forger inside the process could write onto
+  // one too. The credential is pinned at the instant it was verified and is
+  // never re-read off the actor, so the receipt still names the partner — and
+  // the partner's class is not the one this oracle admits, so it refuses.
+  const writtenOver = identity => Object.assign(recordedPartnerActor(identity), {
+    slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+    human: false, review: true, via: "review-token",
+  });
+
+  const emitted = await emitFrom({}, writtenOver);
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.producer_answer.receipt, null);
+
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  assert.deepEqual(
+    await inDispatchedVerb(target, writtenOver(identity),
+      () => identity.authenticatedIdentity.receiptIdentity()),
+    { actor_id: "joe", session_ref: `session:${CORRELATION_ID}`,
+      authority_class: "verified_partner" },
+    "a field written onto a branded actor rewrote who it was");
+});
+
+test("IDENTITY: a caller-chosen bearer plus a caller token map authenticates nobody", async () => {
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  const door = identity.authenticatedIdentity;
+  const CALLERS_OWN = "a-bearer-the-caller-chose";
+  const CALLERS_MAP = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: CALLERS_OWN });
+
+  // THE DOOR TAKES A BEARER AND NOTHING ELSE, so the call the reviewer made is
+  // not one that can be written any more: a second argument is not read.
+  assert.equal(door.reviewActorForToken.length, 1);
+  assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`, CALLERS_MAP), null);
+  // And before the server seals a map, no bearer authenticates at all.
+  assert.equal(door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`), null);
+
+  // THE SERVER'S BOOTSTRAP, once. Everything after it is refused, so a caller
+  // arriving later has nowhere to put a map of its own.
+  assert.equal(door.sealServerReviewTokens(RECORDED_REVIEW_TOKENS), true);
+  assert.equal(door.sealServerReviewTokens(CALLERS_MAP), false);
+  assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null);
+  // NON-VACUOUS: the map the server did seal still authenticates its own bearer.
+  assert.notEqual(door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`), null);
+
+  // AND THE CALLER'S BEARER IS REFUSED THROUGH THE REAL DISPATCH TOO, which is
+  // where the reviewer's probe ended: no actor, so no identity, so no receipt.
+  const emitted = await emitFrom({}, staged => {
+    // The server boots first, the way index.js boots it on the first request.
+    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS), true);
+    // The caller then arrives with a map of its own and is refused it, and its
+    // chosen bearer authenticates nothing against the map the server sealed.
+    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens(CALLERS_MAP), false);
+    assert.equal(staged.authenticatedIdentity.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null,
+      "a caller-chosen bearer authenticated against a caller-chosen map");
+    // So all it is left holding is an object it wrote itself, which is control
+    // 11's case again and refuses for the same reason.
+    return { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+      human: false, review: true, via: "review-token", client_id: null,
+      correlation_id: CORRELATION_ID };
+  });
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emitted.producer_answer.receipt, null);
@@ -313,13 +521,13 @@ test("DIGEST: each bound digest stands on its own artifact's bytes", async () =>
   // ops.scac_artifact_manifest_digest recomputes in the database. A producer
   // that hashed a DESCRIPTION of the candidate would satisfy every shape
   // assertion in this file and fail this one.
-  const target = stageTree({});
+  const { target, treeId } = stageTree({});
   const gate = await moduleOfTree(target, GATE_FILE);
   const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const own = await identity.runInAuthenticatedCall(reviewerActor(),
+  const own = await inDispatchedVerb(target, recordedReviewerActor(identity),
     () => gate.emitGateZeroOutcome());
   assert.equal(own.receipt.candidate_digest,
-    candidateDigestOfTree(target, REVISION_ALL_SUCCEED, own.receipt.policy_digest),
+    candidateDigestOfTree(target, REVISION_ALL_SUCCEED, treeId, own.receipt.policy_digest),
     "the candidate digest is not the sealed artifact manifest for this tree");
 
   // (b) ONE BYTE OF THE CANDIDATE MOVES IT. A comment appended to one module in
@@ -331,8 +539,21 @@ test("DIGEST: each bound digest stands on its own artifact's bytes", async () =>
     first.receipt.environment_manifest_digest);
   assert.equal(edited.receipt.fixture_set_digest, first.receipt.fixture_set_digest);
 
-  // (c) THE HEAD REVISION IS IN THE MANIFEST, so pointing the run at another
-  // revision moves the candidate digest even when the tree is byte-identical.
+  // (b2) AND ONE TRACKED FILE MUTATED AFTER THE SEAL MOVES IT TOO. HEAD's tree
+  // still seals the old bytes, so only the observed half of the manifest moves —
+  // which is the control that the manifest is not merely a relabelling of HEAD's
+  // tree id, and the one the second review round asked for by name.
+  const dirty = await emitFrom({ postSealEdit: "one byte the revision does not seal" });
+  assert.notEqual(dirty.receipt.candidate_digest, first.receipt.candidate_digest);
+  assert.equal(dirty.receipt.environment_manifest_digest,
+    first.receipt.environment_manifest_digest);
+
+  // (c) THE MANIFEST IS BOUND TO HEAD, so pointing the run at another revision
+  // moves the candidate digest even when the working tree is byte-identical —
+  // and the two halves are no longer independent, which is the correction. The
+  // manifest's `source_digest` is the blob ids HEAD'S TREE seals, its
+  // `artifact_digest` is the bytes at exactly those paths, and both are inside
+  // the one digest: neither the revision nor the bytes can move without it.
   const elsewhere = await emitFrom({ revision: REVISION_FAILED_ANCESTOR });
   assert.notEqual(elsewhere.receipt.candidate_digest, first.receipt.candidate_digest);
   assert.equal(elsewhere.receipt.subject_digest, first.receipt.subject_digest,
@@ -557,7 +778,7 @@ test("IDENTITY: a subject maker that is the reviewing seat is denied", async () 
   // cannot collide in the shipped configuration. The case is reached the way
   // every other case here is reached — by editing one line in a throwaway tree —
   // so the guard is PROVED rather than assumed unreachable.
-  const emitted = await emitFrom({ admitPartnerClass: true }, partnerActor());
+  const emitted = await emitFrom({ admitPartnerClass: true }, recordedPartnerActor);
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emitted.outcome_digest, null);
@@ -566,10 +787,43 @@ test("IDENTITY: a subject maker that is the reviewing seat is denied", async () 
   assert.equal(emitted.producer_answer.receipt, null);
 });
 
-test("IDENTITY: a committer this system does not register is an absent binding", async () => {
-  // A real, well-formed address identity.js's ALLOW_LIST does not map. A receipt
-  // may not name a principal this system does not register, so the run binding
-  // reports the subject maker absent and BY NAME, before any store is opened.
+test("PRODUCED: a head written by GitHub's merge path still names its maker", async () => {
+  // THE THIRD REVIEW ROUND'S SECOND FINDING, as a control. Every head GitHub's
+  // own merge path writes carries the author's `users.noreply.github.com`
+  // address as the committer — it is what THIS PR's head carries — and a
+  // registry holding only the Gmail addresses reported `subject_maker` unnamed
+  // for the very branch under review.
+  const emitted = await emitFrom({ maker: MAKER_NOREPLY_EMAIL });
+  assert.equal(emitted.passable, true, emitted.unavailable_because ?? emitted.reason_id);
+
+  // AND THE GMAIL ROW STILL NAMES THE SAME PARTNER. It stopped being the staged
+  // default in PR 1014's second correction — the default is the address git
+  // reports for this repository's own head, which is the noreply one above — so
+  // without this line the registry's other row for the same partner would have
+  // no case at all.
+  const byGmail = await emitFrom({ maker: MAKER_GMAIL_EMAIL });
+  assert.equal(byGmail.passable, true, byGmail.unavailable_because ?? byGmail.reason_id);
+  assert.equal(byGmail.receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
+  assert.equal(emitted.receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
+  assert.equal(emitted.receipt.subject_maker_identity.authority_class, "verified_partner");
+  assert.equal(emitted.receipt.subject_maker_identity.session_ref,
+    `session:${CORRELATION_ID}:candidate-build`);
+
+  // AND GITHUB'S SHARED WEB-FLOW COMMITTER STILL NAMES NOBODY. `noreply@github.com`
+  // is carried by every web commit by every account, so registering it would put
+  // a stranger's work under a partner's name. It is deliberately absent from the
+  // table, and this is the line that keeps it absent.
+  const shared = await emitFrom({ maker: "noreply@github.com" });
+  assert.equal(shared.passable, false);
+  assert.equal(shared.reason_id, "gate_zero_run_binding_unnamed");
+  assert.deepEqual(shared.producer_answer.unnamed_bindings, ["subject_maker"]);
+});
+
+test("ABSENCE: a committer this system does not register IS the absent ruled row", async () => {
+  // A real, well-formed address identity.js's actor registry does not map. The
+  // repository is intact and every sealed file is on disk; what is genuinely
+  // absent is the REGISTRATION of the principal a receipt would name. This is
+  // the one case `gate_zero_run_binding_unnamed` is left with, and it says which.
   const emitted = await emitFrom({ maker: "someone.else@example.com" });
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_run_binding_unnamed");
@@ -577,17 +831,58 @@ test("IDENTITY: a committer this system does not register is an absent binding",
   assert.deepEqual(emitted.producer_answer.unnamed_bindings, ["subject_maker"]);
 });
 
-test("BINDING: a candidate whose repository names no revision says which rows are absent", async () => {
-  // A .git with no HEAD in it: the revision is unreadable, so the committer and
-  // the sealed artifact manifest are unreachable too. `gate_zero_run_binding_
-  // unnamed` fires on exactly this — rows that are genuinely absent — and its
-  // reason text says WHICH, rather than saying somebody has not typed something.
+// ===========================================================================
+// THE THREE KINDS OF ABSENCE, AND THEY ARE THREE DIFFERENT ANSWERS.
+//
+// The second review round's third finding: `gate_zero_run_binding_unnamed`
+// claimed "a ruled store row is absent" for unreadable git metadata and for a
+// missing file alike. A refusal that misdescribes its own cause sends the next
+// session to debug the wrong thing, so the three are now separated and each case
+// below pins one of them.
+// ===========================================================================
+
+test("ABSENCE: a candidate whose repository names no revision is a METADATA absence", async () => {
+  // A .git with nothing in it: no HEAD, so no revision, so no commit object, no
+  // committer and no sealed tree. Nothing is missing from a ruled store here —
+  // this run cannot see the candidate it is standing in, and it says so under
+  // its own reason and names every part it could not resolve.
   const emitted = await emitFrom({ git: "empty" });
   assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_run_binding_unnamed");
-  assert.deepEqual(emitted.producer_answer.unnamed_bindings,
-    ["head_revision", "subject_maker", "candidate_artifact_manifest"]);
+  assert.equal(emitted.reason_id, "gate_zero_candidate_metadata_absent");
+  assert.deepEqual(emitted.producer_answer.absent_candidate_metadata,
+    ["head_revision", "head_revision_object", "head_maker_address",
+      "head_candidate_manifest"]);
   assert.match(emitted.producer_answer.unavailable_because, /head_revision/);
+  assert.equal(emitted.producer_answer.receipt, null);
+  assert.equal(emitted.producer_answer.clauses, null);
+});
+
+test("ABSENCE: a sealed file a digest stands on that is not on disk is an ARTIFACT absence", async () => {
+  // The environment manifest, deleted. The repository is intact, HEAD resolves,
+  // the committer is registered — and one FILE this receipt's digests stand on
+  // is not there. That is neither unreadable metadata nor an absent ruled row.
+  const emitted = await emitFrom({ withoutEnvironmentManifest: true });
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_sealed_artifact_absent");
+  assert.deepEqual(emitted.producer_answer.absent_sealed_artifacts, ["environment_manifest"]);
+  assert.equal(emitted.producer_answer.receipt, null);
+});
+
+test("ABSENCE: HEAD's own object out of reach is a METADATA absence, not a missing row", async () => {
+  // The one shape a real clone reaches: HEAD names a revision whose object this
+  // producer cannot inflate (in a real repository, because it is packed). It
+  // says exactly that, by name, rather than reporting an absent binding row.
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  const base = join(target, "..", "..");
+  rmSync(join(base, ".git", "objects", REVISION_ALL_SUCCEED.slice(0, 2),
+    REVISION_ALL_SUCCEED.slice(2)));
+  const gate = await moduleOfTree(target, GATE_FILE);
+  const emitted = await inDispatchedVerb(target, recordedReviewerActor(identity),
+    () => gate.emitGateZeroOutcome());
+  assert.equal(emitted.reason_id, "gate_zero_candidate_metadata_absent");
+  assert.deepEqual(emitted.producer_answer.absent_candidate_metadata,
+    ["head_revision_object", "head_maker_address", "head_candidate_manifest"]);
 });
 
 // ===========================================================================
@@ -658,6 +953,67 @@ test("SHAPE: the one callable wears amendment 2's closed shape", () => {
     getPrototypeOf() { throw new Error("the operand's chain was walked"); },
   });
   assert.equal(hostile instanceof fn, false);
+});
+
+/**
+ * AMENDMENT 2'S SHAPE, ENUMERATED OVER EVERY MODULE THIS PR ADDED A CALLABLE TO.
+ *
+ * The second review round's standards finding: the new exports were plain
+ * function declarations — a prototype, constructable, and `instanceof` answered
+ * by walking the left operand's chain.
+ *
+ * THE ENUMERATION IS DYNAMIC, which the third round's third finding was about:
+ * the list used to be written out by hand here, so the claim "any future export
+ * arrives holding this shape or arrives red" was true of nothing. identity.js's
+ * whole new surface is now ONE frozen namespace export, and the test walks
+ * `Object.keys` of it — a seventh member added to that object is checked without
+ * anyone remembering to add a name here. The file's OLDER doors are deliberately
+ * out of scope: they predate the amendment and are not this PR's changed
+ * surface. The testhelper is enumerated whole, because every callable in it is
+ * new.
+ */
+function assertClosedShape(fn, where) {
+  assert.equal(typeof fn, "function", `${where} is not callable`);
+  assert.equal(Object.hasOwn(fn, "prototype"), false, `${where} carries a prototype`);
+  assert.throws(() => Reflect.construct(fn, []), TypeError, `${where} is constructable`);
+  assert.ok(Object.isFrozen(fn), `${where} is not frozen`);
+  assert.equal(types.isProxy(fn), false, `${where} is a Proxy`);
+  const descriptor = Object.getOwnPropertyDescriptor(fn, Symbol.hasInstance);
+  assert.ok(descriptor !== undefined, `${where} has no own Symbol.hasInstance`);
+  assert.ok(Object.hasOwn(descriptor, "value"), `${where}'s Symbol.hasInstance is an accessor`);
+  assert.equal(descriptor.writable, false, where);
+  assert.equal(descriptor.configurable, false, where);
+  assert.equal(descriptor.enumerable, false, where);
+  const hostile = new Proxy({}, {
+    get() { throw new Error("the operand was read"); },
+    getPrototypeOf() { throw new Error("the operand's chain was walked"); },
+  });
+  assert.equal(hostile instanceof fn, false, where);
+}
+
+test("SHAPE: every callable this PR added to identity.js and the walker wears amendment 2's shape", async () => {
+  const identity = await import("../src/identity.js");
+  const surface = identity.authenticatedIdentity;
+  assert.ok(Object.isFrozen(surface), "identity.js's new surface is not frozen");
+  // ENUMERATED, NOT LISTED. Every member of the namespace is checked, whatever
+  // it is called and however many there are.
+  const added = Object.keys(surface);
+  assert.ok(added.length >= 6, `identity.js's new surface shrank to ${added.length}`);
+  for (const name of added) assertClosedShape(surface[name], `identity.js#authenticatedIdentity.${name}`);
+  // AND THE SURFACE IS ALL OF IT: amendment 8 leaves identity.js with no other
+  // new top-level callable, so the enumeration above is not enumerating a subset.
+  assert.deepEqual(added.filter(name => typeof surface[name] !== "function"), []);
+
+  const walker = await import("./gate-zero-reachability-walk.testhelper.mjs");
+  const callables = Object.entries(walker).filter(([, value]) => typeof value === "function");
+  assert.deepEqual(callables.map(([name]) => name).sort(),
+    ["pathToValue", "topLevelIdentityOnly"]);
+  for (const [name, value] of callables)
+    assertClosedShape(value, `gate-zero-reachability-walk.testhelper.mjs#${name}`);
+
+  // AND THE WALKER STILL WALKS — a shape assertion over a callable that stopped
+  // working would pass every line above.
+  assert.equal(walker.pathToValue({ outer: { inner: walker } }, walker), ".outer.inner");
 });
 
 
@@ -763,7 +1119,7 @@ test("REASONS: every reason the producer can answer with is registered by the ga
   for (const id of producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS)
     assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes(id),
       `${id} is a producer refusal the gate cannot express`);
-  assert.equal(producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS.length, 7);
+  assert.equal(producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS.length, 9);
   // And the source cites no id outside its own closed list: `reason()` raises on
   // an unregistered one, so a citation that is not here cannot be reached at all.
   const source = readFileSync(join(SRC, PRODUCER_FILE), "utf8");
@@ -806,6 +1162,16 @@ test("VOCABULARY: no value the producer hands the gate carries a privileged word
     "gate_zero_step_ref", "step:gate-zero-read-only-outcome",
     "gate-zero-read-only-accepted", "oracle:gate-producer:gate-zero-read-only",
     "receipt:gate-zero-read-only-outcome",
+    // AND THE ONE ADDED ON 2026-09-12, lifted out by its exact value the way
+    // `status: "pass"` is rather than exempted by category. `verified_partner`
+    // is identity.js's OWN derived authority class for an authenticated human
+    // partner; the subject maker's class is now derived there rather than stated
+    // as a constant, which is what the second review round required. Renaming it
+    // here would be renaming identity.js's authorization vocabulary from inside
+    // a receipt, and the word is a principal's class, never a verdict about
+    // evidence — which is what the sweep exists to keep this module from
+    // claiming.
+    "verified_partner",
   ]);
   const found = [];
   const walk = (value, path) => {

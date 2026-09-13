@@ -73,10 +73,31 @@ export const WHOLE_WALK = Object.freeze({
   bounded: Infinity, symbols: true, prototypes: true, accessors: true,
   accessorFunctions: true, inheritedReceiver: true });
 
+/**
+ * AMENDMENT 2'S CLOSED SHAPE, for the two callables this helper exports
+ * (2026-09-12, second correction round — the first shipped them as plain
+ * function declarations, which carry a prototype, are constructable, and answer
+ * `instanceof` by walking the left operand's prototype chain).
+ *
+ * Bound, so there is no prototype and `Reflect.construct` throws; an own
+ * `Symbol.hasInstance` DATA property answering false without reading the operand;
+ * frozen, so nothing can be written over it afterwards. It is the same shape the
+ * producer, the gate and the readers wear, retyped here rather than imported
+ * because a test helper importing a production module to borrow its shape is the
+ * dependency this suite's reachability guard exists to forbid.
+ */
+function closedCallable(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return Object.freeze(closed);
+}
+
 /** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
 const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
 
-export function pathToValue(root, target, parts = WHOLE_WALK) {
+export const pathToValue = closedCallable((root, target, parts = WHOLE_WALK) => {
   // Keyed by the PAIR (value, receiver): the same prototype reached while a
   // consumer holds two different children can answer two different values, so a
   // set keyed by the object alone would skip the second answer unread.
@@ -139,12 +160,11 @@ export function pathToValue(root, target, parts = WHOLE_WALK) {
     return walk(proto, `${path}.[[Prototype]]`, left - 1, held);
   };
   return walk(root, "", parts.bounded, undefined);
-}
+});
 
 /** The identity check the fourth correction shipped, kept so the self-test can measure it. */
-export function topLevelIdentityOnly(namespace, target) {
+export const topLevelIdentityOnly = closedCallable((namespace, target) => {
   for (const [exportedAs, value] of Object.entries(namespace))
     if (value === target) return exportedAs;
   return null;
-}
-
+});

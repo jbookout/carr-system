@@ -88,7 +88,7 @@
 // reseals all 62 packet chunks.
 
 import { digest } from "./artifact-trust.js";
-import { authenticatedCallIdentity, authorizationClassForActor } from "./identity.js";
+import { authenticatedIdentity, authorizationClassForActor } from "./identity.js";
 import { ToolError } from "./tool-error.js";
 import { V5_A02_GATE_ZERO_PRODUCER_REGISTRATION } from "./gate-zero-producer-registration.v5.js";
 
@@ -381,7 +381,7 @@ export const assertGateZeroReceipt = closedCallable((receipt, seat) => {
   // `session_ref` passed a check that looked like an identity check. The session
   // ref is the server's per-call correlation id and is the only field in the
   // object that no caller writes, so it is the one that has to match.
-  const call = authenticatedCallIdentity();
+  const call = authenticatedIdentity.receiptIdentity();
   if (call === null) {
     refuse("gate_zero_receipt_unauthenticated_call", {
       hint: "there is no authenticated call to derive receipt identities from, so no receipt may be recorded. " +
@@ -446,19 +446,20 @@ export const gateZeroOutcomeDigest = closedCallable(receipt => digest(receipt));
  * THE SAME RECEIPT, REDUCED TO WHAT THE CANDIDATE DECIDES — the value a retry is
  * compared on, and the gateway's copy of ops.gate_zero_outcome_candidate_digest.
  *
- * WHY IT IS NOT THE FULL DIGEST (PR 1014, Sol's finding 3). Three fields of a
+ * WHY IT IS NOT THE FULL DIGEST (PR 1014, Sol's finding 3). Five values of a
  * consumer-gate receipt legitimately move between two GENUINE authenticated runs
  * of one candidate: `observed_at` and `ttl_expires_at`, stamped when each run
- * happened, and the `session_ref` inside `producer_identity` and
- * `evaluator_identity`, which identity.js derives from the request's own
- * correlation id. Keying idempotency on a digest covering those made the only
- * two calls that could ever agree two calls carrying the same bytes — a fixture,
- * not a retry — so the second real call for one candidate was refused.
+ * happened, and the `session_ref` inside ALL THREE identities, every one of
+ * which identity.js derives from the request's own correlation id — the subject
+ * maker's included, because Step A's third correction stopped manufacturing it
+ * out of the revision and made it the candidate-build seat WITHIN the
+ * authenticated call. Keying idempotency on a digest covering those made the
+ * only two calls that could ever agree two calls carrying the same bytes — a
+ * fixture, not a retry — so the second real call for one candidate was refused.
  *
- * WHAT IS DROPPED, EXACTLY THOSE THREE, and what is kept is the point:
- *   * the SUBJECT MAKER's session_ref stays. It is derived from the candidate
- *     revision rather than from the call, so a receipt renaming it is a
- *     different outcome for the same candidate and must still conflict.
+ * WHAT IS DROPPED IS EXACTLY THE PER-CALL VALUES, and what is kept is the point:
+ *   * every identity's actor_id and authority_class stay. A receipt naming a
+ *     different maker, producer or evaluator for one candidate still conflicts.
  *   * every digest, constant, status, comparator and evidence ref stays. A run
  *     that read different rows for one candidate is a real conflict.
  *
@@ -467,14 +468,11 @@ export const gateZeroOutcomeDigest = closedCallable(receipt => digest(receipt));
  * it. This narrows the comparison key; it narrows nothing that is kept.
  */
 export const gateZeroOutcomeCandidateDigest = closedCallable(receipt => {
-  const { observed_at, ttl_expires_at, producer_identity, evaluator_identity, ...rest } = receipt;
+  const { observed_at, ttl_expires_at, ...rest } = receipt;
   const withoutSession = identity => {
     const { session_ref, ...keep } = identity ?? {};
     return keep;
   };
-  return digest({
-    ...rest,
-    producer_identity: withoutSession(producer_identity),
-    evaluator_identity: withoutSession(evaluator_identity),
-  });
+  return digest(Object.fromEntries(Object.entries(rest).map(([field, value]) =>
+    [field, field.endsWith("_identity") ? withoutSession(value) : value])));
 });

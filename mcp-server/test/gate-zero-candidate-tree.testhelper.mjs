@@ -1,8 +1,8 @@
-// THE CANDIDATE-TREE STAGING, ONE COPY, SHARED (2026-09-13, PR 1014
-// correction round).
+// THE CANDIDATE-TREE STAGING, ONE COPY, SHARED (2026-09-13, PR 1014 correction
+// rounds; merged with PR 1013's third correction).
 //
-// WHY IT MOVED HERE. The producer takes no argument, so the only honest way to
-// ask what it answers under a different world is to stage a whole candidate
+// WHY IT IS HERE. The producer takes no argument, so the only honest way to ask
+// what it answers under a different world is to stage a whole candidate
 // repository and read what the module then says. Step B's write verb owes the
 // SAME staging for the opposite reason: its test must drive the registered verb
 // through the real dispatch path over a receipt the real producer really
@@ -13,7 +13,23 @@
 // gate-zero-reachability-walk.testhelper.mjs beside it: a retyped harness is a
 // second implementation that passes because it was written from the same
 // misunderstanding as the code it checks. Both suites import THIS file, so a
-// correction to the staging corrects both proofs at once.
+// correction to the staging corrects both proofs at once. The bytes below are
+// Step A's own staging, moved rather than rewritten.
+//
+// WHAT THE STAGED TREE HOLDS:
+//
+//   * A REAL OBJECT STORE. `.git/HEAD` names the case's revision and
+//     `.git/objects` holds the loose commit and tree objects for it, written
+//     here: the trees are content-addressed exactly as git writes them, so the
+//     path set and the blob ids the producer reads out of HEAD are the real
+//     sealing of the staged bytes. Only the COMMIT object is filed under the
+//     fixture's chosen revision rather than under its own hash. The committer
+//     line is where the subject maker comes from, and no reflog is written.
+//   * mcp-server/src — a copy, with the store module replaced by the fixture,
+//     and with card 9's seat declaration or the three `decision_id:` lines
+//     edited when a case asks;
+//   * mcp-server/test — the sealed fixture bytes the fixture-set digest covers;
+//   * ops/config/environments.json — the environment manifest its digest covers.
 //
 // IT DECIDES NOTHING. Every function here copies bytes, edits a line it has
 // asserted matches exactly once, or imports a module out of the tree it built.
@@ -22,6 +38,8 @@
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
   writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -33,13 +51,21 @@ import {
 export const TEST_DIR = fileURLToPath(new URL("./", import.meta.url));
 export const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 export const REPO = fileURLToPath(new URL("../../", import.meta.url));
-
 export const PRODUCER_FILE = "gate-zero-producer.v5.js";
 export const REGISTRATION_FILE = "gate-zero-producer-registration.v5.js";
 export const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 export const STORES_FILE = "gate-zero-seam-stores.v5.js";
 export const GATE_FILE = "gate-zero-assurance.v5.js";
 export const IDENTITY_FILE = "identity.js";
+export const TOOLS_FILE = "tools.js";
+/**
+ * THE VERB EVERY CASE IS DISPATCHED THROUGH. Any registered read verb would do —
+ * what is under test is `executeRegisteredTool`, not this verb — and `loop-board`
+ * is chosen because its handler reaches its database client immediately and
+ * finishes cleanly over no rows, so the stub client below is a one-line seam
+ * into the middle of a real dispatched call.
+ */
+export const DISPATCHED_VERB = "loop-board";
 export const FIXTURE_FILE = "gate-zero-producer-stores.v5.fixture.mjs";
 
 /** The sealed fixture set the receipt's fixture_set_digest covers, by path. */
@@ -51,44 +77,84 @@ export const SEALED_FIXTURES = Object.freeze([
 export const ENVIRONMENT_MANIFEST = ["ops", "config", "environments.json"];
 
 /**
- * THE AUTHENTICATED CALLER, and it is a real registered machine identity rather
- * than a shape this file made up: identity.js accepts `codex-reviewer` only with
- * the `review` marker and `review-token` provenance, and derives `review_agent`
- * for it. A correlation id is what correlation.js stamps per request, and it is
- * what the session ref is built from.
+ * THE RECORDED AUTHENTICATED CONTEXT. A bearer and the one-entry map shape the
+ * Worker's REVIEW_TOKENS secret holds, which is everything index.js's review
+ * door reads — recorded here so the actor can be MINTED by the real door rather
+ * than written out as a literal. The token is a fixture string: it authenticates
+ * against the map beside it and against nothing else.
  */
 export const REVIEWING_SEAT_ACTOR = "codex-reviewer";
+export const RECORDED_REVIEW_TOKEN = "gate-zero-recorded-review-bearer-2026-09-12";
+export const RECORDED_REVIEW_TOKENS = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: RECORDED_REVIEW_TOKEN });
 export const CORRELATION_ID = "3f2a6c18-9b4d-4e7a-8c11-5d0e2f7a6b93";
-export function reviewerActor(correlationId = CORRELATION_ID) {
-  return { slug: REVIEWING_SEAT_ACTOR, review: true, via: "review-token",
-    human: false, correlation_id: correlationId };
+
+/**
+ * The reviewer seat, authenticated by the STAGED identity.js.
+ *
+ * TWO STEPS, BOTH THE SERVER'S, because amendment 8 moved the token map off the
+ * caller's side of the door. First the server SEALS its map into the module —
+ * one-shot, exactly as index.js does on the first /mcp request. Then the door
+ * takes a BEARER and nothing else: there is no parameter left for a caller to
+ * pair a bearer of its choosing with a map of its choosing.
+ *
+ * The correlation id is then written ON TO the authenticated object, the way
+ * mcp.js now decorates it. It is NOT a spread: the brand is object identity, so
+ * a copy of this actor authenticates as nobody — which is the whole design, and
+ * the control three tests down proves it. identity.js derives `review_agent`
+ * for the seat; nothing here says so.
+ */
+export
+function recordedReviewerActor(identity, correlationId = CORRELATION_ID) {
+  identity.authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS);
+  const actor = identity.authenticatedIdentity
+    .reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
+  assert.notEqual(actor, null, "the recorded review context authenticated no actor");
+  return Object.assign(actor, { correlation_id: correlationId });
 }
-/** A verified partner. Registered, authenticated, and NOT this oracle's class. */
-export function partnerActor(correlationId = CORRELATION_ID) {
-  return { slug: "joe", human: true, via: "oauth-google", correlation_id: correlationId };
+
+/** A verified partner, from the same file's OAuth-props path. NOT this oracle's class. */
+export
+function recordedPartnerActor(identity, correlationId = CORRELATION_ID) {
+  const actor = identity.actorFromProps(identity.propsForSlug("joe", { via: "oauth-google" }));
+  assert.notEqual(actor, null, "the recorded partner context authenticated no actor");
+  return Object.assign(actor, { correlation_id: correlationId });
 }
 
 /**
- * THE COMMITTER THIS REPOSITORY ACTUALLY CARRIES, read out of git rather than
- * typed here — and the actor identity.js must map it to.
+ * THE MUTATION CONTROL FOR THE WHOLE IDENTITY DESIGN: an object with every field
+ * the real reviewer seat carries, written out by hand. It is exactly what the
+ * first correction round's tests passed to the exported setter, and exactly what
+ * the review then used to obtain `authority_class: "review_agent"` from a
+ * literal. identity.js did not mint it, so it derives nothing.
+ */
+export
+function fabricatedReviewerActor() {
+  return { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+    human: false, review: true, via: "review-token", client_id: null,
+    correlation_id: CORRELATION_ID };
+}
+
+/** The committers identity.js's frozen registry maps, and the actor they map to. */
+/**
+ * THE COMMITTERS identity.js's frozen registry maps, and the actor they map to.
  *
- * WHAT WAS HERE BEFORE, AND WHY IT IS GONE (PR 1014, Sol's re-review). This
- * constant was the literal `joe.bookout.carr.us@gmail.com` — an address
- * identity.js's ALLOW_LIST admits — written into every staged tree's reflog. So
- * every proof in both suites ran over a committer the mapping already knew, and
- * the fact that the REAL head's committer is a GitHub noreply address the
- * mapping did not know never showed up in a single green run. A staged world
- * that supplies the one input the code needs is not a proof about the code.
+ * `MAKER_EMAIL` IS DERIVED, NOT TYPED (PR 1014, Sol's re-review). It used to be
+ * the Gmail literal below, written into every staged tree, so every proof in
+ * both suites ran over a committer the mapping already knew — and the fact that
+ * the REAL head's committer is a GitHub noreply address never showed up in a
+ * single green run. The default staged maker is now the address git reports for
+ * this repository's own head, and the two literal rows keep their own controls
+ * in the producer suite.
  *
  * `--no-merges`, DELIBERATELY. On a `pull_request` run the checked-out head is
  * `refs/pull/N/merge`, a merge commit GitHub itself creates and commits as
  * `noreply@github.com`; that is the FORGE's identity, not a partner's, and
- * nothing in this system claims to map it. The last non-merge commit is the one
- * a partner actually made, which is what a candidate's maker means.
+ * nothing in this system maps it. The last non-merge commit is the one a partner
+ * actually made, which is what a candidate's maker means.
  *
- * IF THIS ADDRESS DOES NOT MAP, THE SUITES GO RED, and that is the point: the
- * mapping is Step A's (mcp-server/src/identity.js), the address is the
- * repository's, and a test may not paper over a gap between them.
+ * IF THIS ADDRESS DOES NOT MAP, BOTH SUITES GO RED, and that is the point: the
+ * registry is identity.js's, the address is the repository's, and a test may not
+ * paper over a gap between them.
  */
 function repositoryCommitterEmail() {
   const run = spawnSync("git", ["-C", REPO, "log", "-1", "--no-merges", "--format=%ce"],
@@ -100,6 +166,11 @@ function repositoryCommitterEmail() {
     "git did not answer with one committer email for this repository's head");
   return email;
 }
+export const MAKER_GMAIL_EMAIL = "joe.bookout.carr.us@gmail.com";
+/** The address GitHub's own merge path writes as the committer of every merged
+ *  head — the form this PR's own HEAD carries, and the one the registry could
+ *  not name until amendment 8. */
+export const MAKER_NOREPLY_EMAIL = "64207374+jbookout@users.noreply.github.com";
 export const MAKER_EMAIL = repositoryCommitterEmail();
 export const SUBJECT_MAKER_ACTOR = "joe";
 
@@ -142,7 +213,74 @@ const PREDECESSOR_WORLD_LINE = 'const PREDECESSOR_WORLD = "clean";\n';
 const AUTHORITY_CLASSES_LINE =
   'const PRODUCER_AUTHORITY_CLASSES = Object.freeze(["review_agent"]);\n';
 
-export function editOnce(path, anchor, replacement, what) {
+// ---------------------------------------------------------------------------
+// THE STAGED OBJECT STORE. Git's own on-disk format, written here rather than
+// shelled out for, because a case has to be able to CHOOSE which revision it is
+// standing on and `git commit` hands out the hash it feels like.
+//
+// The trees are content-addressed exactly as git addresses them — id = sha1 of
+// `tree <len>\0<entries>` — so the blob ids the producer reads out of HEAD's
+// tree are the real sealing of the staged bytes, and a case that edits one
+// staged file moves that file's sealed id the way a real commit would. Blob
+// OBJECTS are never written because nothing ever inflates one: the producer
+// reads ids from the tree and bytes from the working tree, which is the whole
+// point of it holding both.
+//
+// The commit object is the one exception, filed under the case's chosen revision
+// rather than under its own hash. The producer does not re-hash what it inflates
+// — see its own note — and this is the seam that exception buys.
+// ---------------------------------------------------------------------------
+
+export const objectId = (kind, body) => createHash("sha1")
+  .update(Buffer.concat([Buffer.from(`${kind} ${body.length}\0`), body])).digest("hex");
+
+function writeLooseObject(objects, id, kind, body) {
+  mkdirSync(join(objects, id.slice(0, 2)), { recursive: true });
+  writeFileSync(join(objects, id.slice(0, 2), id.slice(2)),
+    deflateSync(Buffer.concat([Buffer.from(`${kind} ${body.length}\0`), body])));
+}
+
+/** Every tree object under one directory, written; answers the directory's id.
+ *  `seen` collects each directory's id, because the candidate digest stands on
+ *  the id of the CANDIDATE's tree rather than the repository root's. */
+function writeTreeObjects(objects, directory, seen) {
+  const entries = [];
+  for (const name of readdirSync(directory).sort()) {
+    if (name === ".git") continue;
+    const full = join(directory, name);
+    entries.push(statSync(full).isDirectory()
+      ? { mode: "40000", name, id: writeTreeObjects(objects, full, seen) }
+      : { mode: "100644", name, id: objectId("blob", readFileSync(full)) });
+  }
+  const body = Buffer.concat(entries.map(entry => Buffer.concat([
+    Buffer.from(`${entry.mode} ${entry.name}\0`), Buffer.from(entry.id, "hex")])));
+  const id = objectId("tree", body);
+  writeLooseObject(objects, id, "tree", body);
+  seen.set(directory, id);
+  return id;
+}
+
+/**
+ * Seal the staged tree at `revision`, with `maker` as its committer. Answers the
+ * id of the CANDIDATE's own tree under that revision, which the digest
+ * recomputation below needs.
+ */
+function sealCandidate(base, revision, maker) {
+  const objects = join(base, ".git", "objects");
+  const seen = new Map();
+  const tree = writeTreeObjects(objects, base, seen);
+  const body = Buffer.from(
+    `tree ${tree}\n` +
+    `author A Maker <${maker}> 1757000000 +0000\n` +
+    `committer A Maker <${maker}> 1757000000 +0000\n` +
+    "\nthe staged candidate\n");
+  writeLooseObject(objects, revision, "commit", body);
+  writeFileSync(join(base, ".git", "HEAD"), `${revision}\n`);
+  return seen.get(join(base, "mcp-server", "src"));
+}
+
+export
+function editOnce(path, anchor, replacement, what) {
   const source = readFileSync(path, "utf8");
   assert.equal(source.split(anchor).length - 1, 1,
     `the staging anchor no longer matches ${what}`);
@@ -154,11 +292,13 @@ export function editOnce(path, anchor, replacement, what) {
  * environment manifest. `revision` and `maker` are what a RUN differs by; the
  * rest are the faults a case injects.
  */
-export function stageTree({
+export
+function stageTree({
   revision = REVISION_ALL_SUCCEED, maker = MAKER_EMAIL, staffedSeat = true,
   withdrawnCards = [], ledgerCanary = null, predecessorWorld = null,
   substituteStore = true, environmentEdit = null, candidateEdit = null,
   fixtureEdit = null, admitPartnerClass = false, git = true,
+  withoutEnvironmentManifest = false, postSealEdit = null,
 } = {}) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
@@ -167,24 +307,15 @@ export function stageTree({
   const target = join(base, "mcp-server", "src");
   mkdirSync(target, { recursive: true });
   cpSync(SRC, target, { recursive: true });
-
-  // THE CANDIDATE'S OWN PROVENANCE. A detached HEAD is the simplest true shape:
-  // 40 hex in .git/HEAD is what the producer reads first, and the reflog's last
-  // line is where the committer comes from.
-  if (git !== false) mkdirSync(join(base, ".git", "logs"), { recursive: true });
-  if (git === true) {
-    writeFileSync(join(base, ".git", "HEAD"), `${revision}\n`);
-    writeFileSync(join(base, ".git", "logs", "HEAD"),
-      `${"0".repeat(40)} ${revision} A Committer <${maker}> 1757000000 +0000\tcommit: staged\n`);
-  }
-
-  // THE ONE SIBLING OF src/ THAT src/ IMPORTS. tools.js reaches
-  // `../continuity-reference-manifest.mjs`, so a tree that holds only src cannot
-  // be imported through the verb dispatch at all — which is the door Step B's
-  // suite drives. It is copied rather than stubbed: a stub would be a second
-  // implementation of a manifest the staged modules actually read.
+  mkdirSync(join(base, ".git"), { recursive: true });
+  // THE TWO FILES src IMPORTS FROM OUTSIDE ITSELF. The staged tools.js is a real
+  // module graph and will not load without them; they are copied rather than
+  // stubbed so the dispatch under test is the dispatch that ships.
   cpSync(join(REPO, "mcp-server", "continuity-reference-manifest.mjs"),
     join(base, "mcp-server", "continuity-reference-manifest.mjs"));
+  cpSync(join(REPO, "mcp-server", "assets"), join(base, "mcp-server", "assets"),
+    { recursive: true });
+
 
   // THE TWO SEALED ARTIFACTS, copied as bytes. A case that mutates one mutates
   // the bytes, which is the whole point of asserting the digest moves.
@@ -243,10 +374,62 @@ export function stageTree({
         `const PREDECESSOR_WORLD = ${JSON.stringify(predecessorWorld)};\n`,
         "the fixture store's predecessor world line");
   }
-  return target;
+
+  if (withoutEnvironmentManifest) rmSync(join(base, ...ENVIRONMENT_MANIFEST));
+
+  // SEALED LAST, so every edit a case asked for is inside the revision HEAD
+  // names — which is what makes "mutating one tracked file moves the candidate
+  // digest" a statement about this revision rather than about a dirty checkout.
+  const treeId = git === true ? sealCandidate(base, revision, maker) : null;
+
+  // AFTER the seal: one tracked candidate file mutated in the working tree while
+  // HEAD's tree still seals the old bytes. The sealed half of the manifest does
+  // not move and the observed half does — which is the mutation control for
+  // "the candidate digest is bound to HEAD's manifest AND to the bytes".
+  if (postSealEdit !== null) {
+    const path = join(target, "global-boundaries.v5.js");
+    writeFileSync(path, `${readFileSync(path, "utf8")}\n// ${postSealEdit}\n`);
+  }
+  return { target, treeId };
 }
 
 export const moduleOfTree = (target, file) => import(pathToFileURL(join(target, file)).href);
+
+/**
+ * RUN `fn` INSIDE A REAL DISPATCHED VERB CALL in a staged tree.
+ *
+ * `executeRegisteredTool` is the one dispatch every verb funnels through and the
+ * only place an authenticated call is established. It is reached HERE through
+ * the staged tools.js, so the async context the staged producer reads is the one
+ * the staged identity.js entered for this actor — the same module instance, not
+ * a value carried across a boundary.
+ *
+ * THE STUB CLIENT IS THE SEAM. Step A emits a value and is not bound to a verb
+ * of its own yet (that is Step B), so the only way to be running inside a
+ * dispatched call is to be called by one. The verb's database client is handed
+ * in by the caller, so `fn` runs on its first query — in the middle of a real
+ * handler, inside the real dispatch, under the real context — and the verb then
+ * finishes over no rows.
+ */
+export
+async function inDispatchedVerb(target, actor, fn) {
+  const tools = await moduleOfTree(target, TOOLS_FILE);
+  let answered;
+  let ran = false;
+  const client = { query: async () => {
+    if (!ran) { ran = true; answered = await fn(); }
+    return { rows: [] };
+  } };
+  await tools.executeRegisteredTool(client, actor, DISPATCHED_VERB, {});
+  assert.equal(ran, true, "the dispatched verb never reached its client");
+  return answered;
+}
+
+/**
+ * What the gate answers in a staged tree, inside a real dispatched verb call.
+ *
+ * `mint` builds the actor from the staged identity.js; `mint: null` runs the
+ * same gate with no dispatch and no call established at all.
 
 /**
  * THE REACHABILITY GUARD, in the shape PR 1004's amendment 6 requires: a closed
@@ -255,7 +438,8 @@ export const moduleOfTree = (target, file) => import(pathToFileURL(join(target, 
  * is a producer with a second caller, and a second caller is an argument wearing
  * an import's clothes.
  */
-export function moduleImports(directory) {
+export
+function moduleImports(directory) {
   const script = `
     const { readdirSync, readFileSync, statSync } = require("node:fs");
     const { join } = require("node:path");

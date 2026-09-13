@@ -270,10 +270,16 @@ export const V5_A02_GATE_CONCLUSIONS = deepFreeze([
  */
 export const V5_A02_GATE_ZERO_REASON_IDS = deepFreeze([
   "duplicate_predecessor_observation",
-  // THE PRODUCER'S SEVEN, registered HERE because this surface builds the answer
+  // THE PRODUCER'S NINE, registered HERE because this surface builds the answer
   // around them and `reason()` refuses an id it does not know. The producer
   // module carries the same closed list, and the test asserts the two are
   // identical — so a refusal it can reach is a refusal this gate can express.
+  //
+  // NINE RATHER THAN SEVEN SINCE 2026-09-12: the producer's absence reasons were
+  // split so that an unreadable candidate repository, a missing sealed file and
+  // a genuinely absent ruled row stop sharing one id. See the producer's own
+  // registry for what each one means.
+  "gate_zero_candidate_metadata_absent",
   "gate_zero_evidence_unavailable",
   // THE GATE'S OWN, for the two SYNCHRONOUS reads once the producer exists:
   // a join is something the emission produces from rows, not something a
@@ -285,6 +291,7 @@ export const V5_A02_GATE_ZERO_REASON_IDS = deepFreeze([
   "gate_zero_producer_identity_refused",
   "gate_zero_run_binding_unnamed",
   "gate_zero_scheduler_clause_failed",
+  "gate_zero_sealed_artifact_absent",
   "duplicate_predecessor_outcome",
   "gate_conclusion_reader_unavailable",
   "gate_dependency_unknown",

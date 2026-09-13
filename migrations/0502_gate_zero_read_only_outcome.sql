@@ -211,12 +211,12 @@ create table if not exists ops.gate_zero_read_only_outcome (
   -- THE SAME RECEIPT, DIGESTED OVER WHAT THE CANDIDATE DECIDES AND NOTHING THE
   -- CALL DECIDES. outcome_digest above covers all twenty-one fields, which
   -- includes the two instants stamped when a run happened and the per-call
-  -- session_ref identity.js derives from the request's correlation id -- three
-  -- values that differ between two GENUINE authenticated runs of one candidate.
-  -- Keying idempotency on it therefore refused the second real call (PR 1014,
-  -- Sol's finding 3). This column is the key: the same receipt with the two
-  -- instants dropped and the producer's and evaluator's session_ref dropped, so
-  -- two authenticated calls over one candidate converge on one value. The
+  -- session_ref identity.js derives from the request's correlation id for each
+  -- of the three identities -- five values that differ between two GENUINE
+  -- authenticated runs of one candidate. Keying idempotency on it therefore
+  -- refused the second real call (PR 1014, Sol's finding 3). This column is the
+  -- key: the same receipt with the two instants dropped and every identity's
+  -- session_ref dropped, so two authenticated calls converge on one value. The
   -- session refs are not lost -- they are IN `receipt` and in outcome_digest,
   -- beside the row rather than inside the key.
   candidate_scoped_digest   text not null
@@ -244,7 +244,7 @@ comment on column ops.gate_zero_read_only_outcome.outcome_digest is
   'Recomputed from `receipt` with ops.portfolio_canonical_json, which matches artifact-trust.js canonicalJson. Never supplied by a caller. Plain canonical-JSON sha256 with no domain tag, following benchmark-minimum.v5.js precedent -- a NAMED ASSUMPTION, because r7 states no domain tag for consumer-gate-receipt.v1.';
 
 comment on column ops.gate_zero_read_only_outcome.candidate_scoped_digest is
-  'The idempotency comparison value: ops.gate_zero_outcome_candidate_digest(receipt), which is the same canonical-JSON sha256 recipe over the receipt MINUS observed_at, ttl_expires_at and the producer''s and evaluator''s per-call session_ref. Two genuine authenticated runs of one candidate differ in exactly those three values, so this is what a retry is compared on; outcome_digest stays as the evidence digest of the receipt that was actually stored.';
+  'The idempotency comparison value: ops.gate_zero_outcome_candidate_digest(receipt), which is the same canonical-JSON sha256 recipe over the receipt MINUS observed_at, ttl_expires_at and the per-call session_ref of each of the three identities. Two genuine authenticated runs of one candidate differ in exactly those five values, so this is what a retry is compared on; outcome_digest stays as the evidence digest of the receipt that was actually stored.';
 
 comment on column ops.gate_zero_read_only_outcome.producing_seat_ref is
   'The staffed oracle seat that produced this receipt, derived from the server-established actor context and the frozen holder ref. Never a parameter.';
@@ -301,22 +301,23 @@ comment on function ops.gate_zero_outcome_digest(jsonb) is
 -- The SAME digest, over what the CANDIDATE decides. This is the idempotency key.
 -- ---------------------------------------------------------------------------
 -- THE DEFECT THIS EXISTS FOR (PR 1014, Sol's finding 3). A consumer-gate receipt
--- carries three values that a genuine second run of ONE candidate legitimately
+-- carries five values that a genuine second run of ONE candidate legitimately
 -- changes: `observed_at` and `ttl_expires_at`, stamped when the run happened,
--- and the `session_ref` inside producer_identity and evaluator_identity, which
--- identity.js derives from the request's own correlation id. Digesting all
--- twenty-one fields and then demanding the retry match it made every REAL retry
--- a conflict: the only two calls that could ever agree were two calls carrying
--- the same bytes, which is a fixture, not a retry.
+-- and the `session_ref` inside ALL THREE identities, every one of which
+-- identity.js derives from the request's own correlation id -- the subject
+-- maker's included, because Step A's third correction stopped manufacturing it
+-- out of the revision and made it the candidate-build seat WITHIN the
+-- authenticated call. Digesting all twenty-one fields and then demanding the
+-- retry match it made every REAL retry a conflict: the only two calls that could
+-- ever agree were two calls carrying the same bytes, which is a fixture, not a
+-- retry.
 --
 -- THE PROJECTION, STATED RATHER THAN IMPLIED. Drop the two instants; drop
--- session_ref from the producer and the evaluator. Nothing else moves:
+-- session_ref from each of the three identities. Nothing else moves:
 --
---   * the SUBJECT MAKER's session_ref STAYS. It is
---     `session:candidate-build:<head_revision>` -- derived from the candidate,
---     not from the call -- so it is part of what this key is about, and keeping
---     it means a receipt that renames the maker's session is still a different
---     outcome for the same candidate and still conflicts.
+--   * every identity's actor_id and authority_class STAY. A receipt naming a
+--     different maker, producer or evaluator for one candidate is a different
+--     outcome and still conflicts.
 --   * every digest, every constant, the status, the comparator and the
 --     evidence ref stay. A run that READ different rows and reached a different
 --     verdict for one candidate is a genuine conflict and must still raise.
@@ -330,12 +331,13 @@ set search_path = pg_catalog, ops, public
 as $$
   select (p_receipt - 'observed_at' - 'ttl_expires_at')
       || jsonb_build_object(
+           'subject_maker_identity', (p_receipt -> 'subject_maker_identity') - 'session_ref',
            'producer_identity', (p_receipt -> 'producer_identity') - 'session_ref',
            'evaluator_identity', (p_receipt -> 'evaluator_identity') - 'session_ref')
 $$;
 
 comment on function ops.gate_zero_outcome_candidate_projection(jsonb) is
-  'One consumer-gate-receipt.v1 reduced to what the CANDIDATE decides: the receipt without observed_at, without ttl_expires_at, and with the per-call session_ref removed from producer_identity and evaluator_identity. The subject maker''s session_ref is derived from the candidate revision and is deliberately kept. Used only to compute the idempotency comparison value.';
+  'One consumer-gate-receipt.v1 reduced to what the CANDIDATE decides: the receipt without observed_at, without ttl_expires_at, and with the per-call session_ref removed from each of the three identities. Every identity''s actor_id and authority_class are kept, so a receipt naming a different maker, producer or evaluator for one candidate still conflicts. Used only to compute the idempotency comparison value.';
 
 create or replace function ops.gate_zero_outcome_candidate_digest(p_receipt jsonb)
 returns text language sql immutable
@@ -558,7 +560,7 @@ end;
 $$;
 
 comment on function ops.gate_zero_record_read_only_outcome(uuid,jsonb) is
-  'The only way to record a Gate Zero read-only outcome. The producing seat, the actor and the outcome digest are all derived; the receipt and an idempotency key are the only parameters. Refuses every transaction except the staffed non-human oracle seat, refuses a receipt whose producer or evaluator is not that seat, refuses same-actor or same-session self-review, enforces authenticated-receipt-identity.v1''s closed three-field shape on each of the three identities, and is idempotent on the candidate digest ATOMICALLY -- one insert arbitrated by the candidate key, with a fallback select -- so two writers racing the same candidate both receive the same durable row rather than one of them receiving a unique_violation. A retry is compared on ops.gate_zero_outcome_candidate_digest, which excludes the two per-run instants and the per-call session_ref, so two GENUINE authenticated calls for one candidate converge; the full outcome_digest is stored beside it as the evidence digest of the receipt that was actually persisted.';
+  'The only way to record a Gate Zero read-only outcome. The producing seat, the actor and the outcome digest are all derived; the receipt and an idempotency key are the only parameters. Refuses every transaction except the staffed non-human oracle seat, refuses a receipt whose producer or evaluator is not that seat, refuses same-actor or same-session self-review, enforces authenticated-receipt-identity.v1''s closed three-field shape on each of the three identities, and is idempotent on the candidate digest ATOMICALLY -- one insert arbitrated by the candidate key, with a fallback select -- so two writers racing the same candidate both receive the same durable row rather than one of them receiving a unique_violation. A retry is compared on ops.gate_zero_outcome_candidate_digest, which excludes the two per-run instants and every identity''s per-call session_ref, so two GENUINE authenticated calls for one candidate converge; the full outcome_digest is stored beside it as the evidence digest of the receipt that was actually persisted.';
 
 -- ---------------------------------------------------------------------------
 -- PREREQUISITE TWO, NOW BOUND. The Gate Zero reader benchmark acceptance calls.
