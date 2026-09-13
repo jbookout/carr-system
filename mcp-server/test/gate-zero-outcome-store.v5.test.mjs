@@ -70,6 +70,13 @@ const SECOND_KEY = "99999999-8888-4777-8666-555555555555";
 const MIGRATION = readFileSync(
   new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
 
+test("the public verb description promises immutable convergence, not the retired refusal", () => {
+  const description = TOOLS[VERB].description;
+  assert.match(description, /changed evidence or a changed verdict.*converges onto.*recorded outcome/i);
+  assert.match(description, /separately labels recorded and offered metadata/i);
+  assert.doesNotMatch(description, /different outcome.*is refused|different rows.*still conflicts/i);
+});
+
 // --- actors, and the one thing that can no longer be one ----------------------
 //
 // WHAT CHANGED, AND WHY THESE ARE LITERALS AGAIN (PR 1013's fifth correction,
