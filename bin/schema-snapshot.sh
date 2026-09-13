@@ -358,6 +358,15 @@ cat > "$TMP" <<'ROLES'
 -- ...)` RAISES on a missing role, so the gate crashed with a traceback instead
 -- of a finding. Four for four, every one caught by a rebuild rather than by the
 -- change that created the role.
+-- carr_gate_zero_producer made it FIVE by way of 0502, and it is the first one
+-- the SCAC catalog caught rather than a db-gate: 0503 seals the v26 function
+-- ACL projection at 467 rows, one of which is this role's execute grant on
+-- ops.gate_zero_record_read_only_outcome. A rebuild without the role observes
+-- 466 and the restore guard refuses the whole snapshot with `restored SCAC
+-- registry failed exact historical, current, or per-entry contract seals` —
+-- a message that names the registry and not the missing role, so the fifth
+-- spring of this trap cost a bisect of the guard's five sub-conditions. Five
+-- for five, still none caught by the change that created the role.
 --
 -- All privilege bundles whose creating migrations are in the snapshot ledger
 -- are created here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
@@ -368,18 +377,22 @@ cat > "$TMP" <<'ROLES'
 -- carr_reader, carr_writer, carr_exporter, carr_authority,
 -- carr_device_evidence, the four calendar-prebrief roles, and the renewal
 -- source-attestor role are privilege
--- bundles, so they stay NOLOGIN. carr_jobs is
--- the narrow unattended runtime identity: a fresh
--- rebuild must make it LOGIN. If an older snapshot created it NOLOGIN, convert
--- it with a fresh random placeholder password; an already-login role is left
--- completely unchanged. The placeholder is generated in-process and never
--- selected, logged, or written into this dump.
+-- bundles, so they stay NOLOGIN. carr_jobs and carr_gate_zero_producer are the
+-- narrow machine identities — the unattended runtime and the Gate Zero producer
+-- seat — and a fresh rebuild must make each of them LOGIN. That is not cosmetic:
+-- the v26 role-authority projection counts the NOLOGIN carr_* roles, so minting
+-- either of these as NOLOGIN moves that count off its seal and breaks the
+-- restore in a second place. carr_jobs takes a fresh random placeholder
+-- password, generated in-process and never selected, logged, or written into
+-- this dump; carr_gate_zero_producer takes none at all, for the reason recorded
+-- at its branch below. An already-login role is left completely unchanged.
 --
 do $$
 declare
   r text;
   jobs_can_login boolean;
   jobs_placeholder text;
+  producer_can_login boolean;
 begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
@@ -399,6 +412,22 @@ begin
   elsif not jobs_can_login then
     jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
     execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
+  end if;
+
+  -- THE GATE ZERO PRODUCER SEAT TAKES NO PASSWORD, and that is the difference
+  -- between the two machine logins rather than an oversight. 0502 creates it as
+  -- `create role carr_gate_zero_producer login` with nothing else, and
+  -- ops/staging-database-login-provision-db-gate.py reads the seat's baseline
+  -- back as (rolcanlogin, rolpassword is null, rolconfig is null) = (t,t,t)
+  -- before it provisions anything — a snapshot that minted the seat with
+  -- carr_jobs' placeholder password failed that gate with (t,f,t). The seat is
+  -- credentialed by the provisioning path the gate exercises, not by this file,
+  -- so reproduce 0502's shape exactly and leave an existing role alone.
+  select rolcanlogin into producer_can_login from pg_roles where rolname='carr_gate_zero_producer';
+  if not found then
+    execute format('create role %I login', 'carr_gate_zero_producer');
+  elsif not producer_can_login then
+    execute format('alter role %I login', 'carr_gate_zero_producer');
   end if;
 
   -- THE AGING TRAP ONE LEVEL DOWN: not creating a role, but joining one.
@@ -549,7 +578,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -567,7 +596,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -587,7 +616,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -608,7 +637,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -626,7 +655,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
 -- The snapshot has no grantor field, so render each semantically identical
