@@ -80,7 +80,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
+import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
          hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
@@ -240,7 +240,15 @@ const protectedApiHandler = {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
-    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
+    // THE GRANT DOOR, WITH THE SERVER'S WITNESS. `actorFromProps` is no longer
+    // exported (amendment 8, fourth correction round): a grant's props are an
+    // ordinary object, so an exported builder was a brander taking caller bytes.
+    // The witness is the OAuth client secret this same Worker already holds;
+    // identity.js brands only when the bytes match what it read from the
+    // server's environment at initialisation, and returns the same actor either
+    // way, so a missing secret costs a receipt identity and never a session.
+    const actor = authenticatedIdentity.connectionForGrant(
+      ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS, env.GOOGLE_CLIENT_SECRET);
     if (!actor) {
       // Same reasoning as mcpApiHandler's identical check (mcp.js) — a
       // provider-validated grant with no resolvable actor, not a routine
@@ -357,16 +365,17 @@ function probeActorFor(request, env) {
 // shape, same returned fields — but the actor is authenticated inside
 // identity.js, which is the only file that can brand one.
 //
-// THE MAP IS HANDED OVER, NOT PASSED IN (amendment 8, third correction round).
-// identity.js's review door takes a BEARER ONLY: a caller cannot pair a bearer
-// of its choosing with a token map of its choosing, because there is no second
-// parameter to put one in. A Worker secret is readable only from a request's
-// `env`, so the server seals its map into that module on the first /mcp request
-// that carries one. The seal is one-shot and answers false thereafter, so this
-// line is the server's bootstrap on the first request and a no-op on every
-// request after it.
-function reviewActorFor(request, env) {
-  authenticatedIdentity.sealServerReviewTokens(env.REVIEW_TOKENS);
+// THE MAP IS NOT HANDED OVER AT ALL ANY MORE (amendment 8, fourth correction
+// round). The third round took the token map off the caller's side of the door
+// but kept a one-shot `sealServerReviewTokens` for the server to install its
+// own, and the reviewer's probe simply installed one FIRST: one-shot state
+// decides who is earliest, not who is the server. identity.js now reads
+// REVIEW_TOKENS itself, once, at module initialisation, out of `process.env` —
+// which wrangler populates from this Worker's secrets (nodejs_compat, 2026-07-01
+// compatibility date) and which, unlike `env`, is readable at module scope. So
+// this door is a BEARER and nothing else, and there is no function anywhere that
+// installs a map.
+function reviewActorFor(request) {
   return authenticatedIdentity.reviewActorForToken(request.headers.get("authorization") || "");
 }
 
@@ -651,7 +660,7 @@ async function routeRequest(request, env, ctx) {
   if (url.pathname === "/mcp") {
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
-    const reviewActor = reviewActorFor(request, env);
+    const reviewActor = reviewActorFor(request);
     if (reviewActor) return dispatch(request, env, ctx, reviewActor);
     const hermesCosActor = hermesCosActorFor(request, env);
     if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);

@@ -133,13 +133,53 @@ const RECORDED_REVIEW_TOKENS = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: RECORDED
 const CORRELATION_ID = "3f2a6c18-9b4d-4e7a-8c11-5d0e2f7a6b93";
 
 /**
+ * A LEGACY MAP-TAKING DOOR'S RECORDED SECRET, and the OAuth grant door's
+ * recorded witness. Both are here for the same reason the review map is: the
+ * fourth correction round closed the legacy doors WITHOUT an exception, so this
+ * suite has to be able to show each of them branding for the server's own bytes
+ * and refusing to brand for a caller's. `codex` is an ordinary DISPLAY actor and
+ * the narrowest one that exercises the agent door.
+ */
+const RECORDED_AGENT_ACTOR = "codex";
+const RECORDED_AGENT_TOKEN = "gate-zero-recorded-agent-bearer-2026-09-12";
+const RECORDED_AGENT_TOKENS = JSON.stringify({ [RECORDED_AGENT_ACTOR]: RECORDED_AGENT_TOKEN });
+const RECORDED_GRANT_WITNESS = "gate-zero-recorded-oauth-client-secret-2026-09-12";
+
+/**
+ * THE SERVER'S OWN SECRET SOURCE, AND THERE IS NO OTHER ONE ANY MORE.
+ *
+ * Amendment 8's fourth correction deleted `sealServerReviewTokens`: identity.js
+ * reads its credentials ONCE, at module initialisation, out of the environment
+ * the SERVER PROCESS was started with — `process.env`, which is what wrangler
+ * populates this Worker's secrets into (nodejs_compat, 2026-07-01 compatibility
+ * date). There is no function to install a map, so there is no first-caller race
+ * to win, which is exactly how the reviewer's probe got in twice.
+ *
+ * SO THE SUITE BECOMES THE SERVER, the only way a suite now can: it writes the
+ * recorded secrets into its own process environment, HERE, before any staged
+ * tree is imported. Every `moduleOfTree(target, IDENTITY_FILE)` below is a fresh
+ * module instance whose initialisation reads exactly these values, the way a
+ * deployed Worker's does. Nothing in src is steered by an environment variable —
+ * these are credentials, not addresses, and no staged tree, reader or store is
+ * selected by one.
+ *
+ * The statically imported `../src/identity.js` instance was initialised before
+ * this line ran and therefore holds NO credentials at all. That is deliberate
+ * and it is load-bearing: every case that needs an authenticated actor takes it
+ * from a staged module, so a case cannot accidentally pass because some other
+ * import happened to have booted the door first.
+ */
+process.env.REVIEW_TOKENS = RECORDED_REVIEW_TOKENS;
+process.env.AGENT_TOKENS = RECORDED_AGENT_TOKENS;
+process.env.GOOGLE_CLIENT_SECRET = RECORDED_GRANT_WITNESS;
+
+/**
  * The reviewer seat, authenticated by the STAGED identity.js.
  *
- * TWO STEPS, BOTH THE SERVER'S, because amendment 8 moved the token map off the
- * caller's side of the door. First the server SEALS its map into the module —
- * one-shot, exactly as index.js does on the first /mcp request. Then the door
- * takes a BEARER and nothing else: there is no parameter left for a caller to
- * pair a bearer of its choosing with a map of its choosing.
+ * ONE STEP, AND IT IS A BEARER. There is no seal, no install and no map
+ * argument: the staged module read REVIEW_TOKENS out of the process environment
+ * written above when it initialised, so this is precisely the call index.js
+ * makes on a /mcp request and precisely the call a caller cannot improve on.
  *
  * The correlation id is then written ON TO the authenticated object, the way
  * mcp.js now decorates it. It is NOT a spread: the brand is object identity, so
@@ -148,16 +188,26 @@ const CORRELATION_ID = "3f2a6c18-9b4d-4e7a-8c11-5d0e2f7a6b93";
  * for the seat; nothing here says so.
  */
 function recordedReviewerActor(identity, correlationId = CORRELATION_ID) {
-  identity.authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS);
   const actor = identity.authenticatedIdentity
     .reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
   assert.notEqual(actor, null, "the recorded review context authenticated no actor");
   return Object.assign(actor, { correlation_id: correlationId });
 }
 
-/** A verified partner, from the same file's OAuth-props path. NOT this oracle's class. */
+/**
+ * A verified partner, from the same file's OAuth grant path. NOT this oracle's
+ * class.
+ *
+ * `actorFromProps` is module-private under the fourth correction — props are an
+ * ordinary object, so an exported builder was a brander taking caller bytes.
+ * What the server calls is `connectionForGrant`, and the third argument is the
+ * WITNESS: a credential byte string identity.js read from the server's own
+ * environment. index.js and mcp.js pass `env.GOOGLE_CLIENT_SECRET`; this passes
+ * the recorded value written into that environment above.
+ */
 function recordedPartnerActor(identity, correlationId = CORRELATION_ID) {
-  const actor = identity.actorFromProps(identity.propsForSlug("joe", { via: "oauth-google" }));
+  const actor = identity.authenticatedIdentity.connectionForGrant(
+    identity.propsForSlug("joe", { via: "oauth-google" }), null, RECORDED_GRANT_WITNESS);
   assert.notEqual(actor, null, "the recorded partner context authenticated no actor");
   return Object.assign(actor, { correlation_id: correlationId });
 }
@@ -664,7 +714,12 @@ test("IDENTITY: an actor with no server-stamped correlation id has no session, a
 
 test("IDENTITY: a fabricated actor object obtains no identity and no receipt", async () => {
   const fabricated = fabricatedReviewerActor();
-  const minted = recordedReviewerActor(await import("../src/identity.js"));
+  // FROM A STAGED MODULE, because the statically imported identity.js was
+  // initialised before this file wrote the recorded secrets into the process
+  // environment and therefore holds no credentials at all. Every authenticated
+  // actor in this suite comes from a module that booted the way the Worker does.
+  const { target: mintedIn } = stageTree({});
+  const minted = recordedReviewerActor(await moduleOfTree(mintedIn, IDENTITY_FILE));
   // NON-VACUOUS: the fabricated object is field-for-field what the real door
   // mints, so what refuses it below is provenance and nothing else.
   assert.deepEqual(Object.keys(fabricated).sort(), Object.keys(minted).sort());
@@ -696,8 +751,16 @@ test("IDENTITY: a fabricated actor object obtains no identity and no receipt", a
   // quietly go back to one. The last two are amendment 8's: the door that took
   // the token map as an argument, and the exported context entry.
   for (const gone of ["runInAuthenticatedCall", "authenticatedCallIdentity",
-    "reviewActorForToken", "dispatchAuthenticatedCall", "authenticatedCallReceiptIdentity"])
+    "reviewActorForToken", "dispatchAuthenticatedCall", "authenticatedCallReceiptIdentity",
+    "actorFromProps", "sealServerReviewTokens"])
     assert.equal(Object.hasOwn(identity, gone), false, `${gone} is still exported`);
+  // AND THE INSTALLER IS NOT ON THE NEW SURFACE EITHER, under any name: the
+  // fourth round's mutation control is that the probe cannot name a function to
+  // call, so it is asserted on both surfaces rather than on the module alone.
+  for (const gone of ["sealServerReviewTokens", "actorFromProps",
+    "dispatchAuthenticatedCall", "runInAuthenticatedCall"])
+    assert.equal(Object.hasOwn(identity.authenticatedIdentity, gone), false,
+      `${gone} is still on the authenticated-identity surface`);
 });
 
 // ===========================================================================
@@ -777,31 +840,67 @@ test("IDENTITY: a caller-chosen bearer plus a caller token map authenticates nob
   const CALLERS_OWN = "a-bearer-the-caller-chose";
   const CALLERS_MAP = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: CALLERS_OWN });
 
+  /** Did this object come out of the door BRANDED? Asked the way the dispatch
+   *  asks: an unbranded object derives no identity and therefore no receipt. */
+  const derivesIdentity = value => door.dispatchFor(value)(() => door.receiptIdentity()) !== null;
+
+  // THE INSTALLER IS GONE, WITH NOTHING IN ITS PLACE. This is the fourth round's
+  // mutation control stated as the review stated it: the probe cannot name a
+  // function to call. One-shot state settled which caller was FIRST; it never
+  // said which caller was the SERVER, and the probe simply arrived first.
+  assert.equal(door.sealServerReviewTokens, undefined);
+  assert.equal(Object.keys(door).some(name => /seal|install|bind|set/i.test(name)), false,
+    "the new surface grew something that reads like an installer");
+
   // THE DOOR TAKES A BEARER AND NOTHING ELSE, so the call the reviewer made is
   // not one that can be written any more: a second argument is not read.
   assert.equal(door.reviewActorForToken.length, 1);
   assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`, CALLERS_MAP), null);
-  // And before the server seals a map, no bearer authenticates at all.
-  assert.equal(door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`), null);
+  // NON-VACUOUS: the map the SERVER'S OWN ENVIRONMENT holds still authenticates
+  // its own bearer, and that actor is branded.
+  const server = door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
+  assert.notEqual(server, null);
+  assert.equal(derivesIdentity(Object.assign(server, { correlation_id: CORRELATION_ID })), true);
 
-  // THE SERVER'S BOOTSTRAP, once. Everything after it is refused, so a caller
-  // arriving later has nowhere to put a map of its own.
-  assert.equal(door.sealServerReviewTokens(RECORDED_REVIEW_TOKENS), true);
-  assert.equal(door.sealServerReviewTokens(CALLERS_MAP), false);
-  assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null);
-  // NON-VACUOUS: the map the server did seal still authenticates its own bearer.
-  assert.notEqual(door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`), null);
+  // AND THE LEGACY MAP-TAKING DOORS ARE CLOSED WITH NO EXCEPTION — the half the
+  // third round carved out and the fourth was told to close. They still TAKE a
+  // map, because the server has always called them that way, but branding no
+  // longer follows from a match: it follows from the bytes matched against being
+  // bytes identity.js read from the server's environment at initialisation.
+  const callersAgentMap = JSON.stringify({ [RECORDED_AGENT_ACTOR]: CALLERS_OWN });
+  const callersAgent = identity.agentActorForToken(`Bearer ${CALLERS_OWN}`, callersAgentMap);
+  assert.notEqual(callersAgent, null, "the legacy door stopped returning its actor");
+  assert.equal(derivesIdentity(Object.assign(callersAgent, { correlation_id: CORRELATION_ID })),
+    false, "a caller's own token map branded an actor through the legacy agent door");
+  // NON-VACUOUS, and it is the same door, the same bearer shape and the same
+  // slug — only the PROVENANCE of the map differs.
+  const serversAgent = identity.agentActorForToken(
+    `Bearer ${RECORDED_AGENT_TOKEN}`, RECORDED_AGENT_TOKENS);
+  assert.notEqual(serversAgent, null);
+  assert.equal(derivesIdentity(Object.assign(serversAgent, { correlation_id: CORRELATION_ID })),
+    true, "the server's own token map stopped branding through the legacy agent door");
+
+  // AND THE GRANT DOOR IS THE SAME STORY WITH A WITNESS instead of a map: props
+  // a caller wrote get the actor they always got, and no brand.
+  const callersGrant = door.connectionForGrant(
+    identity.propsForSlug("joe", { via: "oauth-google" }), null, "a-witness-the-caller-chose");
+  assert.notEqual(callersGrant, null);
+  assert.equal(derivesIdentity(Object.assign(callersGrant, { correlation_id: CORRELATION_ID })),
+    false, "a caller-chosen witness branded a partner actor");
 
   // AND THE CALLER'S BEARER IS REFUSED THROUGH THE REAL DISPATCH TOO, which is
-  // where the reviewer's probe ended: no actor, so no identity, so no receipt.
+  // where the reviewer's probe ended: no branded actor, so no identity, so no
+  // receipt.
   const emitted = await emitFrom({}, staged => {
-    // The server boots first, the way index.js boots it on the first request.
-    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS), true);
-    // The caller then arrives with a map of its own and is refused it, and its
-    // chosen bearer authenticates nothing against the map the server sealed.
-    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens(CALLERS_MAP), false);
+    // Everything the probe could reach, tried in the staged module: there is no
+    // installer, the caller's bearer authenticates nothing, and the caller's own
+    // map brands nothing through the door that still accepts one.
+    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens, undefined);
     assert.equal(staged.authenticatedIdentity.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null,
-      "a caller-chosen bearer authenticated against a caller-chosen map");
+      "a caller-chosen bearer authenticated against the server's map");
+    const smuggled = staged.agentActorForToken(`Bearer ${CALLERS_OWN}`,
+      JSON.stringify({ [REVIEWING_SEAT_ACTOR]: CALLERS_OWN }));
+    assert.equal(smuggled, null, "an unregistered slug came back through the agent door");
     // So all it is left holding is an object it wrote itself, which is control
     // 11's case again and refuses for the same reason.
     return { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
@@ -812,6 +911,117 @@ test("IDENTITY: a caller-chosen bearer plus a caller token map authenticates nob
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emitted.producer_answer.receipt, null);
 });
+
+/**
+ * THE HOSTILE VALUES. Everything a caller can write down, and nothing a server
+ * holds: no recorded token, no recorded witness, no minted actor. Amendment 8's
+ * claim is that NO export of identity.js turns any combination of these into a
+ * branded actor or into an entered identity context, so the enumeration below
+ * feeds every export every 1-, 2- and 3-tuple drawn from this set.
+ */
+function hostileValues(probe) {
+  return [
+    null,
+    "Bearer a-bearer-the-caller-chose",
+    JSON.stringify({ [REVIEWING_SEAT_ACTOR]: "a-bearer-the-caller-chose" }),
+    JSON.stringify({ [RECORDED_AGENT_ACTOR]: "a-bearer-the-caller-chose" }),
+    fabricatedReviewerActor(),
+    { slug: "joe", human: true, via: "oauth-google", correlation_id: CORRELATION_ID },
+    probe,
+  ];
+}
+
+test("IDENTITY: no export of identity.js brands an actor or enters a context from caller bytes",
+  async () => {
+    const { target } = stageTree({});
+    const identity = await moduleOfTree(target, IDENTITY_FILE);
+    const door = identity.authenticatedIdentity;
+
+    // THE SURFACE IS ENUMERATED OFF THE MODULE NAMESPACE, not off a list and not
+    // off `authenticatedIdentity` alone — which was finding 4 of the third
+    // re-review: the old loop walked only the members already inside the new
+    // namespace, so a NEW top-level callable export bypassed it entirely while
+    // the test next to it asserted the namespace was the whole new surface. A
+    // callable added anywhere in identity.js now arrives in this loop by
+    // existing, at any depth of one frozen namespace object.
+    const surface = [];
+    for (const [name, value] of Object.entries(identity)) {
+      if (typeof value === "function") surface.push([name, value]);
+      else if (value !== null && typeof value === "object")
+        for (const [inner, member] of Object.entries(value))
+          if (typeof member === "function") surface.push([`${name}.${inner}`, member]);
+    }
+    assert.ok(surface.length >= 20,
+      `identity.js's callable surface enumerated as ${surface.length}, which is too few to be all of it`);
+    for (const required of ["agentActorForToken", "continuityActorForTokenMaps",
+      "hermesActorForToken", "hermesCosActorForToken", "propsForSlug",
+      "authenticatedIdentity.reviewActorForToken", "authenticatedIdentity.connectionForGrant",
+      "authenticatedIdentity.dispatchFor", "authenticatedIdentity.receiptIdentity",
+      "authenticatedIdentity.buildContext", "authenticatedIdentity.committerIdentity"])
+      assert.ok(surface.some(([name]) => name === required),
+        `${required} was not reached by the enumeration`);
+
+    /**
+     * What a value derives through the real dispatcher. A branded actor answers
+     * a three-field identity here; everything else answers null.
+     *
+     * THE CORRELATION ID IS WRITTEN ON FIRST, IN PLACE, exactly as mcp.js
+     * decorates an authenticated actor — and without it this helper would answer
+     * null for EVERY object and the whole enumeration would pass vacuously,
+     * since a derived identity needs the server's per-call id. Written in place
+     * rather than spread, because the brand is object identity.
+     */
+    const derives = value => {
+      if (value !== null && typeof value === "object" && !Object.isFrozen(value)
+          && value.correlation_id === undefined) {
+        try { value.correlation_id = CORRELATION_ID; } catch { /* frozen enough */ }
+      }
+      try { return door.dispatchFor(value)(() => door.receiptIdentity()); }
+      catch { return null; }
+    };
+
+    // A HOSTILE ARGUMENT THAT LOOKS BACK. If any export runs a caller's function
+    // inside an entered context, this records what that context held.
+    const seen = [];
+    const probe = (...args) => { seen.push(door.receiptIdentity()); return args[0] ?? null; };
+    const hostile = hostileValues(probe);
+
+    const produced = [];
+    for (const [name, callable] of surface)
+      for (const a of hostile) for (const b of hostile) for (const c of hostile) {
+        let answered;
+        try { answered = callable(a, b, c); } catch { continue; }
+        if (answered === null || answered === undefined) continue;
+        produced.push([name, answered]);
+        // A callable ANSWER is followed one step further: `dispatchFor` hands
+        // back a closure, and a closure that entered an identity would be the
+        // context entry amendment 8 says this file does not export.
+        if (typeof answered === "function") {
+          try { answered(probe); } catch { /* a refusal is an answer */ }
+        }
+      }
+
+    assert.ok(produced.length > 0, "no export answered anything, so this proved nothing");
+    for (const [name, value] of produced)
+      assert.equal(derives(value), null,
+        `${name} turned caller bytes into a branded actor`);
+    for (const held of seen)
+      assert.equal(held, null, "an export ran a caller's function inside an identity context");
+
+    // NON-VACUOUS, against the same `derives`: the server's own credentials —
+    // which appear nowhere in the hostile set — still brand, so what refuses
+    // above is provenance and not the helper being broken.
+    assert.deepEqual(derives(recordedReviewerActor(identity)), {
+      actor_id: REVIEWING_SEAT_ACTOR,
+      session_ref: `session:${CORRELATION_ID}`,
+      authority_class: "review_agent",
+    });
+    assert.deepEqual(derives(recordedPartnerActor(identity)), {
+      actor_id: "joe",
+      session_ref: `session:${CORRELATION_ID}`,
+      authority_class: "verified_partner",
+    });
+  });
 
 test("DIGEST: each bound digest stands on its own artifact's bytes", async () => {
   const first = await emitFrom({});
@@ -1298,9 +1508,24 @@ test("SHAPE: every callable this PR added to identity.js and the walker wears am
   const added = Object.keys(surface);
   assert.ok(added.length >= 6, `identity.js's new surface shrank to ${added.length}`);
   for (const name of added) assertClosedShape(surface[name], `identity.js#authenticatedIdentity.${name}`);
-  // AND THE SURFACE IS ALL OF IT: amendment 8 leaves identity.js with no other
-  // new top-level callable, so the enumeration above is not enumerating a subset.
   assert.deepEqual(added.filter(name => typeof surface[name] !== "function"), []);
+
+  // AND THE SURFACE IS ALL OF IT — asserted DYNAMICALLY against the file's own
+  // exports, which is finding 4 of the third re-review. The old line only said
+  // that every member of the namespace was callable; it said nothing about a new
+  // top-level callable sitting NEXT to the namespace, which would have slipped
+  // past the whole enumeration while the comment claimed otherwise. identity.js's
+  // top-level callables are exactly the pre-amendment doors listed here, so any
+  // callable added to this file arrives either inside the namespace above (where
+  // it is shape-checked) or in this diff (where it is red).
+  assert.deepEqual(
+    Object.keys(identity).filter(name => typeof identity[name] === "function").sort(),
+    ["agentActorForToken", "agentSlugForClient", "authorizationClassForActor",
+     "continuityActorForTokenMaps", "hermesActorForToken", "hermesActorForTokenMaps",
+     "hermesCosActorForToken", "isKnownActor", "isKnownPartner",
+     "organizationTenantForActor", "permittedActionOwnerSlugs", "personalScopeForActor",
+     "propsForSlug", "slugForEmail", "verifiedAgentSlugForClient"],
+    "identity.js grew or lost a top-level callable export");
 
   const walker = await import("./gate-zero-reachability-walk.testhelper.mjs");
   const callables = Object.entries(walker).filter(([, value]) => typeof value === "function");

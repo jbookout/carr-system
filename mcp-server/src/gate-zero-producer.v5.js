@@ -145,6 +145,7 @@ import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 
 import { artifactManifestDigest, canonicalJson, digest } from "./artifact-trust.js";
+import { closedCallable } from "./closed-callable.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID, authenticatedIdentity } from "./identity.js";
 import {
@@ -200,22 +201,6 @@ function isPlainObject(value) {
 
 function fail(code, message, detail) {
   throw new V5BoundaryError(code, message, detail);
-}
-
-/**
- * AMENDMENT 2'S CLOSED SHAPE FOR AN EXPORTED CALLABLE, the same helper the
- * gate and the readers use, for the same two reasons: a bound function is not
- * constructable and quotes no line of this module back at whoever probed it,
- * and an own `Symbol.hasInstance` answers `instanceof` false WITHOUT walking the
- * left operand's prototype chain. Frozen, so no property can be written over it
- * afterwards — clause (d), the one the shape enumeration found missing.
- */
-function closedCallable(callable) {
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return Object.freeze(closed);
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +653,16 @@ function observedCandidateBytes(root, sealed) {
 // first round collapsed.
 // ---------------------------------------------------------------------------
 
+// AMENDMENT 2'S CLOSED SHAPE FOR AN EXPORTED CALLABLE comes from
+// ./closed-callable.js, which is the ONE definition this module and identity.js
+// now share. It used to be copied into both: the bodies still matched, but the
+// clauses each copy documented had drifted, and a duplicated security primitive
+// drifts in behaviour immediately after it drifts in prose. The Gate Zero seam
+// modules keep their own local copies on purpose — each of those is held to
+// being self-contained and one asserts by source that it holds exactly one
+// definition — so the unification is exactly the two copies that were free to
+// diverge.
+
 /**
  * The authority classes r7's registry admits for an independent control-plane
  * oracle. DERIVED classes only — identity.js computes the class, this module
@@ -709,10 +704,24 @@ function authenticatedCaller() {
  * either. An address the registry does not map answers null, and a receipt does
  * not name a principal this system does not register.
  *
- * THE SESSION comes from the authenticated build context the DISPATCH PATH
- * established. The second correction manufactured it here, out of the revision
- * this module happened to be reading, and the third review round was right that
- * a string this file assembles is not a session anyone authenticated. Outside an
+ * THE SESSION comes from the authenticated build context THE DISPATCH PATH
+ * ESTABLISHES — and since the fourth correction round it really is established
+ * rather than read together. The second correction manufactured it here, out of
+ * the revision this module happened to be reading. The third correction moved
+ * the manufacturing one file over: identity.js still ASSEMBLED the ref at read
+ * time, by suffixing whatever the calling seat's session happened to be, which
+ * the review was right to call synthesis. identity.js now derives both seats at
+ * the instant the dispatcher is built, from the same pinned credential and the
+ * same server-written correlation id, and freezes them into the context the
+ * dispatch enters; this reads the build seat back and builds nothing.
+ *
+ * WHAT THE SEAT NAMES, stated exactly, because a receipt must not overclaim: it
+ * is the candidate-build seat of THIS authenticated run — the session in which
+ * the candidate was materialised from HEAD and digested — not a claim to have
+ * recovered the session the maker originally typed in, which no git object
+ * records and which this system therefore must never assert. The PRINCIPAL is
+ * the maker, read from HEAD's committer through the frozen registry; the SESSION
+ * is the authenticated seat that built what is being judged. Outside an
  * authenticated call there is no build context and this answers null, which is
  * the same fail-closed answer the producer identity gives.
  */

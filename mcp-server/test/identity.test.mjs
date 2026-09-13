@@ -18,15 +18,22 @@ import {
   agentSlugForClient,
   verifiedAgentSlugForClient,
   propsForSlug,
-  actorFromProps,
+  authenticatedIdentity,
   isKnownActor,
   isKnownPartner,
   agentActorForToken,
   continuityActorForTokenMaps,
-  authenticatedIdentity,
 } from "../src/identity.js";
 // The whole namespace, so the removed surfaces can be asserted absent by name.
 import * as identityModule from "../src/identity.js";
+
+// `actorFromProps` is module-private under amendment 8 (PR 1013). The exported
+// grant door is `authenticatedIdentity.connectionForGrant`; called without the
+// server's witness it returns exactly the same actor, unbranded, which is what
+// every case in this file is about.
+const actorFromProps = (props, bindings = null) =>
+  authenticatedIdentity.connectionForGrant(props, bindings);
+
 
 /**
  * THE FIELDS AN ACTOR CARRIES.
@@ -395,24 +402,45 @@ test("local token is per-slug like every other agent token: a stray key does not
 
 const A_CORRELATION_ID = "00000000-0000-4000-8000-000000000000";
 const REVIEW_SECRET = "review-secret-fixture";
+const CONTINUITY_TOKENS = JSON.stringify({ joe: "codex-secret" });
+const GRANT_WITNESS = "oauth-client-secret-fixture";
+
+/**
+ * A SECOND BOOT OF THIS MODULE, WITH THE SERVER'S CREDENTIALS IN PLACE.
+ *
+ * Amendment 8's fourth correction (PR 1013) deleted `sealServerReviewTokens`:
+ * there is no function that installs a credential map, because a one-shot
+ * installer settles which caller is FIRST and never which caller is the SERVER,
+ * and the reviewer's probe simply arrived first — twice. identity.js reads its
+ * credentials ONCE, at module initialisation, out of the environment the server
+ * process was started with, which in the deployed Worker is what wrangler
+ * populates this Worker's secrets into.
+ *
+ * So the only way a suite can be the server is to write the fixture secrets into
+ * its own environment and boot the module. The statically imported instance at
+ * the top of this file was evaluated before any of this ran and holds no
+ * credentials at all — which is itself worth knowing, and the last test below
+ * asserts it: an unprovisioned boot of this file authenticates nobody.
+ */
+process.env.REVIEW_TOKENS = JSON.stringify({ "codex-reviewer": REVIEW_SECRET });
+process.env.AGENT_TOKENS = AGENT_TOKENS;
+process.env.CODEX_CONTINUITY_TOKENS = CONTINUITY_TOKENS;
+process.env.GOOGLE_CLIENT_SECRET = GRANT_WITNESS;
+const booted = await import("../src/identity.js?server-credentials-in-the-environment");
 
 /** What the verb dispatch sees for this actor, asked the way tools.js asks. */
-const identityFor = actor => authenticatedIdentity.dispatchFor(actor)(
-  () => authenticatedIdentity.receiptIdentity());
-
-/** The server's one-shot bootstrap, the way index.js performs it. */
-const sealedOnce = authenticatedIdentity.sealServerReviewTokens(
-  JSON.stringify({ "codex-reviewer": REVIEW_SECRET }));
+const identityFor = actor => booted.authenticatedIdentity.dispatchFor(actor)(
+  () => booted.authenticatedIdentity.receiptIdentity());
 
 test("the authentication brand is object identity: a copy of an authenticated actor is not one", () => {
-  assert.equal(sealedOnce, true, "the server's review map did not seal");
   const doors = [
-    ["agent token", agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS), "grok"],
-    ["continuity token", continuityActorForTokenMaps("Bearer codex-secret",
-      JSON.stringify({ joe: "codex-secret" }), JSON.stringify({ dell: "claude-secret" })), "codex"],
-    ["review token", authenticatedIdentity.reviewActorForToken(`Bearer ${REVIEW_SECRET}`),
+    ["agent token", booted.agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS), "grok"],
+    ["continuity token", booted.continuityActorForTokenMaps("Bearer codex-secret",
+      CONTINUITY_TOKENS, JSON.stringify({ dell: "claude-secret" })), "codex"],
+    ["review token", booted.authenticatedIdentity.reviewActorForToken(`Bearer ${REVIEW_SECRET}`),
       "codex-reviewer"],
-    ["oauth props", actorFromProps(propsForSlug("joe", { via: "oauth-google" })), "joe"],
+    ["oauth props", booted.authenticatedIdentity.connectionForGrant(
+      propsForSlug("joe", { via: "oauth-google" }), null, GRANT_WITNESS), "joe"],
   ];
   for (const [where, actor, slug] of doors) {
     assert.notEqual(actor, null, where);
@@ -437,33 +465,80 @@ test("the authentication brand is object identity: a copy of an authenticated ac
   }
 });
 
+test("a credential map the CALLER supplies authenticates an actor but brands nothing", () => {
+  // THE LEGACY DOORS, CLOSED WITHOUT AN EXCEPTION — the half the third
+  // correction round carved out and the fourth was told to close. They still
+  // TAKE a map, because index.js has always called them that way and the map is
+  // the server's own; what changed is that a MATCH no longer brands. Branding
+  // follows from the bytes matched against being bytes identity.js read from the
+  // server's environment when it initialised.
+  const callersMap = JSON.stringify({ grok: "a-secret-the-caller-chose" });
+  const callersActor = booted.agentActorForToken("Bearer a-secret-the-caller-chose", callersMap);
+  assert.notEqual(callersActor, null, "the door stopped returning its actor");
+  assert.equal(callersActor.slug, "grok");
+  Object.assign(callersActor, { correlation_id: A_CORRELATION_ID });
+  assert.equal(identityFor(callersActor), null, "a caller's own token map branded an actor");
+
+  // NON-VACUOUS: the same door, the same slug, the server's own map — branded.
+  const serversActor = booted.agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
+  Object.assign(serversActor, { correlation_id: A_CORRELATION_ID });
+  assert.equal(identityFor(serversActor)?.actor_id, "grok");
+
+  // AND THE GRANT DOOR IS THE SAME STORY WITH A WITNESS INSTEAD OF A MAP.
+  const callersGrant = booted.authenticatedIdentity.connectionForGrant(
+    propsForSlug("joe", { via: "oauth-google" }), null, "a-witness-the-caller-chose");
+  assert.notEqual(callersGrant, null);
+  Object.assign(callersGrant, { correlation_id: A_CORRELATION_ID });
+  assert.equal(identityFor(callersGrant), null, "a caller-chosen witness branded a partner");
+});
+
 test("a refused credential authenticates nothing", () => {
-  assert.equal(agentActorForToken("Bearer wrong", AGENT_TOKENS), null);
-  const review = authenticatedIdentity.reviewActorForToken;
+  assert.equal(booted.agentActorForToken("Bearer wrong", AGENT_TOKENS), null);
+  const review = booted.authenticatedIdentity.reviewActorForToken;
   assert.equal(review("Bearer wrong"), null);
   assert.equal(review(""), null);
   assert.equal(review(null), null);
-  // NON-VACUOUS: the bearer the server's sealed map does hold still works.
+  // NON-VACUOUS: the bearer the server's environment does hold still works.
   assert.notEqual(review(`Bearer ${REVIEW_SECRET}`), null);
 });
 
-test("the review door takes a bearer only, and the server's map seals once", () => {
-  // AMENDMENT 8. The door used to take the token map as its second argument, so
-  // a caller could verify a bearer of its choosing against a map of its
-  // choosing. There is no second parameter now, and the seal is one-shot.
-  assert.equal(authenticatedIdentity.reviewActorForToken.length, 1);
+test("the review door takes a bearer only, and there is no installer to call", () => {
+  // AMENDMENT 8, FOURTH CORRECTION. The door used to take the token map as its
+  // second argument (second round), then as a one-shot seal (third round). There
+  // is no second parameter and there is no seal: the mutation control is that a
+  // caller cannot name a function to call.
+  assert.equal(booted.authenticatedIdentity.reviewActorForToken.length, 1);
+  assert.equal(booted.authenticatedIdentity.sealServerReviewTokens, undefined);
+  assert.equal(authenticatedIdentity.sealServerReviewTokens, undefined);
   const callersMap = JSON.stringify({ "codex-reviewer": "a-bearer-the-caller-chose" });
-  assert.equal(authenticatedIdentity.sealServerReviewTokens(callersMap), false);
-  assert.equal(authenticatedIdentity.reviewActorForToken("Bearer a-bearer-the-caller-chose"), null);
   assert.equal(
-    authenticatedIdentity.reviewActorForToken("Bearer a-bearer-the-caller-chose", callersMap), null);
+    booted.authenticatedIdentity.reviewActorForToken("Bearer a-bearer-the-caller-chose"), null);
+  assert.equal(booted.authenticatedIdentity
+    .reviewActorForToken("Bearer a-bearer-the-caller-chose", callersMap), null);
+});
+
+test("a boot with no credentials in its environment authenticates nobody", () => {
+  // THE INSTANCE STATICALLY IMPORTED AT THE TOP OF THIS FILE, which was
+  // evaluated before the fixture secrets were written into the environment. It
+  // is the same source; what it lacks is the server's credentials, and that is
+  // the whole of what authenticating means now.
+  assert.equal(authenticatedIdentity.reviewActorForToken(`Bearer ${REVIEW_SECRET}`), null);
+  const unbranded = agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
+  assert.notEqual(unbranded, null, "the door stopped returning its actor");
+  Object.assign(unbranded, { correlation_id: A_CORRELATION_ID });
+  assert.equal(authenticatedIdentity.dispatchFor(unbranded)(
+    () => authenticatedIdentity.receiptIdentity()), null);
 });
 
 test("identity.js exports no context entry and no brander", () => {
   // The removed surfaces, by name, so nothing quietly goes back to one.
   for (const gone of ["reviewActorForToken", "dispatchAuthenticatedCall",
-    "authenticatedCallReceiptIdentity", "runInAuthenticatedCall", "authenticatedCallIdentity"])
+    "authenticatedCallReceiptIdentity", "runInAuthenticatedCall", "authenticatedCallIdentity",
+    "actorFromProps", "sealServerReviewTokens"])
     assert.equal(Object.hasOwn(identityModule, gone), false, `${gone} is still exported`);
+  for (const gone of ["sealServerReviewTokens", "actorFromProps", "dispatchAuthenticatedCall"])
+    assert.equal(Object.hasOwn(authenticatedIdentity, gone), false,
+      `${gone} is still on the authenticated-identity surface`);
   assert.ok(Object.isFrozen(authenticatedIdentity));
 });
 

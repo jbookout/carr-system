@@ -7620,12 +7620,17 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
     // to read and that surface refuses.
     //
     // THIS IS NOT AN IDENTITY SETTER, and identity.js's own note says why at
-    // length. Under amendment 8 the dispatch path does not enter the context at
+    // length. Under amendment 8 the dispatch path does not choose the context at
     // all: it asks identity.js for THIS actor's dispatcher, which that file
-    // closed over an identity it derived from the brand — membership of a
+    // closed over a context it derived from the brand — membership of a
     // module-private WeakSet — and the pinned credential behind it. An object
     // that file did not authenticate, or any copy of one that it did, yields a
-    // dispatcher over a null identity, and the context is entered CLEARED.
+    // dispatcher over a null context, and the context is entered CLEARED.
+    //
+    // TWO SEATS ARE ESTABLISHED HERE, not one: the CALLING seat (who is running
+    // this verb) and the CANDIDATE-BUILD seat inside the same authenticated
+    // call. Both are derived and frozen by identity.js at the moment this
+    // dispatcher is built, so neither is assembled later by whatever reads it.
     const dispatchAuthenticated = authenticatedIdentity.dispatchFor(actor);
     return await dispatchAuthenticated(() => tool.handler(client, actor, args));
   } catch (e) {

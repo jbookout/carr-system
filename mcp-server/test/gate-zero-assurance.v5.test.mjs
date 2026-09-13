@@ -2425,9 +2425,16 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   // are zlib-deflated, rather than the reflog line the first draft took the
   // subject maker from. There is no `node:child_process`: this oracle does not
   // execute a program to learn what it is standing on.
+  // `./closed-callable.js` is the eleventh and it is a UNIFICATION, not a new
+  // dependency: amendment 2's closed shape used to be copied into this module
+  // and into identity.js, and the fourth PR 1013 review round found the two
+  // copies' documented clauses already drifting apart. The Gate Zero seam
+  // modules keep their own local definitions on purpose — each of those is held
+  // to being self-contained — so exactly the two free-to-diverge copies moved.
   assert.deepEqual(imports["gate-zero-producer.v5.js"],
     ["node:fs", "node:path", "node:url", "node:zlib",
-      "./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
+      "./artifact-trust.js", "./closed-callable.js",
+      "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
       "./gate-zero-seam-readers.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],

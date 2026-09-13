@@ -15,8 +15,8 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { partnerAuthoritySlugForActor } from "./partner-authority.js";
-import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor,
-  verifiedAgentSlugForClient } from "./identity.js";
+import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
+  personalScopeForActor, verifiedAgentSlugForClient } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
@@ -815,7 +815,11 @@ export async function dispatch(request, env, ctx, actor) {
 /** Mounted as OAuthProvider `apiHandler` for /mcp. ctx.props is already authenticated. */
 export const mcpApiHandler = {
   async fetch(request, env, ctx) {
-    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
+    // The grant door, with the server's witness — see index.js's note on the
+    // same call. identity.js brands only when the witness is a credential byte
+    // string it read from the server's own environment at initialisation.
+    const actor = authenticatedIdentity.connectionForGrant(
+      ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS, env.GOOGLE_CLIENT_SECRET);
     // Fails closed: a token whose grant does not name one of the two actors is
     // no better than no token at all.
     if (!actor) {

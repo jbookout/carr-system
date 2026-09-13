@@ -20,6 +20,8 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { closedCallable } from "./closed-callable.js";
+
 /** Google identities permitted to be issued a token. Everything else is refused. */
 export const ALLOW_LIST = Object.freeze({
   "joe.bookout.carr.us@gmail.com": "joe",
@@ -155,8 +157,18 @@ export function propsForSlug(slug, extra = {}) {
   return { slug, display: DISPLAY[slug], human: true, ...extra };
 }
 
-/** ctx.props → the actor object the verbs expect. Fails closed. */
-export function actorFromProps(props, currentNativeAgentBindings = null) {
+/**
+ * ctx.props → the actor object the verbs expect. Fails closed.
+ *
+ * MODULE-PRIVATE SINCE AMENDMENT 8 (PR 1013, fourth correction round), and the
+ * reason is the whole amendment in one function: props are an ORDINARY OBJECT.
+ * Anything able to type `{ slug: "joe", via: "oauth-google" }` could call the
+ * exported form, so an exported form was a brander that took caller bytes. The
+ * server reaches this through `authenticatedIdentity.connectionForGrant`, which
+ * brands only when the caller also presents bytes this module read from the
+ * server's own environment at initialisation — see `authenticateConnection`.
+ */
+function actorForGrantProps(props, currentNativeAgentBindings = null, serverWitness = null) {
   if (!props || !isKnownActor(props.slug)) return null;
   // via/client_id ride through to the write path (0037). They were already on the
   // grant props and this function was dropping them, so no row ever recorded which
@@ -198,7 +210,7 @@ export function actorFromProps(props, currentNativeAgentBindings = null) {
            // Compatibility alias for existing internal readers. New code must
            // use sponsoring_human_slug so runtime and sponsor never blur.
            human_slug: sponsoring_human_slug,
-           sponsor_required: props.sponsor_required === true });
+           sponsor_required: props.sponsor_required === true }, serverWitness);
 }
 
 /**
@@ -350,7 +362,7 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
   return authenticateConnection({ slug, display: `Agent (${slug})`, human: false, agent: true,
            via: viaLabel, client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false,
-           ...(native_agent_verified ? { native_agent_verified: true } : {}) });
+           ...(native_agent_verified ? { native_agent_verified: true } : {}) }, agentTokensRaw);
 }
 
 /**
@@ -378,17 +390,17 @@ export function continuityActorForTokenMaps(
     const sponsors = Object.keys(tokens).filter(
       sponsor => isKnownPartner(sponsor) && tokens[sponsor] && tokens[sponsor] === token,
     );
-    if (sponsors.length === 1) candidates.push({ surface, sponsor: sponsors[0] });
+    if (sponsors.length === 1) candidates.push({ surface, sponsor: sponsors[0], raw });
     else if (sponsors.length > 1) return null;
   }
   if (candidates.length !== 1) return null;
-  const { surface, sponsor } = candidates[0];
+  const { surface, sponsor, raw } = candidates[0];
   return authenticateConnection({
     slug: surface, display: DISPLAY[surface], human: false, agent: true,
     via: `${surface}-continuity-token`, client_id: null,
     sponsoring_human_slug: sponsor, human_slug: sponsor, sponsor_required: false,
     native_agent_verified: true, continuity_surface: surface,
-  });
+  }, raw);
 }
 
 /**
@@ -466,7 +478,8 @@ export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   const sponsoring_human_slug = HERMES_SPONSOR[slug] || null;
   return authenticateConnection({ slug, display: `Hermes (${slug})`, human: false, hermes: true,
            via: "hermes-token", client_id: null,
-           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false });
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false },
+         hermesTokensRaw);
 }
 
 /** Try additive Hermes token maps without replacing or reading back the
@@ -505,7 +518,8 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
   if (sponsoring_human_slug !== "joe") return null;
   return authenticateConnection({ slug, display: `Hermes CoS (${slug})`, human: false,
            hermes: true, hermesCos: true, via: "hermes-cos-token", client_id: null,
-           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false });
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false },
+         hermesCosTokensRaw);
 }
 
 // ---------------------------------------------------------------------------
@@ -558,23 +572,43 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
 //     forger's. `{ slug }` and `{ review: true }` written onto a branded actor
 //     change nothing the receipt says.
 //   * THIS FILE EXPORTS NO FUNCTION THAT ENTERS AN IDENTITY CONTEXT AND NO
-//     FUNCTION THAT MINTS A BRANDED ACTOR FROM CALLER-SUPPLIED BYTES. The review
-//     door takes a BEARER ONLY, checked against the map the server sealed into
-//     this module. The context entry is `enterAuthenticatedCall`, which is not
-//     exported: the dispatch path reaches it only through the module-internal
-//     call the per-actor dispatcher closes over, and that dispatcher is closed
-//     over an identity DERIVED here — pointing it somewhere else is not a thing
-//     a caller can express.
+//     FUNCTION THAT MINTS A BRANDED ACTOR FROM CALLER-SUPPLIED BYTES. The
+//     context entry is `enterAuthenticatedCall`, which is not exported: the
+//     dispatch path reaches it only through the module-internal call the
+//     per-actor dispatcher closes over, and that dispatcher is closed over a
+//     context DERIVED here — pointing it somewhere else is not a thing a caller
+//     can express.
 //
-// THE SEAL, and why there is one. A Cloudflare Worker secret is readable only
-// from a request's `env`, so the server hands this module its review-token map
-// once, on the first /mcp request, through `sealServerReviewTokens`. That call
-// is ONE-SHOT: a second map is refused and answers false, and until a map is
-// sealed no bearer authenticates at all. A caller reaching this module after the
-// server has booted therefore has nowhere to put a token map of its own, which
-// is exactly the property the second round lacked. Sealing brands nothing by
-// itself — it installs a credential map, and only `authenticateConnection` can
-// turn a match against that map into an authenticated actor.
+// WHAT THE FOURTH CORRECTION CLOSES, and it is the last door. The third round
+// took the review-token map off the caller's side of the door but left a
+// `sealServerReviewTokens(raw)` on the export surface to get the server's map
+// IN, on the theory that one-shot installation made first-caller-wins the
+// server's race to win. It is not: a caller that reaches this module before the
+// first /mcp request installs its own map, and the reviewer's probe did exactly
+// that and was signed for as `review_agent`. One-shot state controls ORDER, not
+// PROVENANCE. That function is gone, with no replacement under any name — the
+// probe cannot even name something to call.
+//
+// THE CREDENTIALS ARE READ ONCE, AT MODULE INITIALISATION, FROM THE SERVER'S OWN
+// ENVIRONMENT. `SERVER_ENVIRONMENT` below is `process.env` — which in this
+// deployment is the wrangler secret store itself: wrangler populates
+// `process.env` from the Worker's vars and secrets whenever `nodejs_compat` is
+// on and the compatibility date is 2025-04-01 or later (see
+// mcp-server/wrangler.toml: nodejs_compat, 2026-07-01), and it is readable at
+// module scope, which `env` is not. There is no parameter, no setter and no
+// ordering to win. A process that does not hold the secret authenticates nobody
+// through this file, whenever it arrives.
+//
+// AND THAT SAME TEST IS WHAT BRANDS EVERY OTHER DOOR. The legacy doors still
+// take their token map as an argument, because the server has always called them
+// that way and their maps are its own — but branding no longer follows from a
+// match. It follows from the BYTES THE MATCH WAS MADE AGAINST being bytes this
+// module read from the server's environment at initialisation. A caller pairing
+// a bearer of its choosing with a map of its choosing still gets the actor it
+// always got, and that actor is NOT branded, so it derives no identity and
+// obtains no receipt. This is the amendment applied without a legacy exception:
+// the doors keep working, and none of them mints a receipt identity out of bytes
+// a caller supplied.
 //
 // WHAT TRAVELS IS THE DERIVATION, NOT THE ACTOR. The store holds a frozen
 // three-field `authenticated-receipt-identity.v1` — actor_id, session_ref,
@@ -616,22 +650,66 @@ const AUTHENTICATED_ACTORS = new WeakSet();
  */
 const AUTHENTICATED_CREDENTIAL = new WeakMap();
 
-/** The server's review-token map, once the server has sealed it. One-shot. */
-let SERVER_REVIEW_TOKENS = null;
+/**
+ * THE SERVER'S OWN SECRET SOURCE, read ONCE, here, at module initialisation.
+ *
+ * `process.env` is the deployed Worker's secret store: with `nodejs_compat` and
+ * a compatibility date of 2025-04-01 or later — this Worker is on 2026-07-01 —
+ * wrangler populates it from the Worker's vars and secrets, and unlike a
+ * request's `env` it is readable at module scope. In node (the suites, the
+ * local verb client, the ops processes) it is the process environment, which is
+ * the same statement: the environment the SERVER PROCESS was started with.
+ *
+ * Guarded, because a runtime without a `process` global must degrade to "this
+ * module holds no credentials" rather than throw on import.
+ */
+function serverEnvironmentSecret(name) {
+  try {
+    const environment = typeof process === "undefined" ? null : process.env;
+    const value = environment ? environment[name] : undefined;
+    return typeof value === "string" && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Amendment 2's closed callable shape, for the exports added below: bound (so
- * it carries no prototype and is not constructable), with an own
- * `Symbol.hasInstance` data property answering false without reading the left
- * operand, and frozen.
+ * EVERY CREDENTIAL BYTE STRING THIS SERVER HOLDS, frozen at initialisation.
+ *
+ * This is the whole provenance test. `authenticateConnection` brands an actor
+ * only when the bytes its door verified the credential against are IN HERE —
+ * so a caller that hands a door a token map of its own gets the actor that door
+ * has always returned and no brand, whatever the map says. Membership is by
+ * exact string, so a caller would have to already hold the secret to pass, at
+ * which point it is not forging anything.
+ *
+ * The names are exactly the Worker secrets the request handler feeds the doors
+ * in index.js, plus GOOGLE_CLIENT_SECRET, which is the OAuth grant path's
+ * witness: that door has no token map of its own — a grant's props are an
+ * ordinary object — so the server proves it is the server by presenting the
+ * secret only the OAuth provider half of this Worker holds.
  */
-function closedCallable(callable) {
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return Object.freeze(closed);
+const SERVER_CREDENTIAL_NAMES = Object.freeze([
+  "REVIEW_TOKENS", "AGENT_TOKENS", "LOCAL_TOKENS",
+  "HERMES_TOKENS", "HERMES_TOKENS_EXTRA", "HERMES_COS_TOKENS",
+  "CODEX_CONTINUITY_TOKENS", "CLAUDE_CONTINUITY_TOKENS",
+  "GOOGLE_CLIENT_SECRET",
+]);
+
+const SERVER_CREDENTIAL_BYTES = new Set(
+  SERVER_CREDENTIAL_NAMES.map(serverEnvironmentSecret).filter(value => value !== null));
+
+/** Are these the bytes this module read from the server's environment? */
+function serverHeldCredential(bytes) {
+  return typeof bytes === "string" && bytes.length > 0 && SERVER_CREDENTIAL_BYTES.has(bytes);
 }
+
+/**
+ * The review council's token map and the exact bytes it was parsed from. Read
+ * here and nowhere else; there is no function that installs one.
+ */
+const SERVER_REVIEW_TOKENS_RAW = serverEnvironmentSecret("REVIEW_TOKENS");
+const SERVER_REVIEW_TOKENS = parsedTokenMap(SERVER_REVIEW_TOKENS_RAW);
 
 /** The shapes a derived session ref is built from. Server-written, both of them. */
 const CALL_VIA = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -643,16 +721,23 @@ const CALL_CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
  * Called at every return in this file that turns a verified CREDENTIAL into an
  * actor — the OAuth grant's props, the agent bearer, the two continuity bearers,
  * the two Hermes bearers, and the review bearer below — and nowhere else. It is
- * not exported.
+ * not exported, and nothing exported is a synonym for it.
  *
- * It brands only what it can also PIN: a slug, a recognizable server-written
- * provenance, and a personal scope this file will stand behind. An actor it
- * declines to brand is still returned unchanged and still works for every verb;
- * what it cannot do is obtain a receipt identity.
+ * `credentialBytes` is THE BYTES THE DOOR VERIFIED AGAINST: the token map it
+ * matched a bearer in, or, for the grant door, the witness the server presented.
+ * It is not a flag a caller can pass — every door supplies its own — and it is
+ * checked against what this module read from the server's environment at
+ * initialisation. Bytes from anywhere else brand nothing.
+ *
+ * Beyond provenance it brands only what it can also PIN: a slug, a recognizable
+ * server-written provenance, and a personal scope this file will stand behind.
+ * An actor it declines to brand is still returned unchanged and still works for
+ * every verb; what it cannot do is obtain a receipt identity.
  */
-function authenticateConnection(actor) {
+function authenticateConnection(actor, credentialBytes) {
   if (actor === null || typeof actor !== "object") return actor;
   if (typeof actor.slug !== "string") return actor;
+  if (!serverHeldCredential(credentialBytes)) return actor;
   const via = typeof actor.via === "string" ? actor.via.toLowerCase() : "";
   if (!CALL_VIA.test(via)) return actor;
   if (personalScopeForActor(actor).status === "error") return actor;
@@ -694,10 +779,40 @@ function deriveCallIdentity(actor) {
 /**
  * THE CONTEXT ENTRY, and it is NOT EXPORTED — amendment 8 in one line. The only
  * way to reach it is the dispatcher `dispatchFor` hands back, which is closed
- * over an identity this file derived and cannot be aimed at another one.
+ * over a context this file derived and cannot be aimed at another one.
  */
-function enterAuthenticatedCall(identity, fn) {
-  return AUTHENTICATED_CALL.run(identity, fn);
+function enterAuthenticatedCall(context, fn) {
+  return AUTHENTICATED_CALL.run(context, fn);
+}
+
+/**
+ * THE WHOLE CONTEXT THE DISPATCH PATH ESTABLISHES, derived once, at the moment
+ * the dispatcher is built, and frozen.
+ *
+ * TWO SEATS, NOT ONE, and the third review round is why. A verb call has a
+ * CALLING seat — who is running this verb — and it has a CANDIDATE-BUILD seat,
+ * the seat inside this same authenticated call in which the candidate under
+ * evaluation is materialised and digested. The producer needs both, and the
+ * correction it is answering is that the build seat used to be ASSEMBLED BY THE
+ * READER: `buildContext()` took the caller's session ref and appended a suffix
+ * to it at read time, which is string work done on the consumer's side of the
+ * boundary wearing a session's clothes. It is derived HERE now, by the dispatch
+ * path, at the same instant and from the same pinned credential as the calling
+ * seat, and the readers below return what was established rather than build
+ * anything.
+ *
+ * BOTH REFS STAND ON THE CORRELATION ID, which is the only per-call identifier
+ * in this system that no caller writes. No authenticated call means no context
+ * at all: `deriveCallIdentity` answers null, this answers null, and every reader
+ * below answers null.
+ */
+function deriveDispatchContext(actor) {
+  const call = deriveCallIdentity(actor);
+  if (call === null) return null;
+  return Object.freeze({
+    call,
+    build: Object.freeze({ session_ref: `${call.session_ref}:candidate-build` }),
+  });
 }
 
 /** A slug -> secret map the SERVER holds, or null when there is nothing usable. */
@@ -748,25 +863,16 @@ const COMMITTER_IDENTITIES = Object.freeze({
 });
 
 /**
- * Seal the server's review-token map into this module. ONE-SHOT: answers true
- * the first time it is given a usable map and false every time after, so the
- * map a caller arrives with has nowhere to go. Brands nothing by itself.
- */
-const sealServerReviewTokens = closedCallable((reviewTokensRaw) => {
-  if (SERVER_REVIEW_TOKENS !== null) return false;
-  const tokens = parsedTokenMap(reviewTokensRaw);
-  if (tokens === null) return false;
-  SERVER_REVIEW_TOKENS = tokens;
-  return true;
-});
-
-/**
  * REVIEW bearer -> the review council's machine actor, or null.
  *
- * A BEARER AND NOTHING ELSE. The map it is checked against is the one the server
- * sealed above; there is no second parameter, so "a bearer I chose plus a token
- * map I chose" is not a call that can be written. Before the server seals, this
- * door authenticates nobody.
+ * A BEARER AND NOTHING ELSE, checked against the map this module read from the
+ * server's own environment at initialisation. There is no second parameter, so
+ * "a bearer I chose plus a token map I chose" is not a call that can be written
+ * — and, since the fourth correction round, there is no installer either: the
+ * one-shot seal that used to get the map in is deleted, because one-shot state
+ * settles which caller is FIRST and says nothing about which caller is the
+ * SERVER. A process whose environment holds no REVIEW_TOKENS authenticates
+ * nobody here, at any point in its life.
  *
  * The fields are unchanged byte for byte from when this door lived in index.js,
  * including `review: true` — still the only thing that can put mcp.js's dispatch
@@ -783,8 +889,31 @@ const reviewActorForToken = closedCallable((authorizationHeader) => {
   const slug = Object.keys(SERVER_REVIEW_TOKENS).find(s => SERVER_REVIEW_TOKENS[s] === token);
   if (!slug) return null;
   return authenticateConnection({ slug, display: `Reviewer (${slug})`, human: false,
-                                  review: true, via: "review-token", client_id: null });
+                                  review: true, via: "review-token", client_id: null },
+                                SERVER_REVIEW_TOKENS_RAW);
 });
+
+/**
+ * THE OAUTH GRANT DOOR: a decrypted grant's props -> the actor the verbs expect.
+ *
+ * `actorForGrantProps` is module-private because props are an ordinary object,
+ * so an exported form is a brander that takes caller bytes — the exact shape
+ * amendment 8 forbids. This is the server's way in, and what makes it the
+ * SERVER'S is the third argument: the witness, which brands only when it is a
+ * credential byte string this module read from the server's environment at
+ * initialisation. index.js and mcp.js pass `env.GOOGLE_CLIENT_SECRET`, which is
+ * the secret the OAuth provider half of this same Worker already holds and
+ * which nothing outside the deployment can present.
+ *
+ * CALLED WITHOUT A WITNESS IT STILL WORKS, and returns exactly the actor it has
+ * always returned — unbranded. That is deliberate: the Deal Room's session
+ * surface builds actors from grant props and needs no receipt identity, and a
+ * door that failed closed on the witness would turn a receipt-identity control
+ * into an authentication outage.
+ */
+const connectionForGrant = closedCallable((props, currentNativeAgentBindings = null,
+                                           serverWitness = null) =>
+  actorForGrantProps(props, currentNativeAgentBindings, serverWitness));
 
 /**
  * The dispatch path's door: the per-actor dispatcher for ONE verb call.
@@ -799,8 +928,8 @@ const reviewActorForToken = closedCallable((authorizationHeader) => {
  * security-relevant change, not a convenience.
  */
 const dispatchFor = closedCallable((actor) => {
-  const identity = deriveCallIdentity(actor);
-  return closedCallable(fn => enterAuthenticatedCall(identity, fn));
+  const context = deriveDispatchContext(actor);
+  return closedCallable(fn => enterAuthenticatedCall(context, fn));
 });
 
 /**
@@ -810,8 +939,8 @@ const dispatchFor = closedCallable((actor) => {
  * actor, so there is nothing to read back out of it either.
  */
 const receiptIdentity = closedCallable(() => {
-  const identity = AUTHENTICATED_CALL.getStore();
-  return identity === undefined ? null : identity;
+  const context = AUTHENTICATED_CALL.getStore();
+  return context === undefined || context === null ? null : context.call;
 });
 
 /**
@@ -827,9 +956,8 @@ const receiptIdentity = closedCallable(() => {
  * build context, so a run that cannot authenticate cannot name a maker either.
  */
 const buildContext = closedCallable(() => {
-  const identity = AUTHENTICATED_CALL.getStore();
-  if (identity === undefined || identity === null) return null;
-  return Object.freeze({ session_ref: `${identity.session_ref}:candidate-build` });
+  const context = AUTHENTICATED_CALL.getStore();
+  return context === undefined || context === null ? null : context.build;
 });
 
 /**
@@ -860,7 +988,7 @@ const committerIdentity = closedCallable((email) => {
  * no context entry, and no way to turn bytes into a branded actor.
  */
 export const authenticatedIdentity = Object.freeze({
-  sealServerReviewTokens,
+  connectionForGrant,
   reviewActorForToken,
   dispatchFor,
   receiptIdentity,
