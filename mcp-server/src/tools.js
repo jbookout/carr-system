@@ -32,7 +32,7 @@ import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
-         personalScopeForActor, authenticatedIdentity } from "./identity.js";
+         personalScopeForActor } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
@@ -7611,28 +7611,28 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // connection or driver fault) still surfaces as-is for the transport's own
   // generic handling.
   try {
-    // THE ONE PLACE AN AUTHENTICATED CALL IS ESTABLISHED (2026-09-12). Every
-    // verb funnels through this dispatch, so the server-derived actor is bound
-    // to the async context here and nowhere else. A surface that must derive
-    // its own identity — r7's receipt identities, which deny anything a caller
-    // supplied — reads it with no argument through identity.js's
-    // authenticatedCallReceiptIdentity(); outside a verb call there is nothing
-    // to read and that surface refuses.
+    // THE AUTHENTICATED CALL IS NOT ESTABLISHED HERE ANY MORE (amendment 9,
+    // 2026-09-14). It used to be: this line asked identity.js for THIS actor's
+    // dispatcher and ran the handler inside it. The fifth review round found
+    // what that required identity.js to publish — `dispatchFor(actor)`, a
+    // callable that enters a context — and that a probe composing it with the
+    // equally public review door ran its own code as `review_agent`.
     //
-    // THIS IS NOT AN IDENTITY SETTER, and identity.js's own note says why at
-    // length. Under amendment 8 the dispatch path does not choose the context at
-    // all: it asks identity.js for THIS actor's dispatcher, which that file
-    // closed over a context it derived from the brand — membership of a
-    // module-private WeakSet — and the pinned credential behind it. An object
-    // that file did not authenticate, or any copy of one that it did, yields a
-    // dispatcher over a null context, and the context is entered CLEARED.
+    // SO THE ENTRY MOVED UP TO THE REQUEST, and into identity.js, where the
+    // bearer is matched and the context entered in one module-internal act:
+    // index.js's /mcp route calls `serveReviewRequestAuthenticated`, and every
+    // verb dispatched inside that request — this one included — runs under the
+    // context it established. Nothing is threaded through here, so there is
+    // nothing here for a caller to aim.
     //
-    // TWO SEATS ARE ESTABLISHED HERE, not one: the CALLING seat (who is running
-    // this verb) and the CANDIDATE-BUILD seat inside the same authenticated
-    // call. Both are derived and frozen by identity.js at the moment this
-    // dispatcher is built, so neither is assembled later by whatever reads it.
-    const dispatchAuthenticated = authenticatedIdentity.dispatchFor(actor);
-    return await dispatchAuthenticated(() => tool.handler(client, actor, args));
+    // WHAT THAT NARROWS, stated rather than discovered later: a verb reached
+    // through any OTHER door — the OAuth grant path, the agent, Hermes,
+    // continuity and local bearers, `./run.sh call`, a direct import — runs with
+    // NO authenticated call at all, so r7's receipt surfaces refuse. That is
+    // correct for the Gate Zero producer, whose candidate is the deployed
+    // Worker's own build stamp (build-stamp.js) and which has nothing to say
+    // about a local checkout.
+    return await tool.handler(client, actor, args);
   } catch (e) {
     if (e instanceof ToolError) throw e;
     throw pgConstraintError(e) || e;

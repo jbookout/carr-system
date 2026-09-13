@@ -572,12 +572,21 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
 //     forger's. `{ slug }` and `{ review: true }` written onto a branded actor
 //     change nothing the receipt says.
 //   * THIS FILE EXPORTS NO FUNCTION THAT ENTERS AN IDENTITY CONTEXT AND NO
-//     FUNCTION THAT MINTS A BRANDED ACTOR FROM CALLER-SUPPLIED BYTES. The
-//     context entry is `enterAuthenticatedCall`, which is not exported: the
-//     dispatch path reaches it only through the module-internal call the
-//     per-actor dispatcher closes over, and that dispatcher is closed over a
-//     context DERIVED here — pointing it somewhere else is not a thing a caller
-//     can express.
+//     FUNCTION THAT MINTS A BRANDED ACTOR FROM CALLER-SUPPLIED BYTES.
+//
+// WHAT THE FIFTH CORRECTION CLOSES (amendment 9, 2026-09-14), and it is the
+// clause directly above, finally true. The fourth round kept two exports that
+// were each harmless alone and were the whole door together:
+// `reviewActorForToken(header)` MINTED A BRANDED ACTOR, and `dispatchFor(actor)`
+// RETURNED A CALLABLE THAT ENTERS A CONTEXT. A module-initialisation probe
+// composed them and ran its own code inside a `review_agent` context — no seal
+// to beat, no race to win, just two published capabilities and a `.` between
+// them. Both names are deleted. The review door is module-private; the context
+// entry is module-private; and the single exported entry that reaches either,
+// `serveReviewRequestAuthenticated`, takes the REQUEST'S OWN AUTHORIZATION
+// HEADER rather than an actor, so there is no identity for a caller to choose
+// and no dispatcher for a caller to keep. A branded actor, however obtained, now
+// reaches no context at all.
 //
 // WHAT THE FOURTH CORRECTION CLOSES, and it is the last door. The third round
 // took the review-token map off the caller's side of the door but left a
@@ -761,13 +770,13 @@ function authenticateConnection(actor, credentialBytes) {
  * actor is the server's correlation id, which names a call rather than an
  * authority, and which correlation.js — not any caller — writes.
  */
-function deriveCallIdentity(actor) {
+function deriveCallIdentity(actor, serverCorrelationId) {
   if (actor === null || typeof actor !== "object") return null;
   if (!AUTHENTICATED_ACTORS.has(actor)) return null;
   const credential = AUTHENTICATED_CREDENTIAL.get(actor);
   if (credential === undefined) return null;
-  const correlationId = typeof actor.correlation_id === "string"
-    ? actor.correlation_id.toLowerCase() : "";
+  const correlationId = typeof serverCorrelationId === "string"
+    ? serverCorrelationId.toLowerCase() : "";
   if (!CALL_CORRELATION_ID.test(correlationId)) return null;
   return Object.freeze({
     actor_id: credential.slug,
@@ -777,42 +786,15 @@ function deriveCallIdentity(actor) {
 }
 
 /**
- * THE CONTEXT ENTRY, and it is NOT EXPORTED — amendment 8 in one line. The only
- * way to reach it is the dispatcher `dispatchFor` hands back, which is closed
- * over a context this file derived and cannot be aimed at another one.
+ * THE CONTEXT ENTRY, and it is NOT EXPORTED — amendment 8 in one line, kept and
+ * narrowed by amendment 9's fifth correction round. Since `dispatchFor` was
+ * deleted there is no exported value anywhere that returns a callable able to
+ * reach this: the ONE way into the authenticated call is
+ * `serveReviewRequestAuthenticated` below, which authenticates the request's own
+ * bearer itself and never accepts an identity from its caller.
  */
 function enterAuthenticatedCall(context, fn) {
   return AUTHENTICATED_CALL.run(context, fn);
-}
-
-/**
- * THE WHOLE CONTEXT THE DISPATCH PATH ESTABLISHES, derived once, at the moment
- * the dispatcher is built, and frozen.
- *
- * TWO SEATS, NOT ONE, and the third review round is why. A verb call has a
- * CALLING seat — who is running this verb — and it has a CANDIDATE-BUILD seat,
- * the seat inside this same authenticated call in which the candidate under
- * evaluation is materialised and digested. The producer needs both, and the
- * correction it is answering is that the build seat used to be ASSEMBLED BY THE
- * READER: `buildContext()` took the caller's session ref and appended a suffix
- * to it at read time, which is string work done on the consumer's side of the
- * boundary wearing a session's clothes. It is derived HERE now, by the dispatch
- * path, at the same instant and from the same pinned credential as the calling
- * seat, and the readers below return what was established rather than build
- * anything.
- *
- * BOTH REFS STAND ON THE CORRELATION ID, which is the only per-call identifier
- * in this system that no caller writes. No authenticated call means no context
- * at all: `deriveCallIdentity` answers null, this answers null, and every reader
- * below answers null.
- */
-function deriveDispatchContext(actor) {
-  const call = deriveCallIdentity(actor);
-  if (call === null) return null;
-  return Object.freeze({
-    call,
-    build: Object.freeze({ session_ref: `${call.session_ref}:candidate-build` }),
-  });
 }
 
 /** A slug -> secret map the SERVER holds, or null when there is nothing usable. */
@@ -829,38 +811,6 @@ function parsedTokenMap(raw) {
     && typeof secret === "string" && secret.length > 0);
   return entries.length === 0 ? null : Object.freeze(Object.fromEntries(entries));
 }
-
-/**
- * THE SUBJECT MAKER'S REGISTRY — a commit's committer address to the registered
- * partner it names.
- *
- * A FROZEN TABLE AND AN EXACT MATCH, never a pattern and never a domain rule.
- * It is deliberately SEPARATE from ALLOW_LIST above: ALLOW_LIST says which
- * Google identity may be ISSUED A TOKEN, and a committer address authenticates
- * nothing at all — it is an attribution read out of a commit object. Mapping the
- * two through one table would make a git address an authentication surface.
- *
- * THE NOREPLY ADDRESSES ARE WHY THIS EXISTS. Every commit GitHub's own merge
- * path writes carries the author's `users.noreply.github.com` address as the
- * committer, so a table holding only the Gmail addresses cannot name the maker
- * of any merged head — which is exactly what the third review round found at
- * head 0849b987.
- *
- * Joe's numeric-id form is the one observed on this repository's heads. Dell's
- * is the legacy login form of the GitHub account observed authoring Dell's
- * commits here (`dellmccraneycarrus-gif`); if Dell's account is set to the
- * numeric-id form, that address is added HERE when it is first observed, never
- * guessed at — an invented id would map a stranger.
- *
- * `noreply@github.com` — GitHub's shared web-flow committer — is deliberately
- * absent: every web commit by every account carries it, so it names nobody.
- */
-const COMMITTER_IDENTITIES = Object.freeze({
-  "joe.bookout.carr.us@gmail.com": "joe",
-  "64207374+jbookout@users.noreply.github.com": "joe",
-  "dell.mccraney.carr.us@gmail.com": "dell",
-  "dellmccraneycarrus-gif@users.noreply.github.com": "dell",
-});
 
 /**
  * REVIEW bearer -> the review council's machine actor, or null.
@@ -882,7 +832,7 @@ const COMMITTER_IDENTITIES = Object.freeze({
  * entry with this exact marker and provenance, so a sealed map naming an
  * unregistered slug brands nothing.
  */
-const reviewActorForToken = closedCallable((authorizationHeader) => {
+function reviewActorForToken(authorizationHeader) {
   if (SERVER_REVIEW_TOKENS === null) return null;
   const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
   if (!token) return null;
@@ -891,7 +841,7 @@ const reviewActorForToken = closedCallable((authorizationHeader) => {
   return authenticateConnection({ slug, display: `Reviewer (${slug})`, human: false,
                                   review: true, via: "review-token", client_id: null },
                                 SERVER_REVIEW_TOKENS_RAW);
-});
+}
 
 /**
  * THE OAUTH GRANT DOOR: a decrypted grant's props -> the actor the verbs expect.
@@ -916,66 +866,98 @@ const connectionForGrant = closedCallable((props, currentNativeAgentBindings = n
   actorForGrantProps(props, currentNativeAgentBindings, serverWitness));
 
 /**
- * The dispatch path's door: the per-actor dispatcher for ONE verb call.
+ * THE SERVER REQUEST HANDLER'S ONE ENTRY ONTO THE AUTHENTICATED CALL — and the
+ * shape is the whole of amendment 9's fifth finding.
  *
- * NOT A CONTEXT ENTRY AND NOT A SETTER. It derives the identity HERE, from the
- * brand and the pinned credential, and hands back a closure that can run a
- * function inside that identity and no other. An actor this file did not brand
- * derives null, and the closure then enters a CLEARED context — which is the
- * fail-closed half: a nested call never inherits an outer call's identity.
+ * WHAT WAS HERE, AND WHAT THE REVIEW DID WITH IT. `dispatchFor(actor)` was
+ * exported: hand it an actor and it handed back a CALLABLE THAT ENTERS A
+ * CONTEXT. Beside it, `reviewActorForToken(header)` was exported and MINTED A
+ * BRANDED ACTOR. Neither was a door on its own, and composed they were the whole
+ * door: a module-initialisation probe called the first, passed its result to the
+ * second, and ran its own code inside a `review_agent` context. The fix is not a
+ * tighter argument check on either — it is that neither capability is reachable
+ * from outside this file at all.
  *
- * The one caller is tools.js's `executeRegisteredTool`. Adding a second is a
- * security-relevant change, not a convenience.
+ * SO THE TWO ACTS ARE ONE ACT, and it is this one. It takes the REQUEST'S OWN
+ * AUTHORIZATION HEADER — not an actor, so there is no identity for a caller to
+ * choose — matches it against the review map this module read from the server's
+ * environment at initialisation, derives the receipt identity from what it
+ * matched, enters the context, and runs the server's continuation inside it.
+ * What comes back is the continuation's own value. No dispatcher is returned, no
+ * context escapes, and the only actor that crosses the boundary is the one this
+ * call authenticated a moment earlier — which buys its holder nothing, because
+ * nothing exported turns a branded actor into a context any more.
+ *
+ * NO BEARER MATCH IS `null`, NOT A REFUSAL. index.js tries its doors in order;
+ * answering null is "this is not a review-council request", and the next door
+ * gets its turn. A request that IS a review request but whose correlation id the
+ * server did not write derives no identity and runs with the context CLEARED —
+ * served, and unable to obtain a receipt.
+ *
+ * THE CORRELATION ID IS A PARAMETER because it is written per request by
+ * correlation.js, onto `env.CORRELATION_ID`, before any door runs. It names a
+ * call rather than an authority: supplying one grants nothing, and supplying
+ * none removes the only per-call identifier a receipt may be told apart by.
+ *
+ * WHAT THIS DELIBERATELY NARROWS. Before, EVERY authenticated actor reaching
+ * tools.js's dispatch established a context. Now exactly one door does, and it
+ * is the review council's — the only authority class r7's registry admits for
+ * the independent Gate Zero oracle. The OAuth grant path, the agent, Hermes,
+ * continuity and local doors run with no context at all, so a receipt cannot be
+ * minted through any of them, whatever they hold.
  */
-const dispatchFor = closedCallable((actor) => {
-  const context = deriveDispatchContext(actor);
-  return closedCallable(fn => enterAuthenticatedCall(context, fn));
-});
+export const serveReviewRequestAuthenticated = closedCallable(
+  (authorizationHeader, serverCorrelationId, run) => {
+    const actor = reviewActorForToken(authorizationHeader);
+    if (actor === null) return null;
+    return enterAuthenticatedCall(deriveCallIdentity(actor, serverCorrelationId),
+                                  () => run(actor));
+  });
 
 /**
  * The `authenticated-receipt-identity.v1` of the call this code is running
  * inside, or null when there is no such call. Takes no argument, so there is
  * nothing to supply, and returns a frozen three-field value rather than the
  * actor, so there is nothing to read back out of it either.
+ *
+ * THE STORED VALUE IS THE IDENTITY ITSELF since amendment 9. It used to be a
+ * two-seat container — the calling seat and a CANDIDATE-BUILD seat — because the
+ * producer read its subject maker's session out of the second half. That half
+ * was the evaluator's own session with a suffix on it, which the fifth review
+ * round named as relabelling rather than provenance; the subject maker's session
+ * is now the release record's own correlation, so there is one seat to store.
  */
 const receiptIdentity = closedCallable(() => {
   const context = AUTHENTICATED_CALL.getStore();
-  return context === undefined || context === null ? null : context.call;
+  return context === undefined || context === null ? null : context;
 });
 
 /**
- * THE BUILD CONTEXT the dispatch path established, or null outside one.
+ * A REGISTERED PARTNER'S SLUG -> that partner's derived authority class, or
+ * null.
  *
- * The candidate under review was built in some other session, and a receipt that
- * names its maker still has to name a SESSION — the third review round's second
- * finding was that the producer was manufacturing one out of the revision it
- * happened to be reading, which is caller-side string assembly wearing a
- * session's clothes. This derives it instead, from the one per-call identifier
- * no caller writes: the authenticated call's own session ref, narrowed to the
- * candidate-build seat within it. Outside an authenticated call there is no
- * build context, so a run that cannot authenticate cannot name a maker either.
- */
-const buildContext = closedCallable(() => {
-  const context = AUTHENTICATED_CALL.getStore();
-  return context === undefined || context === null ? null : context.build;
-});
-
-/**
- * A commit committer address -> the registered partner it names, with the
- * authority class DERIVED for that partner, or null.
+ * WHAT THIS REPLACED, AND WHY IT IS GONE. Until amendment 9 this file held a
+ * frozen COMMITTER table — Gmail and GitHub-noreply addresses mapped to partner
+ * slugs — because the producer took its subject maker from the committer line of
+ * HEAD's commit object. Under amendment 9 the subject maker is the
+ * RELEASE-CANDIDATE RECORD the deploy wrapper filed for the stamped revision, an
+ * authenticated authority write read back through the ruled store. A git address
+ * is no longer an input to anything, so the table that turned one into a
+ * partner is deleted rather than left standing unused.
  *
- * NO ACTOR IS MINTED HERE, deliberately: a table lookup over an address read out
- * of a commit must never be able to produce a branded actor, or the git object
- * store would become an authentication surface. What comes back is an
- * attribution — a slug and a derived class — and nothing that can be dispatched.
+ * NO ACTOR IS MINTED HERE, which is unchanged and is the point: what comes back
+ * is an ATTRIBUTION — a slug this system registers and the class it derives for
+ * that partner — and nothing that can be dispatched, branded or run. A slug the
+ * partner registry does not know answers null, and a receipt does not name a
+ * principal this system does not register.
  */
-const committerIdentity = closedCallable((email) => {
-  if (typeof email !== "string") return null;
-  const slug = COMMITTER_IDENTITIES[email.trim().toLowerCase()] ?? null;
-  if (slug === null || !isKnownPartner(slug)) return null;
+const partnerIdentity = closedCallable((slug) => {
+  if (typeof slug !== "string") return null;
+  const named = slug.trim().toLowerCase();
+  if (!isKnownPartner(named)) return null;
   return Object.freeze({
-    actor_id: slug,
-    authority_class: authorizationClassForActor({ slug, human: true }),
+    actor_id: named,
+    authority_class: authorizationClassForActor({ slug: named, human: true }),
   });
 });
 
@@ -989,9 +971,6 @@ const committerIdentity = closedCallable((email) => {
  */
 export const authenticatedIdentity = Object.freeze({
   connectionForGrant,
-  reviewActorForToken,
-  dispatchFor,
   receiptIdentity,
-  buildContext,
-  committerIdentity,
+  partnerIdentity,
 });

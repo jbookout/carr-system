@@ -22,13 +22,17 @@
 //   (c) FROZEN, so neither (a) nor (b) can be written over afterwards. This is
 //       the clause the first shape enumeration found missing.
 //
-// WHAT IS DELIBERATELY NOT CHANGED. The Gate Zero seam modules — readers,
-// stores, rulings, the assurance gate and the internal binding — keep their own
-// local definitions. Each of those files is held to being self-contained, and
-// gate-zero-seam-readers.v5.test.mjs asserts BY SOURCE that its module holds
-// exactly one such definition; folding them in here would replace a proven
-// property with an import. This file unifies the two copies that carry no such
-// constraint and that the review named.
+// WHAT THE FIFTH ROUND FOLDED IN (amendment 9, 2026-09-14). The Gate Zero seam
+// modules — readers, stores, rulings, the assurance gate and the internal
+// binding — each kept a local definition, on the argument that a self-contained
+// module is worth a duplicated primitive and that a by-source assertion proved
+// each file held exactly one copy. The review measured that argument against the
+// copies: all five had already DIVERGED from this one, none of them freezing the
+// callable, so clause (c) — added here after the first shape enumeration found
+// it missing — was absent from every file whose job is to close a probe. The
+// by-source assertion had proved the copy existed, not that it was the hardened
+// shape. There is one definition in the tree now and every module imports it;
+// the readers suite asserts by source that its module defines NONE.
 
 /** Amendment 2's closed shape, applied to `callable`. */
 export function closedCallable(callable) {

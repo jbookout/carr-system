@@ -35,6 +35,7 @@
 // null, which is the fail-closed answer and shuts the seam in both files at once.
 
 import { seamRulingRef } from "../gate-zero-seam-rulings.v5.js";
+import { closedCallable } from "../closed-callable.js";
 
 /**
  * The ONE store ref each card's reader will serve. This is the reader's half of
@@ -50,23 +51,16 @@ const CARD_STORE_REF = Object.freeze({
   "card:13": "github:checks",
 });
 
-/**
- * EVERY EXPORTED CALLABLE ANSWERS `instanceof` WITH FALSE, AND ANSWERS IT
- * WITHOUT LOOKING AT THE OPERAND. Amendment 2 of 2026-09-12, clause (b): without
- * an own `Symbol.hasInstance` the intrinsic one walks the LEFT OPERAND'S
- * prototype chain, so `hostile instanceof ruledCardBinding` would run the
- * caller's own getPrototypeOf trap and let the caller's own thrown text back out
- * of an exported callable. The guard is an ARROW that ignores its argument,
- * installed as a NON-WRITABLE, NON-CONFIGURABLE DATA property, over a BOUND
- * arrow so the engine's refusal for `new` quotes no line of this module.
- */
-function closedCallable(callable) {
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return closed;
-}
+// AMENDMENT 2'S CLOSED SHAPE COMES FROM closed-callable.js (amendment 9, fifth
+// correction round, 2026-09-14). This file used to define its own copy, on the
+// argument that a self-contained module is worth a duplicated primitive. The
+// review measured that argument against the copies and it failed: the local
+// copies had already DIVERGED from the shared one — they never froze the
+// callable, which is clause (c), the clause the first shape enumeration added
+// after finding it missing — so the file whose whole job is to close a probe was
+// running the unhardened version of the shape. A security primitive that exists
+// five times is hardened in one of five places. There is one definition now, and
+// the enumeration control walks every export against it.
 
 /** Both halves, or null. A throw on the way in is a null too. */
 const ruledCardBindingOf = (cardRef) => {

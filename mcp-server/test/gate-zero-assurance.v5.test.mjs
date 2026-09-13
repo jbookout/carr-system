@@ -2403,7 +2403,7 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   // the two files form a cycle. Move the reader import above it and the import
   // order that starts at the gate hits a temporal dead zone.
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
-    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
+    ["./artifact-trust.js", "./closed-callable.js", "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
       "./gate-zero-seam-readers.v5.js", "./internal/gate-zero-seam-binding.v5.js",
       // THE EIGHTH, AND IT IS LAST ON PURPOSE. The producer imports the readers,
@@ -2417,26 +2417,31 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   // and the registration and nothing test-shaped, and it does NOT import the
   // gate — a producer that imported the surface it answers for would be able to
   // read its own verdict back.
-  // The four `node:` builtins are the producer's own derivation: it reads the
-  // candidate tree's bytes, the environment manifest and the sealed fixture set
-  // rather than hashing a description of them, and it reads the repository's own
-  // .git for the revision the running module was built from — `node:zlib` since
-  // 2026-09-12, because it now reads HEAD's own commit and tree OBJECTS, which
-  // are zlib-deflated, rather than the reflog line the first draft took the
-  // subject maker from. There is no `node:child_process`: this oracle does not
-  // execute a program to learn what it is standing on.
-  // `./closed-callable.js` is the eleventh and it is a UNIFICATION, not a new
-  // dependency: amendment 2's closed shape used to be copied into this module
-  // and into identity.js, and the fourth PR 1013 review round found the two
-  // copies' documented clauses already drifting apart. The Gate Zero seam
-  // modules keep their own local definitions on purpose — each of those is held
-  // to being self-contained — so exactly the two free-to-diverge copies moved.
+  // THERE IS NO `node:` BUILTIN LEFT IN THIS GRAPH, and that is standing-rule
+  // amendment 9 (2026-09-14) asserted structurally. The producer used to import
+  // `node:fs`, `node:path`, `node:url` and `node:zlib` to walk up for a `.git`,
+  // resolve HEAD, inflate loose objects and hash the working tree — every one of
+  // those a read of a CHECKOUT, which the deployed Worker does not have. The
+  // candidate is build-time metadata now: `./build-stamp.js` reads the vars
+  // bin/deploy-worker.sh stamped, through the same function release.js reads
+  // GIT_SHA with. A `node:fs` back in this list is the regression, and it is red
+  // here before any behavioural case has to catch it.
+  //
+  // `./gate-zero-seam-stores.v5.js` is the other addition, and it is the ONE
+  // store this module opens: the candidate-build record it takes its subject
+  // maker from. It is not card evidence — no clause reads it and no ruling names
+  // it — and the readers suite's ISOLATION case carries the closed two-importer
+  // set and the reasoning.
+  //
+  // `./closed-callable.js` is a UNIFICATION rather than a dependency: amendment
+  // 2's closed shape used to be copied into six modules, and the fifth review
+  // round found five of the copies already diverged from the shared one in the
+  // same way — none of them froze the callable. There is one definition now.
   assert.deepEqual(imports["gate-zero-producer.v5.js"],
-    ["node:fs", "node:path", "node:url", "node:zlib",
-      "./artifact-trust.js", "./closed-callable.js",
+    ["./artifact-trust.js", "./build-stamp.js", "./closed-callable.js",
       "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
-      "./gate-zero-seam-readers.v5.js"]);
+      "./gate-zero-seam-readers.v5.js", "./gate-zero-seam-stores.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./benchmark-minimum.v5.js"]);
 });

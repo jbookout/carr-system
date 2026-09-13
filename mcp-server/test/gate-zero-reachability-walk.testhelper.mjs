@@ -97,13 +97,27 @@ function closedCallable(callable) {
 /** How a key is spelled in a route: `.name` for a string, `[Symbol(x)]` for a symbol. */
 const stepFor = key => (typeof key === "symbol" ? `[${String(key)}]` : `.${key}`);
 
-export const pathToValue = closedCallable((root, target, parts = WHOLE_WALK) => {
+/**
+ * THE ONE WALK, with the question left to the caller.
+ *
+ * `pathToValue` asks "where is this value"; `reachableCallables` asks "what
+ * callables are there". They were two walks for about an hour and that is
+ * exactly the shape the fifth review round refused in the suite that used them:
+ * an enumeration that looked at top-level functions and one object level while
+ * the assertion next to it claimed "every callable on the module". One
+ * traversal, two visitors — a correction to the walk corrects both answers.
+ *
+ * `visit(value, path)` is called for every edge, before the edge is descended.
+ * Answering a non-undefined value stops the walk and is returned.
+ */
+function traverse(root, parts, visit) {
   // Keyed by the PAIR (value, receiver): the same prototype reached while a
   // consumer holds two different children can answer two different values, so a
   // set keyed by the object alone would skip the second answer unread.
   const seen = new Map();
   const walk = (value, path, left, receiver) => {
-    if (value === target) return path === "" ? "<the namespace itself>" : path;
+    const answered = visit(value, path);
+    if (answered !== undefined) return answered;
     if (left === 0 || value === null) return null;
     const kind = typeof value;
     if (kind !== "object" && kind !== "function") return null;
@@ -160,6 +174,50 @@ export const pathToValue = closedCallable((root, target, parts = WHOLE_WALK) => 
     return walk(proto, `${path}.[[Prototype]]`, left - 1, held);
   };
   return walk(root, "", parts.bounded, undefined);
+}
+
+export const pathToValue = closedCallable((root, target, parts = WHOLE_WALK) =>
+  traverse(root, parts, (value, path) =>
+    (value === target ? (path === "" ? "<the namespace itself>" : path) : undefined)) ?? null);
+
+/**
+ * EVERY CALLABLE REACHABLE FROM A NAMESPACE, as `[route, callable]` pairs — the
+ * enumeration half of the same walk.
+ *
+ * WHY IT EXISTS (amendment 9's fifth correction round, 2026-09-14). The producer
+ * suite enumerated identity.js's surface by hand: `Object.entries`, then one
+ * level into each object member, functions only. The review mutated a nested
+ * export in — `export const api = { deep: { leak } }` — and the enumeration
+ * walked straight past it while the assertion beside it claimed to cover "every
+ * callable on the module". It now walks with the same traversal the reachability
+ * guard uses: symbols, prototypes, accessors, accessor functions and inherited
+ * getters under the exported child as receiver.
+ *
+ * INTRINSICS ARE NOT EXPORTS, and they are excluded by MEASUREMENT rather than
+ * by a name list: the same walk is run first over a bare object, a bare
+ * function, a frozen object and an array, and every callable it finds there —
+ * `bind`, `toString`, every `Object.prototype` member — is a callable the
+ * language supplies to anything, not one this module published. What is left is
+ * the module's own surface at every depth.
+ */
+const INTRINSIC_CALLABLES = (() => {
+  const found = new Set();
+  for (const root of [{}, () => {}, Object.freeze({}), [], new Map()])
+    traverse(root, WHOLE_WALK, (value) => {
+      if (typeof value === "function") found.add(value);
+      return undefined;
+    });
+  return found;
+})();
+
+export const reachableCallables = closedCallable((root, parts = WHOLE_WALK) => {
+  const found = [];
+  traverse(root, parts, (value, path) => {
+    if (typeof value === "function" && path !== "" && !INTRINSIC_CALLABLES.has(value))
+      found.push([path, value]);
+    return undefined;
+  });
+  return found;
 });
 
 /** The identity check the fourth correction shipped, kept so the self-test can measure it. */

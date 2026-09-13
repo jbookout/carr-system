@@ -1,6 +1,6 @@
 // V5-A02 STEP A — THE GATE ZERO PRODUCER, proved the only way a seam that takes
-// no argument can be proved: by staging a whole candidate repository, editing
-// the things a RUN differs by, and reading what the module then answers.
+// no argument can be proved: by staging a whole candidate tree, editing the
+// things a RUN differs by, and reading what the module then answers.
 //
 // THERE IS NO INJECTION POINT AND THAT IS THE SUBJECT. `v5A02GateZeroEmitOutcome`
 // has arity zero. It cannot be handed evidence, a hash, an identity, a revision,
@@ -11,75 +11,89 @@
 // half: the producer reads the authenticated call it is running inside, so a
 // process that cannot authenticate cannot obtain a receipt at all.
 //
+// EVERY CASE RUNS UNDER THE PRODUCTION CONDITION, WHICH IS NO `.git` AT ALL
+// (standing-rule amendment 9, 2026-09-14). The staged trees used to hold a real
+// loose object store, and every case that showed the producer working had first
+// built the one thing the deployed Worker does not have. The fifth review round
+// named it a P0: Cloudflare bundles the modules wrangler was pointed at, serves
+// them over a read-only virtual filesystem, and supplies no `.git` directory —
+// so in production the old derivation had exactly one reachable answer, which
+// was to refuse. NO STAGED TREE HERE WRITES A `.git`, and the suite asserts that
+// no staged tree HAS one before it asserts a receipt was produced. The mutation
+// control is `reintroduceGitDerivation`, which puts a repository read back into
+// the staged producer and turns the produced cases red.
+//
 // SO EVERY CASE BELOW IS A STAGED TREE under node_modules/.cache, holding:
 //
-//   * A REAL OBJECT STORE. `.git/HEAD` names the case's revision and
-//     `.git/objects` holds the loose commit and tree objects for it, written
-//     here: the trees are content-addressed exactly as git writes them, so the
-//     path set and the blob ids the producer reads out of HEAD are the real
-//     sealing of the staged bytes. Only the COMMIT object is filed under the
-//     fixture's chosen revision rather than under its own hash — the producer
-//     does not re-hash what it inflates, and a case has to be able to say which
-//     revision it is standing on. The committer line is where the subject maker
-//     comes from, and the reflog is not written at all any more;
 //   * mcp-server/src — a copy, with the store module replaced by
 //     ./gate-zero-producer-stores.v5.fixture.mjs, and with card 9's seat
 //     declaration or the three `decision_id:` lines edited when a case asks;
 //   * mcp-server/test — the sealed fixture bytes the fixture-set digest covers;
-//   * ops/config/environments.json — the environment manifest its digest covers.
+//   * ops/config/environments.json — the environment manifest its digest covers;
 //
-// Nothing in src reaches those trees, no argument selects one, and no environment
-// variable points at one. What runs in each is the real producer, the real
-// clauses, the real readers and the real ruling gate over known rows — invoked
-// inside a REAL VERB DISPATCH.
+// and a set of BUILD STAMPS computed over exactly those bytes and written into
+// the process environment for the duration of the call, which is what
+// bin/deploy-worker.sh writes into a real upload with `wrangler --var`. The
+// bytes still decide the digests; what changed is WHO READS THEM — the deploy
+// wrapper's sealer, at build time, instead of the Worker at request time. That
+// the sealer's digests move with the bytes is proved over a real git repository
+// in gate-zero-candidate-seal.test.mjs; that the receipt's digests move with the
+// stamp is proved here.
 //
-// HOW THE AUTHENTICATED CALL IS OBTAINED, and this is the second correction
-// round's subject. Nothing here fabricates an actor. The reviewer seat is minted
-// by the staged identity.js's own `reviewActorForToken` from a recorded
-// Authorization header and the recorded shape of the server's REVIEW_TOKENS map
-// — the same door index.js now delegates to — and the correlation id is
-// decorated on the way mcp.js decorates it. That actor then goes through the
-// staged tools.js's `executeRegisteredTool`, the one dispatch every verb funnels
-// through, and the producer runs INSIDE a real verb call: the stub database
-// client the verb is handed calls the gate from within the handler, which is the
-// only seam Step A has into a dispatched verb (binding Gate Zero to a verb of
-// its own is Step B). An object that identity.js did not mint is refused by the
-// derivation, so the fabricated `codex-reviewer` literal the first correction
-// round's tests used obtains no identity and no receipt — control 11.
+// Nothing in src reaches those trees, no argument selects one, and no
+// environment variable OTHER THAN THE THREE DECLARED BUILD STAMPS moves an
+// answer — which is its own test near the end of this file, run in a fresh
+// process against a hostile environment.
+//
+// HOW THE AUTHENTICATED CALL IS OBTAINED, and it is the fifth correction round's
+// subject. Nothing here mints or fabricates an actor, because identity.js no
+// longer exports anything that could. The suite writes the recorded REVIEW_TOKENS
+// map into its own process environment — becoming the server, the only way a
+// suite now can — and then calls `serveReviewRequestAuthenticated` with an
+// Authorization header, exactly as index.js's /mcp route does. That one entry
+// matches the bearer internally, derives the identity internally, enters the
+// context internally, and runs the continuation inside it; the continuation goes
+// through the staged tools.js's `executeRegisteredTool`, so the producer runs
+// inside a real verb call. A caller-chosen bearer authenticates nobody, and
+// there is no second export to compose with anything — which is control 11.
 //
 // THE CONTROLS, and each is named where it is asserted:
-//   1. an authenticated call + every row present  -> passable, a digest, an instant
-//   2. an UNAUTHENTICATED invocation              -> refused, and no receipt
-//  11. a FABRICATED actor object                  -> no identity, and no receipt
-//  12. the real verb dispatch                     -> is what establishes the
-//                                                    identity the producer reads
-//   3. the receipt's producer identity            -> equals the authenticated actor
-//   4. each of the three clauses turned off       -> the gate refuses or fails
-//   5. each digest against its own artifact       -> one byte moves it
-//   6. the seat back to unstaffed                 -> the whole slice goes dark
-//   7. an injected non-green conclusion           -> status "fail", denials observed
-//   8. subject maker == the reviewing seat        -> denied
-//   9. a caller-supplied anything                 -> unreachable, by parse and by call
-//  10. the producer callable                      -> unreachable from every src
-//                                                    namespace, by the repository's
-//                                                    own runtime walk
+//   1. an authenticated request + every row present -> passable, digest, instant
+//   2. an UNAUTHENTICATED invocation                -> refused, and no receipt
+//  11. every export, walked recursively             -> none mints an identity and
+//                                                      none enters a context
+//  12. the real request entry                       -> is what establishes the
+//                                                      identity the producer reads
+//   3. the receipt's producer identity              -> equals the authenticated seat
+//   4. each of the three clauses turned off         -> the gate refuses or fails
+//   5. each digest against its own stamp            -> one byte moves it
+//   6. the seat back to unstaffed                   -> the whole slice goes dark
+//   7. an injected non-green conclusion             -> status "fail", denials observed
+//   8. subject maker == the reviewing seat          -> denied
+//   9. a caller-supplied anything                   -> unreachable, by parse and call
+//  10. the producer callable                        -> unreachable from every src
+//                                                      namespace, by the repository's
+//                                                      own runtime walk
+//  13. no `.git` anywhere                           -> and a git read put back is red
 //
 //   node --test mcp-server/test/gate-zero-producer.v5.test.mjs
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
-  writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+  statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { deflateSync } from "node:zlib";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { types } from "node:util";
 
 import { artifactManifestDigest, canonicalJson, digest } from "../src/artifact-trust.js";
+import { BUILD_STAMP_NAMES, CANDIDATE_MANIFEST_SCHEMA } from "../src/build-stamp.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
-import { WHOLE_WALK, pathToValue } from "./gate-zero-reachability-walk.testhelper.mjs";
+import {
+  WHOLE_WALK, pathToValue, reachableCallables,
+} from "./gate-zero-reachability-walk.testhelper.mjs";
 import {
   CONSUMER_GATE_RECEIPT_FIELDS,
   CONSUMER_GATE_RECEIPT_SCHEMA,
@@ -89,6 +103,7 @@ import { V5_A02_GATE_ZERO_REASON_IDS } from "../src/gate-zero-assurance.v5.js";
 import * as producer from "../src/gate-zero-producer.v5.js";
 import {
   CANARY_ABSENT, CANARY_UNBOUND, FORGED_HASH,
+  CANDIDATE_BUILD_CORRELATION_ID, CANDIDATE_MAKER_ACTOR,
   REVISION_ALL_SUCCEED, REVISION_FAILED_ANCESTOR, REVISION_UNFINISHED,
 } from "./gate-zero-producer-stores.v5.fixture.mjs";
 
@@ -104,10 +119,10 @@ const IDENTITY_FILE = "identity.js";
 const TOOLS_FILE = "tools.js";
 /**
  * THE VERB EVERY CASE IS DISPATCHED THROUGH. Any registered read verb would do —
- * what is under test is `executeRegisteredTool`, not this verb — and `loop-board`
- * is chosen because its handler reaches its database client immediately and
- * finishes cleanly over no rows, so the stub client below is a one-line seam
- * into the middle of a real dispatched call.
+ * what is under test is that the producer runs inside a real dispatched call —
+ * and `loop-board` is chosen because its handler reaches its database client
+ * immediately and finishes cleanly over no rows, so the stub client below is a
+ * one-line seam into the middle of a real dispatched call.
  */
 const DISPATCHED_VERB = "loop-board";
 const FIXTURE_FILE = "gate-zero-producer-stores.v5.fixture.mjs";
@@ -123,9 +138,9 @@ const ENVIRONMENT_MANIFEST = ["ops", "config", "environments.json"];
 /**
  * THE RECORDED AUTHENTICATED CONTEXT. A bearer and the one-entry map shape the
  * Worker's REVIEW_TOKENS secret holds, which is everything index.js's review
- * door reads — recorded here so the actor can be MINTED by the real door rather
- * than written out as a literal. The token is a fixture string: it authenticates
- * against the map beside it and against nothing else.
+ * door reads — recorded here so the call under test is the call the server
+ * makes rather than a literal written out. The token is a fixture string: it
+ * authenticates against the map beside it and against nothing else.
  */
 const REVIEWING_SEAT_ACTOR = "codex-reviewer";
 const RECORDED_REVIEW_TOKEN = "gate-zero-recorded-review-bearer-2026-09-12";
@@ -134,11 +149,9 @@ const CORRELATION_ID = "3f2a6c18-9b4d-4e7a-8c11-5d0e2f7a6b93";
 
 /**
  * A LEGACY MAP-TAKING DOOR'S RECORDED SECRET, and the OAuth grant door's
- * recorded witness. Both are here for the same reason the review map is: the
- * fourth correction round closed the legacy doors WITHOUT an exception, so this
- * suite has to be able to show each of them branding for the server's own bytes
- * and refusing to brand for a caller's. `codex` is an ordinary DISPLAY actor and
- * the narrowest one that exercises the agent door.
+ * recorded witness. Both are here because the enumeration control has to show
+ * every door refusing a caller's bytes — and, non-vacuously, the same doors
+ * still answering for the server's own.
  */
 const RECORDED_AGENT_ACTOR = "codex";
 const RECORDED_AGENT_TOKEN = "gate-zero-recorded-agent-bearer-2026-09-12";
@@ -148,90 +161,30 @@ const RECORDED_GRANT_WITNESS = "gate-zero-recorded-oauth-client-secret-2026-09-1
 /**
  * THE SERVER'S OWN SECRET SOURCE, AND THERE IS NO OTHER ONE ANY MORE.
  *
- * Amendment 8's fourth correction deleted `sealServerReviewTokens`: identity.js
- * reads its credentials ONCE, at module initialisation, out of the environment
- * the SERVER PROCESS was started with — `process.env`, which is what wrangler
- * populates this Worker's secrets into (nodejs_compat, 2026-07-01 compatibility
- * date). There is no function to install a map, so there is no first-caller race
- * to win, which is exactly how the reviewer's probe got in twice.
+ * identity.js reads its credentials ONCE, at module initialisation, out of the
+ * environment the SERVER PROCESS was started with — `process.env`, which is what
+ * wrangler populates this Worker's secrets into (nodejs_compat, 2026-07-01
+ * compatibility date). There is no function to install a map, so there is no
+ * first-caller race to win.
  *
  * SO THE SUITE BECOMES THE SERVER, the only way a suite now can: it writes the
  * recorded secrets into its own process environment, HERE, before any staged
  * tree is imported. Every `moduleOfTree(target, IDENTITY_FILE)` below is a fresh
  * module instance whose initialisation reads exactly these values, the way a
- * deployed Worker's does. Nothing in src is steered by an environment variable —
- * these are credentials, not addresses, and no staged tree, reader or store is
- * selected by one.
+ * deployed Worker's does.
  *
  * The statically imported `../src/identity.js` instance was initialised before
  * this line ran and therefore holds NO credentials at all. That is deliberate
- * and it is load-bearing: every case that needs an authenticated actor takes it
- * from a staged module, so a case cannot accidentally pass because some other
- * import happened to have booted the door first.
+ * and load-bearing: every authenticated case goes through a staged module, so a
+ * case cannot pass because some other import booted the door first.
  */
 process.env.REVIEW_TOKENS = RECORDED_REVIEW_TOKENS;
 process.env.AGENT_TOKENS = RECORDED_AGENT_TOKENS;
 process.env.GOOGLE_CLIENT_SECRET = RECORDED_GRANT_WITNESS;
 
-/**
- * The reviewer seat, authenticated by the STAGED identity.js.
- *
- * ONE STEP, AND IT IS A BEARER. There is no seal, no install and no map
- * argument: the staged module read REVIEW_TOKENS out of the process environment
- * written above when it initialised, so this is precisely the call index.js
- * makes on a /mcp request and precisely the call a caller cannot improve on.
- *
- * The correlation id is then written ON TO the authenticated object, the way
- * mcp.js now decorates it. It is NOT a spread: the brand is object identity, so
- * a copy of this actor authenticates as nobody — which is the whole design, and
- * the control three tests down proves it. identity.js derives `review_agent`
- * for the seat; nothing here says so.
- */
-function recordedReviewerActor(identity, correlationId = CORRELATION_ID) {
-  const actor = identity.authenticatedIdentity
-    .reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
-  assert.notEqual(actor, null, "the recorded review context authenticated no actor");
-  return Object.assign(actor, { correlation_id: correlationId });
-}
-
-/**
- * A verified partner, from the same file's OAuth grant path. NOT this oracle's
- * class.
- *
- * `actorFromProps` is module-private under the fourth correction — props are an
- * ordinary object, so an exported builder was a brander taking caller bytes.
- * What the server calls is `connectionForGrant`, and the third argument is the
- * WITNESS: a credential byte string identity.js read from the server's own
- * environment. index.js and mcp.js pass `env.GOOGLE_CLIENT_SECRET`; this passes
- * the recorded value written into that environment above.
- */
-function recordedPartnerActor(identity, correlationId = CORRELATION_ID) {
-  const actor = identity.authenticatedIdentity.connectionForGrant(
-    identity.propsForSlug("joe", { via: "oauth-google" }), null, RECORDED_GRANT_WITNESS);
-  assert.notEqual(actor, null, "the recorded partner context authenticated no actor");
-  return Object.assign(actor, { correlation_id: correlationId });
-}
-
-/**
- * THE MUTATION CONTROL FOR THE WHOLE IDENTITY DESIGN: an object with every field
- * the real reviewer seat carries, written out by hand. It is exactly what the
- * first correction round's tests passed to the exported setter, and exactly what
- * the review then used to obtain `authority_class: "review_agent"` from a
- * literal. identity.js did not mint it, so it derives nothing.
- */
-function fabricatedReviewerActor() {
-  return { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
-    human: false, review: true, via: "review-token", client_id: null,
-    correlation_id: CORRELATION_ID };
-}
-
-/** The committers identity.js's frozen registry maps, and the actor they map to. */
-const MAKER_EMAIL = "joe.bookout.carr.us@gmail.com";
-/** The address GitHub's own merge path writes as the committer of every merged
- *  head — the form this PR's own HEAD carries, and the one the registry could
- *  not name until amendment 8. */
-const MAKER_NOREPLY_EMAIL = "64207374+jbookout@users.noreply.github.com";
-const SUBJECT_MAKER_ACTOR = "joe";
+/** The maker and session the release-candidate record names, from the fixture. */
+const SUBJECT_MAKER_ACTOR = CANDIDATE_MAKER_ACTOR;
+const SUBJECT_MAKER_SESSION = `session:${CANDIDATE_BUILD_CORRELATION_ID}`;
 
 const staged = [];
 after(() => {
@@ -239,14 +192,12 @@ after(() => {
 });
 
 // ---------------------------------------------------------------------------
-// THE STAGING. It builds a whole candidate repository, because the producer now
-// derives its run binding from one: the revision and the committer come out of
-// .git, the candidate digest out of the source tree's bytes, the environment
-// digest out of ops/config/environments.json and the fixture-set digest out of
-// the sealed fixture bytes. Every edit is asserted to have matched exactly once
-// before it is made — a staging whose anchor silently stopped matching would
-// leave the case proving nothing, which is the failure mode the seam suites
-// already learned once.
+// THE STAGING. It builds a candidate tree and the BUILD STAMPS that describe it,
+// because that is the pair the producer now stands on: the modules that run, and
+// the sealed manifest the deploy wrapper stamped for the revision they were
+// built from. Every edit is asserted to have matched exactly once before it is
+// made — a staging whose anchor silently stopped matching would leave the case
+// proving nothing, which is the failure mode the seam suites already learned.
 // ---------------------------------------------------------------------------
 
 const STAFFED_SEAT_LINE = '  holder_ref: "seat:codex-reviewer:gpt-5.6-sol",\n';
@@ -258,78 +209,26 @@ const RULED_DECISION_LINES = Object.freeze([
 ]);
 const NULL_DECISION_LINE = "    decision_id: null,\n";
 
-/** The two lines the fixture STORE carries so a broken world is a store edit. */
+/** The lines the fixture STORE carries so a broken world is a store edit. */
 const LEDGER_CANARY_LINE = "const LEDGER_CANARY = CANARY_JOINING;\n";
 const PREDECESSOR_WORLD_LINE = 'const PREDECESSOR_WORLD = "clean";\n';
+const CANDIDATE_RECORD_WORLD_LINE = 'const CANDIDATE_BUILD_RECORD_WORLD = "filed";\n';
 /** The producer's own admitted-class line, edited by exactly one control. */
 const AUTHORITY_CLASSES_LINE =
   'const PRODUCER_AUTHORITY_CLASSES = Object.freeze(["review_agent"]);\n';
-
-// ---------------------------------------------------------------------------
-// THE STAGED OBJECT STORE. Git's own on-disk format, written here rather than
-// shelled out for, because a case has to be able to CHOOSE which revision it is
-// standing on and `git commit` hands out the hash it feels like.
-//
-// The trees are content-addressed exactly as git addresses them — id = sha1 of
-// `tree <len>\0<entries>` — so the blob ids the producer reads out of HEAD's
-// tree are the real sealing of the staged bytes, and a case that edits one
-// staged file moves that file's sealed id the way a real commit would. Blob
-// OBJECTS are never written because nothing ever inflates one: the producer
-// reads ids from the tree and bytes from the working tree, which is the whole
-// point of it holding both.
-//
-// The commit object is the one exception, filed under the case's chosen revision
-// rather than under its own hash. The producer does not re-hash what it inflates
-// — see its own note — and this is the seam that exception buys.
-// ---------------------------------------------------------------------------
-
-const objectId = (kind, body) => createHash("sha1")
-  .update(Buffer.concat([Buffer.from(`${kind} ${body.length}\0`), body])).digest("hex");
-
-function writeLooseObject(objects, id, kind, body) {
-  mkdirSync(join(objects, id.slice(0, 2)), { recursive: true });
-  writeFileSync(join(objects, id.slice(0, 2), id.slice(2)),
-    deflateSync(Buffer.concat([Buffer.from(`${kind} ${body.length}\0`), body])));
-}
-
-/** Every tree object under one directory, written; answers the directory's id.
- *  `seen` collects each directory's id, because the candidate digest stands on
- *  the id of the CANDIDATE's tree rather than the repository root's. */
-function writeTreeObjects(objects, directory, seen) {
-  const entries = [];
-  for (const name of readdirSync(directory).sort()) {
-    if (name === ".git") continue;
-    const full = join(directory, name);
-    entries.push(statSync(full).isDirectory()
-      ? { mode: "40000", name, id: writeTreeObjects(objects, full, seen) }
-      : { mode: "100644", name, id: objectId("blob", readFileSync(full)) });
-  }
-  const body = Buffer.concat(entries.map(entry => Buffer.concat([
-    Buffer.from(`${entry.mode} ${entry.name}\0`), Buffer.from(entry.id, "hex")])));
-  const id = objectId("tree", body);
-  writeLooseObject(objects, id, "tree", body);
-  seen.set(directory, id);
-  return id;
-}
-
 /**
- * Seal the staged tree at `revision`, with `maker` as its committer. Answers the
- * id of the CANDIDATE's own tree under that revision, which the digest
- * recomputation below needs.
+ * THE MUTATION CONTROL FOR AMENDMENT 9's FIRST CLAUSE. The producer's one read
+ * of its build stamps, replaced by a read of a REPOSITORY — the shape this file
+ * used to ship. In a staged tree there is no `.git`, so the read throws, the
+ * gate's guarded boundary answers its own refusal, and every produced case goes
+ * red. A producer that quietly kept a git path would pass the no-git assertions
+ * below and fail nothing; this is what makes them mean something.
  */
-function sealCandidate(base, revision, maker) {
-  const objects = join(base, ".git", "objects");
-  const seen = new Map();
-  const tree = writeTreeObjects(objects, base, seen);
-  const body = Buffer.from(
-    `tree ${tree}\n` +
-    `author A Maker <${maker}> 1757000000 +0000\n` +
-    `committer A Maker <${maker}> 1757000000 +0000\n` +
-    "\nthe staged candidate\n");
-  writeLooseObject(objects, revision, "commit", body);
-  writeFileSync(join(base, ".git", "HEAD"), `${revision}\n`);
-  return seen.get(join(base, "mcp-server", "src"));
-}
+const STAMPED_CANDIDATE_CALL = "  const stamped = stampedCandidate();\n";
+const GIT_DERIVED_CANDIDATE_CALL =
+  "  const stamped = (await import(\"node:fs\"))\n"
+  + "    .readFileSync(new URL(\"../../../.git/HEAD\", import.meta.url), \"utf8\")\n"
+  + "    && stampedCandidate();\n";
 
 function editOnce(path, anchor, replacement, what) {
   const source = readFileSync(path, "utf8");
@@ -338,17 +237,124 @@ function editOnce(path, anchor, replacement, what) {
   writeFileSync(path, source.replace(anchor, replacement));
 }
 
+/** Git's own blob address for some bytes: sha1 of `blob <len>\0<bytes>`. */
+const blobId = bytes => createHash("sha1")
+  .update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest("hex");
+
 /**
- * A candidate repository: .git, a copy of src, the sealed fixtures and the
- * environment manifest. `revision` and `maker` are what a RUN differs by; the
- * rest are the faults a case injects.
+ * THE SEALED MANIFEST FOR A STAGED TREE, computed the way the deploy wrapper's
+ * sealer computes it for a real one: git's blob id per candidate path for the
+ * sealed half, sha256 of each blob's content for the observed half, JCS over the
+ * parsed environment manifest, and sha256 per sealed fixture under its own path.
+ *
+ * IT IS COMPUTED FROM THE STAGED BYTES, not written out as constants, so the
+ * byte-level controls this suite has always run still move the stamp: append one
+ * comment to one staged module and its blob id and its content hash both move,
+ * so the manifest moves, so the digest the producer reports moves. What this
+ * file does NOT do is check that the PRODUCTION sealer computes the same values
+ * — that is gate-zero-candidate-seal.test.mjs's job, over a real repository,
+ * because a suite that recomputed the sealer's recipe here would only be proving
+ * it had copied it.
+ */
+function sealStagedTree(base, revision) {
+  const target = join(base, "mcp-server", "src");
+  const files = [];
+  const walk = (at) => {
+    for (const name of readdirSync(at).sort()) {
+      const full = join(at, name);
+      if (statSync(full).isDirectory()) { walk(full); continue; }
+      if (!name.endsWith(".js")) continue;
+      files.push({ path: `mcp-server/src/${relative(target, full).split(sep).join("/")}`,
+        bytes: readFileSync(full) });
+    }
+  };
+  walk(target);
+  files.sort((a, b) => (a.path < b.path ? -1 : 1));
+
+  const sealedFixtures = {};
+  for (const name of SEALED_FIXTURES) {
+    const path = join(base, "mcp-server", "test", name);
+    sealedFixtures[`mcp-server/test/${name}`] =
+      existsSync(path) ? digest(readFileSync(path)) : null;
+  }
+  const environmentPath = join(base, ...ENVIRONMENT_MANIFEST);
+  const sourceDigest = digest(canonicalJson(Object.fromEntries(
+    files.map(file => [file.path, blobId(file.bytes)]))));
+  return {
+    schema_version: CANDIDATE_MANIFEST_SCHEMA,
+    git_sha: revision,
+    // A stand-in for git's tree id, derived from the sealed ids so it moves with
+    // them. The producer only checks its shape and carries it into the
+    // provenance digest; what a real tree id IS comes from git, at build time.
+    candidate_tree_id: createHash("sha1").update(sourceDigest).digest("hex"),
+    file_count: files.length,
+    byte_length: files.reduce((total, file) => total + file.bytes.length, 0),
+    artifact_digest: digest(canonicalJson(Object.fromEntries(
+      files.map(file => [file.path, digest(file.bytes)])))),
+    source_digest: sourceDigest,
+    environment_manifest_digest: existsSync(environmentPath)
+      ? digest(canonicalJson(JSON.parse(readFileSync(environmentPath, "utf8"))))
+      : null,
+    fixture_set_digest: digest(canonicalJson(sealedFixtures)),
+  };
+}
+
+/** The three vars bin/deploy-worker.sh stamps, for one sealed manifest. */
+function stampsFor(manifest, { drop = null, rewrite = null, coverRewrite = false } = {}) {
+  const stamped = rewrite === null ? manifest : rewrite({ ...manifest });
+  const values = {
+    // ALWAYS THE SEALED SHA, never the rewritten one: the wrapper stamps the
+    // revision it sealed, so a case that edits `git_sha` inside the manifest is
+    // a manifest that names another revision — which is its own refusal.
+    [BUILD_STAMP_NAMES.gitSha]: manifest.git_sha,
+    [BUILD_STAMP_NAMES.candidateManifest]: canonicalJson(stamped),
+    // THE DIGEST IS OVER THE MANIFEST AS SEALED. A case that rewrites the
+    // manifest after the seal is the tampered-var case and the two stamps stop
+    // agreeing, which is exactly what a hand-edited Worker var looks like from
+    // inside the Worker. `coverRewrite` re-seals instead, so a case can isolate
+    // a single WRONG FIELD from the digest disagreement.
+    [BUILD_STAMP_NAMES.candidateManifestDigest]:
+      digest(rewrite === null || coverRewrite ? stamped : manifest),
+  };
+  if (drop !== null) delete values[drop];
+  return values;
+}
+
+/**
+ * Run `fn` with these build stamps in the process environment, and put the
+ * environment back afterwards. This is `wrangler --var` for one call: the
+ * producer reads `process.env` at call time, which is the same binding store
+ * wrangler populates from a Worker's vars.
+ */
+async function withStamps(stamps, fn) {
+  const before = new Map();
+  for (const name of Object.values(BUILD_STAMP_NAMES)) {
+    before.set(name, process.env[name]);
+    if (Object.hasOwn(stamps, name)) process.env[name] = stamps[name];
+    else delete process.env[name];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of before) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/**
+ * A candidate tree: a copy of src, the sealed fixtures and the environment
+ * manifest — and NO `.git`, which is the production condition. `revision` is
+ * what a RUN differs by; the rest are the faults a case injects.
  */
 function stageTree({
-  revision = REVISION_ALL_SUCCEED, maker = MAKER_EMAIL, staffedSeat = true,
-  withdrawnCards = [], ledgerCanary = null, predecessorWorld = null,
+  revision = REVISION_ALL_SUCCEED, staffedSeat = true,
+  withdrawnCards = [], ledgerCanary = null, predecessorWorld = null, candidateRecordWorld = null,
   substituteStore = true, environmentEdit = null, candidateEdit = null,
-  fixtureEdit = null, admitPartnerClass = false, git = true,
-  withoutEnvironmentManifest = false, postSealEdit = null,
+  fixtureEdit = null, deniedClass = false, reintroduceGitDerivation = false,
+  withoutEnvironmentManifest = false, dropStamp = null, rewriteManifest = null,
+  coverRewrittenManifest = false,
 } = {}) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
@@ -357,7 +363,6 @@ function stageTree({
   const target = join(base, "mcp-server", "src");
   mkdirSync(target, { recursive: true });
   cpSync(SRC, target, { recursive: true });
-  mkdirSync(join(base, ".git"), { recursive: true });
   // THE TWO FILES src IMPORTS FROM OUTSIDE ITSELF. The staged tools.js is a real
   // module graph and will not load without them; they are copied rather than
   // stubbed so the dispatch under test is the dispatch that ships.
@@ -365,7 +370,6 @@ function stageTree({
     join(base, "mcp-server", "continuity-reference-manifest.mjs"));
   cpSync(join(REPO, "mcp-server", "assets"), join(base, "mcp-server", "assets"),
     { recursive: true });
-
 
   // THE TWO SEALED ARTIFACTS, copied as bytes. A case that mutates one mutates
   // the bytes, which is the whole point of asserting the digest moves.
@@ -384,6 +388,7 @@ function stageTree({
     manifest.version = environmentEdit;
     writeFileSync(path, JSON.stringify(manifest, null, 2));
   }
+  if (withoutEnvironmentManifest) rmSync(join(base, ...ENVIRONMENT_MANIFEST));
 
   if (!staffedSeat)
     editOnce(join(target, REGISTRATION_FILE), STAFFED_SEAT_LINE, UNSTAFFED_SEAT_LINE,
@@ -400,10 +405,14 @@ function stageTree({
     writeFileSync(path, source);
   }
 
-  if (admitPartnerClass)
+  if (deniedClass)
     editOnce(join(target, PRODUCER_FILE), AUTHORITY_CLASSES_LINE,
-      'const PRODUCER_AUTHORITY_CLASSES = Object.freeze(["review_agent", "verified_partner"]);\n',
+      'const PRODUCER_AUTHORITY_CLASSES = Object.freeze(["verified_partner"]);\n',
       "the producer's admitted authority classes");
+
+  if (reintroduceGitDerivation)
+    editOnce(join(target, PRODUCER_FILE), STAMPED_CANDIDATE_CALL, GIT_DERIVED_CANDIDATE_CALL,
+      "the producer's one read of its build stamps");
 
   if (candidateEdit !== null) {
     const path = join(target, "global-boundaries.v5.js");
@@ -413,7 +422,7 @@ function stageTree({
   if (substituteStore) {
     const store = join(target, STORES_FILE);
     cpSync(join(TEST_DIR, FIXTURE_FILE), store);
-    // THE STORE IS WHERE A BROKEN WORLD IS CHOSEN NOW. The producer derives its
+    // THE STORE IS WHERE A BROKEN WORLD IS CHOSEN. The producer derives its
     // addresses, so a test can no longer steer by writing one — it edits the
     // row the store holds, which is the honest place for a fault to live.
     if (ledgerCanary !== null)
@@ -423,45 +432,45 @@ function stageTree({
       editOnce(store, PREDECESSOR_WORLD_LINE,
         `const PREDECESSOR_WORLD = ${JSON.stringify(predecessorWorld)};\n`,
         "the fixture store's predecessor world line");
+    if (candidateRecordWorld !== null)
+      editOnce(store, CANDIDATE_RECORD_WORLD_LINE,
+        `const CANDIDATE_BUILD_RECORD_WORLD = ${JSON.stringify(candidateRecordWorld)};\n`,
+        "the fixture store's release-candidate world line");
   }
 
-  if (withoutEnvironmentManifest) rmSync(join(base, ...ENVIRONMENT_MANIFEST));
-
-  // SEALED LAST, so every edit a case asked for is inside the revision HEAD
-  // names — which is what makes "mutating one tracked file moves the candidate
-  // digest" a statement about this revision rather than about a dirty checkout.
-  const treeId = git === true ? sealCandidate(base, revision, maker) : null;
-
-  // AFTER the seal: one tracked candidate file mutated in the working tree while
-  // HEAD's tree still seals the old bytes. The sealed half of the manifest does
-  // not move and the observed half does — which is the mutation control for
-  // "the candidate digest is bound to HEAD's manifest AND to the bytes".
-  if (postSealEdit !== null) {
-    const path = join(target, "global-boundaries.v5.js");
-    writeFileSync(path, `${readFileSync(path, "utf8")}\n// ${postSealEdit}\n`);
-  }
-  return { target, treeId };
+  // SEALED LAST, so every edit a case asked for is inside the manifest the
+  // stamps describe — which is what a real deploy does too: the wrapper seals
+  // the revision it is about to upload.
+  const manifest = sealStagedTree(base, revision);
+  // AND THE PRODUCTION CONDITION IS ASSERTED, not assumed: a staged tree that
+  // grew a `.git` would let a git-derived producer pass every case below.
+  assert.equal(existsSync(join(base, ".git")), false,
+    "a staged tree holds a .git, so the production condition is not being tested");
+  return { base, target, manifest,
+    stamps: stampsFor(manifest, { drop: dropStamp, rewrite: rewriteManifest,
+                                  coverRewrite: coverRewrittenManifest }) };
 }
 
 const moduleOfTree = (target, file) => import(pathToFileURL(join(target, file)).href);
 
 /**
- * RUN `fn` INSIDE A REAL DISPATCHED VERB CALL in a staged tree.
+ * RUN `fn` INSIDE A REAL SERVED REQUEST in a staged tree.
  *
- * `executeRegisteredTool` is the one dispatch every verb funnels through and the
- * only place an authenticated call is established. It is reached HERE through
- * the staged tools.js, so the async context the staged producer reads is the one
- * the staged identity.js entered for this actor — the same module instance, not
- * a value carried across a boundary.
+ * THIS IS THE ONLY WAY AN AUTHENTICATED CALL EXISTS NOW, and that is the fifth
+ * correction round's whole point. `serveReviewRequestAuthenticated` is the one
+ * export that reaches identity.js's context entry; it takes the request's own
+ * Authorization header rather than an actor, so this helper cannot choose an
+ * identity any more than a caller could. Inside it, the continuation goes
+ * through the staged tools.js's `executeRegisteredTool` — the dispatch every
+ * verb funnels through — and the stub database client calls `fn` from within the
+ * handler, which is the only seam Step A has into a dispatched verb.
  *
- * THE STUB CLIENT IS THE SEAM. Step A emits a value and is not bound to a verb
- * of its own yet (that is Step B), so the only way to be running inside a
- * dispatched call is to be called by one. The verb's database client is handed
- * in by the caller, so `fn` runs on its first query — in the middle of a real
- * handler, inside the real dispatch, under the real context — and the verb then
- * finishes over no rows.
+ * Answers `{ served: false }` when the bearer matched nothing, which is the
+ * server's "this was not a review request" and the next door's turn.
  */
-async function inDispatchedVerb(target, actor, fn) {
+async function inServedRequest(target, { bearer = RECORDED_REVIEW_TOKEN,
+                                         correlationId = CORRELATION_ID } = {}, fn) {
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
   const tools = await moduleOfTree(target, TOOLS_FILE);
   let answered;
   let ran = false;
@@ -469,56 +478,51 @@ async function inDispatchedVerb(target, actor, fn) {
     if (!ran) { ran = true; answered = await fn(); }
     return { rows: [] };
   } };
-  await tools.executeRegisteredTool(client, actor, DISPATCHED_VERB, {});
+  const served = identity.serveReviewRequestAuthenticated(
+    bearer === null ? "" : `Bearer ${bearer}`, correlationId,
+    actor => tools.executeRegisteredTool(client, actor, DISPATCHED_VERB, {}));
+  if (served === null) return { served: false, answered: null };
+  await served;
   assert.equal(ran, true, "the dispatched verb never reached its client");
-  return answered;
+  return { served: true, answered };
 }
 
 /**
- * What the gate answers in a staged tree, inside a real dispatched verb call.
+ * What the gate answers in a staged tree, under this deploy's stamps.
  *
- * `mint` builds the actor from the staged identity.js; `mint: null` runs the
- * same gate with no dispatch and no call established at all.
+ * `seat` names the request: a bearer and a correlation id. `seat: null` runs the
+ * same gate with no request and no authenticated call at all.
  */
-async function emitFrom(options = {}, mint = recordedReviewerActor) {
-  const { target } = stageTree(options);
+async function emitFrom(options = {}, seat = {}) {
+  const { target, stamps } = stageTree(options);
   const gate = await moduleOfTree(target, GATE_FILE);
-  if (mint === null) return gate.emitGateZeroOutcome();
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  return inDispatchedVerb(target, mint(identity), () => gate.emitGateZeroOutcome());
+  return withStamps(stamps, async () => {
+    if (seat === null) return gate.emitGateZeroOutcome();
+    const served = await inServedRequest(target, seat, () => gate.emitGateZeroOutcome());
+    assert.equal(served.served, true, "the recorded review bearer was not served");
+    return served.answered;
+  });
 }
 
 /**
- * THE CANDIDATE DIGEST RECOMPUTED HERE, over both halves the manifest binds: the
- * blob ids HEAD's tree sealed for each candidate path, and the bytes on disk at
- * those same paths. Computed from the staged tree independently of the module
- * under test, so a producer that hashed something else is red.
+ * THE CANDIDATE DIGEST RECOMPUTED HERE, from the sealed manifest the stamps
+ * carry, by artifact-trust.js's own `artifactManifestDigest` — the same JCS
+ * SHA-256 recipe ops.scac_artifact_manifest_digest recomputes in the database.
+ * A producer that hashed something else, or that stamped a constant, is red.
  */
-function candidateDigestOfTree(target, revision, treeId, policyDigest) {
-  const files = [];
-  const walk = (at) => {
-    for (const name of readdirSync(at).sort()) {
-      const full = join(at, name);
-      if (statSync(full).isDirectory()) { walk(full); continue; }
-      if (!name.endsWith(".js")) continue;
-      files.push({ path: `mcp-server/src/${relative(target, full).split(sep).join("/")}`,
-        bytes: readFileSync(full) });
-    }
-  };
-  walk(target);
-  files.sort((a, b) => (a.path < b.path ? -1 : 1));
+function candidateDigestOfStamps(manifest, policyDigest) {
   return artifactManifestDigest({
-    artifact_digest: digest(canonicalJson(Object.fromEntries(
-      files.map(file => [file.path, digest(file.bytes)])))),
+    artifact_digest: manifest.artifact_digest,
     artifact_kind: "source_bundle",
     media_type: "application/vnd.carr.source-bundle+json",
-    byte_length: files.reduce((total, file) => total + file.bytes.length, 0),
-    source_ref: revision,
-    source_digest: digest(canonicalJson(Object.fromEntries(
-      files.map(file => [file.path, objectId("blob", file.bytes)])))),
+    byte_length: manifest.byte_length,
+    source_ref: manifest.git_sha,
+    source_digest: manifest.source_digest,
     sbom_digest: null,
     provenance_digest: digest({
-      head_revision: revision, head_tree_id: treeId, file_count: files.length }),
+      head_revision: manifest.git_sha,
+      head_tree_id: manifest.candidate_tree_id,
+      file_count: manifest.file_count }),
     policy_epoch: 1,
     policy_epoch_digest: policyDigest,
   });
@@ -619,22 +623,28 @@ test("RECEIPT: all twenty-one fields of consumer-gate-receipt.v1, and nothing el
   // gets a second session; the old design gave both the same one.
   assert.equal(receipt.producer_identity.session_ref, `session:${CORRELATION_ID}`);
   const elsewhere = "7b1c9d40-2e55-4a61-9f03-8ac4be21d7e6";
-  const second = await emitFrom({}, identity => recordedReviewerActor(identity, elsewhere));
+  const second = await emitFrom({}, { correlationId: elsewhere });
   assert.equal(second.receipt.producer_identity.session_ref, `session:${elsewhere}`);
 
-  // THE SUBJECT MAKER IS HEAD'S OWN COMMITTER — the committer line of the commit
-  // object the staged HEAD names, not the reflog, which this staging no longer
-  // writes at all. Resolved through identity.js's own registry, and its AUTHORITY
-  // CLASS IS DERIVED THERE TOO: the first draft wrote the constant
+  // THE SUBJECT MAKER IS THE RELEASE-CANDIDATE RECORD for the stamped revision —
+  // amendment 9(b) — so BOTH halves come out of a row somebody had to be
+  // authenticated to write. The actor is the `maker_actor` the ops recorder
+  // filed, resolved through identity.js's partner registry, and the AUTHORITY
+  // CLASS IS DERIVED THERE: the first draft wrote the constant
   // `candidate_builder` into this field, which named a class nothing in this
   // system derives, admits or checks.
   assert.equal(receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
   assert.equal(receipt.subject_maker_identity.authority_class, "verified_partner");
-  // THE SESSION IS DERIVED, NOT MANUFACTURED: it is the candidate-build seat
-  // within the authenticated call the dispatch path established, so it moves
-  // with the server's correlation id and not with the revision.
-  assert.equal(receipt.subject_maker_identity.session_ref,
-    `session:${CORRELATION_ID}:candidate-build`);
+  // THE SESSION IS THE RECORD'S OWN CORRELATION, and this is the line the fifth
+  // review round's finding 3 is about. It used to be the EVALUATOR'S session
+  // with `:candidate-build` appended — the reviewer's seat, relabelled as the
+  // maker's. It is now the correlation the recorder stamped on the release row,
+  // so it does not move with the call doing the judging.
+  assert.equal(receipt.subject_maker_identity.session_ref, SUBJECT_MAKER_SESSION);
+  assert.equal(JSON.stringify(receipt).includes("candidate-build"), false,
+    "the evaluator's session is still being relabelled as the maker's");
+  assert.equal(second.receipt.subject_maker_identity.session_ref, SUBJECT_MAKER_SESSION,
+    "the maker's session moved with the evaluator's correlation id");
   assert.notEqual(receipt.subject_maker_identity.actor_id, receipt.producer_identity.actor_id);
   assert.notEqual(receipt.subject_maker_identity.session_ref, receipt.producer_identity.session_ref);
 });
@@ -682,230 +692,99 @@ test("IDENTITY: with no authenticated call there is no receipt, only a derived r
   assert.equal(bare.receipt, null);
 });
 
-test("IDENTITY: an authenticated actor of the wrong derived class is refused", async () => {
-  // A verified partner is authenticated, registered and human — and is not the
-  // class r7's registry admits for an independent control-plane oracle. The
-  // class is DERIVED by identity.js from the live actor; this module only checks
-  // membership, so widening it is an edit somebody reviews.
-  const emitted = await emitFrom({}, recordedPartnerActor);
-  assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
-  assert.equal(emitted.producer_answer.receipt, null);
-});
-
-test("IDENTITY: an actor with no server-stamped correlation id has no session, and is refused", async () => {
-  const emitted = await emitFrom({},
-    identity => Object.assign(recordedReviewerActor(identity), { correlation_id: null }));
-  assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
-  assert.equal(emitted.producer_answer.receipt, null);
-});
-
-// ===========================================================================
-// CONTROL 11 — a FABRICATED actor object obtains no receipt.
-//
-// THE MUTATION CONTROL FOR THE WHOLE IDENTITY DESIGN, and the one the second
-// review round asked for by name. The first correction shipped
-// `runInAuthenticatedCall(actor, fn)` as a public export that took an ordinary
-// object, and the reviewer obtained `authority_class: "review_agent"` out of a
-// literal. Both that name and its reader are gone; what replaces them derives
-// an identity only for an actor identity.js itself minted from a credential.
-// ===========================================================================
-
-test("IDENTITY: a fabricated actor object obtains no identity and no receipt", async () => {
-  const fabricated = fabricatedReviewerActor();
-  // FROM A STAGED MODULE, because the statically imported identity.js was
-  // initialised before this file wrote the recorded secrets into the process
-  // environment and therefore holds no credentials at all. Every authenticated
-  // actor in this suite comes from a module that booted the way the Worker does.
-  const { target: mintedIn } = stageTree({});
-  const minted = recordedReviewerActor(await moduleOfTree(mintedIn, IDENTITY_FILE));
-  // NON-VACUOUS: the fabricated object is field-for-field what the real door
-  // mints, so what refuses it below is provenance and nothing else.
-  assert.deepEqual(Object.keys(fabricated).sort(), Object.keys(minted).sort());
-  for (const key of Object.keys(fabricated)) assert.equal(fabricated[key], minted[key], key);
-
-  const emitted = await emitFrom({}, () => fabricated);
-  assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
-  assert.equal(emitted.outcome_digest, null);
-  assert.equal(emitted.producer_answer.receipt, null);
-  assert.equal(emitted.producer_answer.clauses, null);
-  assert.equal(JSON.stringify(emitted).includes("session:"), false,
-    "a session ref was minted for a fabricated actor");
-
-  // AND THE SAME OBJECT THROUGH THE SAME DISPATCH DERIVES NOTHING AT ALL, asked
-  // of identity.js directly from inside a real dispatched verb call: the real
-  // door's actor answers a three-field identity there, the fabricated one null.
-  const { target } = stageTree({});
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const read = () => identity.authenticatedIdentity.receiptIdentity();
-  assert.deepEqual(await inDispatchedVerb(target, recordedReviewerActor(identity), read), {
-    actor_id: REVIEWING_SEAT_ACTOR,
-    session_ref: `session:${CORRELATION_ID}`,
-    authority_class: "review_agent",
+test("IDENTITY: an authenticated seat of a class this oracle does not admit is refused", () => {
+  // r7's registry admits exactly one authority class for an independent
+  // control-plane oracle, and the producer checks MEMBERSHIP rather than
+  // asserting the class it expects. The case is reached the way every other case
+  // here is: by editing that one line in a throwaway tree, so the check is
+  // PROVED live rather than assumed unreachable.
+  return emitFrom({ deniedClass: true }).then(emitted => {
+    assert.equal(emitted.passable, false);
+    assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+    assert.equal(emitted.producer_answer.receipt, null);
+    assert.equal(emitted.producer_answer.clauses, null,
+      "a refused class reached the clauses");
   });
-  assert.equal(await inDispatchedVerb(target, fabricatedReviewerActor(), read), null);
+});
 
-  // AND EVERY SURFACE A PREVIOUS ROUND SHIPPED IS GONE BY NAME, so nothing can
-  // quietly go back to one. The last two are amendment 8's: the door that took
-  // the token map as an argument, and the exported context entry.
+test("IDENTITY: a request with no server-written correlation id obtains no session", async () => {
+  // The correlation id is written per request by correlation.js, onto
+  // env.CORRELATION_ID, and it is the only per-call identifier in this system no
+  // caller writes. A request that arrives without one is SERVED — the server does
+  // not drop a review-council call over a missing log id — and runs with the
+  // context CLEARED, so it obtains no receipt.
+  for (const correlationId of [null, "", "not-a-correlation-id", "3f2a6c18"]) {
+    const emitted = await emitFrom({}, { correlationId });
+    assert.equal(emitted.passable, false, String(correlationId));
+    assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused", String(correlationId));
+    assert.equal(emitted.producer_answer.receipt, null);
+    assert.equal(JSON.stringify(emitted).includes("session:"), false,
+      "a session ref was minted for a call with no server-written correlation id");
+  }
+});
+
+// ===========================================================================
+// CONTROL 11 — THERE IS NOTHING LEFT TO COMPOSE.
+//
+// THE FIFTH REVIEW ROUND'S FIRST FINDING, as the control it asks for. Amendment
+// 8 left two exports that were each harmless alone: `reviewActorForToken(header)`
+// MINTED A BRANDED ACTOR, and `dispatchFor(actor)` RETURNED A CALLABLE THAT
+// ENTERS A CONTEXT. A module-initialisation probe composed them and ran its own
+// code inside a `review_agent` context — no seal to beat and no race to win.
+//
+// Both names are deleted. The review door and the context entry are
+// module-private, and the ONE export that reaches either takes the request's own
+// Authorization header rather than an actor. So the case below is not "the
+// forgery is refused"; it is that the forgery has no entry point at all, which
+// is a stronger claim and is asserted as one.
+// ===========================================================================
+
+test("IDENTITY: a caller-chosen bearer is served by nobody and enters no context", async () => {
+  const CALLERS_OWN = "a-bearer-the-caller-chose";
+  const { target, stamps } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+
+  // THE ONE ENTRY IS A BEARER AND A CONTINUATION. A bearer the caller chose
+  // matches nothing in the map identity.js read from the server's environment,
+  // so the entry answers null — "not a review request" — and the continuation is
+  // never run at all.
+  let ran = false;
+  assert.equal(
+    identity.serveReviewRequestAuthenticated(`Bearer ${CALLERS_OWN}`, CORRELATION_ID,
+      () => { ran = true; return "served"; }),
+    null);
+  assert.equal(ran, false, "a caller-chosen bearer ran a continuation");
+  // NON-VACUOUS: the SERVER'S own bearer is served, and what runs inside it reads
+  // the three-field identity r7 requires.
+  assert.deepEqual(
+    identity.serveReviewRequestAuthenticated(`Bearer ${RECORDED_REVIEW_TOKEN}`, CORRELATION_ID,
+      () => identity.authenticatedIdentity.receiptIdentity()),
+    { actor_id: REVIEWING_SEAT_ACTOR, session_ref: `session:${CORRELATION_ID}`,
+      authority_class: "review_agent" });
+
+  // AND THE COMPOSITION THE REVIEW PERFORMED CANNOT BE WRITTEN, because neither
+  // half is exported under any name. This is the mutation control stated the way
+  // the review stated it: the probe cannot NAME a function to call.
   for (const gone of ["runInAuthenticatedCall", "authenticatedCallIdentity",
-    "reviewActorForToken", "dispatchAuthenticatedCall", "authenticatedCallReceiptIdentity",
-    "actorFromProps", "sealServerReviewTokens"])
+    "reviewActorForToken", "dispatchFor", "dispatchAuthenticatedCall",
+    "authenticatedCallReceiptIdentity", "actorFromProps", "sealServerReviewTokens",
+    "buildContext", "committerIdentity", "enterAuthenticatedCall"]) {
     assert.equal(Object.hasOwn(identity, gone), false, `${gone} is still exported`);
-  // AND THE INSTALLER IS NOT ON THE NEW SURFACE EITHER, under any name: the
-  // fourth round's mutation control is that the probe cannot name a function to
-  // call, so it is asserted on both surfaces rather than on the module alone.
-  for (const gone of ["sealServerReviewTokens", "actorFromProps",
-    "dispatchAuthenticatedCall", "runInAuthenticatedCall"])
     assert.equal(Object.hasOwn(identity.authenticatedIdentity, gone), false,
       `${gone} is still on the authenticated-identity surface`);
-});
+  }
+  assert.equal(Object.keys(identity.authenticatedIdentity)
+    .some(name => /seal|install|bind|set|dispatch/i.test(name)), false,
+    "the surface grew something that reads like an installer or a dispatcher");
 
-// ===========================================================================
-// CONTROL 13 — THE COPY, AND THE WRITE-OVER. Amendment 8's subject, and the
-// reviewer's own probe of the second correction round.
-//
-// The brand it replaced was an ENUMERABLE property, so it survived `{ ...actor }`
-// — including the forger's. The reviewer took a branded partner actor, spread
-// it, rewrote the copy as `codex-reviewer`, put it through the REAL
-// `executeRegisteredTool`, and was signed for as a review agent. The brand is
-// now membership of a module-private WeakSet, so the copy is simply a different
-// object; and the fields the identity is built from are pinned at the moment the
-// credential was verified, so writing over the ORIGINAL does not move them
-// either. Both halves are asserted, and both are asserted non-vacuously.
-// ===========================================================================
-
-test("IDENTITY: a spread copy of a branded actor, rewritten as the reviewer, is refused", async () => {
-  const rewrittenCopy = identity => ({
-    ...recordedPartnerActor(identity),
-    slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
-    human: false, review: true, via: "review-token",
-  });
-
-  const emitted = await emitFrom({}, rewrittenCopy);
-  assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
-  assert.equal(emitted.outcome_digest, null);
-  assert.equal(emitted.producer_answer.receipt, null);
-  assert.equal(JSON.stringify(emitted).includes("session:"), false,
-    "a session ref was minted for a copied actor");
-
-  // NON-VACUOUS, asked of identity.js from inside the SAME real dispatch: the
-  // object the copy was made FROM derives an identity, and the copy derives
-  // none. So what refuses above is the copying and nothing else.
-  const { target } = stageTree({});
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const read = () => identity.authenticatedIdentity.receiptIdentity();
-  const branded = recordedPartnerActor(identity);
-  assert.deepEqual(await inDispatchedVerb(target, branded, read), {
-    actor_id: "joe",
-    session_ref: `session:${CORRELATION_ID}`,
-    authority_class: "verified_partner",
-  });
-  assert.equal(await inDispatchedVerb(target, rewrittenCopy(identity), read), null);
-});
-
-test("IDENTITY: writing the reviewer's fields onto a branded actor does not move what it is", async () => {
-  // THE OTHER HALF. Object identity alone would not stop this: the server now
-  // decorates actors IN PLACE, so a forger inside the process could write onto
-  // one too. The credential is pinned at the instant it was verified and is
-  // never re-read off the actor, so the receipt still names the partner — and
-  // the partner's class is not the one this oracle admits, so it refuses.
-  const writtenOver = identity => Object.assign(recordedPartnerActor(identity), {
-    slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
-    human: false, review: true, via: "review-token",
-  });
-
-  const emitted = await emitFrom({}, writtenOver);
-  assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
-  assert.equal(emitted.producer_answer.receipt, null);
-
-  const { target } = stageTree({});
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  assert.deepEqual(
-    await inDispatchedVerb(target, writtenOver(identity),
-      () => identity.authenticatedIdentity.receiptIdentity()),
-    { actor_id: "joe", session_ref: `session:${CORRELATION_ID}`,
-      authority_class: "verified_partner" },
-    "a field written onto a branded actor rewrote who it was");
-});
-
-test("IDENTITY: a caller-chosen bearer plus a caller token map authenticates nobody", async () => {
-  const { target } = stageTree({});
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const door = identity.authenticatedIdentity;
-  const CALLERS_OWN = "a-bearer-the-caller-chose";
-  const CALLERS_MAP = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: CALLERS_OWN });
-
-  /** Did this object come out of the door BRANDED? Asked the way the dispatch
-   *  asks: an unbranded object derives no identity and therefore no receipt. */
-  const derivesIdentity = value => door.dispatchFor(value)(() => door.receiptIdentity()) !== null;
-
-  // THE INSTALLER IS GONE, WITH NOTHING IN ITS PLACE. This is the fourth round's
-  // mutation control stated as the review stated it: the probe cannot name a
-  // function to call. One-shot state settled which caller was FIRST; it never
-  // said which caller was the SERVER, and the probe simply arrived first.
-  assert.equal(door.sealServerReviewTokens, undefined);
-  assert.equal(Object.keys(door).some(name => /seal|install|bind|set/i.test(name)), false,
-    "the new surface grew something that reads like an installer");
-
-  // THE DOOR TAKES A BEARER AND NOTHING ELSE, so the call the reviewer made is
-  // not one that can be written any more: a second argument is not read.
-  assert.equal(door.reviewActorForToken.length, 1);
-  assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`, CALLERS_MAP), null);
-  // NON-VACUOUS: the map the SERVER'S OWN ENVIRONMENT holds still authenticates
-  // its own bearer, and that actor is branded.
-  const server = door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
-  assert.notEqual(server, null);
-  assert.equal(derivesIdentity(Object.assign(server, { correlation_id: CORRELATION_ID })), true);
-
-  // AND THE LEGACY MAP-TAKING DOORS ARE CLOSED WITH NO EXCEPTION — the half the
-  // third round carved out and the fourth was told to close. They still TAKE a
-  // map, because the server has always called them that way, but branding no
-  // longer follows from a match: it follows from the bytes matched against being
-  // bytes identity.js read from the server's environment at initialisation.
-  const callersAgentMap = JSON.stringify({ [RECORDED_AGENT_ACTOR]: CALLERS_OWN });
-  const callersAgent = identity.agentActorForToken(`Bearer ${CALLERS_OWN}`, callersAgentMap);
-  assert.notEqual(callersAgent, null, "the legacy door stopped returning its actor");
-  assert.equal(derivesIdentity(Object.assign(callersAgent, { correlation_id: CORRELATION_ID })),
-    false, "a caller's own token map branded an actor through the legacy agent door");
-  // NON-VACUOUS, and it is the same door, the same bearer shape and the same
-  // slug — only the PROVENANCE of the map differs.
-  const serversAgent = identity.agentActorForToken(
-    `Bearer ${RECORDED_AGENT_TOKEN}`, RECORDED_AGENT_TOKENS);
-  assert.notEqual(serversAgent, null);
-  assert.equal(derivesIdentity(Object.assign(serversAgent, { correlation_id: CORRELATION_ID })),
-    true, "the server's own token map stopped branding through the legacy agent door");
-
-  // AND THE GRANT DOOR IS THE SAME STORY WITH A WITNESS instead of a map: props
-  // a caller wrote get the actor they always got, and no brand.
-  const callersGrant = door.connectionForGrant(
-    identity.propsForSlug("joe", { via: "oauth-google" }), null, "a-witness-the-caller-chose");
-  assert.notEqual(callersGrant, null);
-  assert.equal(derivesIdentity(Object.assign(callersGrant, { correlation_id: CORRELATION_ID })),
-    false, "a caller-chosen witness branded a partner actor");
-
-  // AND THE CALLER'S BEARER IS REFUSED THROUGH THE REAL DISPATCH TOO, which is
-  // where the reviewer's probe ended: no branded actor, so no identity, so no
-  // receipt.
-  const emitted = await emitFrom({}, staged => {
-    // Everything the probe could reach, tried in the staged module: there is no
-    // installer, the caller's bearer authenticates nothing, and the caller's own
-    // map brands nothing through the door that still accepts one.
-    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens, undefined);
-    assert.equal(staged.authenticatedIdentity.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null,
-      "a caller-chosen bearer authenticated against the server's map");
-    const smuggled = staged.agentActorForToken(`Bearer ${CALLERS_OWN}`,
-      JSON.stringify({ [REVIEWING_SEAT_ACTOR]: CALLERS_OWN }));
-    assert.equal(smuggled, null, "an unregistered slug came back through the agent door");
-    // So all it is left holding is an object it wrote itself, which is control
-    // 11's case again and refuses for the same reason.
-    return { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
-      human: false, review: true, via: "review-token", client_id: null,
-      correlation_id: CORRELATION_ID };
+  // AND THE PRODUCER AGREES, through the real gate: a request nobody served
+  // never establishes a call, so the producer refuses.
+  const gate = await moduleOfTree(target, GATE_FILE);
+  const emitted = await withStamps(stamps, async () => {
+    const served = await inServedRequest(target, { bearer: CALLERS_OWN },
+      () => gate.emitGateZeroOutcome());
+    assert.equal(served.served, false, "a caller-chosen bearer was served");
+    return gate.emitGateZeroOutcome();
   });
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
@@ -914,10 +793,11 @@ test("IDENTITY: a caller-chosen bearer plus a caller token map authenticates nob
 
 /**
  * THE HOSTILE VALUES. Everything a caller can write down, and nothing a server
- * holds: no recorded token, no recorded witness, no minted actor. Amendment 8's
- * claim is that NO export of identity.js turns any combination of these into a
- * branded actor or into an entered identity context, so the enumeration below
- * feeds every export every 1-, 2- and 3-tuple drawn from this set.
+ * holds: no recorded token, no recorded witness, no served request. The claim
+ * under test is that NO export of identity.js — at any depth — turns any
+ * combination of these into an entered identity context, so the enumeration
+ * below feeds every reachable callable every 1-, 2- and 3-tuple drawn from this
+ * set, and follows any callable ANSWER one step further.
  */
 function hostileValues(probe) {
   return [
@@ -925,105 +805,106 @@ function hostileValues(probe) {
     "Bearer a-bearer-the-caller-chose",
     JSON.stringify({ [REVIEWING_SEAT_ACTOR]: "a-bearer-the-caller-chose" }),
     JSON.stringify({ [RECORDED_AGENT_ACTOR]: "a-bearer-the-caller-chose" }),
-    fabricatedReviewerActor(),
+    { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+      human: false, review: true, via: "review-token", client_id: null,
+      correlation_id: CORRELATION_ID },
     { slug: "joe", human: true, via: "oauth-google", correlation_id: CORRELATION_ID },
     probe,
   ];
 }
 
-test("IDENTITY: no export of identity.js brands an actor or enters a context from caller bytes",
+test("IDENTITY: no export of identity.js, at any depth, enters a context from caller bytes",
   async () => {
     const { target } = stageTree({});
     const identity = await moduleOfTree(target, IDENTITY_FILE);
     const door = identity.authenticatedIdentity;
 
-    // THE SURFACE IS ENUMERATED OFF THE MODULE NAMESPACE, not off a list and not
-    // off `authenticatedIdentity` alone — which was finding 4 of the third
-    // re-review: the old loop walked only the members already inside the new
-    // namespace, so a NEW top-level callable export bypassed it entirely while
-    // the test next to it asserted the namespace was the whole new surface. A
-    // callable added anywhere in identity.js now arrives in this loop by
-    // existing, at any depth of one frozen namespace object.
-    const surface = [];
-    for (const [name, value] of Object.entries(identity)) {
-      if (typeof value === "function") surface.push([name, value]);
-      else if (value !== null && typeof value === "object")
-        for (const [inner, member] of Object.entries(value))
-          if (typeof member === "function") surface.push([`${name}.${inner}`, member]);
-    }
+    // THE SURFACE IS WALKED, NOT LISTED, AND WALKED RECURSIVELY — which is the
+    // fifth review round's second finding. The old enumeration read
+    // `Object.entries` of the namespace and then one level into each object
+    // member, functions only; a mutation exporting `{ deep: { leak } }` was
+    // never enumerated and returned a branded actor while the assertion beside
+    // it claimed to cover "every callable on the module". This uses the SHARED
+    // reachability walker — the one the producer's own unreachability guard uses
+    // and the readers suite's part-by-part mutation controls measure — so
+    // symbols, prototypes, accessors, accessor functions and inherited getters
+    // under the exported child as receiver are all followed, at every depth.
+    const surface = reachableCallables(identity, WHOLE_WALK);
     assert.ok(surface.length >= 20,
-      `identity.js's callable surface enumerated as ${surface.length}, which is too few to be all of it`);
-    for (const required of ["agentActorForToken", "continuityActorForTokenMaps",
-      "hermesActorForToken", "hermesCosActorForToken", "propsForSlug",
-      "authenticatedIdentity.reviewActorForToken", "authenticatedIdentity.connectionForGrant",
-      "authenticatedIdentity.dispatchFor", "authenticatedIdentity.receiptIdentity",
-      "authenticatedIdentity.buildContext", "authenticatedIdentity.committerIdentity"])
-      assert.ok(surface.some(([name]) => name === required),
+      `identity.js's callable surface enumerated as ${surface.length}, too few to be all of it`);
+    for (const required of [".agentActorForToken", ".continuityActorForTokenMaps",
+      ".hermesActorForToken", ".hermesCosActorForToken", ".propsForSlug",
+      ".serveReviewRequestAuthenticated", ".authenticatedIdentity.connectionForGrant",
+      ".authenticatedIdentity.receiptIdentity", ".authenticatedIdentity.partnerIdentity"])
+      assert.ok(surface.some(([route]) => route === required),
         `${required} was not reached by the enumeration`);
 
-    /**
-     * What a value derives through the real dispatcher. A branded actor answers
-     * a three-field identity here; everything else answers null.
-     *
-     * THE CORRELATION ID IS WRITTEN ON FIRST, IN PLACE, exactly as mcp.js
-     * decorates an authenticated actor — and without it this helper would answer
-     * null for EVERY object and the whole enumeration would pass vacuously,
-     * since a derived identity needs the server's per-call id. Written in place
-     * rather than spread, because the brand is object identity.
-     */
-    const derives = value => {
-      if (value !== null && typeof value === "object" && !Object.isFrozen(value)
-          && value.correlation_id === undefined) {
-        try { value.correlation_id = CORRELATION_ID; } catch { /* frozen enough */ }
-      }
-      try { return door.dispatchFor(value)(() => door.receiptIdentity()); }
-      catch { return null; }
-    };
+    // AND THE ENUMERATION IS NON-VACUOUS AT DEPTH, measured rather than argued:
+    // a nested container holding a callable is reached. This is exactly the
+    // shape the review mutated in, asserted against the walker itself so the
+    // control cannot pass by the walker having stopped working.
+    const leak = () => null;
+    assert.ok(reachableCallables({ api: { deep: { leak } } }, WHOLE_WALK)
+      .some(([route, value]) => value === leak && route === ".api.deep.leak"),
+      "the enumeration does not reach a callable nested two levels down");
 
     // A HOSTILE ARGUMENT THAT LOOKS BACK. If any export runs a caller's function
     // inside an entered context, this records what that context held.
     const seen = [];
-    const probe = (...args) => { seen.push(door.receiptIdentity()); return args[0] ?? null; };
+    const probe = (...args) => {
+      seen.push(door.receiptIdentity());
+      return args[0] ?? null;
+    };
     const hostile = hostileValues(probe);
 
-    const produced = [];
-    for (const [name, callable] of surface)
+    let answeredAnything = false;
+    for (const [route, callable] of surface)
       for (const a of hostile) for (const b of hostile) for (const c of hostile) {
         let answered;
         try { answered = callable(a, b, c); } catch { continue; }
         if (answered === null || answered === undefined) continue;
-        produced.push([name, answered]);
-        // A callable ANSWER is followed one step further: `dispatchFor` hands
-        // back a closure, and a closure that entered an identity would be the
-        // context entry amendment 8 says this file does not export.
+        answeredAnything = true;
+        // A callable ANSWER is followed one step further: a dispatcher handed
+        // back from an export would be the context entry amendment 8 forbids,
+        // and following it is how the fifth round's probe reached one.
         if (typeof answered === "function") {
           try { answered(probe); } catch { /* a refusal is an answer */ }
         }
+        // And so is a callable held ON an answer, at any depth: an export that
+        // returned `{ run }` would hand back the same capability one key down.
+        for (const [, nested] of reachableCallables(Object(answered), WHOLE_WALK)) {
+          if (nested === probe || nested === callable) continue;
+          try { nested(probe); } catch { /* a refusal is an answer */ }
+        }
+        void route;
       }
 
-    assert.ok(produced.length > 0, "no export answered anything, so this proved nothing");
-    for (const [name, value] of produced)
-      assert.equal(derives(value), null,
-        `${name} turned caller bytes into a branded actor`);
+    assert.ok(answeredAnything, "no export answered anything, so this proved nothing");
     for (const held of seen)
       assert.equal(held, null, "an export ran a caller's function inside an identity context");
 
-    // NON-VACUOUS, against the same `derives`: the server's own credentials —
-    // which appear nowhere in the hostile set — still brand, so what refuses
-    // above is provenance and not the helper being broken.
-    assert.deepEqual(derives(recordedReviewerActor(identity)), {
+    // NON-VACUOUS, AGAINST THE SAME PROBE: the server's own bearer — which
+    // appears nowhere in the hostile set — does run it inside a context, so what
+    // answers null above is provenance and not a broken probe.
+    identity.serveReviewRequestAuthenticated(`Bearer ${RECORDED_REVIEW_TOKEN}`,
+      CORRELATION_ID, probe);
+    assert.deepEqual(seen.at(-1), {
       actor_id: REVIEWING_SEAT_ACTOR,
       session_ref: `session:${CORRELATION_ID}`,
       authority_class: "review_agent",
     });
-    assert.deepEqual(derives(recordedPartnerActor(identity)), {
-      actor_id: "joe",
-      session_ref: `session:${CORRELATION_ID}`,
-      authority_class: "verified_partner",
-    });
+
+    // AND THE LEGACY MAP-TAKING DOORS STILL RETURN THEIR ACTORS, which is what
+    // makes the loop above a real sweep rather than a sweep over doors that
+    // answer nothing. What none of them can do any more is reach a context: an
+    // actor is not a capability once nothing exported turns one into a call.
+    assert.notEqual(identity.agentActorForToken(
+      `Bearer ${RECORDED_AGENT_TOKEN}`, RECORDED_AGENT_TOKENS), null);
+    assert.notEqual(door.connectionForGrant(
+      identity.propsForSlug("joe", { via: "oauth-google" }), null, RECORDED_GRANT_WITNESS), null);
   });
 
-test("DIGEST: each bound digest stands on its own artifact's bytes", async () => {
+test("DIGEST: each bound digest stands on its own stamped artifact", async () => {
   const first = await emitFrom({});
   // The receipts differ only by their instants, so two runs over one candidate
   // agree on all five bound digests.
@@ -1032,23 +913,23 @@ test("DIGEST: each bound digest stands on its own artifact's bytes", async () =>
     "environment_manifest_digest", "fixture_set_digest"])
     assert.equal(first.receipt[field], second.receipt[field], field);
 
-  // (a) THE CANDIDATE DIGEST IS THE SEALED ARTIFACT MANIFEST FOR THE HEAD
+  // (a) THE CANDIDATE DIGEST IS THE SEALED ARTIFACT MANIFEST FOR THE STAMPED
   // REVISION — recomputed here by artifact-trust.js's own artifactManifestDigest
-  // over the staged tree's actual bytes, which is the same JCS SHA-256 recipe
+  // over the manifest the stamps carry, which is the same JCS SHA-256 recipe
   // ops.scac_artifact_manifest_digest recomputes in the database. A producer
-  // that hashed a DESCRIPTION of the candidate would satisfy every shape
-  // assertion in this file and fail this one.
-  const { target, treeId } = stageTree({});
+  // that hashed a DESCRIPTION of the candidate, or that stamped a constant,
+  // would satisfy every shape assertion in this file and fail this one.
+  const { target, manifest, stamps } = stageTree({});
   const gate = await moduleOfTree(target, GATE_FILE);
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const own = await inDispatchedVerb(target, recordedReviewerActor(identity),
-    () => gate.emitGateZeroOutcome());
+  const own = await withStamps(stamps, async () =>
+    (await inServedRequest(target, {}, () => gate.emitGateZeroOutcome())).answered);
   assert.equal(own.receipt.candidate_digest,
-    candidateDigestOfTree(target, REVISION_ALL_SUCCEED, treeId, own.receipt.policy_digest),
-    "the candidate digest is not the sealed artifact manifest for this tree");
+    candidateDigestOfStamps(manifest, own.receipt.policy_digest),
+    "the candidate digest is not the sealed artifact manifest the stamps carry");
 
   // (b) ONE BYTE OF THE CANDIDATE MOVES IT. A comment appended to one module in
-  // the staged src is one byte the candidate tree did not have before.
+  // the staged src moves that file's blob id and its content hash, so it moves
+  // the sealed manifest, so it moves the stamp, so it moves this.
   const edited = await emitFrom({ candidateEdit: "one byte of the candidate tree" });
   assert.notEqual(edited.receipt.candidate_digest, first.receipt.candidate_digest);
   // And it moves NOTHING ELSE: the environment and the fixture set did not change.
@@ -1056,21 +937,8 @@ test("DIGEST: each bound digest stands on its own artifact's bytes", async () =>
     first.receipt.environment_manifest_digest);
   assert.equal(edited.receipt.fixture_set_digest, first.receipt.fixture_set_digest);
 
-  // (b2) AND ONE TRACKED FILE MUTATED AFTER THE SEAL MOVES IT TOO. HEAD's tree
-  // still seals the old bytes, so only the observed half of the manifest moves —
-  // which is the control that the manifest is not merely a relabelling of HEAD's
-  // tree id, and the one the second review round asked for by name.
-  const dirty = await emitFrom({ postSealEdit: "one byte the revision does not seal" });
-  assert.notEqual(dirty.receipt.candidate_digest, first.receipt.candidate_digest);
-  assert.equal(dirty.receipt.environment_manifest_digest,
-    first.receipt.environment_manifest_digest);
-
-  // (c) THE MANIFEST IS BOUND TO HEAD, so pointing the run at another revision
-  // moves the candidate digest even when the working tree is byte-identical —
-  // and the two halves are no longer independent, which is the correction. The
-  // manifest's `source_digest` is the blob ids HEAD'S TREE seals, its
-  // `artifact_digest` is the bytes at exactly those paths, and both are inside
-  // the one digest: neither the revision nor the bytes can move without it.
+  // (c) THE MANIFEST IS BOUND TO THE REVISION, so a stamp for another revision
+  // moves the candidate digest even when the bytes are identical.
   const elsewhere = await emitFrom({ revision: REVISION_FAILED_ANCESTOR });
   assert.notEqual(elsewhere.receipt.candidate_digest, first.receipt.candidate_digest);
   assert.equal(elsewhere.receipt.subject_digest, first.receipt.subject_digest,
@@ -1104,6 +972,104 @@ test("DIGEST: each bound digest stands on its own artifact's bytes", async () =>
     assert.notEqual(first.receipt[field], digest(described),
       `${field} is a digest of a description of the artifact rather than of the artifact`);
 });
+
+// ===========================================================================
+// CONTROL 13 — THE STAMPS, AND THE PRODUCTION CONDITION THEY EXIST FOR.
+//
+// Amendment 9's first clause, proved in four parts: a receipt is produced with
+// NO `.git` anywhere (which every case above has already been doing, and which
+// stageTree asserts); a missing stamp is refused BY NAME; a stamp that does not
+// agree with its own digest is refused; and a git read put back into the
+// producer turns the produced cases red, which is what makes the first part
+// mean something.
+// ===========================================================================
+
+test("STAMPS: a receipt is produced with no .git anywhere, and a git read put back is red",
+  async () => {
+    const produced = await emitFrom({});
+    assert.equal(produced.passable, true, produced.unavailable_because ?? produced.reason_id);
+    assert.equal(produced.receipt.candidate_digest.startsWith("sha256:"), true);
+
+    // AND THE PRODUCER HOLDS NO REPOSITORY READ AT ALL, asked of the source: no
+    // filesystem import, no zlib, no walk. A module that cannot name these
+    // cannot fall back to them.
+    const source = readFileSync(join(SRC, PRODUCER_FILE), "utf8");
+    for (const forbidden of ['"node:fs"', '"node:zlib"', '"node:path"', "readFileSync(",
+      "statSync(", "inflateSync(", 'join(root'])
+      assert.equal(source.includes(forbidden), false,
+        `${forbidden} is a request-time repository read in the production producer`);
+
+    // THE MUTATION CONTROL. One anchored edit puts a `.git` read back in front of
+    // the stamp read. In a staged tree there is no repository, so the read throws,
+    // the gate's guarded boundary answers its own refusal, and the case above
+    // goes red — which is the whole evidence that the no-git run is a run and not
+    // a tautology.
+    const regressed = await emitFrom({ reintroduceGitDerivation: true });
+    assert.equal(regressed.passable, false,
+      "a git-derived candidate path still produced a receipt with no repository present");
+  });
+
+test("STAMPS: a stamp this deploy does not carry is refused by name", async () => {
+  for (const [name, absent] of [
+    [BUILD_STAMP_NAMES.gitSha, "GIT_SHA"],
+    [BUILD_STAMP_NAMES.candidateManifest, "CANDIDATE_MANIFEST"],
+    [BUILD_STAMP_NAMES.candidateManifestDigest, "CANDIDATE_MANIFEST_DIGEST"],
+  ]) {
+    const emitted = await emitFrom({ dropStamp: name });
+    assert.equal(emitted.passable, false, name);
+    assert.equal(emitted.reason_id, "gate_zero_candidate_metadata_absent", name);
+    assert.deepEqual(emitted.producer_answer.absent_candidate_metadata, [absent]);
+    assert.match(emitted.producer_answer.unavailable_because, new RegExp(absent));
+    assert.equal(emitted.producer_answer.receipt, null);
+    assert.equal(emitted.producer_answer.clauses, null);
+  }
+});
+
+test("STAMPS: a manifest edited after its seal does not match its digest and is refused",
+  async () => {
+    // THE TWO STAMPS CHECK EACH OTHER. `stampsFor` digests the manifest AS
+    // SEALED and then writes the rewritten one into the var, which is exactly
+    // what a hand-edited Worker var looks like from inside the Worker.
+    const tampered = await emitFrom({
+      rewriteManifest: manifest => ({ ...manifest, byte_length: manifest.byte_length + 1 }) });
+    assert.equal(tampered.passable, false);
+    assert.equal(tampered.reason_id, "gate_zero_candidate_metadata_absent");
+    assert.deepEqual(tampered.producer_answer.absent_candidate_metadata,
+      ["CANDIDATE_MANIFEST_DIGEST:does_not_cover_the_stamped_manifest"]);
+
+    // A MANIFEST FOR ANOTHER REVISION IS REFUSED TOO, by its own field name —
+    // the sha and the manifest cannot drift apart.
+    const mismatched = await emitFrom({
+      coverRewrittenManifest: true,
+      rewriteManifest: manifest => ({ ...manifest, git_sha: REVISION_UNFINISHED }) });
+    assert.equal(mismatched.passable, false);
+    assert.equal(mismatched.reason_id, "gate_zero_candidate_metadata_absent");
+    assert.deepEqual(mismatched.producer_answer.absent_candidate_metadata,
+      ["CANDIDATE_MANIFEST:git_sha"]);
+
+    // AND SO IS A MANIFEST MISSING ONE OF THE SEALED DIGESTS. The environment
+    // manifest deleted from the tree is no longer "a file that is not on disk" —
+    // it is a field the wrapper could not seal, and it is named as one.
+    const unsealed = await emitFrom({ withoutEnvironmentManifest: true,
+      coverRewrittenManifest: true, rewriteManifest: manifest => manifest });
+    assert.equal(unsealed.passable, false);
+    assert.equal(unsealed.reason_id, "gate_zero_candidate_metadata_absent");
+    assert.deepEqual(unsealed.producer_answer.absent_candidate_metadata,
+      ["CANDIDATE_MANIFEST:environment_manifest_digest"]);
+
+    // NOT PARSING AT ALL is its own name rather than a field name. The stamps
+    // are written directly here because a manifest that is not JSON is not
+    // something the sealer could produce — it is a var somebody wrote by hand.
+    const { target, stamps } = stageTree({});
+    const gate = await moduleOfTree(target, GATE_FILE);
+    const unparsed = await withStamps(
+      { ...stamps, [BUILD_STAMP_NAMES.candidateManifest]: "not-json-at-all" },
+      async () => (await inServedRequest(target, {}, () => gate.emitGateZeroOutcome())).answered);
+    assert.equal(unparsed.passable, false);
+    assert.equal(unparsed.reason_id, "gate_zero_candidate_metadata_absent");
+    assert.deepEqual(unparsed.producer_answer.absent_candidate_metadata,
+      ["CANDIDATE_MANIFEST:not_json"]);
+  });
 
 // ===========================================================================
 // CONTROL 3 — each clause turned off, one at a time.
@@ -1289,13 +1255,15 @@ test("PROPAGATION: the required denials are re-derived, not asserted", async () 
 // ===========================================================================
 
 test("IDENTITY: a subject maker that is the reviewing seat is denied", async () => {
-  // r7's rule denies same-actor self-review, and the guard has to exist whether
-  // or not today's class set can reach it: `review_agent` is the only admitted
-  // class and a committer never resolves to a machine identity, so the two seats
-  // cannot collide in the shipped configuration. The case is reached the way
-  // every other case here is reached — by editing one line in a throwaway tree —
-  // so the guard is PROVED rather than assumed unreachable.
-  const emitted = await emitFrom({ admitPartnerClass: true }, recordedPartnerActor);
+  // r7's rule denies same-seat self-review, and the guard has to exist whether
+  // or not today's rows can reach it: the subject maker is a registered PARTNER
+  // out of the release record and the producer is a review-council machine seat,
+  // so the ACTORS cannot collide in the shipped configuration. The SESSIONS can,
+  // and that is the half this case reaches — a release row whose correlation is
+  // the correlation of the call now reviewing it. Two seats collide when they
+  // share EITHER the actor or the session, so the guard is PROVED live rather
+  // than assumed unreachable.
+  const emitted = await emitFrom({ candidateRecordWorld: "same-session" });
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emitted.outcome_digest, null);
@@ -1304,93 +1272,45 @@ test("IDENTITY: a subject maker that is the reviewing seat is denied", async () 
   assert.equal(emitted.producer_answer.receipt, null);
 });
 
-test("PRODUCED: a head written by GitHub's merge path still names its maker", async () => {
-  // THE THIRD REVIEW ROUND'S SECOND FINDING, as a control. Every head GitHub's
-  // own merge path writes carries the author's `users.noreply.github.com`
-  // address as the committer — it is what THIS PR's head carries — and a
-  // registry holding only the Gmail addresses reported `subject_maker` unnamed
-  // for the very branch under review.
-  const emitted = await emitFrom({ maker: MAKER_NOREPLY_EMAIL });
-  assert.equal(emitted.passable, true, emitted.unavailable_because ?? emitted.reason_id);
-  assert.equal(emitted.receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
-  assert.equal(emitted.receipt.subject_maker_identity.authority_class, "verified_partner");
-  assert.equal(emitted.receipt.subject_maker_identity.session_ref,
-    `session:${CORRELATION_ID}:candidate-build`);
+// ===========================================================================
+// THE SUBJECT MAKER, AND THE RECORD IT COMES OUT OF (amendment 9(b)).
+// ===========================================================================
 
-  // AND GITHUB'S SHARED WEB-FLOW COMMITTER STILL NAMES NOBODY. `noreply@github.com`
-  // is carried by every web commit by every account, so registering it would put
-  // a stranger's work under a partner's name. It is deliberately absent from the
-  // table, and this is the line that keeps it absent.
-  const shared = await emitFrom({ maker: "noreply@github.com" });
-  assert.equal(shared.passable, false);
-  assert.equal(shared.reason_id, "gate_zero_run_binding_unnamed");
-  assert.deepEqual(shared.producer_answer.unnamed_bindings, ["subject_maker"]);
-});
+test("ABSENCE: a revision with no release candidate on record IS the absent ruled row",
+  async () => {
+    // A build nobody filed a release candidate for. The stamps are intact and
+    // every clause row is present; what is genuinely absent is the RECORD naming
+    // who made the candidate. This is the one case
+    // `gate_zero_run_binding_unnamed` is left with, and it says which.
+    const emitted = await emitFrom({ candidateRecordWorld: "absent" });
+    assert.equal(emitted.passable, false);
+    assert.equal(emitted.reason_id, "gate_zero_run_binding_unnamed");
+    assert.equal(emitted.producer_answer.clauses, null);
+    assert.deepEqual(emitted.producer_answer.unnamed_bindings, ["subject_maker"]);
+  });
 
-test("ABSENCE: a committer this system does not register IS the absent ruled row", async () => {
-  // A real, well-formed address identity.js's actor registry does not map. The
-  // repository is intact and every sealed file is on disk; what is genuinely
-  // absent is the REGISTRATION of the principal a receipt would name. This is
-  // the one case `gate_zero_run_binding_unnamed` is left with, and it says which.
-  const emitted = await emitFrom({ maker: "someone.else@example.com" });
+test("ABSENCE: release rows that disagree about the maker name nobody", async () => {
+  // TWO ROWS, TWO MAKERS. A receipt that named one of them would be PICKING, and
+  // an oracle that picks its own subject maker is not reading a record. Both
+  // rows are well-formed and both makers are registered partners, so what
+  // refuses is the disagreement itself.
+  const emitted = await emitFrom({ candidateRecordWorld: "ambiguous" });
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_run_binding_unnamed");
-  assert.equal(emitted.producer_answer.clauses, null);
   assert.deepEqual(emitted.producer_answer.unnamed_bindings, ["subject_maker"]);
 });
 
-// ===========================================================================
-// THE THREE KINDS OF ABSENCE, AND THEY ARE THREE DIFFERENT ANSWERS.
-//
-// The second review round's third finding: `gate_zero_run_binding_unnamed`
-// claimed "a ruled store row is absent" for unreadable git metadata and for a
-// missing file alike. A refusal that misdescribes its own cause sends the next
-// session to debug the wrong thing, so the three are now separated and each case
-// below pins one of them.
-// ===========================================================================
-
-test("ABSENCE: a candidate whose repository names no revision is a METADATA absence", async () => {
-  // A .git with nothing in it: no HEAD, so no revision, so no commit object, no
-  // committer and no sealed tree. Nothing is missing from a ruled store here —
-  // this run cannot see the candidate it is standing in, and it says so under
-  // its own reason and names every part it could not resolve.
-  const emitted = await emitFrom({ git: "empty" });
+test("ABSENCE: a maker this system does not register as a partner names nobody", async () => {
+  // A slug-shaped maker the store lets through — it passes the store's own
+  // pattern — and which identity.js's partner registry does not know. The widest
+  // value this path can carry into a receipt is a registered partner's name, so
+  // the row is read and the principal is still absent.
+  const emitted = await emitFrom({ candidateRecordWorld: "unregistered-maker" });
   assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_candidate_metadata_absent");
-  assert.deepEqual(emitted.producer_answer.absent_candidate_metadata,
-    ["head_revision", "head_revision_object", "head_maker_address",
-      "head_candidate_manifest"]);
-  assert.match(emitted.producer_answer.unavailable_because, /head_revision/);
-  assert.equal(emitted.producer_answer.receipt, null);
-  assert.equal(emitted.producer_answer.clauses, null);
-});
-
-test("ABSENCE: a sealed file a digest stands on that is not on disk is an ARTIFACT absence", async () => {
-  // The environment manifest, deleted. The repository is intact, HEAD resolves,
-  // the committer is registered — and one FILE this receipt's digests stand on
-  // is not there. That is neither unreadable metadata nor an absent ruled row.
-  const emitted = await emitFrom({ withoutEnvironmentManifest: true });
-  assert.equal(emitted.passable, false);
-  assert.equal(emitted.reason_id, "gate_zero_sealed_artifact_absent");
-  assert.deepEqual(emitted.producer_answer.absent_sealed_artifacts, ["environment_manifest"]);
-  assert.equal(emitted.producer_answer.receipt, null);
-});
-
-test("ABSENCE: HEAD's own object out of reach is a METADATA absence, not a missing row", async () => {
-  // The one shape a real clone reaches: HEAD names a revision whose object this
-  // producer cannot inflate (in a real repository, because it is packed). It
-  // says exactly that, by name, rather than reporting an absent binding row.
-  const { target } = stageTree({});
-  const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const base = join(target, "..", "..");
-  rmSync(join(base, ".git", "objects", REVISION_ALL_SUCCEED.slice(0, 2),
-    REVISION_ALL_SUCCEED.slice(2)));
-  const gate = await moduleOfTree(target, GATE_FILE);
-  const emitted = await inDispatchedVerb(target, recordedReviewerActor(identity),
-    () => gate.emitGateZeroOutcome());
-  assert.equal(emitted.reason_id, "gate_zero_candidate_metadata_absent");
-  assert.deepEqual(emitted.producer_answer.absent_candidate_metadata,
-    ["head_revision_object", "head_maker_address", "head_candidate_manifest"]);
+  assert.equal(emitted.reason_id, "gate_zero_run_binding_unnamed");
+  assert.deepEqual(emitted.producer_answer.unnamed_bindings, ["subject_maker"]);
+  assert.equal(JSON.stringify(emitted).includes("carr-release-bot"), false,
+    "an unregistered maker slug came back out of the answer");
 });
 
 // ===========================================================================
@@ -1506,9 +1426,16 @@ test("SHAPE: every callable this PR added to identity.js and the walker wears am
   // ENUMERATED, NOT LISTED. Every member of the namespace is checked, whatever
   // it is called and however many there are.
   const added = Object.keys(surface);
-  assert.ok(added.length >= 6, `identity.js's new surface shrank to ${added.length}`);
+  assert.deepEqual(added.sort(),
+    ["connectionForGrant", "partnerIdentity", "receiptIdentity"],
+    "the authenticated-identity surface grew or lost a member");
   for (const name of added) assertClosedShape(surface[name], `identity.js#authenticatedIdentity.${name}`);
   assert.deepEqual(added.filter(name => typeof surface[name] !== "function"), []);
+  // AND THE ONE ENTRY ONTO THE AUTHENTICATED CALL WEARS THE SHAPE TOO. It is a
+  // top-level export rather than a member of the namespace above, because that
+  // namespace is a set of READERS and this is not one.
+  assertClosedShape(identity.serveReviewRequestAuthenticated,
+    "identity.js#serveReviewRequestAuthenticated");
 
   // AND THE SURFACE IS ALL OF IT — asserted DYNAMICALLY against the file's own
   // exports, which is finding 4 of the third re-review. The old line only said
@@ -1524,13 +1451,14 @@ test("SHAPE: every callable this PR added to identity.js and the walker wears am
      "continuityActorForTokenMaps", "hermesActorForToken", "hermesActorForTokenMaps",
      "hermesCosActorForToken", "isKnownActor", "isKnownPartner",
      "organizationTenantForActor", "permittedActionOwnerSlugs", "personalScopeForActor",
-     "propsForSlug", "slugForEmail", "verifiedAgentSlugForClient"],
+     "propsForSlug", "serveReviewRequestAuthenticated", "slugForEmail",
+     "verifiedAgentSlugForClient"],
     "identity.js grew or lost a top-level callable export");
 
   const walker = await import("./gate-zero-reachability-walk.testhelper.mjs");
   const callables = Object.entries(walker).filter(([, value]) => typeof value === "function");
   assert.deepEqual(callables.map(([name]) => name).sort(),
-    ["pathToValue", "topLevelIdentityOnly"]);
+    ["pathToValue", "reachableCallables", "topLevelIdentityOnly"]);
   for (const [name, value] of callables)
     assertClosedShape(value, `gate-zero-reachability-walk.testhelper.mjs#${name}`);
 
@@ -1631,18 +1559,49 @@ test("REACHABILITY: the producer callable is reachable from its own namespace an
     "the producer's callable is reachable from a public namespace that is not its own");
 });
 
-test("SURFACE: no environment variable names a row, opens a seam or moves an answer", () => {
-  // A FRESH PROCESS, because a module reads its environment while it evaluates:
-  // the variables are set before the import, not after it.
+test("SURFACE: no environment variable but the declared build stamps moves an answer", () => {
+  // WHAT CHANGED, AND WHAT DID NOT (amendment 9, 2026-09-14). This module now
+  // reads THREE environment variables, and they are declared, closed and named
+  // in build-stamp.js: they carry WHAT THIS DEPLOY IS, stamped by the deploy
+  // wrapper at upload time. What they are not, and what nothing else may be, is
+  // an ADDRESS: no variable names a row, selects a store, opens a seam, chooses
+  // an identity or moves a verdict. So the sweep below is unchanged in kind — a
+  // hostile environment against a clean one, in a fresh process, asserting the
+  // answers are identical — and the hostile set is asserted DISJOINT from the
+  // three declared stamps, so this cannot pass by accidentally testing them.
+  const declared = Object.values(BUILD_STAMP_NAMES);
+  assert.deepEqual([...declared].sort(),
+    ["CANDIDATE_MANIFEST", "CANDIDATE_MANIFEST_DIGEST", "GIT_SHA"]);
+
+  // THE CHILD RUNS INSIDE A SERVED REQUEST, which the old shape did not — and
+  // without that this whole case was comparing two identity refusals, since the
+  // producer asks who is calling before it reads anything at all. It authenticates
+  // through the same one entry index.js uses, over credentials passed identically
+  // to every variant below, so the ONLY thing that differs between runs is the
+  // environment under test.
   const script = `
     const { pathToFileURL } = require("node:url");
-    import(pathToFileURL(process.argv[1]).href).then(async gate => {
+    (async () => {
+      const gate = await import(pathToFileURL(process.argv[1]).href);
       const { digest } = await import(pathToFileURL(process.argv[2]).href);
-      process.stdout.write(JSON.stringify({ emitted: digest(await gate.emitGateZeroOutcome()) }));
-    }).catch(error => { process.stderr.write(String(error)); process.exit(1); });
+      const identity = await import(pathToFileURL(process.argv[3]).href);
+      const answered = await identity.serveReviewRequestAuthenticated(
+        "Bearer " + process.env.REVIEW_BEARER, process.env.REVIEW_CORRELATION,
+        () => gate.emitGateZeroOutcome());
+      process.stdout.write(JSON.stringify({ emitted: digest(answered) }));
+    })().catch(error => { process.stderr.write(String(error)); process.exit(1); });
   `;
-  const hostile = {
+  const served = {
     ...process.env,
+    REVIEW_TOKENS: RECORDED_REVIEW_TOKENS,
+    REVIEW_BEARER: RECORDED_REVIEW_TOKEN,
+    REVIEW_CORRELATION: CORRELATION_ID,
+  };
+  const child = env => spawnSync(process.execPath,
+    ["-e", script, join(SRC, GATE_FILE), join(SRC, "artifact-trust.js"), join(SRC, IDENTITY_FILE)],
+    { encoding: "utf8", env });
+  const hostile = {
+    ...served,
     CARR_GATE_ZERO_HEAD_REVISION: REVISION_ALL_SUCCEED,
     CARR_GATE_ZERO_SERVICE_KEY: "gate-zero-canary",
     CARR_GATE_ZERO_CANARY_RUN_KEY: "gate-zero-run-0001",
@@ -1651,18 +1610,28 @@ test("SURFACE: no environment variable names a row, opens a seam or moves an ans
     CARR_GATE_ZERO_RUN_BINDING: "named",
     CARR_GATE_ZERO_ACTOR: REVIEWING_SEAT_ACTOR,
     GATE_ZERO_PASSABLE: "true",
+    CANDIDATE_MANIFEST_SCHEMA,
   };
-  const run = spawnSync(process.execPath,
-    ["-e", script, join(SRC, GATE_FILE), join(SRC, "artifact-trust.js")],
-    { encoding: "utf8", env: hostile });
+  for (const name of declared)
+    assert.equal(Object.hasOwn(hostile, name), false,
+      `${name} is a declared build stamp and must not be in the hostile set`);
+
+  const run = child(hostile);
   assert.equal(run.status, 0, `the child failed: ${run.stderr}`);
   const withEnvironment = JSON.parse(run.stdout).emitted;
-  const clean = spawnSync(process.execPath,
-    ["-e", script, join(SRC, GATE_FILE), join(SRC, "artifact-trust.js")],
-    { encoding: "utf8", env: process.env });
+  const clean = child(served);
   assert.equal(clean.status, 0, `the child failed: ${clean.stderr}`);
   assert.equal(withEnvironment, JSON.parse(clean.stdout).emitted,
-    "an environment variable moved the emitted answer");
+    "an environment variable that is not a declared build stamp moved the emitted answer");
+
+  // AND THE DECLARED STAMPS DO REACH THE ANSWER, which is what makes the
+  // assertion above a statement about ADDRESSES rather than about a module that
+  // reads no environment at all. One stamp supplied is one stamp fewer in the
+  // refusal's named list, so the answer moves.
+  const stamped = child({ ...served, [BUILD_STAMP_NAMES.gitSha]: REVISION_UNFINISHED });
+  assert.equal(stamped.status, 0, `the child failed: ${stamped.stderr}`);
+  assert.notEqual(JSON.parse(stamped.stdout).emitted, withEnvironment,
+    "the declared build stamps do not reach the answer at all");
 });
 
 // ===========================================================================
@@ -1673,7 +1642,15 @@ test("REASONS: every reason the producer can answer with is registered by the ga
   for (const id of producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS)
     assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes(id),
       `${id} is a producer refusal the gate cannot express`);
-  assert.equal(producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS.length, 9);
+  // EIGHT, not nine: `gate_zero_sealed_artifact_absent` left this list with
+  // amendment 9 because the producer can no longer reach it — the sealed files
+  // are digested by the deploy wrapper now, so their absence is a missing stamp
+  // field. The GATE still registers the id, which is why the loop above still
+  // passes over a strict subset.
+  assert.equal(producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS.length, 8);
+  assert.equal(producer.V5_A02_GATE_ZERO_PRODUCER_REASON_IDS
+    .includes("gate_zero_sealed_artifact_absent"), false);
+  assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes("gate_zero_sealed_artifact_absent"));
   // And the source cites no id outside its own closed list: `reason()` raises on
   // an unregistered one, so a citation that is not here cannot be reached at all.
   const source = readFileSync(join(SRC, PRODUCER_FILE), "utf8");

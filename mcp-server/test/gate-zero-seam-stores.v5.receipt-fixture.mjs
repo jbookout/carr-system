@@ -237,3 +237,7 @@ export const fetchSchedulerLedgerRows = closedCallable(
 
 export const fetchCheckConclusionRows = closedCallable(
   async () => ({ store_ref: "github:checks", rows: [] }));
+
+/** And the candidate-build record store, which this fixture also holds nothing for. */
+export const fetchCandidateBuildRecordRows = closedCallable(
+  async () => ({ store_ref: "control-plane:ops.candidate-build-record", rows: [] }));

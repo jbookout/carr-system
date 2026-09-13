@@ -81,6 +81,7 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
+         serveReviewRequestAuthenticated,
          hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
@@ -360,25 +361,21 @@ function probeActorFor(request, env) {
 // deterministically to probe first; in practice a caller only ever holds one
 // of the two tokens.
 //
-// THE MATCHING LOGIC MOVED TO identity.js ON 2026-09-12 (PR 1013) and this is
-// now a delegation. Nothing about the door changed — same secret, same map
-// shape, same returned fields — but the actor is authenticated inside
-// identity.js, which is the only file that can brand one.
+// THE MATCHING LOGIC MOVED TO identity.js ON 2026-09-12 (PR 1013) and THE DOOR
+// ITSELF FOLLOWED IT on 2026-09-14 (amendment 9, fifth correction round). There
+// is no `reviewActorFor(request)` here any more, because there is no exported
+// function to delegate to: `reviewActorForToken` minted a branded actor and
+// `dispatchFor` returned a callable that entered a context, and a probe that
+// composed the two ran its own code as `review_agent`. Both are module-private
+// inside identity.js now.
 //
-// THE MAP IS NOT HANDED OVER AT ALL ANY MORE (amendment 8, fourth correction
-// round). The third round took the token map off the caller's side of the door
-// but kept a one-shot `sealServerReviewTokens` for the server to install its
-// own, and the reviewer's probe simply installed one FIRST: one-shot state
-// decides who is earliest, not who is the server. identity.js now reads
-// REVIEW_TOKENS itself, once, at module initialisation, out of `process.env` —
-// which wrangler populates from this Worker's secrets (nodejs_compat, 2026-07-01
-// compatibility date) and which, unlike `env`, is readable at module scope. So
-// this door is a BEARER and nothing else, and there is no function anywhere that
-// installs a map.
-function reviewActorFor(request) {
-  return authenticatedIdentity.reviewActorForToken(request.headers.get("authorization") || "");
-}
-
+// WHAT THIS FILE CALLS INSTEAD is `serveReviewRequestAuthenticated`, in the
+// /mcp route below: it matches the request's own Authorization header against
+// the REVIEW_TOKENS map identity.js read from `process.env` at initialisation —
+// which wrangler populates from this Worker's secrets (nodejs_compat,
+// 2026-07-01 compatibility date) — establishes the authenticated call for what
+// it matched, and runs this file's dispatch inside it. No bearer match answers
+// null and the next door gets its turn.
 // ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------
 //
 // The fifth door, built on the PROBE_TOKENS/REVIEW_TOKENS pattern above and
@@ -660,8 +657,15 @@ async function routeRequest(request, env, ctx) {
   if (url.pathname === "/mcp") {
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
-    const reviewActor = reviewActorFor(request);
-    if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    // THE ONE ENTRY ONTO THE AUTHENTICATED CALL (amendment 9, 2026-09-14). The
+    // bearer is matched inside identity.js, the context is entered inside
+    // identity.js, and the dispatch below runs inside it — one act, so there is
+    // no pair of exports for a caller to compose. `null` means this was not a
+    // review-council request at all.
+    const reviewServed = await serveReviewRequestAuthenticated(
+      request.headers.get("authorization") || "", env.CORRELATION_ID,
+      reviewActor => dispatch(request, env, ctx, reviewActor));
+    if (reviewServed !== null) return reviewServed;
     const hermesCosActor = hermesCosActorFor(request, env);
     if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);
     const hermesActor = hermesActorFor(request, env);

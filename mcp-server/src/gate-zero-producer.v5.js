@@ -57,13 +57,13 @@
 // below says from what.
 //
 // AND AN ABSENCE IS CLASSIFIED HONESTLY, which the second review round asked
-// for. Three different things can go missing and they are three different
-// answers: `gate_zero_candidate_metadata_absent` when this candidate's own
-// git metadata cannot be read, `gate_zero_sealed_artifact_absent` when a sealed
-// FILE a digest stands on is not on disk, and `gate_zero_run_binding_unnamed`
-// only when a RULED ROW is genuinely absent — today that is exactly one row, the
-// subject maker's registration. The first draft answered the third for all
-// three, which described the wrong fault to whoever read it next.
+// for. Two different things can go missing and they are two different answers:
+// `gate_zero_candidate_metadata_absent` when this DEPLOY carries no usable build
+// stamp — which var, which field — and `gate_zero_run_binding_unnamed` only when
+// a RULED ROW is genuinely absent, which today is exactly one row: the
+// release-candidate record naming who built the stamped revision. The first
+// draft answered the second for everything, which described the wrong fault to
+// whoever read it next.
 //
 // ---------------------------------------------------------------------------
 // THE DIGEST RECIPE, AND THE ONE GAP THE SEAM STUDY NAMED.
@@ -108,25 +108,25 @@
 // THE PRODUCER AND THE EVALUATOR ARE THE AUTHENTICATED CALLER, read through the
 // module-private `authenticatedCaller()` below. There is no exported reader and
 // no exported setter anywhere on this path: the value it answers with is the one
-// tools.js's single verb dispatch entered, DERIVED inside identity.js from an
-// actor identity.js itself minted from a credential and stamped with a Symbol
-// nothing else can name. The second review round found the first correction
-// shipping `runInAuthenticatedCall(actor, fn)` as a public export that accepted
-// an ordinary object — caller-supplied identity wearing a context's clothes —
-// and both that name and its reader are gone. A fabricated actor object now
-// enters the scope as null, so it obtains no receipt.
+// identity.js's SINGLE REQUEST ENTRY established, derived there from a bearer
+// that file matched against the credential map it read from the server's own
+// environment. The second round found `runInAuthenticatedCall(actor, fn)` shipped
+// as a public export taking an ordinary object; the fifth found the pair that
+// replaced it — a public minter and a public dispatcher-factory — composed by a
+// probe into the same thing. Neither name exists now, and nothing exported by
+// that file returns a branded actor or a callable that enters a context.
 //
-// THE SUBJECT MAKER IS HEAD'S OWN COMMITTER — the `committer` line of HEAD's
-// commit OBJECT, not the reflog's last actor, which is whoever last moved this
-// worktree's HEAD and is a different person after every checkout. The address is
-// resolved by identity.js's frozen committer registry, which holds each
-// partner's Gmail address AND their GitHub noreply address: every head GitHub's
-// own merge path writes carries the latter, so a table without them could not
-// name the maker of any merged commit. That file derives the class too. Nothing
-// is stated as a constant — `candidate_builder`, which the first draft wrote
-// into the field, named a class no part of this system derives, admits or
-// checks — and the SESSION half is not assembled here either: it comes from the
-// authenticated build context the dispatch path established.
+// THE SUBJECT MAKER IS THE RELEASE-CANDIDATE RECORD FOR THE STAMPED REVISION
+// (amendment 9(b), 2026-09-14) — the ops.release row `tools/ops-record.py
+// release candidate` filed over an authenticated authority connection for this
+// exact build, read back through the Control Plane store. Both halves come out
+// of that row: the maker it names, resolved through identity.js's partner
+// registry, and the correlation the recorder stamped on it as the session. It is
+// NOT HEAD's committer any more, which the third round installed and the fifth
+// round's finding 3 undid: a committer line is an attribution anybody with a git
+// config can write, the deployed Worker cannot read one, and the session beside
+// it was being manufactured by suffixing the EVALUATOR'S OWN session with
+// `:candidate-build` — the reviewer's seat, relabelled as the maker's.
 //
 // CARD 9 IS STILL WHAT BINDS THE SEAM. An unstaffed seat still turns the whole
 // slice dark. What the seat no longer does is sign: naming who may sign and
@@ -139,12 +139,15 @@
 //   * A CONTRACT VIOLATION THROWS V5BoundaryError. Handing this module an
 //     argument is not a policy question.
 
-import { readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-import { inflateSync } from "node:zlib";
-
 import { artifactManifestDigest, canonicalJson, digest } from "./artifact-trust.js";
+import {
+  BUILD_STAMP_NAMES,
+  CANDIDATE_MANIFEST_SCHEMA,
+  serverBuildEnvironment,
+  stampedCandidateManifestDigest,
+  stampedCandidateManifestText,
+  stampedGitSha,
+} from "./build-stamp.js";
 import { closedCallable } from "./closed-callable.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID, authenticatedIdentity } from "./identity.js";
@@ -167,6 +170,7 @@ import {
   readPredecessorOutcomeEvidence,
   readSchedulerCanaryEvidence,
 } from "./gate-zero-seam-readers.v5.js";
+import { fetchCandidateBuildRecordRows, isSeamStoreUnreachable } from "./gate-zero-seam-stores.v5.js";
 
 export const V5_A02_GATE_ZERO_PRODUCER_SCHEMA_VERSION =
   "doctorcre-v5-a02-gate-zero-producer.v1";
@@ -229,29 +233,35 @@ export const V5_A02_GATE_ZERO_CLAUSE_STATES = deepFreeze([FAILED, HELD, UNKNOWN]
  * so the two lists cannot drift apart in silence.
  */
 export const V5_A02_GATE_ZERO_PRODUCER_REASON_IDS = deepFreeze([
-  // THE THREE KINDS OF ABSENCE, AND THEY ARE NOT ONE REASON (2026-09-12, second
-  // correction round). The first draft answered `gate_zero_run_binding_unnamed`
-  // for all of them, which told a reader "a row is missing" when the truth was
-  // "this candidate's git metadata could not be parsed" or "a file on disk is
-  // not there". A refusal that misdescribes its own cause is worse than a
-  // refusal, because the next session debugs the wrong thing.
+  // THE TWO KINDS OF ABSENCE, AND THEY ARE NOT ONE REASON (2026-09-12, second
+  // correction round; narrowed from three by amendment 9, 2026-09-14). The first
+  // draft answered `gate_zero_run_binding_unnamed` for all of them, which told a
+  // reader "a row is missing" when the truth was "this deploy cannot say what it
+  // is". A refusal that misdescribes its own cause is worse than a refusal,
+  // because the next session debugs the wrong thing.
   //
-  //   gate_zero_candidate_metadata_absent  the candidate repository's own git
-  //       metadata — .git, HEAD, HEAD's own object, its maker line, or the tree
-  //       it names — is missing, malformed, or not a loose object. Nothing is
-  //       absent from a ruled store; this run cannot see the candidate it is
-  //       standing in. (The field names below avoid two words the v5 privileged
-  //       -word sweep closes over as SUBSTRINGS, which is why HEAD's commit is
-  //       `head_revision_object` and its committer `head_maker_address`.)
-  //   gate_zero_sealed_artifact_absent  a sealed FILE one of this receipt's
-  //       digests stands on is not on disk: the environment manifest, one of
-  //       the sealed fixtures, or a path HEAD's tree names that the working
-  //       tree does not have.
-  //   gate_zero_run_binding_unnamed  a RULED ROW this run's binding derives
-  //       from is genuinely absent, and the answer names which. The one such
-  //       row today is the subject maker: HEAD's committer is a well-formed
-  //       address that identity.js's actor registry does not map, so the
-  //       principal a receipt would name has no registration.
+  //   gate_zero_candidate_metadata_absent  this DEPLOY carries no usable
+  //       candidate stamp: GIT_SHA, CANDIDATE_MANIFEST or
+  //       CANDIDATE_MANIFEST_DIGEST is missing, or the manifest does not parse,
+  //       lacks a field, names another revision, or is not what the stamped
+  //       digest covers. The answer names which var and which field. Nothing is
+  //       absent from a ruled store; this run cannot say which candidate it IS.
+  //   gate_zero_run_binding_unnamed  a RULED ROW this run's binding derives from
+  //       is genuinely absent, and the answer names which. The one such row is
+  //       the subject maker: the release-candidate record the deploy wrapper
+  //       filed for the stamped revision is missing, its rows disagree about who
+  //       made the candidate, or the maker slug is one identity.js does not
+  //       register as a partner.
+  //
+  // `gate_zero_sealed_artifact_absent` IS GONE FROM THIS LIST, and its absence
+  // is the shape of amendment 9. It answered "a sealed file one of these digests
+  // stands on is not on disk" — a sentence only a process standing in a checkout
+  // can say. The environment manifest and the sealed fixture set are digested by
+  // the deploy wrapper's sealer now and arrive inside the stamped manifest, so
+  // their absence is a missing stamp field and is reported as one. The GATE's
+  // registry keeps the id; this producer can no longer reach it, and a
+  // vocabulary that keeps unreachable words invites a reader to look for a path
+  // that is not there.
   "gate_zero_candidate_metadata_absent",
   "gate_zero_evidence_unavailable",
   "gate_zero_gate_graph_clause_failed",
@@ -260,7 +270,6 @@ export const V5_A02_GATE_ZERO_PRODUCER_REASON_IDS = deepFreeze([
   "gate_zero_producer_identity_refused",
   "gate_zero_run_binding_unnamed",
   "gate_zero_scheduler_clause_failed",
-  "gate_zero_sealed_artifact_absent",
 ].sort());
 
 function reason(id) {
@@ -375,251 +384,104 @@ const COMPARATOR =
  */
 const SCHEDULER_SERVICE_KEY = "gate-zero-canary";
 
-/** Where the running module's own repository begins, walking up from this file. */
-function repositoryRoot() {
-  let at = dirname(fileURLToPath(import.meta.url));
-  for (let step = 0; step < 32; step += 1) {
-    try {
-      statSync(join(at, ".git"));
-      return at;
-    } catch { /* keep walking */ }
-    const up = dirname(at);
-    if (up === at) return null;
-    at = up;
-  }
-  return null;
-}
-
-function readText(path) {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The git directory for the candidate tree, and the common directory its refs
- * and reflog live in. A worktree's `.git` is a FILE naming its own directory,
- * which is the shape this repository's sessions actually run in.
- */
-function gitDirectories(root) {
-  if (root === null) return null;
-  const dotGit = join(root, ".git");
-  let gitDir = dotGit;
-  const asFile = readText(dotGit);
-  if (asFile !== null) {
-    const named = /^gitdir:\s*(.+?)\s*$/m.exec(asFile);
-    if (named === null) return null;
-    gitDir = named[1].startsWith(sep) ? named[1] : join(root, named[1]);
-  }
-  const common = readText(join(gitDir, "commondir"));
-  return {
-    gitDir,
-    commonDir: common === null ? gitDir
-      : (common.trim().startsWith(sep) ? common.trim() : join(gitDir, common.trim())),
-  };
-}
-
 const HEAD_REVISION = /^[0-9a-f]{40}$/;
 const SERVICE_KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ACTOR_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-
-/**
- * THE REVISION THE RUNNING MODULE WAS BUILT FROM. Loose ref, packed ref or a
- * detached HEAD — all three are read, none is guessed, and anything else answers
- * null, which refuses.
- */
-function headRevisionOf(git) {
-  if (git === null) return null;
-  const head = readText(join(git.gitDir, "HEAD"));
-  if (head === null) return null;
-  const direct = head.trim();
-  if (HEAD_REVISION.test(direct)) return direct;
-  const symbolic = /^ref:\s*(refs\/\S+)\s*$/m.exec(head);
-  if (symbolic === null) return null;
-  const ref = symbolic[1];
-  for (const base of [git.gitDir, git.commonDir]) {
-    const loose = readText(join(base, ...ref.split("/")));
-    if (loose !== null && HEAD_REVISION.test(loose.trim())) return loose.trim();
-  }
-  for (const base of [git.gitDir, git.commonDir]) {
-    const packed = readText(join(base, "packed-refs"));
-    if (packed === null) continue;
-    for (const line of packed.split("\n")) {
-      const entry = /^([0-9a-f]{40})\s+(\S+)$/.exec(line.trim());
-      if (entry !== null && entry[2] === ref) return entry[1];
-    }
-  }
-  return null;
-}
+const CANDIDATE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 // ---------------------------------------------------------------------------
-// THE CANDIDATE'S OWN OBJECT STORE, READ AS OBJECTS (2026-09-12, second
-// correction round).
+// THE CANDIDATE IS BUILD-TIME METADATA, NOT A REPOSITORY READ (standing-rule
+// amendment 9, 2026-09-14).
 //
-// WHAT THE FIRST DRAFT READ, AND WHY IT WAS WRONG. It took the subject maker
-// from `.git/logs/HEAD` — the REFLOG — whose last line is whoever last moved
-// this worktree's HEAD. That is a different person from HEAD's committer
-// whenever the ref was moved by a checkout, a reset, a fetch or another
-// session, and the receipt was naming it as "who built the candidate". It also
-// hashed whatever the working tree happened to hold and LABELLED those bytes
-// with HEAD's revision, so bytes and revision could each move without the
-// other: the review's exact words were that it "can issue a manifest labeling
-// arbitrary working-tree bytes with a SHA".
+// WHAT WAS HERE, AND WHY IT COULD NOT WORK. Two hundred lines of this file
+// walked up for a `.git` directory, read HEAD, resolved loose and packed refs,
+// zlib-inflated the commit object, parsed the tree it named, and hashed the
+// working-tree bytes at the paths that tree sealed. Every one of those is a read
+// of a CHECKOUT, and the fifth review round's P0 is that THE DEPLOYED WORKER HAS
+// NO CHECKOUT: Cloudflare bundles the modules wrangler was pointed at and serves
+// them over a read-only virtual filesystem, and supplies no `.git` directory at
+// all. In production that derivation had exactly one reachable answer —
+// `gate_zero_candidate_metadata_absent` — and every suite that showed it working
+// had staged a local git tree first, which is not the condition the code runs
+// in. A test that can only pass where production cannot run is not evidence.
 //
-// WHAT IT READS NOW: HEAD's own commit object, and the tree that commit names.
-// The committer line comes out of the commit; the candidate's file set comes out
-// of the tree, with each path's blob id as git sealed it. Both are facts ABOUT
-// THE REVISION rather than facts about the checkout standing on it.
+// WHAT IT READS NOW: THE STAMPS THE DEPLOY WRAPPER WROTE. bin/deploy-worker.sh
+// runs mcp-server/bin/seal-candidate-manifest.mjs against the revision it is
+// deploying — at build time, in a real checkout, where git is a fact — and
+// stamps the result into the upload as Worker vars beside the GIT_SHA it has
+// stamped since 2026-08-13:
 //
-// LOOSE OBJECTS ONLY, STATED RATHER THAN HIDDEN. This reads
-// `<objects>/xx/yyyy…`, zlib-inflated. A repository whose HEAD commit lives in a
-// packfile answers `gate_zero_candidate_metadata_absent` naming
-// `head_revision_object`, because resolving packed and delta-compressed objects is
-// a second object-store implementation and an oracle that guesses is worse than
-// one that says it cannot see. That refusal is derived and honest, which is the
-// property this round was asked for; teaching it packfiles is Step B's business
-// if a run ever has to produce from one.
+//   GIT_SHA                    the revision, read here through the SAME function
+//                              release.js reads it with (build-stamp.js), so the
+//                              sha this receipt binds and the sha /release
+//                              reports cannot become two different reads.
+//   CANDIDATE_MANIFEST         the sealed manifest's own JCS text: the candidate
+//                              tree id, the file count and byte length, the
+//                              digest of the blob ids the revision sealed, the
+//                              digest of those blobs' contents, and the
+//                              environment-manifest and fixture-set digests.
+//   CANDIDATE_MANIFEST_DIGEST  the digest of that manifest, computed by the same
+//                              recipe and stamped separately.
+//
+// THE STAMPS CHECK EACH OTHER. The manifest is re-digested here and must equal
+// the stamped digest, and its `git_sha` must equal the stamped sha — so a var
+// edited by hand after the seal refuses rather than signs, and neither stamp can
+// move without the other moving with it. `--var` is scoped to one wrangler
+// invocation and `--keep-vars` defaults to false, so a deploy that bypasses the
+// wrapper carries no stamps at all.
+//
+// AN ABSENT STAMP IS NAMED, NEVER FALLEN BACK FROM. There is no git path left in
+// this module to fall back TO — no `node:fs`, no `node:zlib`, no repository walk
+// — which is the property the no-git suite proves and the property its mutation
+// control breaks by putting one back.
 // ---------------------------------------------------------------------------
 
-/** `<objects>/xx/yyyy…`, inflated, or null. Both worktree dirs are tried. */
-function looseObject(git, id) {
-  if (git === null || !HEAD_REVISION.test(id)) return null;
-  for (const base of [git.commonDir, git.gitDir]) {
-    let raw;
-    try { raw = readFileSync(join(base, "objects", id.slice(0, 2), id.slice(2))); }
-    catch { continue; }
-    let inflated;
-    try { inflated = inflateSync(raw); } catch { continue; }
-    const nul = inflated.indexOf(0);
-    if (nul < 0) continue;
-    const header = /^(commit|tree|blob) (\d+)$/.exec(inflated.subarray(0, nul).toString("latin1"));
-    if (header === null) continue;
-    const body = inflated.subarray(nul + 1);
-    if (body.length !== Number(header[2])) continue;
-    return { kind: header[1], body };
+/**
+ * The stamped build metadata, validated, or the names of the stamps that are
+ * absent or do not agree. Reads the process environment and nothing else.
+ */
+function stampedCandidate() {
+  const env = serverBuildEnvironment();
+  const sha = stampedGitSha(env);
+  const manifestText = stampedCandidateManifestText(env);
+  const manifestDigest = stampedCandidateManifestDigest(env);
+
+  const absent = [];
+  if (typeof sha !== "string" || !HEAD_REVISION.test(sha))
+    absent.push(BUILD_STAMP_NAMES.gitSha);
+  if (typeof manifestText !== "string" || manifestText.length === 0)
+    absent.push(BUILD_STAMP_NAMES.candidateManifest);
+  if (typeof manifestDigest !== "string" || !CANDIDATE_DIGEST.test(manifestDigest))
+    absent.push(BUILD_STAMP_NAMES.candidateManifestDigest);
+  if (absent.length > 0) return { revision: null, manifest: null, absent };
+
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch {
+    return { revision: null, manifest: null,
+      absent: [`${BUILD_STAMP_NAMES.candidateManifest}:not_json`] };
   }
-  return null;
-}
-
-/**
- * HEAD'S COMMIT: the tree it seals and the address that committed it.
- *
- * The committer line, not the author line — the author is who wrote the change,
- * the committer is who produced this revision, and the receipt's subject maker
- * is the second of those.
- */
-function headCommitOf(git, revision) {
-  const object = looseObject(git, revision);
-  if (object === null || object.kind !== "commit") return null;
-  const text = object.body.toString("utf8");
-  const tree = /^tree ([0-9a-f]{40})$/m.exec(text);
-  const committer = /^committer [^<>]*<([^<>]+)>/m.exec(text);
-  if (tree === null) return null;
-  return { tree: tree[1], committer_email: committer === null ? null : committer[1].trim() };
-}
-
-/** One tree object's entries: name, mode and the id git sealed for it. */
-function treeEntries(git, id) {
-  const object = looseObject(git, id);
-  if (object === null || object.kind !== "tree") return null;
-  const entries = [];
-  let at = 0;
-  while (at < object.body.length) {
-    const nul = object.body.indexOf(0, at);
-    if (nul < 0) return null;
-    const head = /^(\d{5,6}) (.+)$/.exec(object.body.subarray(at, nul).toString("utf8"));
-    if (head === null || nul + 21 > object.body.length) return null;
-    entries.push({ mode: head[1], name: head[2],
-                   id: object.body.subarray(nul + 1, nul + 21).toString("hex") });
-    at = nul + 21;
+  const wrong = [];
+  if (!isPlainObject(manifest) || manifest.schema_version !== CANDIDATE_MANIFEST_SCHEMA) {
+    wrong.push(`${BUILD_STAMP_NAMES.candidateManifest}:schema_version`);
+  } else {
+    for (const [field, held] of [
+      ["git_sha", manifest.git_sha === sha],
+      ["candidate_tree_id", HEAD_REVISION.test(String(manifest.candidate_tree_id))],
+      ["file_count", Number.isInteger(manifest.file_count) && manifest.file_count > 0],
+      ["byte_length", Number.isInteger(manifest.byte_length) && manifest.byte_length > 0],
+      ["artifact_digest", CANDIDATE_DIGEST.test(String(manifest.artifact_digest))],
+      ["source_digest", CANDIDATE_DIGEST.test(String(manifest.source_digest))],
+      ["environment_manifest_digest",
+        CANDIDATE_DIGEST.test(String(manifest.environment_manifest_digest))],
+      ["fixture_set_digest", CANDIDATE_DIGEST.test(String(manifest.fixture_set_digest))],
+    ]) if (!held) wrong.push(`${BUILD_STAMP_NAMES.candidateManifest}:${field}`);
+    if (wrong.length === 0 && digest(manifest) !== manifestDigest)
+      wrong.push(`${BUILD_STAMP_NAMES.candidateManifestDigest}:does_not_cover_the_stamped_manifest`);
   }
-  return entries;
-}
-
-/** Walk one path of names down from a tree, answering the tree it names. */
-function treeAt(git, rootTree, segments) {
-  let id = rootTree;
-  for (const name of segments) {
-    const entries = treeEntries(git, id);
-    if (entries === null) return null;
-    const found = entries.find(entry => entry.name === name && entry.mode === "40000");
-    if (found === undefined) return null;
-    id = found.id;
-  }
-  return id;
-}
-
-/**
- * THE SEALED CANDIDATE MANIFEST FOR HEAD: every `.js` path under the candidate
- * directory as HEAD's tree seals it, with git's own blob id for each. Sorted by
- * path, so the manifest is a fact about the revision and not about walk order.
- */
-function sealedCandidateTree(git, rootTree, segments) {
-  const base = treeAt(git, rootTree, segments);
-  if (base === null) return null;
-  const sealed = [];
-  const walk = (id, prefix) => {
-    const entries = treeEntries(git, id);
-    if (entries === null) return false;
-    for (const entry of entries.slice().sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const path = `${prefix}${entry.name}`;
-      if (entry.mode === "40000") { if (!walk(entry.id, `${path}/`)) return false; continue; }
-      if (entry.name.endsWith(".js")) sealed.push({ path, blob_id: entry.id });
-    }
-    return true;
-  };
-  if (!walk(base, `${segments.join("/")}/`)) return null;
-  // THE CANDIDATE'S OWN TREE ID, not the root's. The root tree moves when any
-  // file anywhere in the repository moves, and the candidate digest must stand
-  // on the candidate — the sealed fixture set and the environment manifest have
-  // their own digests in this receipt precisely so they are not smuggled into
-  // this one.
-  return sealed.length === 0 ? null : { tree_id: base, files: sealed };
-}
-
-/**
- * THE TWO SEALED ARTIFACTS THIS RECEIPT'S DIGESTS STAND ON, as repository paths.
- *
- * NEITHER IS A DESCRIPTION. The environment manifest is the declaration
- * ops/environment-matrix-selftest.py checks the repository against; the fixture
- * set is the sealed gate-zero fixture bytes, which `evidence_scope:
- * candidate-and-test` puts inside this receipt's scope by name. They are READ as
- * bytes and hashed. Nothing here imports or executes either one.
- */
-const ENVIRONMENT_MANIFEST_PATH = ["ops", "config", "environments.json"];
-const SEALED_FIXTURE_SET_PATHS = Object.freeze([
-  ["mcp-server", "test", "gate-zero-producer-stores.v5.fixture.mjs"],
-  ["mcp-server", "test", "gate-zero-seam-stores.v5.fixture.mjs"],
-  ["mcp-server", "test", "gate-zero-seam-stores.v5.receipt-fixture.mjs"],
-]);
-
-/**
- * WHERE THE CANDIDATE LIVES, as path segments under the repository root — the
- * directory the running module was built in, derived rather than written down.
- */
-function candidateSegments(root) {
-  if (root === null) return null;
-  const here = dirname(fileURLToPath(import.meta.url));
-  const inside = relative(root, here).split(sep);
-  return inside.length === 0 || inside[0] === "" || inside[0] === ".." ? null : inside;
-}
-
-/**
- * THE BYTES ON DISK FOR EXACTLY THE PATHS HEAD SEALED. A path in HEAD's tree
- * that the working tree does not have is an absent sealed artifact and refuses;
- * a file the working tree has that HEAD does not seal is not part of this
- * candidate and is not read, which is the half the first draft got backwards.
- */
-function observedCandidateBytes(root, sealed) {
-  const observed = [];
-  for (const file of sealed) {
-    let bytes;
-    try { bytes = readFileSync(join(root, ...file.path.split("/"))); } catch { return null; }
-    observed.push({ path: file.path, bytes });
-  }
-  return observed;
+  if (wrong.length > 0) return { revision: null, manifest: null, absent: wrong };
+  return { revision: sha, manifest: deepFreeze({ ...manifest }), absent: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -694,46 +556,91 @@ function authenticatedCaller() {
 }
 
 /**
- * THE SUBJECT MAKER'S IDENTITY — both halves derived, neither assembled here.
- *
- * THE PRINCIPAL comes from identity.js's frozen committer registry: HEAD's
- * committer address, matched exactly, answering a registered partner and the
- * authority class that file derives for them. It is not a constant — the first
- * draft wrote `candidate_builder` into the field, which named a class no part of
- * this system derives, admits or checks — and it is not this module's table
- * either. An address the registry does not map answers null, and a receipt does
- * not name a principal this system does not register.
- *
- * THE SESSION comes from the authenticated build context THE DISPATCH PATH
- * ESTABLISHES — and since the fourth correction round it really is established
- * rather than read together. The second correction manufactured it here, out of
- * the revision this module happened to be reading. The third correction moved
- * the manufacturing one file over: identity.js still ASSEMBLED the ref at read
- * time, by suffixing whatever the calling seat's session happened to be, which
- * the review was right to call synthesis. identity.js now derives both seats at
- * the instant the dispatcher is built, from the same pinned credential and the
- * same server-written correlation id, and freezes them into the context the
- * dispatch enters; this reads the build seat back and builds nothing.
- *
- * WHAT THE SEAT NAMES, stated exactly, because a receipt must not overclaim: it
- * is the candidate-build seat of THIS authenticated run — the session in which
- * the candidate was materialised from HEAD and digested — not a claim to have
- * recovered the session the maker originally typed in, which no git object
- * records and which this system therefore must never assert. The PRINCIPAL is
- * the maker, read from HEAD's committer through the frozen registry; the SESSION
- * is the authenticated seat that built what is being judged. Outside an
- * authenticated call there is no build context and this answers null, which is
- * the same fail-closed answer the producer identity gives.
+ * THE STORE THIS PRODUCER READS ITS SUBJECT MAKER OUT OF, and the ONE store ref
+ * it will accept an answer from. A store that states it is another store is a
+ * store this derivation did not ask, whatever rows came back with it.
  */
-function subjectMakerIdentityFor(email) {
-  const named = authenticatedIdentity.committerIdentity(email);
+const CANDIDATE_BUILD_RECORD_STORE_REF = "control-plane:ops.candidate-build-record";
+
+/** The uuid shape the ops recorder stamps as a release row's correlation. */
+const CANDIDATE_BUILD_CORRELATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * THE SUBJECT MAKER IS THE RELEASE-CANDIDATE RECORD FOR THE STAMPED REVISION —
+ * standing-rule amendment 9(b), 2026-09-14, and the third shape this field has
+ * had.
+ *
+ * THE TWO THAT WERE WRONG, because the wrongness is the whole reason this one is
+ * shaped as it is. The first draft took the maker from card 9's SEAT
+ * DECLARATION: a constant in a source file, authenticating nobody. The third
+ * round replaced it with HEAD's own committer address through a frozen table —
+ * better, and still not authentication: a committer line is an attribution
+ * anybody with a git config can write, and the session half of the identity was
+ * then MANUFACTURED, first here out of the revision and then one file over by
+ * suffixing the evaluator's own session with `:candidate-build`. The fifth round
+ * put it exactly: "this relabels the reviewer's authenticated session as the
+ * subject-maker's build session; it is not authenticated provenance for the
+ * person who made the candidate."
+ *
+ * WHAT IT IS NOW. `tools/ops-record.py release candidate` files one row in
+ * ops.release per build, over an authenticated authority connection, carrying
+ * the revision, the maker and the correlation the recorder stamped. This reads
+ * that row back for the revision the deploy wrapper stamped into this Worker —
+ * so BOTH HALVES of the identity come out of a record somebody had to be
+ * authenticated to write, and neither is assembled from the call that is doing
+ * the judging.
+ *
+ * THE ROWS ARE READ, NOT TRUSTED. Exactly one maker may answer: rows for the
+ * revision that disagree about who made it are an ambiguous record and refuse,
+ * because a receipt that picked one of two makers would be picking. The slug
+ * must then be one identity.js REGISTERS as a partner — the store already
+ * refuses anything that is not slug-shaped, and this refuses anything the
+ * partner registry does not know — so the widest value this path can put in a
+ * receipt is a registered partner's name.
+ *
+ * NO ROW IS A REFUSAL, NOT A DEFAULT. A revision with no release candidate on
+ * record is a build nobody filed for, and this oracle does not judge one:
+ * `gate_zero_run_binding_unnamed` answers with `subject_maker` named, which is
+ * the same derived, honest absence an unreadable store gets.
+ */
+async function subjectMakerIdentityFor(revision) {
+  let answered;
+  try {
+    answered = await fetchCandidateBuildRecordRows({ gitSha: revision });
+  } catch (cause) {
+    // The store's own refusal and any other throw reach the same answer: this
+    // run could not read the record, so it has no maker. isSeamStoreUnreachable
+    // is asked so the two are distinguishable in a debugger and identical here.
+    void isSeamStoreUnreachable(cause);
+    return null;
+  }
+  if (answered === null || typeof answered !== "object") return null;
+  if (answered.store_ref !== CANDIDATE_BUILD_RECORD_STORE_REF) return null;
+  const rows = Array.isArray(answered.rows) ? answered.rows : [];
+
+  const makers = new Set();
+  const sessions = new Set();
+  for (const row of rows) {
+    if (!isPlainObject(row)) return null;
+    if (typeof row.maker_actor !== "string" || !ACTOR_ID.test(row.maker_actor)) continue;
+    if (typeof row.correlation_id !== "string" || !CANDIDATE_BUILD_CORRELATION_ID.test(row.correlation_id))
+      continue;
+    makers.add(row.maker_actor);
+    sessions.add(row.correlation_id);
+  }
+  if (makers.size !== 1 || sessions.size !== 1) return null;
+
+  const [makerSlug] = [...makers];
+  const [correlationId] = [...sessions];
+  const named = authenticatedIdentity.partnerIdentity(makerSlug);
   if (named === null) return null;
   if (typeof named.actor_id !== "string" || !ACTOR_ID.test(named.actor_id)) return null;
-  const build = authenticatedIdentity.buildContext();
-  if (build === null || !SESSION_REF.test(build.session_ref)) return null;
+  const sessionRef = `session:${correlationId}`;
+  if (!SESSION_REF.test(sessionRef)) return null;
   return deepFreeze({
     actor_id: named.actor_id,
-    session_ref: build.session_ref,
+    session_ref: sessionRef,
     authority_class: named.authority_class,
   });
 }
@@ -1094,35 +1001,41 @@ function subjectDigestOf() {
 }
 
 /**
- * THE SOURCE-BUNDLE MANIFEST FOR HEAD, and both halves of it are inside the one
- * digest — which is the correction this round makes.
+ * THE SOURCE-BUNDLE MANIFEST FOR THE STAMPED REVISION, assembled from the sealed
+ * manifest the deploy wrapper stamped and from nothing else.
  *
- * `source_digest` is what HEAD SEALED: git's own blob id for every candidate
- * path in HEAD's tree. `artifact_digest` is what was OBSERVED: the bytes on disk
- * at exactly those paths. `source_ref` is the revision and `provenance_digest`
- * carries the tree id beside it.
+ * `source_digest` is what the revision SEALED: git's own blob id for every
+ * candidate path in that revision's tree. `artifact_digest` is what those blobs
+ * CONTAIN: sha256 per path, over the same paths. `source_ref` is the revision and
+ * `provenance_digest` carries the candidate tree id and the file count beside it.
  *
- * WHY THIS CLOSES THE FINDING. Before, the revision and the bytes were read
- * independently and only the bytes reached the bundle digest, so a manifest
- * could label any working-tree bytes with any SHA and neither half moved the
- * other. Now the PATH SET comes from HEAD, the sealed ids come from HEAD, and
- * the observed bytes are read for those paths only — so changing the revision
- * moves the manifest, and mutating one tracked file moves it too, and neither
- * can move without the digest moving with it.
+ * BOTH HALVES ARE READ AT ONE REVISION NOW, and that is stronger than the shape
+ * it replaces rather than weaker. The previous producer read the sealed ids from
+ * HEAD and the bytes from the WORKING TREE precisely so a dirty checkout would
+ * show as a mismatch — a check the deployed Worker could never run, because it
+ * has neither. The wrapper's sealer reads ids and contents from the object store
+ * at one revision, so there is no second reading to disagree, and the question
+ * the old comparison asked — is this checkout what it claims to be — is answered
+ * where it belongs: bin/deploy-worker.sh refuses a dirty tree before it uploads.
+ *
+ * ONE BYTE STILL MOVES THIS DIGEST. Change a candidate file, and its blob id and
+ * its content hash both move, so the sealed manifest moves, so the stamp moves,
+ * so this moves. mcp-server/test/gate-zero-candidate-seal.test.mjs proves that
+ * over a real repository rather than asserting it here.
  */
-function candidateManifestOf(headRevision, treeId, sealed, observed, policyDigest) {
+function candidateManifestOf(manifest, policyDigest) {
   return {
-    artifact_digest: digest(canonicalJson(Object.fromEntries(
-      observed.map(file => [file.path, digest(file.bytes)])))),
+    artifact_digest: manifest.artifact_digest,
     artifact_kind: "source_bundle",
     media_type: "application/vnd.carr.source-bundle+json",
-    byte_length: observed.reduce((total, file) => total + file.bytes.length, 0),
-    source_ref: headRevision,
-    source_digest: digest(canonicalJson(Object.fromEntries(
-      sealed.map(file => [file.path, file.blob_id])))),
+    byte_length: manifest.byte_length,
+    source_ref: manifest.git_sha,
+    source_digest: manifest.source_digest,
     sbom_digest: null,
     provenance_digest: digest({
-      head_revision: headRevision, head_tree_id: treeId, file_count: sealed.length }),
+      head_revision: manifest.git_sha,
+      head_tree_id: manifest.candidate_tree_id,
+      file_count: manifest.file_count }),
     policy_epoch: 1,
     policy_epoch_digest: policyDigest,
   };
@@ -1139,30 +1052,6 @@ function policyDigestOf() {
     receipt_ttl_ms: RECEIPT_TTL_MS,
     digest_recipe: V5_A02_GATE_ZERO_RECEIPT_DIGEST_RECIPE,
   });
-}
-
-/** JCS SHA-256 over the environment manifest's own parsed bytes, or null. */
-function environmentManifestDigestOf(root) {
-  if (root === null) return null;
-  const bytes = readText(join(root, ...ENVIRONMENT_MANIFEST_PATH));
-  if (bytes === null) return null;
-  try {
-    return digest(canonicalJson(JSON.parse(bytes)));
-  } catch {
-    return null;
-  }
-}
-
-/** SHA-256 over the sealed fixture set's bytes, under their own paths, or null. */
-function fixtureSetDigestOf(root) {
-  if (root === null) return null;
-  const sealed = {};
-  for (const parts of SEALED_FIXTURE_SET_PATHS) {
-    let bytes;
-    try { bytes = readFileSync(join(root, ...parts)); } catch { return null; }
-    sealed[parts.join("/")] = digest(bytes);
-  }
-  return digest(canonicalJson(sealed));
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,50 +1105,35 @@ async function produce() {
   // (2) WHAT THIS RUN STANDS ON, derived — and each KIND of absence answers with
   // its own reason rather than all of them saying "a row is missing".
   //
-  // (2a) THE CANDIDATE'S OWN GIT METADATA. Unreadable metadata is not an absent
-  // row: it is this run failing to read the revision it is standing on.
-  const root = repositoryRoot();
-  const git = gitDirectories(root);
-  const headRevision = headRevisionOf(git);
-  const segments = candidateSegments(root);
-  const commit = headRevision === null ? null : headCommitOf(git, headRevision);
-  const candidate = commit === null || segments === null
-    ? null : sealedCandidateTree(git, commit.tree, segments);
-
-  const unparsed = [
-    ["candidate_object_store", git !== null],
-    ["candidate_module_path", segments !== null],
-    ["head_revision", headRevision !== null && HEAD_REVISION.test(headRevision)],
-    ["head_revision_object", commit !== null],
-    ["head_maker_address", commit !== null && commit.committer_email !== null],
-    ["head_candidate_manifest", candidate !== null],
-  ].filter(([, held]) => !held).map(([name]) => name);
-  if (unparsed.length > 0)
+  // (2a) THE BUILD STAMPS. An absent or disagreeing stamp is not an absent row:
+  // it is this deploy being unable to say what candidate it IS. It is named
+  // exactly — which var, and which field of the manifest — and there is nothing
+  // to fall back to, because the repository this module used to read at request
+  // time does not exist where this module runs.
+  const stamped = stampedCandidate();
+  if (stamped.absent.length > 0)
     return refusal("gate_zero_candidate_metadata_absent",
-      `this candidate's own git metadata is absent or malformed: ${unparsed.join(", ")}`,
-      { clauses: null, negative_admission: null, absent_candidate_metadata: unparsed });
+      `this deploy carries no usable candidate stamp: ${stamped.absent.join(", ")}`,
+      { clauses: null, negative_admission: null, absent_candidate_metadata: stamped.absent });
 
-  // (2b) THE SEALED FILES the receipt's digests stand on. A file that is not on
-  // disk is an absent artifact, and it is named.
+  const headRevision = stamped.revision;
+  const manifest = stamped.manifest;
   const policyDigest = policyDigestOf();
-  const observed = observedCandidateBytes(root, candidate.files);
-  const environmentDigest = environmentManifestDigestOf(root);
-  const fixtureDigest = fixtureSetDigestOf(root);
+  // (2b) THE SEALED ARTIFACTS the receipt's other two digests stand on. They are
+  // sealed in the same manifest, by the same wrapper, at the same revision — so
+  // "absent" here means the stamped manifest did not carry them, which
+  // `stampedCandidate` has already refused above. They are read out rather than
+  // recomputed: this process cannot see ops/config/environments.json or the
+  // sealed fixture bytes, and a digest it cannot take is not one it may invent.
+  const environmentDigest = manifest.environment_manifest_digest;
+  const fixtureDigest = manifest.fixture_set_digest;
 
-  const absent = [
-    ["candidate_source_bundle", observed !== null],
-    ["environment_manifest", environmentDigest !== null],
-    ["sealed_fixture_set", fixtureDigest !== null],
-  ].filter(([, held]) => !held).map(([name]) => name);
-  if (absent.length > 0)
-    return refusal("gate_zero_sealed_artifact_absent",
-      `a sealed artifact this receipt's digests stand on is not on disk: ${absent.join(", ")}`,
-      { clauses: null, negative_admission: null, absent_sealed_artifacts: absent });
-
-  // (2c) THE RULED ROW. The subject maker is HEAD's committer resolved through
-  // identity.js's actor registry; an address that registry does not map is a
-  // genuinely absent row, and `gate_zero_run_binding_unnamed` says which.
-  const subjectMakerIdentity = subjectMakerIdentityFor(commit.committer_email);
+  // (2c) THE RULED ROW. The subject maker is the release-candidate record the
+  // deploy wrapper filed for this exact revision, read back through the Control
+  // Plane store; a revision with no such record — or one whose rows disagree
+  // about who made it — is a genuinely absent row, and
+  // `gate_zero_run_binding_unnamed` says which.
+  const subjectMakerIdentity = await subjectMakerIdentityFor(headRevision);
   const unnamed = [
     ["subject_maker", subjectMakerIdentity !== null],
     ["scheduler_service_key", SERVICE_KEY.test(SCHEDULER_SERVICE_KEY)],
@@ -1269,8 +1143,7 @@ async function produce() {
       `a ruled row this run's binding derives from is absent: ${unnamed.join(", ")}`,
       { clauses: null, negative_admission: null, unnamed_bindings: unnamed });
 
-  const candidateManifest = candidateManifestOf(
-    headRevision, candidate.tree_id, candidate.files, observed, policyDigest);
+  const candidateManifest = candidateManifestOf(manifest, policyDigest);
 
   const binding = deepFreeze({
     head_revision: headRevision,
