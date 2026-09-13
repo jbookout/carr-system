@@ -46,7 +46,7 @@ import {
   GATE_ZERO_IDENTITY_FIELDS, GATE_ZERO_IDENTITY_SCHEMA, GATE_ZERO_RECEIPT_CONSTANTS,
   GATE_ZERO_RECEIPT_FIELDS, GATE_ZERO_RECEIPT_SCHEMA, GATE_ZERO_RECEIPT_STATUSES,
   assertGateZeroReceipt, deriveGateZeroProducerSeat, gateZeroOracleSeatLane,
-  gateZeroOutcomeDigest,
+  gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest,
 } from "../src/gate-zero-outcome-store.v5.js";
 import { V5_A02_GATE_ZERO_PRODUCER_REGISTRATION } from "../src/gate-zero-producer-registration.v5.js";
 import { runInAuthenticatedCall } from "../src/identity.js";
@@ -103,18 +103,31 @@ function mockDatabase({ existing = null } = {}) {
       if (sql.includes("ops.gate_zero_record_read_only_outcome")) {
         const offered = JSON.parse(params[1]);
         state.persisted = offered;
-        // IDEMPOTENT ON THE CANDIDATE, exactly as the SQL writer is: a second
-        // call for a candidate already recorded returns the row that exists
-        // rather than minting a second id.
-        if (!(state.recorded && state.recorded.candidate_digest === offered.candidate_digest))
+        // IDEMPOTENT ON THE CANDIDATE, exactly as the SQL writer is, INCLUDING
+        // what it compares (PR 1014, second correction). The row is kept when
+        // the candidate matches; what decides whether the offered outcome is the
+        // SAME outcome is the candidate-scoped digest, not the full receipt
+        // digest — so a second genuine call, with its own session_ref and its
+        // own instants, collapses onto the row that exists here exactly as it
+        // does in ops.gate_zero_record_read_only_outcome. A mock that answered
+        // otherwise would be a second implementation of the writer's rule.
+        if (state.recorded && state.recorded.candidate_digest === offered.candidate_digest) {
+          if (gateZeroOutcomeCandidateDigest(state.recorded)
+              !== gateZeroOutcomeCandidateDigest(offered))
+            throw new Error(
+              `a different Gate Zero outcome is already recorded for candidate ${offered.candidate_digest}`);
+        } else {
           state.recorded = offered;
+        }
         return { rows: [{ id: OUTCOME_ID }] };
       }
       if (sql.includes("from ops.gate_zero_read_only_outcome")) {
         const r = state.recorded;
         return { rows: [{
-          id: OUTCOME_ID, outcome_digest: digest(r), candidate_digest: r.candidate_digest,
-          status: r.status,
+          id: OUTCOME_ID, outcome_digest: digest(r),
+          candidate_scoped_digest: gateZeroOutcomeCandidateDigest(r),
+          candidate_digest: r.candidate_digest,
+          status: r.status, receipt: r,
           producing_seat_ref: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_holder_ref,
           observed_at: r.observed_at, recorded_at: "2026-09-13T00:00:05Z",
         }] };
@@ -344,13 +357,76 @@ test("CONTROL 4 — the bound seat writes, and what it writes is the producer's 
   assert.equal(result.effects.benchmark_accepted, false);
 });
 
-test("CONTROL 5 — a second write for the same candidate is idempotent", async () => {
+test("CONTROL 5 — a second AUTHENTICATED call for the same candidate is idempotent", async () => {
+  // THE RETRY IS A DIFFERENT CALL, WHICH IS THE WHOLE POINT (PR 1014, second
+  // correction). The first version of this case reused one actor object, so
+  // both runs carried the SAME correlation id and therefore the same
+  // session_ref, and the two receipts differed only in instants a fixture could
+  // hold still. It passed, and it proved nothing about a retry: identity.js
+  // derives session_ref from the request's own correlation id, so two genuine
+  // calls NEVER share one. Sol's finding 3 was exactly that gap.
+  //
+  // A SECOND CORRELATION ID IS WHAT A SECOND REQUEST IS. Everything else is
+  // held equal — same candidate tree, same seat — so the only thing that moved
+  // between the two calls is what the server stamps per request.
   const client = mockDatabase();
+  const retrying = reviewerActor("5a0b7c33-41de-4f9a-8e26-1c7b93d0af45");
+  assert.notEqual(retrying.correlation_id, SEAT.correlation_id);
   const first = await recordIn({}, SEAT, { idempotency_key: KEY }, client);
-  const second = await recordIn({}, SEAT, { idempotency_key: SECOND_KEY }, client);
+  const second = await recordIn({}, retrying, { idempotency_key: SECOND_KEY }, client);
+
   assert.equal(second.result.outcome_id, first.result.outcome_id, "a retry minted a second outcome");
   assert.equal(second.result.candidate_digest, first.result.candidate_digest);
+  // THE DURABLE ROW IS THE FIRST ONE, and both callers are handed it: the
+  // evidence digest reported back is the stored receipt's, unchanged by the
+  // second call, and the value the two were COMPARED on is equal.
   assert.equal(second.result.outcome_digest, first.result.outcome_digest);
+  assert.equal(second.result.candidate_scoped_digest, first.result.candidate_scoped_digest);
+
+  // AND THE TWO RECEIPTS REALLY WERE DIFFERENT BYTES. This is the assertion that
+  // makes the case a proof rather than a coincidence: keying on the full receipt
+  // digest — what the writer did before this correction — would have refused the
+  // second call, because the second call's session_ref is its own.
+  const firstReceipt = first.client.state.recorded;
+  const secondReceipt = second.client.state.persisted;
+  assert.notEqual(secondReceipt.producer_identity.session_ref,
+    firstReceipt.producer_identity.session_ref);
+  assert.notEqual(gateZeroOutcomeDigest(secondReceipt), gateZeroOutcomeDigest(firstReceipt),
+    "the two calls produced identical receipts, so this proves nothing about a retry");
+  assert.equal(gateZeroOutcomeCandidateDigest(secondReceipt),
+    gateZeroOutcomeCandidateDigest(firstReceipt));
+});
+
+test("MUTATION — a second run that read DIFFERENT rows for one candidate still conflicts", async () => {
+  // THE OTHER EDGE OF THE SAME KEY. Narrowing what a retry is compared on is
+  // only safe if it still refuses a genuinely different outcome for one
+  // candidate. Here the candidate is held identical and the WORLD is changed
+  // under it, so the producer reaches a different verdict: the record layer must
+  // refuse rather than silently keep either one.
+  const client = mockDatabase();
+  await recordIn({}, SEAT, { idempotency_key: KEY }, client);
+  const recorded = client.state.recorded;
+
+  // The same candidate digest, a different verdict — assembled by bending what
+  // the producer emitted, the same way the identity mutations below do, and
+  // pushed at the writer through the mock's own mirror of the SQL rule. The
+  // record layer's copy of this refusal is proved against a real PostgreSQL in
+  // gate-zero-outcome-record-race.test.mjs; this is the gateway-side mirror.
+  const divergent = { ...recorded, status: "fail" };
+  assert.equal(divergent.candidate_digest, recorded.candidate_digest);
+  await assert.rejects(
+    client.query("select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
+      [SECOND_KEY, JSON.stringify(divergent)]),
+    /a different Gate Zero outcome is already recorded/);
+
+  // AND THE SUBJECT MAKER IS INSIDE THE KEY, deliberately: its session_ref is
+  // derived from the candidate revision, not from the call, so renaming it is a
+  // different outcome for the same candidate.
+  const remadeMaker = { ...recorded,
+    subject_maker_identity: { ...recorded.subject_maker_identity,
+      session_ref: "session:candidate-build:somewhere-else" } };
+  assert.notEqual(gateZeroOutcomeCandidateDigest(remadeMaker),
+    gateZeroOutcomeCandidateDigest(recorded));
 });
 
 test("an injected non-green conclusion records as fail — Q036.D1's own falsifier", async () => {
@@ -532,7 +608,7 @@ test("STANDARDS: every exported callable wears amendment 2's closed shape", asyn
   const callables = Object.entries(store).filter(([, value]) => typeof value === "function");
   assert.deepEqual(callables.map(([name]) => name).sort(),
     ["assertGateZeroReceipt", "deriveGateZeroProducerSeat", "gateZeroOracleSeatLane",
-      "gateZeroOutcomeDigest"]);
+      "gateZeroOutcomeCandidateDigest", "gateZeroOutcomeDigest"]);
   for (const [name, fn] of callables) {
     assert.equal(Object.hasOwn(fn, "prototype"), false, `${name} carries a prototype`);
     assert.throws(() => Reflect.construct(fn, []), TypeError, name);

@@ -441,3 +441,40 @@ export const assertGateZeroReceipt = closedCallable((receipt, seat) => {
  * would win and the row would carry its value, not this one.
  */
 export const gateZeroOutcomeDigest = closedCallable(receipt => digest(receipt));
+
+/**
+ * THE SAME RECEIPT, REDUCED TO WHAT THE CANDIDATE DECIDES — the value a retry is
+ * compared on, and the gateway's copy of ops.gate_zero_outcome_candidate_digest.
+ *
+ * WHY IT IS NOT THE FULL DIGEST (PR 1014, Sol's finding 3). Three fields of a
+ * consumer-gate receipt legitimately move between two GENUINE authenticated runs
+ * of one candidate: `observed_at` and `ttl_expires_at`, stamped when each run
+ * happened, and the `session_ref` inside `producer_identity` and
+ * `evaluator_identity`, which identity.js derives from the request's own
+ * correlation id. Keying idempotency on a digest covering those made the only
+ * two calls that could ever agree two calls carrying the same bytes — a fixture,
+ * not a retry — so the second real call for one candidate was refused.
+ *
+ * WHAT IS DROPPED, EXACTLY THOSE THREE, and what is kept is the point:
+ *   * the SUBJECT MAKER's session_ref stays. It is derived from the candidate
+ *     revision rather than from the call, so a receipt renaming it is a
+ *     different outcome for the same candidate and must still conflict.
+ *   * every digest, constant, status, comparator and evidence ref stays. A run
+ *     that read different rows for one candidate is a real conflict.
+ *
+ * NOTHING IS LOST BY IT. The dropped values are inside the receipt this projects
+ * from, which is stored whole, and inside the full outcome digest stored beside
+ * it. This narrows the comparison key; it narrows nothing that is kept.
+ */
+export const gateZeroOutcomeCandidateDigest = closedCallable(receipt => {
+  const { observed_at, ttl_expires_at, producer_identity, evaluator_identity, ...rest } = receipt;
+  const withoutSession = identity => {
+    const { session_ref, ...keep } = identity ?? {};
+    return keep;
+  };
+  return digest({
+    ...rest,
+    producer_identity: withoutSession(producer_identity),
+    evaluator_identity: withoutSession(evaluator_identity),
+  });
+});

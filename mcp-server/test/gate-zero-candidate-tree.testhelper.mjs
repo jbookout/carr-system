@@ -68,8 +68,39 @@ export function partnerActor(correlationId = CORRELATION_ID) {
   return { slug: "joe", human: true, via: "oauth-google", correlation_id: correlationId };
 }
 
-/** The committer identity.js maps, and the actor it maps to. */
-export const MAKER_EMAIL = "joe.bookout.carr.us@gmail.com";
+/**
+ * THE COMMITTER THIS REPOSITORY ACTUALLY CARRIES, read out of git rather than
+ * typed here — and the actor identity.js must map it to.
+ *
+ * WHAT WAS HERE BEFORE, AND WHY IT IS GONE (PR 1014, Sol's re-review). This
+ * constant was the literal `joe.bookout.carr.us@gmail.com` — an address
+ * identity.js's ALLOW_LIST admits — written into every staged tree's reflog. So
+ * every proof in both suites ran over a committer the mapping already knew, and
+ * the fact that the REAL head's committer is a GitHub noreply address the
+ * mapping did not know never showed up in a single green run. A staged world
+ * that supplies the one input the code needs is not a proof about the code.
+ *
+ * `--no-merges`, DELIBERATELY. On a `pull_request` run the checked-out head is
+ * `refs/pull/N/merge`, a merge commit GitHub itself creates and commits as
+ * `noreply@github.com`; that is the FORGE's identity, not a partner's, and
+ * nothing in this system claims to map it. The last non-merge commit is the one
+ * a partner actually made, which is what a candidate's maker means.
+ *
+ * IF THIS ADDRESS DOES NOT MAP, THE SUITES GO RED, and that is the point: the
+ * mapping is Step A's (mcp-server/src/identity.js), the address is the
+ * repository's, and a test may not paper over a gap between them.
+ */
+function repositoryCommitterEmail() {
+  const run = spawnSync("git", ["-C", REPO, "log", "-1", "--no-merges", "--format=%ce"],
+    { encoding: "utf8" });
+  assert.equal(run.status, 0,
+    `git could not name this repository's committer: ${run.stderr}`);
+  const email = run.stdout.trim();
+  assert.match(email, /^[^\s<>@]+@[^\s<>@]+$/,
+    "git did not answer with one committer email for this repository's head");
+  return email;
+}
+export const MAKER_EMAIL = repositoryCommitterEmail();
 export const SUBJECT_MAKER_ACTOR = "joe";
 
 /**
