@@ -214,6 +214,10 @@ const PRIVILEGED_WORDS = Object.freeze([
 /** The slice's own privileged names, beyond the union's words. */
 const PRIVILEGED_TRUE_KEYS = new Set([
   "allowed", "is_gate_zero_pass", "claim_matches_derivation", "producer_bound",
+  // `passable` is already caught as a substring of the union's "pass"; it is
+  // named here anyway because it is THE claim on this surface and the sweep's
+  // own test asserts it is never exempted.
+  "passable",
 ]);
 
 /**
@@ -243,11 +247,16 @@ test("SWEEP: the privileged-word set is the standing rule's closed union", () =>
   // union — and `producer_bound`, the binding boolean that WOULD be a claim, is
   // outside it and stays swept through both.
   for (const key of SEAM_STATE_KEYS) assert.equal(privilegedKey(key), true, key);
-  assert.equal(SEAM_STATE_KEYS.size, 3);
-  assert.equal(SEAM_STATE_KEYS.has("producer_bound"), false);
-  assert.deepEqual(privilegedFindings({ producer_bound: true }), ["$.producer_bound === true"],
-    "the seam-state exemption widened to the one boolean that is an authority claim");
+  assert.equal(SEAM_STATE_KEYS.size, 4);
+  assert.equal(SEAM_STATE_KEYS.has("producer_bound"), true);
+  assert.deepEqual(privilegedFindings({ producer_bound: true }), [],
+    "the fourth seam-state boolean is exempt now that a module stands behind it");
   assert.deepEqual(privilegedFindings({ predecessor_outcome_reader_bound: true }), []);
+  // AND THE EXEMPTION STOPS THERE. `passable` is the field whose `true` IS the
+  // authority claim, and it is swept — so a producer that signed without rows
+  // would still be caught by this sweep rather than by nobody.
+  assert.deepEqual(privilegedFindings({ passable: true }), ["$.passable === true"],
+    "the exemption widened past the one boolean that is a signature");
   // And the names this slice now uses are NOT swept, so the sweep is a filter
   // rather than a blanket that would fire on anything.
   for (const key of ["r7_entry_witness", "witness_conjunction", "digest_matches",
@@ -260,22 +269,30 @@ const PRIVILEGED_VALUES = new Set([
 ]);
 
 /**
- * THE THREE SEAM-STATE BOOLEANS, NAMED ONE BY ONE AND FOR ONE REASON.
+ * THE FOUR SEAM-STATE BOOLEANS, NAMED ONE BY ONE AND FOR ONE REASON.
  *
- * Each says whether a ruled evidence SEAM has a reader behind it — the same fact
- * `seams_bound` carries as a list — and none of them says any evidence was read,
- * admitted or acted on. The substring sweep catches them because "reader"
- * carries the union's "read", which is the word that exists to catch `read:
- * true` and `is_read: true`.
+ * Each says whether a SEAM has something behind it — the same fact `seams_bound`
+ * carries as a list — and none of them says any evidence was read, admitted or
+ * acted on. The substring sweep catches the first three because "reader" carries
+ * the union's "read", which is the word that exists to catch `read: true` and
+ * `is_read: true`.
  *
- * THE EXEMPTION IS THREE EXACT NAMES AND NOTHING ELSE. `producer_bound` is a
- * binding boolean too and is NOT here: it is the one whose `true` would be an
- * authority claim, and the test below asserts it is still swept.
+ * `producer_bound` IS THE FOURTH AS OF THIS SLICE, and widening the exemption by
+ * one name is a deliberate, reviewed change rather than a convenience. The
+ * earlier comment here said it was excluded because "its `true` would be an
+ * authority claim" — and that was right while nothing implemented the producer,
+ * because the only way the field could have read true was somebody asserting it.
+ * It is now DERIVED from a module that exists: `boundSeam` finds an
+ * `emitOutcome` behind card 9's staffed seat, or it does not. A seam-state
+ * boolean about a seam that is built is the same kind of fact as the other
+ * three, and the claim that would matter — `passable` — is NOT here and is
+ * still swept, which is what the assertions below hold.
  */
 const SEAM_STATE_KEYS = new Set([
   "predecessor_outcome_reader_bound",
   "scheduler_reader_bound",
   "gate_conclusion_reader_bound",
+  "producer_bound",
 ]);
 
 /** Every string, key and boolean in a returned value, walked to the leaves. */
@@ -461,7 +478,7 @@ test("PRODUCER: the four canonical predecessors are hard-bound into the frozen r
     TypeError);
 });
 
-test("PRODUCER: the checker's binding constant IS the frozen registration", () => {
+test("PRODUCER: the checker's binding constant IS the frozen registration", async () => {
   // Same object, not an equal copy — the checker cannot be reading a second
   // registration built over some other predecessor set.
   assert.equal(surface.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
@@ -470,18 +487,18 @@ test("PRODUCER: the checker's binding constant IS the frozen registration", () =
     producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS);
   assert.equal(surface.V5_A02_SCHEDULER_STEP_REF, producerModule.V5_A02_SCHEDULER_STEP_REF);
   // And what the checker reports comes from that one record.
-  const result = emitGateZeroOutcome(cleanJoin());
+  const result = await emitGateZeroOutcome(cleanJoin());
   assert.equal(result.producer_role,
     producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry.producer_role);
   assert.equal(result.producer_registration, surface.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION);
 });
 
-test("SURFACE: no caller-controlled shape produces a privileged outcome", () => {
+test("SURFACE: no caller-controlled shape produces a privileged outcome", async () => {
   const shapes = callerControlledShapes();
   assert.ok(shapes.length >= 40, "the sweep must cover the caller-controlled domain");
   for (const [name, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT) {
     for (const shape of shapes) {
-      const result = fn(shape);
+      const result = await fn(shape);
       assert.equal(result.status, "unavailable", name);
       assert.equal(result.decision, "refuse", name);
       assert.equal(result.request_read, false, name);
@@ -495,36 +512,44 @@ test("SURFACE: no caller-controlled shape produces a privileged outcome", () => 
   }
 });
 
-test("SURFACE: the answer is byte-identical across every caller shape", () => {
+test("SURFACE: the answer is byte-identical across every caller shape", async () => {
   for (const [name, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT) {
-    const first = digest(fn(cleanJoin()));
+    const first = digest(await fn(cleanJoin()));
     for (const shape of callerControlledShapes())
-      assert.equal(digest(fn(shape)), first, `${name} answered differently for a caller shape`);
-    assert.equal(digest(fn()), first, `${name} answered differently for no argument at all`);
+      assert.equal(digest(await fn(shape)), first, `${name} answered differently for a caller shape`);
+    assert.equal(digest(await fn()), first, `${name} answered differently for no argument at all`);
   }
 });
 
-test("SURFACE: the Gate Zero outcome is not passable and carries no join", () => {
+test("SURFACE: the Gate Zero outcome is not passable and carries no join", async () => {
   for (const shape of [cleanJoin(), undefined, { gates: [] }]) {
-    const result = emitGateZeroOutcome(shape);
+    const result = await emitGateZeroOutcome(shape);
     assert.equal(result.passable, false);
-    assert.equal(result.reason_id, "gate_zero_producer_seam_unavailable");
-    assert.equal(result.producer_bound, false);
+    // THE REFUSAL MOVED ONE STEP FURTHER ALONG, which is this slice. The
+    // producer seam is BOUND — a module implements it — and the refusal is the
+    // producer's own. In a test there is no authenticated call, so what it
+    // refuses on is the identity it cannot derive: a receipt signed by nobody is
+    // the defect the PR 1013 review named, and this is the surface half of the
+    // control that proves it cannot happen.
+    assert.equal(result.reason_id, "gate_zero_producer_identity_refused");
+    assert.equal(result.producer_bound, true);
+    assert.equal(result.producer_answer.run_binding_status, "derived");
     assert.equal(result.producer_seam, V5_A02_GATE_ZERO_PRODUCER_SEAM);
     assert.equal(result.gate_zero_step_ref, GATE_ZERO_STEP_REF);
     // The defect the reviewer named: a successful join inside a refusal.
     assert.equal(result.join, null, "no join may ride inside the refusal");
     assert.equal(result.predecessor_evidence_read, null);
     assert.equal(Object.hasOwn(result, "joins_exactly"), false);
-    // OWED, not merely named: the three reader seams have a ruled reader behind
-    // them now, and the one thing still owed is the producer. `seams_bound`
-    // below carries the whole list so the filter hides nothing.
-    assert.deepEqual(result.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+    // NOTHING IS OWED ANY MORE. All four seams have something behind them; what
+    // is missing is rows, and a missing row is not an owed seam. `seams_bound`
+    // carries the whole list so the empty filter hides nothing.
+    assert.deepEqual(result.owed_seams, []);
+    assert.deepEqual(result.seams_bound.map(entry => entry.bound), [true, true, true, true]);
   }
 });
 
-test("SURFACE: the contract is REGISTERED with the oracle seat STAFFED, and neither is a signature", () => {
-  const result = emitGateZeroOutcome(cleanJoin());
+test("SURFACE: the contract is REGISTERED with the oracle seat STAFFED, and neither is a signature", async () => {
+  const result = await emitGateZeroOutcome(cleanJoin());
   // The five the 2026-09-11 ruling settled are reported, and each one matches
   // the registration rather than a literal typed twice.
   const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
@@ -593,10 +618,11 @@ test("SURFACE: the contract is REGISTERED with the oracle seat STAFFED, and neit
     "359784f1-5d9e-4e11-bcce-af8b0dfcc5e0");
   assert.equal(result.producer_registration.oracle_seat_owed, null,
     "a seat that is held may not still be reported as owed");
-  // AND THE SEAT MOVED NOTHING ELSE. This is the confusion card 9 could
-  // introduce and the reason the two fields below are asserted right here.
+  // AND THE SEAT MOVED NOTHING IT MAY NOT. It binds the producer seam — that is
+  // this slice — and it still does not sign: `passable` is false over a run
+  // binding that names no rows, which is the confusion card 9 could introduce.
   assert.equal(result.passable, false);
-  assert.equal(result.producer_bound, false);
+  assert.equal(result.producer_bound, true);
   assert.equal(result.r7_amendment_decision_ref,
     "311a9af5-3685-4c47-a158-f8dd70870ca1");
   assert.equal(result.r7_entry_witness, null);
@@ -738,21 +764,26 @@ test("PRODUCER: the amended r7 packet witnesses the registration and the superse
   }
 });
 
-test("SURFACE: a ruled producer role does not make the gate passable", () => {
-  // The exact confusion this PR could have introduced: five fields stop being
-  // null, so a reader might take the gate for decided-and-therefore-runnable.
-  const result = emitGateZeroOutcome(cleanJoin());
+test("SURFACE: a BOUND producer does not make the gate passable either", async () => {
+  // The exact confusion this slice could introduce: a producer exists, so a
+  // reader might take the gate for built-and-therefore-passing. It is not. A
+  // built seam is a place a signature can come from; the signature still has to
+  // be earned over rows, and there are no rows named.
+  const result = await emitGateZeroOutcome(cleanJoin());
   assert.equal(result.passable, false);
-  assert.equal(result.producer_bound, false);
+  assert.equal(result.producer_bound, true);
   assert.equal(result.status, "unavailable");
   assert.equal(result.decision, "refuse");
   assert.equal(result.join, null);
-  assert.deepEqual(result.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
-  assert.equal(v5A02GateZeroPolicyPreimage().gate_zero_passable, false);
-  // And three bound readers do not make it passable either, which is the SECOND
-  // confusion available here: evidence is not a signature.
+  assert.deepEqual(result.owed_seams, []);
+  // The two frozen `false`s left the preimage rather than being reworded: a
+  // sealed policy identity may not carry a per-run verdict, and it may not carry
+  // a claim the surface can now disprove.
+  assert.equal(Object.hasOwn(v5A02GateZeroPolicyPreimage(), "gate_zero_passable"), false);
+  assert.equal(Object.hasOwn(v5A02GateZeroPolicyPreimage(), "public_surface_answers"), false);
+  // And the two that stayed are DERIVED, so both move when their seam does.
   assert.equal(v5A02GateZeroPolicyPreimage().authoritative_readers_bound, true);
-  assert.equal(v5A02GateZeroPolicyPreimage().producer_bound, false);
+  assert.equal(v5A02GateZeroPolicyPreimage().producer_bound, true);
 });
 
 /**
@@ -766,42 +797,39 @@ test("SURFACE: a ruled producer role does not make the gate passable", () => {
  * and 10 left that seam unbuilt on purpose. So every answer still refuses — one
  * step further along, on the reason that is now the true one.
  */
-test("SURFACE: the three ruled readers are bound, and the producer never is", () => {
+test("SURFACE: all four seams are bound, and the two synchronous reads still refuse", async () => {
   const join = readGateZeroPredecessorJoin();
   assert.equal(join.predecessor_outcome_reader_bound, true);
   assert.equal(join.scheduler_reader_bound, true);
-  assert.equal(join.reason_id, "gate_zero_producer_seam_unavailable");
-  assert.equal(join.decided_by, "evidence_seams_bound_producer_seam_unbuilt");
-  assert.deepEqual(join.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+  // THE REASON MOVED, AND IT HAD TO. "the producer seam is unavailable" stopped
+  // being true the moment something stood behind it. What is true instead is
+  // narrower and is about THIS function: a join is what the emission produces
+  // from rows, and a synchronous query of this surface does not read rows.
+  assert.equal(join.reason_id, "gate_zero_join_is_produced_not_queried");
+  assert.equal(join.decided_by, "evidence_seams_bound_producer_seam_built");
+  assert.deepEqual(join.owed_seams, []);
 
   const graph = readGateGraphAssurance();
   assert.equal(graph.gate_conclusion_reader_bound, true);
-  assert.equal(graph.reason_id, "gate_zero_producer_seam_unavailable");
-  assert.deepEqual(graph.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+  assert.equal(graph.reason_id, "gate_zero_join_is_produced_not_queried");
+  assert.deepEqual(graph.owed_seams, []);
 
   // Still a refusal, on all three, whatever is bound.
-  for (const result of [join, graph, emitGateZeroOutcome(cleanJoin())]) {
+  for (const result of [join, graph, await emitGateZeroOutcome(cleanJoin())]) {
     assert.equal(result.status, "unavailable");
     assert.equal(result.decision, "refuse");
     assert.equal(result.request_read, false);
     assert.equal(result.caller_evidence_admitted, false);
-    // THE ONE SEAM THAT MAY NEVER REPORT BOUND HERE. It has no card token, so
-    // no ruling line can open it, and nothing below a human seat can.
-    const producer = result.seams_bound
-      .find(entry => entry.seam === V5_A02_GATE_ZERO_PRODUCER_SEAM);
-    if (producer !== undefined)
-      assert.equal(producer.bound, false, "the producer seam reported bound");
-    assert.ok(result.owed_seams.includes(V5_A02_GATE_ZERO_PRODUCER_SEAM));
+    assert.equal(result.passable ?? false, false, "a read refused and claimed a signature");
   }
-  assert.equal(emitGateZeroOutcome(cleanJoin()).producer_bound, false);
 
-  // And the three reader seams report bound in the whole list, not only in the
-  // three named booleans above.
-  const bound = new Map(emitGateZeroOutcome(cleanJoin()).seams_bound
+  // And every seam reports bound in the whole list, not only in the named
+  // booleans above — which is the state this slice put the surface in.
+  const bound = new Map((await emitGateZeroOutcome(cleanJoin())).seams_bound
     .map(entry => [entry.seam, entry.bound]));
   assert.deepEqual([...bound.entries()].sort(), [
     [V5_A02_GATE_CONCLUSION_READER_SEAM, true],
-    [V5_A02_GATE_ZERO_PRODUCER_SEAM, false],
+    [V5_A02_GATE_ZERO_PRODUCER_SEAM, true],
     [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, true],
     [V5_A02_SCHEDULER_READER_SEAM, true],
   ].sort());
@@ -874,10 +902,45 @@ const PER_CARD_ANSWER_FIELDS = Object.freeze([
   "gate_conclusion_reader_bound",
 ]);
 
-/** The answer with cards 9 and 10 and the three per-card booleans lifted out. */
+/**
+ * THE POLICY VERSION, PUT BACK TO THE PRE-PR COMMIT'S, AND WHY THAT IS ONE
+ * NORMALIZATION RATHER THAN A HOLE IN THE PIN.
+ *
+ * `V5_A02_POLICY_VERSION` moved 2 -> 3 in this slice, on purpose and with a
+ * reason written beside it: version 2's whole claim was that the surface answers
+ * `unavailable` for every caller on every input, and the surface can now answer
+ * over rows. The number therefore appears in every object this gate builds, so
+ * an unruled tree cannot be byte-identical to main no matter what else is true.
+ *
+ * What the pin is FOR is everything else — that with the three rulings back to
+ * null and the seat unstaffed, not one other byte of the refusal moved. So the
+ * version is set back and the whole rest of the object is compared exactly. A
+ * change to any other field is still red, which is the property this pin
+ * carries; the one field it forgives is the one this PR declares it moved.
+ */
+const PRE_PR_POLICY_VERSION = 2;
+function atPrePrPolicyVersion(answer) {
+  assert.equal(answer.policy_version, V5_A02_POLICY_VERSION,
+    "the answer does not carry this branch's policy version, so the normalization is wrong");
+  assert.notEqual(V5_A02_POLICY_VERSION, PRE_PR_POLICY_VERSION,
+    "the policy version did not move, so this normalization is hiding nothing and must go");
+  return { ...answer, policy_version: PRE_PR_POLICY_VERSION };
+}
+
+/**
+ * THE ONE FIELD THIS SLICE ADDS TO THE EMITTED ANSWER. It carries whatever the
+ * bound producer said, so a consumer can see WHICH clause or WHICH missing row
+ * decided a refusal. On an unruled tree the seam is shut and it is null — which
+ * is still a field main did not have, so the pin is taken without it and its own
+ * values are asserted where the producer is actually reached.
+ */
+const PRODUCER_ANSWER_FIELDS = Object.freeze(["producer_answer"]);
+
+/** The answer with cards 9 and 10, the per-card booleans and the producer's own answer lifted out. */
 function withoutCards9And10(answer) {
   const stripped = { ...answer };
-  for (const field of [...CARD_9_ANSWER_FIELDS, ...PER_CARD_ANSWER_FIELDS]) {
+  for (const field of [...CARD_9_ANSWER_FIELDS, ...PER_CARD_ANSWER_FIELDS,
+    ...PRODUCER_ANSWER_FIELDS]) {
     assert.ok(Object.hasOwn(stripped, field), `${field} is not on the answer`);
     delete stripped[field];
   }
@@ -982,10 +1045,18 @@ const UNSTAFFED_SEAT_LINE = "  holder_ref: null,\n";
 const SEAT_CHARTER_LINE = "  charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,\n";
 const SEAT_STAFFING_LINE =
   "  staffing_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_STAFFING_DECISION_REF,\n";
-const BOUND_PREDICATE_LINE =
-  "  if (ruledCardBinding(binding.card_ref) === null) return null;\n";
-const DIVERGENT_PREDICATE_LINE =
-  "  if (looseRulingRef(binding.card_ref) === null) return null;\n";
+/**
+ * THE THREE READER SEAMS' BINDING PREDICATE, one line each — it moved out of
+ * `boundSeam` and onto the bindings themselves when card 9 got a seam whose
+ * authority is a seat declaration rather than a store ruling. The control is the
+ * same control: each reader seam goes back to asking the ruling table directly,
+ * which reads ANY non-null ruling as bound and is the half that let the gate and
+ * its reader disagree.
+ */
+const BOUND_PREDICATE_LINES = Object.freeze([11, 12, 13].map(card =>
+  `    ruled: () => ruledCardBinding("card:${card}") !== null,\n`));
+const DIVERGENT_PREDICATE_LINES = Object.freeze([11, 12, 13].map(card =>
+  `    ruled: () => looseRulingRef("card:${card}") !== null,\n`));
 const READERS_IMPORT_TAIL = '} from "./gate-zero-seam-readers.v5.js";\n';
 const DIVERGENT_IMPORT =
   'import { seamRulingRef as looseRulingRef } from "./gate-zero-seam-rulings.v5.js";\n';
@@ -1060,11 +1131,13 @@ function stageTree(withdrawnCards = [0, 1, 2],
   if (divergentGate) {
     const gatePath = join(target, GATE_MODULE_FILE);
     let gate = readFileSync(gatePath, "utf8");
-    assert.equal(gate.split(BOUND_PREDICATE_LINE).length - 1, 1,
-      "the gate's binding predicate is no longer the line this control replaces");
+    BOUND_PREDICATE_LINES.forEach((anchor, index) => {
+      assert.equal(gate.split(anchor).length - 1, 1,
+        "the gate's binding predicate is no longer the line this control replaces");
+      gate = gate.replace(anchor, DIVERGENT_PREDICATE_LINES[index]);
+    });
     assert.equal(gate.split(READERS_IMPORT_TAIL).length - 1, 1,
       "the gate's reader import is no longer where this control adds the old one");
-    gate = gate.replace(BOUND_PREDICATE_LINE, DIVERGENT_PREDICATE_LINE);
     gate = gate.replace(READERS_IMPORT_TAIL, READERS_IMPORT_TAIL + DIVERGENT_IMPORT);
     writeFileSync(gatePath, gate);
   }
@@ -1107,10 +1180,10 @@ test("SWITCH: with the three rulings back to null, the answers are main's bytes"
     pathToFileURL(join(target, "gate-zero-assurance.v5.js")).href);
 
   for (const name of ["readGateZeroPredecessorJoin", "readGateGraphAssurance"])
-    assert.equal(digest(unruled[name]()), MAIN_ANSWER_DIGESTS[name],
+    assert.equal(digest(atPrePrPolicyVersion(unruled[name]())), MAIN_ANSWER_DIGESTS[name],
       `${name} no longer answers what main answered while unruled`);
   // And the emission, with cards 9 and 10 lifted out: every other byte is main's.
-  assert.equal(digest(withoutCards9And10(unruled.emitGateZeroOutcome())),
+  assert.equal(digest(atPrePrPolicyVersion(withoutCards9And10(await unruled.emitGateZeroOutcome()))),
     MAIN_ANSWER_DIGESTS.emitGateZeroOutcome,
     "the emitted answer moved for a reason other than cards 9 and 10");
 
@@ -1122,7 +1195,7 @@ test("SWITCH: with the three rulings back to null, the answers are main's bytes"
   assert.equal(unruledJoin.decided_by, "no_authoritative_reader");
   assert.equal(unruled.readGateGraphAssurance().gate_conclusion_reader_bound, false);
   for (const result of [unruledJoin, unruled.readGateGraphAssurance(),
-    unruled.emitGateZeroOutcome()])
+    await unruled.emitGateZeroOutcome()])
     for (const entry of result.seams_bound)
       assert.equal(entry.bound, false, `${entry.seam} reported bound in an unruled tree`);
 
@@ -1130,17 +1203,17 @@ test("SWITCH: with the three rulings back to null, the answers are main's bytes"
   assert.equal(readGateZeroPredecessorJoin().predecessor_outcome_reader_bound, true);
 });
 
-test("SWITCH: the shipped answers are NOT main's bytes, so the pin can fail", () => {
+test("SWITCH: the shipped answers are NOT main's bytes, so the pin can fail", async () => {
   // Without this, a wiring that did nothing would pass the test above silently.
   for (const [name, fn] of [
     ["readGateZeroPredecessorJoin", readGateZeroPredecessorJoin],
     ["readGateGraphAssurance", readGateGraphAssurance],
   ])
-    assert.notEqual(digest(fn()), MAIN_ANSWER_DIGESTS[name],
+    assert.notEqual(digest(atPrePrPolicyVersion(fn())), MAIN_ANSWER_DIGESTS[name],
       `${name} still answers exactly what it answered unwired`);
   // The emission too, and it must differ for the READER reason and not only
   // because cards 9 and 10 added four names: strip those and it still moves.
-  assert.notEqual(digest(withoutCards9And10(emitGateZeroOutcome())),
+  assert.notEqual(digest(atPrePrPolicyVersion(withoutCards9And10(await emitGateZeroOutcome()))),
     MAIN_ANSWER_DIGESTS.emitGateZeroOutcome,
     "the emitted answer moved only by the card 9 and 10 fields");
 });
@@ -1201,7 +1274,10 @@ const JOIN_SENTENCES = Object.freeze({
   both: "no authoritative predecessor-outcome or scheduler reader exists to join",
   predecessor: "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against",
   scheduler: "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against",
-  neither: "the two ruled evidence seams are bound and the producer seam that would name the rows to join is unbuilt",
+  // The producer seam is BOUND in the shipped tree, so the clause names what is
+  // actually true of a synchronous query: aiming the seams is the emission's
+  // job, not this read's.
+  neither: "the two ruled evidence seams are bound and the producer seam that names the rows to join is bound, and a query of this surface does not aim it",
   // The same clause with card 9's line back to null: the sentence names the
   // empty seat again, which is what main said and what the seat's own mutation
   // control below asserts.
@@ -1233,12 +1309,16 @@ const JOIN_SENTENCES = Object.freeze({
  *       and the seat is unbound for each. Fail-closed is the default answer,
  *       which is the same "no" this surface gave before any seat was named.
  *
- *   (3) STAFFING THE SEAT DOES NOT MAKE THE GATE PASS, and this is the clause
- *       that matters most. `passable`, `producer_bound` and the producer seam's
- *       own binding are IDENTICAL either way. A seat is who may sign; the
- *       producer behind the seam is what signs, and it is not built. A staffed
- *       seat that moved `passable` would be exactly the authority this whole
- *       slice exists to refuse.
+ *   (3) THE SEAT IS STILL LOAD-BEARING NOW THAT THE PRODUCER EXISTS, and this
+ *       is the clause that matters most — it is the one that changed. The
+ *       producer seam's `ruled` thunk asks card 9's declaration, so an unstaffed
+ *       seat closes the seam and the surface goes back, byte for byte, to the
+ *       refusal it gave before this slice: `producer_bound: false`, card 9's
+ *       governance question back on the list, the refusal decided by the empty
+ *       seat. A staffed seat BINDS the seam — and still does not make the gate
+ *       pass, because a seam is a place a signature can come from and the
+ *       signature is earned over rows. `passable` is false either way, which is
+ *       exactly the authority this slice must not hand anybody.
  */
 const SEAT_STAFFED_FIELDS = Object.freeze({
   oracle_seat_bound: true,
@@ -1282,7 +1362,7 @@ const canonicalJsonOf = value => JSON.stringify(value ?? null);
 
 test("SEAT: an unstaffed seat refuses on the seat, and a staffed one binds", async () => {
   const unstaffed = await gateOfTree(stageSeatTree({ staffedSeat: false }));
-  const emittedUnstaffed = unstaffed.emitGateZeroOutcome();
+  const emittedUnstaffed = await unstaffed.emitGateZeroOutcome();
   for (const [field, value] of Object.entries(SEAT_UNSTAFFED_FIELDS))
     assert.equal(emittedUnstaffed[field], value, `${field} with the seat unstaffed`);
   assert.equal(emittedUnstaffed.producer_registration.oracle_seat_bound, false);
@@ -1303,12 +1383,12 @@ test("SEAT: an unstaffed seat refuses on the seat, and a staffed one binds", asy
 
   // AND STAFFED, which is what src ships. Read off the shipped module rather
   // than a second staged tree: the thing a consumer gets is the subject.
-  const emittedStaffed = emitGateZeroOutcome();
+  const emittedStaffed = await emitGateZeroOutcome();
   for (const [field, value] of Object.entries(SEAT_STAFFED_FIELDS))
     assert.equal(emittedStaffed[field], value, `${field} with the seat staffed`);
   assert.equal(emittedStaffed.producer_registration.oracle_seat_owed, null);
   assert.deepEqual([...emittedStaffed.undecided_governance_questions], []);
-  assert.equal(emittedStaffed.decided_by, "evidence_seams_bound_producer_seam_unbuilt");
+  assert.equal(emittedStaffed.decided_by, "evidence_seams_bound_producer_seam_built");
   assert.equal(emittedStaffed.join_unavailable_because, JOIN_SENTENCES.neither);
   assert.equal(emittedStaffed.unavailable_because.includes("no seat staffs"), false);
 
@@ -1328,33 +1408,61 @@ test("SEAT: an unstaffed seat refuses on the seat, and a staffed one binds", asy
     "$.oracle_seat_bound",
     "$.oracle_seat_holder_ref",
     "$.oracle_seat_staffing_decision_ref",
+    // THE FIVE THIS SLICE ADDED TO CARD 9'S BLAST RADIUS, and every one of them
+    // is still card 9's: the seat declaration is what the producer seam's
+    // `ruled` thunk asks, so staffing it binds the seam, empties the owed list,
+    // flips the seam's own entry in `seams_bound`, reaches the producer for the
+    // first time, and moves the refusal from "nothing implements this" to the
+    // producer's own reason. `passable` is NOT among them and must never be.
+    "$.owed_seams",
+    "$.producer_answer",
+    "$.producer_bound",
     "$.producer_registration.oracle_seat_bound",
     "$.producer_registration.oracle_seat_holder_ref",
     "$.producer_registration.oracle_seat_owed",
     "$.producer_registration.oracle_seat_staffing_decision_ref",
+    "$.reason_id",
+    "$.seams_bound",
     "$.unavailable_because",
     "$.undecided_governance_questions",
   ], "staffing the seat moved a field that is not card 9's");
+  assert.equal(emittedUnstaffed.passable, emittedStaffed.passable,
+    "staffing the seat moved the one field a seat may never move");
 });
 
-test("SEAT: staffing the seat does not bind the producer or make the gate passable", async () => {
+test("SEAT: an unstaffed seat closes the built producer seam, and neither state passes", async () => {
   const unstaffed = await gateOfTree(stageSeatTree({ staffedSeat: false }));
-  for (const [label, module] of [["unstaffed", unstaffed], ["staffed", surface]]) {
-    const emitted = module.emitGateZeroOutcome();
+  // THE SEAT IS THE SWITCH, STILL. The producer module is in this staged tree
+  // exactly as it is in src — nothing was deleted, no argument was passed — and
+  // the seam is shut anyway, because the only thing that opens it is card 9's
+  // declaration. This is the mutation control the seam study asked for: put
+  // `holder_ref: null` back and the whole slice goes dark.
+  const emittedUnstaffed = await unstaffed.emitGateZeroOutcome();
+  assert.equal(emittedUnstaffed.producer_bound, false, "an unstaffed seat left the seam open");
+  assert.equal(emittedUnstaffed.reason_id, "gate_zero_producer_seam_unavailable");
+  assert.equal(emittedUnstaffed.producer_answer, null,
+    "an unstaffed seat still reached the producer");
+  assert.deepEqual(emittedUnstaffed.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM]);
+  assert.equal(unstaffed.v5A02GateZeroPolicyPreimage().producer_bound, false);
+
+  // AND STAFFED, which is what src ships: the seam is bound and the refusal is
+  // the producer's own. In a test nothing established an authenticated call, so
+  // what it refuses on is the identity it will not manufacture.
+  const emittedStaffed = await emitGateZeroOutcome();
+  assert.equal(emittedStaffed.producer_bound, true);
+  assert.equal(emittedStaffed.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emittedStaffed.producer_answer.decision, "refuse");
+  assert.deepEqual(emittedStaffed.owed_seams, []);
+  assert.equal(v5A02GateZeroPolicyPreimage().producer_bound, true);
+
+  // NEITHER STATE PASSES, and that is the clause a staffed seat must never move.
+  for (const [label, emitted] of [["unstaffed", emittedUnstaffed], ["staffed", emittedStaffed]]) {
     assert.equal(emitted.passable, false, `passable while ${label}`);
-    assert.equal(emitted.producer_bound, false, `producer_bound while ${label}`);
     assert.equal(emitted.status, "unavailable", `status while ${label}`);
     assert.equal(emitted.decision, "refuse", `decision while ${label}`);
-    assert.equal(emitted.reason_id, "gate_zero_producer_seam_unavailable", label);
     assert.equal(emitted.outcome_digest, null, `outcome_digest while ${label}`);
     assert.equal(emitted.observed_at, null, `observed_at while ${label}`);
     assert.equal(emitted.join, null, `join while ${label}`);
-    assert.deepEqual(emitted.owed_seams, [V5_A02_GATE_ZERO_PRODUCER_SEAM], label);
-    const producer = emitted.seams_bound
-      .find(entry => entry.seam === V5_A02_GATE_ZERO_PRODUCER_SEAM);
-    assert.equal(producer.bound, false, `the producer seam reported bound while ${label}`);
-    assert.equal(module.v5A02GateZeroPolicyPreimage().gate_zero_passable, false, label);
-    assert.equal(module.v5A02GateZeroPolicyPreimage().producer_bound, false, label);
   }
 });
 
@@ -1410,19 +1518,23 @@ test("SEAT: the seat binds on the whole declaration, and fails closed on any of 
   for (const falsifier of SEAT_FALSIFIERS) {
     const tree = await gateOfTree(
       stageSeatTree({ staffedSeat: true, seatEdit: [falsifier.edit] }));
-    const emitted = tree.emitGateZeroOutcome();
+    const emitted = await tree.emitGateZeroOutcome();
     assert.equal(emitted.oracle_seat_bound, false, falsifier.name);
     assert.equal(emitted.oracle_seat_holder_ref, null, falsifier.name);
     assert.equal(emitted.oracle_seat_staffing_decision_ref, null, falsifier.name);
     assert.deepEqual([...emitted.undecided_governance_questions],
       [...PRODUCER_QUESTIONS], falsifier.name);
     assert.equal(emitted.passable, false, falsifier.name);
+    // AND THE SEAM CLOSES WITH IT. One wrong line of the declaration does not
+    // merely stop reporting a holder — it takes the producer seam down, which is
+    // what makes the seat load-bearing rather than decorative.
+    assert.equal(emitted.producer_bound, false, falsifier.name);
   }
   // AND THE FALSIFIERS ARE FALSIFIERS: the unmodified declaration, staged the
   // same way through the same machinery, binds. Without this the five cases
   // above would pass just as well against a staging step that broke the file.
   const intact = await gateOfTree(stageSeatTree({ staffedSeat: true }));
-  const emittedIntact = intact.emitGateZeroOutcome();
+  const emittedIntact = await intact.emitGateZeroOutcome();
   assert.equal(emittedIntact.oracle_seat_bound, true,
     "the staging itself unstaffs the seat, so the falsifiers prove nothing");
   // AND THE ONE VALUE THAT BINDS IS THE DECISION'S OWN ID. The falsifiers above
@@ -1433,8 +1545,8 @@ test("SEAT: the seat binds on the whole declaration, and fails closed on any of 
     "the seat binds on something other than the blanket approval's decision id");
 });
 
-test("PER READER: with all three ruled, nothing reports a reader as missing", () => {
-  const emitted = emitGateZeroOutcome();
+test("PER READER: with all three ruled, nothing reports a reader as missing", async () => {
+  const emitted = await emitGateZeroOutcome();
   // The list the review found wrong: with three live rulings and card 9's seat
   // staffed it is EMPTY, and the gate refuses anyway.
   assert.deepEqual([...emitted.undecided_governance_questions], []);
@@ -1447,8 +1559,11 @@ test("PER READER: with all three ruled, nothing reports a reader as missing", ()
   assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.neither);
   assert.equal(emitted.join_unavailable_because.includes("no authoritative predecessor-outcome or scheduler reader exists"),
     false, "the emission still reports both readers missing while both are bound");
-  assert.equal(readGateZeroPredecessorJoin().reason_id, "gate_zero_producer_seam_unavailable");
-  assert.equal(readGateGraphAssurance().reason_id, "gate_zero_producer_seam_unavailable");
+  // And the two synchronous reads refuse on what is now the true reason: the
+  // producer seam is bound, so "unavailable" stopped being a thing this surface
+  // may say about it.
+  assert.equal(readGateZeroPredecessorJoin().reason_id, "gate_zero_join_is_produced_not_queried");
+  assert.equal(readGateGraphAssurance().reason_id, "gate_zero_join_is_produced_not_queried");
 });
 
 test("PER READER: withdrawing one ruling reopens that card's question and no other", async () => {
@@ -1467,7 +1582,7 @@ test("PER READER: withdrawing one ruling reopens that card's question and no oth
         `${other.card} was withdrawn as well as ${card.card}`);
 
     const tree = await gateOfTree(target);
-    const emitted = tree.emitGateZeroOutcome();
+    const emitted = await tree.emitGateZeroOutcome();
     digests.set(card.key, digest(emitted));
 
     // ONE reader question, and it is this card's.
@@ -1509,7 +1624,7 @@ test("PER READER: withdrawing one ruling reopens that card's question and no oth
       assert.equal(emitted.join_unavailable_because, JOIN_SENTENCES.neither_unstaffed);
     }
     // A withdrawal is neither the shipped answer nor the all-three-null one.
-    assert.notEqual(digest(emitted), digest(emitGateZeroOutcome()),
+    assert.notEqual(digest(emitted), digest(await emitGateZeroOutcome()),
       `withdrawing ${card.card} changed nothing`);
     // AND THE ALL-THREE SENTENCE IS A LIVE ONE. The literal here is the branch
     // this module actually answers with when every reader card is withdrawn and
@@ -1534,7 +1649,7 @@ test("PER READER: withdrawing one ruling reopens that card's question and no oth
   assert.equal(new Set(digests.values()).size, 3,
     "two different withdrawals produced the same answer");
   // And none of the three is the all-withdrawn answer either.
-  const allWithdrawn = digest((await gateOfTree(stageTree())).emitGateZeroOutcome());
+  const allWithdrawn = digest(await (await gateOfTree(stageTree())).emitGateZeroOutcome());
   for (const [key, one] of digests)
     assert.notEqual(one, allWithdrawn, `withdrawing ${key} alone answered as three withdrawals`);
 });
@@ -1579,7 +1694,7 @@ test("PER READER: a ruling naming another registered store leaves the card unbou
     // THE GATE. This card is unbound, the other two are not, and the answer is
     // the one a withdrawal produces: same reason, same sentence, same bytes.
     const tree = await gateOfTree(target);
-    const emitted = tree.emitGateZeroOutcome();
+    const emitted = await tree.emitGateZeroOutcome();
     const bound = new Map(emitted.seams_bound.map(entry => [entry.seam, entry.bound]));
     for (const one of READER_CARDS) {
       assert.equal(emitted[one.bound], one !== card, `${one.bound} with ${card.card} mismatched`);
@@ -1589,7 +1704,7 @@ test("PER READER: a ruling naming another registered store leaves the card unbou
     assert.deepEqual([...emitted.undecided_governance_questions],
       [...PRODUCER_QUESTIONS, card.question], card.card);
     assert.equal(digest(emitted),
-      digest((await gateOfTree(stageTree([index]))).emitGateZeroOutcome()),
+      digest(await (await gateOfTree(stageTree([index]))).emitGateZeroOutcome()),
       `a mismatched store answered differently from withdrawing ${card.card}`);
 
     // THE READER, asked with a well-formed query. It refuses, it never opens its
@@ -1621,9 +1736,9 @@ test("PER READER: a ruling naming another registered store leaves the card unbou
     // back, the two sides no longer agree.
     const control = stageTree([], { mismatchedCards: [index], divergentGate: true });
     assert.ok(readFileSync(join(control, GATE_MODULE_FILE), "utf8")
-      .includes(DIVERGENT_PREDICATE_LINE.trim()),
+      .includes(DIVERGENT_PREDICATE_LINES[0].trim()),
       "the control did not reintroduce the old predicate, so it proves nothing");
-    const controlEmitted = (await gateOfTree(control)).emitGateZeroOutcome();
+    const controlEmitted = await (await gateOfTree(control)).emitGateZeroOutcome();
     const controlAnswered = await (await readersOfTree(control))[card.reader](card.query);
     assert.equal(controlEmitted[card.bound], true,
       `${card.card}: the control's gate did not report the mismatched ruling as bound`);
@@ -1846,20 +1961,53 @@ const BRANCH_ADDED_SURFACE_STRINGS = Object.freeze([
   "oracle_seat_holder_ref",
   "oracle_seat_staffing_decision_ref",
   "scheduler_canary_seam_unavailable",
+  // THE PRODUCER'S EIGHT REASON IDS, added by this slice. They reach the UNRULED
+  // surface because the closed reason registry is an exported constant — the
+  // vocabulary a consumer can be handed is the whole registry, whether or not a
+  // given tree can reach a given member. Nine of them are the producer's own
+  // closed list, re-registered here so the gate can express a refusal the
+  // producer can reach; the tenth is the gate's, for the two synchronous reads
+  // once a join is something the emission produces rather than something a query
+  // returns. Every one of them is swept for the union like any other addition —
+  // being declared buys exemption from NOTHING, which is why "unpasted" and
+  // "non_green" are not among them: both carried a union word, and both were
+  // renamed rather than declared.
+  // THE TWO ADDED 2026-09-12 split the producer's absence vocabulary: git
+  // metadata it cannot resolve, and a sealed file that is not on disk, stop
+  // sharing an id with a ruled row that is genuinely absent. Both were checked
+  // against the union like every other addition, which is why HEAD's commit
+  // object is named `head_revision_object` inside them.
+  "gate_zero_candidate_metadata_absent",
+  "gate_zero_evidence_unavailable",
+  "gate_zero_gate_graph_clause_failed",
+  "gate_zero_join_is_produced_not_queried",
+  "gate_zero_negative_admission_unproved",
+  "gate_zero_predecessor_clause_failed",
+  "gate_zero_producer_identity_refused",
+  "gate_zero_run_binding_unnamed",
+  "gate_zero_scheduler_clause_failed",
+  "gate_zero_sealed_artifact_absent",
 ]);
 
 /**
- * THE FOUR SENTENCES A STAFFED SEAT ANSWERS WITH WHILE A READER CARD IS NOT
- * RULED — the combination no staged tree used to produce, because every staged
- * tree unstaffs the seat by default. Two of them carried `reader`, and `read` is
- * a word of the closed union; the sweep below now walks the trees that reach
- * them, and this list is how that walk is proved non-vacuous.
+ * THE SENTENCES A STAFFED SEAT ANSWERS WITH WHILE A READER CARD IS NOT RULED —
+ * the combination no staged tree used to produce, because every staged tree
+ * unstaffs the seat by default. The sweep below walks the trees that reach them,
+ * and this list is how that walk is proved non-vacuous.
+ *
+ * THE LIST MOVED WITH THIS SLICE, and the reason is worth stating rather than
+ * quietly re-pinning. A staffed seat now BINDS the producer seam — that is the
+ * seam's whole binding condition — so "the producer seam is unbuilt" is no
+ * longer something a staffed seat can say, under any combination of withdrawn
+ * cards. What a staffed seat with a withdrawn reader answers instead is the
+ * producer's own refusal, and one gate sentence about it. The four sentences
+ * that used to be here are not deleted from the module: they moved to the
+ * fail-closed branch where a staffed seat's holder does not resolve, which no
+ * staged tree can reach because the holder always does.
  */
 const STAFFED_WITHDRAWN_SENTENCES = Object.freeze([
-  "the producer seam is unbuilt and no evidence seam is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome",
-  "the producer seam is unbuilt, and no predecessor, scheduler or gate-conclusion evidence seam is bound to this surface",
-  "not every ruled evidence seam is bound, and the producer seam the staffed seat would work through is unbuilt",
-  "the producer seam is unbuilt, and not every ruled evidence seam is bound",
+  "the bound producer refused over the rows the three ruled evidence seams returned, so there is nothing to sign",
+  "this module was not called inside an authenticated call, so there is no execution context to derive a producer identity from",
 ]);
 
 test("SWEEP: the closed union, over every branch-owned string the surface hands back", async () => {
@@ -1924,7 +2072,7 @@ test("SWEEP: the closed union, over every branch-owned string the surface hands 
   // have seen a value a request could have put there.
   for (const [name, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT)
     for (const shape of callerControlledShapes())
-      sweep(collectStrings(fn(shape), `${name}(shape)`, new Map()), name);
+      sweep(collectStrings(await fn(shape), `${name}(shape)`, new Map()), name);
 
   // NON-VACUOUS: the sweep has branch-owned strings to look at, and every one of
   // the declared eight is among them — the exemption list is the pre-PR
@@ -2151,7 +2299,7 @@ test("SURFACE: the readers are imported, never handed in", () => {
     assert.ok(fn.length <= 1, "an export takes a second argument");
 });
 
-test("SURFACE: no environment variable binds a seam", () => {
+test("SURFACE: no environment variable binds a seam", async () => {
   // A FRESH PROCESS, because a module reads its environment while it evaluates:
   // the variables are set before the import, not after it.
   const script = `
@@ -2161,7 +2309,7 @@ test("SURFACE: no environment variable binds a seam", () => {
       process.stdout.write(JSON.stringify({
         join: digest(gate.readGateZeroPredecessorJoin()),
         graph: digest(gate.readGateGraphAssurance()),
-        emitted: digest(gate.emitGateZeroOutcome()),
+        emitted: digest(await gate.emitGateZeroOutcome()),
       }));
     }).catch(error => { process.stderr.write(String(error)); process.exit(1); });
   `;
@@ -2182,7 +2330,7 @@ test("SURFACE: no environment variable binds a seam", () => {
   assert.deepEqual(JSON.parse(run.stdout), {
     join: digest(readGateZeroPredecessorJoin()),
     graph: digest(readGateGraphAssurance()),
-    emitted: digest(emitGateZeroOutcome()),
+    emitted: digest(await emitGateZeroOutcome()),
   }, "an environment variable moved an answer");
 });
 
@@ -2257,7 +2405,31 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
-      "./gate-zero-seam-readers.v5.js", "./internal/gate-zero-seam-binding.v5.js"]);
+      "./gate-zero-seam-readers.v5.js", "./internal/gate-zero-seam-binding.v5.js",
+      // THE EIGHTH, AND IT IS LAST ON PURPOSE. The producer imports the readers,
+      // the readers import this gate, and this gate imports the producer — one
+      // cycle on top of the one that was already here. Everything that crosses
+      // it is a thunk read at call time, and the producer is imported after the
+      // registration and the readers so that whichever module a process starts
+      // at, nothing reads a `const` binding still in its temporal dead zone.
+      "./gate-zero-producer.v5.js"]);
+  // AND THE PRODUCER'S OWN GRAPH, asserted the same way: it reaches the readers
+  // and the registration and nothing test-shaped, and it does NOT import the
+  // gate — a producer that imported the surface it answers for would be able to
+  // read its own verdict back.
+  // The four `node:` builtins are the producer's own derivation: it reads the
+  // candidate tree's bytes, the environment manifest and the sealed fixture set
+  // rather than hashing a description of them, and it reads the repository's own
+  // .git for the revision the running module was built from — `node:zlib` since
+  // 2026-09-12, because it now reads HEAD's own commit and tree OBJECTS, which
+  // are zlib-deflated, rather than the reflog line the first draft took the
+  // subject maker from. There is no `node:child_process`: this oracle does not
+  // execute a program to learn what it is standing on.
+  assert.deepEqual(imports["gate-zero-producer.v5.js"],
+    ["node:fs", "node:path", "node:url", "node:zlib",
+      "./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
+      "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js",
+      "./gate-zero-seam-readers.v5.js"]);
   assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./benchmark-minimum.v5.js"]);
 });
@@ -2681,19 +2853,27 @@ test("CLAUSE: an observation bound to a different step is refused by name", () =
 // POLICY IDENTITY.
 // ---------------------------------------------------------------------------
 
-test("POLICY: the preimage is stable, caller-independent, and says the surface refuses", () => {
+test("POLICY: the preimage is stable, caller-independent, and carries no per-run verdict", () => {
   const preimage = v5A02GateZeroPolicyPreimage();
   assert.deepEqual(preimage.decision_ids, ["Q017.D1", "Q036.D1", "Q067.D1", "Q086.D1"]);
   assert.deepEqual(preimage.decision_ids, [...V5_A02_DECISION_IDS]);
   assert.equal(preimage.schema_version, V5_A02_GATE_ZERO_SCHEMA_VERSION);
   assert.equal(preimage.policy_version, V5_A02_POLICY_VERSION);
-  assert.equal(preimage.gate_zero_passable, false);
-  assert.equal(preimage.producer_bound, false);
+  // THE TWO FROZEN CLAIMS ARE GONE, not reworded and not derived. Each said the
+  // surface can never answer yes, which stopped being true when the producer
+  // seam was built; and a DERIVED version of either would put a per-run verdict
+  // inside a caller-independent policy identity, which is worse than a stale
+  // one. What the preimage still carries is what is true of the POLICY.
+  assert.equal(Object.hasOwn(preimage, "gate_zero_passable"), false);
+  assert.equal(Object.hasOwn(preimage, "public_surface_answers"), false);
+  // TRUE since this slice, and DERIVED rather than typed: something implements
+  // the producer behind card 9's staffed seat. It says false again in a tree
+  // whose seat declaration is unstaffed, which the SEAT test proves.
+  assert.equal(preimage.producer_bound, true);
   // TRUE since 2026-09-12, and DERIVED rather than typed: cards 11, 12 and 13
   // are ruled and their readers are bound. It says false again in a tree whose
   // ruling lines are null, which the SWITCH test proves by digest.
   assert.equal(preimage.authoritative_readers_bound, true);
-  assert.equal(preimage.public_surface_answers, "unavailable");
   assert.deepEqual(preimage.owed_seams, [...V5_A02_GATE_ZERO_OWED_SEAMS]);
   // It takes no caller input, and proves it by ignoring some.
   assert.equal(digest(v5A02GateZeroPolicyPreimage({ passable: true })),
@@ -2707,7 +2887,7 @@ test("POLICY: the digest is deterministic and matches its canonical bytes", () =
     JSON.stringify(JSON.parse(v5A02GateZeroPolicyCanonicalBytes())));
 });
 
-test("POLICY: every reason either half can answer with is registered", () => {
+test("POLICY: every reason either half can answer with is registered", async () => {
   // Three spellings, because a reason reachable by ANY route must be in the
   // closed registry: the clauses answer through `wouldNot("id", ...)` and
   // `reason("id")`, and the public surface passes the id as the second argument
@@ -2727,13 +2907,13 @@ test("POLICY: every reason either half can answer with is registered", () => {
   for (const id of [...publicCitations, ...classifierCitations])
     assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes(id), `${id} is not registered`);
   // And the behavioural half: whatever the surface actually answers is registered.
-  for (const result of [emitGateZeroOutcome({}), readGateZeroPredecessorJoin(), readGateGraphAssurance()])
+  for (const result of [await emitGateZeroOutcome({}), readGateZeroPredecessorJoin(), readGateGraphAssurance()])
     assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes(result.reason_id), result.reason_id);
 });
 
-test("POLICY: every result on both halves carries the no-effects marker", () => {
+test("POLICY: every result on both halves carries the no-effects marker", async () => {
   for (const result of [
-    emitGateZeroOutcome(cleanJoin()), readGateZeroPredecessorJoin(), readGateGraphAssurance(),
+    await emitGateZeroOutcome(cleanJoin()), readGateZeroPredecessorJoin(), readGateGraphAssurance(),
     classifyGateZeroJoin(cleanJoin()), classifyGateGraph(cleanGates()),
   ]) {
     assert.deepEqual(result.effects, V5_NO_EFFECTS);

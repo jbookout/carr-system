@@ -191,7 +191,18 @@ export const PROFILES = {
   // the profile is the whole point, not a suggestion the model could widen by
   // passing a different verb name (callTool's allowedIn() check enforces this
   // at call time, same as every other profile).
-  reviewer: new Set(["record-finding"]),
+  // THE SECOND ENTRY, ADDED 2026-09-13, AND IT IS NARROWER THAN IT LOOKS. The
+  // profile now admits two write verbs rather than one, and the addition is
+  // record-gate-zero-read-only-outcome under Joe's ruling
+  // d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70. This entry is NOT the authority: it
+  // is the blast-radius limiter, and on its own it would admit BOTH reviewer
+  // lanes, because grok-reviewer authenticates through the same door and lands
+  // in the same profile. The authority is the `oracleSeatOnly` gate in
+  // executeRegisteredTool, which reads the staffed seat off the frozen
+  // registration and refuses every lane but that one. Both are kept: the
+  // profile keeps a reviewer out of the other two hundred write verbs, and the
+  // seat gate keeps the wrong reviewer out of this one.
+  reviewer: new Set(["record-finding", "record-gate-zero-read-only-outcome"]),
 
   // HERMES (R0 runtime evaluation, 2026-08-16). The write set is EMPTY, which
   // is the whole design: the 2026-08-12 frontier council cleared Hermes for a
@@ -283,8 +294,11 @@ const PROFILE_NOTICE = {
     "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
     "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
   reviewer:
-    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly one write verb, " +
-    "record-finding. Every other write verb refuses with not_in_profile — no advancing a deal, no " +
+    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly two write verbs, " +
+    "record-finding and record-gate-zero-read-only-outcome. The second one additionally refuses every " +
+    "reviewer lane except the one staffed with the DoctorCRE v5 Gate Zero oracle seat, so being in this " +
+    "profile is not by itself permission to call it. Every other write verb refuses with not_in_profile " +
+    "— no advancing a deal, no " +
     "drafting a document, no touching a party or a rule. This profile is locked server-side by a " +
     "REVIEW_TOKENS bearer, not by ?profile=, and cannot be widened by this token under any request. " +
     "This is the Automatic Review Council's Codex-reviewer machine actor, never a human seat. Land " +
@@ -464,7 +478,9 @@ export async function executeWithTrustedPrincipal(actor, readback, requiredBundl
     }
     throw error;
   }
-  return handler({ ...actor, trusted_principal: trustedPrincipal });
+  // In place, not a copy: identity.js's authentication brand is object identity
+  // (amendment 8, 2026-09-13), so a spread here would strip it.
+  return handler(Object.assign(actor, { trusted_principal: trustedPrincipal }));
 }
 
 // Exported for deterministic no-network identity-gate tests. It remains the
@@ -623,7 +639,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
     if (!a.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug,
       hint: "the token authenticates as this actor but no row exists in the actor table — " +
             "provision the actor before any write verb will run" });
-    const actorWithId = { ...actor, id: a.rows[0].id };
+    // In place, not a copy — see executeWithTrustedPrincipal above.
+    const actorWithId = Object.assign(actor, { id: a.rows[0].id });
     await setWriterActorContext(client, actorWithId);
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
     if (principalReadback.rows.length !== 1)
@@ -671,7 +688,13 @@ export async function dispatch(request, env, ctx, actor) {
   // The authority class is server-derived from the authenticated actor. The
   // legacy ?profile= remains only a voluntary operational limiter: it can
   // reduce the listed/callable verbs, never select a sponsor or widen humanOnly.
-  const scopedActor = { ...actor,
+  // DECORATED IN PLACE. This used to be `{ ...actor, ... }`, and the copy was
+  // load-bearing in the wrong direction: identity.js's brand is now object
+  // identity (amendment 8), so an actor spread here reaches the verb dispatch
+  // authenticated as nobody. The fields a receipt identity is derived from were
+  // pinned at authentication and are not re-read off this object, so decorating
+  // it cannot move who the actor is either.
+  const scopedActor = Object.assign(actor, {
     authorization_class: authorizationClassForActor(actor),
     organization_tenant_id: organizationTenantForActor(actor),
     operational_profile: profile,
@@ -683,7 +706,7 @@ export async function dispatch(request, env, ctx, actor) {
     // every verb handler — means every write verb's existing withEnvelope()/
     // writeEvent() calls pick it up for free through auditIdentity(actor)
     // (tools.js), with zero change to any individual verb.
-    correlation_id: env.CORRELATION_ID || null };
+    correlation_id: env.CORRELATION_ID || null });
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 

@@ -44,11 +44,16 @@
 // a projection that copied a stored class string would turn the partner test
 // into the caller boolean this rail exists to prevent.
 //
-// THE ACCEPTANCE VERB REFUSES TODAY, ON PURPOSE, AND NOW FOR ONE REASON RATHER
-// THAN TWO. r7's receipt_producer_step_registry makes the benchmark acceptance
-// step depend on exactly two steps; acceptance additionally rests on the passing
-// review's measurement evidence, which WAS the second gap and is now recorded.
-// The remaining refusal is Gate Zero, and it is not a gap this file can close.
+// THE ACCEPTANCE VERB'S THREE BINDINGS ARE NOW ALL BOUND, AND IT STILL REFUSES
+// UNLESS EACH OF THEM ANSWERS. r7's receipt_producer_step_registry makes the
+// benchmark acceptance step depend on exactly two steps; acceptance additionally
+// rests on the passing review's measurement evidence. Both of the two gaps this
+// header used to name are closed — the coverage attestation on its own evidence,
+// and Gate Zero in migration 0502 — and closing them changed WHY an acceptance
+// refuses, not WHETHER it can. Every acceptance still fails closed unless a
+// current passing Gate Zero outcome, an attested passing review on the same
+// bytes and an accepted intact portfolio all answer, strictly before it, for a
+// live verified partner.
 //
 //   * step:portfolio-constitution-human-exact-hash-acceptance-receipt — BOUND.
 //     ops.portfolio_accepted_revision() from migration 0496 answers it,
@@ -61,18 +66,22 @@
 //     from it. No benchmark-to-portfolio lineage is recorded anywhere in the
 //     record layer, so none is claimed, and none is invented here. r7 requires
 //     the prerequisite step, not a lineage relation.
-//   * step:gate-zero-read-only-outcome — NO AUTHENTICATED BINDING HERE. r7
-//     references the step without registering a v5 producer, and
-//     tools/doctorcre-v5-review.cjs admits it as an external pre-v5 step. That
-//     is intentional and this file asks for no producer registry entry. Gate
-//     Zero runs outside this system and may well have produced an outcome;
-//     nothing here claims otherwise. What this rail can say is only about
-//     itself: the record layer holds no authenticated Gate Zero outcome digest
-//     and observed instant, so there is nothing HERE to bind.
-//     `readGateZeroOutcome` below is a PRIVATE fail-closed stub: it is not
-//     exported, it takes no argument, it reads no configuration, and it always
-//     throws. The acceptance handler calls it BEFORE it issues any query, so
-//     the acceptance path cannot even be observed touching the database.
+//   * step:gate-zero-read-only-outcome — BOUND as of migration 0502, and the
+//     OLD READING IS RETIRED BY THE PACKET RATHER THAN BY PREFERENCE. This
+//     bullet used to say r7 registers no v5 producer for the step and that it
+//     runs outside this system. The card-10 amendment (decision
+//     311a9af5-3685-4c47-a158-f8dd70870ca1) added the producer row with the role
+//     independent_control_plane_oracle, and tools/doctorcre-v5-review.cjs's own
+//     comment now says the external boundary moved down to the four
+//     predecessors. The seat that holds the oracle — the independent Codex
+//     reviewer lane — records the outcome itself under Joe's 2026-09-13 ruling
+//     d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70, with no partner countersign.
+//     `readGateZeroOutcome` below is STILL PRIVATE and still fail-closed: not
+//     exported, and refusing whenever no current passing, unexpired outcome
+//     exists. It takes a CONNECTION now rather than nothing, because it reads a
+//     record; that is the whole of the change to its shape. It is still read
+//     FIRST, so nothing on the acceptance path writes anything before it
+//     answers.
 //   * the review's MEASUREMENT COVERAGE — BOUND, AND STILL SEPARATE FROM GATE
 //     ZERO ON PURPOSE. This verb's own review path proves coverage with the
 //     kernel against the payload rebuilt from the stored rows and computes the
@@ -110,9 +119,14 @@
 // benchmark-minimum.v5.js applies to member observation.
 //
 // WHAT REMAINS INTEGRATION WORK, named rather than implied:
-//   * The authenticated Gate Zero outcome record, and reading it here and in
-//     ops.benchmark_gate_zero_outcome(). Both stubs must be replaced together;
-//     deleting the throw in one of them opens the gate without a record.
+//   * NO LONGER OUTSTANDING: the authenticated Gate Zero outcome record and its
+//     two readers. Migration 0502 lands the record;
+//     ops.benchmark_gate_zero_outcome() and readGateZeroOutcome below were
+//     implemented in the SAME change, which is what the requirement demanded —
+//     deleting the throw in one of them alone would have opened the gate without
+//     a record. mcp-server/test/benchmark-acceptance-store.v5.test.mjs keeps that
+//     pairing enforced now that neither throws: it reads both sources and fails
+//     if either one reverts to a raise while the other still reads.
 //   * NO LONGER OUTSTANDING: the measurement coverage attestation. It is
 //     recorded by the review write path and read by both readers, landed
 //     together in one change as the requirement demanded. What it does NOT
@@ -511,38 +525,77 @@ export function benchmarkPayloadFromRows(rows) {
 // ---------------------------------------------------------------------------
 
 /**
- * The Gate Zero integration requirement, stated once and quoted in the refusal.
+ * The Gate Zero integration requirement — RESOLVED as of migration 0502, and
+ * resolved to exactly what it said it would take and no more.
  *
- * This is a description of a MISSING BINDING. It is not a Gate Zero policy, it
- * grants nothing, and nothing reads it to decide anything.
+ * This is still not a Gate Zero policy, it still grants nothing, and nothing
+ * reads it to decide anything. What changed is that the three clauses under
+ * `required_to_resolve` were satisfied together, which is what that list asked
+ * for.
+ *
+ * ONE OF THE OLD `why_unresolved` CLAUSES WAS ALSO WRONG BY THE TIME IT WAS
+ * REPLACED, and it is kept below under `corrected_stale_clause` rather than
+ * silently dropped. It said `step:gate-zero-read-only-outcome` is an external
+ * pre-v5 step for which r7 registers no v5 producer, and that this is
+ * intentional. The card-10 amendment (decision
+ * 311a9af5-3685-4c47-a158-f8dd70870ca1, applied under Joe's ruling on open loop
+ * #589) added the producer row, and tools/doctorcre-v5-review.cjs's own comment
+ * now says the external boundary moved down to the four predecessors. That
+ * sentence was the single most likely thing to send the next reader looking for
+ * a human, so it is corrected by name.
  */
 export const BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT = deepFreeze({
   step_ref: GATE_ZERO_STEP_REF,
-  resolved: false,
-  // SCOPED TO THIS RECORD LAYER, DELIBERATELY. Every clause below is a statement
-  // about what is bindable HERE. None of them says Gate Zero produced no
-  // outcome: it is an external pre-v5 step, it runs outside this system, and
-  // what it did or did not produce is not something this module can observe or
-  // is entitled to assert.
-  scope: "the binding available in this record layer, not the existence of a Gate Zero outcome anywhere",
-  external_producer_is_intentional: true,
-  why_unresolved: [
-    "This record layer holds no authenticated Gate Zero outcome: no outcome digest and no observed instant, so an acceptance has nothing here to bind to.",
-    "step:gate-zero-read-only-outcome is an external pre-v5 step admitted as such by tools/doctorcre-v5-review.cjs, and r7 registers no v5 producer for it. That is intentional and no producer registry entry is requested; it is stated only to explain why the outcome would have to arrive from outside and be authenticated on the way in.",
-    "Whether Gate Zero has produced an outcome externally is unknown to this module and is not claimed either way.",
+  resolved: true,
+  // STILL SCOPED TO THIS RECORD LAYER. Every clause is a statement about what is
+  // bindable HERE. Resolving it does not turn this constant into a claim about
+  // what Gate Zero decided; the rail binds a recorded outcome and judges none.
+  scope: "the binding available in this record layer, not a judgement about what a Gate Zero run decided",
+  // FALSE SINCE 2026-09-12, and it is a correction rather than a ruling: r7
+  // carries the producer row, so a Gate Zero outcome is a v5 producer's output
+  // and not an external arrival this record layer is merely receiving. The
+  // producer itself landed in Step A (gate-zero-producer.v5.js).
+  external_producer_is_intentional: false,
+  what_was_unbound: [
+    "This record layer held no authenticated Gate Zero outcome: no outcome digest and no observed instant, so an acceptance had nothing here to bind to.",
+    "Both readers were fail-closed stubs, and either implemented alone would have opened the gate without a record on the other side.",
+    "Whether the registered producer had emitted an outcome was unknowable to this module, because nothing here could see one. Step A built the producer and Step B records what it emits, so the question is now answered by a row rather than left open.",
   ],
-  required_to_resolve: [
-    "Record an authenticated Gate Zero read-only outcome in this record layer, carrying the exact outcome digest and the trusted instant it was observed.",
-    "Implement the private reader in this module and ops.benchmark_gate_zero_outcome() against that record, together.",
-    "Keep the strictly-after ordering: an acceptance recorded at the Gate Zero instant did not follow it.",
+  // THE CORRECTION, kept as a field because a deleted wrong sentence teaches
+  // nobody. See the doc comment above.
+  corrected_stale_clause: {
+    said: "step:gate-zero-read-only-outcome is an external pre-v5 step admitted as such by tools/doctorcre-v5-review.cjs, and r7 registers no v5 producer for it. That is intentional and no producer registry entry is requested.",
+    corrected_to: "r7 registers a v5 producer for step:gate-zero-read-only-outcome with the role independent_control_plane_oracle and the oracle oracle:gate-producer:gate-zero-read-only. The external pre-v5 boundary moved down to its four predecessors, and tools/doctorcre-v5-review.cjs says so in its own comment.",
+    corrected_by: "311a9af5-3685-4c47-a158-f8dd70870ca1",
+  },
+  resolved_by: [
+    "migrations/0502_gate_zero_read_only_outcome.sql, which records the authenticated outcome: one consumer-gate-receipt.v1 per candidate, the digest RECOMPUTED from the stored receipt, the instant it was observed, and the independent oracle seat that produced it.",
+    "readGateZeroOutcome in this module and ops.benchmark_gate_zero_outcome(), implemented together against that record, as the requirement demanded.",
+    "the write verb record-gate-zero-read-only-outcome, which refuses every actor except the staffed oracle seat under Joe's 2026-09-13 ruling d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70 — no partner countersign, because the human act in this chain is the benchmark acceptance downstream.",
   ],
+  // The strictly-after ordering is unchanged and is still enforced by the
+  // acceptance receipt's own check constraint, not by this constant.
+  ordering_unchanged: "an acceptance recorded AT the Gate Zero instant did not follow it, and is refused exactly as one recorded before it is.",
+  // WHAT RESOLVING THIS DID NOT DO, kept as a field because it is the clause
+  // most likely to be forgotten by a reader who sees `resolved: true`.
+  still_refused_after_resolution: [
+    "a Gate Zero outcome digest supplied by a caller",
+    "a caller-selected work-request reference standing in for the outcome",
+    "a digest derived from a synthetic test fixture",
+    "an arbitrary verified boolean",
+    "a Gate Zero policy invented in this slice",
+    "a recorded non-passing or expired outcome standing in for a current one",
+    "silently upgrading the measurement coverage attestation, which is independent and stays an attributed assertion",
+  ],
+  // Retained under its old name so a consumer reading the refusal detail does
+  // not lose the list when the requirement flipped.
   explicitly_refused: [
     "a Gate Zero outcome digest supplied by a caller",
     "a caller-selected work-request reference standing in for the outcome",
     "a digest derived from a synthetic test fixture",
     "an arbitrary verified boolean",
     "a Gate Zero policy invented in this slice",
-    "a claim that Gate Zero produced no outcome",
+    "a recorded non-passing or expired outcome standing in for a current one",
   ],
 });
 
@@ -586,7 +639,7 @@ export const BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT = deepFreeze
   // What resolving this did NOT do, kept as a field because it is the clause
   // most likely to be forgotten by a reader who sees `resolved: true`.
   still_unresolved_elsewhere: [
-    "The Gate Zero binding. It is independent, it is unbound, it is read first, and benchmark acceptance still fails closed there.",
+    "NO LONGER: the Gate Zero binding, which was unbound when this list was written and landed in migration 0502. It is still independent, still read FIRST, and still refuses on its own grounds — and it did not upgrade this attestation on its way past, which is the fourth thing explicitly_refused below names.",
     "The authenticated benchmark_coverage fact the join projection needs, which requires a LIVE declared evaluator seat and a storage verifier that re-derives the evaluation. That is a different obligation for a different artifact and this attestation is not it.",
   ],
   // KEPT VERBATIM from the unresolved constant. Read the doc comment above.
@@ -604,23 +657,72 @@ export const BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT = deepFreeze
 });
 
 /**
- * THE PRIVATE FAIL-CLOSED GATE ZERO READER.
+ * THE PRIVATE GATE ZERO READER — now a real read, and the second half of a pair.
  *
- * Deliberately not exported, deliberately parameterless, and deliberately
- * without a configuration path: an exported stub is a callable claim about Gate
- * Zero, and a stub that takes an argument is one edit away from being a
- * configuration surface. The only way to reach it is to attempt an acceptance,
- * which is where the gap actually matters.
+ * IT WAS A PARAMETERLESS STUB THAT ALWAYS THREW, from V5-A00 until migration
+ * 0502_gate_zero_read_only_outcome.sql. Its own doc comment named the condition
+ * for changing that: land the record and implement BOTH readers in the same
+ * change, because either alone opens the gate without a record on the other
+ * side. That is what happened; ops.benchmark_gate_zero_outcome() is implemented
+ * in the same commit, against the same table, with the same currentness rule.
  *
- * It always throws. When the record exists, this body reads it and returns
- * { step_ref, outcome_digest, observed_at } — and ops.benchmark_gate_zero_outcome()
- * must be implemented in the same change, because either stub alone opens the
- * gate without a record on the other side.
+ * STILL PRIVATE, for the reason it always was: an exported reader is a callable
+ * claim about Gate Zero, and a caller who could ask this module "what is the
+ * current Gate Zero outcome" outside an acceptance would be reading an oracle's
+ * receipt as an answer to a question it does not answer. It takes a CONNECTION
+ * rather than nothing, because it now reads a record; that is the whole of the
+ * change to its shape, and it is exactly the change readMeasurementCoverageBinding
+ * made when its own record landed.
+ *
+ * IT IS THE MODULE-SIDE TWIN OF ops.benchmark_gate_zero_outcome(), NOT A
+ * REPLACEMENT FOR IT. The database's reader is the authoritative one: it runs
+ * inside the definer acceptance path where a handler bug cannot step around it,
+ * and it is granted to no role, so this module cannot call it. What this one
+ * does is refuse EARLY and by name, on the same grounds, from the granted
+ * primitives — the same pattern deriveBenchmarkAcceptor and
+ * readMeasurementCoverageBinding already follow. If the two ever disagreed, the
+ * database would win and the acceptance would refuse.
+ *
+ * WHICH ROW IS CURRENT, as the same ordered procedure the SQL applies: status
+ * 'pass'; not past its expiry; latest observed_at, tie-broken on outcome_digest
+ * descending so the order is total; none left is a refusal. The two empty cases
+ * are told apart — nothing ever recorded, versus everything recorded being
+ * expired or non-passing — because they are different problems for whoever
+ * hits them, and because a rail that reported them identically would make a
+ * quarantined Gate Zero look like a Gate Zero that never ran.
  */
-function readGateZeroOutcome() {
-  refuse("gate_zero_outcome_unresolved",
-    "benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and this record layer holds none: no outcome digest and no observed instant are recorded here for step:gate-zero-read-only-outcome. That is a statement about what can be bound here, not a claim that the external pre-v5 Gate Zero step produced no outcome. Acceptance fails closed until such a record and its reader exist.",
-    BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT);
+async function readGateZeroOutcome(c) {
+  const row = (await c.query(
+    `select step_ref, outcome_digest,
+            to_char(observed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as observed_at
+       from ops.gate_zero_read_only_outcome
+      where status = 'pass' and ttl_expires_at > now()
+      order by observed_at desc, outcome_digest collate "C" desc
+      limit 1`)).rows[0];
+
+  if (!row) {
+    const any = (await c.query(
+      `select exists (select 1 from ops.gate_zero_read_only_outcome) as recorded`)).rows[0];
+    if (any?.recorded) {
+      refuse("gate_zero_outcome_not_current",
+        "benchmark acceptance requires a CURRENT PASSING Gate Zero read-only outcome, and every outcome this record layer holds is non-passing or past its expiry. A recorded run is not a binding: r7's Q036.D1 requires truthful failure propagation, so a fail, unknown, stale or quarantined outcome refuses here exactly as an absent one does.",
+        { ...BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT, recorded_outcomes_present: true });
+    }
+    refuse("gate_zero_outcome_unresolved",
+      "benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and none has been recorded in this record layer yet. The record and its writer exist (ops.gate_zero_read_only_outcome, written by the independent oracle seat through record-gate-zero-read-only-outcome); until that seat records one, acceptance fails closed. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.",
+      { ...BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT, recorded_outcomes_present: false });
+  }
+
+  // Exactly the closed three-field object benchmark-minimum.v5.js reads
+  // (:435, :1449-1453), and nothing more. The receipt, the seat and the status
+  // are recorded and are deliberately NOT returned: acceptance binds none of
+  // them, and a field on this result that nothing consumes invites a future
+  // reader to consume it as something it is not.
+  return deepFreeze({
+    step_ref: row.step_ref,
+    outcome_digest: row.outcome_digest,
+    observed_at: row.observed_at,
+  });
 }
 
 /**
@@ -746,17 +848,22 @@ export function benchmarkAcceptancePrerequisites() {
     },
     gate_zero: BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT,
     measurement_coverage_proof: BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT,
-    acceptance_available: false,
-    // ONE ENTRY NOW, AND IT WENT FROM TWO TO ONE THE ONLY HONEST WAY: by a
-    // record landing, visibly, in a field a reader can check — not by the two
-    // being quietly merged. The coverage binding cleared on its own evidence and
-    // Gate Zero is untouched by it, which is exactly what the coverage
-    // requirement's third clause demanded.
+    // ZERO ENTRIES NOW, AND IT WENT FROM TWO TO ONE TO ZERO THE ONLY HONEST WAY
+    // BOTH TIMES: by a record landing, visibly, in a field a reader can check —
+    // never by two requirements being quietly merged. The coverage binding
+    // cleared on its own evidence; Gate Zero cleared on its own, in migration
+    // 0502, and did not upgrade the coverage one on its way past.
     //
-    // AND ACCEPTANCE IS STILL UNAVAILABLE. One unbound binding is as closed as
-    // two: the Gate Zero outcome is a fact this record layer does not hold and
-    // cannot compute, and no source change can honestly supply it.
-    acceptance_blocked_by: [GATE_ZERO_STEP_REF],
+    // WHAT `acceptance_available: true` MEANS AND WHAT IT DOES NOT. It means no
+    // binding is structurally absent any more: each of the three has a record
+    // and a reader. It does NOT mean any particular acceptance will succeed —
+    // every one of them still refuses unless a current passing Gate Zero
+    // outcome, an attested passing review on the same bytes, and an accepted
+    // intact portfolio all answer, strictly before it, for a live verified
+    // partner. This field reports the SHAPE of the rail, not a prediction about
+    // a call.
+    acceptance_available: true,
+    acceptance_blocked_by: [],
     ordering_rule: "strictly_after_both_prerequisites_and_the_passing_review",
     effects: V5_NO_EFFECTS,
   });
@@ -899,7 +1006,7 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
   return {
     "read-benchmark-manifest": {
       write: false,
-      description: "Read one DoctorCRE v5 benchmark manifest: its payload rebuilt from the stored rows, both the digest recorded at proposal and the digest recomputed from those rows right now, its structural validity, the independent reviews recorded against it, and whether a verified partner has accepted it. Also reports the acceptance bindings and whether each is bound: the portfolio prerequisite (bound, and reported with what it does and does not prove), the Gate Zero outcome (unbound — this record layer holds no authenticated binding, which says nothing about whether the external pre-v5 step produced an outcome) and the measurement coverage proof (bound, and bound to exactly what it claimed it would be worth: a passing review carries a recorded attestation naming the kernel evaluator, the payload digest it proved against and the measurement digest it proved over, and the database recomputes that payload digest from the draft's own rows and compares that measurement digest against the review's own — it stays a trusted writer's attributed assertion and not an independent verification, because the samples stay outside this record layer). Exposes only content inside the payload digest and produces no effect.",
+      description: "Read one DoctorCRE v5 benchmark manifest: its payload rebuilt from the stored rows, both the digest recorded at proposal and the digest recomputed from those rows right now, its structural validity, the independent reviews recorded against it, and whether a verified partner has accepted it. Also reports the acceptance bindings and whether each is bound: the portfolio prerequisite (bound, and reported with what it does and does not prove), the Gate Zero outcome (bound as of migration 0502 — an independent oracle seat records one consumer-gate-receipt.v1 per candidate and this rail reads the current passing, unexpired one; a recorded fail, unknown, stale or quarantined outcome is a run and not a binding, and refuses exactly as an absent one does) and the measurement coverage proof (bound, and bound to exactly what it claimed it would be worth: a passing review carries a recorded attestation naming the kernel evaluator, the payload digest it proved against and the measurement digest it proved over, and the database recomputes that payload digest from the draft's own rows and compares that measurement digest against the review's own — it stays a trusted writer's attributed assertion and not an independent verification, because the samples stay outside this record layer). Exposes only content inside the payload digest and produces no effect.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: { benchmark_ref: { type: "string" } }, required: ["benchmark_ref"],
@@ -1113,7 +1220,7 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
 
     "accept-benchmark-manifest-draft": {
       write: true, humanOnly: true, authorityOnly: true,
-      description: "HUMAN-ONLY: accept one exact DoctorCRE v5 benchmark payload digest as the verified_partner_benchmark_authority. The acceptor is derived from the authenticated partner authority session and is never a field in this payload; a writer connection cannot reach this verb at all. Acceptance requires a fresh passing independent review on the same bytes, three distinct identities, an accepted and intact portfolio constitution named by the acceptor (a prerequisite binding, not a claim of lineage: no benchmark-to-portfolio descent is recorded anywhere), and the Gate Zero read-only outcome as authenticated in this record layer — and must fall strictly after all of them. IT REFUSES TODAY, FOR ONE REMAINING REASON: this record layer holds no authenticated Gate Zero outcome to bind, which says nothing about whether the external pre-v5 step produced one. That refusal happens before this verb issues any query, so nothing on this path reaches the database while Gate Zero is unbound, and no benchmark has been or can be accepted through it yet. THE SECOND REFUSAL IS RETIRED, on its own evidence and not by Gate Zero: a passing review now carries a recorded coverage attestation naming the kernel evaluator, the payload digest it proved against and the measurement digest it proved over, and the coverage binding is read after Gate Zero against that record. It remains a trusted writer's attributed assertion, not an independent verification: the samples are outside this record layer.",
+      description: "HUMAN-ONLY: accept one exact DoctorCRE v5 benchmark payload digest as the verified_partner_benchmark_authority. The acceptor is derived from the authenticated partner authority session and is never a field in this payload; a writer connection cannot reach this verb at all. Acceptance requires a fresh passing independent review on the same bytes, three distinct identities, an accepted and intact portfolio constitution named by the acceptor (a prerequisite binding, not a claim of lineage: no benchmark-to-portfolio descent is recorded anywhere), and the Gate Zero read-only outcome as authenticated in this record layer -- and must fall strictly after all of them. ALL THREE BINDINGS ARE NOW BOUND, AND IT STILL REFUSES UNLESS EACH ANSWERS. The Gate Zero binding landed with migration 0502: an independent oracle seat records one consumer-gate-receipt.v1 per candidate through record-gate-zero-read-only-outcome, and this verb reads the CURRENT PASSING, UNEXPIRED one FIRST. A recorded fail, unknown, stale or quarantined outcome is a run and not a binding, and refuses here exactly as an absent one does -- that is Q036.D1's truthful-failure-propagation clause, not a courtesy. That read happens before this verb writes anything, so no acceptance can be half-attempted or mistaken for one that nearly worked. THE SECOND REFUSAL WAS RETIRED EARLIER, on its own evidence and not by Gate Zero: a passing review carries a recorded coverage attestation naming the kernel evaluator, the payload digest it proved against and the measurement digest it proved over, and the coverage binding is read AFTER Gate Zero so nothing about Gate Zero can skip it. It remains a trusted writer's attributed assertion, not an independent verification: the samples are outside this record layer, and Gate Zero landing did not upgrade it.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -1133,43 +1240,51 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           assertNoSelfAssertedAuthority(args, "args");
         });
 
-        // ORDER IS DELIBERATE.
+        // ORDER IS DELIBERATE, AND IT IS THE SAME ORDER IT WAS BEFORE GATE ZERO
+        // LANDED — which is the point. Nothing about the sequence changed when
+        // the second binding became a real read; only the reason each step can
+        // refuse did.
         //
         //   1. The acceptor is derived from the LIVE actor. The humanOnly and
         //      authorityOnly flags already gate this verb; deriving the class
         //      again here means the rail does not depend on a flag being read
         //      correctly somewhere else.
-        //   2. The Gate Zero read refuses, and it is FIRST. It takes no
-        //      argument, reads nothing and always throws.
-        //   3. The measurement coverage proof binding is read SECOND. It is now
-        //      a real read of a real record, so it issues a query — and that is
-        //      why the guarantee below is stated the way it is.
+        //   2. The Gate Zero binding is read, and it is STILL FIRST. It is no
+        //      longer a parameterless stub — since migration 0502 it reads the
+        //      current passing, unexpired outcome — and it still refuses when
+        //      there is none, so an acceptance attempted before any oracle run
+        //      exists fails exactly where it always did.
+        //   3. The measurement coverage proof binding is read SECOND, so
+        //      whatever happens to (2) can never skip it.
         //
-        // THE GUARANTEE, RESTATED HONESTLY RATHER THAN QUIETLY DROPPED. It used
-        // to be "nothing on this path reaches the database", which was true when
-        // both readers were parameterless stubs. It is now: NOTHING ON THIS PATH
-        // REACHES THE DATABASE WHILE GATE ZERO IS UNBOUND. Gate Zero throws
-        // first, so no acceptance can be half-attempted, logged as pending, or
-        // mistaken for one that nearly worked — and the assertion in the tests
-        // that this verb issues ZERO statements is still the strongest thing
-        // said about it. When Gate Zero is bound, this path will read the
-        // coverage record before it writes anything, which is the correct order
-        // for a reader whose job is to refuse.
+        // THE GUARANTEE, RESTATED AGAIN RATHER THAN QUIETLY DROPPED, because it
+        // has now been narrowed twice and each narrowing is worth seeing. It was
+        // "nothing on this path reaches the database", true while both readers
+        // were parameterless stubs. It became "nothing reaches the database
+        // while Gate Zero is unbound", true while one was. It is now: NOTHING ON
+        // THIS PATH WRITES ANYTHING UNTIL ALL THREE BINDINGS ANSWER. Both
+        // readers issue queries and both refuse before any write, so an
+        // acceptance still cannot be half-attempted, logged as pending, or
+        // mistaken for one that nearly worked. The old test assertion that this
+        // verb issues ZERO statements is retired with the stub it described; the
+        // assertion that replaces it is that it issues only READS and writes
+        // nothing when either binding refuses.
         //
-        // The two bindings remain independent — one unbound, one resolved — and
-        // the coverage read stays after Gate Zero so that deleting the throw in
-        // (2) does not skip it.
+        // The two bindings remain INDEPENDENT, and Gate Zero landing did not
+        // upgrade the coverage one: that is the fourth thing the coverage
+        // requirement explicitly refuses, and it is asserted by test rather than
+        // promised here.
         const acceptor = check(() => deriveBenchmarkAcceptor(actor));
-        check(() => readGateZeroOutcome());
+        const gateZero = await readGateZeroOutcome(c).catch(error => asToolError(error));
         const coverage = await readMeasurementCoverageBinding(c, args.review_id)
           .catch(error => asToolError(error));
 
-        // UNREACHABLE UNTIL THE GATE ZERO RECORD EXISTS. Everything below is
-        // written out in full rather than stubbed, so that landing it is a change
-        // to the two Gate Zero readers and nothing else — not a rewrite of the
-        // acceptance path under time pressure, and not a fresh set of decisions
-        // made by whoever happens to land it. The coverage pair landed exactly
-        // that way, in one change to its two readers, and needed nothing here.
+        // REACHABLE AS OF MIGRATION 0502, AND THIS BLOCK IS UNCHANGED BY THAT.
+        // It was written out in full rather than stubbed precisely so that
+        // landing Gate Zero would be a change to the two Gate Zero readers and
+        // nothing else — not a rewrite of the acceptance path under time
+        // pressure, and not a fresh set of decisions made by whoever happened to
+        // land it. It cost nothing here, exactly as the coverage pair did.
         const live = await readLiveDraft(c, args.draft_id);
         if (live.payload_digest !== args.accepted_payload_digest) {
           toolRefuse("benchmark_acceptance_digest_stale",
@@ -1206,6 +1321,15 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           // passing review — and, from the field name alone, that what stands
           // behind it is an attributed assertion rather than a verification this
           // database performed.
+          // The Gate Zero binding this acceptance fell strictly after, named on
+          // the result so a consumer can see WHICH oracle run stands behind it
+          // rather than being told a boolean. The database re-derived the same
+          // values inside ops.benchmark_accept_manifest_draft and wrote those;
+          // these are the ones this rail read on the way in, and the two agree
+          // or the definer call would have refused.
+          gate_zero_step_ref: gateZero.step_ref,
+          gate_zero_outcome_digest: gateZero.outcome_digest,
+          gate_zero_observed_at: gateZero.observed_at,
           measurement_coverage_proved_by: coverage.coverage_proved_by,
           measurement_coverage_attested_over: coverage.measurement_set_digest,
           measurement_coverage_binding_proves: BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.remaining_trust_boundary,

@@ -83,7 +83,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 25)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 26)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -143,6 +143,14 @@ assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
 # the v23 branch below so this file fails if the snapshot ever loses the current
 # frontier while keeping its history -- the failure mode a substring-presence
 # test is otherwise blind to.
+assert "SCAC_CURRENT_NUMBER=26" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=38670" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1615" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=841" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=25" in GENERATOR
+assert "ops.scac_mutation_catalog_v26_current()" in GENERATOR
+assert "0503_gate_zero_outcome_and_scac_successor.sql" in GENERATOR
+# The v25 frontier stays a selectable branch behind the new one.
 assert "SCAC_CURRENT_NUMBER=25" in GENERATOR
 assert "SCAC_TOTAL_ENTRY_COUNT=37055" in GENERATOR
 assert "SCAC_CURRENT_ENTRY_COUNT=1609" in GENERATOR
@@ -227,7 +235,7 @@ numeric_registry_order = (
     "split_part(registry_version,'.v',2)::integer)"
 )
 assert numeric_registry_order in GENERATOR
-versions = [f"scac-mutation-registry.v{version}" for version in range(1, 24)]
+versions = [f"scac-mutation-registry.v{version}" for version in range(1, 25)]
 assert sorted(versions, key=lambda value: int(value.rsplit("v", 1)[1])) == versions
 assert sorted(versions) != versions
 
@@ -237,14 +245,14 @@ loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
 loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\")\"", loader_start)
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "24"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "25"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 24
-assert loaded_sql.count("sha256:") == 24
-assert FULL_SET_SEALS["scac-mutation-registry.v24"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 25
+assert loaded_sql.count("sha256:") == 25
+assert FULL_SET_SEALS["scac-mutation-registry.v25"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -264,13 +272,13 @@ def loader_rejects(seals: dict, count: str) -> bool:
         os.unlink(path)
 
 
-dropped = {k: v for k, v in FULL_SET_SEALS.items() if k != "scac-mutation-registry.v24"}
-assert loader_rejects(dropped, "24"), "a seal file missing v24 must not load"
+dropped = {k: v for k, v in FULL_SET_SEALS.items() if k != "scac-mutation-registry.v25"}
+assert loader_rejects(dropped, "25"), "a seal file missing v25 must not load"
 assert loader_rejects(dropped, "21"), (
-    "lowering the count must not be a way to hide a missing v24 seal"
+    "lowering the count must not be a way to hide a missing v25 seal"
 )
-malformed = dict(FULL_SET_SEALS, **{"scac-mutation-registry.v24": "sha256:not-a-digest"})
-assert loader_rejects(malformed, "24"), "a malformed v24 seal must not load"
+malformed = dict(FULL_SET_SEALS, **{"scac-mutation-registry.v25": "sha256:not-a-digest"})
+assert loader_rejects(malformed, "25"), "a malformed v25 seal must not load"
 
 def runtime_seal(source: str, name: str) -> str:
     match = re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', source, re.MULTILINE)

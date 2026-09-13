@@ -80,8 +80,8 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, continuityActorForTokenMaps, hermesActorForTokenMaps,
-         hermesCosActorForToken } from "./identity.js";
+import { actorFromProps, agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
+         hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
@@ -351,19 +351,23 @@ function probeActorFor(request, env) {
 // maps (it never will in practice — they are separate secrets) resolves
 // deterministically to probe first; in practice a caller only ever holds one
 // of the two tokens.
+//
+// THE MATCHING LOGIC MOVED TO identity.js ON 2026-09-12 (PR 1013) and this is
+// now a delegation. Nothing about the door changed — same secret, same map
+// shape, same returned fields — but the actor is authenticated inside
+// identity.js, which is the only file that can brand one.
+//
+// THE MAP IS HANDED OVER, NOT PASSED IN (amendment 8, third correction round).
+// identity.js's review door takes a BEARER ONLY: a caller cannot pair a bearer
+// of its choosing with a token map of its choosing, because there is no second
+// parameter to put one in. A Worker secret is readable only from a request's
+// `env`, so the server seals its map into that module on the first /mcp request
+// that carries one. The seal is one-shot and answers false thereafter, so this
+// line is the server's bootstrap on the first request and a no-op on every
+// request after it.
 function reviewActorFor(request, env) {
-  const auth = request.headers.get("authorization") || "";
-  const token = auth.replace(/^Bearer\s+/i, "");
-  if (!token) return null;
-  let tokens;
-  try {
-    tokens = JSON.parse(env.REVIEW_TOKENS || "{}");
-  } catch {
-    tokens = {};
-  }
-  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
-  if (!slug) return null;
-  return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
+  authenticatedIdentity.sealServerReviewTokens(env.REVIEW_TOKENS);
+  return authenticatedIdentity.reviewActorForToken(request.headers.get("authorization") || "");
 }
 
 // ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------
@@ -528,8 +532,11 @@ function localActorFor(request, env) {
   // its new client profile, then promote this server-side flag to required.
   // In required mode the shared local token carries no continuity surface and
   // both continuity families refuse it.
+  // DECORATED IN PLACE, never copied: identity.js's brand is object identity
+  // (amendment 8), so `{ ...actor }` here would hand the dispatch an actor that
+  // authenticates as nobody. The object is built per request by the door above.
   return actor && env.CONTINUITY_SURFACE_ENFORCEMENT === "compat"
-    ? { ...actor, continuity_surface: "codex", continuity_surface_compat: true }
+    ? Object.assign(actor, { continuity_surface: "codex", continuity_surface_compat: true })
     : actor;
 }
 
