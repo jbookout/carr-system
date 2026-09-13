@@ -2249,16 +2249,30 @@ def cmd_deployment(args) -> int:
 # absence. A door needs an EXECUTE grant, that grant is a new DB mutation
 # capability, and SIEP-11 admits one only through a SCAC mutation-registry
 # successor — so the door shipped ungranted and `release candidate` could not
-# file anything at all. Moving the insert onto the authority connection instead
-# fails the same way: carr_authority holds no INSERT on ops.release (0161 built
-# it deliberately without one) and granting it moves the identical seal.
+# file anything at all. Moving the insert onto the authority connection failed
+# the same way for as long as carr_authority held no INSERT on ops.release: 0161
+# built that bundle deliberately without one, and granting it moves the identical
+# seal.
 #
-# SO THE ROW IS FILED ON THE CREDENTIAL THAT MAY FILE IT, and the database
-# records which one that was. A candidate filed on the ledger writer is an honest
-# UNAUTHENTICATED record, read by nobody who needs an authenticated maker; a
-# candidate filed on a human authority credential is the authenticated one Gate
-# Zero's subject-maker seat reads. The wrapper's log prints what the database
-# recorded rather than what anybody meant.
+# AND THAT SEAL HAS SINCE BEEN MOVED, WHICH IS WHY THE CONNECTION CHANGED
+# (2026-09-13, the third release candidate's refusal, finding 1). Migration 0503
+# is the SCAC mutation-registry successor that admits
+# `db-relation-acl:ops.release:carr_authority:insert`, and it carries the grant
+# inside itself so the capability and its seal cannot come apart. Migration 0505
+# then grants the two READS this command path needs — ops.service by key, and the
+# five ops.release columns the INSERT below returns — column-scoped and nothing
+# wider.
+#
+# SO THE ROW IS FILED ON THE AUTHORITY CREDENTIAL NOW, and the database still
+# records which login that was. Standing amendment 9(c) requires it: the Gate
+# Zero seam store reads a subject maker only out of a row whose GENERATED
+# `maker_authority_verified` column is true, which is true exactly when the
+# filing login was carr_authority_joe or carr_authority_dell. A candidate filed
+# on the ledger writer is still an honest UNAUTHENTICATED record and 0504 still
+# marks it as one — that path is unchanged — but it is not what the deploy
+# wrapper writes any more, because a record no reader may believe is not
+# provenance. The wrapper's log prints what the database recorded rather than
+# what anybody meant.
 CANDIDATE_INSERT = """
     insert into ops.release
         (correlation_id, release_key, service_id, environment,
@@ -2439,13 +2453,35 @@ def cmd_release(args) -> int:
             return 2
 
     try:
-        # ONE CONNECTION, AND IT IS THE ONE ALLOWED TO WRITE THE ROW. The
-        # candidate no longer opens an authority connection at all: there is
-        # nothing left for it to derive there, because migration 0504 derives the
-        # maker inside the INSERT from the session's own login role. An approval
-        # still runs on the authority connection, where a human's identity is the
-        # thing being recorded.
-        connection_kind = "authority" if args.action in ("approve", "staging-approve") else "write"
+        # ONE CONNECTION, AND FOR A CANDIDATE IT IS NOW THE AUTHORITY'S
+        # (2026-09-13, the third release candidate's refusal, finding 1).
+        #
+        # WHAT THE EIGHTH ROUND MEASURED AND WHY IT NO LONGER HOLDS. That round
+        # put the candidate on the ledger writer because carr_authority held no
+        # INSERT on ops.release -- migration 0161 built the bundle without one --
+        # and granting it was a new DB mutation capability SIEP-11 admits only
+        # through a SCAC mutation-registry successor. Migration 0503 IS that
+        # successor and it landed the grant, with the two column-scoped selects
+        # the invoker-rights trigger reads; migration 0505 adds the two reads
+        # THIS command path needs (ops.service, and the ops.release columns the
+        # INSERT returns). So the reason for the writer connection is gone.
+        #
+        # AND STANDING AMENDMENT 9(c) REQUIRES IT TO BE GONE. The producer takes
+        # its subject maker from this row, and the Gate Zero seam store reads
+        # only rows whose `maker_authority_verified` is true -- a generated
+        # column that is true exactly when the filing login was a human
+        # authority. Filed on the writer, the row is honestly UNAUTHENTICATED
+        # and the store ignores it, which is the state the release-3 reviewer
+        # refused. Filed here, the database itself names the maker.
+        #
+        # THE MAKER IS STILL NOT A CALLER FIELD. Nothing below asserts it: 0504's
+        # trigger writes maker_session_user from session_user and derives
+        # maker_actor and maker_verification_ref from that login, so moving the
+        # connection changes WHICH credential files the row and nothing about who
+        # gets to name its maker.
+        connection_kind = ("authority"
+                           if args.action in ("candidate", "approve", "staging-approve")
+                           else "write")
         with connect(connection_kind) as conn, conn.cursor() as cur:
             if args.action == "candidate":
                 corr = correlation_of(getattr(args, "correlation", None))

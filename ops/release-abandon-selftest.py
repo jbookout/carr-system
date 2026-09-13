@@ -85,11 +85,13 @@ def psql(dsn, *args):
 # ~/.config/carr/db.env would reach PRODUCTION. tools/ops-record.py loads db.env
 # with setdefault, so an explicitly set value wins; this is the same class of
 # accident that wrote 46 fabricated run rows into production in 2026-08 (see
-# credential_names() there). `release candidate` no longer opens this connection
-# at all — migration 0504 records the filing login inside the insert, and
-# carr_authority holds no insert on ops.release to open it with — but the pin
-# stays, because what it protects against is an ops-record call reaching the wrong
-# database, not one command's own DSN choice.
+# credential_names() there). `release candidate` OPENS THIS CONNECTION AGAIN as
+# of 2026-09-13: migration 0503 admitted `insert on ops.release` to carr_authority
+# and 0505 granted the two column-scoped reads the filing path performs, so the
+# candidate is filed under the authority identity standing-rule amendment 9(c)
+# requires and 0504 marks the row authenticated. The pin would matter either way —
+# what it protects against is an ops-record call reaching the wrong database, not
+# one command's own DSN choice — but it is now load-bearing rather than defensive.
 AUTHORITY_DSN: str | None = None
 
 
@@ -110,10 +112,16 @@ def provision_authority_principal(dsn: str) -> None:
     to the carr_authority bundle — so the role has to exist, have login, and hold
     that membership for any authority-connection command to work here. Its
     password is the base DSN's own, so nothing about the throwaway cluster's
-    credentials is written down here. This role is deliberately NOT given insert
-    on ops.release: that grant is the capability open loop #594 carries, and a
-    test that granted it to itself would report a green candidate path this
-    database's Production twin does not have.
+    credentials is written down here.
+
+    THE INSERT ON ops.release IS STILL NOT GRANTED HERE, and that has not changed
+    even though `release candidate` now runs on this connection: the role reaches
+    the table through its carr_authority MEMBERSHIP, and the grant on the bundle
+    is migration 0503's own — applied to Production on 2026-09-13 — with the two
+    column-scoped reads the filing path needs coming from 0505. A test that
+    granted either to itself would report a green candidate path this database's
+    Production twin does not have; both arrive here the same way they arrive
+    there, by applying the numbered files.
     """
     global AUTHORITY_DSN
     params = psycopg.conninfo.conninfo_to_dict(dsn)
@@ -178,26 +186,38 @@ def _cases(dsn: str) -> None:
     provision_authority_principal(dsn)
     record(dsn, "sync-registry")
     # Candidate intake verifies every environment before opening the database,
-    # so the abandonment fixtures use one real staging manifest rather than a
-    # synthetic shape that the release door must refuse.
-    mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-manifest.json"
-    staging_built = subprocess.run(
-        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-         "build", "--sha", "HEAD", "--environment", "staging",
-         "--performance-budget-ref", "runbook:worker-performance-v1",
-         "--performance-budget-ms", "1500",
-         "--recovery-strategy", "rollback",
-         "--rollback-plan-ref", "runbook:rollback-worker-v1"],
-        cwd=REPO, capture_output=True, text=True, timeout=300)
-    check("0. canonical staging source manifest builds",
-          staging_built.returncode == 0,
-          (staging_built.stderr or staging_built.stdout).strip()[:160])
-    if staging_built.returncode != 0:
+    # so every abandonment fixture uses a real staging manifest rather than a
+    # synthetic shape that the release door must refuse. Each fixture uses a
+    # distinct repository revision because 0504 deliberately permits exactly
+    # one authority-filed candidate per git_sha.
+    staging_manifests: dict[str, Path] = {}
+    staging_error = ""
+    fixture_keys = ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor")
+    for offset, key in enumerate(fixture_keys, start=1):
+        staging_built = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+             "build", "--sha", f"HEAD~{offset}", "--environment", "staging",
+             "--performance-budget-ref", "runbook:worker-performance-v1",
+             "--performance-budget-ms", "1500",
+             "--recovery-strategy", "rollback",
+             "--rollback-plan-ref", "runbook:rollback-worker-v1"],
+            cwd=REPO, capture_output=True, text=True, timeout=300)
+        if staging_built.returncode != 0:
+            staging_error = (staging_built.stderr or staging_built.stdout).strip()[:160]
+            break
+        manifest_path = (Path(os.environ.get("TMPDIR", "/tmp")) /
+                         f"abandon-manifest-{offset}.json")
+        manifest_path.write_text(staging_built.stdout)
+        staging_manifests[key] = manifest_path
+    check("0. canonical staging source manifests build on distinct revisions",
+          not staging_error and len(staging_manifests) == len(fixture_keys),
+          staging_error)
+    if staging_error or len(staging_manifests) != len(fixture_keys):
         return
-    mpath.write_text(staging_built.stdout)
 
-    for k in ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor"):
-        record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
+    for k in fixture_keys:
+        record(dsn, "release", "candidate", "--key", k,
+               "--manifest", str(staging_manifests[k]),
                "--service", "carr-mcp", "--environment", "staging",
                "--test-evidence", "ref", "--security-evidence", "ref")
     # Production candidate intake now rebuilds the manifest before it opens a

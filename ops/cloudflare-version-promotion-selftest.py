@@ -290,20 +290,22 @@ def main() -> int:
           (refused_target.stdout + refused_target.stderr),
           f"rc={refused_target.returncode}")
 
-    # A CANDIDATE OPENS NO WRITER CONNECTION AT ALL any more (PR 1013's seventh
-    # correction): the manifest is verified first, and the row is then filed on
-    # the authority connection that derives its maker. So this asks the stronger
-    # question the old one was reaching for — the verification precedes the ONE
-    # connection the candidate branch opens, and that connection is the writer's:
-    # carr_authority holds no insert on ops.release, so a candidate that opened
-    # the authority connection could not file its row at all.
+    # A CANDIDATE NOW FILES ON THE AUTHORITY CONNECTION, and the reason the old
+    # assertion gave for the writer is gone: migration 0503 granted
+    # carr_authority the insert on ops.release, 0505 granted it exactly the two
+    # reads the filing path makes, and the third release review REFUSED the
+    # writer-filed row because 0504's provenance columns then mark it
+    # unauthenticated. What survives from the old pair is the ORDER — the
+    # manifest is verified before any connection opens — and it is still the
+    # point worth checking, so it is checked against the new line.
     candidate_verify_at = record.find("release-manifest.py")
-    candidate_connect_at = record.find("connection_kind = \"authority\" if", candidate_verify_at)
+    candidate_connect_at = record.find('connection_kind = ("authority"', candidate_verify_at)
     check("5e. candidate verification runs before the connection opens",
           candidate_verify_at != -1 and candidate_connect_at > candidate_verify_at)
-    check("5e-i. and the candidate branch reaches for no authority connection",
-          'connection_kind = "authority" if args.action in ("approve", "staging-approve")'
-          in record)
+    check("5e-i. and the candidate branch opens the AUTHORITY connection",
+          re.search(r'connection_kind = \("authority"\s*\n\s*if args\.action in '
+                    r'\("candidate", "approve", "staging-approve"\)\s*\n\s*else "write"\)',
+                    record) is not None)
 
     check("5f. Cloudflare UUIDs normalize to lowercase at both boundaries",
           "args.provider_version_id = version_id.lower()" in record

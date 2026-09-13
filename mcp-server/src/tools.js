@@ -7533,7 +7533,7 @@ export const TOOLS = {
   // gate-zero-outcome-store.v5.js, which registers no verb of its own.
   "record-gate-zero-read-only-outcome": {
     write: true, humanOnly: false, oracleSeatOnly: true,
-    description: "ORACLE-SEAT-ONLY, AND NOT A HUMAN ACT: record the DoctorCRE v5 Gate Zero read-only outcome as one consumer-gate-receipt.v1, its recomputed digest, the instant it was observed and the seat that produced it. It refuses every actor except the one review-token seat holding oracle:gate-producer:gate-zero-read-only — a partner is refused, a sponsored agent is refused, and a review-token seat on a DIFFERENT lane is refused by name rather than admitted by authority class. That shape exists because r7 registers this producer's role as independent_control_plane_oracle and Joe ruled on 2026-09-13 (decision d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70) that the seat records the row on its own authority with no partner countersign. THE HUMAN ACT IN THIS CHAIN IS UNCHANGED AND IS DOWNSTREAM: accept-benchmark-manifest-draft is still humanOnly and still derives its acceptor from a live verified partner. THE RECEIPT IS PRODUCED IN THIS CALL, NOT SUPPLIED: the verb takes ONE argument, idempotency_key, and invokes the bound producer seam — Step A's zero-argument Gate Zero producer — which derives its own run binding, aims the three ruled evidence readers at it and assembles one consumer-gate-receipt.v1 signed with the identity the server derived for this call. There is no receipt argument and no receipt-shaped argument: any other top-level field is refused as unregistered_operation_fields before the handler runs. NOTHING HERE IS A CALLER'S WORD FOR ANYTHING — the producing seat comes from the frozen registration, the actor from the authenticated bearer match, the three receipt identities from the authenticated call, and the outcome digest is RECOMPUTED by the record layer from the stored receipt, so no caller-supplied digest is accepted and none is sent. What the producer emits is still checked against the closed twenty-one-field r7 schema, against the twelve constants the producer registry fixes, against the closed three-field authenticated-receipt-identity.v1 shape, and against the identity rule that the producer and evaluator are this call while the subject maker is not. A producer refusal records nothing and is reported as gate_zero_outcome_not_produced with the reason the producer gave. RETRYABLE, EVERY RUN KEPT: a second call for the same candidate digest returns the row that exists rather than writing a second one, and a DIFFERENT outcome for a candidate already recorded is refused rather than silently replacing it. WHAT \"DIFFERENT\" MEANS IS NARROWER THAN THE RECEIPT: two genuine authenticated runs of one candidate carry different per-run instants and a different per-call session_ref in each of their three identities, so the comparison is made over the receipt WITHOUT observed_at, ttl_expires_at and every identity's session_ref -- the candidate-scoped digest, which is stored and reported beside the full receipt digest. A run that read different rows or reached a different verdict for one candidate still conflicts. It grants no dispatch, activation or execution authority, accepts no benchmark and starts no clock.",
+    description: "ORACLE-SEAT-ONLY, AND NOT A HUMAN ACT: record the DoctorCRE v5 Gate Zero read-only outcome as one consumer-gate-receipt.v1, its recomputed digest, the instant it was observed and the seat that produced it. It refuses every actor except the one review-token seat holding oracle:gate-producer:gate-zero-read-only — a partner is refused, a sponsored agent is refused, and a review-token seat on a DIFFERENT lane is refused by name rather than admitted by authority class. That shape exists because r7 registers this producer's role as independent_control_plane_oracle and Joe ruled on 2026-09-13 (decision d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70) that the seat records the row on its own authority with no partner countersign. THE HUMAN ACT IN THIS CHAIN IS UNCHANGED AND IS DOWNSTREAM: accept-benchmark-manifest-draft is still humanOnly and still derives its acceptor from a live verified partner. THE RECEIPT IS PRODUCED IN THIS CALL, NOT SUPPLIED: the verb takes ONE argument, idempotency_key, and invokes the bound producer seam — Step A's zero-argument Gate Zero producer — which derives its own run binding, aims the three ruled evidence readers at it and assembles one consumer-gate-receipt.v1 signed with the identity the server derived for this call. There is no receipt argument and no receipt-shaped argument: any other top-level field is refused as unregistered_operation_fields before the handler runs. NOTHING HERE IS A CALLER'S WORD FOR ANYTHING — the producing seat comes from the frozen registration, the actor from the authenticated bearer match, the three receipt identities from the authenticated call, and the outcome digest is RECOMPUTED by the record layer from the stored receipt, so no caller-supplied digest is accepted and none is sent. What the producer emits is still checked against the closed twenty-one-field r7 schema, against the twelve constants the producer registry fixes, against the closed three-field authenticated-receipt-identity.v1 shape, and against the identity rule that the producer and evaluator are this call while the subject maker is not. A producer refusal records nothing and is reported as gate_zero_outcome_not_produced with the reason the producer gave. RETRYABLE, IMMUTABLE FIRST OUTCOME: a second call for the same candidate digest returns the row that exists rather than writing a second one. If the later run offers changed evidence or a changed verdict, it converges onto that immutable recorded outcome rather than being refused or replacing it, so the retry can repair a missing audit event; the result separately labels recorded and offered metadata. WHAT \"CHANGED\" MEANS IS NARROWER THAN THE RECEIPT: two genuine authenticated runs of one candidate carry different per-run instants and a different per-call session_ref in each of their three identities, so the comparison is made over the receipt WITHOUT observed_at, ttl_expires_at and every identity's session_ref -- the candidate-scoped digest, which is stored and reported beside the full receipt digest. It grants no dispatch, activation or execution authority, accepts no benchmark and starts no clock.",
     // ONE ARGUMENT, AND IT NAMES AN INTENDED ACT RATHER THAN A SUBJECT. The
     // caller says "record the outcome, once, under this key"; WHAT gets recorded
     // is produced here. A `receipt` property was in the first draft of this verb
@@ -7660,28 +7660,74 @@ export const TOOLS = {
           hint: "the record layer's canonical JSON and artifact-trust.js's disagreed about the stored receipt. " +
                 "The recorded value is the database's; this is a contract defect, not a caller error." });
       }
-      // AND THE ROW REALLY IS THIS CANDIDATE'S OUTCOME. The record layer already
-      // refused a different one under the same candidate key; this is the
-      // gateway saying the same thing over its own canonicalization, so a
-      // divergence in the projection the two sides digest cannot pass as a
-      // successful retry. It holds on a first call and on a retry: the projection
-      // drops exactly the values a second genuine run changes.
-      const localCandidateDigest = gateZeroOutcomeCandidateDigest(receipt);
-      if (row.candidate_scoped_digest !== localCandidateDigest) {
+      // AND THE TWO CANONICALIZATIONS AGREE ABOUT THE PROJECTION TOO, asked over
+      // the STORED receipt exactly as the full digest above is. This is the same
+      // contract question in the narrower place: does the record layer's
+      // projection-then-canonicalize produce the bytes artifact-trust.js's does?
+      // It is a property of the row alone, so it holds on a first call, on a
+      // genuine retry, and on a retry that converged onto an earlier run's row.
+      const storedCandidateDigest = gateZeroOutcomeCandidateDigest(row.receipt);
+      if (row.candidate_scoped_digest !== storedCandidateDigest) {
         throw new ToolError({ error: "gate_zero_outcome_candidate_digest_divergence",
-          recorded: row.candidate_scoped_digest, recomputed_here: localCandidateDigest,
-          hint: "the recorded outcome for this candidate does not match the one produced in this call, " +
-                "over the fields a retry may not change. The recorded row stands; nothing was overwritten." });
+          recorded: row.candidate_scoped_digest, recomputed_here: storedCandidateDigest,
+          hint: "the record layer's candidate projection and artifact-trust.js's disagreed about the stored " +
+                "receipt. The recorded value is the database's; this is a contract defect, not a caller error." });
       }
+      // WHETHER THIS CALL'S RECEIPT IS THE ONE ON THE ROW, or whether this call
+      // CONVERGED onto an earlier run's (2026-09-13, the third release
+      // candidate's refusal, finding 3).
+      //
+      // THE DEFECT THIS REPLACES. The seat's transaction commits before this
+      // outer one writes the audit event, so a failure anywhere between the two
+      // leaves a recorded outcome with no event. The previous shape then made
+      // that state unrecoverable: it compared the row's projection against THIS
+      // call's receipt and refused when they differed, and the record layer
+      // refused first for the same reason — so a retry whose evidence had moved
+      // could never reach the event write. An outcome without an event, and no
+      // path back.
+      //
+      // WHAT CONVERGENCE IS AND IS NOT. Migration 0505 makes the record layer
+      // return the EXISTING row for a recorded candidate instead of raising, and
+      // this reads that row back. Nothing is overwritten and nothing is
+      // replaced — the append-only triggers are untouched and the first receipt
+      // is still the one stored and the one digested. What changes is that the
+      // second call now learns which receipt bound, says so on its result, and
+      // gets to write the event that was lost.
+      const offeredCandidateDigest = gateZeroOutcomeCandidateDigest(receipt);
+      const convergedOntoRecorded = offeredCandidateDigest !== row.candidate_scoped_digest;
 
-      await writeEvent(c, actor, "record-gate-zero-read-only-outcome", "gate_zero_outcome", row.id,
-        { field: "outcome_recorded",
-          new: { outcome_digest: row.outcome_digest,
-                 candidate_scoped_digest: row.candidate_scoped_digest,
-                 candidate_digest: row.candidate_digest,
-                 status: row.status, observed_at: row.observed_at,
-                 producing_seat_ref: row.producing_seat_ref },
-          idempotency_key: args.idempotency_key });
+      // ONE EVENT PER OUTCOME ROW, SERIALIZED ON THE OUTCOME. The retry is
+      // exactly what makes this necessary: it exists to heal a missing event, and
+      // an unguarded insert would instead write a second one every time a call
+      // got past the seat commit.
+      //
+      // THE LOCK BLOCKS, DELIBERATELY. A try-lock let a concurrent retry return
+      // `ok: true` without an event; if the holder then rolled back, the row was
+      // still eventless and only a THIRD call could repair it. That is eventually
+      // healable, not the unconditional second-call healing the refusal requires.
+      // In production the dependency graph has no cycle: each seat transaction
+      // commits before its caller reaches this lock, so a waiter holds no row the
+      // lock owner needs. The former test deadlock came from its harness awaiting
+      // the waiter before committing the owner transaction; the proof now stages
+      // the production order instead of weakening the production invariant.
+      await c.query(
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`gate-zero-outcome-event:${row.id}`]);
+      const eventAlready = await c.query(
+        `select 1 from event
+          where verb = 'record-gate-zero-read-only-outcome'
+            and subject_type = 'gate_zero_outcome' and subject_id = $1::uuid
+          limit 1`, [row.id]);
+      if (!eventAlready.rows.length) {
+        await writeEvent(c, actor, "record-gate-zero-read-only-outcome", "gate_zero_outcome", row.id,
+          { field: "outcome_recorded",
+            new: { outcome_digest: row.outcome_digest,
+                   candidate_scoped_digest: row.candidate_scoped_digest,
+                   candidate_digest: row.candidate_digest,
+                   status: row.status, observed_at: row.observed_at,
+                   producing_seat_ref: row.producing_seat_ref },
+            idempotency_key: args.idempotency_key });
+      }
 
       return {
         ok: true, outcome_id: row.id,
@@ -7693,22 +7739,40 @@ export const TOOLS = {
         // the idempotency key is narrower than the evidence digest above it.
         candidate_scoped_digest: row.candidate_scoped_digest,
         candidate_digest: row.candidate_digest,
+        // WHOSE RECEIPT IS ON THE ROW. False on a first call and on a genuine
+        // retry whose projection matches. TRUE when this call converged onto a
+        // row an earlier run committed with different evidence: the recorded
+        // receipt stands, this call's was not stored, and every digest above is
+        // the recorded one's. Reported rather than refused so a retry can heal a
+        // missing audit event instead of stranding the outcome.
+        converged_onto_recorded_outcome: convergedOntoRecorded,
+        offered_candidate_scoped_digest: offeredCandidateDigest,
         status: row.status,
         observed_at: row.observed_at,
         recorded_at: row.recorded_at,
         producing_seat_ref: row.producing_seat_ref,
         producing_seat_charter_decision_ref: seat.charter_decision_ref,
         producing_seat_staffing_decision_ref: seat.staffing_decision_ref,
-        // WHAT THE PRODUCER ANSWERED, so a consumer can see WHICH clause decided
-        // a recorded `fail` without opening the receipt. Null on a pass.
-        producer_reason_id: emitted.reason_id,
-        receipt_status: emitted.receipt_status,
+        // RECORDED AND OFFERED METADATA STAY SEPARATE. On convergence the row is
+        // an earlier run's, so pairing its status and digests with this run's
+        // reason would describe one outcome using facts from two receipts. The
+        // closed receipt stores status but not its producer reason; therefore a
+        // divergent convergence reports the recorded status, leaves the recorded
+        // reason honestly unknown, and labels the offered run's values separately.
+        producer_reason_id: convergedOntoRecorded ? null : emitted.reason_id,
+        receipt_status: row.receipt.status,
+        offered_producer_reason_id: emitted.reason_id,
+        offered_receipt_status: receipt.status,
         // WHAT THIS ROW IS WORTH, said on the result so a consumer does not read
         // more into it than it carries.
-        digest_recipe: "canonical-JSON sha256 over the receipt, no domain tag, recomputed by the record layer. " +
-          "A named assumption: r7's receipt_payload_digest_rule states no domain tag for consumer-gate-receipt.v1. " +
-          "candidate_scoped_digest is the same recipe over the receipt without observed_at, ttl_expires_at and the " +
-          "per-call session_ref of each of its three identities, and it is what a retry for one candidate is compared on.",
+        digest_recipe: "canonical-JSON sha256 over the TAGGED two-element array " +
+          "[\"consumer-gate-receipt.v1\", <receipt>], recomputed by the record layer. r7's " +
+          "receipt_payload_digest_rule declares that preimage for this schema (amended 2026-09-13) and states that " +
+          "a plain digest over the receipt alone does not satisfy it. candidate_scoped_digest is the UNTAGGED " +
+          "canonical-JSON sha256 over a projection of the receipt — without observed_at, ttl_expires_at and the " +
+          "per-call session_ref of each of its three identities — because that projection is not a " +
+          "consumer-gate-receipt.v1 and r7's rule does not speak about it; it is what a retry for one candidate " +
+          "is compared on, and it is a comparison key rather than evidence.",
         effects: Object.freeze({
           creates_effect: false, clock_started: false, benchmark_accepted: false,
           note: "recording an outcome binds nothing on its own. Benchmark acceptance reads the current passing " +
