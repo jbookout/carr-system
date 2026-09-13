@@ -51,7 +51,9 @@ RECOVERY_ARGS = (
 )
 
 
-def make_source(*, mismatch: bool = False, broken_attachment: bool = False) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
+def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
+                legacy_without_stamp: bool = False
+                ) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
     holder = tempfile.TemporaryDirectory(prefix="exact-recovery-source-")
     root = Path(holder.name)
     shutil.copytree(ROOT / "mcp-server", root / "mcp-server",
@@ -67,6 +69,9 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False) -> t
             config.read_text(encoding="utf-8").replace("routes = []\n", "", 1),
             encoding="utf-8",
         )
+    if legacy_without_stamp:
+        (root / "mcp-server" / "bin" / "seal-candidate-manifest.mjs").unlink()
+        (root / "mcp-server" / "src" / "build-stamp.js").unlink()
     subprocess.run(["git", "init", "-q", str(root)], check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "selftest@example.invalid"],
                    check=True, env=FIXTURE_GIT_ENV)
@@ -159,6 +164,122 @@ def test_cleanup_traps(source: str) -> None:
         assert not link.exists()
 
 
+def shell_function(source: str, name: str) -> str:
+    start = source.index(f"{name}() {{")
+    end = source.index("\n}\n", start) + 2
+    return source[start:end]
+
+
+def test_legacy_prior_omits_candidate_stamps(source: str) -> None:
+    """An exact pre-stamp rollback source still reaches Wrangler safely."""
+    holder, exact_root, exact_sha = make_source(legacy_without_stamp=True)
+    try:
+      with tempfile.TemporaryDirectory(prefix="legacy-prior-stamp-") as raw:
+        root = Path(raw)
+        worker = exact_root / "mcp-server"
+        assert not (worker / "bin" / "seal-candidate-manifest.mjs").exists()
+        assert not (worker / "src" / "build-stamp.js").exists()
+        call_log = root / "wrangler.args"
+        wrangler = root / "wrangler"
+        wrangler.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CALL_LOG\"\n"
+            "printf '%s\\n' '--dry-run: exiting now.'\n",
+            encoding="utf-8",
+        )
+        wrangler.chmod(0o755)
+        harness = root / "harness.sh"
+        harness.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"WORKER_DIR={worker}\nWRANGLER={wrangler}\n"
+            "VERSION_MODE=ordinary\nTARGET_ENV=staging\nRECOVERY_STEP=prior\n"
+            f"EXACT_SOURCE_ROOT={exact_root}\n"
+            f"HEAD_SHA={exact_sha}\n"
+            "DEPLOY_TAG=carr-staging-22222222222243338444555555555555\n"
+            "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
+            "seal_candidate_field() { echo unexpected-sealer-call; exit 91; }\n"
+            + shell_function(source, "prepare_candidate_stamps") + "\n"
+            + shell_function(source, "deploy_staging_worker") + "\n"
+            "prepare_candidate_stamps\ndeploy_staging_worker\n",
+            encoding="utf-8",
+        )
+        harness.chmod(0o755)
+        result = subprocess.run(
+            ["sh", str(harness)],
+            env={**os.environ, "CALL_LOG": str(call_log)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "--dry-run: exiting now." in result.stdout
+        args = call_log.read_text(encoding="utf-8").splitlines()
+        assert args == [
+            "deploy", "--env", "staging",
+            "--var", f"GIT_SHA:{exact_sha}",
+            "--tag", "carr-staging-22222222222243338444555555555555",
+        ], args
+    finally:
+        holder.cleanup()
+
+
+def test_missing_candidate_sealer_refuses_every_other_route(source: str) -> None:
+    for step, mode, target, exact_root in (
+            ("current_before", "ordinary", "staging", True),
+            ("current_after", "ordinary", "staging", True),
+            ("restore_only", "ordinary", "staging", True),
+            ("standalone", "ordinary", "staging", False),
+            ("prior", "ordinary", "staging", False),
+            ("standalone", "upload", "production", False)):
+        with tempfile.TemporaryDirectory(prefix="missing-candidate-sealer-") as raw:
+            root = Path(raw)
+            worker = root / "mcp-server"
+            (worker / "src").mkdir(parents=True)
+            harness = root / "harness.sh"
+            harness.write_text(
+                "#!/bin/sh\nset -eu\n"
+                f"WORKER_DIR={worker}\nVERSION_MODE={mode}\nTARGET_ENV={target}\n"
+                f"RECOVERY_STEP={step}\nEXACT_SOURCE_ROOT={'/exact' if exact_root else ''}\n"
+                "HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+                "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
+                "seal_candidate_field() { echo should-not-run; exit 91; }\n"
+                + shell_function(source, "prepare_candidate_stamps") + "\n"
+                "prepare_candidate_stamps\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(["sh", str(harness)], capture_output=True,
+                                    text=True, check=False)
+            assert result.returncode != 0, (step, mode, result.stdout, result.stderr)
+            assert "candidate sealer is missing" in result.stderr, (
+                step, mode, result.stdout, result.stderr
+            )
+
+
+def test_declared_candidate_stamp_contract_requires_sealer(source: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="declared-candidate-stamp-") as raw:
+        root = Path(raw)
+        worker = root / "mcp-server"
+        (worker / "src").mkdir(parents=True)
+        (worker / "src" / "build-stamp.js").write_text(
+            'export const BUILD_STAMP_NAMES = {candidateManifest: "CANDIDATE_MANIFEST"};\n',
+            encoding="utf-8",
+        )
+        harness = root / "harness.sh"
+        harness.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"WORKER_DIR={worker}\nVERSION_MODE=ordinary\nTARGET_ENV=staging\n"
+            "RECOVERY_STEP=prior\nEXACT_SOURCE_ROOT=/exact\n"
+            "HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
+            "seal_candidate_field() { echo should-not-run; exit 91; }\n"
+            + shell_function(source, "prepare_candidate_stamps") + "\n"
+            "prepare_candidate_stamps\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(["sh", str(harness)], capture_output=True,
+                                text=True, check=False)
+        assert result.returncode != 0
+        assert "candidate sealer is missing" in result.stderr
+
 def main() -> int:
     source = DEPLOY.read_text(encoding="utf-8")
     assert 'cmp -s "$CURRENT_PACKAGE_LOCK" "$EXACT_PACKAGE_LOCK"' in source
@@ -191,6 +312,9 @@ def main() -> int:
 
     test_cleanup_traps(source)
     test_wrangler_dry_run()
+    test_legacy_prior_omits_candidate_stamps(source)
+    test_missing_candidate_sealer_refuses_every_other_route(source)
+    test_declared_candidate_stamp_contract_requires_sealer(source)
     print("exact-recovery-runtime: lock gate, dry-run bundle, and cleanup passed")
     return 0
 

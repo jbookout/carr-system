@@ -261,6 +261,21 @@ def main() -> int:
           and "structurally outside the three\nreceipt tables" in rollback_runbook,
           "a repair could be routed through current_after and forge a bundle leg")
 
+    check("10. only an exact legacy prior may omit candidate stamps",
+          'LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=0' in source
+          and '[ "$VERSION_MODE" = "ordinary" ]' in source
+          and '[ "$TARGET_ENV" = "staging" ]' in source
+          and '[ "$RECOVERY_STEP" = "prior" ]' in source
+          and '[ -n "$EXACT_SOURCE_ROOT" ]' in source
+          and '[ ! -e "$WORKER_DIR/src/build-stamp.js" ]' in source,
+          "a non-prior, non-exact, or stamp-aware source could bypass sealing")
+    check("10b. legacy prior keeps SHA/tag and omits only candidate stamps",
+          'deploy_staging_worker()' in source
+          and 'if [ "$LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP" = "1" ]; then' in source
+          and '"$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"' in source
+          and '--tag "$DEPLOY_TAG"' in source,
+          "the compatibility route can lose deterministic deployment provenance")
+
     print()
     if FAILURES:
         print(f"deploy-release-wiring-selftest: {len(FAILURES)} FAILED")
