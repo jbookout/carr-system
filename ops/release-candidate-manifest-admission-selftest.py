@@ -207,13 +207,105 @@ def main() -> int:
           and "for share" in record_source
           and "successor.service_id = target.service_id" in record_source
           and "successor.environment = target.environment" in record_source)
-    candidate_insert = record_source[record_source.index("insert into ops.release"):]
-    candidate_insert = candidate_insert[:candidate_insert.index("row = cur.fetchone()")]
+    candidate_call = record_source[record_source.index("cur.execute(RECORD_CANDIDATE_CALL,"):]
+    candidate_call = candidate_call[:candidate_call.index("row = cur.fetchone()")]
     check("10. persisted rollback evidence comes from the verified manifest",
-          'manifest.get("rollback_ready")' in candidate_insert
-          and 'manifest.get("rollback_plan_ref")' in candidate_insert
-          and "else args.rollback_ready" not in candidate_insert
-          and "else args.rollback_plan" not in candidate_insert)
+          'manifest.get("rollback_ready")' in candidate_call
+          and 'manifest.get("rollback_plan_ref")' in candidate_call
+          and "else args.rollback_ready" not in candidate_call
+          and "else args.rollback_plan" not in candidate_call)
+
+    # ── the seventh review round: the row is written on the credential that
+    #    named its maker, and on no other ────────────────────────────────────
+    #
+    # The sixth round derived the maker over the authority connection, CLOSED it,
+    # and inserted the row over the generic ledger writer. The derivation was
+    # honest and the row's provenance still was not, because any role holding
+    # INSERT on ops.release could write the same two text columns. Migration 0502
+    # moves the insert into a SECURITY DEFINER door only carr_authority may open;
+    # what is checked here is the wrapper's half — that `release candidate` opens
+    # the authority connection, calls that door, and opens no writer connection at
+    # all on this path.
+    check("11. the recorder holds no direct release-candidate insert beside the door",
+          "insert into ops.release" not in record_source
+          and "ops.record_release_candidate(" in record_source)
+
+    opened: list[str] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def execute(self, statement: str, params: Any = None) -> None:
+            self.statements.append(statement)
+
+        def fetchone(self) -> tuple[Any, ...]:
+            return ("11111111-1111-4111-8111-111111111111",
+                    "candidate-production", "joe", "ops.authority-principal:joe")
+
+    class FakeConnection:
+        def __init__(self, kind: str) -> None:
+            self.kind = kind
+            self.cursor_object = FakeCursor()
+
+        def __enter__(self) -> "FakeConnection":
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_object
+
+    connection_objects: list[FakeConnection] = []
+
+    def recording_connect(kind: str) -> FakeConnection:
+        opened.append(kind)
+        conn = FakeConnection(kind)
+        connection_objects.append(conn)
+        return conn
+
+    provider_version = "11111111-2222-4333-8444-555555555555"
+    with tempfile.TemporaryDirectory() as raw_authority:
+        authority_tmp = Path(raw_authority)
+        exact_path = authority_tmp / "production.json"
+        build("production", exact_path)
+        bound_exact = run_manifest(
+            "bind-provider", "--manifest", str(exact_path),
+            "--provider", "cloudflare-workers",
+            "--provider-version-id", provider_version,
+        )
+        if bound_exact.returncode != 0:
+            raise RuntimeError((bound_exact.stderr or bound_exact.stdout).strip())
+        exact_path.write_text(bound_exact.stdout, encoding="utf-8")
+        module.connect = recording_connect
+        candidate_rc = module.cmd_release(args_for(
+            "production", exact_path,
+            key="candidate-production",
+            provider="cloudflare-workers",
+            provider_version_id=provider_version,
+            correlation=None, verifier=None, verifier_evidence=None,
+            test_evidence="evidence:tests", security_evidence="evidence:security",
+            work_request=None, expires_at=None, actor=None, plan_hash=None,
+            idempotency_key=None,
+        ))
+
+    check("12. an exact candidate is filed on the authority connection and no other",
+          candidate_rc == 0 and opened == ["authority"],
+          f"rc={candidate_rc} connections={opened}")
+    filed = [statement for conn in connection_objects
+             for statement in conn.cursor_object.statements]
+    check("13. the one statement it runs is the authority door, not an insert",
+          len(filed) == 1
+          and "ops.record_release_candidate(" in filed[0]
+          and "insert into" not in filed[0].lower(),
+          f"statements={filed}")
 
     if FAILURES:
         print(f"release-candidate-manifest-admission-selftest: {len(FAILURES)} FAILED")

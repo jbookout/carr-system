@@ -1339,6 +1339,8 @@ test("PROVENANCE: the store admits only the row the database itself named a make
     // into cannot satisfy the pair, so it is not a row this producer can read.
     const storeSource = readFileSync(join(SRC, STORES_FILE), "utf8");
     const recorder = readFileSync(join(REPO, "tools", "ops-record.py"), "utf8");
+    const migration = readFileSync(
+      join(REPO, "migrations", "0502_release_candidate_authority_provenance.sql"), "utf8");
     const candidateQuery = storeSource.slice(storeSource.indexOf("from ops.release r"));
     assert.match(candidateQuery, /and r\.source_kind = 'wrapper'/,
       "the candidate store no longer requires the one writer's own source kind");
@@ -1355,17 +1357,66 @@ test("PROVENANCE: the store admits only the row the database itself named a make
       /MAKER_AUTHORITY_PREFIX = "ops\.authority-principal:"/,
       "the recorder's authenticated-maker marker is not the store's spelling");
 
-    // AND THE RECORDER IS THE OTHER HALF OF THE SAME CLAIM: the two columns this
-    // predicate stands on are unreachable from any caller flag.
-    assert.match(recorder, /select ops\.authority_actor_slug\(\)/,
-      "the recorder no longer derives the maker from the authority connection");
+    // AND THE SEVENTH ROUND'S HALF, which is the one that makes the two text
+    // columns above believable rather than merely conventional. The store keys on
+    // a column no caller and no ordinary writer can set.
+    assert.match(candidateQuery, /and r\.maker_authority_verified/,
+      "the candidate store trusts the two text columns without the database's own mark");
+
+    // THE RECORDER FILES THE ROW ON THE CREDENTIAL THAT NAMED ITS MAKER. The
+    // sixth round derived the maker on the authority connection, closed it, and
+    // inserted over the generic ledger writer — an honest derivation whose row
+    // any writer could have forged. There is now ONE call, and the candidate
+    // branch opens no other connection kind.
+    assert.match(recorder, /from ops\.record_release_candidate\(/,
+      "the recorder no longer files the candidate through the authority door");
+    assert.match(recorder,
+      /connection_kind = \("authority"\s*\n\s*if args\.action in \("candidate", "approve", "staging-approve"\)/,
+      "the candidate branch no longer runs on the authority connection");
     assert.match(recorder,
       /the release candidate's maker is not a caller field/,
       "the recorder no longer refuses a caller-asserted maker");
-    assert.match(recorder, /maker_actor, maker_verification_ref,/,
-      "the candidate insert no longer writes the derived pair");
+    assert.equal(recorder.includes("insert into ops.release\n"), false,
+      "the recorder still holds a direct candidate insert beside the door");
     assert.equal(recorder.includes("args.maker, args.maker_verification"), false,
       "the candidate insert still reads the caller's maker flags");
+
+    // AND THE DATABASE IS WHERE THE MARK IS DEFENDED, not the wrapper. Three
+    // clauses, each asserted against the migration that installs them: the door
+    // derives rather than accepts a maker, only the authority may open it, and
+    // one revision may carry one authenticated candidate.
+    assert.match(migration, /v_slug := ops\.authority_actor_slug\(\);/,
+      "the door no longer derives the maker from the session's own credential");
+    assert.match(migration, /revoke all on function ops\.record_release_candidate\(/,
+      "the door is left executable by public");
+    // AND THE ONE LINE IT DOES NOT CARRY IS A DECISION, asserted so it cannot
+    // become drift. The EXECUTE grant to carr_authority is a new DB mutation
+    // capability; SIEP-11 admits one only through a mutation-registry successor,
+    // which this branch may not spawn. Measured on a disposable PostgreSQL: with
+    // the grant, secdef_execute goes 462 -> 463 and three gates refuse against
+    // the v25 seal; without it, every census category is byte-identical. The
+    // forgery is closed either way — nothing can mint the marker — so what waits
+    // on the successor is writing a genuine row, not trusting a forged one.
+    const grantOutsideAComment = migration
+      .split("\n")
+      .filter(line => !line.trimStart().startsWith("--"))
+      .join("\n");
+    assert.equal(
+      /grant execute on function ops\.record_release_candidate\(/.test(grantOutsideAComment),
+      false,
+      "0502 grants the candidate door's capability without a registry successor admitting it");
+    assert.match(migration,
+      /db-function-acl:ops\.record_release_candidate\(\.\.\.\):carr_authority:execute/,
+      "0502 does not name the exact ingress key its successor has to admit");
+    assert.match(migration,
+      /if has_function_privilege\('carr_authority', v_sig, 'execute'\) then/,
+      "0502 does not prove the door is still closed to the authority role");
+    assert.match(migration,
+      /create unique index if not exists release_authority_candidate_sha_uniq\s*\n\s*on ops\.release \(git_sha\) where maker_authority_verified;/,
+      "one revision may still carry two authenticated candidate rows");
+    assert.match(migration,
+      /a release candidate is filed through '\s*\n?\s*'ops\.record_release_candidate\(\)/,
+      "a direct candidate insert by the ledger writer is no longer refused");
   });
 
 test("ABSENCE: a revision with no AUTHENTICATED release candidate on record IS the absent ruled row",

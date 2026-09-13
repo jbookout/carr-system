@@ -274,11 +274,19 @@ def main() -> int:
     # and why: this selftest runs in CI, which must never hold a production
     # credential, and the columns in question are only observable through a
     # write nobody should be doing from a test run.
-    candidate_insert = source[source.index("insert into ops.release"):]
-    candidate_insert = candidate_insert[:candidate_insert.index("returning id, release_key")]
+    # The candidate is no longer an insert in this file: PR 1013's seventh
+    # correction moved it behind migration 0502's authority door, so the columns
+    # 0169 says a candidate may collect are asserted on the door's own signature
+    # and on the arguments this tool passes it.
+    candidate_call = source[source.index("RECORD_CANDIDATE_CALL = "):]
+    candidate_call = candidate_call[:candidate_call.index("row = cur.fetchone()")]
+    door = (REPO / "migrations" /
+            "0502_release_candidate_authority_provenance.sql").read_text(encoding="utf-8")
     check("8. the CANDIDATE can collect the verifier, which 0169 says it may",
-          "verifier_actor" in candidate_insert
-          and "verifier_evidence_ref" in candidate_insert)
+          "args.verifier, args.verifier_evidence" in candidate_call
+          and "p_verifier_actor            text," in door
+          and "p_verifier_evidence_ref     text," in door
+          and "verifier_actor, verifier_evidence_ref," in door)
 
     approval_migration = (REPO / "migrations" /
                           "0205_program5_approval_verifier.sql").read_text(encoding="utf-8")

@@ -110,6 +110,8 @@ const UNREACHABLE_REASONS = Object.freeze({
   foreignRepository: "the configured checks repository is not the one this file serves",
   callDidNotFinish: "the call did not finish",
   shaNotAddressed: "the addressed head sha is not the shape this file serves",
+  candidateRecordAmbiguous:
+    "more than one authenticated candidate build row answers this head sha",
   notRegistered: "the reason this store was unreachable is not a registered one",
 });
 
@@ -884,6 +886,14 @@ async function checkConclusionRows(query) {
  * they are in the WHERE clause rather than in the consumer, because a row this
  * reader cannot vouch for is not a row it should hand anybody.
  *
+ *   `maker_authority_verified` — THE ONE PREDICATE THAT IS NOT TEXT, added by
+ *   migration 0502 after the seventh review round found the other two forgeable.
+ *   A trigger sets it only for a row inserted from a session whose session_user
+ *   is an admitted human authority principal, and refuses every update that
+ *   would move it; carr_writer cannot file a candidate row at all any more, and
+ *   could not mark one if it could. The two text columns below are what the row
+ *   SAYS; this column is why a reader may believe it.
+ *
  *   `source_kind = 'wrapper'` — the one writer of a release candidate,
  *   tools/ops-record.py, writes that literal and nothing else ever does.
  *
@@ -896,11 +906,13 @@ async function checkConclusionRows(query) {
  *   a human authority credential, and a row whose maker somebody typed does not
  *   satisfy it and is not returned.
  *
- * WHAT THE PAIR DOES NOT CLAIM, said plainly: a row written before amendment 9,
- * when --maker was a caller field, could have carried any slug — but it could not
- * have carried this verification ref, because nothing wrote that spelling. The
- * predicate is therefore exact about the rows it admits rather than trusting the
- * table's history, and it is state-INDEPENDENT on purpose: the release this
+ * WHAT THIS DOES NOT CLAIM, said plainly: every row written before migration 0502
+ * — including the ones the previous round's recorder derived honestly and then
+ * inserted over the generic ledger writer — carries `maker_authority_verified`
+ * false and is NOT read here, because at the moment it was written any role with
+ * INSERT on the table could have written the same two columns. The predicate is
+ * therefore exact about the rows it admits rather than trusting the table's
+ * history, and it is state-INDEPENDENT on purpose: the release this
  * producer judges is usually approved or complete by the time it is deployed, so
  * filtering on `state = 'candidate'` would hide the record of every build that
  * actually shipped.
@@ -918,10 +930,20 @@ async function candidateBuildRecordRows(query) {
            r.observed_at
       from ops.release r
      where r.git_sha = $1
+       and r.maker_authority_verified
        and r.source_kind = 'wrapper'
        and r.maker_verification_ref = '${MAKER_AUTHORITY_PREFIX}' || r.maker_actor
      order by r.observed_at desc nulls last`, params: [gitSha] }]);
-  const rows = (Array.isArray(raw) ? raw : []).map(row => ({
+  const answered = Array.isArray(raw) ? raw : [];
+  // EXACTLY ONE, OR NOBODY. Migration 0502's partial unique index is what makes
+  // this the normal case rather than a hope, and this is the reader's own half of
+  // the same rule: a second row for one revision would leave the producer
+  // CHOOSING which authenticated maker to name, and a store that hands its
+  // consumer an ambiguity has already made that choice for it. So the ambiguity
+  // is the refusal, and it says which store it is about.
+  if (answered.length > 1)
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.candidateRecordAmbiguous);
+  const rows = answered.map(row => ({
     git_sha_digest: opaque(cell(row, "git_sha")),
     state_digest: opaque(cell(row, "state")),
     environment_digest: opaque(cell(row, "environment")),

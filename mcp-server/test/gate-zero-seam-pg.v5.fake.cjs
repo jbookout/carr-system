@@ -212,10 +212,42 @@ const LEDGER_NEAR_MISS_RECEIPT_ROWS = [{
   evidence_ref: mintedReceipt(LEDGER_RUN_KEY, T1).replace(":0123456789abcdef:", "::"),
 }];
 
+/**
+ * THE CANDIDATE-BUILD WORLD, and it exists to ask ONE question of the real store:
+ * what does it do when a revision resolves to two authenticated candidate rows?
+ *
+ * Migration 0502's partial unique index is what stops that happening in a
+ * database that has it. This fake is a database that does NOT — an older
+ * production, a restored dump, a hand-repaired row — because a reader whose
+ * safety depends entirely on an index it cannot see is a reader with no answer
+ * for the day the index is missing.
+ */
+const CANDIDATE_ONE_ROW = "1".repeat(40);
+const CANDIDATE_TWO_ROWS = "2".repeat(40);
+
+const CANDIDATE_ROW = Object.freeze({
+  git_sha: CANDIDATE_ONE_ROW,
+  state: "complete",
+  environment: "production",
+  maker_actor: "joe",
+  correlation_id: "9f1c6a2e-4d3b-4c8a-9e7f-1b2c3d4e5f60",
+  observed_at: T1,
+});
+
+const CANDIDATE_ROWS_ONE = Object.freeze([CANDIDATE_ROW]);
+const CANDIDATE_ROWS_TWO = Object.freeze([
+  CANDIDATE_ROW,
+  Object.freeze({ ...CANDIDATE_ROW, git_sha: CANDIDATE_TWO_ROWS, observed_at: T2 }),
+]);
+
 function rowsFor(text, params) {
   const addressedValue = Array.isArray(params) ? params[0] : undefined;
   const scenario = THROWS[addressedValue];
   if (scenario !== undefined) return scenario();
+  if (text.includes("maker_authority_verified"))
+    return addressedValue === CANDIDATE_TWO_ROWS ? CANDIDATE_ROWS_TWO
+      : addressedValue === CANDIDATE_ONE_ROW ? CANDIDATE_ROWS_ONE
+      : [];
   if (text.includes("acceptance_receipt"))
     return addressedValue === UNPATTERNED ? UNPATTERNED_RECEIPT_ROWS : RECEIPT_ROWS;
   if (text.includes("work_request_card")) return CARD_ROWS;
@@ -291,4 +323,6 @@ module.exports = {
   FAKE_UNPATTERNED: UNPATTERNED,
   FAKE_POOL_THROWS: POOL_THROWS,
   FAKE_END_THROWS: END_THROWS,
+  FAKE_CANDIDATE_ONE_ROW: CANDIDATE_ONE_ROW,
+  FAKE_CANDIDATE_TWO_ROWS: CANDIDATE_TWO_ROWS,
 };

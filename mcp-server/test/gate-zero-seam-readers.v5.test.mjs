@@ -182,6 +182,7 @@ const STORE_UNREACHABLE_REASONS = Object.freeze([
   "the configured checks repository is not the one this file serves",
   "the call did not finish",
   "the addressed head sha is not the shape this file serves",
+  "more than one authenticated candidate build row answers this head sha",
   "the reason this store was unreachable is not a registered one",
 ]);
 
@@ -1995,6 +1996,60 @@ test("STORES: card 11's statements are read from ONE snapshot, not one each", as
     restoreEnv(savedEnv);
   }
 });
+
+test("STORES: a revision with two authenticated candidate rows is refused, not picked",
+  async () => {
+    // THE SEVENTH REVIEW ROUND'S CARDINALITY FINDING, asked of the real store.
+    // The producer reads its SUBJECT MAKER out of this store by git_sha alone, and
+    // the previous shape accepted any number of rows so long as their makers and
+    // correlations each happened to collapse to one value. Two rows that agree are
+    // still two rows: nothing in the reader was deciding that a revision has one
+    // authenticated candidate, so nothing was enforcing it either.
+    //
+    // Migration 0502 enforces it in the database, with a partial unique index over
+    // `maker_authority_verified`. This is the OTHER half — what the reader does in
+    // a database where that index is absent — because a control that exists only
+    // in the schema is a control this file cannot claim.
+    const target = stageWithFakePg({});
+    const staged = await import(pathToFileURL(join(target, STORES_FILE)).href);
+    const fakePg = await import(
+      pathToFileURL(join(dirname(target), "node_modules", "pg", "index.js")).href);
+    const savedEnv = saveEnv(STORE_CREDENTIALS);
+    process.env.DATABASE_URL_READER = "postgres://fake/rows";
+    try {
+      // The control first: one row answers, so the refusal below is about the
+      // COUNT and not about the store being unable to read this world at all.
+      const one = await staged.fetchCandidateBuildRecordRows(
+        { gitSha: fakePg.default.FAKE_CANDIDATE_ONE_ROW });
+      assert.equal(one.rows.length, 1, "the one-row control returned no row to judge");
+      assert.equal(one.rows[0].maker_actor, "joe");
+      assertSwept("candidate.one", one);
+
+      await assert.rejects(
+        () => staged.fetchCandidateBuildRecordRows(
+          { gitSha: fakePg.default.FAKE_CANDIDATE_TWO_ROWS }),
+        error => {
+          assert.equal(staged.isSeamStoreUnreachable(error), true,
+            "the ambiguity came back as something other than this store's refusal");
+          assert.equal(error.because,
+            "more than one authenticated candidate build row answers this head sha",
+            "the refusal does not name the ambiguity it is about");
+          assert.equal(error.store_ref, "control-plane:ops.candidate-build-record");
+          return true;
+        });
+
+      // AND THE PREDICATE THAT MAKES A ROW AUTHENTICATED IS IN THE STATEMENT, not
+      // in the consumer: the fake answers this query only because the column is
+      // named in it, so a store that stopped asking for it would fail the control
+      // above rather than quietly widening what it trusts.
+      const source = readFileSync(join(SRC, STORES_FILE), "utf8");
+      const candidateQuery = source.slice(source.indexOf("from ops.release r"));
+      assert.match(candidateQuery, /and r\.maker_authority_verified/,
+        "the candidate store reads rows the database did not mark authenticated");
+    } finally {
+      restoreEnv(savedEnv);
+    }
+  });
 
 test("GUARD CONTROL: each clause of the thrown-value sweep has been seen to fail", async () => {
   // A sweep nobody has seen fail is a sweep nobody has tested. SEVEN THROWS,

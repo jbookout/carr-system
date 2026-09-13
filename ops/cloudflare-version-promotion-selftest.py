@@ -288,18 +288,26 @@ def main() -> int:
           (refused_target.stdout + refused_target.stderr),
           f"rc={refused_target.returncode}")
 
+    # A CANDIDATE OPENS NO WRITER CONNECTION AT ALL any more (PR 1013's seventh
+    # correction): the manifest is verified first, and the row is then filed on
+    # the authority connection that derives its maker. So this asks the stronger
+    # question the old one was reaching for — the verification precedes the ONE
+    # connection the candidate branch opens, and that connection is not a
+    # writer's.
     candidate_verify_at = record.find("release-manifest.py")
-    candidate_connect_at = record.find('with connect("write")', candidate_verify_at)
-    check("5e. candidate verification runs before opening the write connection",
+    candidate_connect_at = record.find("connection_kind = (\"authority\"", candidate_verify_at)
+    check("5e. candidate verification runs before the authority connection opens",
           candidate_verify_at != -1 and candidate_connect_at > candidate_verify_at)
+    check("5e-i. and the candidate branch never reaches for a writer connection",
+          'if args.action in ("candidate", "approve", "staging-approve")' in record)
 
     check("5f. Cloudflare UUIDs normalize to lowercase at both boundaries",
           "args.provider_version_id = version_id.lower()" in record
           and "tr 'A-F' 'a-f'" in deploy)
 
     check("6. release candidate persists both provider identity fields",
-          re.search(r"insert into ops\.release.*?provider.*?provider_version_id",
-                    record, re.DOTALL) is not None)
+          re.search(r"ops\.record_release_candidate\(.*?args\.provider, "
+                    r"args\.provider_version_id", record, re.DOTALL) is not None)
     check("6a. Production candidate verifies the manifest carries the exact pair",
           "manifest_identity != requested_identity" in record
           and "approval plan hash" in record)
