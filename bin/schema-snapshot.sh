@@ -390,8 +390,9 @@ cat > "$TMP" <<'ROLES'
 do $$
 declare
   r text;
-  login_ok boolean;
-  login_placeholder text;
+  jobs_can_login boolean;
+  jobs_placeholder text;
+  producer_can_login boolean;
 begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
@@ -404,13 +405,13 @@ begin
       execute format('create role %I nologin', r);
     end if;
   end loop;
-  select rolcanlogin into login_ok from pg_roles where rolname='carr_jobs';
+  select rolcanlogin into jobs_can_login from pg_roles where rolname='carr_jobs';
   if not found then
-    login_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
-    execute format('create role %I login password %L', 'carr_jobs', login_placeholder);
-  elsif not login_ok then
-    login_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
-    execute format('alter role %I login password %L', 'carr_jobs', login_placeholder);
+    jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('create role %I login password %L', 'carr_jobs', jobs_placeholder);
+  elsif not jobs_can_login then
+    jobs_placeholder := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+    execute format('alter role %I login password %L', 'carr_jobs', jobs_placeholder);
   end if;
 
   -- THE GATE ZERO PRODUCER SEAT TAKES NO PASSWORD, and that is the difference
@@ -422,10 +423,10 @@ begin
   -- carr_jobs' placeholder password failed that gate with (t,f,t). The seat is
   -- credentialed by the provisioning path the gate exercises, not by this file,
   -- so reproduce 0502's shape exactly and leave an existing role alone.
-  select rolcanlogin into login_ok from pg_roles where rolname='carr_gate_zero_producer';
+  select rolcanlogin into producer_can_login from pg_roles where rolname='carr_gate_zero_producer';
   if not found then
     execute format('create role %I login', 'carr_gate_zero_producer');
-  elsif not login_ok then
+  elsif not producer_can_login then
     execute format('alter role %I login', 'carr_gate_zero_producer');
   end if;
 
