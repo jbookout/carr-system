@@ -81,7 +81,7 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
-         serveReviewRequestAuthenticated,
+         serveReviewRequest,
          hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
@@ -369,13 +369,20 @@ function probeActorFor(request, env) {
 // composed the two ran its own code as `review_agent`. Both are module-private
 // inside identity.js now.
 //
-// WHAT THIS FILE CALLS INSTEAD is `serveReviewRequestAuthenticated`, in the
-// /mcp route below: it matches the request's own Authorization header against
-// the REVIEW_TOKENS map identity.js read from `process.env` at initialisation —
-// which wrangler populates from this Worker's secrets (nodejs_compat,
-// 2026-07-01 compatibility date) — establishes the authenticated call for what
-// it matched, and runs this file's dispatch inside it. No bearer match answers
-// null and the next door gets its turn.
+// WHAT THIS FILE CALLS INSTEAD is `serveReviewRequest`, in the /mcp route below:
+// it matches the request's own Authorization header against the REVIEW_TOKENS
+// map identity.js read from `process.env` at initialisation — which wrangler
+// populates from this Worker's secrets (nodejs_compat, 2026-07-01 compatibility
+// date) — and serves the request as what it matched, through the same dispatch
+// this file uses for every other door. No bearer match answers null and the next
+// door gets its turn.
+//
+// IT ESTABLISHES NO AUTHENTICATED CALL (sixth correction round, 2026-09-15). The
+// previous shape passed this file's dispatch INTO identity.js as a callback so
+// the whole request ran inside a receipt context, and a callback parameter on an
+// exported door is an exported context entry — which is what amendment 8
+// forbids. The context is now reached only by NAME, through
+// `serveAuthenticatedCall`, over a frozen map of the server's own entries.
 // ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------
 //
 // The fifth door, built on the PROBE_TOKENS/REVIEW_TOKENS pattern above and
@@ -657,14 +664,11 @@ async function routeRequest(request, env, ctx) {
   if (url.pathname === "/mcp") {
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
-    // THE ONE ENTRY ONTO THE AUTHENTICATED CALL (amendment 9, 2026-09-14). The
-    // bearer is matched inside identity.js, the context is entered inside
-    // identity.js, and the dispatch below runs inside it — one act, so there is
-    // no pair of exports for a caller to compose. `null` means this was not a
-    // review-council request at all.
-    const reviewServed = await serveReviewRequestAuthenticated(
-      request.headers.get("authorization") || "", env.CORRELATION_ID,
-      reviewActor => dispatch(request, env, ctx, reviewActor));
+    // THE REVIEW COUNCIL'S DOOR. The bearer is matched inside identity.js and
+    // the request is served by what it matched, with no callback crossing the
+    // boundary in either direction and no authenticated call established. `null`
+    // means this was not a review-council request at all.
+    const reviewServed = await serveReviewRequest(request, env, ctx);
     if (reviewServed !== null) return reviewServed;
     const hermesCosActor = hermesCosActorFor(request, env);
     if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);

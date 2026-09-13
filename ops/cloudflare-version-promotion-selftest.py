@@ -158,6 +158,34 @@ def main() -> int:
           (missing_candidate.stdout + missing_candidate.stderr),
           f"rc={missing_candidate.returncode}")
 
+    # ── the maker is not a caller field (standing-rule amendment 9) ──────
+    #
+    # The Gate Zero producer reads its SUBJECT MAKER out of the
+    # release-candidate row, so a --maker somebody typed would be
+    # caller-asserted metadata inside a receipt that claims provenance. Both
+    # halves of the pair are refused, before any credential is opened, and the
+    # refusal names where the identity comes from instead.
+    for flag, value in (("--maker", "joe"), ("--maker-verification", "ref:anything")):
+        asserted = run_record(
+            "release", "candidate", "--key", "selftest", "--environment", "production",
+            "--provider", PROVIDER, "--provider-version-id", VERSION, flag, value)
+        check(f"4aa. a candidate asserting {flag} is refused",
+              asserted.returncode == 2
+              and "not a caller field" in (asserted.stdout + asserted.stderr)
+              and "authority connection identity" in (asserted.stdout + asserted.stderr),
+              f"rc={asserted.returncode} err={(asserted.stderr or asserted.stdout)[:160]}")
+    filed_at = deploy.find('ops-record.py" release candidate')
+    filed_command = deploy[filed_at:deploy.find("|| fail", filed_at)] if filed_at != -1 else ""
+    check("4ab. the wrapper files the candidate itself instead of printing a command",
+          filed_at != -1
+          and "Record this exact candidate" not in deploy
+          and "--provider-version-id" in filed_command
+          and "--manifest" in filed_command,
+          "the upload path still hands the record to a human to run")
+    check("4ac. and it passes no maker of its own",
+          "--maker" not in filed_command,
+          "the wrapper names a maker the database is supposed to derive")
+
     missing_require = run_record("release", "require", "--environment", "production")
     check("4b. Production approval lookup fails closed without provider identity",
           missing_require.returncode == 2

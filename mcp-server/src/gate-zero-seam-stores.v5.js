@@ -90,6 +90,14 @@ const STORE_TOKENS = Object.freeze({
   unregistered: "a-store-this-file-does-not-serve",
 });
 
+/**
+ * THE MARKER OF AN AUTHENTICATED MAKER, in the one spelling tools/ops-record.py
+ * writes. It is a literal here rather than a parameter for the same reason the
+ * store tokens are: a reader whose admission predicate a caller could choose
+ * admits whatever that caller chose.
+ */
+const MAKER_AUTHORITY_PREFIX = "ops.authority-principal:";
+
 const UNREACHABLE_REASONS = Object.freeze({
   answerDidNotParse: "the checks source answer did not parse",
   credentialsNotConfigured: "the checks source credentials are not configured in this process",
@@ -871,6 +879,31 @@ async function checkConclusionRows(query) {
  * EVERYTHING ELSE IS DIGESTED or reduced, exactly as the other stores do it: the
  * state and environment words come back as digests, because the derivation asks
  * equality of them and nothing else.
+ *
+ * TWO PREDICATES DECIDE WHETHER A ROW IS THE AUTHENTICATED RECORD AT ALL, and
+ * they are in the WHERE clause rather than in the consumer, because a row this
+ * reader cannot vouch for is not a row it should hand anybody.
+ *
+ *   `source_kind = 'wrapper'` — the one writer of a release candidate,
+ *   tools/ops-record.py, writes that literal and nothing else ever does.
+ *
+ *   `maker_verification_ref = 'ops.authority-principal:' || maker_actor` — the
+ *   MARKER OF THE DERIVATION. Those two columns are no longer reachable from any
+ *   caller flag: `release candidate` refuses --maker and --maker-verification and
+ *   writes both halves itself from one answer to `ops.authority_actor_slug()`
+ *   over the authority connection, which is how `release approve` derives its
+ *   approver. So a row satisfying this pair carries a maker the DATABASE named on
+ *   a human authority credential, and a row whose maker somebody typed does not
+ *   satisfy it and is not returned.
+ *
+ * WHAT THE PAIR DOES NOT CLAIM, said plainly: a row written before amendment 9,
+ * when --maker was a caller field, could have carried any slug — but it could not
+ * have carried this verification ref, because nothing wrote that spelling. The
+ * predicate is therefore exact about the rows it admits rather than trusting the
+ * table's history, and it is state-INDEPENDENT on purpose: the release this
+ * producer judges is usually approved or complete by the time it is deployed, so
+ * filtering on `state = 'candidate'` would hide the record of every build that
+ * actually shipped.
  */
 async function candidateBuildRecordRows(query) {
   const storeRef = STORE_TOKENS.candidateBuildRecord;
@@ -885,6 +918,8 @@ async function candidateBuildRecordRows(query) {
            r.observed_at
       from ops.release r
      where r.git_sha = $1
+       and r.source_kind = 'wrapper'
+       and r.maker_verification_ref = '${MAKER_AUTHORITY_PREFIX}' || r.maker_actor
      order by r.observed_at desc nulls last`, params: [gitSha] }]);
   const rows = (Array.isArray(raw) ? raw : []).map(row => ({
     git_sha_digest: opaque(cell(row, "git_sha")),

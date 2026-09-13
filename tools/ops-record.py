@@ -2233,6 +2233,44 @@ def cmd_deployment(args) -> int:
 
 
 # ── release ──────────────────────────────────────────────────────────────────
+# The exact shape a derived maker_verification_ref takes, and the marker the Gate
+# Zero seam store reads the row back by: `ops.authority-principal:<slug>` beside a
+# `maker_actor` of that same slug. Both halves are written here, from one
+# authenticated answer, and no caller flag can reach either column — so a row
+# satisfying `maker_verification_ref = 'ops.authority-principal:' || maker_actor`
+# is a row whose maker the DATABASE named on a human authority credential.
+MAKER_AUTHORITY_PREFIX = "ops.authority-principal:"
+
+
+def authority_derived_maker() -> tuple[str, str]:
+    """WHO MADE THIS CANDIDATE — asked of the database over the authority
+    connection, exactly the way `release approve` derives its approver.
+
+    `ops.approve_program5_release` opens with `ops.authority_actor_slug()`, which
+    maps the connection's own `session_user` to a partner slug and raises for any
+    principal that is not an admitted human authority. This asks that same
+    function over that same connection kind, so the answer is a fact about the
+    CREDENTIAL the caller presented rather than a string the caller typed. There
+    is no argument and no fallback: a run with no authority credential refuses
+    before any release row exists.
+
+    WHY THE ROW IS STILL INSERTED ON THE WRITER CONNECTION. `carr_authority` holds
+    SELECT on ops.release and no INSERT (schema.sql's grant block), so an
+    authority-role insert needs either a new grant or a SECURITY DEFINER recorder
+    — a production migration, which is the heavy path. The provenance the review
+    asked for is the derivation, and the derivation is authenticated here; the
+    columns it writes cannot be reached by a caller at all.
+    """
+    with connect("authority") as conn, conn.cursor() as cur:
+        cur.execute("select ops.authority_actor_slug()")
+        row = cur.fetchone()
+    slug = row[0] if row else None
+    if not isinstance(slug, str) or re.fullmatch(r"[a-z][a-z0-9_-]{1,63}", slug) is None:
+        raise SystemExit("ops-record: the authority connection named no admitted human "
+                         "authority principal, so this candidate has no maker")
+    return slug, f"{MAKER_AUTHORITY_PREFIX}{slug}"
+
+
 def release_candidate_manifest_refusal(args, manifest: dict) -> str | None:
     """Return a fail-closed candidate-manifest refusal, or ``None``.
 
@@ -2347,6 +2385,16 @@ def cmd_release(args) -> int:
     elif not args.key:
         print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
         return 2
+    # getattr, not attribute access: the paired selftests call this function with
+    # a SimpleNamespace carrying only the fields their case is about, which is how
+    # they prove the pre-connection refusals without a database at all.
+    if args.action == "candidate" and (getattr(args, "maker", None) is not None
+                                       or getattr(args, "maker_verification", None) is not None):
+        print("ops-record: the release candidate's maker is not a caller field; it is "
+              "derived from the authority connection identity the same way `release "
+              "approve` derives its approver. Drop --maker and --maker-verification.",
+              file=sys.stderr)
+        return 2
     if args.action in ("approve", "staging-approve") and args.actor:
         print("ops-record: approval identity is not a caller field; Joe is derived "
               "from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
@@ -2374,11 +2422,17 @@ def cmd_release(args) -> int:
         except Exception as e:                                   # noqa: BLE001
             print(f"ops-record: could not read the manifest: {e}", file=sys.stderr)
             return 2
+    maker_actor = None
+    maker_verification_ref = None
     if args.action == "candidate":
         refusal = release_candidate_manifest_refusal(args, manifest)
         if refusal:
             print(f"ops-record: {refusal}", file=sys.stderr)
             return 2
+        # Derived BEFORE the writer connection opens, for the same reason the
+        # manifest is verified there: a candidate that cannot name an
+        # authenticated maker must not consume a credential or leave a row.
+        maker_actor, maker_verification_ref = authority_derived_maker()
 
     try:
         connection_kind = "authority" if args.action in ("approve", "staging-approve") else "write"
@@ -2419,7 +2473,7 @@ def cmd_release(args) -> int:
                      manifest.get("config_fingerprint"),
                      manifest.get("declared_env_differences"),
                      json.dumps(manifest.get("asset_versions")) if manifest.get("asset_versions") else None,
-                     args.maker, args.maker_verification,
+                     maker_actor, maker_verification_ref,
                      # COLLECTED AT CANDIDACY, which is exactly what migration
                      # 0169's own comment says should be possible: "drafts and
                      # candidates may still collect it." Until this line existed
@@ -2926,8 +2980,12 @@ def main() -> int:
                      choices=["local", "rehearsal", "staging", "production"],
                      default="production")
     rel.add_argument("--correlation")
-    rel.add_argument("--maker", default=os.environ.get("CARR_ACTOR", "claude"))
-    rel.add_argument("--maker-verification", help="ref to the maker's own evidence")
+    rel.add_argument("--maker", help="REFUSED for `candidate`: the maker is derived "
+                                     "from the authority connection identity, never "
+                                     "asserted by the caller")
+    rel.add_argument("--maker-verification", help="REFUSED for `candidate`: derived "
+                                                  "beside the maker from the same "
+                                                  "authenticated identity")
     rel.add_argument("--test-evidence", help="ref to the test run, e.g. ops/ci.sh#<run>")
     rel.add_argument("--security-evidence", help="ref to the security/scan run")
     rel.add_argument("--rollback-ready", action="store_true")

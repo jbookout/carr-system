@@ -45,17 +45,21 @@
 // answer — which is its own test near the end of this file, run in a fresh
 // process against a hostile environment.
 //
-// HOW THE AUTHENTICATED CALL IS OBTAINED, and it is the fifth correction round's
+// HOW THE AUTHENTICATED CALL IS OBTAINED, and it is the sixth correction round's
 // subject. Nothing here mints or fabricates an actor, because identity.js no
-// longer exports anything that could. The suite writes the recorded REVIEW_TOKENS
-// map into its own process environment — becoming the server, the only way a
-// suite now can — and then calls `serveReviewRequestAuthenticated` with an
-// Authorization header, exactly as index.js's /mcp route does. That one entry
-// matches the bearer internally, derives the identity internally, enters the
-// context internally, and runs the continuation inside it; the continuation goes
-// through the staged tools.js's `executeRegisteredTool`, so the producer runs
-// inside a real verb call. A caller-chosen bearer authenticates nobody, and
-// there is no second export to compose with anything — which is control 11.
+// longer exports anything that could — and since this round, nothing here hands
+// identity.js CODE either. The suite writes the recorded REVIEW_TOKENS map into
+// its own process environment — becoming the server, the only way a suite now
+// can — and then calls `serveAuthenticatedCall` with an Authorization header and
+// the NAME of one of the server's own entries, exactly as a route would. That one
+// entry matches the bearer internally, derives the identity internally, resolves
+// the name in a frozen map identity.js holds itself, enters the context
+// internally, and runs what it resolved inside it. The previous shape passed a
+// CONTINUATION, and a callback parameter on an exported door is the exported
+// context entry amendment 8 forbids: a probe holding the configured bearer ran
+// its own code as `review_agent` through it. A caller-chosen bearer authenticates
+// nobody, a function in the name's place is refused rather than run, and there is
+// no second export to compose with anything — which is control 11.
 //
 // THE CONTROLS, and each is named where it is asserted:
 //   1. an authenticated request + every row present -> passable, digest, instant
@@ -116,15 +120,14 @@ const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
 const GATE_FILE = "gate-zero-assurance.v5.js";
 const IDENTITY_FILE = "identity.js";
-const TOOLS_FILE = "tools.js";
 /**
- * THE VERB EVERY CASE IS DISPATCHED THROUGH. Any registered read verb would do —
- * what is under test is that the producer runs inside a real dispatched call —
- * and `loop-board` is chosen because its handler reaches its database client
- * immediately and finishes cleanly over no rows, so the stub client below is a
- * one-line seam into the middle of a real dispatched call.
+ * THE NAME EVERY CASE IS SERVED THROUGH — identity.js's one entry for the Gate
+ * Zero outcome, spelled exactly as V5_A02_GATE_ZERO_PRODUCER_SEAM. It is a NAME
+ * rather than a callable on purpose (sixth correction round): a caller may choose
+ * which of the server's entries runs and can express nothing else, and an
+ * unknown name runs nothing at all.
  */
-const DISPATCHED_VERB = "loop-board";
+const GATE_ZERO_ENTRY = "seam:gate-zero-read-only-outcome-producer";
 const FIXTURE_FILE = "gate-zero-producer-stores.v5.fixture.mjs";
 
 /** The sealed fixture set the receipt's fixture_set_digest covers, by path. */
@@ -454,36 +457,35 @@ function stageTree({
 const moduleOfTree = (target, file) => import(pathToFileURL(join(target, file)).href);
 
 /**
- * RUN `fn` INSIDE A REAL SERVED REQUEST in a staged tree.
+ * SERVE A REAL AUTHENTICATED CALL in a staged tree, and answer what the gate
+ * answered inside it.
  *
- * THIS IS THE ONLY WAY AN AUTHENTICATED CALL EXISTS NOW, and that is the fifth
- * correction round's whole point. `serveReviewRequestAuthenticated` is the one
- * export that reaches identity.js's context entry; it takes the request's own
- * Authorization header rather than an actor, so this helper cannot choose an
- * identity any more than a caller could. Inside it, the continuation goes
- * through the staged tools.js's `executeRegisteredTool` — the dispatch every
- * verb funnels through — and the stub database client calls `fn` from within the
- * handler, which is the only seam Step A has into a dispatched verb.
+ * THIS IS THE ONLY WAY AN AUTHENTICATED CALL EXISTS NOW, and the shape of it is
+ * the SIXTH correction round's first finding. The previous helper handed
+ * identity.js a CONTINUATION — `serveReviewRequestAuthenticated(header,
+ * correlationId, fn)` — and that callback parameter was an exported context
+ * entry however the identity behind it was derived: a probe holding the
+ * configured bearer ran its own code as `review_agent` through exactly this
+ * helper's shape.
+ *
+ * So there is no `fn` any more, here or on the door. `serveAuthenticatedCall`
+ * takes the request's own Authorization header, the server's correlation id and
+ * the NAME of one of the server's own entries; identity.js resolves that name in
+ * a frozen map it holds itself and runs what it resolved inside the context.
+ * This helper cannot choose an identity, and it cannot choose CODE either — the
+ * widest thing it can express is which of the server's entries runs, and the
+ * entry it names is the Gate Zero outcome the whole suite is about.
  *
  * Answers `{ served: false }` when the bearer matched nothing, which is the
  * server's "this was not a review request" and the next door's turn.
  */
 async function inServedRequest(target, { bearer = RECORDED_REVIEW_TOKEN,
-                                         correlationId = CORRELATION_ID } = {}, fn) {
+                                         correlationId = CORRELATION_ID,
+                                         entryName = GATE_ZERO_ENTRY } = {}) {
   const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const tools = await moduleOfTree(target, TOOLS_FILE);
-  let answered;
-  let ran = false;
-  const client = { query: async () => {
-    if (!ran) { ran = true; answered = await fn(); }
-    return { rows: [] };
-  } };
-  const served = identity.serveReviewRequestAuthenticated(
-    bearer === null ? "" : `Bearer ${bearer}`, correlationId,
-    actor => tools.executeRegisteredTool(client, actor, DISPATCHED_VERB, {}));
-  if (served === null) return { served: false, answered: null };
-  await served;
-  assert.equal(ran, true, "the dispatched verb never reached its client");
+  const answered = await identity.serveAuthenticatedCall(
+    bearer === null ? "" : `Bearer ${bearer}`, correlationId, entryName);
+  if (answered === null) return { served: false, answered: null };
   return { served: true, answered };
 }
 
@@ -498,7 +500,7 @@ async function emitFrom(options = {}, seat = {}) {
   const gate = await moduleOfTree(target, GATE_FILE);
   return withStamps(stamps, async () => {
     if (seat === null) return gate.emitGateZeroOutcome();
-    const served = await inServedRequest(target, seat, () => gate.emitGateZeroOutcome());
+    const served = await inServedRequest(target, seat);
     assert.equal(served.served, true, "the recorded review bearer was not served");
     return served.answered;
   });
@@ -724,19 +726,26 @@ test("IDENTITY: a request with no server-written correlation id obtains no sessi
 });
 
 // ===========================================================================
-// CONTROL 11 — THERE IS NOTHING LEFT TO COMPOSE.
+// CONTROL 11 — THERE IS NOTHING LEFT TO COMPOSE, AND NOTHING LEFT TO HAND OVER.
 //
-// THE FIFTH REVIEW ROUND'S FIRST FINDING, as the control it asks for. Amendment
-// 8 left two exports that were each harmless alone: `reviewActorForToken(header)`
-// MINTED A BRANDED ACTOR, and `dispatchFor(actor)` RETURNED A CALLABLE THAT
-// ENTERS A CONTEXT. A module-initialisation probe composed them and ran its own
-// code inside a `review_agent` context — no seal to beat and no race to win.
+// THE FIFTH ROUND'S FINDING was a COMPOSITION: `reviewActorForToken(header)`
+// minted a branded actor and `dispatchFor(actor)` returned a callable that
+// entered a context, and a probe composed them. Both names are deleted and both
+// capabilities are module-private.
 //
-// Both names are deleted. The review door and the context entry are
-// module-private, and the ONE export that reaches either takes the request's own
-// Authorization header rather than an actor. So the case below is not "the
-// forgery is refused"; it is that the forgery has no entry point at all, which
-// is a stronger claim and is asserted as one.
+// THE SIXTH ROUND'S FINDING was the CALLBACK that replaced them. The single
+// entry left standing took `(header, correlationId, run)` and ran `run` inside
+// `enterAuthenticatedCall`, so a probe holding the configured bearer needed no
+// composition at all — it handed the door its own code. A callback parameter on
+// an exported door IS an exported context entry, which amendment 8 forbids in as
+// many words.
+//
+// SO THE ENTRY TAKES A NAME. `serveAuthenticatedCall(header, correlationId,
+// entryName)` resolves the name in a frozen map identity.js holds itself, and
+// there is no parameter anywhere on the file's export surface that a function
+// may travel through. The cases below therefore assert two things rather than
+// one: a caller-chosen bearer reaches nothing, AND the server's own bearer
+// cannot be made to run caller code either.
 // ===========================================================================
 
 test("IDENTITY: a caller-chosen bearer is served by nobody and enters no context", async () => {
@@ -744,31 +753,41 @@ test("IDENTITY: a caller-chosen bearer is served by nobody and enters no context
   const { target, stamps } = stageTree({});
   const identity = await moduleOfTree(target, IDENTITY_FILE);
 
-  // THE ONE ENTRY IS A BEARER AND A CONTINUATION. A bearer the caller chose
-  // matches nothing in the map identity.js read from the server's environment,
-  // so the entry answers null — "not a review request" — and the continuation is
-  // never run at all.
+  // THE ONE ENTRY IS A BEARER AND A NAME. A bearer the caller chose matches
+  // nothing in the map identity.js read from the server's environment, so the
+  // entry answers null — "not a review request" — and nothing runs.
+  assert.equal(
+    await identity.serveAuthenticatedCall(`Bearer ${CALLERS_OWN}`, CORRELATION_ID,
+      GATE_ZERO_ENTRY),
+    null);
+
+  // AND A FUNCTION IN THE NAME'S PLACE IS REFUSED RATHER THAN RUN — with the
+  // SERVER'S OWN bearer, which is the exact construction the sixth review
+  // performed. This is the negative of the case that used to stand here.
   let ran = false;
   assert.equal(
-    identity.serveReviewRequestAuthenticated(`Bearer ${CALLERS_OWN}`, CORRELATION_ID,
-      () => { ran = true; return "served"; }),
+    await identity.serveAuthenticatedCall(`Bearer ${RECORDED_REVIEW_TOKEN}`,
+      CORRELATION_ID, () => { ran = true; return "served"; }),
     null);
-  assert.equal(ran, false, "a caller-chosen bearer ran a continuation");
-  // NON-VACUOUS: the SERVER'S own bearer is served, and what runs inside it reads
-  // the three-field identity r7 requires.
-  assert.deepEqual(
-    identity.serveReviewRequestAuthenticated(`Bearer ${RECORDED_REVIEW_TOKEN}`, CORRELATION_ID,
-      () => identity.authenticatedIdentity.receiptIdentity()),
-    { actor_id: REVIEWING_SEAT_ACTOR, session_ref: `session:${CORRELATION_ID}`,
-      authority_class: "review_agent" });
+  assert.equal(ran, false, "the configured bearer ran caller code inside the context");
 
-  // AND THE COMPOSITION THE REVIEW PERFORMED CANNOT BE WRITTEN, because neither
-  // half is exported under any name. This is the mutation control stated the way
-  // the review stated it: the probe cannot NAME a function to call.
+  // NON-VACUOUS: the server's own bearer and a NAME the server holds do enter a
+  // context, and what runs inside it — the server's own entry, not the caller's
+  // — obtains the three-field identity r7 requires.
+  const served = await withStamps(stamps, () => inServedRequest(target, {}));
+  assert.equal(served.served, true, "the recorded review bearer was not served");
+  assert.deepEqual(served.answered.receipt.evaluator_identity, {
+    actor_id: REVIEWING_SEAT_ACTOR, session_ref: `session:${CORRELATION_ID}`,
+    authority_class: "review_agent" });
+
+  // AND NEITHER COMPOSITION NOR CALLBACK CAN BE WRITTEN, because no half is
+  // exported under any name. This is the mutation control stated the way the
+  // reviews stated it: the probe cannot NAME a function to call.
   for (const gone of ["runInAuthenticatedCall", "authenticatedCallIdentity",
     "reviewActorForToken", "dispatchFor", "dispatchAuthenticatedCall",
     "authenticatedCallReceiptIdentity", "actorFromProps", "sealServerReviewTokens",
-    "buildContext", "committerIdentity", "enterAuthenticatedCall"]) {
+    "buildContext", "committerIdentity", "enterAuthenticatedCall",
+    "serveReviewRequestAuthenticated"]) {
     assert.equal(Object.hasOwn(identity, gone), false, `${gone} is still exported`);
     assert.equal(Object.hasOwn(identity.authenticatedIdentity, gone), false,
       `${gone} is still on the authenticated-identity surface`);
@@ -781,9 +800,8 @@ test("IDENTITY: a caller-chosen bearer is served by nobody and enters no context
   // never establishes a call, so the producer refuses.
   const gate = await moduleOfTree(target, GATE_FILE);
   const emitted = await withStamps(stamps, async () => {
-    const served = await inServedRequest(target, { bearer: CALLERS_OWN },
-      () => gate.emitGateZeroOutcome());
-    assert.equal(served.served, false, "a caller-chosen bearer was served");
+    const unserved = await inServedRequest(target, { bearer: CALLERS_OWN });
+    assert.equal(unserved.served, false, "a caller-chosen bearer was served");
     return gate.emitGateZeroOutcome();
   });
   assert.equal(emitted.passable, false);
@@ -792,17 +810,29 @@ test("IDENTITY: a caller-chosen bearer is served by nobody and enters no context
 });
 
 /**
- * THE HOSTILE VALUES. Everything a caller can write down, and nothing a server
- * holds: no recorded token, no recorded witness, no served request. The claim
- * under test is that NO export of identity.js — at any depth — turns any
- * combination of these into an entered identity context, so the enumeration
- * below feeds every reachable callable every 1-, 2- and 3-tuple drawn from this
- * set, and follows any callable ANSWER one step further.
+ * THE HOSTILE VALUES — AND THE SERVER'S REAL BEARER IS AMONG THEM, which is the
+ * sixth review round's own instruction and the difference between this control
+ * and the one it replaces.
+ *
+ * The previous set deliberately EXCLUDED the configured bearer, so the sweep only
+ * ever proved that a caller who cannot authenticate runs nothing — and the review
+ * then supplied that bearer by hand and watched a callback run inside a
+ * `review_agent` context. Provenance was never the question; the question is
+ * whether holding the credential buys the ability to run CODE. So the recorded
+ * token is in here twice, raw and as an Authorization header, and the claim under
+ * test is the strong one: NO export of identity.js, at any depth, runs a caller's
+ * function — with or without the server's own credential — and none of them
+ * enters an identity context around one. The enumeration feeds every reachable
+ * callable every 1-, 2- and 3-tuple drawn from this set and follows any callable
+ * ANSWER one step further.
  */
 function hostileValues(probe) {
   return [
     null,
     "Bearer a-bearer-the-caller-chose",
+    `Bearer ${RECORDED_REVIEW_TOKEN}`,
+    RECORDED_REVIEW_TOKEN,
+    CORRELATION_ID,
     JSON.stringify({ [REVIEWING_SEAT_ACTOR]: "a-bearer-the-caller-chose" }),
     JSON.stringify({ [RECORDED_AGENT_ACTOR]: "a-bearer-the-caller-chose" }),
     { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
@@ -834,7 +864,8 @@ test("IDENTITY: no export of identity.js, at any depth, enters a context from ca
       `identity.js's callable surface enumerated as ${surface.length}, too few to be all of it`);
     for (const required of [".agentActorForToken", ".continuityActorForTokenMaps",
       ".hermesActorForToken", ".hermesCosActorForToken", ".propsForSlug",
-      ".serveReviewRequestAuthenticated", ".authenticatedIdentity.connectionForGrant",
+      ".serveAuthenticatedCall", ".serveReviewRequest",
+      ".authenticatedIdentity.connectionForGrant",
       ".authenticatedIdentity.receiptIdentity", ".authenticatedIdentity.partnerIdentity"])
       assert.ok(surface.some(([route]) => route === required),
         `${required} was not reached by the enumeration`);
@@ -849,7 +880,7 @@ test("IDENTITY: no export of identity.js, at any depth, enters a context from ca
       "the enumeration does not reach a callable nested two levels down");
 
     // A HOSTILE ARGUMENT THAT LOOKS BACK. If any export runs a caller's function
-    // inside an entered context, this records what that context held.
+    // at all, this records the fact — and what the context held when it did.
     const seen = [];
     const probe = (...args) => {
       seen.push(door.receiptIdentity());
@@ -883,16 +914,33 @@ test("IDENTITY: no export of identity.js, at any depth, enters a context from ca
     for (const held of seen)
       assert.equal(held, null, "an export ran a caller's function inside an identity context");
 
-    // NON-VACUOUS, AGAINST THE SAME PROBE: the server's own bearer — which
-    // appears nowhere in the hostile set — does run it inside a context, so what
-    // answers null above is provenance and not a broken probe.
-    identity.serveReviewRequestAuthenticated(`Bearer ${RECORDED_REVIEW_TOKEN}`,
-      CORRELATION_ID, probe);
-    assert.deepEqual(seen.at(-1), {
-      actor_id: REVIEWING_SEAT_ACTOR,
-      session_ref: `session:${CORRELATION_ID}`,
-      authority_class: "review_agent",
-    });
+
+    // AND THE PROBE WAS NEVER CALLED AT ALL, by any export, on any tuple —
+    // including the tuples carrying the server's own bearer. `seen` records one
+    // entry per invocation, so this is the stronger statement the sixth review
+    // asked for: not "a caller's code read nothing", but "a caller's code did not
+    // run".
+    assert.deepEqual(seen, [],
+      "an export invoked a caller-supplied function, whatever it read");
+
+    // NON-VACUOUS, AND THIS IS WHAT MAKES THE EMPTY SET MEAN SOMETHING: the same
+    // bearer, with a NAME instead of a function, DOES enter a context — and what
+    // runs inside it is the server's own entry, which obtains the three-field
+    // identity r7 requires. The context exists; nothing exported lets a caller
+    // into it.
+    const inside = await identity.serveAuthenticatedCall(
+      `Bearer ${RECORDED_REVIEW_TOKEN}`, CORRELATION_ID, GATE_ZERO_ENTRY);
+    assert.notEqual(inside, null, "the server's own bearer and name were not served");
+    assert.deepEqual(seen, [], "the named entry ran caller code");
+    assert.equal(inside.producer_bound, true);
+
+    // AND A FUNCTION IN THE NAME'S PLACE, WITH THAT SAME BEARER, IS REFUSED —
+    // stated here as well as in control 11 because this is the enumeration that
+    // sweeps the surface, and a reader comparing the two rounds should find the
+    // prohibited construction spelled out beside its refusal.
+    assert.equal(await identity.serveAuthenticatedCall(
+      `Bearer ${RECORDED_REVIEW_TOKEN}`, CORRELATION_ID, probe), null);
+    assert.deepEqual(seen, [], "a function in the entry-name slot was called");
 
     // AND THE LEGACY MAP-TAKING DOORS STILL RETURN THEIR ACTORS, which is what
     // makes the loop above a real sweep rather than a sweep over doors that
@@ -922,7 +970,7 @@ test("DIGEST: each bound digest stands on its own stamped artifact", async () =>
   const { target, manifest, stamps } = stageTree({});
   const gate = await moduleOfTree(target, GATE_FILE);
   const own = await withStamps(stamps, async () =>
-    (await inServedRequest(target, {}, () => gate.emitGateZeroOutcome())).answered);
+    (await inServedRequest(target, {})).answered);
   assert.equal(own.receipt.candidate_digest,
     candidateDigestOfStamps(manifest, own.receipt.policy_digest),
     "the candidate digest is not the sealed artifact manifest the stamps carry");
@@ -1064,7 +1112,7 @@ test("STAMPS: a manifest edited after its seal does not match its digest and is 
     const gate = await moduleOfTree(target, GATE_FILE);
     const unparsed = await withStamps(
       { ...stamps, [BUILD_STAMP_NAMES.candidateManifest]: "not-json-at-all" },
-      async () => (await inServedRequest(target, {}, () => gate.emitGateZeroOutcome())).answered);
+      async () => (await inServedRequest(target, {})).answered);
     assert.equal(unparsed.passable, false);
     assert.equal(unparsed.reason_id, "gate_zero_candidate_metadata_absent");
     assert.deepEqual(unparsed.producer_answer.absent_candidate_metadata,
@@ -1276,12 +1324,59 @@ test("IDENTITY: a subject maker that is the reviewing seat is denied", async () 
 // THE SUBJECT MAKER, AND THE RECORD IT COMES OUT OF (amendment 9(b)).
 // ===========================================================================
 
-test("ABSENCE: a revision with no release candidate on record IS the absent ruled row",
+test("PROVENANCE: the store admits only the row the database itself named a maker on",
+  () => {
+    // THE SIXTH REVIEW ROUND'S SECOND FINDING, asserted where the query is
+    // written. The producer's subject maker used to be whatever `--maker` the
+    // person running `tools/ops-record.py release candidate` typed, read back by
+    // git_sha alone — caller-asserted metadata wearing a record's clothes.
+    //
+    // TWO THINGS CHANGED AND BOTH ARE CHECKED HERE. The recorder refuses --maker
+    // and --maker-verification outright and derives both columns from
+    // `ops.authority_actor_slug()` over the authority connection — the same
+    // function `release approve` opens with — and this store will only return a
+    // row that carries that derivation's own marker. A row somebody typed a maker
+    // into cannot satisfy the pair, so it is not a row this producer can read.
+    const storeSource = readFileSync(join(SRC, STORES_FILE), "utf8");
+    const recorder = readFileSync(join(REPO, "tools", "ops-record.py"), "utf8");
+    const candidateQuery = storeSource.slice(storeSource.indexOf("from ops.release r"));
+    assert.match(candidateQuery, /and r\.source_kind = 'wrapper'/,
+      "the candidate store no longer requires the one writer's own source kind");
+    assert.match(candidateQuery,
+      /and r\.maker_verification_ref = '\$\{MAKER_AUTHORITY_PREFIX\}' \|\| r\.maker_actor/,
+      "the candidate store reads a maker without requiring the authenticated derivation");
+    // And the marker that predicate stands on is the spelling the recorder
+    // writes, asserted as a literal so the two files cannot drift apart in
+    // silence — a prefix that moved on one side would return every row or none.
+    assert.match(storeSource,
+      /const MAKER_AUTHORITY_PREFIX = "ops\.authority-principal:";/,
+      "the store's authenticated-maker marker is not the recorder's spelling");
+    assert.match(recorder,
+      /MAKER_AUTHORITY_PREFIX = "ops\.authority-principal:"/,
+      "the recorder's authenticated-maker marker is not the store's spelling");
+
+    // AND THE RECORDER IS THE OTHER HALF OF THE SAME CLAIM: the two columns this
+    // predicate stands on are unreachable from any caller flag.
+    assert.match(recorder, /select ops\.authority_actor_slug\(\)/,
+      "the recorder no longer derives the maker from the authority connection");
+    assert.match(recorder,
+      /the release candidate's maker is not a caller field/,
+      "the recorder no longer refuses a caller-asserted maker");
+    assert.match(recorder, /maker_actor, maker_verification_ref,/,
+      "the candidate insert no longer writes the derived pair");
+    assert.equal(recorder.includes("args.maker, args.maker_verification"), false,
+      "the candidate insert still reads the caller's maker flags");
+  });
+
+test("ABSENCE: a revision with no AUTHENTICATED release candidate on record IS the absent ruled row",
   async () => {
-    // A build nobody filed a release candidate for. The stamps are intact and
-    // every clause row is present; what is genuinely absent is the RECORD naming
-    // who made the candidate. This is the one case
-    // `gate_zero_run_binding_unnamed` is left with, and it says which.
+    // A build nobody filed a release candidate for — and, since the store admits
+    // only the authenticated derivation (the case above), a build whose only row
+    // carries a maker somebody typed is the SAME case: no row comes back, so
+    // there is no maker. The stamps are intact and every clause row is present;
+    // what is genuinely absent is the RECORD naming who made the candidate. This
+    // is the one case `gate_zero_run_binding_unnamed` is left with, and it says
+    // which.
     const emitted = await emitFrom({ candidateRecordWorld: "absent" });
     assert.equal(emitted.passable, false);
     assert.equal(emitted.reason_id, "gate_zero_run_binding_unnamed");
@@ -1434,8 +1529,14 @@ test("SHAPE: every callable this PR added to identity.js and the walker wears am
   // AND THE ONE ENTRY ONTO THE AUTHENTICATED CALL WEARS THE SHAPE TOO. It is a
   // top-level export rather than a member of the namespace above, because that
   // namespace is a set of READERS and this is not one.
-  assertClosedShape(identity.serveReviewRequestAuthenticated,
-    "identity.js#serveReviewRequestAuthenticated");
+  for (const name of ["serveAuthenticatedCall", "serveReviewRequest"])
+    assertClosedShape(identity[name], `identity.js#${name}`);
+
+  // AND THE NAME SPACE THE CONTEXT ENTRY WILL RESOLVE IS DECLARED AND FROZEN —
+  // the whole point of naming rather than passing code. A caller can express one
+  // of these and nothing else.
+  assert.deepEqual(identity.SERVER_ENTRY_NAMES, [GATE_ZERO_ENTRY]);
+  assert.ok(Object.isFrozen(identity.SERVER_ENTRY_NAMES));
 
   // AND THE SURFACE IS ALL OF IT — asserted DYNAMICALLY against the file's own
   // exports, which is finding 4 of the third re-review. The old line only said
@@ -1451,7 +1552,7 @@ test("SHAPE: every callable this PR added to identity.js and the walker wears am
      "continuityActorForTokenMaps", "hermesActorForToken", "hermesActorForTokenMaps",
      "hermesCosActorForToken", "isKnownActor", "isKnownPartner",
      "organizationTenantForActor", "permittedActionOwnerSlugs", "personalScopeForActor",
-     "propsForSlug", "serveReviewRequestAuthenticated", "slugForEmail",
+     "propsForSlug", "serveAuthenticatedCall", "serveReviewRequest", "slugForEmail",
      "verifiedAgentSlugForClient"],
     "identity.js grew or lost a top-level callable export");
 
@@ -1582,12 +1683,11 @@ test("SURFACE: no environment variable but the declared build stamps moves an an
   const script = `
     const { pathToFileURL } = require("node:url");
     (async () => {
-      const gate = await import(pathToFileURL(process.argv[1]).href);
       const { digest } = await import(pathToFileURL(process.argv[2]).href);
       const identity = await import(pathToFileURL(process.argv[3]).href);
-      const answered = await identity.serveReviewRequestAuthenticated(
+      const answered = await identity.serveAuthenticatedCall(
         "Bearer " + process.env.REVIEW_BEARER, process.env.REVIEW_CORRELATION,
-        () => gate.emitGateZeroOutcome());
+        process.env.REVIEW_ENTRY);
       process.stdout.write(JSON.stringify({ emitted: digest(answered) }));
     })().catch(error => { process.stderr.write(String(error)); process.exit(1); });
   `;
@@ -1596,6 +1696,7 @@ test("SURFACE: no environment variable but the declared build stamps moves an an
     REVIEW_TOKENS: RECORDED_REVIEW_TOKENS,
     REVIEW_BEARER: RECORDED_REVIEW_TOKEN,
     REVIEW_CORRELATION: CORRELATION_ID,
+    REVIEW_ENTRY: GATE_ZERO_ENTRY,
   };
   const child = env => spawnSync(process.execPath,
     ["-e", script, join(SRC, GATE_FILE), join(SRC, "artifact-trust.js"), join(SRC, IDENTITY_FILE)],
