@@ -216,6 +216,30 @@ end $v5_a02_gate_zero_outcome_preflight$;
 -- apply at (10), and it precedes the promotion at (12) because a Worker
 -- promoted before this secret exists is a verb that refuses every write and
 -- names required_secret.
+--
+-- RECORDED DEVIATION FROM THE PLAN'S NUMBERING, ruled at execution 2026-09-13 by
+-- the orchestrator and written here rather than left for whoever runs the acts
+-- to discover. The accepted plan lists (9) before (10). THAT ORDER CANNOT BE
+-- RUN: this migration is what CREATES carr_gate_zero_producer, so before act
+-- (10) the role does not exist and act (9)(a) has nothing to set a password on
+-- -- its own first proof, reading pg_authid for a passwordless
+-- carr_gate_zero_producer, would find no row at all. The only executable order
+-- is therefore
+--
+--     (8) merge PR #1014  ->  (10) apply 0502 and 0503 as one atomic group
+--       ->  (9) Joe provisions the credential and publishes the Worker secret
+--       ->  (11) commit the db/schema.sql refresh  ->  (12) promote  ->  (13) live run
+--
+-- and every reason the plan gives for act (9)'s POSITION survives the swap
+-- unharmed: what (9) must precede is the PROMOTION at (12), because a Worker
+-- promoted before its secret exists refuses every write and names
+-- required_secret. It never needed to precede the apply. Nothing about the two
+-- halves of (9), their order, their proofs or their readbacks changes.
+--
+-- THE PLAN ITSELF IS IMMUTABLE and is not edited: PLAN-a5059eb52474-v3 still
+-- reads (9) then (10), the deviation is recorded at execution in the outcome
+-- feedback, and this header, mcp-server/wrangler.toml and PR #1014's body carry
+-- the same statement so no one reads the impossible order as runnable.
 do $v5_a02_gate_zero_producer_role$
 begin
   if not exists (select 1 from pg_roles where rolname = 'carr_gate_zero_producer') then

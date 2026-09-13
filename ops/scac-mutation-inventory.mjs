@@ -539,14 +539,44 @@ export const GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   ...GATE_ZERO_OUTCOME_PRE_V26_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v26",
   // Read back from a clean disposable Postgres carrying db/schema.sql and every
-  // migration through this one. This successor is registry-only: it creates no
-  // table, no role and no domain function of its own -- 0502 did that, one
-  // migration earlier and under its own review -- so the entire
-  // security-definer delta from the pre-v26 463 is the four seal-and-catalog
-  // functions this successor installs for itself, exactly as the v20, v21, v23
-  // and v25 registry-only successors before it. Every other category is
-  // unchanged for the same reason.
+  // migration through this one. The security-definer delta from the pre-v26 463
+  // is the four seal-and-catalog functions this successor installs for itself,
+  // exactly as the v20, v21, v23 and v25 registry-only successors before it.
   secdef_execute: { count: 467, digest: "sha256:1800f076650126201edac1af8b28a7a98377a6818731b0520fd630b054841883" },
+  // AND THIS SUCCESSOR IS NO LONGER REGISTRY-ONLY, which is the whole reason the
+  // two categories below move. It ADMITS ONE SEALED CAPABILITY -- open loop
+  // #594's `db-relation-acl:ops.release:carr_authority:insert` -- because that
+  // is the only door SIEP-11 has: there is no allowlist and no partial
+  // admission, so the grant and the seal that describes it land in one migration
+  // or neither lands at all.
+  //
+  // WHY THE GRANT IS OWED. Migration 0504 makes `maker_authority_verified` a
+  // STORED GENERATED column over `maker_session_user`, which a BEFORE trigger
+  // writes from `session_user`. A row can therefore carry a true marker only if
+  // the session that INSERTED it authenticated as a human authority login -- and
+  // migration 0161 built carr_authority as a privilege bundle holding no
+  // business-record table grant, while 0273 made the two partner logins members
+  // of exactly that bundle, so no such session could insert at all. Until this
+  // grant lands, every release candidate is an honest UNAUTHENTICATED row and the
+  // Gate Zero producer's subject-maker store reads none of them.
+  //
+  // BOTH MOVES MEASURED, on a disposable loopback PostgreSQL 17 carrying
+  // db/schema.sql and every migration through 0503, by adding the single grant
+  // and re-reading each projection. Neither was predicted from the shape of the
+  // change and then adopted; each is the number the database named.
+  //   * relation_dml 295 -> 296: one row, the ingress key above. This category
+  //     counts the four row-changing relation privileges whose grantee is
+  //     `public` or reachable from a `^carr_` role, which is exactly what this
+  //     grant creates.
+  //   * runtime_dml_grants 307 -> 308: the same grant seen by
+  //     ops.scac_runtime_dml_grant_snapshot(), which the reference monitor reads
+  //     to decide `grant_state`. A successor that moved the first and not the
+  //     second would install a monitor that reports `drifted_or_unbound` about
+  //     its own migration's work.
+  // Every other category is unchanged: the grant creates no function, no column
+  // grant, no role and no job.
+  relation_dml: { count: 296, digest: "sha256:24397869684369e5d4fcf904e16ea84a762f2046536b14cb438b8677833b02c1" },
+  runtime_dml_grants: { count: 308, digest: "sha256:810aa3a9ad94e182e5d1b3f985e51ccbaab8e48e40ad070ba7c45199a226a813" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -8832,6 +8862,15 @@ comment on function ops.scac_mutation_catalog_v25_current() is 'Historical v24 l
     `'{registry_digest}',to_jsonb('${v25Seal.digest}'::text)`,
     `'{registry_digest}',to_jsonb('sha256:${v26Digest}'::text)`,
     "Gate Zero outcome admission snapshot registry digest");
+  // THE REFERENCE MONITOR'S OWN GRANT PIN, which every registry-only successor
+  // before this one inherited unchanged because its baseline did not move. This
+  // one admits a relation grant, so the monitor is re-rendered against the
+  // baseline that includes it -- otherwise the migration installs a monitor that
+  // calls its own migration's work drift.
+  sql = replaceExactlyOnce(sql,
+    `(grant_snapshot->>'entry_count')::integer=${sealedPredecessorBaseline.runtime_dml_grants.count} and\n    grant_snapshot->>'grant_digest'='${sealedPredecessorBaseline.runtime_dml_grants.digest}'`,
+    `(grant_snapshot->>'entry_count')::integer=${dbCatalogBaseline.runtime_dml_grants.count} and\n    grant_snapshot->>'grant_digest'='${dbCatalogBaseline.runtime_dml_grants.digest}'`,
+    "Gate Zero outcome admission v26 runtime grant state");
   sql = replaceExactlyOnce(sql,
     "ops.scac_mutation_registry_v24_seal_available(),ops.scac_mutation_catalog_v26_current()",
     "ops.scac_mutation_registry_v24_seal_available(),ops.scac_mutation_catalog_v25_live_at_seal(),ops.scac_mutation_catalog_v25_current(),ops.scac_mutation_registry_v25_seal_available(),ops.scac_mutation_catalog_v26_current()",
@@ -8915,7 +8954,64 @@ begin
 ${preflightBody}end $gate_zero_outcome_admission_preflight$;
 
 `;
-  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+  // THE ONE CAPABILITY THIS SUCCESSOR ADMITS, placed between the receipt that
+  // asserts the state before it and the seal that describes the state after it.
+  // It is a written constant rather than a derived one on purpose: a generator
+  // that could compose arbitrary grants would be a door for admitting a
+  // capability without a reviewed migration, which is the property SIEP-11
+  // exists to hold.
+  const capabilityAdmission =
+`-- ---------------------------------------------------------------------------
+-- THE SEALED CAPABILITY ADMISSION (open loop #594, standing-rule amendment 9).
+--
+-- ONE GRANT, AND IT IS THE WHOLE TOLL. db-relation-acl:ops.release:carr_authority:insert
+-- is a new ingress in the SIEP-11 mutation census, and that census has no
+-- allowlist and no partial-admission door: admitting the key IS a mutation
+-- registry successor's act. So the grant lands HERE, inside the successor that
+-- seals it, and the two cannot be separated -- a branch carrying the grant
+-- without the seal has no green state, and a seal without the grant describes a
+-- database that does not exist.
+--
+-- WHAT IT UNBLOCKS, stated as the fact rather than the intent. Migration 0504
+-- makes ops.release.maker_authority_verified a STORED GENERATED column over
+-- maker_session_user, which a BEFORE trigger writes from session_user. No role,
+-- the table owner included, can write that marker; it is true exactly when the
+-- login that filed the row was carr_authority_joe or carr_authority_dell. Those
+-- two logins are members of carr_authority (migration 0273), and carr_authority
+-- was built by migration 0161 as a privilege bundle carrying no business-record
+-- table grant -- so until this line, no session that could mint the marker could
+-- insert the row, and the Gate Zero producer's subject-maker store read nothing.
+--
+-- IT IS INSERT AND NOTHING ELSE. ops.release is append-only by design and the
+-- authority bundle keeps the select it already held; no update and no delete is
+-- granted here, so a filed candidate stays as filed. The ordinary writer
+-- connection keeps the insert it already had and is unaffected: what it cannot
+-- do, before this grant and after it, is produce a row whose marker is true.
+grant insert on table ops.release to carr_authority;
+
+do $gate_zero_release_candidate_authority_admission$
+begin
+  -- THE ADMISSION READS ITSELF BACK. A grant that silently did not take would
+  -- otherwise surface four statements later as an unexplained catalog mismatch.
+  if not has_table_privilege('carr_authority','ops.release','insert') then
+    raise exception 'the admitted capability db-relation-acl:ops.release:carr_authority:insert is absent after its own grant';
+  end if;
+  -- AND THE WIDTH IS ASSERTED, not assumed: this successor admits exactly one
+  -- privilege on exactly one relation, and a direct grant of any other
+  -- row-changing privilege to this bundle would be an ingress nothing sealed.
+  if exists (
+    select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
+    cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
+    join pg_roles g on g.oid=acl.grantee
+    where g.rolname='carr_authority' and acl.privilege_type in ('UPDATE','DELETE')
+      and n.nspname='ops' and c.relname='release'
+  ) then
+    raise exception 'the release-candidate admission widened beyond insert';
+  end if;
+end $gate_zero_release_candidate_authority_admission$;
+
+`;
+  return `${predecessorPreflight}${capabilityAdmission}${sql}`.replace(/\n+$/, "\n");
 }
 
 /**

@@ -1193,22 +1193,28 @@ test("v26 admits the Gate Zero outcome verb and preserves the v25 predecessor", 
   // NO ARGUMENT, the same closed shape every successor renderer carries.
   assert.equal(v26Migration, renderGateZeroOutcomeAdmissionForwardRegistrySql());
 
-  // TWO NEW INGRESSES, AND THE SECOND ARRIVED WITH A MERGE (2026-09-14, PR 1014
-  // third correction). The first is this slice's own: an MCP tool rather than a
-  // script or an agent, the first successor in this chain whose admission is a
-  // verb. The second came in with origin/v5-producer-step-a —
-  // mcp-server/bin/seal-candidate-manifest.mjs, the build-time candidate sealer
-  // amendment 9 moved the producer onto. It is a tracked .mjs carrying a
-  // shebang, so isScriptEntrypoint() admits it whatever anyone intended; Step
-  // A's own fixture still reads 840 and does not carry the row, which is why
-  // that branch fails --check-source-inventory-frontier standing alone. This
-  // seal is measured from the merged tree, so it carries both.
-  assert.equal(rows.length, 842);
+  // ONE NEW INGRESS, AND THE COUNT IS THE HISTORY OF THIS SLICE. It was two at
+  // PR 1014's third correction: this slice's own MCP tool -- the first successor
+  // in this chain whose admission is a verb -- plus
+  // mcp-server/bin/seal-candidate-manifest.mjs, which arrived with Step A as a
+  // tracked .mjs carrying a shebang and was therefore a script entrypoint
+  // whatever anyone intended. STEP A THEN TOOK ITS OWN ENTRYPOINT BACK OUT:
+  // bin/deploy-worker.sh imports sealCandidateManifest in one evaluation instead
+  // of executing the file, so the sealer carries no shebang and no command-line
+  // main and discoverScriptEntrypoints() does not see it. The frontier that
+  // merged is therefore one row narrower than the one first written here, and
+  // this assertion is the place that says so out loud rather than a number that
+  // quietly moved.
+  assert.equal(rows.length, 841);
   assert.equal(frozenInventory(REGISTRY_V25_VERSION).length, 840);
   const before = new Set(frozenInventory(REGISTRY_V25_VERSION).map(row => row.ingress_key));
   assert.deepEqual(rows.filter(row => !before.has(row.ingress_key)).map(row => row.ingress_key),
-    ["mcp-tool:record-gate-zero-read-only-outcome",
-     "script-entrypoint:mcp-server/bin/seal-candidate-manifest.mjs"]);
+    ["mcp-tool:record-gate-zero-read-only-outcome"]);
+  // AND THE SEALER IS NOT ONE, asserted directly rather than inferred from the
+  // count: a shebang put back on that file is an ingress nothing seals, and it
+  // would otherwise surface as an unexplained frontier drift in a later branch.
+  assert.equal(rows.some(row =>
+    row.ingress_key === "script-entrypoint:mcp-server/bin/seal-candidate-manifest.mjs"), false);
 
   // THE PREDECESSOR IS SEALED, NOT REWRITTEN.
   assert.match(v26Migration,
@@ -2113,10 +2119,15 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // gate that runs it end to end, ops/gate-zero-scheduler-canary-gate.py. The
   // three new LaunchAgents are workflow_entrypoint rows and are filtered out
   // above.
-  // 547 before origin/v5-producer-step-a merged in: its build-time sealer,
-  // mcp-server/bin/seal-candidate-manifest.mjs, is a tracked .mjs with a
-  // shebang and is therefore a script entrypoint by the predicate's own test.
-  assert.equal(rows.length, 548);
+  // 547 before origin/v5-producer-step-a merged in, 548 while its build-time
+  // sealer still carried a shebang, and 547 again now. Step A's final
+  // correction made mcp-server/bin/seal-candidate-manifest.mjs a LIBRARY --
+  // bin/deploy-worker.sh imports sealCandidateManifest in one evaluation
+  // instead of executing the file -- so it carries no shebang and no
+  // command-line main and the predicate no longer admits it. The number went
+  // up and came back down, which is exactly the movement a pinned count exists
+  // to make visible.
+  assert.equal(rows.length, 547);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2125,11 +2136,15 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   }
   const scripts = discoverScriptEntrypoints();
   // 534 before the portfolio tail, 536 before v25; two new executables,
-  // bin/gate-zero-canary.sh and ops/gate-zero-scheduler-canary-gate.py. 538
-  // before origin/v5-producer-step-a merged in its build-time candidate sealer,
-  // mcp-server/bin/seal-candidate-manifest.mjs.
-  assert.equal(scripts.length, 539);
-  assert.equal(scripts.some(path => path === "mcp-server/bin/seal-candidate-manifest.mjs"), true);
+  // bin/gate-zero-canary.sh and ops/gate-zero-scheduler-canary-gate.py. It went
+  // to 539 while Step A's build-time candidate sealer carried a shebang and is
+  // back to 538 now that Step A's final correction made that sealer a library
+  // bin/deploy-worker.sh IMPORTS rather than a file it executes.
+  assert.equal(scripts.length, 538);
+  // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
+  // ingress this branch's registry successor does not seal, and the whole point
+  // of the predicate is that intent does not enter it.
+  assert.equal(scripts.some(path => path === "mcp-server/bin/seal-candidate-manifest.mjs"), false);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

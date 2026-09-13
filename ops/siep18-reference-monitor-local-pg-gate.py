@@ -56,9 +56,15 @@ PREDECESSOR_LIVE_AT_SEAL_NAME = (
     f"scac_mutation_catalog_v{SEALED_PREDECESSOR_ORDINAL}_live_at_seal"
 )
 
-EXPECTED_GRANT_COUNT = 307
+# MOVED BY 0503'S OWN CAPABILITY ADMISSION, not by drift. The successor grants
+# insert on ops.release to carr_authority -- open loop #594's
+# db-relation-acl:ops.release:carr_authority:insert -- and that grant is visible
+# to ops.scac_runtime_dml_grant_snapshot(), so the live projection this gate
+# pins is 308, one more than the 307 a database carrying only 0502 holds.
+# Measured on a disposable loopback PostgreSQL 17, never predicted.
+EXPECTED_GRANT_COUNT = 308
 EXPECTED_GRANT_DIGEST = (
-    "sha256:5ac46a8d4226dae12c5a455be0080a472bf4e7f9dd3aa725004ec9c105be74a1"
+    "sha256:810aa3a9ad94e182e5d1b3f985e51ccbaab8e48e40ad070ba7c45199a226a813"
 )
 
 # WR-000048 mutation test fixtures. NARROWED_ROLE_AUTHORITY_SCOPE is the

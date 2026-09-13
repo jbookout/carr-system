@@ -31,9 +31,24 @@
 #                         Cloudflare token or the Production owner credential.
 #                         It is RELEASE ACT (9) of PLAN-a5059eb52474-v3 -- AFTER
 #                         PR #1013 and PR #1014 have merged (acts 6 and 8) and
-#                         BEFORE bin/migrate-prod.sh applies 0502 and 0503 as one
-#                         group (act 10), and so before the third Worker
-#                         promotion (act 12). Joe sets the role's password per
+#                         before the third Worker promotion (act 12).
+#                         RECORDED DEVIATION FROM THE PLAN'S NUMBERING, ruled at
+#                         execution 2026-09-13: the plan lists act (9) BEFORE the
+#                         apply at act (10), and that order cannot be run --
+#                         migration 0502 is what CREATES
+#                         carr_gate_zero_producer, so before the apply there is
+#                         no role to set a password on and (9)(a)'s own first
+#                         proof would find no pg_authid row at all. The
+#                         executable order is (8) merge, (10) apply 0502 and 0503
+#                         as one group, (9) Joe provisions and publishes, then
+#                         (11) the schema refresh, (12) the promotion, (13) the
+#                         live run. Every reason the plan gives for (9)'s
+#                         position survives it: what (9) must precede is the
+#                         PROMOTION, never the apply. The plan is immutable and
+#                         unedited; the deviation is recorded at execution in the
+#                         outcome feedback, and migration 0502's own header and
+#                         PR #1014's body carry this same statement.
+#                         Joe sets the role's password per
 #                         the Neon Database SOP, section
 #                         `01-connections-and-roles`, proving from pg_authid that
 #                         the role is still passwordless first and leaving that
