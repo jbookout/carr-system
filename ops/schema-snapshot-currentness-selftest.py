@@ -48,6 +48,14 @@ refusals = (
     (snapshot(), "CREATE SCHEMA ops;\nCOMMIT;\n"),
     ("CREATE SCHEMA ops;\nCOMMIT;\n", "CREATE SCHEMA ops;\nCOMMIT;\n"),
     (snapshot() + EXACT_77 + "\n", snapshot() + EXACT_78 + "\n"),
+    (
+        snapshot() + "SELECT pg_catalog.setval('ops.work_request_ref_seq', 90, true);\n",
+        snapshot(EXACT_78) + "SELECT pg_catalog.setval('ops.work_request_ref_seq', 90, true);\n",
+    ),
+    (
+        snapshot() + "select  pg_catalog.setval( 'ops.work_request_ref_seq' , 90 , true );\n",
+        snapshot(EXACT_78) + "select  pg_catalog.setval( 'ops.work_request_ref_seq' , 90 , true );\n",
+    ),
 )
 for expected, observed in refusals:
     assert compare(expected, observed) == 1, (expected, observed)
