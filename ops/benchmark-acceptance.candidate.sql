@@ -1058,7 +1058,7 @@ comment on function ops.benchmark_portfolio_prerequisite(text) is
 -- different problems for whoever hits them.
 --
 -- IT IS DEFINED IN TWO PLACES ON PURPOSE, AND THEY MUST NOT DRIFT. Migration
--- 0502 carries the definition that binds in a database; this file is candidate
+-- 0505 carries the current definition that binds in a database; this file is candidate
 -- source and is still not in public.schema_migrations. The bodies are
 -- deliberately identical, and mcp-server/test/benchmark-acceptance-store.v5.test.mjs
 -- asserts so by reading both files.
@@ -1071,7 +1071,10 @@ create or replace function ops.benchmark_gate_zero_outcome()
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
 as $$
-declare v_row ops.gate_zero_read_only_outcome%rowtype; v_any boolean;
+declare
+  v_row ops.gate_zero_read_only_outcome%rowtype;
+  v_any boolean;
+  v_recomputed_digest text;
 begin
   select * into v_row from ops.gate_zero_read_only_outcome
    where status = 'pass' and ttl_expires_at > now()
@@ -1083,6 +1086,11 @@ begin
       raise exception 'benchmark acceptance requires a current passing Gate Zero read-only outcome; every outcome recorded here is non-passing or past its expiry. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
     end if;
     raise exception 'benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and none has been recorded here yet. The record exists (ops.gate_zero_read_only_outcome) and the independent oracle seat writes it; until it does, acceptance fails closed. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
+  end if;
+  v_recomputed_digest := ops.gate_zero_outcome_digest(v_row.receipt);
+  if v_row.outcome_digest <> v_recomputed_digest then
+    raise exception 'Gate Zero outcome digest divergence: stored %, recomputed % from the tagged consumer-gate-receipt.v1 receipt',
+      v_row.outcome_digest, v_recomputed_digest;
   end if;
   -- THE CLOSED THREE-FIELD OBJECT the whole foundation join hangs on
   -- (benchmark-minimum.v5.js:435, :1449-1453). Nothing else is returned: a
@@ -1096,7 +1104,7 @@ end;
 $$;
 
 comment on function ops.benchmark_gate_zero_outcome() is
-  'PRIVATE reader for the current Gate Zero read-only outcome: the latest passing, unexpired row in ops.gate_zero_read_only_outcome (migration 0502), as the closed { step_ref, outcome_digest, observed_at }. Raises when there is none, which is the same fail-closed posture this reader had while it was a stub. Granted to no role; reachable only from the definer write path in this file.';
+  'PRIVATE reader for the current Gate Zero read-only outcome: the latest passing, unexpired row in ops.gate_zero_read_only_outcome, as the closed { step_ref, outcome_digest, observed_at }. Recomputes the tagged consumer-gate-receipt.v1 digest from the stored receipt and refuses a mismatch before answering. Raises when there is no current row, which is the same fail-closed posture this reader had while it was a stub. Granted to no role; reachable only from the definer write path in this file.';
 
 -- THE THIRD BINDING, NOW BOUND, AND DELIBERATELY STILL INDEPENDENT OF THE
 -- SECOND. THE PRIVATE MEASUREMENT COVERAGE PROOF READER.

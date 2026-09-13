@@ -20,7 +20,7 @@
 // actually installed, read out of the live catalog, and the JS side is the
 // shipped module.
 //
-// FOUR THINGS IT ESTABLISHES, each executed rather than described:
+// FIVE THINGS IT ESTABLISHES, each executed rather than described:
 //
 //   1. AGREEMENT, over a receipt the REAL producer emitted inside a real
 //      dispatched call, and again over a canonicalization-stress fixture whose
@@ -38,6 +38,9 @@
 //      is intercepted and the row's `outcome_digest` replaced with the plain
 //      one; the verb must refuse by name with
 //      `gate_zero_outcome_digest_divergence` rather than report it.
+//   5. BOTH CONSUMER READERS RECOMPUTE. The SQL reader returns the intact row,
+//      then refuses after the installed digest function is transactionally
+//      mutated; the gateway reader has its own direct unit falsifier.
 //
 // IT SKIPS WITHOUT A DATABASE and REFUSES a database that is not loopback: case
 // 4 commits to an append-only record, which is safe only on the throwaway
@@ -264,6 +267,18 @@ test("SQL and the gateway compute the same TAGGED outcome digest, and the plain 
     assert.equal(stored.outcome_digest, digest([GATE_ZERO_RECEIPT_SCHEMA, stored.receipt]));
     assert.notEqual(stored.outcome_digest, plainDigest(stored.receipt),
       "a real receipt's recorded digest is still the plain one");
+    const currentRow = (await outer.query(
+      `select receipt, outcome_digest
+         from ops.gate_zero_read_only_outcome
+        where status = 'pass' and ttl_expires_at > now()
+        order by observed_at desc, outcome_digest collate "C" desc
+        limit 1`)).rows[0];
+    const intactRead = (await outer.query(
+      "select ops.benchmark_gate_zero_outcome() as outcome")).rows[0].outcome;
+    assert.equal(intactRead.outcome_digest, currentRow.outcome_digest,
+      "the SQL consumer did not return the digest of the row its currentness rule selected");
+    assert.equal(currentRow.outcome_digest, gateZeroOutcomeDigest(currentRow.receipt),
+      "the SQL consumer's selected row is not internally consistent before the mutation control");
     // AND THE VERB SAYS WHICH RECIPE IT USED, in the words a consumer reads.
     assert.match(result.digest_recipe, /TAGGED two-element array/);
     assert.match(result.digest_recipe, /does not satisfy it/);
@@ -292,6 +307,16 @@ test("SQL and the gateway compute the same TAGGED outcome digest, and the plain 
     assert.ok(corruptedReceipt, "the corruption control never reached a stored receipt readback");
     assert.equal(refusal.recomputed_here, gateZeroOutcomeDigest(corruptedReceipt));
     assert.equal(refusal.recorded, plainDigest(corruptedReceipt));
+
+    // THE SQL CONSUMER'S OWN FALSIFIER. Replacing the installed helper inside
+    // this uncommitted outer transaction changes only what the reader
+    // recomputes; the append-only row keeps the exact digest it was written
+    // with. A reader that merely returns the stored value would stay green.
+    await outer.query(def.replace(
+      TAG, `'${GATE_ZERO_RECEIPT_SCHEMA.replace(/1$/, "0")}'::text`));
+    await assert.rejects(
+      outer.query("select ops.benchmark_gate_zero_outcome()"),
+      /Gate Zero outcome digest divergence/);
 
     await outer.query("rollback");
   });

@@ -114,6 +114,48 @@ comment on function ops.gate_zero_outcome_digest(jsonb) is
 comment on column ops.gate_zero_read_only_outcome.outcome_digest is
   'Recomputed from `receipt` with ops.gate_zero_outcome_digest, which is sha256 over the canonical JSON of the TAGGED two-element array ["consumer-gate-receipt.v1", receipt] as r7''s receipt_payload_digest_rule declares (amended 2026-09-13). Never supplied by a caller. ops.portfolio_canonical_json matches artifact-trust.js canonicalJson byte for byte, over that same array.';
 
+-- THE SQL CONSUMER RECOMPUTES TOO. 0502's reader selected the stored digest and
+-- returned it unchanged. The accepted plan requires both readers to derive the
+-- tagged value from the stored receipt and compare before answering, so this
+-- forward replacement keeps 0502's currentness rule and closed return shape but
+-- refuses an internally inconsistent row.
+create or replace function ops.benchmark_gate_zero_outcome()
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  v_row ops.gate_zero_read_only_outcome%rowtype;
+  v_any boolean;
+  v_recomputed_digest text;
+begin
+  select * into v_row from ops.gate_zero_read_only_outcome
+   where status = 'pass' and ttl_expires_at > now()
+   order by observed_at desc, outcome_digest collate "C" desc
+   limit 1;
+  if not found then
+    select exists (select 1 from ops.gate_zero_read_only_outcome) into v_any;
+    if v_any then
+      raise exception 'benchmark acceptance requires a current passing Gate Zero read-only outcome; every outcome recorded here is non-passing or past its expiry. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
+    end if;
+    raise exception 'benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and none has been recorded here yet. The record exists (ops.gate_zero_read_only_outcome) and the independent oracle seat writes it; until it does, acceptance fails closed. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.';
+  end if;
+
+  v_recomputed_digest := ops.gate_zero_outcome_digest(v_row.receipt);
+  if v_row.outcome_digest <> v_recomputed_digest then
+    raise exception 'Gate Zero outcome digest divergence: stored %, recomputed % from the tagged consumer-gate-receipt.v1 receipt',
+      v_row.outcome_digest, v_recomputed_digest;
+  end if;
+
+  return jsonb_build_object(
+    'step_ref', v_row.step_ref,
+    'outcome_digest', v_row.outcome_digest,
+    'observed_at', to_char(v_row.observed_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'));
+end;
+$$;
+
+comment on function ops.benchmark_gate_zero_outcome() is
+  'PRIVATE reader for the latest passing, unexpired Gate Zero outcome. Before returning the closed { step_ref, outcome_digest, observed_at } object it recomputes sha256 over canonical JSON ["consumer-gate-receipt.v1", receipt] and refuses if that tagged digest differs from the stored value.';
+
 -- ── (2) the writer, with exact-replay fallback ───────────────────────────────
 -- LIFTED FROM 0502 RATHER THAN RETYPED. Every line below except the fallback
 -- branch is the text migration 0502 applied to Production; the fallback now

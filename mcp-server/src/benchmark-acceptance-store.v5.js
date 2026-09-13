@@ -693,7 +693,7 @@ export const BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT = deepFreeze
  */
 async function readGateZeroOutcome(c) {
   const row = (await c.query(
-    `select step_ref, outcome_digest,
+    `select step_ref, receipt, outcome_digest,
             to_char(observed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as observed_at
        from ops.gate_zero_read_only_outcome
       where status = 'pass' and ttl_expires_at > now()
@@ -711,6 +711,22 @@ async function readGateZeroOutcome(c) {
     refuse("gate_zero_outcome_unresolved",
       "benchmark acceptance requires an authenticated Gate Zero read-only outcome binding, and none has been recorded in this record layer yet. The record and its writer exist (ops.gate_zero_read_only_outcome, written by the independent oracle seat through record-gate-zero-read-only-outcome); until that seat records one, acceptance fails closed. No caller-supplied, configured or synthetic Gate Zero outcome is accepted.",
       { ...BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT, recorded_outcomes_present: false });
+  }
+
+  // THE RECEIPT IS READ TO VERIFY, NOT TO RETURN. r7 binds outcome_digest to
+  // the canonical tagged preimage ["consumer-gate-receipt.v1", receipt]. A
+  // stored digest is evidence only after this consumer independently derives
+  // the same value from the stored receipt; otherwise the reader refuses before
+  // the acceptance path reaches its next prerequisite or any write.
+  const recomputed = digest(["consumer-gate-receipt.v1", row.receipt]);
+  if (row.outcome_digest !== recomputed) {
+    refuse("gate_zero_outcome_digest_divergence",
+      "the current Gate Zero outcome digest does not match the tagged digest recomputed from its stored receipt",
+      {
+        recorded: row.outcome_digest,
+        recomputed_here: recomputed,
+        digest_recipe: 'digest(["consumer-gate-receipt.v1", receipt])',
+      });
   }
 
   // Exactly the closed three-field object benchmark-minimum.v5.js reads

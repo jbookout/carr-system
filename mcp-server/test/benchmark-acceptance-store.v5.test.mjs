@@ -427,8 +427,8 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
   // there is no runtime state that would show it.
   const moduleSource = readFileSync(
     new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
-  const migration = readFileSync(
-    new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
+  const correction = readFileSync(
+    new URL("../../migrations/0505_gate_zero_tagged_digest_and_candidate_reads.sql", import.meta.url), "utf8");
   const candidate = readFileSync(
     new URL("../../ops/benchmark-acceptance.candidate.sql", import.meta.url), "utf8");
 
@@ -436,17 +436,21 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
   // passing row, and is not a parameterless always-throwing stub.
   assert.match(moduleSource, /async function readGateZeroOutcome\(c\) \{/);
   assert.match(moduleSource, /from ops\.gate_zero_read_only_outcome/);
+  assert.match(moduleSource, /select step_ref, receipt, outcome_digest,/);
+  assert.match(moduleSource, /digest\(\["consumer-gate-receipt\.v1", row\.receipt\]\)/);
   assert.equal(/function readGateZeroOutcome\(\) \{/.test(moduleSource), false,
     "the module reader reverted to the parameterless stub while the SQL half still reads");
 
-  // (b) BOTH SQL HALVES READ, and they are the same reader in two files: the
-  // numbered migration that binds, and the candidate source that must not drift
-  // from it. A body present in one and raising in the other is the exact
-  // half-landed state the stubs warned about.
-  for (const [name, sql] of [["migration 0502", migration], ["candidate source", candidate]]) {
+  // (b) BOTH CURRENT SQL HALVES READ AND RECOMPUTE: the forward correction that
+  // binds, and the candidate source that must not drift from it. A body present
+  // in one and absent from the other is the half-landed state the pairing guard
+  // exists to catch.
+  for (const [name, sql] of [["migration 0505", correction], ["candidate source", candidate]]) {
     assert.match(sql, /create or replace function ops\.benchmark_gate_zero_outcome\(\)/, name);
     assert.match(sql, /where status = 'pass' and ttl_expires_at > now\(\)/, name);
     assert.ok(sql.includes("order by observed_at desc, outcome_digest collate \"C\" desc"), name);
+    assert.match(sql, /ops\.gate_zero_outcome_digest\(v_row\.receipt\)/, name);
+    assert.match(sql, /Gate Zero outcome digest divergence/, name);
   }
 
   // (c) AND BOTH STILL FAIL CLOSED. Implementing them was not the same as
@@ -454,7 +458,7 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
   // a reader that stopped raising would be a gate opened by omission.
   assert.match(moduleSource, /refuse\("gate_zero_outcome_unresolved"/);
   assert.match(moduleSource, /refuse\("gate_zero_outcome_not_current"/);
-  for (const [name, sql] of [["migration 0502", migration], ["candidate source", candidate]]) {
+  for (const [name, sql] of [["migration 0505", correction], ["candidate source", candidate]]) {
     assert.equal(sql.includes(
       "benchmark acceptance requires a current passing Gate Zero read-only outcome"), true, name);
     assert.equal(sql.includes(
@@ -1098,16 +1102,38 @@ test("a recorded but non-current Gate Zero outcome refuses differently, and stil
     assert.match(call.sql, /^\s*select/i, `the acceptance path issued a non-read: ${call.sql}`);
 });
 
+test("a current Gate Zero row whose stored digest diverges from its receipt refuses before any write", async () => {
+  const receipt = { candidate_digest: D(2), status: "pass", evidence_ref: "safe:test:gate-zero" };
+  const recomputed = digest(["consumer-gate-receipt.v1", receipt]);
+  const recorded = D(99);
+  assert.notEqual(recorded, recomputed);
+  const c = mockDatabase({
+    "from ops.gate_zero_read_only_outcome": [{
+      step_ref: GATE_ZERO_STEP_REF,
+      receipt,
+      outcome_digest: recorded,
+      observed_at: "2026-09-13T15:00:00Z",
+    }],
+  });
+
+  const refused = await refusal(tools["accept-benchmark-manifest-draft"].handler(c, PARTNER, {
+    idempotency_key: KEY, draft_id: DRAFT_ID,
+    accepted_payload_digest: benchmarkPayloadDigest(payload()),
+    review_id: REVIEW_ID, portfolio_ref: "WR-DOCTORCRE-V5",
+  }));
+  assert.equal(refused.error, "gate_zero_outcome_digest_divergence");
+  assert.equal(refused.detail.recorded, recorded);
+  assert.equal(refused.detail.recomputed_here, recomputed);
+  assert.equal(c.calls.length, 1);
+  assert.equal(c.events.length, 0);
+  assert.match(c.calls[0].sql, /^\s*select/i);
+});
+
 test("the acceptance audit call is positional, checked at the source because it is unreachable", () => {
-  // THE ONE SITE OF THE FIVE THAT NO HANDLER TEST CAN REACH. readGateZeroOutcome
-  // is a private parameterless stub that always throws, so everything below it —
-  // including this writeEvent call — is unreachable by construction until Gate
-  // Zero is bound. The test above proves that: zero statements, zero events.
-  //
-  // A call nothing can drive is exactly where the object-form shape survived for
-  // months in the first place, so it is pinned at the source instead. When Gate
-  // Zero lands and this path becomes reachable, replace this with a recording-
-  // double test like the two above; until then this is the honest check.
+  // Driving this call needs all three durable prerequisites at once; the focused
+  // refusal tests deliberately stop at the first missing or inconsistent one.
+  // Keep the positional audit-call contract pinned at its only call site until a
+  // full acceptance fixture can reach it without weakening those prerequisites.
   const source = readFileSync(new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
   const call = source.match(/writeEvent\([^;]*"accept-benchmark-manifest-draft"[^;]*;/);
   assert.ok(call, "the acceptance path no longer writes an audit event");
