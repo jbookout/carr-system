@@ -53,7 +53,9 @@
 //     receipt_producer_step_registry until the 2026-09-12 amendment, which
 //     registered the producer row, the gate-zero-read-only-accepted gate and the
 //     independent_control_plane_oracle role and re-froze r7 to
-//     ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6. WHAT
+//     ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6, since
+//     re-frozen again by the 2026-09-13 digest amendment to
+//     4379c60e9a4fefbcf044f4bc5a34e5a95c90f77b9adf348b6da7475e17d5e6d7. WHAT
 //     THAT DID NOT SUPPLY, and the reason nothing below changes: the row reuses
 //     consumer-gate-receipt.v1 rather than declaring a Gate Zero receipt schema,
 //     and no seat holds the oracle, so there is still no Gate Zero receipt to

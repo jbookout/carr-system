@@ -24,7 +24,11 @@
 // `step:gate-zero-read-only-outcome` producer row, and the
 // `independent_control_plane_oracle` role its row resolves through. Re-freezing
 // moved the packet's digest from `ef34aa54…` to `ea40f61a…` and the doctrine pin
-// in section 5882b0cd-16f4-4896-b567-eb0fca6554f7 moved with it. r7 IS
+// in section 5882b0cd-16f4-4896-b567-eb0fca6554f7 moved with it. A SECOND
+// amendment on 2026-09-13 — act 5 of accepted plan PLAN-a5059eb52474-v3 — then
+// declared `consumer-gate-receipt.v1`'s payload digest as the tagged preimage in
+// r7's canonicalization contract and re-froze the packet again, to `4379c60e…`,
+// which is the value pinned below. r7 IS
 // reachable, contrary to what this header said before: it is 62 base64 chunk
 // sections behind manifest section 6ac54e7b-0965-41f6-88c3-da187a8b5d23 in
 // doctrine document `doctorcre-v5-design-basis`, and
@@ -91,13 +95,19 @@ export const V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS = "registered";
 /**
  * THE PACKET THIS REGISTRATION IS A COPY OF, by digest.
  *
- * `ea40f61a…` is the sha256 of the amended r7 design packet's bytes — the value
- * doctrine now pins as `normalized_r7_sha256`. `ef34aa54…` is the packet as it
- * stood before the amendment, kept because it is the one digest that proves a
- * reader is looking at a packet WITHOUT the Gate Zero entry.
+ * `4379c60e…` is the sha256 of the r7 design packet's bytes as they stand after
+ * the 2026-09-13 consumer-gate-receipt digest amendment — the value doctrine now
+ * pins as `normalized_r7_sha256`. `ef34aa54…` is the packet as it stood before
+ * the Gate Zero entry was written into it, kept because it is the one digest
+ * that proves a reader is looking at a packet WITHOUT that entry.
+ *
+ * `ea40f61a…` is a THIRD state and is deliberately not a constant here: it is
+ * the packet that carries the Gate Zero entry but predates the digest rule. A
+ * reader handed those bytes gets `digest_matches: false` with the row, the gate
+ * and the role all true, which is the honest answer — right entry, wrong bytes.
  */
 export const V5_A02_GATE_ZERO_R7_PACKET_SHA256 =
-  "ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6";
+  "4379c60e9a4fefbcf044f4bc5a34e5a95c90f77b9adf348b6da7475e17d5e6d7";
 export const V5_A02_GATE_ZERO_R7_SUPERSEDED_PACKET_SHA256 =
   "ef34aa54740dd56508b7cebf05a2a95851aacedbbe4f2e4865a39ffede28f0ad";
 

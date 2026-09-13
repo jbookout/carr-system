@@ -286,7 +286,9 @@ function assertTenant(value, path) {
 // a drifted copy moves the digest instead of quietly disagreeing.
 // SUPERSEDED DIGEST, kept because it is the packet these rows were copied from:
 // the 2026-09-12 Gate Zero amendment re-froze r7 to
-// ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6. It changed
+// ea40f61a9081814e53c989f2f945c61b270597cdfeafc4ec535578e60462a8f6, and the
+// 2026-09-13 consumer-gate-receipt digest amendment re-froze it again to
+// 4379c60e9a4fefbcf044f4bc5a34e5a95c90f77b9adf348b6da7475e17d5e6d7. Neither changed
 // exactly one decision row, Q036.D1's consumer_gates, and none of the rows below.
 // ---------------------------------------------------------------------------
 
