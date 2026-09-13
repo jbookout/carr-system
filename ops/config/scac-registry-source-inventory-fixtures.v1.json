@@ -34206,8 +34206,31 @@
           "operation": "ops/staging-database-login-provision-db-gate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/staging-database-login-provision-db-gate.py",
-          "schema_digest": "4888479afbbe8b3fcac41877e1e813aa9a0cc07cda418961965342a0cb151a07",
-          "handler_digest": "4888479afbbe8b3fcac41877e1e813aa9a0cc07cda418961965342a0cb151a07",
+          "schema_digest": "8b8b70be283503e1ee0b31ad576fcc1bca9c70f3be54ee3a4b59db5f09f8dc48",
+          "handler_digest": "8b8b70be283503e1ee0b31ad576fcc1bca9c70f3be54ee3a4b59db5f09f8dc48",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "2d28290da1e4bbe4044fbc9148c1e94ec5ad9ec1477a7eee35e7bf9365c70d53",
+          "handler_digest": "2d28290da1e4bbe4044fbc9148c1e94ec5ad9ec1477a7eee35e7bf9365c70d53",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -34229,8 +34252,8 @@
           "operation": "tools/provision-staging-app-writer.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/provision-staging-app-writer.py",
-          "schema_digest": "68e9db5376fbcaca02944dd40bec494199d04aadce4ce14fe0a82f7e73249b9b",
-          "handler_digest": "68e9db5376fbcaca02944dd40bec494199d04aadce4ce14fe0a82f7e73249b9b",
+          "schema_digest": "ef4422e5b536cc1363619232e9afec519ac32aa36a20ede27f3af1ee11907d3d",
+          "handler_digest": "ef4422e5b536cc1363619232e9afec519ac32aa36a20ede27f3af1ee11907d3d",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -37614,8 +37637,8 @@
           "operation": "tools/staging_database_credential.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/staging_database_credential.py",
-          "schema_digest": "0cd2ff36fee7fdfa0c89ed438179deec474209c671f69fb8af928b53eb0e212d",
-          "handler_digest": "0cd2ff36fee7fdfa0c89ed438179deec474209c671f69fb8af928b53eb0e212d",
+          "schema_digest": "8b895ca130ad0c818bf4d5b7f8cf1f8265ed74d24397c04e081facc267a61a29",
+          "handler_digest": "8b895ca130ad0c818bf4d5b7f8cf1f8265ed74d24397c04e081facc267a61a29",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -37702,14 +37725,14 @@
         }
       ],
       "expected_count": 842,
-      "expected_sha256": "0e39e077a47d112b754f03ce194fb503d155cb050e5c5cc6c3ae42434d238e38"
+      "expected_sha256": "459c436d0fe2b745bde79c2fe5f0bf6019cc05efe87e410868816bfa4e8982af"
     }
   ],
   "current_source_review": {
     "base_version": "v26",
     "upsert": [],
     "expected_count": 842,
-    "expected_sha256": "0e39e077a47d112b754f03ce194fb503d155cb050e5c5cc6c3ae42434d238e38",
-    "reason": "Re-derived at the PR 1014 FOURTH-correction head, from the tree that carries origin/v5-producer-step-a merged in (DoctorCRE v5 slice V5-A02, Steps A and B in one tree). THE ROWS ARE DERIVED, NEVER HAND-MERGED: the v26 patch below is the live inventory of this tree compared against frozenInventory(\"scac-mutation-registry.v25\"), so no side of any conflict had to be chosen for and the sealed digest reproduces the live digest exactly. What the earlier corrections moved is unchanged and still carried here. Step B, under standing-rule amendment 9, moved seat-only write onto the CONNECTION ROLE: the Gate Zero write verb opens its own connection on a dedicated producer credential instead of writing on the ordinary writer connection, so the verb registry, the request dispatcher, the record layer's receipt contract and the CI entrypoint all moved, and a new seat-connection module joined the tree. Step A, under the same amendment, moved the producer off a request-time repository read and onto BUILD-TIME STAMPS written by bin/deploy-worker.sh, and moved the subject maker onto the release-candidate record that wrapper filed -- so the wrapper, identity.js's single request entry and every mcp-tool ingress declared in tools.js re-digest with it. The merged tree admits one ingress neither side declared and it is named rather than absorbed: mcp-server/bin/seal-candidate-manifest.mjs, the build-time sealer Step A added, is a tracked .mjs with a shebang and is therefore a script entrypoint by discoverScriptEntrypoints()'s own test. THE FOURTH CORRECTION ADDS THE ONE THING 0502 COULD NOT: A GOVERNED WAY TO CREDENTIAL THE SEAT IT CREATES. Sol's re-review found that the migration creates carr_gate_zero_producer with no password while the provisioner refused exactly that state, so the declared DATABASE_URL_GATE_ZERO_WRITER had no production path to exist at all. tools/provision-staging-app-writer.py -- an ingress this patch already seals -- now ADOPTS a migration-created seat (the owner connection sets the password itself) and carries a second, production-only mode that publishes that one named secret to the production Worker under the same release-truth gate bin/deploy-worker.sh asks before it moves production traffic. That moves this ingress's bytes past the digest the third correction sealed, so the patch is re-derived rather than overlaid: the overlay stays empty and the patch remains what a later reader has to read. No ingress is added or removed by the fourth correction -- the frontier count is identical on both sides of it, and only already-sealed rows re-digest. v26 admission provenance, measured from the sealed row sets rather than typed: the frozen source inventory grows from 840 to 842 rows, admitting two new ingresses -- one script entrypoint and one MCP tool -- namely mcp-tool:record-gate-zero-read-only-outcome, script-entrypoint:mcp-server/bin/seal-candidate-manifest.mjs, and removing none. The v26 patch carries those two additions plus 152 already-known rows whose bytes the same change moved, and this overlay re-derives 0 reviewed ingresses from the live inventory of this tree rather than hand-merging them, so the reviewed digest reproduces the live digest exactly. No reviewed row supersedes a row the v26 patch seals: every ingress the patch carries still holds the bytes it was sealed with. Every count and every ingress key in this paragraph is computed by gateZeroOutcomeAdmissionProvenance() from frozenInventory(\"scac-mutation-registry.v25\"), frozenInventory(\"scac-mutation-registry.v26\") and the fixture's own v26 patch and overlay, and the frontier check refuses a reason that does not end with the rendered text."
+    "expected_sha256": "459c436d0fe2b745bde79c2fe5f0bf6019cc05efe87e410868816bfa4e8982af",
+    "reason": "Re-derived at the PR 1014 FIFTH-correction head, from the tree that carries origin/v5-producer-step-a merged in (DoctorCRE v5 slice V5-A02, Steps A and B in one tree). THE ROWS ARE DERIVED, NEVER HAND-MERGED: the v26 patch below is the live inventory of this tree compared against frozenInventory(\"scac-mutation-registry.v25\"), so no side of any conflict had to be chosen for and the sealed digest reproduces the live digest exactly. What the earlier corrections moved is unchanged and still carried here. Step B, under standing-rule amendment 9, moved seat-only write onto the CONNECTION ROLE: the Gate Zero write verb opens its own connection on a dedicated producer credential instead of writing on the ordinary writer connection, so the verb registry, the request dispatcher, the record layer's receipt contract and the CI entrypoint all moved, and a new seat-connection module joined the tree. Step A, under the same amendment, moved the producer off a request-time repository read and onto BUILD-TIME STAMPS written by bin/deploy-worker.sh, and moved the subject maker onto the release-candidate record that wrapper filed -- so the wrapper, identity.js's single request entry and every mcp-tool ingress declared in tools.js re-digest with it. The merged tree admits one ingress neither side declared and it is named rather than absorbed: mcp-server/bin/seal-candidate-manifest.mjs, the build-time sealer Step A added, is a tracked .mjs with a shebang and is therefore a script entrypoint by discoverScriptEntrypoints()'s own test. THE FOURTH CORRECTION ADDED A GOVERNED WAY TO CREDENTIAL THE SEAT 0502 CREATES, AND THE FIFTH CORRECTION NARROWS IT BACK TO WHAT THE ACCEPTED PLAN ALLOWS. The migration creates carr_gate_zero_producer with no password while the provisioner refused exactly that state, so the declared DATABASE_URL_GATE_ZERO_WRITER had no way to exist; the fourth correction answered that with an ADOPT path plus a second, production-only mode. PLAN-a5059eb52474-v3, which Joe accepted 2026-09-13, says the opposite about the second half: the branch provisioner REFUSES the Production project by design, no tool in the branch provisions Production, and the production credential and Worker secret are Joe's own act through the equivalent production path. So the production mode, its profile, its blank-id production scope and the multi-flag command the 0502 header and wrangler.toml published are REMOVED, and both documents now name the two SOP sections Joe performs instead. What stays is the staging seat, hardened: before any `alter role ... password` the provisioner proves against pg_authid that the role is still passwordless and refuses a role that already holds one, because the credential file lives under one machine's home directory and its absence is a lost file rather than a passwordless seat; and the password change is COMMITTED ONLY AFTER the Worker secret is published and read back, so a failed publication rolls it away. tools/provision-staging-app-writer.py, tools/staging_database_credential.py and tools/migrate.py -- three ingresses this patch already seals -- move with it, tools/migrate.py because 0502 and 0503 are now a declared atomic group. That moves those bytes past the digests the fourth correction sealed, so the patch is re-derived rather than overlaid: the overlay stays empty and the patch remains what a later reader has to read. No ingress is added or removed by the fifth correction -- the frontier count is identical on both sides of it, and only already-sealed rows re-digest. v26 admission provenance, measured from the sealed row sets rather than typed: the frozen source inventory grows from 840 to 842 rows, admitting two new ingresses -- one script entrypoint and one MCP tool -- namely mcp-tool:record-gate-zero-read-only-outcome, script-entrypoint:mcp-server/bin/seal-candidate-manifest.mjs, and removing none. The v26 patch carries those two additions plus 153 already-known rows whose bytes the same change moved, and this overlay re-derives 0 reviewed ingresses from the live inventory of this tree rather than hand-merging them, so the reviewed digest reproduces the live digest exactly. No reviewed row supersedes a row the v26 patch seals: every ingress the patch carries still holds the bytes it was sealed with. Every count and every ingress key in this paragraph is computed by gateZeroOutcomeAdmissionProvenance() from frozenInventory(\"scac-mutation-registry.v25\"), frozenInventory(\"scac-mutation-registry.v26\") and the fixture's own v26 patch and overlay, and the frontier check refuses a reason that does not end with the rendered text."
   }
 }

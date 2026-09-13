@@ -17,15 +17,19 @@
 #                         STAGING is provisioned as the third LoginProfile in
 #                         tools/provision-staging-app-writer.py, which publishes
 #                         all three DSNs in one atomic bulk cutover.
-#                         PRODUCTION is one named human act, in the same tool:
-#                           tools/provision-staging-app-writer.py \
-#                             --production-gate-zero-writer --apply --sha <release sha> \
-#                             --provider cloudflare-workers --provider-version-id <id>
-#                         Joe runs it between bin/migrate-prod.sh and
-#                         bin/deploy-worker.sh --promote-version; it passes the
-#                         same production release-truth gate that promotion does,
-#                         adopts the passwordless role 0502 created, publishes
-#                         ONLY this secret, and prints no value.
+#                         PRODUCTION is JOE'S OWN ACT and no tool in this
+#                         repository performs it: that provisioner refuses the
+#                         Production project by design, and no session holds the
+#                         Cloudflare token or the Production owner credential.
+#                         Joe sets the role's password per the Neon Database
+#                         SOP, section `01-connections-and-roles`, then sets this
+#                         secret on the production Worker and verifies it from
+#                         the consumer per the Cloudflare Edge SOP, section
+#                         `02-secrets-and-tokens` (its per-secret procedure).
+#                         He does both between bin/migrate-prod.sh and
+#                         bin/deploy-worker.sh --promote-version: a Worker
+#                         promoted before this secret exists refuses every write
+#                         and names required_secret.
 #   INGEST_TOKENS       — JSON map { "<source>": "<token>" } for the ingest socket
 #   PROBE_TOKENS        — JSON map { "<slug>": "<token>" } for the smoke suite ONLY
 #                         (loop #192, 2026-08-06). Authenticates as one locked-

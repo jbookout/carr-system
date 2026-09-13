@@ -150,33 +150,37 @@ end $v5_a02_gate_zero_outcome_preflight$;
 -- THE ROLE IS CREATED HERE AND ITS CREDENTIAL IS NOT. `create role ... login`
 -- with no password cannot authenticate to a managed provider; the password, and
 -- the DSN the Worker carries as DATABASE_URL_GATE_ZERO_WRITER, are minted out of
--- band by tools/provision-staging-app-writer.py, which carries this seat as a
--- third LoginProfile beside the reader and the writer. A rebuilt schema still
--- mints no secret.
+-- band. A rebuilt schema still mints no secret.
 --
--- WHAT PROVISIONS PRODUCTION, AND WHO RUNS IT. The state this migration leaves
--- behind -- role present, no password, no credential file -- is the state the
--- provisioner ADOPTS: the owner connection sets the password itself. For
--- STAGING that happens inside the ordinary replacement cutover. For PRODUCTION
--- it is one explicit command, and JOE RUNS IT BY HAND:
+-- STAGING is provisioned by tools/provision-staging-app-writer.py, which carries
+-- this seat as a third LoginProfile beside the reader and the writer. The state
+-- this migration leaves behind -- role present, no password -- is the state that
+-- tool ADOPTS: it proves against pg_authid that the seat is still passwordless,
+-- sets the password on the open transaction, publishes the Worker secret and
+-- reads it back, and only then commits.
 --
---   .venv/bin/python tools/provision-staging-app-writer.py \
---     --production-gate-zero-writer --apply \
---     --sha <approved release SHA> \
---     --provider cloudflare-workers \
---     --provider-version-id <approved immutable version id>
+-- PRODUCTION IS NOT PROVISIONED BY ANY TOOL IN THIS REPOSITORY, and that is the
+-- design rather than a gap. That tool refuses the Production project id, no
+-- session, subagent or scheduled lane holds the Cloudflare token or the
+-- Production owner credential, and no numbered file mints a password. The
+-- production credential for carr_gate_zero_producer and the production Worker
+-- secret DATABASE_URL_GATE_ZERO_WRITER are JOE'S OWN ACT at a console he
+-- controls, through the equivalent production path already written down:
 --
+--   1. Neon Database SOP, section `01-connections-and-roles` -- set the
+--      password on this login role at the production project.
+--   2. Cloudflare Edge SOP, section `02-secrets-and-tokens` -- its per-secret
+--      procedure: set DATABASE_URL_GATE_ZERO_WRITER on the production Worker,
+--      update every other holder the secrets inventory lists, and verify from
+--      the consumer rather than from an exit code.
+--
+-- There is no wrapper to name here because none exists: bin/staging-secrets.sh
+-- is staging's, and production Worker secrets are a human procedure in that SOP.
 -- ORDER: bin/migrate-prod.sh applies this migration, bin/deploy-worker.sh
 -- --upload-version produces the immutable candidate and its approved release,
--- THEN the command above mints and publishes the secret, THEN
--- --promote-version puts that version in front of traffic. It is a human act
--- rather than an orchestrated one for two reasons that are the same reason: the
--- gate it must pass is `ops-record.py release require --environment production`
--- -- the identical question deploy-worker.sh asks before it moves production --
--- and the two inputs that question needs are approval artifacts a human holds.
--- Anything able to supply them could promote the release itself. The command is
--- idempotent (a second run proves the stored credential against the live role
--- and republishes the same value; it rotates nothing) and prints no secret.
+-- THEN Joe performs the two steps above, THEN --promote-version puts that
+-- version in front of traffic. The order matters because a Worker promoted
+-- before its secret exists is a verb that refuses every write.
 do $v5_a02_gate_zero_producer_role$
 begin
   if not exists (select 1 from pg_roles where rolname = 'carr_gate_zero_producer') then

@@ -111,6 +111,20 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0485_claude_continuity.sql",
         "0486_claude_continuity_registry_activation.sql",
     ),
+    # 0502 creates the Gate Zero outcome record, its readers' function and the
+    # dedicated login role that alone may write it; 0503 is its SEALED REGISTRY
+    # SUCCESSOR, admitting the two new ingresses and sealing the source
+    # inventory from 840 rows to 842. 0503 refuses before 0502 exists, so the
+    # order is already fixed -- what this declaration adds is the guarantee that
+    # a 0503 failure cannot leave 0502 committed ALONE. That state is the one no
+    # later reseal can express cleanly: the record and the role live in
+    # Production while the inventory is unsealed, and the forward-only rule then
+    # allows no retry of 0503, only a new successor sealing from wherever the
+    # database actually is.
+    (
+        "0502_gate_zero_read_only_outcome.sql",
+        "0503_gate_zero_outcome_and_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
