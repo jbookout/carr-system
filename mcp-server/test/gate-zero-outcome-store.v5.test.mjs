@@ -70,7 +70,7 @@ const SECOND_KEY = "99999999-8888-4777-8666-555555555555";
 const MIGRATION = readFileSync(
   new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
 const CONVERGENCE_MIGRATION = readFileSync(
-  new URL("../../migrations/0505_gate_zero_tagged_digest_and_candidate_reads.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0506_gate_zero_applied_0505_recovery.sql", import.meta.url), "utf8");
 
 test("the public verb description promises immutable, transparent convergence", () => {
   const description = TOOLS[VERB].description;

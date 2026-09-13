@@ -428,7 +428,7 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
   const moduleSource = readFileSync(
     new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
   const correction = readFileSync(
-    new URL("../../migrations/0505_gate_zero_tagged_digest_and_candidate_reads.sql", import.meta.url), "utf8");
+    new URL("../../migrations/0506_gate_zero_applied_0505_recovery.sql", import.meta.url), "utf8");
   const candidate = readFileSync(
     new URL("../../ops/benchmark-acceptance.candidate.sql", import.meta.url), "utf8");
 
@@ -445,7 +445,7 @@ test("PAIRED SELFTEST — neither Gate Zero reader may be implemented without th
   // binds, and the candidate source that must not drift from it. A body present
   // in one and absent from the other is the half-landed state the pairing guard
   // exists to catch.
-  for (const [name, sql] of [["migration 0505", correction], ["candidate source", candidate]]) {
+  for (const [name, sql] of [["migration 0506", correction], ["candidate source", candidate]]) {
     assert.match(sql, /create or replace function ops\.benchmark_gate_zero_outcome\(\)/, name);
     assert.match(sql, /where status = 'pass' and ttl_expires_at > now\(\)/, name);
     assert.ok(sql.includes("order by observed_at desc, outcome_digest collate \"C\" desc"), name);
