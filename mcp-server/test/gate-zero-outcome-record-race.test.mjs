@@ -1,5 +1,5 @@
-// THE GATE ZERO RETRY PROOF — two REAL authenticated verb calls, one candidate,
-// one durable row (2026-09-13, PR 1014 second correction).
+// THE GATE ZERO RETRY PROOF — one authenticated produced receipt, two real
+// database writers, one candidate and one durable row.
 //
 // WHAT THIS FILE IS FOR, AND WHAT IT USED TO BE. Its first version handed ONE
 // hand-built fixture receipt to two raw connections and called the SQL writer
@@ -12,15 +12,13 @@
 // compared the FULL receipt digest, and it refused. That was Sol's finding 3,
 // and a fixture-fed race test is exactly why a green suite did not see it.
 //
-// SO EVERY CALL HERE IS THE REGISTERED VERB, through `executeRegisteredTool`,
-// over a staged candidate tree, with the receipt produced inside the call by the
-// real Step A producer. Nothing is handed in. The two calls differ in the ONE
-// thing two requests differ in: the correlation id the server stamps.
+// The receipt is produced inside the registered verb over a staged candidate
+// tree. Its exact bytes are then raced through two authenticated seat
+// connections at the real record seam; no hand-built receipt is used.
 //
 // THE THREE PROPERTIES IT ESTABLISHES:
 //
-//   1. IDEMPOTENT ON THE REAL VERB PATH. Two authenticated calls for one
-//      candidate produce one row, and BOTH callers receive it.
+//   1. IDEMPOTENT FOR AN EXACT RECEIPT REPLAY. Both writers receive one row.
 //   2. ATOMICALLY, under concurrency. The interleaving is made deterministic
 //      rather than hoped for: A calls the verb and leaves its transaction open,
 //      so its candidate-key entry is speculative; B's call is sent and blocks
@@ -28,18 +26,14 @@
 //      reads the committed row in its fallback select -- a new statement and so
 //      a new snapshot -- and answers with the same id. Against a
 //      lookup-then-insert writer this fails with a unique_violation.
-//   3. IMMUTABLE UNDER A GENUINELY DIFFERENT OUTCOME. A later run that reaches
-//      a different verdict for the same candidate still receives the first
-//      recorded row; it cannot replace or merge into that immutable outcome.
+//   3. IMMUTABLE UNDER A DIFFERENT OUTCOME. A later different receipt for the
+//      same candidate is refused and cannot replace the immutable first row.
 //
 // AND THE MUTATION CONTROL IS EXECUTED, NOT DESCRIBED. The writer's own
 // definition is read back out of the catalog with pg_get_functiondef, the ONE
-// comparison is put back to the full receipt digest, and the result is created
-// in pg_temp and called with the second call's real receipt. The mutant emits a
-// divergence NOTICE that the real candidate-scoped comparison does not. So
-// "keying on the full digest again turns this red" is a statement this file
-// makes by running it, and the function it mutates is the one the database is
-// actually carrying rather than a retyped copy of it.
+// full-receipt comparison is narrowed to the candidate projection, and the
+// mutant is proved to accept a receipt whose per-call identity moved. The
+// function it mutates is the one the database is actually carrying.
 //
 // THE CLIENTS ARE REAL, and the recorder around them is a passthrough: every
 // statement reaches PostgreSQL, and the wrapper keeps a copy of the receipt each
@@ -79,6 +73,17 @@ const VERB = "record-gate-zero-read-only-outcome";
 const SEAT_SLUG = "codex-reviewer";
 
 after(cleanupStagedTrees);
+
+async function withFrozenDate(instant, run) {
+  const NativeDate = globalThis.Date;
+  const fixed = NativeDate.parse(instant);
+  class FrozenDate extends NativeDate {
+    constructor(...args) { super(...(args.length === 0 ? [fixed] : args)); }
+    static now() { return fixed; }
+  }
+  globalThis.Date = FrozenDate;
+  try { return await run(); } finally { globalThis.Date = NativeDate; }
+}
 
 /**
  * TWO REAL CONNECTIONS PER CALLER, WHICH IS WHAT PRODUCTION OPENS
@@ -142,7 +147,7 @@ async function seatedClient(pg, producerLoginRole) {
   return recorder;
 }
 
-test("two authenticated calls for one candidate converge on one durable row", async t => {
+test("two identical concurrent writes for one candidate return one durable row", async t => {
   if (!DSN) {
     assert.equal(REQUIRED, false,
       "this proof was required and no database URL was given to it");
@@ -204,8 +209,6 @@ test("two authenticated calls for one candidate converge on one durable row", as
   // audit row id the way index.js decorates it -- so the two calls below differ
   // by exactly what two real requests differ by.
   const FIRST_CALL = "2c8f5a91-7d3e-4b06-9a14-6e0d8b5f37c2";
-  const SECOND_CALL = "9e14b7d2-035a-4c68-b1f7-4a2d6c90e8b3";
-  assert.notEqual(FIRST_CALL, SECOND_CALL);
   const { target, stamps } = stageTree({});
   const tools = await moduleOfTree(target, "tools.js");
   // UNDER THIS DEPLOY'S BUILD STAMPS (amendment 9). The producer derives its
@@ -228,38 +231,31 @@ test("two authenticated calls for one candidate converge on one durable row", as
   assert.match(firstResult.outcome_id, /^[0-9a-f-]{36}$/);
   assert.equal(firstResult.status, "pass");
 
-  // (2) B's call goes out and is left in flight. It blocks inside the insert,
-  //     on A's uncommitted index entry.
-  const pending = callVerb(SECOND_CALL, b).then(served => {
-    assert.equal(served.served, true, "the recorded review bearer was not served");
-    return served.answered;
-  });
+  // (2) B offers the EXACT receipt A wrote and is left in flight. It blocks
+  //     inside the insert on A's uncommitted candidate-key entry. This is the
+  //     only replay RETRY-IDEMPOTENT permits to converge.
+  const sentA = a.sent;
+  assert.ok(sentA, "the first call never reached the writer");
+  await b.seat.query("begin");
+  const pending = b.seat.query(
+    "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb) as id",
+    [randomUUID(), JSON.stringify(sentA)]).then(answer => answer.rows[0].id);
   let settledEarly = false;
   pending.then(() => { settledEarly = true; }, () => { settledEarly = true; });
   await new Promise(resolve => setTimeout(resolve, 500));
   assert.equal(settledEarly, false,
     "the second writer did not block on the first, so the candidate key is not arbitrating");
 
-  // (3) A's seat commits, which releases B's seat transaction. B then reaches
-  //     the OUTER audit-event lock and waits for A's still-open outer
-  //     transaction. This is the production order: no caller waits on B while
-  //     holding A open.
+  // (3) A's seat commits, which releases B's identical replay.
   await a.seat.query("commit");
-  await new Promise(resolve => setTimeout(resolve, 500));
-  assert.equal(settledEarly, false,
-    "the second caller returned before the first caller settled its audit event");
-  await a.client.query("commit");
-  const secondResult = await pending;
+  const secondId = await pending;
   await b.seat.query("commit");
-  await b.client.query("commit");
+  await a.client.query("commit");
+  await b.client.query("rollback");
 
-  // BOTH CALLERS RECEIVED THE SAME DURABLE ROW.
-  assert.equal(secondResult.ok, true);
-  assert.equal(secondResult.outcome_id, firstResult.outcome_id,
-    "the second authenticated call did not receive the row the first wrote");
-  assert.equal(secondResult.candidate_digest, firstResult.candidate_digest);
-  assert.equal(secondResult.outcome_digest, firstResult.outcome_digest);
-  assert.equal(secondResult.candidate_scoped_digest, firstResult.candidate_scoped_digest);
+  // BOTH IDENTICAL WRITES RECEIVED THE SAME DURABLE ROW.
+  assert.equal(secondId, firstResult.outcome_id,
+    "the identical concurrent replay did not receive the row the first write created");
 
   // AND EXACTLY ONE ROW EXISTS, which is the property the whole shape is for:
   // every run kept, one current outcome per candidate.
@@ -268,33 +264,22 @@ test("two authenticated calls for one candidate converge on one durable row", as
     [firstResult.candidate_digest]);
   assert.equal(rows.rows[0].n, 1, "a retry minted a second outcome for one candidate");
 
-  // THE TWO CALLS REALLY WERE TWO CALLS. Without this the case above could pass
-  // on two identical receipts, which is the fixture-shaped proof this file
-  // replaced. The session refs are the server's own, one per request.
-  const sentA = a.sent;
-  const sentB = b.sent;
-  assert.ok(sentA && sentB, "one of the two calls never reached the writer");
+  // The receipt came from the registered authenticated verb, not a hand-built
+  // fixture; B merely replays those exact stored bytes at the record seam.
   assert.equal(sentA.producer_identity.session_ref, `session:${FIRST_CALL}`);
-  assert.equal(sentB.producer_identity.session_ref, `session:${SECOND_CALL}`);
-  assert.notEqual(sentB.producer_identity.session_ref, sentA.producer_identity.session_ref);
-  assert.equal(sentA.candidate_digest, sentB.candidate_digest);
-  assert.notEqual(gateZeroOutcomeDigest(sentB), gateZeroOutcomeDigest(sentA),
-    "the two calls produced byte-identical receipts, so this proves nothing about a retry");
-  assert.equal(gateZeroOutcomeCandidateDigest(sentB), gateZeroOutcomeCandidateDigest(sentA));
 
   // AND THE DATABASE AGREES WITH THE GATEWAY about both values, computed by its
   // own canonicalization rather than by artifact-trust.js.
   const digests = await a.query(
-    `select ops.gate_zero_outcome_digest($1::jsonb) as full_b,
-            ops.gate_zero_outcome_candidate_digest($1::jsonb) as candidate_b,
-            ops.gate_zero_outcome_candidate_digest($2::jsonb) as candidate_a`,
-    [JSON.stringify(sentB), JSON.stringify(sentA)]);
-  assert.equal(digests.rows[0].full_b, gateZeroOutcomeDigest(sentB));
-  assert.equal(digests.rows[0].candidate_b, gateZeroOutcomeCandidateDigest(sentB));
-  assert.equal(digests.rows[0].candidate_a, digests.rows[0].candidate_b);
+    `select ops.gate_zero_outcome_digest($1::jsonb) as full,
+            ops.gate_zero_outcome_candidate_digest($1::jsonb) as candidate`,
+    [JSON.stringify(sentA)]);
+  assert.equal(digests.rows[0].full, gateZeroOutcomeDigest(sentA));
+  assert.equal(digests.rows[0].candidate, gateZeroOutcomeCandidateDigest(sentA));
 
   // ===================================================================
-  // MUTATION CONTROL — put the full digest back and this turns red.
+  // MUTATION CONTROL — narrow equality to the candidate projection and a
+  // changed verdict is silently accepted.
   // ===================================================================
   // The writer's own definition, read out of the catalog rather than retyped, so
   // the thing being mutated is what the database is carrying.
@@ -303,35 +288,16 @@ test("two authenticated calls for one candidate converge on one durable row", as
        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'ops' and p.proname = 'gate_zero_record_read_only_outcome'`)).rows[0].def;
   const NAME = "ops.gate_zero_record_read_only_outcome(";
-  const CANDIDATE_KEY = "v_digest := ops.gate_zero_outcome_candidate_digest(p_receipt);";
-  const CANDIDATE_COMPARE = "v_existing.candidate_scoped_digest <> v_digest";
+  const FULL_KEY = "v_digest := ops.gate_zero_outcome_digest(p_receipt);";
+  const FULL_COMPARE = "v_existing.outcome_digest <> v_digest";
   for (const [anchor, what] of [[NAME, "the writer's name"],
-    [CANDIDATE_KEY, "the retry comparison value"], [CANDIDATE_COMPARE, "the retry comparison"]])
+    [FULL_KEY, "the retry comparison value"], [FULL_COMPARE, "the retry comparison"]])
     assert.equal(def.split(anchor).length - 1, 1,
       `the mutation anchor no longer matches ${what}`);
   const mutant = def
-    .replace(NAME, "pg_temp.gate_zero_record_read_only_outcome_full_digest_key(")
-    .replace(CANDIDATE_KEY, "v_digest := ops.gate_zero_outcome_digest(p_receipt);")
-    .replace(CANDIDATE_COMPARE, "v_existing.outcome_digest <> v_digest");
-
-  // WHAT THE CONTROL READS, AND WHY IT MOVED (2026-09-13, the third release
-  // candidate's refusal, finding 3). Until migration 0505 this branch RAISED, so
-  // the control read a rejection. 0505 makes it return the recorded row instead
-  // -- that is the whole of the fix, because the raise was what made an
-  // outcome-without-event unrepairable -- and what the branch now emits is a
-  // NOTICE naming the two projections. So the falsifier is the notice: the REAL
-  // writer stays silent for a genuine retry, and the full-digest mutant does not,
-  // because the full digest carries this call's session_ref and its two instants.
-  // Keying on it would make every genuine second call a divergence, which is
-  // exactly Sol's finding 3 and is still the thing this control refuses to let
-  // back in.
-  const noticesOf = async run => {
-    const seen = [];
-    const listener = message => seen.push(String(message?.message ?? ""));
-    a.seat.on("notice", listener);
-    try { await run(); } finally { a.seat.removeListener("notice", listener); }
-    return seen.filter(text => /already recorded from a run whose projection differs/.test(text));
-  };
+    .replace(NAME, "pg_temp.gate_zero_record_read_only_outcome_candidate_key(")
+    .replace(FULL_KEY, "v_digest := ops.gate_zero_outcome_candidate_digest(p_receipt);")
+    .replace(FULL_COMPARE, "v_existing.candidate_scoped_digest <> v_digest");
 
   // THE MUTANT RUNS ON THE SEAT'S CONNECTION, because that is the only
   // connection the record layer admits at all now. It is CREATED with the
@@ -343,59 +309,47 @@ test("two authenticated calls for one candidate converge on one durable row", as
   await a.seat.query("reset session authorization");
   await a.seat.query(mutant);
   await authorizeAs(a.seat, (await ensureProducerRoles(setup)).login);
+  const projectionCollision = { ...sentA,
+    producer_identity: { ...sentA.producer_identity,
+      session_ref: "session:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" } };
+  assert.equal(projectionCollision.candidate_digest, sentA.candidate_digest);
+  assert.notEqual(gateZeroOutcomeDigest(projectionCollision), gateZeroOutcomeDigest(sentA));
+  assert.equal(gateZeroOutcomeCandidateDigest(projectionCollision),
+    gateZeroOutcomeCandidateDigest(sentA));
   await a.seat.query("begin");
-  const mutantDivergences = await noticesOf(() => a.seat.query(
-    "select pg_temp.gate_zero_record_read_only_outcome_full_digest_key($1::uuid, $2::jsonb)",
-    [randomUUID(), JSON.stringify(sentB)]));
-  assert.equal(mutantDivergences.length, 1,
-    "the full-digest key called the second real call a retry, so this control proves nothing");
-  await a.seat.query("rollback");
-
-  // AND THE REAL WRITER SAYS NOTHING ABOUT THE SAME CALL, which is the other
-  // half of the same control: what separates the two is the comparison value,
-  // not the fact that one of them happens to be a mutant.
-  await a.seat.query("begin");
-  const realDivergences = await noticesOf(() => a.seat.query(
-    "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb)",
-    [randomUUID(), JSON.stringify(sentB)]));
-  assert.equal(realDivergences.length, 0,
-    "the shipped writer called a genuine retry a divergence");
+  const mutantId = (await a.seat.query(
+    "select pg_temp.gate_zero_record_read_only_outcome_candidate_key($1::uuid, $2::jsonb) as id",
+    [randomUUID(), JSON.stringify(projectionCollision)])).rows[0].id;
+  assert.equal(mutantId, firstResult.outcome_id,
+    "the narrowed comparison did not silently accept the divergent receipt, so this control proves nothing");
   await a.seat.query("rollback");
 
   // ===================================================================
-  // AND A DIFFERENT OUTCOME FOR ONE CANDIDATE CONVERGES, REPLACING NOTHING.
+  // AND A DIFFERENT OUTCOME FOR ONE CANDIDATE IS REFUSED, REPLACING NOTHING.
   // ===================================================================
-  // The same candidate, a different verdict. Before 0505 the writer raised here,
-  // and that raise is what the outside review refused: the seat's transaction
-  // commits before the outer one writes the audit event, so a failure between
-  // them leaves an outcome with no event -- and evidence legitimately moves
-  // between two runs of one candidate, so the retry meant to write the lost event
-  // was the retry the raise turned away.
-  //
-  // CONVERGING IS NOT REPLACING, and both halves are asserted. The call receives
-  // the row that exists; the row's own receipt, digest and status are read back
-  // afterwards and must be byte-identical to what the first call stored. The
-  // append-only triggers are untouched and nothing here updates anything -- this
-  // is what makes "the first receipt wins forever" a measurement rather than a
-  // description.
+  // RETRY-IDEMPOTENT is write-once in both directions: the same receipt returns
+  // the row already recorded, while a different receipt for the same candidate
+  // is a conflict. Returning the earlier row for this changed verdict would make
+  // the call look successful even though none of the offered evidence landed.
   const before = (await a.query(
     `select outcome_digest, candidate_scoped_digest, status, receipt
        from ops.gate_zero_read_only_outcome where id = $1::uuid`,
     [firstResult.outcome_id])).rows[0];
   await a.seat.query("begin");
-  const divergent = { ...sentB, status: "fail" };
-  assert.equal(divergent.candidate_digest, sentB.candidate_digest);
-  const convergedId = (await a.seat.query(
-    "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb) as id",
-    [randomUUID(), JSON.stringify(divergent)])).rows[0].id;
-  assert.equal(convergedId, firstResult.outcome_id,
-    "a different verdict for one candidate did not converge onto the recorded row");
-  await a.seat.query("commit");
+  const divergent = { ...sentA, status: "fail" };
+  assert.equal(divergent.candidate_digest, sentA.candidate_digest);
+  await assert.rejects(
+    a.seat.query(
+      "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb) as id",
+      [randomUUID(), JSON.stringify(divergent)]),
+    /already has a different receipt/,
+    "a different verdict for one candidate was silently accepted");
+  await a.seat.query("rollback");
 
   const after = (await a.query(
     `select count(*)::int as n from ops.gate_zero_read_only_outcome where candidate_digest = $1`,
     [firstResult.candidate_digest])).rows[0];
-  assert.equal(after.n, 1, "converging minted a second outcome for one candidate");
+  assert.equal(after.n, 1, "the refused write minted a second outcome for one candidate");
   const unchanged = (await a.query(
     `select outcome_digest, candidate_scoped_digest, status, receipt
        from ops.gate_zero_read_only_outcome where id = $1::uuid`,
@@ -405,7 +359,7 @@ test("two authenticated calls for one candidate converge on one durable row", as
   assert.equal(unchanged.status, "pass");
 });
 
-test("an outer failure after the seat commit leaves no event, and the retry writes exactly one",
+test("an exact replay heals a missing event, while a changed receipt cannot",
   async t => {
     // FINDING 3 OF THE THIRD RELEASE CANDIDATE'S REFUSAL, RUN RATHER THAN
     // ARGUED. Standing-rule amendment 9 puts the outcome write on the seat's own
@@ -467,10 +421,14 @@ test("an outer failure after the seat commit leaves no event, and the retry writ
     globalThis[DYNAMIC_PREDECESSOR_WORLD] = "clean";
     t.after(() => { delete globalThis[DYNAMIC_PREDECESSOR_WORLD]; });
     const tools = await moduleOfTree(target, "tools.js");
-    const callVerb = correlationId => withStamps(stamps,
-      () => inServedReview(target, { correlationId },
-        actor => tools.executeRegisteredTool(caller,
-          Object.assign(actor, { id: seatRow.id }), VERB, { idempotency_key: randomUUID() })));
+    // Freeze only the producer's public clock so repeating the same authenticated
+    // request below is a byte-exact receipt replay rather than a new observation.
+    const fixedObservedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const callVerb = correlationId => withFrozenDate(fixedObservedAt,
+      () => withStamps(stamps,
+        () => inServedReview(target, { correlationId },
+          actor => tools.executeRegisteredTool(caller,
+            Object.assign(actor, { id: seatRow.id }), VERB, { idempotency_key: randomUUID() }))));
 
     const eventsFor = async outcomeId => (await setup.query(
       `select count(*)::int as n from event
@@ -485,12 +443,11 @@ test("an outer failure after the seat commit leaves no event, and the retry writ
     //     work is committed where production commits it; everything the ordinary
     //     writer did -- the audit event and the idempotency envelope's tool_call
     //     row -- goes away with the rollback.
-    const served = await callVerb("1f7e4c20-6a35-4b8d-9c42-0e1a7b5d38f6");
+    const FIRST_CALL = "1f7e4c20-6a35-4b8d-9c42-0e1a7b5d38f6";
+    const served = await callVerb(FIRST_CALL);
     assert.equal(served.served, true, "the recorded review bearer was not served");
     const first = served.answered;
     assert.equal(first.ok, true);
-    assert.equal(first.converged_onto_recorded_outcome, false,
-      "a first call reported itself as having converged onto somebody else's row");
     assert.equal(first.receipt_status, "pass");
     await caller.seat.query("commit");
     await caller.client.query("rollback");
@@ -500,53 +457,37 @@ test("an outer failure after the seat commit leaves no event, and the retry writ
     assert.equal(await eventsFor(first.outcome_id), 0,
       "the outer rollback did not remove the audit event, so this proof is not staging the failure it claims");
 
-    // (3) THE RETRY, AFTER THE WORLD MOVES. A new request -- its own correlation
-    //     id, idempotency key and transactions -- reaches the same candidate,
-    //     but the predecessor join now fails. The candidate-scoped projection
-    //     therefore differs from the stored pass. Before 0505 the record layer
-    //     refused THIS retry, leaving the event unreachable.
+    // (3) AN EXACT REPLAY HEALS THE EVENT. Same authenticated session, same
+    //     fixed instant and same evidence means the full tagged digest matches.
+    await caller.client.query("begin");
+    await caller.client.query(
+      "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
+    const healed = (await callVerb(FIRST_CALL)).answered;
+    assert.equal(healed.outcome_id, first.outcome_id);
+    await caller.seat.query("commit");
+    await caller.client.query("commit");
+    assert.equal(await eventsFor(first.outcome_id), 1,
+      "the exact replay did not heal the missing audit event");
+
+    // (4) A LATER RUN AFTER THE WORLD MOVES IS NOT A REPLAY OF THIS RECEIPT. It
+    //     reaches the same candidate with changed evidence and a changed verdict,
+    //     so RETRY-IDEMPOTENT requires refusal. A lost audit event does not make
+    //     it valid to label this new run as the old one.
     globalThis[DYNAMIC_PREDECESSOR_WORLD] = "receipt-card-mismatch";
     await caller.client.query("begin");
     await caller.client.query(
       "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
-    const retried = (await callVerb("2a8d5b31-7c46-4d9e-8f53-1b2c8e6a49b7")).answered;
-    assert.equal(retried.ok, true);
-    assert.equal(retried.outcome_id, first.outcome_id,
-      "the retry did not converge on the row the failed call left behind");
-    assert.equal(retried.converged_onto_recorded_outcome, true,
-      "the retry did not report that its changed evidence lost to the recorded row");
-    assert.notEqual(retried.offered_candidate_scoped_digest,
-      retried.candidate_scoped_digest,
-      "the changed-evidence retry did not actually change the candidate projection");
-    assert.equal(retried.receipt_status, "pass",
-      "the response did not report the status of the stored receipt");
-    assert.equal(retried.offered_receipt_status, "fail",
-      "the response did not label the changed run's offered status separately");
-    assert.equal(retried.producer_reason_id, null,
-      "a converged response attributed the offered run's reason to the stored row");
-    assert.ok(retried.offered_producer_reason_id,
-      "the changed run's offered reason was not reported separately");
-    await caller.seat.query("commit");
-    await caller.client.query("commit");
+    await assert.rejects(
+      callVerb("2a8d5b31-7c46-4d9e-8f53-1b2c8e6a49b7"),
+      /already has a different receipt/,
+      "changed evidence was silently accepted as an idempotent retry");
+    await caller.seat.query("rollback");
+    await caller.client.query("rollback");
 
-    // (4) EXACTLY ONE ROW AND EXACTLY ONE EVENT. The healed state.
+    // (5) THE FIRST ROW AND ITS ONE HEALED EVENT STILL STAND. The changed run
+    //     neither writes a row nor duplicates the exact replay's audit event.
     assert.equal(await outcomesFor(first.candidate_digest), 1,
       "the retry minted a second outcome for one candidate");
     assert.equal(await eventsFor(first.outcome_id), 1,
-      "the retry did not write the audit event the failed call lost");
-
-    // (5) AND A THIRD CALL WRITES NO SECOND EVENT. Healing a missing event and
-    //     duplicating an existing one are the same statement with the guard
-    //     removed, so the guard is asserted rather than assumed: one event per
-    //     outcome row, however many times the verb is called.
-    await caller.client.query("begin");
-    await caller.client.query(
-      "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
-    const thrice = (await callVerb("3b9e6c42-8d57-4e0f-9a64-2c3d9f7b5ac8")).answered;
-    assert.equal(thrice.outcome_id, first.outcome_id);
-    await caller.seat.query("commit");
-    await caller.client.query("commit");
-    assert.equal(await eventsFor(first.outcome_id), 1,
-      "a third call wrote a second audit event for one outcome row");
-    assert.equal(await outcomesFor(first.candidate_digest), 1);
+      "a refused changed receipt altered the exact replay's audit event count");
   });

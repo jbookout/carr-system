@@ -72,11 +72,11 @@ const MIGRATION = readFileSync(
 const CONVERGENCE_MIGRATION = readFileSync(
   new URL("../../migrations/0505_gate_zero_tagged_digest_and_candidate_reads.sql", import.meta.url), "utf8");
 
-test("the public verb description promises immutable convergence, not the retired refusal", () => {
+test("the public verb description promises exact replay and divergent-receipt refusal", () => {
   const description = TOOLS[VERB].description;
-  assert.match(description, /changed evidence or a changed verdict.*converges onto.*recorded outcome/i);
-  assert.match(description, /separately labels recorded and offered metadata/i);
-  assert.doesNotMatch(description, /different outcome.*is refused|different rows.*still conflicts/i);
+  assert.match(description, /exact receipt replay.*returns the immutable row/i);
+  assert.match(description, /different receipt.*changed evidence, verdict.*is refused/i);
+  assert.doesNotMatch(description, /changed evidence or a changed verdict.*converges/i);
 });
 
 // --- actors, and the one thing that can no longer be one ----------------------
@@ -143,15 +143,12 @@ function mockDatabase({ existing = null, seatConnection = true } = {}) {
       if (sql.includes("ops.gate_zero_record_read_only_outcome")) {
         const offered = JSON.parse(params[1]);
         state.persisted = offered;
-        // IDEMPOTENT ON THE CANDIDATE, AND CONVERGENT, exactly as the SQL writer
-        // is from migration 0505 (the third release candidate's refusal, finding
-        // 3). The first row for a candidate is the durable one: a later call
-        // naming the same candidate NEVER replaces it and never raises — it
-        // receives that row and is told, by the digests read back, that it
-        // converged. A mock that raised here would be a second implementation of
-        // a rule the record layer no longer has, and it would hide exactly the
-        // state the refusal named: an outcome whose audit event a failed outer
-        // transaction lost, unreachable because the retry was refused.
+        // Mirror the record layer's write-once candidate key: exact receipt
+        // bytes replay, but a second observation for the candidate is refused.
+        if (state.recorded?.candidate_digest === offered.candidate_digest
+            && digest([GATE_ZERO_RECEIPT_SCHEMA, state.recorded])
+              !== digest([GATE_ZERO_RECEIPT_SCHEMA, offered]))
+          throw new Error(`candidate ${offered.candidate_digest} already has a different receipt`);
         if (!state.recorded || state.recorded.candidate_digest !== offered.candidate_digest)
           state.recorded = offered;
         return { rows: [{ id: OUTCOME_ID }] };
@@ -417,66 +414,25 @@ test("CONTROL 4 — the bound seat writes, and what it writes is the producer's 
   assert.equal(result.effects.benchmark_accepted, false);
 });
 
-test("CONTROL 5 — a second AUTHENTICATED call for the same candidate is idempotent", async () => {
-  // THE RETRY IS A DIFFERENT CALL, WHICH IS THE WHOLE POINT (PR 1014, second
-  // correction). The first version of this case reused one actor object, so
-  // both runs carried the SAME correlation id and therefore the same
-  // session_ref, and the two receipts differed only in instants a fixture could
-  // hold still. It passed, and it proved nothing about a retry: identity.js
-  // derives session_ref from the request's own correlation id, so two genuine
-  // calls NEVER share one. Sol's finding 3 was exactly that gap.
-  //
-  // A SECOND CORRELATION ID IS WHAT A SECOND REQUEST IS. Everything else is
-  // held equal — same candidate tree, same seat — so the only thing that moved
-  // between the two calls is what the server stamps per request.
+test("CONTROL 5 — a second authenticated run is not an exact receipt replay", async () => {
+  // A new authenticated request has its own session_ref (and may have new
+  // instants), so even for the same candidate it is a different receipt. The
+  // write-once criterion requires that conflict to be visible, not converged.
   const client = mockDatabase();
   const RETRY_CALL = "5a0b7c33-41de-4f9a-8e26-1c7b93d0af45";
   assert.notEqual(RETRY_CALL, CORRELATION_ID);
-  const first = await recordIn({}, {}, { idempotency_key: KEY }, client);
-  const second = await recordIn({}, { correlationId: RETRY_CALL },
-    { idempotency_key: SECOND_KEY }, client);
-
-  assert.equal(second.result.outcome_id, first.result.outcome_id, "a retry minted a second outcome");
-  assert.equal(second.result.candidate_digest, first.result.candidate_digest);
-  // THE DURABLE ROW IS THE FIRST ONE, and both callers are handed it: the
-  // evidence digest reported back is the stored receipt's, unchanged by the
-  // second call, and the value the two were COMPARED on is equal.
-  assert.equal(second.result.outcome_digest, first.result.outcome_digest);
-  assert.equal(second.result.candidate_scoped_digest, first.result.candidate_scoped_digest);
-
-  // AND THE TWO RECEIPTS REALLY WERE DIFFERENT BYTES. This is the assertion that
-  // makes the case a proof rather than a coincidence: keying on the full receipt
-  // digest — what the writer did before this correction — would have refused the
-  // second call, because the second call's session_ref is its own.
-  const firstReceipt = first.client.state.recorded;
-  const secondReceipt = second.client.state.persisted;
-  assert.notEqual(secondReceipt.producer_identity.session_ref,
-    firstReceipt.producer_identity.session_ref);
-  assert.notEqual(gateZeroOutcomeDigest(secondReceipt), gateZeroOutcomeDigest(firstReceipt),
-    "the two calls produced identical receipts, so this proves nothing about a retry");
-  assert.equal(gateZeroOutcomeCandidateDigest(secondReceipt),
-    gateZeroOutcomeCandidateDigest(firstReceipt));
+  await recordIn({}, {}, { idempotency_key: KEY }, client);
+  await assert.rejects(
+    recordIn({}, { correlationId: RETRY_CALL },
+      { idempotency_key: SECOND_KEY }, client),
+    /already has a different receipt/);
+  assert.notEqual(client.state.persisted.producer_identity.session_ref,
+    client.state.recorded.producer_identity.session_ref);
+  assert.equal(client.state.recorded.producer_identity.session_ref,
+    `session:${CORRELATION_ID}`);
 });
 
-test("MUTATION — a second run that read DIFFERENT rows for one candidate converges, and replaces nothing", async () => {
-  // THE OTHER EDGE OF THE SAME KEY, RE-DECIDED (2026-09-13, the third release
-  // candidate's refusal, finding 3). Here the candidate is held identical and
-  // the WORLD is changed under it, so the producer reaches a different verdict.
-  //
-  // WHAT THE RECORD LAYER USED TO DO, AND WHY IT COULD NOT KEEP DOING IT: it
-  // RAISED. The outcome row and its audit event are written by two different
-  // login roles and so two different transactions, the seat's committing first,
-  // and a failure between them leaves an outcome with no event. Evidence
-  // legitimately moves between two runs of one candidate, so the retry that was
-  // supposed to write the lost event was exactly the retry the raise refused.
-  // The outside reviewer's words: "an outcome-without-event state is reachable
-  // where subsequent retries using the now-current evidence cannot converge."
-  //
-  // WHAT IT DOES NOW, and the two halves are equally load-bearing: it RETURNS
-  // the recorded row, and it CHANGES NOTHING. The first receipt stays stored and
-  // stays digested; the later one is not persisted and not merged. Asserted
-  // below, because "converges" would otherwise be indistinguishable from
-  // "silently replaces" — which is the plan's own named failure condition.
+test("MUTATION — a second run with a different verdict is refused and replaces nothing", async () => {
   const client = mockDatabase();
   await recordIn({}, {}, { idempotency_key: KEY }, client);
   const recorded = client.state.recorded;
@@ -492,16 +448,14 @@ test("MUTATION — a second run that read DIFFERENT rows for one candidate conve
   assert.notEqual(gateZeroOutcomeCandidateDigest(divergent),
     gateZeroOutcomeCandidateDigest(recorded),
     "the divergent receipt projects to the same value, so this proves nothing");
-  const converged = await client.query(
-    "select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
-    [SECOND_KEY, JSON.stringify(divergent)]);
-  assert.equal(converged.rows[0].id, OUTCOME_ID,
-    "the converging call did not receive the row that already exists");
+  await assert.rejects(
+    client.query(
+      "select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
+      [SECOND_KEY, JSON.stringify(divergent)]),
+    /already has a different receipt/);
 
   // NOTHING WAS REPLACED. The stored receipt is the first one, byte for byte,
-  // and so is the digest read back off the row — which is what the gateway then
-  // reports, so a consumer cannot mistake a converged call's answer for its own
-  // run's evidence.
+  // and so is the digest read back off the row.
   assert.deepEqual(client.state.recorded, recorded,
     "the divergent receipt replaced the recorded one");
   assert.equal(client.state.recorded.status, "pass");
@@ -699,13 +653,14 @@ test("the writer is ONE insert arbitrated by the candidate key, not a lookup the
     "the candidate lookup still runs before the insert, which is the race");
   assert.equal(MIGRATION.split("select * into v_existing").length - 1, 1,
     "there is more than one candidate lookup in the writer");
-  // AND THE FALLBACK CONTRACT IS THE IMMUTABLE FIRST ROW, UNCONDITIONALLY.
-  // Changed evidence is reported by the gateway, not turned back into the
-  // retired record-layer refusal this migration exists to remove.
+  // AND THE FALLBACK CONTRACT DISTINGUISHES an exact receipt replay from a
+  // different observation of the same candidate.
   assert.match(CONVERGENCE_MIGRATION,
-    /fallback returns the recorded row UNCONDITIONALLY/);
-  assert.doesNotMatch(CONVERGENCE_MIGRATION,
-    /a different Gate Zero outcome is already recorded for candidate/);
+    /v_digest := ops\.gate_zero_outcome_digest\(p_receipt\)/);
+  assert.match(CONVERGENCE_MIGRATION,
+    /v_existing\.outcome_digest <> v_digest/);
+  assert.match(CONVERGENCE_MIGRATION,
+    /already has a different receipt/);
 });
 
 // ===========================================================================

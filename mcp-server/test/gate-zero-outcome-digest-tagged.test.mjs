@@ -195,6 +195,7 @@ test("SQL and the gateway compute the same TAGGED outcome digest, and the plain 
     // transaction, committed before the outer one writes the event. The one
     // thing this harness adds is the interception case 4 needs.
     let corruptReadback = false;
+    let corruptedReceipt = null;
     const outer = new PG.Client({ connectionString: DSN });
     await outer.connect();
     t.after(() => outer.end().catch(() => {}));
@@ -219,9 +220,11 @@ test("SQL and the gateway compute the same TAGGED outcome digest, and the plain 
               // which is unreachable by construction while both are correct, and
               // is exactly the condition the verb's comparison exists to catch.
               if (corruptReadback && typeof sql === "string"
-                  && sql.includes("from ops.gate_zero_read_only_outcome"))
+                  && sql.includes("from ops.gate_zero_read_only_outcome")) {
+                corruptedReceipt = result.rows[0].receipt;
                 return { ...result, rows: [{ ...result.rows[0],
                   outcome_digest: plainDigest(result.rows[0].receipt) }] };
+              }
               return result;
             },
           });
@@ -266,20 +269,29 @@ test("SQL and the gateway compute the same TAGGED outcome digest, and the plain 
     assert.match(result.digest_recipe, /does not satisfy it/);
 
     // ── (4) THE UNTAGGED DIGEST IS NOT ACCEPTED ─────────────────────────────
-    // A SECOND call, same candidate, with the readback's digest replaced by the
-    // plain one. The verb recomputes from the stored receipt and must refuse by
-    // name. Without the interception this call would simply converge.
+    // A FIRST call for a separate candidate, with the readback's digest replaced
+    // by the plain one. A different receipt for the candidate above is now
+    // correctly refused by RETRY-IDEMPOTENT before readback, so the digest
+    // falsifier needs its own candidate to reach the comparison it tests.
     corruptReadback = true;
+    const corruptTree = stageTree({
+      candidateEdit: "the tagged-digest corruption control's own candidate" });
+    const corruptTools = await moduleOfTree(corruptTree.target, "tools.js");
+    const callCorrupt = correlationId => withStamps(corruptTree.stamps,
+      () => inServedReview(corruptTree.target, { correlationId },
+        actor => corruptTools.executeRegisteredTool(recorder,
+          Object.assign(actor, { id: seatRow.id }), VERB, { idempotency_key: randomUUID() })));
     let refusal = null;
     try {
-      await callVerb("7c3a1e58-9d62-4b4a-af81-2e6b3d94ca75");
+      await callCorrupt("7c3a1e58-9d62-4b4a-af81-2e6b3d94ca75");
     } catch (error) {
       refusal = error?.payload ?? error;
     }
     assert.ok(refusal, "the verb accepted a row carrying the untagged digest");
     assert.equal(refusal.error, "gate_zero_outcome_digest_divergence");
-    assert.equal(refusal.recomputed_here, gateZeroOutcomeDigest(stored.receipt));
-    assert.equal(refusal.recorded, plainDigest(stored.receipt));
+    assert.ok(corruptedReceipt, "the corruption control never reached a stored receipt readback");
+    assert.equal(refusal.recomputed_here, gateZeroOutcomeDigest(corruptedReceipt));
+    assert.equal(refusal.recorded, plainDigest(corruptedReceipt));
 
     await outer.query("rollback");
   });
