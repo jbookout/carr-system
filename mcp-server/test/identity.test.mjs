@@ -18,12 +18,35 @@ import {
   agentSlugForClient,
   verifiedAgentSlugForClient,
   propsForSlug,
-  actorFromProps,
+  authenticatedIdentity,
   isKnownActor,
   isKnownPartner,
   agentActorForToken,
   continuityActorForTokenMaps,
 } from "../src/identity.js";
+// The whole namespace, so the removed surfaces can be asserted absent by name.
+import * as identityModule from "../src/identity.js";
+
+// `actorFromProps` is module-private under amendment 8 (PR 1013). The exported
+// grant door is `authenticatedIdentity.connectionForGrant`; called without the
+// server's witness it returns exactly the same actor, unbranded, which is what
+// every case in this file is about.
+const actorFromProps = (props, bindings = null) =>
+  authenticatedIdentity.connectionForGrant(props, bindings);
+
+
+/**
+ * THE FIELDS AN ACTOR CARRIES.
+ *
+ * Under amendment 8 (2026-09-13) an actor carries NOTHING that marks it as
+ * authenticated: the brand is membership of a module-private WeakSet in
+ * identity.js, so it is object identity and not a property. The second
+ * correction's enumerable Symbol stamp is gone — a property that survives the
+ * server's spread survived a forger's spread too — and this helper is now a
+ * plain own-entries copy kept for the deep comparisons below.
+ */
+const fieldsOf = actor => (actor === null ? null : Object.fromEntries(Object.entries(actor)));
+
 
 test("continuity bearer maps derive one exact surface and sponsor", () => {
   const codex = continuityActorForTokenMaps(
@@ -31,7 +54,7 @@ test("continuity bearer maps derive one exact surface and sponsor", () => {
     JSON.stringify({ joe: "codex-secret" }),
     JSON.stringify({ joe: "claude-secret" }),
   );
-  assert.deepEqual(codex, {
+  assert.deepEqual(fieldsOf(codex), {
     slug: "codex", display: "Codex", human: false, agent: true,
     via: "codex-continuity-token", client_id: null,
     sponsoring_human_slug: "joe", human_slug: "joe", sponsor_required: false,
@@ -236,7 +259,7 @@ const AGENT_TOKENS = JSON.stringify({ grok: "grok-secret-fixture", codex: "codex
 
 test("agent token resolves to the tool's own actor, never a human", () => {
   const actor = agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
-  assert.deepEqual(actor, {
+  assert.deepEqual(fieldsOf(actor), {
     slug: "grok", display: "Agent (grok)", human: false, agent: true,
     via: "agent-token", client_id: null, sponsoring_human_slug: null,
     human_slug: null, sponsor_required: false,
@@ -297,7 +320,7 @@ const LOCAL_TOKENS = JSON.stringify({ "joe-local": "local-secret-fixture" });
 
 test("local token resolves to joe-local, human:false, sponsored to joe", () => {
   const actor = agentActorForToken("Bearer local-secret-fixture", LOCAL_TOKENS, "local-token");
-  assert.deepEqual(actor, {
+  assert.deepEqual(fieldsOf(actor), {
     slug: "joe-local", display: "Agent (joe-local)", human: false, agent: true,
     via: "local-token", client_id: null, sponsoring_human_slug: "joe",
     human_slug: "joe", sponsor_required: false, native_agent_verified: true,
@@ -332,7 +355,7 @@ const DELL_LOCAL_TOKENS = JSON.stringify({ "dell-local": "dell-local-secret-fixt
 
 test("dell-local resolves to Dell's personal scope, human:false", () => {
   const actor = agentActorForToken("Bearer dell-local-secret-fixture", DELL_LOCAL_TOKENS, "local-token");
-  assert.deepEqual(actor, {
+  assert.deepEqual(fieldsOf(actor), {
     slug: "dell-local", display: "Agent (dell-local)", human: false, agent: true,
     via: "local-token", client_id: null, sponsoring_human_slug: "dell",
     human_slug: "dell", sponsor_required: false, native_agent_verified: true,
@@ -366,4 +389,171 @@ test("local token is per-slug like every other agent token: a stray key does not
   const mixed = JSON.stringify({ "joe-local": "local-secret-fixture", grok: "grok-secret-fixture" });
   assert.equal(agentActorForToken("Bearer grok-secret-fixture", mixed, "local-token").sponsoring_human_slug, null);
   assert.equal(agentActorForToken("Bearer local-secret-fixture", mixed, "local-token").sponsoring_human_slug, "joe");
+});
+
+// ---------------------------------------------------------------------------
+// THE AUTHENTICATION BRAND (2026-09-12, PR 1013; amendment 8, 2026-09-13).
+//
+// The brand is MEMBERSHIP OF A MODULE-PRIVATE WeakSet, so there is nothing on an
+// actor to look at. What is observable from out here is the only thing that ever
+// mattered: whether a receipt identity can be derived for it, which the dispatch
+// path's own door answers.
+// ---------------------------------------------------------------------------
+
+const A_CORRELATION_ID = "00000000-0000-4000-8000-000000000000";
+const REVIEW_SECRET = "review-secret-fixture";
+const CONTINUITY_TOKENS = JSON.stringify({ joe: "codex-secret" });
+const GRANT_WITNESS = "oauth-client-secret-fixture";
+
+/**
+ * A SECOND BOOT OF THIS MODULE, WITH THE SERVER'S CREDENTIALS IN PLACE.
+ *
+ * Amendment 8's fourth correction (PR 1013) deleted `sealServerReviewTokens`:
+ * there is no function that installs a credential map, because a one-shot
+ * installer settles which caller is FIRST and never which caller is the SERVER,
+ * and the reviewer's probe simply arrived first — twice. identity.js reads its
+ * credentials ONCE, at module initialisation, out of the environment the server
+ * process was started with, which in the deployed Worker is what wrangler
+ * populates this Worker's secrets into.
+ *
+ * So the only way a suite can be the server is to write the fixture secrets into
+ * its own environment and boot the module. The statically imported instance at
+ * the top of this file was evaluated before any of this ran and holds no
+ * credentials at all — which is itself worth knowing, and the last test below
+ * asserts it: an unprovisioned boot of this file authenticates nobody.
+ */
+process.env.REVIEW_TOKENS = JSON.stringify({ "codex-reviewer": REVIEW_SECRET });
+process.env.AGENT_TOKENS = AGENT_TOKENS;
+process.env.CODEX_CONTINUITY_TOKENS = CONTINUITY_TOKENS;
+process.env.GOOGLE_CLIENT_SECRET = GRANT_WITNESS;
+const booted = await import("../src/identity.js?server-credentials-in-the-environment");
+
+/**
+ * WHAT THE SERVER SEES FOR THIS ACTOR, asked the way the request handler asks.
+ *
+ * THERE IS NO LONGER A WAY TO ASK IT WITH AN ACTOR (amendment 9, fifth
+ * correction round). `dispatchFor(actor)` was an exported factory that returned
+ * a callable which ENTERED A CONTEXT, and a probe composed it with the equally
+ * public review door and ran its own code as `review_agent`. Both are
+ * module-private now, and the one exported entry —
+ * `serveReviewRequestAuthenticated` — takes the request's own Authorization
+ * header, so the identity it establishes is the one it authenticated and not
+ * one a caller handed it.
+ *
+ * So this helper asks the only question that remains askable: what does a
+ * BEARER establish? An actor cannot be supplied to it at all, which is why the
+ * copy-and-write-over cases below are gone — there is nothing to copy INTO.
+ */
+const identityForBearer = bearer => booted.serveReviewRequestAuthenticated(
+  bearer, A_CORRELATION_ID, () => booted.authenticatedIdentity.receiptIdentity());
+
+test("the one request entry establishes an identity for the server's own bearer, and for nobody else",
+  () => {
+    // THE SERVER'S BEARER: served, and what runs inside it reads the three-field
+    // identity r7 requires, with the class identity.js derives for the seat.
+    assert.deepEqual(identityForBearer(`Bearer ${REVIEW_SECRET}`), {
+      actor_id: "codex-reviewer",
+      session_ref: `session:${A_CORRELATION_ID}`,
+      authority_class: "review_agent",
+    });
+
+    // EVERY OTHER BEARER: not served at all, so the continuation never runs and
+    // there is no context for anything to read.
+    let ran = 0;
+    for (const bearer of ["Bearer a-bearer-the-caller-chose", "Bearer wrong", "", null,
+      `Bearer ${REVIEW_SECRET} `, `bearer ${REVIEW_SECRET}x`])
+      assert.equal(booted.serveReviewRequestAuthenticated(bearer, A_CORRELATION_ID,
+        () => { ran += 1; return "served"; }), null, String(bearer));
+    assert.equal(ran, 0, "a bearer the server does not hold ran a continuation");
+
+    // AND A CORRELATION THE SERVER DID NOT WRITE IS SERVED WITH THE CONTEXT
+    // CLEARED: the request is answered, and it obtains no identity.
+    for (const correlationId of [null, "", "not-a-correlation-id", "0000"])
+      assert.equal(booted.serveReviewRequestAuthenticated(`Bearer ${REVIEW_SECRET}`,
+        correlationId, () => booted.authenticatedIdentity.receiptIdentity()), null,
+        String(correlationId));
+  });
+
+test("a credential map the CALLER supplies authenticates an actor but establishes nothing", () => {
+  // THE LEGACY DOORS, CLOSED WITHOUT AN EXCEPTION. They still TAKE a map,
+  // because index.js has always called them that way and the map is the
+  // server's own; what a match no longer buys is a context, because no export
+  // turns an actor into one.
+  const callersMap = JSON.stringify({ grok: "a-secret-the-caller-chose" });
+  const callersActor = booted.agentActorForToken("Bearer a-secret-the-caller-chose", callersMap);
+  assert.notEqual(callersActor, null, "the door stopped returning its actor");
+  assert.equal(callersActor.slug, "grok");
+
+  // AND THE GRANT DOOR IS THE SAME STORY WITH A WITNESS INSTEAD OF A MAP.
+  const callersGrant = booted.authenticatedIdentity.connectionForGrant(
+    propsForSlug("joe", { via: "oauth-google" }), null, "a-witness-the-caller-chose");
+  assert.notEqual(callersGrant, null);
+
+  // WHAT NONE OF THEM CAN DO IS REACH AN IDENTITY, and that is asserted of the
+  // whole export surface rather than of these two doors: there is no exported
+  // callable that takes an actor and answers a receipt identity, so an actor —
+  // however obtained, branded or not — is not a capability.
+  for (const [name, value] of Object.entries(booted))
+    if (typeof value === "function")
+      assert.equal(/dispatch|enter|runIn|contextFor/i.test(name), false,
+        `${name} reads like a context entry on the export surface`);
+  assert.equal(booted.authenticatedIdentity.receiptIdentity(), null,
+    "an identity is readable outside a served request");
+});
+
+test("a refused credential authenticates nothing", () => {
+  assert.equal(booted.agentActorForToken("Bearer wrong", AGENT_TOKENS), null);
+  // NON-VACUOUS: the bearer the server's environment does hold still works.
+  assert.notEqual(booted.agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS), null);
+});
+
+test("a boot with no credentials in its environment authenticates nobody", () => {
+  // THE INSTANCE STATICALLY IMPORTED AT THE TOP OF THIS FILE, which was
+  // evaluated before the fixture secrets were written into the environment. It
+  // is the same source; what it lacks is the server's credentials, and that is
+  // the whole of what authenticating means now.
+  assert.equal(identityModule.serveReviewRequestAuthenticated(`Bearer ${REVIEW_SECRET}`,
+    A_CORRELATION_ID, () => "served"), null);
+  const unbranded = agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS);
+  assert.notEqual(unbranded, null, "the door stopped returning its actor");
+  assert.equal(authenticatedIdentity.receiptIdentity(), null);
+});
+
+test("identity.js exports no context entry, no brander and no dispatcher factory", () => {
+  // The removed surfaces, by name, so nothing quietly goes back to one. The last
+  // three are amendment 9's: the review door that minted a branded actor, the
+  // dispatcher factory that returned a callable entering a context, and the
+  // build-context reader whose value was the evaluator's own session relabelled.
+  for (const gone of ["reviewActorForToken", "dispatchFor", "dispatchAuthenticatedCall",
+    "authenticatedCallReceiptIdentity", "runInAuthenticatedCall", "authenticatedCallIdentity",
+    "actorFromProps", "sealServerReviewTokens", "buildContext", "committerIdentity",
+    "enterAuthenticatedCall"]) {
+    assert.equal(Object.hasOwn(identityModule, gone), false, `${gone} is still exported`);
+    assert.equal(Object.hasOwn(authenticatedIdentity, gone), false,
+      `${gone} is still on the authenticated-identity surface`);
+  }
+  assert.ok(Object.isFrozen(authenticatedIdentity));
+  // AND THE SURFACE IS EXACTLY THREE READERS. A member added here is a member
+  // added in a diff somebody reviews.
+  assert.deepEqual(Object.keys(authenticatedIdentity).sort(),
+    ["connectionForGrant", "partnerIdentity", "receiptIdentity"]);
+});
+
+test("a partner slug maps to the class this system derives for it, and nothing else does", () => {
+  // WHAT THIS REPLACED. Until amendment 9 this was a COMMITTER table — Gmail and
+  // GitHub-noreply addresses mapped to partner slugs — because the Gate Zero
+  // producer took its subject maker from HEAD's committer line. The maker is the
+  // release-candidate record now, an authenticated authority write, so a git
+  // address is an input to nothing and the table that turned one into a partner
+  // is deleted rather than left standing unused.
+  const partner = authenticatedIdentity.partnerIdentity;
+  for (const slug of ["joe", "JOE", "  joe  "])
+    assert.deepEqual(partner(slug), { actor_id: "joe", authority_class: "verified_partner" }, slug);
+  assert.deepEqual(partner("dell"), { actor_id: "dell", authority_class: "verified_partner" });
+  // A MACHINE SEAT IS NOT A PARTNER, and neither is anything that merely looks
+  // like a slug: what comes back is an attribution this system registers, or
+  // nothing at all.
+  for (const slug of ["codex-reviewer", "codex", "grok", "carr-release-bot",
+    "someone-else", "", null, undefined, 7, { toString: () => "joe" }])
+    assert.equal(partner(slug), null, String(slug));
 });

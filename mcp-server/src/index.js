@@ -80,8 +80,9 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, continuityActorForTokenMaps, hermesActorForTokenMaps,
-         hermesCosActorForToken } from "./identity.js";
+import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
+         serveReviewRequestAuthenticated,
+         hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
@@ -240,7 +241,15 @@ const protectedApiHandler = {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
-    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
+    // THE GRANT DOOR, WITH THE SERVER'S WITNESS. `actorFromProps` is no longer
+    // exported (amendment 8, fourth correction round): a grant's props are an
+    // ordinary object, so an exported builder was a brander taking caller bytes.
+    // The witness is the OAuth client secret this same Worker already holds;
+    // identity.js brands only when the bytes match what it read from the
+    // server's environment at initialisation, and returns the same actor either
+    // way, so a missing secret costs a receipt identity and never a session.
+    const actor = authenticatedIdentity.connectionForGrant(
+      ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS, env.GOOGLE_CLIENT_SECRET);
     if (!actor) {
       // Same reasoning as mcpApiHandler's identical check (mcp.js) — a
       // provider-validated grant with no resolvable actor, not a routine
@@ -351,21 +360,22 @@ function probeActorFor(request, env) {
 // maps (it never will in practice — they are separate secrets) resolves
 // deterministically to probe first; in practice a caller only ever holds one
 // of the two tokens.
-function reviewActorFor(request, env) {
-  const auth = request.headers.get("authorization") || "";
-  const token = auth.replace(/^Bearer\s+/i, "");
-  if (!token) return null;
-  let tokens;
-  try {
-    tokens = JSON.parse(env.REVIEW_TOKENS || "{}");
-  } catch {
-    tokens = {};
-  }
-  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
-  if (!slug) return null;
-  return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
-}
-
+//
+// THE MATCHING LOGIC MOVED TO identity.js ON 2026-09-12 (PR 1013) and THE DOOR
+// ITSELF FOLLOWED IT on 2026-09-14 (amendment 9, fifth correction round). There
+// is no `reviewActorFor(request)` here any more, because there is no exported
+// function to delegate to: `reviewActorForToken` minted a branded actor and
+// `dispatchFor` returned a callable that entered a context, and a probe that
+// composed the two ran its own code as `review_agent`. Both are module-private
+// inside identity.js now.
+//
+// WHAT THIS FILE CALLS INSTEAD is `serveReviewRequestAuthenticated`, in the
+// /mcp route below: it matches the request's own Authorization header against
+// the REVIEW_TOKENS map identity.js read from `process.env` at initialisation —
+// which wrangler populates from this Worker's secrets (nodejs_compat,
+// 2026-07-01 compatibility date) — establishes the authenticated call for what
+// it matched, and runs this file's dispatch inside it. No bearer match answers
+// null and the next door gets its turn.
 // ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------
 //
 // The fifth door, built on the PROBE_TOKENS/REVIEW_TOKENS pattern above and
@@ -528,8 +538,11 @@ function localActorFor(request, env) {
   // its new client profile, then promote this server-side flag to required.
   // In required mode the shared local token carries no continuity surface and
   // both continuity families refuse it.
+  // DECORATED IN PLACE, never copied: identity.js's brand is object identity
+  // (amendment 8), so `{ ...actor }` here would hand the dispatch an actor that
+  // authenticates as nobody. The object is built per request by the door above.
   return actor && env.CONTINUITY_SURFACE_ENFORCEMENT === "compat"
-    ? { ...actor, continuity_surface: "codex", continuity_surface_compat: true }
+    ? Object.assign(actor, { continuity_surface: "codex", continuity_surface_compat: true })
     : actor;
 }
 
@@ -644,8 +657,15 @@ async function routeRequest(request, env, ctx) {
   if (url.pathname === "/mcp") {
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
-    const reviewActor = reviewActorFor(request, env);
-    if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    // THE ONE ENTRY ONTO THE AUTHENTICATED CALL (amendment 9, 2026-09-14). The
+    // bearer is matched inside identity.js, the context is entered inside
+    // identity.js, and the dispatch below runs inside it — one act, so there is
+    // no pair of exports for a caller to compose. `null` means this was not a
+    // review-council request at all.
+    const reviewServed = await serveReviewRequestAuthenticated(
+      request.headers.get("authorization") || "", env.CORRELATION_ID,
+      reviewActor => dispatch(request, env, ctx, reviewActor));
+    if (reviewServed !== null) return reviewServed;
     const hermesCosActor = hermesCosActorFor(request, env);
     if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);
     const hermesActor = hermesActorFor(request, env);

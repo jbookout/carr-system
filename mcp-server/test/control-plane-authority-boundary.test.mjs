@@ -2,7 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { TOOLS, ToolError, canExercisePartnerAuthority } from "../src/tools.js";
 import { authorityDsnForActor, callTool } from "../src/mcp.js";
-import { actorFromProps, agentActorForToken } from "../src/identity.js";
+import { authenticatedIdentity, agentActorForToken } from "../src/identity.js";
+// `actorFromProps` is module-private under amendment 8 (PR 1013). The exported
+// grant door is `authenticatedIdentity.connectionForGrant`; called without the
+// server's witness it returns exactly the same actor, unbranded, which is what
+// every case in this file is about.
+const actorFromProps = (props, bindings = null) =>
+  authenticatedIdentity.connectionForGrant(props, bindings);
+
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "test" };
 const dell = { id: "10000000-0000-0000-0000-000000000003", slug: "dell", display: "Dell", human: true, via: "test" };

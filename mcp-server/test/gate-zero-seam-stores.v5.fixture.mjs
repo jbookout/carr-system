@@ -533,3 +533,14 @@ export const fetchCheckConclusionRows = closedCallable(async query => ({
   store_ref: "github:checks",
   rows: rowsFor(CHECK_ROWS, cell(query, "checkName")),
 }));
+
+/**
+ * The candidate-build record store (amendment 9). This suite proves the three
+ * CARD readers, and the subject maker is not one of them — the producer reads
+ * this store directly — so the fixture answers the store's own shape with no
+ * rows. It exists because the surface sweep holds every fixture to covering
+ * every export the real module has: a fixture missing one would leave a path
+ * that the substituted module never exercises.
+ */
+export const fetchCandidateBuildRecordRows = closedCallable(
+  async () => ({ store_ref: "control-plane:ops.candidate-build-record", rows: [] }));

@@ -5,8 +5,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   hermesActorForToken, hermesActorForTokenMaps, hermesCosActorForToken,
-  agentActorForToken, permittedActionOwnerSlugs, actorFromProps, propsForSlug,
+  agentActorForToken, permittedActionOwnerSlugs, authenticatedIdentity, propsForSlug,
 } from "../src/identity.js";
+
+// `actorFromProps` is module-private under amendment 8 (PR 1013). The exported
+// grant door is `authenticatedIdentity.connectionForGrant`; called without the
+// server's witness it returns exactly the same actor, unbranded, which is what
+// every case in this file is about.
+const actorFromProps = (props, bindings = null) =>
+  authenticatedIdentity.connectionForGrant(props, bindings);
+
 import {
   PROFILES, allowedIn, profileForActor, hermesCosDealFieldRefusal,
   hermesCosPremisesRefusal, HERMES_COS_DEAL_FIELDS,

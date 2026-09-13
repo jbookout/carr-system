@@ -1,5 +1,5 @@
-// DoctorCRE v5 slice V5-A02, half one: THE GATE ZERO PUBLIC SURFACE — and it is
-// a surface that cannot say yes about anything.
+// DoctorCRE v5 slice V5-A02, half one: THE GATE ZERO PUBLIC SURFACE — and every
+// yes it can carry is one it was handed by a bound seam, never one it computed.
 //
 // WHAT THIS FILE MAY NOT DECIDE, said first because it is the whole point.
 //
@@ -26,13 +26,18 @@
 // to this surface's seams as of 2026-09-12, which is what section (2) below is
 // about.
 //
-// SO WHAT STILL REFUSES IS THE PRODUCER SEAM, and it is the only thing left.
-// Nothing implements `seam:gate-zero-read-only-outcome-producer`: no code aims
-// the three bound readers at particular rows and signs the result. The producer
-// seam is therefore still unbound, `producer_bound` is still false, `passable`
-// is still false for every caller on every input, and there is still no join. A
-// staffed seat is WHO MAY SIGN; it is not a signature, and naming who may sign
-// is not somebody signing.
+// AND THE PRODUCER SEAM IS NOW BOUND, which is what PR 1013 built.
+// `seam:gate-zero-read-only-outcome-producer` is implemented by
+// gate-zero-producer.v5.js: it derives the rows a Gate Zero run stands on, aims
+// the three bound readers at them, applies the three clauses over the readings
+// and assembles one `consumer-gate-receipt.v1`. So `producer_bound` is derived
+// true while card 9's seat is staffed, and `passable` follows the producer's own
+// answer rather than being false by construction.
+//
+// WHAT THAT DID NOT CHANGE. This file still computes nothing. It holds no
+// clause, reads no store and signs nothing; it asks the bound seam and reports
+// what came back, and every seam is fail-closed in every direction. Put card 9's
+// `holder_ref` back to null and this surface refuses again, byte for byte.
 //
 // (2) THE EVIDENCE, AND THIS HALF MOVED ON 2026-09-12. A caller object
 // describing four accepted outcomes, a canary, a readback and a green gate graph
@@ -51,40 +56,43 @@
 // report BOUND here on exactly the condition they are open there — and report
 // unbound again the moment a `decision_id:` line goes back to null.
 //
-// WHAT DID NOT CHANGE is the answer. Every function below still returns
-// `unavailable`, because a bound reader is a surface and not a subject: which
-// accepted outcome, which canary row, which commit and which declared check a
-// Gate Zero run stands on are the PRODUCER's bindings, and the producer seam is
-// still unbuilt — cards 9 and 10 staffed the seat and amended the packet, and
-// neither of them writes the code that does the aiming. The refusal moved forward
-// rather than lifting — from "nothing exists to read with" to "nothing has the
-// authority to aim it" — which is the more advanced and more honest of the two.
+// WHAT THE TWO READ SURFACES STILL ANSWER. A bound reader is a surface and not a
+// subject: which accepted outcome, which canary row, which commit and which
+// declared check a run stands on are the PRODUCER's derivation, not a question
+// either read surface can put to a caller. So both of them still refuse, and
+// they refuse for that reason rather than for a missing reader.
 //
 // SO THE PUBLIC SURFACE IS THIS, and it is the whole of it:
 //
 //   readGateZeroPredecessorJoin  -> status "unavailable"; the two ruled readers
-//                                   report bound, the producer seam is named owed
+//                                   report bound, the aiming is the producer's
 //   readGateGraphAssurance       -> status "unavailable"; the ruled conclusion
-//                                   reader reports bound, the producer seam owed
-//   emitGateZeroOutcome          -> passable false, for every caller on every
-//                                   input, and it embeds NO join — a successful
-//                                   join inside a refusal is still a successful
-//                                   join, and there is none to be had.
+//                                   reader reports bound, the aiming is the
+//                                   producer's
+//   emitGateZeroOutcome          -> asks the bound producer seam and reports its
+//                                   answer, which is a receipt and a digest when
+//                                   every derived row is there and a refusal
+//                                   naming the absent one when it is not. It
+//                                   still embeds no join of its own.
 //
 // NONE OF THE THREE READS ITS REQUEST. That is not laziness, it is the boundary:
 // if no field of the request can change the answer, then no caller can smuggle
 // authority in through one. `request_read: false` says so in every result.
 //
 // WHERE THE REAL DECISION LOGIC LIVES. The three deterministic clauses V5-A02's
-// checkable_done names are implemented, proved clause by clause, and kept
-// MODULE-PRIVATE to the public surface: they live in
-// gate-zero-classifiers.v5.testonly.js, which this file does not import, which
-// no production module imports, and which answers only in the conditional
-// (`would_satisfy_if_authoritative`, `would_be_green_if_authoritative`,
-// `would_join_exactly_if_authoritative`). gate-zero-assurance.v5.test.mjs proves
-// the isolation with a parser-backed import scan of every module in
-// mcp-server/src, and proves this surface with a sweep over every
-// caller-controlled shape — including the reviewer's one-gate construction.
+// checkable_done names are implemented in PRODUCTION, in
+// gate-zero-producer.v5.js, module-private to it, applied to readings taken by
+// ruled readers from ruled stores. They answer held, failed or unknown about a
+// row — no clause on this side of the line is written in the conditional, in any
+// spelling, and the producer's own suite asserts that.
+//
+// A test-side helper still evaluates the same clause shapes over a CALLER'S
+// object, and it has to answer conditionally because a caller's object is not
+// evidence. It lives in test/, this file does not import it, and no production
+// module does; gate-zero-assurance.v5.test.mjs proves the isolation with a
+// parser-backed import scan of every module in mcp-server/src, and proves this
+// surface with a sweep over every caller-controlled shape — including the
+// reviewer's one-gate construction.
 //
 // THE FOUR PREDECESSORS ARE NOT THIS FILE'S CHOICE. They are the frozen plan's,
 // enforced today at tools/doctorcre-v5-review.cjs:1234-1244, which asserts that
@@ -117,6 +125,7 @@
 // knowledge of their text and derives no behaviour from a guess at it.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
+import { closedCallable } from "./closed-callable.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { GATE_ZERO_STEP_REF } from "./benchmark-minimum.v5.js";
@@ -141,16 +150,19 @@ import {
   readSchedulerCanaryEvidence,
 } from "./gate-zero-seam-readers.v5.js";
 import { ruledCardBinding } from "./internal/gate-zero-seam-binding.v5.js";
+import { v5A02GateZeroEmitOutcome } from "./gate-zero-producer.v5.js";
 
 export { GATE_ZERO_STEP_REF, V5_NO_EFFECTS };
 
 export const V5_A02_GATE_ZERO_SCHEMA_VERSION = "doctorcre-v5-a02-gate-zero-assurance.v1";
 
 /**
- * 2, not 1: version 1 answered from caller-supplied observations. This version
- * answers `unavailable` and names what it is owed.
+ * 3, not 2. Version 1 answered from caller-supplied observations. Version 2
+ * answered `unavailable` and named what it was owed. This version can answer:
+ * the producer seam is built, so the surface's verdict is now derived from what
+ * three ruled readers returned about named rows rather than fixed at refuse.
  */
-export const V5_A02_POLICY_VERSION = 2;
+export const V5_A02_POLICY_VERSION = 3;
 
 /** The four decisions the catalog maps to V5-A02. Carried, not interpreted. */
 export const V5_A02_DECISION_IDS = deepFreeze(["Q017.D1", "Q036.D1", "Q067.D1", "Q086.D1"]);
@@ -171,35 +183,16 @@ function fail(code, message, detail) {
   throw new V5BoundaryError(code, message, detail);
 }
 
-/**
- * AMENDMENT 2's CLOSED SHAPE FOR AN EXPORTED CALLABLE, and every export of this
- * module wears it. It is the same helper gate-zero-seam-readers.v5.js uses, for
- * the same two reasons.
- *
- * (a) NOT CONSTRUCTABLE, AND WITHOUT QUOTING THIS FILE. A bound function is not
- * a constructor and carries no `prototype`, so `new` and `Reflect.construct` are
- * refused by the ENGINE before a line here runs; binding also means the engine's
- * refusal names `function () { [native code] }` rather than reciting this
- * module's own source text back to whoever probed it. Binding is neutral for an
- * arrow, so no behaviour moves.
- *
- * (b) `instanceof` ANSWERS FALSE WITHOUT TOUCHING THE OPERAND. Without an own
- * `Symbol.hasInstance` the intrinsic one walks the LEFT operand's prototype
- * chain, which runs the CALLER's `getPrototypeOf` trap and can hand the caller's
- * own thrown text back out of an exported callable. These exports have no
- * membership question to answer: they are functions, and nothing is an instance
- * of one. The guard is an arrow that ignores its argument, installed as a
- * NON-WRITABLE, NON-CONFIGURABLE DATA property, on a FROZEN callable — so it
- * cannot be replaced, cannot be redefined as an accessor, and no property of the
- * export can be written over afterwards.
- */
-function closedCallable(callable) {
-  const closed = callable.bind(null);
-  Object.defineProperty(closed, Symbol.hasInstance, {
-    value: () => false, writable: false, enumerable: false, configurable: false,
-  });
-  return Object.freeze(closed);
-}
+// AMENDMENT 2'S CLOSED SHAPE COMES FROM closed-callable.js (amendment 9, fifth
+// correction round, 2026-09-14). This file used to define its own copy, on the
+// argument that a self-contained module is worth a duplicated primitive. The
+// review measured that argument against the copies and it failed: the local
+// copies had already DIVERGED from the shared one — they never froze the
+// callable, which is clause (c), the clause the first shape enumeration added
+// after finding it missing — so the file whose whole job is to close a probe was
+// running the unhardened version of the shape. A security primitive that exists
+// five times is hardened in one of five places. There is one definition now, and
+// the enumeration control walks every export against it.
 
 // ---------------------------------------------------------------------------
 // The frozen plan's four bound predecessors, and the scheduler among them.
@@ -259,6 +252,28 @@ export const V5_A02_GATE_CONCLUSIONS = deepFreeze([
  */
 export const V5_A02_GATE_ZERO_REASON_IDS = deepFreeze([
   "duplicate_predecessor_observation",
+  // THE PRODUCER'S NINE, registered HERE because this surface builds the answer
+  // around them and `reason()` refuses an id it does not know. The producer
+  // module carries the same closed list, and the test asserts the two are
+  // identical — so a refusal it can reach is a refusal this gate can express.
+  //
+  // NINE RATHER THAN SEVEN SINCE 2026-09-12: the producer's absence reasons were
+  // split so that an unreadable candidate repository, a missing sealed file and
+  // a genuinely absent ruled row stop sharing one id. See the producer's own
+  // registry for what each one means.
+  "gate_zero_candidate_metadata_absent",
+  "gate_zero_evidence_unavailable",
+  // THE GATE'S OWN, for the two SYNCHRONOUS reads once the producer exists:
+  // a join is something the emission produces from rows, not something a
+  // query of this surface can return.
+  "gate_zero_join_is_produced_not_queried",
+  "gate_zero_gate_graph_clause_failed",
+  "gate_zero_negative_admission_unproved",
+  "gate_zero_predecessor_clause_failed",
+  "gate_zero_producer_identity_refused",
+  "gate_zero_run_binding_unnamed",
+  "gate_zero_scheduler_clause_failed",
+  "gate_zero_sealed_artifact_absent",
   "duplicate_predecessor_outcome",
   "gate_conclusion_reader_unavailable",
   "gate_dependency_unknown",
@@ -357,15 +372,13 @@ export const V5_A02_GATE_ZERO_OWED_SEAMS = deepFreeze([
  * controls, and no environment variable that binds a seam: the binding
  * condition is a decision id committed to a file, which is what a ruling is.
  *
- * AND THE PRODUCER SEAM IS STILL NULL — the one that decides everything below.
- * Cards 9 and 10 are both answered: the oracle seat is staffed and r7 carries
- * the registration. Neither of them builds a producer. So `passable` is still
- * false, `producer_bound` is still false, and the join is still unavailable —
- * now for the reason that is actually true. These readers answer truthfully
- * about whatever row they are pointed at, and NOTHING IN THIS REPOSITORY
- * IMPLEMENTS THE POINTING: which canary row, which accepted outcome, which
- * commit and which check a Gate Zero run stands on are the producer's bindings,
- * and no code writes them down.
+ * AND THE PRODUCER SEAM IS BOUND (PR 1013). gate-zero-producer.v5.js implements
+ * the pointing these readers were built for: it derives the head revision, the
+ * scheduler service and the acceptance receipts from the candidate tree and the
+ * ruled stores, aims all three readers at them, and signs the result with the
+ * identity of the authenticated call it is running inside. `producer_bound` is
+ * derived from card 9's seat exactly as before, so an unstaffed seat still
+ * closes this seam and takes `passable` down with it.
  *
  * `holder` IS A THUNK, NOT A VALUE, and that is load-order and not style.
  * gate-zero-seam-readers.v5.js imports this module for its unruled answer, so
@@ -375,21 +388,34 @@ export const V5_A02_GATE_ZERO_OWED_SEAMS = deepFreeze([
  * on the import order that starts at the readers.
  */
 const V5_A02_GATE_ZERO_SEAM_BINDINGS = Object.freeze({
-  // Cards 9 and 10. No card token and no holder: nothing can rule this one open.
-  [V5_A02_GATE_ZERO_PRODUCER_SEAM]: null,
+  // CARD 9, AND IT IS BOUND AS OF THIS SLICE. The producer seam's authority is
+  // not a store ruling — there is no store to name — so its `ruled` thunk asks
+  // the one authority it does have: card 9's seat declaration, read off the
+  // registration's own derived field. Put `holder_ref: null` back on that
+  // declaration and this seam closes exactly the way a card with a `null`
+  // decision id closes, with nothing else touched.
+  [V5_A02_GATE_ZERO_PRODUCER_SEAM]: Object.freeze({
+    card_ref: "card:9",
+    method: "emitOutcome",
+    ruled: () => V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound === true,
+    holder: () => Object.freeze({ emitOutcome: v5A02GateZeroEmitOutcome }),
+  }),
   [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM]: Object.freeze({
     card_ref: "card:11",
     method: "readOutcome",
+    ruled: () => ruledCardBinding("card:11") !== null,
     holder: () => Object.freeze({ readOutcome: readPredecessorOutcomeEvidence }),
   }),
   [V5_A02_SCHEDULER_READER_SEAM]: Object.freeze({
     card_ref: "card:12",
     method: "readCanary",
+    ruled: () => ruledCardBinding("card:12") !== null,
     holder: () => Object.freeze({ readCanary: readSchedulerCanaryEvidence }),
   }),
   [V5_A02_GATE_CONCLUSION_READER_SEAM]: Object.freeze({
     card_ref: "card:13",
     method: "readConclusion",
+    ruled: () => ruledCardBinding("card:13") !== null,
     holder: () => Object.freeze({ readConclusion: readGateConclusionEvidence }),
   }),
 });
@@ -415,7 +441,17 @@ const V5_A02_GATE_ZERO_SEAM_BINDINGS = Object.freeze({
 function boundSeam(seam, method) {
   const binding = V5_A02_GATE_ZERO_SEAM_BINDINGS[seam];
   if (!isPlainObject(binding) || binding.method !== method) return null;
-  if (ruledCardBinding(binding.card_ref) === null) return null;
+  // EACH SEAM ASKS THE AUTHORITY THAT OWNS IT, and no seam gets to answer its
+  // own question. Cards 11, 12 and 13 ask the shared ruling predicate, which is
+  // also the predicate their readers ask. Card 9 asks the seat declaration,
+  // which is the registration's own derived field. A thunk that throws is a no.
+  let ruled;
+  try {
+    ruled = binding.ruled();
+  } catch {
+    return null;
+  }
+  if (ruled !== true) return null;
   let holder;
   try {
     holder = binding.holder();
@@ -536,21 +572,44 @@ const PRODUCER_SEAT_UNSTAFFED = "evidence_seams_bound_producer_unstaffed";
  */
 const PRODUCER_SEAM_UNBUILT = "evidence_seams_bound_producer_seam_unbuilt";
 
+/**
+ * THE THIRD STATE, AND IT IS THIS SLICE. The seam is built: a module-private
+ * producer stands behind it, and the gate's verdict is derived from what it
+ * returns rather than fixed at refuse. Two facts became three, so the token did
+ * too — and it stays opaque for the PR 1004 reason: a branch-owned value
+ * carrying a word of the closed union is a word a consumer can pattern-match,
+ * whatever it was meant to say.
+ */
+const PRODUCER_SEAM_BUILT = "evidence_seams_bound_producer_seam_built";
+
 /** Whether card 9's seat has a holder. Read off the registration, never typed twice. */
 const oracleSeatBound = () => V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound === true;
 
-/** Which of the two producer facts decided a refusal that got past the readers. */
-const producerDecidedBy = () => (oracleSeatBound() ? PRODUCER_SEAM_UNBUILT : PRODUCER_SEAT_UNSTAFFED);
+/** Whether anything actually implements the producer behind the seam. Derived. */
+const producerSeamBound = () => boundSeam(V5_A02_GATE_ZERO_PRODUCER_SEAM, "emitOutcome") !== null;
+
+/** Which of the three producer facts decided an answer that got past the readers. */
+const producerDecidedBy = () => (producerSeamBound()
+  ? PRODUCER_SEAM_BUILT
+  : (oracleSeatBound() ? PRODUCER_SEAM_UNBUILT : PRODUCER_SEAT_UNSTAFFED));
 
 /**
- * The clause that says why nothing may aim the bound readers at particular rows,
- * over the thing that would be named. It blames the empty seat while the seat is
- * empty and the unbuilt seam once it is not, so the sentence a consumer reads is
- * the one that is true at the time it reads it.
+ * The clause that says why THIS SYNCHRONOUS QUERY cannot aim the bound readers
+ * at particular rows, over the thing that would be named. It blames the empty
+ * seat while the seat is empty, the unbuilt seam once it is not, and — once the
+ * seam is built — the thing that is then actually true: aiming the readers is
+ * what the EMISSION does, and a read-only query of this surface is not it.
  */
-const noProducerBecause = (wouldName) => (oracleSeatBound()
-  ? `the producer seam that would name ${wouldName} is unbuilt`
-  : `no seat holds the producer that would name ${wouldName}`);
+const noProducerBecause = (wouldName) => (producerSeamBound()
+  ? `the producer seam that names ${wouldName} is bound, and a query of this surface does not aim it`
+  : (oracleSeatBound()
+    ? `the producer seam that would name ${wouldName} is unbuilt`
+    : `no seat holds the producer that would name ${wouldName}`));
+
+/** The reason those two reads refuse, which moves when the seam is built. */
+const noProducerReason = () => (producerSeamBound()
+  ? "gate_zero_join_is_produced_not_queried"
+  : "gate_zero_producer_seam_unavailable");
 
 // ---------------------------------------------------------------------------
 // checkable_done 1 — "WR prerequisites and scheduler canary/readback join
@@ -625,7 +684,7 @@ export const readGateZeroPredecessorJoin = closedCallable(() => {
   // this answer stands on rather than the join being reported as available.
   return unavailable(
     "gate_zero_predecessor_join",
-    "gate_zero_producer_seam_unavailable",
+    noProducerReason(),
     `the ruled evidence seams for the four predecessors and for the scheduler canary are bound, and ${noProducerBecause("which accepted outcome and which canary row a Gate Zero run stands on")}`,
     [...seams, V5_A02_GATE_ZERO_PRODUCER_SEAM],
     stood,
@@ -666,7 +725,7 @@ export const readGateGraphAssurance = closedCallable(() => {
   // to report on.
   return unavailable(
     "gate_graph_assurance",
-    "gate_zero_producer_seam_unavailable",
+    noProducerReason(),
     `the ruled evidence seam for gate conclusions is bound, and ${noProducerBecause("which head revision and which declared check a Gate Zero run stands on")}`,
     [V5_A02_GATE_CONCLUSION_READER_SEAM, V5_A02_GATE_ZERO_PRODUCER_SEAM],
     stood,
@@ -699,11 +758,40 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
   // arrow has no `arguments` object — and amendment 2 clause (a) requires an
   // arrow or a bound function. The request itself is as unread as it ever was:
   // `received` is measured and never looked into.
+  //
+  // AND IT IS STILL A SYNCHRONOUS THROW. This function now returns a PROMISE,
+  // because the producer behind the seam reads rows out of three ruled stores
+  // and a reading takes time — but "you handed me a producer" is a contract
+  // violation, not a policy question, so it is refused before anything is
+  // awaited and in the caller's own frame.
   if (received.length > 1)
     fail("gate_zero_producer_is_not_an_argument",
       "emitGateZeroOutcome takes one request; the producer is bound by this module",
       { arguments_received: received.length, required_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM });
 
+  const producer = boundSeam(V5_A02_GATE_ZERO_PRODUCER_SEAM, "emitOutcome");
+  if (producer === null) return Promise.resolve(emission(null));
+  // FAIL-CLOSED ON THE PRODUCER TOO. A producer that throws, or that answers
+  // with anything but its own closed shape, is a producer that did not produce:
+  // the answer is the same refusal an unbound seam gives, with the seam still
+  // reported bound, because pretending a thrown value was a pass is the one
+  // thing this surface exists to refuse.
+  let produced;
+  try {
+    produced = producer.emitOutcome();
+  } catch {
+    return Promise.resolve(emission(null));
+  }
+  return Promise.resolve(produced).then(answer => emission(answer), () => emission(null));
+});
+
+/**
+ * ONE BUILDER FOR BOTH ANSWERS, so the refusal and the pass cannot drift into
+ * two descriptions of one surface. `produced` is null when nothing stands behind
+ * the seam — which is byte-for-byte the answer this surface gave before the
+ * producer existed — and is the producer's own closed answer otherwise.
+ */
+function emission(produced) {
   const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
   // THE THREE CARDS, ASKED SEPARATELY. `owed` is the ones with no bound holder,
   // in card order, and every sentence and list below reads it rather than a
@@ -712,137 +800,238 @@ export const emitGateZeroOutcome = closedCallable((...received) => {
   // governance question alone.
   const owed = withdrawn();
   const readersBound = owed.length === 0;
+  const bound = producerSeamBound();
+  // WHAT THE PRODUCER SAID, read defensively: a value that is not its closed
+  // shape is not a reading, and the surface answers as though nothing stood
+  // behind the seam rather than reporting over whatever arrived.
+  const reported = isPlainObject(produced) && typeof produced.decision === "string"
+    ? produced : null;
+  // AN OUTCOME WAS PRODUCED, WHICH IS NOT THE SAME AS A PASS. A run that read
+  // all three seams and found a failed gate produced a real outcome with a real
+  // digest and a real instant, and its receipt says `status: "fail"`. Both facts
+  // are reported, separately, because a consumer needs the digest either way and
+  // must never read the first as the second.
+  const outcomeProduced = reported !== null && reported.decision === "report"
+    && reported.status === "outcome_produced"
+    && typeof reported.outcome_digest === "string" && typeof reported.observed_at === "string"
+    && isPlainObject(reported.receipt);
+  const passes = outcomeProduced && reported.receipt.status === "pass";
+
+  const body = {
+    decision_ids: [...V5_A02_DECISION_IDS],
+    // DERIVED, and this is what card 9's slice could not do. It is not derived
+    // from a join, not from the request, not by any caller, and not from the
+    // registration either — a ruled role is not a signature. It is derived from
+    // one thing: whether the bound producer returned an outcome over rows three
+    // ruled readers took from three ruled stores.
+    passable: passes,
+    not_passable_because: passes ? null : notPassableBecause(owed, readersBound, bound, reported),
+    producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
+    // EACH CARD, ON ITS OWN LINE. `seams_bound` above carries all four seams
+    // with their live state; these three say the same thing under the names
+    // the two reader answers already use, so a consumer reading only this
+    // answer can still tell WHICH of the three is missing.
+    predecessor_outcome_reader_bound: !owed.includes("predecessor"),
+    scheduler_reader_bound: !owed.includes("scheduler"),
+    gate_conclusion_reader_bound: !owed.includes("conclusion"),
+    producer_bound: bound,
+    producer_is_caller_supplied: false,
+    // What decision 20c83902 ruled and the 2026-09-12 amendment then wrote
+    // into r7 itself. `producer_registration.r7_packet_sha256` is the digest
+    // this repository pins; `r7_entry_witness` is NULL because only the
+    // packet's bytes decide and they are not here; and the four fields the
+    // ruling could not settle are answered in `resolved_from_r7`.
+    producer_role: entry.producer_role,
+    oracle_ref: entry.oracle_ref,
+    output_schema_ref: entry.output_schema_ref,
+    evidence_scope: entry.evidence_scope,
+    produced_gate_id: entry.produces_gate_ids[0],
+    producer_registration: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+    producer_registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
+    producer_registration_decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
+    // NULL, and null is not a soft false: the packet's bytes are not in this
+    // repository, so this surface may assert neither that the amendment landed
+    // nor that it did not. `r7_entry_witness_decided_by` names the only thing
+    // that decides it, and it takes bytes.
+    r7_entry_witness: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
+    r7_entry_witness_decided_by: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
+    // Cards 9 and 10, reported as ruled. The charter is named by decision
+    // 8a1dad08 and the desk behind it by the staffing ruling beside it; the
+    // r7 amendment is ruled by decision 311a9af5 and was applied to the packet
+    // on 2026-09-12 — which is why the field beside it is a witness over bytes
+    // rather than a flag anybody here can set.
+    //
+    // EVERY ONE OF THESE IS READ OFF THE REGISTRATION, including the boolean:
+    // a second derivation of "is the seat staffed" in this file would be a
+    // second authority over card 9, which is the defect the shared ruling
+    // predicate was extracted to stop.
+    oracle_seat_bound: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound,
+    oracle_seat_holder_ref: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_holder_ref,
+    oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
+    oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
+    oracle_seat_staffing_decision_ref:
+      V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_staffing_decision_ref,
+    r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
+    // The outcome fields a consumer would need, and they are the producer's or
+    // they are null. Nothing here computes a digest or stamps an instant: a
+    // surface that minted either would be the producer wearing the gate's name.
+    outcome_digest: outcomeProduced ? reported.outcome_digest : null,
+    observed_at: outcomeProduced ? reported.observed_at : null,
+    // AND the join fields. The producer's clause results ARE the join — the
+    // three checkable_done clauses applied to rows — so a pass carries them and
+    // a refusal carries null, which is the truth in both directions.
+    join: outcomeProduced ? reported.clauses : null,
+    join_unavailable_because: outcomeProduced ? null : joinUnavailableBecause(owed),
+    predecessor_evidence_read: null,
+    // WHAT THE PRODUCER ANSWERED, carried whole so a consumer can see WHICH
+    // clause or WHICH missing row decided a refusal rather than only that one
+    // did. Null while nothing stands behind the seam.
+    producer_answer: reported,
+    // WHAT IS STILL UNDECIDED, and as this module ships the answer is NOTHING:
+    // the list is EMPTY, and it is empty by derivation rather than by anyone
+    // having trimmed it.
+    // The three reader questions left on 2026-09-11, when Joe ruled cards 11,
+    // 12 and 13 and the readers those rulings switched on became bound above.
+    // Each is listed again the moment its own ruling line goes back to null,
+    // ONE ENTRY PER WITHDRAWN CARD in card order — so withdrawing card 12
+    // reopens the scheduler question and not the other two, which is the defect
+    // this list carried until the 2026-09-12 review.
+    // CARD 9'S QUESTION IS DERIVED FROM THE SEAT, not carried as a literal: it
+    // was listed while nobody held the oracle, it is gone now that the Codex
+    // reviewer lane holds it, and it comes back the moment the declaration goes
+    // back to unstaffed. Card 10's left on 2026-09-12 with the amendment.
+    // AN EMPTY LIST IS NOT AN ALLOW. Every governance question being answered
+    // is exactly why the refusal beside it names a MISSING ROW and nothing else
+    // — there is no question left to hide behind, and no seam either.
+    undecided_governance_questions: deepFreeze([
+      ...(oracleSeatBound()
+        ? [] : ["which independent seat holds oracle:gate-producer:gate-zero-read-only"]),
+      ...owed.map(key => V5_A02_GATE_ZERO_READER_QUESTIONS[key]),
+    ]),
+  };
+
+  if (outcomeProduced) return produced2Answer(body, reported, passes);
   return unavailable(
     "gate_zero_outcome_emission",
-    "gate_zero_producer_seam_unavailable",
-    readersBound
-      ? (oracleSeatBound()
-        ? "the three ruled evidence seams are bound and the registered producer role is held by a staffed seat, and the producer seam that seat would work through is unbuilt"
-        : "the three ruled evidence seams are bound, and the registered producer role is held by a charter that no seat staffs")
-      : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
-        ? (oracleSeatBound()
-          ? "the producer seam is unbuilt and no evidence seam is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
-          : "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome")
-        : (oracleSeatBound()
-          ? "not every ruled evidence seam is bound, and the producer seam the staffed seat would work through is unbuilt"
-          : "not every ruled evidence seam is bound, and the registered producer role is held by a charter that no seat staffs"),
+    reported === null ? "gate_zero_producer_seam_unavailable" : reported.reason_id,
+    reported === null ? unavailableBecause(owed, readersBound) : reported.unavailable_because,
     [...V5_A02_GATE_ZERO_OWED_SEAMS],
-    {
-      decision_ids: [...V5_A02_DECISION_IDS],
-      // FIXED. Not derived from a join, not derived from the request, not
-      // derivable by any caller, and NOT derived from the registration either:
-      // a ruled role is not a signature. Binding three readers does not move it
-      // one step: a reading is evidence, and this field is a signature.
-      passable: false,
-      // THE SEAT MOVED AND `passable` DID NOT, which is the whole of card 9 and
-      // is why this sentence is derived rather than reworded. A staffed seat is
-      // an answer to WHO; the producer seam is the answer to WHAT SIGNS, and it
-      // is still empty.
-      not_passable_because: readersBound
-        ? (oracleSeatBound()
-          ? "the producer seam is unbuilt, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on, whoever holds the seat"
-          : "the registered producer role is unstaffed, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on")
-        : owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length
-          ? (oracleSeatBound()
-            ? "the producer seam is unbuilt, and no predecessor, scheduler or gate-conclusion evidence seam is bound to this surface"
-            : "the registered producer role is unstaffed, and no predecessor, scheduler or gate-conclusion reader is bound to this surface")
-          : (oracleSeatBound()
-            ? "the producer seam is unbuilt, and not every ruled evidence seam is bound"
-            : "the registered producer role is unstaffed, and not every ruled evidence seam is bound"),
-      producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
-      // EACH CARD, ON ITS OWN LINE. `seams_bound` above carries all four seams
-      // with their live state; these three say the same thing under the names
-      // the two reader answers already use, so a consumer reading only this
-      // answer can still tell WHICH of the three is missing.
-      predecessor_outcome_reader_bound: !owed.includes("predecessor"),
-      scheduler_reader_bound: !owed.includes("scheduler"),
-      gate_conclusion_reader_bound: !owed.includes("conclusion"),
-      producer_bound: boundSeam(V5_A02_GATE_ZERO_PRODUCER_SEAM, "emitOutcome") !== null,
-      producer_is_caller_supplied: false,
-      // What decision 20c83902 ruled and the 2026-09-12 amendment then wrote
-      // into r7 itself. `producer_registration.r7_packet_sha256` is the digest
-      // this repository pins; `r7_entry_witness` is NULL because only the
-      // packet's bytes decide and they are not here; and the four fields the
-      // ruling could not settle are answered in `resolved_from_r7`.
-      producer_role: entry.producer_role,
-      oracle_ref: entry.oracle_ref,
-      output_schema_ref: entry.output_schema_ref,
-      evidence_scope: entry.evidence_scope,
-      produced_gate_id: entry.produces_gate_ids[0],
-      producer_registration: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
-      producer_registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
-      producer_registration_decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
-      // NULL, and null is not a soft false: the packet's bytes are not in this
-      // repository, so this surface may assert neither that the amendment landed
-      // nor that it did not. `r7_entry_witness_decided_by` names the only thing
-      // that decides it, and it takes bytes.
-      r7_entry_witness: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS,
-      r7_entry_witness_decided_by: V5_A02_GATE_ZERO_R7_ENTRY_WITNESS_DECIDED_BY,
-      // Cards 9 and 10, reported as ruled. The charter is named by decision
-      // 8a1dad08 and the desk behind it by the staffing ruling beside it; the
-      // r7 amendment is ruled by decision 311a9af5 and was applied to the packet
-      // on 2026-09-12 — which is why the field beside it is a witness over bytes
-      // rather than a flag anybody here can set.
-      //
-      // EVERY ONE OF THESE IS READ OFF THE REGISTRATION, including the boolean:
-      // a second derivation of "is the seat staffed" in this file would be a
-      // second authority over card 9, which is the defect the shared ruling
-      // predicate was extracted to stop.
-      oracle_seat_bound: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_bound,
-      oracle_seat_holder_ref: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_holder_ref,
-      oracle_seat_charter_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_CHARTER_REF,
-      oracle_seat_charter_decision_ref: V5_A02_GATE_ZERO_ORACLE_SEAT_DECISION_REF,
-      oracle_seat_staffing_decision_ref:
-        V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_staffing_decision_ref,
-      r7_amendment_decision_ref: V5_A02_GATE_ZERO_R7_AMENDMENT_DECISION_REF,
-      // The outcome fields a consumer would need. Null because no run has
-      // happened and no producer exists that could have run one.
-      outcome_digest: null,
-      observed_at: null,
-      // AND the join fields. Null because there is no join to report, not
-      // because this one happened to fail.
-      join: null,
-      // AND THE REASON THERE IS NO JOIN, PER CARD. The 2026-09-12 review found
-      // this sentence claiming no predecessor or scheduler reader existed while
-      // both were bound; it now says which of the two is missing, and says
-      // neither is when neither is.
-      join_unavailable_because: owed.includes("predecessor") && owed.includes("scheduler")
-        ? "no authoritative predecessor-outcome or scheduler reader exists to join"
-        : owed.includes("predecessor")
-          ? "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against"
-          : owed.includes("scheduler")
-            ? "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against"
-            : `the two ruled evidence seams are bound and ${noProducerBecause("the rows to join")}`,
-      predecessor_evidence_read: null,
-      // WHAT IS STILL UNDECIDED, and as this module ships the answer is NOTHING:
-      // the list is EMPTY, and it is empty by derivation rather than by anyone
-      // having trimmed it.
-      // The three reader questions left on 2026-09-11, when Joe ruled cards 11,
-      // 12 and 13 and the readers those rulings switched on became bound above.
-      // Each is listed again the moment its own ruling line goes back to null,
-      // ONE ENTRY PER WITHDRAWN CARD in card order — so withdrawing card 12
-      // reopens the scheduler question and not the other two, which is the defect
-      // this list carried until the 2026-09-12 review.
-      // CARD 9'S QUESTION IS DERIVED FROM THE SEAT, not carried as a literal: it
-      // was listed while nobody held the oracle, it is gone now that the Codex
-      // reviewer lane holds it, and it comes back the moment the declaration goes
-      // back to unstaffed. Card 10's left on 2026-09-12 with the amendment.
-      // AN EMPTY LIST IS NOT AN ALLOW. Every governance question being answered
-      // is exactly why the refusal beside it names the unbuilt producer seam and
-      // nothing else — there is no question left to hide behind.
-      undecided_governance_questions: deepFreeze([
-        ...(oracleSeatBound()
-          ? [] : ["which independent seat holds oracle:gate-producer:gate-zero-read-only"]),
-        ...owed.map(key => V5_A02_GATE_ZERO_READER_QUESTIONS[key]),
-      ]),
-    },
+    body,
     // WHO DECIDED THIS REFUSAL. While no reader is bound it is decided by there
-    // being nothing authoritative to read; once the three ruled readers are bound
-    // it is decided by the producer — the unbuilt seam while the seat is staffed,
-    // which is what this module ships, and the empty seat while it is not. Two
-    // facts, two words, and `producerDecidedBy` picks between them.
+    // being nothing authoritative to read; once the three ruled readers are
+    // bound it is decided by the producer fact that is true at the time — an
+    // unstaffed seat, an unbuilt seam, or a built one whose rows did not hold.
     readersBound ? producerDecidedBy() : "no_authoritative_reader");
-});
+}
+
+/**
+ * THE SENTENCES FOR AN UNBOUND PRODUCER SEAM, and this function is reached only
+ * while the seam is unbound — which, since the seam's binding condition IS card
+ * 9's declaration, means one of exactly two things.
+ *
+ * THE ORDINARY ONE is an unstaffed seat, and those sentences are main's own,
+ * word for word: putting `holder_ref` back to null returns this surface to
+ * exactly what it said before this slice.
+ *
+ * THE OTHER IS FAIL-CLOSED RATHER THAN EXPECTED. `boundSeam` also answers null
+ * when the holder thunk throws or hands back something without the method, so a
+ * staffed seat with no resolvable holder lands here too. It is not "the seam is
+ * unbuilt" any more — the module is right there — so that branch says what is
+ * actually true instead of repeating a sentence this slice made false.
+ */
+function unavailableBecause(owed, readersBound) {
+  if (readersBound)
+    return oracleSeatBound()
+      ? "the three ruled evidence seams are bound and the registered producer role is held by a staffed seat, and the producer behind that seam did not resolve"
+      : "the three ruled evidence seams are bound, and the registered producer role is held by a charter that no seat staffs";
+  if (owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length)
+    return oracleSeatBound()
+      ? "the producer behind the seam did not resolve and no evidence seam is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome"
+      : "no seat holds the oracle and no evidence reader is bound to this surface, so nothing here can produce or stand behind a Gate Zero outcome";
+  return oracleSeatBound()
+    ? "not every ruled evidence seam is bound, and the producer behind the seam the staffed seat works through did not resolve"
+    : "not every ruled evidence seam is bound, and the registered producer role is held by a charter that no seat staffs";
+}
+
+/**
+ * WHY THIS ANSWER IS NOT A SIGNATURE. Derived in all four states, so the
+ * sentence a consumer reads is the one that is true when it reads it: an
+ * unstaffed seat, an unbuilt seam, a withdrawn reader, or — now that the seam is
+ * built — a producer that refused over the rows it was aimed at.
+ */
+function notPassableBecause(owed, readersBound, bound, reported) {
+  if (bound && reported !== null)
+    return "the bound producer refused over the rows the three ruled evidence seams returned, so there is nothing to sign";
+  if (bound)
+    return "the bound producer did not answer in its own closed shape, so nothing it returned may be read as an outcome";
+  if (readersBound)
+    return oracleSeatBound()
+      ? "the producer behind the seam did not resolve, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on, whoever holds the seat"
+      : "the registered producer role is unstaffed, so nothing may aim the three bound evidence seams at the rows a Gate Zero run would stand on";
+  if (owed.length === V5_A02_GATE_ZERO_READER_SEAM_KEYS.length)
+    return oracleSeatBound()
+      ? "the producer behind the seam did not resolve, and no predecessor, scheduler or gate-conclusion evidence seam is bound to this surface"
+      : "the registered producer role is unstaffed, and no predecessor, scheduler or gate-conclusion reader is bound to this surface";
+  return oracleSeatBound()
+    ? "the producer behind the seam did not resolve, and not every ruled evidence seam is bound"
+    : "the registered producer role is unstaffed, and not every ruled evidence seam is bound";
+}
+
+/**
+ * THE REASON THERE IS NO JOIN, PER CARD. The 2026-09-12 review found this
+ * sentence claiming no predecessor or scheduler reader existed while both were
+ * bound; it now says which of the two is missing, and says neither is when
+ * neither is.
+ */
+function joinUnavailableBecause(owed) {
+  if (owed.includes("predecessor") && owed.includes("scheduler"))
+    return "no authoritative predecessor-outcome or scheduler reader exists to join";
+  if (owed.includes("predecessor"))
+    return "no authoritative accepted-outcome seam is bound, so there is nothing for a scheduler canary to join against";
+  if (owed.includes("scheduler"))
+    return "the ruled accepted-outcome seam is bound and no authoritative scheduler surface is bound, so there is nothing to join it against";
+  return `the two ruled evidence seams are bound and ${noProducerBecause("the rows to join")}`;
+}
+
+/**
+ * THE ONE ANSWER ON THIS SURFACE THAT IS NOT A REFUSAL, and every field of it is
+ * the producer's or this module's own constant. `decision` is "report", never
+ * "allow": a Gate Zero outcome is a statement about rows, and what a consumer
+ * does with it is the consumer's gate to decide.
+ */
+function produced2Answer(body, reported, passes) {
+  const stands_on = [...V5_A02_GATE_ZERO_OWED_SEAMS].sort();
+  return deepFreeze({
+    schema_version: V5_A02_GATE_ZERO_SCHEMA_VERSION,
+    policy_version: V5_A02_POLICY_VERSION,
+    answer: "gate_zero_outcome_emission",
+    tenant: ORGANIZATION_TENANT_ID,
+    gate_zero_step_ref: GATE_ZERO_STEP_REF,
+    status: "outcome_produced",
+    decision: "report",
+    // NULL ON A PASS, AND THE CLAUSE'S OWN ID ON A FAIL. An outcome that says
+    // `fail` is still an outcome — it has a digest, an instant and twenty-one
+    // fields — and a consumer reading only this answer must be able to see WHY
+    // it is not a pass without opening the receipt.
+    reason_id: passes ? null : reported.reason_id,
+    unavailable_because: passes ? null : reported.unavailable_because,
+    receipt_status: reported.receipt.status,
+    owed_seams: stands_on.filter(seam => !seamBound(seam)),
+    seams_bound: seamsBound(stands_on),
+    request_read: false,
+    caller_evidence_admitted: false,
+    decided_by: producerDecidedBy(),
+    model_judgment_admitted: false,
+    effects: V5_NO_EFFECTS,
+    receipt: reported.receipt,
+    receipt_schema_ref: reported.receipt_schema_ref,
+    outcome_digest_recipe: reported.outcome_digest_recipe,
+    negative_admission: reported.negative_admission,
+    persisted: false,
+    durable_outcome_record_required: true,
+    ...body,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // The closed, versioned policy preimage and its digest.
@@ -869,13 +1058,23 @@ export const v5A02GateZeroPolicyPreimage = closedCallable(() => ({
     owed_seams: [...V5_A02_GATE_ZERO_OWED_SEAMS],
     producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
     producer_registration: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
-    producer_bound: false,
+    // DERIVED, not asserted — and this is the field this slice moved. A frozen
+    // `false` here was a statement about the repository, and the repository
+    // changed: something implements the producer now. It says false again the
+    // moment card 9's seat declaration or this module's binding does.
+    producer_bound: producerSeamBound(),
     // DERIVED, not asserted: three of the four seams have a ruled reader behind
     // them now, and this preimage would be lying if it still said false. It says
     // false again the moment a ruling line does.
     authoritative_readers_bound: allReaderSeamsBound(),
-    public_surface_answers: "unavailable",
-    gate_zero_passable: false,
+    // `public_surface_answers: "unavailable"` and `gate_zero_passable: false`
+    // are GONE rather than reworded. Both were frozen statements that the
+    // surface can never say yes, and the surface can now say yes — over rows,
+    // through a bound producer. A policy preimage that still carried them would
+    // be a sealed lie, and a derived version of either would put a per-run
+    // verdict inside a caller-independent identity. What is left says what is
+    // true of the POLICY: which seams exist, which are bound, and what the
+    // vocabulary is.
   }));
 
 export const v5A02GateZeroPolicyDigest =

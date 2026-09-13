@@ -6,7 +6,14 @@ import { codexContinuityTools } from "../src/codex-continuity.js";
 import { TOOLS } from "../src/tools.js";
 import { digest } from "../src/artifact-trust.js";
 import { splitReferenceManifest, storedJsonBytes } from "../continuity-reference-manifest.mjs";
-import { agentActorForToken, actorFromProps, continuityActorForTokenMaps } from "../src/identity.js";
+import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps } from "../src/identity.js";
+// `actorFromProps` is module-private under amendment 8 (PR 1013). The exported
+// grant door is `authenticatedIdentity.connectionForGrant`; called without the
+// server's witness it returns exactly the same actor, unbranded, which is what
+// every case in this file is about.
+const actorFromProps = (props, bindings = null) =>
+  authenticatedIdentity.connectionForGrant(props, bindings);
+
 
 class TestToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
