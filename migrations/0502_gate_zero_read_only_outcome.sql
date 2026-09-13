@@ -305,7 +305,7 @@ as $$
 declare
   v_actor uuid; v_slug text; v_seat text; v_id uuid;
   v_existing ops.gate_zero_read_only_outcome%rowtype;
-  v_digest text; v_field text; v_keys integer;
+  v_digest text; v_field text; v_keys integer; v_identity jsonb; v_identity_keys integer;
 begin
   if p_idempotency_key is null then
     raise exception 'recording a Gate Zero read-only outcome requires an idempotency key';
@@ -340,14 +340,43 @@ begin
     raise exception 'consumer-gate-receipt.v1 is a closed schema: the Gate Zero receipt carries % fields rather than 21', v_keys;
   end if;
 
-  -- THE THREE IDENTITIES. Each is an authenticated-receipt-identity.v1 with
-  -- actor_id, session_ref and authority_class.
+  -- THE THREE IDENTITIES, AND r7's SHAPE FOR THEM IS CLOSED TOO.
+  -- `authenticated-receipt-identity.v1` sets additional_properties false, names
+  -- exactly actor_id, session_ref and authority_class, and gives session_ref a
+  -- LOWERCASE pattern with a minimum length. All three clauses are checked here,
+  -- and all three are checked again in the gateway: a fourth key inside an
+  -- identity object would otherwise travel into the digest unread, which would
+  -- make the digest a statement about an open shape.
+  --
+  -- WHAT THIS COPY CANNOT CHECK, said plainly rather than implied: the record
+  -- layer does not know which correlation id the gateway derived for this call,
+  -- so "these identities are THIS call's" is the gateway's clause alone
+  -- (gate-zero-outcome-store.v5.js, against identity.js's authenticated call).
+  -- What is checkable here is the SHAPE, the seat and the self-review rule, and
+  -- those are checked here because a writer connection opened outside the
+  -- gateway reaches this function and not that one.
   foreach v_field in array array['subject_maker_identity', 'producer_identity', 'evaluator_identity'] loop
-    if jsonb_typeof(p_receipt -> v_field) <> 'object'
-       or coalesce(p_receipt -> v_field ->> 'actor_id', '') = ''
-       or coalesce(p_receipt -> v_field ->> 'session_ref', '') !~ '^session:'
-       or coalesce(p_receipt -> v_field ->> 'authority_class', '') = '' then
-      raise exception 'the Gate Zero receipt field % is not an authenticated-receipt-identity.v1', v_field;
+    v_identity := p_receipt -> v_field;
+    if jsonb_typeof(v_identity) <> 'object' then
+      raise exception 'the Gate Zero receipt field % is not an authenticated-receipt-identity.v1 object', v_field;
+    end if;
+    select count(*) into v_identity_keys from jsonb_object_keys(v_identity);
+    if v_identity_keys <> 3
+       or not (v_identity ? 'actor_id')
+       or not (v_identity ? 'session_ref')
+       or not (v_identity ? 'authority_class') then
+      raise exception 'authenticated-receipt-identity.v1 is a closed schema: the Gate Zero receipt field % carries % fields rather than exactly actor_id, session_ref and authority_class',
+        v_field, v_identity_keys;
+    end if;
+    if coalesce(v_identity ->> 'actor_id', '') = ''
+       or coalesce(v_identity ->> 'authority_class', '') = '' then
+      raise exception 'the Gate Zero receipt field % has an empty actor_id or authority_class', v_field;
+    end if;
+    -- r7's own pattern, character for character. Lowercase only, and at least
+    -- nine characters after `session:`.
+    if coalesce(v_identity ->> 'session_ref', '') !~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$' then
+      raise exception 'the Gate Zero receipt field % has a session_ref that is not r7''s authenticated-receipt-identity.v1 pattern: %',
+        v_field, coalesce(v_identity ->> 'session_ref', '');
     end if;
   end loop;
   if p_receipt -> 'producer_identity' ->> 'actor_id' <> v_slug
@@ -367,21 +396,30 @@ begin
     raise exception 'the Gate Zero receipt names one session as both subject maker and evaluator';
   end if;
 
-  -- IDEMPOTENT ON THE CANDIDATE, which is the retry rule the provisional ruling
-  -- states. A second run over the same candidate returns the row that exists;
-  -- a DIFFERENT receipt for that candidate is a conflict, not a silent replace,
-  -- because the table is append-only and the first digest may already be bound.
-  select * into v_existing from ops.gate_zero_read_only_outcome
-   where candidate_digest = p_receipt ->> 'candidate_digest';
-  if found then
-    v_digest := ops.gate_zero_outcome_digest(p_receipt);
-    if v_existing.outcome_digest <> v_digest then
-      raise exception 'a different Gate Zero outcome is already recorded for candidate %: recorded %, offered %',
-        v_existing.candidate_digest, v_existing.outcome_digest, v_digest;
-    end if;
-    return v_existing.id;
-  end if;
-
+  -- IDEMPOTENT ON THE CANDIDATE, ATOMICALLY, and the atomicity is the whole
+  -- point of the shape (2026-09-13, PR 1014 correction).
+  --
+  -- THE DEFECT THIS REPLACES. The first draft looked the candidate up, found
+  -- nothing, and then inserted. Two runs of the same candidate arriving at once
+  -- both missed the lookup, and the loser of the race got a bare
+  -- unique_violation on candidate_digest instead of the durable row -- a retry
+  -- policy that says "every run kept, a retry collapses onto the row that
+  -- exists" turning into an error whenever two writers actually retried at once.
+  --
+  -- THE SHAPE THAT CANNOT RACE. ONE statement does the insert with the candidate
+  -- key as its arbiter, so the conflict is resolved by the index rather than by
+  -- a window between two statements: a concurrent inserter BLOCKS on the
+  -- speculative insertion, and when the first committer commits the second takes
+  -- the DO NOTHING branch and reads the committed row in the fallback select --
+  -- which sees it, because each statement in READ COMMITTED takes a fresh
+  -- snapshot. If the first transaction rolls back instead, the second inserts.
+  -- Either way both callers receive the same durable row and neither receives an
+  -- error.
+  --
+  -- AND A DIFFERENT RECEIPT FOR A RECORDED CANDIDATE IS STILL A CONFLICT, not a
+  -- silent replace: the fallback select compares the recorded digest with the
+  -- one offered and raises when they differ. The table is append-only and the
+  -- first digest may already be bound by an acceptance.
   insert into ops.gate_zero_read_only_outcome (
     idempotency_key, step_ref, receipt_producer_step_ref, gate_id, receipt_schema,
     producer_role, independent_oracle_ref, oracle_version, evidence_scope,
@@ -415,13 +453,37 @@ begin
     p_receipt ->> 'comparator',
     (p_receipt ->> 'observed_at')::timestamptz,
     (p_receipt ->> 'ttl_expires_at')::timestamptz)
+  on conflict (candidate_digest) do nothing
   returning id into v_id;
-  return v_id;
+  if v_id is not null then
+    return v_id;
+  end if;
+
+  -- THE FALLBACK, reached only when the arbiter index already held this
+  -- candidate. It is a separate statement and therefore a fresh snapshot, which
+  -- is what lets it see a row a concurrent transaction committed while this
+  -- insert was blocked on it.
+  select * into v_existing from ops.gate_zero_read_only_outcome
+   where candidate_digest = p_receipt ->> 'candidate_digest';
+  if not found then
+    -- Neither inserted nor found: the only way here is the row having been
+    -- removed between the two statements, which the append-only triggers refuse.
+    -- It is reported rather than retried, because a writer that cannot explain
+    -- its own outcome must not invent one.
+    raise exception 'the Gate Zero outcome for candidate % was neither inserted nor found; the record layer is in a state this writer cannot account for',
+      p_receipt ->> 'candidate_digest';
+  end if;
+  v_digest := ops.gate_zero_outcome_digest(p_receipt);
+  if v_existing.outcome_digest <> v_digest then
+    raise exception 'a different Gate Zero outcome is already recorded for candidate %: recorded %, offered %',
+      v_existing.candidate_digest, v_existing.outcome_digest, v_digest;
+  end if;
+  return v_existing.id;
 end;
 $$;
 
 comment on function ops.gate_zero_record_read_only_outcome(uuid,jsonb) is
-  'The only way to record a Gate Zero read-only outcome. The producing seat, the actor and the outcome digest are all derived; the receipt and an idempotency key are the only parameters. Refuses every transaction except the staffed non-human oracle seat, refuses a receipt whose producer or evaluator is not that seat, refuses same-actor or same-session self-review, and is idempotent on the candidate digest.';
+  'The only way to record a Gate Zero read-only outcome. The producing seat, the actor and the outcome digest are all derived; the receipt and an idempotency key are the only parameters. Refuses every transaction except the staffed non-human oracle seat, refuses a receipt whose producer or evaluator is not that seat, refuses same-actor or same-session self-review, enforces authenticated-receipt-identity.v1''s closed three-field shape on each of the three identities, and is idempotent on the candidate digest ATOMICALLY -- one insert arbitrated by the candidate key, with a fallback select -- so two writers racing the same candidate both receive the same durable row rather than one of them receiving a unique_violation.';
 
 -- ---------------------------------------------------------------------------
 -- PREREQUISITE TWO, NOW BOUND. The Gate Zero reader benchmark acceptance calls.

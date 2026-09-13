@@ -15,9 +15,18 @@
 // evidence readers at rows, applies a `checkable_done` clause, or decides
 // whether Gate Zero passed. That is Step A
 // (`mcp-server/src/gate-zero-producer.v5.js`), which emits the receipt this file
-// records. A receipt arriving here has already been decided by whoever signed
-// it; this file's whole job is to refuse everyone who is not entitled to sign,
-// and to refuse a receipt whose shape does not match the one r7 registers.
+// records. This file's whole job is to refuse everyone who is not entitled to
+// sign, and to refuse a receipt whose shape does not match the one r7 registers.
+//
+// AND THE RECEIPT IS NOT A CALLER'S (2026-09-13, PR 1014 correction). The verb
+// takes ONE argument, `idempotency_key`, and gets the receipt by invoking the
+// bound producer seam: `emitGateZeroOutcome()` in gate-zero-assurance.v5.js,
+// which calls Step A's zero-argument producer and hands back what it emitted.
+// The first draft of this slice accepted a `receipt` object from the caller and
+// persisted it, which made the durable row a statement about whatever the caller
+// had assembled. There is now NO input that can carry one: a `receipt` argument
+// is refused by the verb's closed input schema as an unregistered field, before
+// this module is reached at all.
 //
 // THE NEW AUTHORITY SHAPE, AND THE RULING THAT CREATED IT. Every write verb in
 // this system before this one gated on a verified human partner (`humanOnly`)
@@ -50,9 +59,20 @@
 //   * The digest is recomputed by the database from the stored receipt, so this
 //     module never accepts one and never sends one.
 //   * `assertNoCallerAuthorityFields` already refuses `actor`, `identity`,
-//     `authorization_class` and their family at the choke point; the receipt's
-//     three identity objects are checked against the derived seat rather than
-//     believed, in this module AND again in SQL.
+//     `authorization_class` and their family at the choke point; and since there
+//     is no receipt argument left, there is nothing for a caller to put an
+//     identity inside either.
+//   * THE NESTED IDENTITIES COME FROM THE AUTHENTICATED CALL AND ARE CHECKED
+//     AGAINST IT. `producer_identity` and `evaluator_identity` must equal, field
+//     for field, the `authenticated-receipt-identity.v1` that identity.js
+//     derived for THIS call — the same value the producer read when it built the
+//     receipt. A receipt naming a foreign session is refused here even though
+//     its actor_id and authority_class are the seat's, which is the one mutation
+//     a same-seat-different-session forgery would otherwise pass.
+//   * THE IDENTITY OBJECT'S SHAPE IS r7's, CLOSED. `authenticated-receipt-
+//     identity.v1` sets `additional_properties: false`, names exactly three
+//     required fields, and gives `session_ref` a LOWERCASE pattern with a
+//     minimum length. All three clauses are enforced here and again in SQL.
 //
 // THE DIGEST RECIPE IS A NAMED ASSUMPTION. r7's `receipt_payload_digest_rule`
 // names domain tags for `benchmark-manifest.v1`, `attended-effect-capability.v1`,
@@ -68,12 +88,39 @@
 // reseals all 62 packet chunks.
 
 import { digest } from "./artifact-trust.js";
-import { authorizationClassForActor } from "./identity.js";
+import { authenticatedCallIdentity, authorizationClassForActor } from "./identity.js";
 import { ToolError } from "./tool-error.js";
 import { V5_A02_GATE_ZERO_PRODUCER_REGISTRATION } from "./gate-zero-producer-registration.v5.js";
 
+/**
+ * AMENDMENT 2'S CLOSED SHAPE FOR AN EXPORTED CALLABLE, lifted from
+ * gate-zero-assurance.v5.js and gate-zero-producer.v5.js rather than retyped,
+ * because a retyped guard is a second implementation that passes because it was
+ * written from the same misunderstanding as the code it checks.
+ *
+ * (a) NOT CONSTRUCTABLE. A bound function carries no `prototype`, so `new` and
+ *     `Reflect.construct` are refused by the engine before a line here runs, and
+ *     the engine's refusal quotes `[native code]` rather than this module's own
+ *     source back at whoever probed it.
+ * (b) `instanceof` ANSWERS FALSE WITHOUT TOUCHING THE OPERAND. The intrinsic
+ *     `Symbol.hasInstance` walks the LEFT operand's prototype chain, which runs
+ *     the caller's own `getPrototypeOf` trap; an own non-writable,
+ *     non-configurable, non-enumerable data property answers false instead.
+ * (d) FROZEN, so no property of the export can be written over afterwards.
+ */
+function closedCallable(callable) {
+  const closed = callable.bind(null);
+  Object.defineProperty(closed, Symbol.hasInstance, {
+    value: () => false, writable: false, enumerable: false, configurable: false,
+  });
+  return Object.freeze(closed);
+}
+
 /** The schema r7 registers as this producer's output. Not a schema of our own. */
 export const GATE_ZERO_RECEIPT_SCHEMA = "consumer-gate-receipt.v1";
+
+/** The schema r7 registers for each of the receipt's three identity objects. */
+export const GATE_ZERO_IDENTITY_SCHEMA = "authenticated-receipt-identity.v1";
 
 /**
  * The twenty-one required fields of `consumer-gate-receipt.v1`, in r7's own
@@ -110,12 +157,26 @@ export const GATE_ZERO_RECEIPT_CONSTANTS = Object.freeze({
 export const GATE_ZERO_RECEIPT_STATUSES =
   Object.freeze(["pass", "fail", "unknown", "stale", "quarantined"]);
 
+/**
+ * `authenticated-receipt-identity.v1`'s CLOSED field set, in r7's own order.
+ * The schema sets `additional_properties: false` and names these three as
+ * required, so this list is both the required set and the permitted set: a
+ * fourth key denies exactly as a missing one does.
+ */
+export const GATE_ZERO_IDENTITY_FIELDS =
+  Object.freeze(["actor_id", "session_ref", "authority_class"]);
+
 const DIGEST_REF = /^sha256:[0-9a-f]{64}$/;
 // LOWERCASE ONLY, and it is worth the comment: a single capital is refused by
 // the r7 pattern with a bare error naming no field, which has cost a real
 // debugging session before.
 const EVIDENCE_REF = /^safe:[a-z0-9][a-z0-9:_./-]*$/;
-const SESSION_REF = /^session:[A-Za-z0-9][A-Za-z0-9:._-]*$/;
+// r7's OWN PATTERN FOR session_ref, character for character, and it is neither
+// of the two things the first draft wrote. It is LOWERCASE (a single capital
+// denies, the same trap `safe:` refs carry), it admits `/`, and it has a
+// MINIMUM LENGTH — `session:` plus at least nine more characters — so a
+// one-character session ref is refused rather than accepted as well-formed.
+const SESSION_REF = /^session:[a-z0-9][a-z0-9:._/-]{8,199}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 const DIGEST_FIELDS = Object.freeze([
@@ -139,14 +200,14 @@ function refuse(error, detail) {
  * here, for the same reason the registration reads its own witness off itself:
  * two derivations of one fact are two authorities, and they drift.
  */
-export function gateZeroOracleSeatLane() {
+export const gateZeroOracleSeatLane = closedCallable(() => {
   const registration = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION;
   if (registration?.oracle_seat_bound !== true) return null;
   const holder = registration.oracle_seat_holder_ref;
   if (typeof holder !== "string") return null;
   const lane = holder.split(":")[1];
   return typeof lane === "string" && lane.length ? lane : null;
-}
+});
 
 /**
  * THE ONE AUTHORITY TEST. Four ordered questions, each answering "refuse", and
@@ -167,7 +228,7 @@ export function gateZeroOracleSeatLane() {
  * It returns the seat it admitted, so the caller records what it derived rather
  * than re-deriving it a second time and hoping the two agree.
  */
-export function deriveGateZeroProducerSeat(actor) {
+export const deriveGateZeroProducerSeat = closedCallable((actor) => {
   const lane = gateZeroOracleSeatLane();
   if (lane === null) {
     refuse("gate_zero_oracle_seat_unstaffed", {
@@ -203,7 +264,7 @@ export function deriveGateZeroProducerSeat(actor) {
     charter_decision_ref: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_charter_decision_ref,
     staffing_decision_ref: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.oracle_seat_staffing_decision_ref,
   });
-}
+});
 
 /**
  * THE RECEIPT CONTRACT. Every clause below refuses; none of them decides
@@ -214,7 +275,7 @@ export function deriveGateZeroProducerSeat(actor) {
  * `seat` is the RESULT of deriveGateZeroProducerSeat, never a caller value: the
  * identity clauses compare the receipt against what the server derived.
  */
-export function assertGateZeroReceipt(receipt, seat) {
+export const assertGateZeroReceipt = closedCallable((receipt, seat) => {
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) {
     refuse("gate_zero_receipt_malformed",
       { hint: `pass one ${GATE_ZERO_RECEIPT_SCHEMA} object` });
@@ -270,27 +331,87 @@ export function assertGateZeroReceipt(receipt, seat) {
     });
   }
 
-  // THE THREE IDENTITIES, CHECKED AGAINST THE DERIVED SEAT.
+  // THE THREE IDENTITIES, AND r7's SHAPE FOR THEM IS CLOSED. Three fields,
+  // exactly — a fourth key denies as readily as a missing one, because
+  // `authenticated-receipt-identity.v1` sets `additional_properties: false` and
+  // a digest over an open shape is a statement about nothing in particular.
   for (const field of IDENTITY_FIELDS) {
     const identity = receipt[field];
-    if (!identity || typeof identity !== "object" || Array.isArray(identity)
-        || typeof identity.actor_id !== "string" || !identity.actor_id
-        || typeof identity.session_ref !== "string" || !SESSION_REF.test(identity.session_ref)
+    if (!identity || typeof identity !== "object" || Array.isArray(identity)) {
+      refuse("gate_zero_receipt_identity_malformed", {
+        field, schema: GATE_ZERO_IDENTITY_SCHEMA,
+        hint: `each identity is one ${GATE_ZERO_IDENTITY_SCHEMA} object`,
+      });
+    }
+    const keys = Object.keys(identity);
+    const missing = GATE_ZERO_IDENTITY_FIELDS.filter(one => !keys.includes(one));
+    const unknown = keys.filter(one => !GATE_ZERO_IDENTITY_FIELDS.includes(one)).sort();
+    if (missing.length || unknown.length) {
+      refuse("gate_zero_receipt_identity_fields", {
+        field, schema: GATE_ZERO_IDENTITY_SCHEMA, missing, unknown,
+        hint: `${GATE_ZERO_IDENTITY_SCHEMA} is closed: exactly actor_id, session_ref and authority_class`,
+      });
+    }
+    if (typeof identity.actor_id !== "string" || !identity.actor_id
         || typeof identity.authority_class !== "string" || !identity.authority_class) {
       refuse("gate_zero_receipt_identity_malformed", {
-        field,
-        hint: "each identity is an authenticated-receipt-identity.v1: actor_id, session_ref matching ^session:, authority_class",
+        field, schema: GATE_ZERO_IDENTITY_SCHEMA,
+        hint: "actor_id and authority_class are non-empty strings",
+      });
+    }
+    if (typeof identity.session_ref !== "string" || !SESSION_REF.test(identity.session_ref)) {
+      refuse("gate_zero_receipt_session_ref_malformed", {
+        field, got: identity.session_ref,
+        hint: "r7's session_ref pattern is lowercase and at least nine characters after `session:`; " +
+              "a single capital denies, exactly as it does in a safe: ref",
       });
     }
   }
+
+  // AND THE PRODUCER AND EVALUATOR ARE THIS CALL, FIELD FOR FIELD. r7's
+  // identity_rule says the gateway DERIVES all identities from authenticated
+  // execution context and that caller-supplied identity denies. The derivation
+  // is identity.js's, taken with no argument from the AsyncLocalStorage that
+  // tools.js's one dispatch entered — the same value the producer read when it
+  // assembled this receipt — so what is compared here is not a claim about the
+  // seat but the seat's own derived identity for THIS call.
+  //
+  // COMPARING actor_id AND authority_class ALONE WAS THE HOLE. Both are stable
+  // across every call the seat ever makes, so a receipt carrying a foreign
+  // `session_ref` passed a check that looked like an identity check. The session
+  // ref is the server's per-call correlation id and is the only field in the
+  // object that no caller writes, so it is the one that has to match.
+  const call = authenticatedCallIdentity();
+  if (call === null) {
+    refuse("gate_zero_receipt_unauthenticated_call", {
+      hint: "there is no authenticated call to derive receipt identities from, so no receipt may be recorded. " +
+            "The one place a call is established is tools.js's verb dispatch; a direct import cannot obtain one.",
+    });
+  }
   for (const field of ["producer_identity", "evaluator_identity"]) {
-    if (receipt[field].actor_id !== seat.lane || receipt[field].authority_class !== "review_agent") {
-      refuse("gate_zero_receipt_identity_not_the_seat", {
-        field, seat_lane: seat.lane,
-        hint: "r7 binds producer_role to the registry entry and derives identity from authenticated context. " +
-              "The producer and the evaluator are the staffed oracle seat; nobody else's name may appear there.",
+    const identity = receipt[field];
+    const differs = GATE_ZERO_IDENTITY_FIELDS.filter(one => identity[one] !== call[one]);
+    if (differs.length) {
+      refuse("gate_zero_receipt_identity_not_this_call", {
+        field, differing_fields: differs, seat_lane: seat.lane,
+        hint: "r7 derives the producer and evaluator identities from the authenticated execution context. " +
+              "This receipt names an identity that is not the one this call derived — a different actor, a " +
+              "different authority class, or a session that is not this call's.",
       });
     }
+  }
+  // AND THE DERIVED IDENTITY IS STILL THE STAFFED SEAT'S. The two checks are
+  // not the same question: the one above says the receipt is this call's, and
+  // this one says this call is the seat r7 registered. A call that authenticated
+  // as something else never reaches here -- deriveGateZeroProducerSeat already
+  // refused it -- so this is the assertion that the two derivations agree.
+  if (call.actor_id !== seat.lane || call.authority_class !== "review_agent") {
+    refuse("gate_zero_receipt_identity_not_the_seat", {
+      seat_lane: seat.lane, derived_actor_id: call.actor_id,
+      derived_authority_class: call.authority_class,
+      hint: "r7 binds producer_role to the registry entry and derives identity from authenticated context. " +
+            "The producer and the evaluator are the staffed oracle seat; nobody else's name may appear there.",
+    });
   }
   // SAME-ACTOR SELF-REVIEW DENIES, in both dimensions r7 names. This is exactly
   // why the seat was staffed with the lane that reviewed every Gate Zero pull
@@ -307,7 +428,7 @@ export function assertGateZeroReceipt(receipt, seat) {
     });
   }
   return receipt;
-}
+});
 
 /**
  * THE DIGEST, computed the way the repository already computes a consumer-gate
@@ -319,6 +440,4 @@ export function assertGateZeroReceipt(receipt, seat) {
  * so a test can assert the two sides agree. If they ever disagreed, the database
  * would win and the row would carry its value, not this one.
  */
-export function gateZeroOutcomeDigest(receipt) {
-  return digest(receipt);
-}
+export const gateZeroOutcomeDigest = closedCallable(receipt => digest(receipt));

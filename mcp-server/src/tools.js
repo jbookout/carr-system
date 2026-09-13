@@ -37,6 +37,12 @@ import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./par
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 import { assertGateZeroReceipt, deriveGateZeroProducerSeat, gateZeroOracleSeatLane,
          gateZeroOutcomeDigest, GATE_ZERO_RECEIPT_SCHEMA } from "./gate-zero-outcome-store.v5.js";
+// THE RECEIPT'S ONE SOURCE. The gate's producer seam is bound to Step A's
+// zero-argument producer, so this is how a receipt enters the write path: by
+// being produced, inside this call, from rows three ruled readers took from
+// three ruled stores. There is no other import that could supply one and no
+// argument that could carry one.
+import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -7525,14 +7531,20 @@ export const TOOLS = {
   // gate-zero-outcome-store.v5.js, which registers no verb of its own.
   "record-gate-zero-read-only-outcome": {
     write: true, humanOnly: false, oracleSeatOnly: true,
-    description: "ORACLE-SEAT-ONLY, AND NOT A HUMAN ACT: record the DoctorCRE v5 Gate Zero read-only outcome as one consumer-gate-receipt.v1, its recomputed digest, the instant it was observed and the seat that produced it. It refuses every actor except the one review-token seat holding oracle:gate-producer:gate-zero-read-only — a partner is refused, a sponsored agent is refused, and a review-token seat on a DIFFERENT lane is refused by name rather than admitted by authority class. That shape exists because r7 registers this producer's role as independent_control_plane_oracle and Joe ruled on 2026-09-13 (decision d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70) that the seat records the row on its own authority with no partner countersign. THE HUMAN ACT IN THIS CHAIN IS UNCHANGED AND IS DOWNSTREAM: accept-benchmark-manifest-draft is still humanOnly and still derives its acceptor from a live verified partner. NOTHING HERE IS A CALLER'S WORD FOR ANYTHING — the producing seat comes from the frozen registration, the actor from the authenticated bearer match, and the outcome digest is RECOMPUTED by the record layer from the stored receipt, so no caller-supplied digest is accepted and none is sent. The receipt is checked against the closed twenty-one-field r7 schema, against the twelve constants the producer registry fixes, and against the identity rule that the producer and evaluator are this seat while the subject maker is not. RETRYABLE, EVERY RUN KEPT: a second call for the same candidate digest returns the row that exists rather than writing a second one, and a DIFFERENT receipt for a candidate already recorded is refused rather than silently replacing it. It grants no dispatch, activation or execution authority, accepts no benchmark and starts no clock.",
+    description: "ORACLE-SEAT-ONLY, AND NOT A HUMAN ACT: record the DoctorCRE v5 Gate Zero read-only outcome as one consumer-gate-receipt.v1, its recomputed digest, the instant it was observed and the seat that produced it. It refuses every actor except the one review-token seat holding oracle:gate-producer:gate-zero-read-only — a partner is refused, a sponsored agent is refused, and a review-token seat on a DIFFERENT lane is refused by name rather than admitted by authority class. That shape exists because r7 registers this producer's role as independent_control_plane_oracle and Joe ruled on 2026-09-13 (decision d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70) that the seat records the row on its own authority with no partner countersign. THE HUMAN ACT IN THIS CHAIN IS UNCHANGED AND IS DOWNSTREAM: accept-benchmark-manifest-draft is still humanOnly and still derives its acceptor from a live verified partner. THE RECEIPT IS PRODUCED IN THIS CALL, NOT SUPPLIED: the verb takes ONE argument, idempotency_key, and invokes the bound producer seam — Step A's zero-argument Gate Zero producer — which derives its own run binding, aims the three ruled evidence readers at it and assembles one consumer-gate-receipt.v1 signed with the identity the server derived for this call. There is no receipt argument and no receipt-shaped argument: any other top-level field is refused as unregistered_operation_fields before the handler runs. NOTHING HERE IS A CALLER'S WORD FOR ANYTHING — the producing seat comes from the frozen registration, the actor from the authenticated bearer match, the three receipt identities from the authenticated call, and the outcome digest is RECOMPUTED by the record layer from the stored receipt, so no caller-supplied digest is accepted and none is sent. What the producer emits is still checked against the closed twenty-one-field r7 schema, against the twelve constants the producer registry fixes, against the closed three-field authenticated-receipt-identity.v1 shape, and against the identity rule that the producer and evaluator are this call while the subject maker is not. A producer refusal records nothing and is reported as gate_zero_outcome_not_produced with the reason the producer gave. RETRYABLE, EVERY RUN KEPT: a second call for the same candidate digest returns the row that exists rather than writing a second one, and a DIFFERENT receipt for a candidate already recorded is refused rather than silently replacing it. It grants no dispatch, activation or execution authority, accepts no benchmark and starts no clock.",
+    // ONE ARGUMENT, AND IT NAMES AN INTENDED ACT RATHER THAN A SUBJECT. The
+    // caller says "record the outcome, once, under this key"; WHAT gets recorded
+    // is produced here. A `receipt` property was in the first draft of this verb
+    // and is deliberately gone: the closed top-level check in mutation-registry.js
+    // refuses any key that is not in this list as `unregistered_operation_fields`,
+    // so `receipt`, `outcome`, `consumer_gate_receipt` and every other
+    // receipt-shaped spelling is refused BEFORE the handler runs.
     inputSchema: {
       type: "object", additionalProperties: false,
       properties: {
         idempotency_key: { type: "string" },
-        receipt: { type: "object" },
       },
-      required: ["idempotency_key", "receipt"],
+      required: ["idempotency_key"],
     },
     handler: async (c, actor, args) => withEnvelope(c, actor, "record-gate-zero-read-only-outcome", args, async () => {
       // ORDER IS DELIBERATE, and it is the same order the record layer uses.
@@ -7544,7 +7556,42 @@ export const TOOLS = {
       //   3. Only then does anything reach the database, where all three
       //      derivations happen again as the function owner.
       const seat = deriveGateZeroProducerSeat(actor);
-      const receipt = assertGateZeroReceipt(args.receipt, seat);
+
+      // THE RECEIPT IS PRODUCED, NOT RECEIVED (2026-09-13, PR 1014 correction).
+      // `emitGateZeroOutcome` is the gate's bound producer seam: it calls Step
+      // A's zero-argument producer, which derives its own run binding, aims the
+      // three ruled readers at it, applies the three clauses over what came back
+      // and assembles one consumer-gate-receipt.v1 signed with the identity
+      // identity.js derived for THIS call. Nothing is handed in and nothing can
+      // be: the producer's arity is zero and this verb has no receipt argument.
+      //
+      // A REFUSAL IS NOT A ROW. The producer refuses when it cannot authenticate,
+      // when a row its binding stands on is absent, when a ruled seam returned no
+      // row for the address it derived, or when its own falsifiers did not fire.
+      // Each of those is a run that established nothing, so nothing is written
+      // and the reason is reported by name. A clause that was READ and did not
+      // hold is the opposite case: that is a real outcome with `status: "fail"`,
+      // and it is recorded.
+      const emitted = await emitGateZeroOutcome();
+      if (emitted?.decision !== "report" || emitted?.status !== "outcome_produced"
+          || !emitted?.receipt) {
+        throw new ToolError({ error: "gate_zero_outcome_not_produced",
+          reason_id: emitted?.reason_id ?? null,
+          unavailable_because: emitted?.unavailable_because ?? null,
+          decided_by: emitted?.decided_by ?? null,
+          owed_seams: emitted?.owed_seams ?? null,
+          producer_bound: emitted?.producer_bound ?? null,
+          hint: "the Gate Zero producer did not emit an outcome in this call, so there is nothing to record. " +
+                "This is a refusal by the producer over the rows it derived, not a caller error: no receipt " +
+                "argument exists and none would have changed it." });
+      }
+      // CHECKED ANYWAY, against the derived seat and this call's own identity.
+      // The producer already assembled the twenty-one fields, so this cannot be
+      // a caller's malformed object -- which is exactly why it is checked: the
+      // contract is the record layer's, not the producer's, and a producer that
+      // drifted from r7's shape must be refused at the write path rather than
+      // trusted because it is ours.
+      const receipt = assertGateZeroReceipt(emitted.receipt, seat);
 
       const recordedId = (await c.query(
         `select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id`,
@@ -7591,6 +7638,10 @@ export const TOOLS = {
         producing_seat_ref: row.producing_seat_ref,
         producing_seat_charter_decision_ref: seat.charter_decision_ref,
         producing_seat_staffing_decision_ref: seat.staffing_decision_ref,
+        // WHAT THE PRODUCER ANSWERED, so a consumer can see WHICH clause decided
+        // a recorded `fail` without opening the receipt. Null on a pass.
+        producer_reason_id: emitted.reason_id,
+        receipt_status: emitted.receipt_status,
         // WHAT THIS ROW IS WORTH, said on the result so a consumer does not read
         // more into it than it carries.
         digest_recipe: "canonical-JSON sha256 over the receipt, no domain tag, recomputed by the record layer. " +
