@@ -305,13 +305,17 @@ def main() -> int:
             idempotency_key=None,
         ))
 
-    # ONE CONNECTION, AND NOT THE AUTHORITY'S. carr_authority holds no insert on
-    # ops.release and cannot be granted one without the registry successor this
-    # branch may not start, so a candidate that opened the authority connection
-    # would be a candidate that could not be filed — which is exactly the outage
-    # the seventh round shipped.
-    check("12. an exact candidate is filed on the writer connection and no other",
-          candidate_rc == 0 and opened == ["write"],
+    # ONE CONNECTION, AND IT IS THE AUTHORITY'S. The reason this case once
+    # demanded the writer is gone: migration 0503 granted carr_authority the
+    # insert on ops.release and 0505 grants it exactly the two reads the filing
+    # path makes (ops.service.key and the columns the insert RETURNS), so the
+    # candidate can now be filed on the credential whose session_user 0504
+    # records. Filing it on the writer is what the third release review
+    # refused, because maker_authority_verified then comes out FALSE on a row
+    # a human authority actually made. Still exactly ONE connection: a second
+    # one would mean the row and its maker came from different credentials.
+    check("12. an exact candidate is filed on the authority connection and no other",
+          candidate_rc == 0 and opened == ["authority"],
           f"rc={candidate_rc} connections={opened}")
     filed = [statement for conn in connection_objects
              for statement in conn.cursor_object.statements]

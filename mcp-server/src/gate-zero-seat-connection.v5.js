@@ -38,12 +38,21 @@ export const GATE_ZERO_WRITER_SECRET_NAME = "DATABASE_URL_GATE_ZERO_WRITER";
  * as a different database role entirely, so it cannot be the same transaction —
  * that is the whole point of the amendment, not an accident of plumbing. The
  * cost is that the outcome row commits before the audit event does, so an outer
- * failure after this returns leaves a recorded outcome with no event row. That
- * is survivable and deliberately chosen: the record is append-only and
- * IDEMPOTENT ON THE CANDIDATE DIGEST, so the retry converges on the same row and
- * writes the event that was lost. The opposite arrangement — holding the seat's
- * transaction open across the event write — would put an ordinary writer failure
- * in a position to roll back an oracle's signature, which is worse.
+ * failure after this returns leaves a recorded outcome with no event row. The
+ * opposite arrangement — holding the seat's transaction open across the event
+ * write — would put an ordinary writer failure in a position to roll back an
+ * oracle's signature, which is worse.
+ *
+ * SO THE COST IS PAID BY MAKING THE RETRY HEAL IT, UNCONDITIONALLY (2026-09-13,
+ * the third release candidate's refusal, finding 3). It is not enough that the
+ * record is append-only and keyed on the candidate digest: until migration 0505
+ * the record layer RAISED when a retry offered different evidence for a recorded
+ * candidate, and the gateway refused for the same reason, so precisely the retry
+ * that was meant to write the missing event could not run. 0505 returns the
+ * existing row instead; the gateway reads it back, reports which receipt bound,
+ * and writes the event only if that outcome row has none. One row, one event, and
+ * no state a second call cannot reach — with nothing overwritten and the
+ * append-only triggers untouched.
  *
  * IT CARRIES NO ACTOR CONTEXT. `setWriterActorContext` is deliberately not called
  * here: carr.acting_actor_slug decides nothing on this path any more, and setting

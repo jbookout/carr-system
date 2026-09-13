@@ -189,6 +189,9 @@ const NULL_DECISION_LINE = "    decision_id: null,\n";
 /** The lines the fixture STORE carries so a broken world is a store edit. */
 const LEDGER_CANARY_LINE = "const LEDGER_CANARY = CANARY_JOINING;\n";
 const PREDECESSOR_WORLD_LINE = 'const PREDECESSOR_WORLD = "clean";\n';
+const PREDECESSOR_WORLD_COMPARISON =
+  'PREDECESSOR_WORLD === "receipt-card-mismatch"';
+export const DYNAMIC_PREDECESSOR_WORLD = "__carrGateZeroPredecessorWorld";
 const CANDIDATE_RECORD_WORLD_LINE = 'const CANDIDATE_BUILD_RECORD_WORLD = "filed";\n';
 /** The producer's own admitted-class line, edited by exactly one control. */
 const AUTHORITY_CLASSES_LINE =
@@ -330,6 +333,7 @@ export function stageTree({
   withdrawnCards = [], ledgerCanary = null, predecessorWorld = null, candidateRecordWorld = null,
   substituteStore = true, environmentEdit = null, candidateEdit = null,
   fixtureEdit = null, deniedClass = false, reintroduceGitDerivation = false,
+  mutablePredecessorWorld = false,
   withoutEnvironmentManifest = false, dropStamp = null, rewriteManifest = null,
   coverRewrittenManifest = false,
 } = {}) {
@@ -417,6 +421,16 @@ export function stageTree({
       editOnce(store, PREDECESSOR_WORLD_LINE,
         `const PREDECESSOR_WORLD = ${JSON.stringify(predecessorWorld)};\n`,
         "the fixture store's predecessor world line");
+    if (mutablePredecessorWorld) {
+      assert.equal(predecessorWorld, null,
+        "a staged predecessor world cannot be both fixed and mutable");
+      editOnce(store, PREDECESSOR_WORLD_LINE,
+        `const predecessorWorld = () => globalThis[${JSON.stringify(DYNAMIC_PREDECESSOR_WORLD)}] ?? "clean";\n`,
+        "the fixture store's mutable predecessor world line");
+      editOnce(store, PREDECESSOR_WORLD_COMPARISON,
+        'predecessorWorld() === "receipt-card-mismatch"',
+        "the fixture store's mutable predecessor comparison");
+    }
     if (candidateRecordWorld !== null)
       editOnce(store, CANDIDATE_RECORD_WORLD_LINE,
         `const CANDIDATE_BUILD_RECORD_WORLD = ${JSON.stringify(candidateRecordWorld)};\n`,

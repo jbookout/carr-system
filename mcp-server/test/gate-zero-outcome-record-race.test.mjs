@@ -59,7 +59,8 @@ import { randomUUID } from "node:crypto";
 
 import { gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest }
   from "../src/gate-zero-outcome-store.v5.js";
-import { cleanupStagedTrees, inServedReview, moduleOfTree, stageTree, withStamps }
+import { cleanupStagedTrees, DYNAMIC_PREDECESSOR_WORLD, inServedReview,
+  moduleOfTree, stageTree, withStamps }
   from "./gate-zero-candidate-tree.testhelper.mjs";
 import { authorizeAs, ensureProducerRoles }
   from "./gate-zero-producer-role.testhelper.mjs";
@@ -238,12 +239,17 @@ test("two authenticated calls for one candidate converge on one durable row", as
   assert.equal(settledEarly, false,
     "the second writer did not block on the first, so the candidate key is not arbitrating");
 
-  // (3) A commits, which releases B. (4) B answers with the row that exists.
-  //     The transaction that matters is the SEAT's: that is where the insert is.
+  // (3) A's seat commits, which releases B's seat transaction. B then reaches
+  //     the OUTER audit-event lock and waits for A's still-open outer
+  //     transaction. This is the production order: no caller waits on B while
+  //     holding A open.
   await a.seat.query("commit");
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(settledEarly, false,
+    "the second caller returned before the first caller settled its audit event");
+  await a.client.query("commit");
   const secondResult = await pending;
   await b.seat.query("commit");
-  await a.client.query("commit");
   await b.client.query("commit");
 
   // BOTH CALLERS RECEIVED THE SAME DURABLE ROW.
@@ -307,6 +313,25 @@ test("two authenticated calls for one candidate converge on one durable row", as
     .replace(CANDIDATE_KEY, "v_digest := ops.gate_zero_outcome_digest(p_receipt);")
     .replace(CANDIDATE_COMPARE, "v_existing.outcome_digest <> v_digest");
 
+  // WHAT THE CONTROL READS, AND WHY IT MOVED (2026-09-13, the third release
+  // candidate's refusal, finding 3). Until migration 0505 this branch RAISED, so
+  // the control read a rejection. 0505 makes it return the recorded row instead
+  // -- that is the whole of the fix, because the raise was what made an
+  // outcome-without-event unrepairable -- and what the branch now emits is a
+  // NOTICE naming the two projections. So the falsifier is the notice: the REAL
+  // writer stays silent for a genuine retry, and the full-digest mutant does not,
+  // because the full digest carries this call's session_ref and its two instants.
+  // Keying on it would make every genuine second call a divergence, which is
+  // exactly Sol's finding 3 and is still the thing this control refuses to let
+  // back in.
+  const noticesOf = async run => {
+    const seen = [];
+    const listener = message => seen.push(String(message?.message ?? ""));
+    a.seat.on("notice", listener);
+    try { await run(); } finally { a.seat.removeListener("notice", listener); }
+    return seen.filter(text => /already recorded from a run whose projection differs/.test(text));
+  };
+
   // THE MUTANT RUNS ON THE SEAT'S CONNECTION, because that is the only
   // connection the record layer admits at all now. It is CREATED with the
   // connection's own authenticated identity rather than the seat's -- a SECURITY
@@ -318,24 +343,209 @@ test("two authenticated calls for one candidate converge on one durable row", as
   await a.seat.query(mutant);
   await authorizeAs(a.seat, (await ensureProducerRoles(setup)).login);
   await a.seat.query("begin");
-  await assert.rejects(
-    a.seat.query(
-      "select pg_temp.gate_zero_record_read_only_outcome_full_digest_key($1::uuid, $2::jsonb)",
-      [randomUUID(), JSON.stringify(sentB)]),
-    /a different Gate Zero outcome is already recorded/,
-    "the full-digest key accepted the second real call, so this control proves nothing");
+  const mutantDivergences = await noticesOf(() => a.seat.query(
+    "select pg_temp.gate_zero_record_read_only_outcome_full_digest_key($1::uuid, $2::jsonb)",
+    [randomUUID(), JSON.stringify(sentB)]));
+  assert.equal(mutantDivergences.length, 1,
+    "the full-digest key called the second real call a retry, so this control proves nothing");
+  await a.seat.query("rollback");
+
+  // AND THE REAL WRITER SAYS NOTHING ABOUT THE SAME CALL, which is the other
+  // half of the same control: what separates the two is the comparison value,
+  // not the fact that one of them happens to be a mutant.
+  await a.seat.query("begin");
+  const realDivergences = await noticesOf(() => a.seat.query(
+    "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb)",
+    [randomUUID(), JSON.stringify(sentB)]));
+  assert.equal(realDivergences.length, 0,
+    "the shipped writer called a genuine retry a divergence");
   await a.seat.query("rollback");
 
   // ===================================================================
-  // AND THE NARROWER KEY STILL REFUSES A DIFFERENT OUTCOME.
+  // AND A DIFFERENT OUTCOME FOR ONE CANDIDATE CONVERGES, REPLACING NOTHING.
   // ===================================================================
-  // The same candidate, a different verdict. A retry may not change this, and
-  // the record is append-only, so the writer must raise rather than keep either.
+  // The same candidate, a different verdict. Before 0505 the writer raised here,
+  // and that raise is what the outside review refused: the seat's transaction
+  // commits before the outer one writes the audit event, so a failure between
+  // them leaves an outcome with no event -- and evidence legitimately moves
+  // between two runs of one candidate, so the retry meant to write the lost event
+  // was the retry the raise turned away.
+  //
+  // CONVERGING IS NOT REPLACING, and both halves are asserted. The call receives
+  // the row that exists; the row's own receipt, digest and status are read back
+  // afterwards and must be byte-identical to what the first call stored. The
+  // append-only triggers are untouched and nothing here updates anything -- this
+  // is what makes "the first receipt wins forever" a measurement rather than a
+  // description.
+  const before = (await a.query(
+    `select outcome_digest, candidate_scoped_digest, status, receipt
+       from ops.gate_zero_read_only_outcome where id = $1::uuid`,
+    [firstResult.outcome_id])).rows[0];
   await a.seat.query("begin");
-  await assert.rejects(
-    a.seat.query("select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb)",
-      [randomUUID(), JSON.stringify({ ...sentB, status: "fail" })]),
-    /a different Gate Zero outcome is already recorded/,
-    "a different verdict for one candidate was accepted as a retry");
-  await a.seat.query("rollback");
+  const divergent = { ...sentB, status: "fail" };
+  assert.equal(divergent.candidate_digest, sentB.candidate_digest);
+  const convergedId = (await a.seat.query(
+    "select ops.gate_zero_record_read_only_outcome($1::uuid, $2::jsonb) as id",
+    [randomUUID(), JSON.stringify(divergent)])).rows[0].id;
+  assert.equal(convergedId, firstResult.outcome_id,
+    "a different verdict for one candidate did not converge onto the recorded row");
+  await a.seat.query("commit");
+
+  const after = (await a.query(
+    `select count(*)::int as n from ops.gate_zero_read_only_outcome where candidate_digest = $1`,
+    [firstResult.candidate_digest])).rows[0];
+  assert.equal(after.n, 1, "converging minted a second outcome for one candidate");
+  const unchanged = (await a.query(
+    `select outcome_digest, candidate_scoped_digest, status, receipt
+       from ops.gate_zero_read_only_outcome where id = $1::uuid`,
+    [firstResult.outcome_id])).rows[0];
+  assert.deepEqual(unchanged, before,
+    "the divergent receipt moved the recorded row, which the append-only record forbids");
+  assert.equal(unchanged.status, "pass");
 });
+
+test("an outer failure after the seat commit leaves no event, and the retry writes exactly one",
+  async t => {
+    // FINDING 3 OF THE THIRD RELEASE CANDIDATE'S REFUSAL, RUN RATHER THAN
+    // ARGUED. Standing-rule amendment 9 puts the outcome write on the seat's own
+    // login role and the audit event on the ordinary writer's, so they cannot
+    // share a transaction and the seat's commits first. The reviewer asked what
+    // happens when the outer one then fails, and answered it: an outcome with no
+    // event, reachable, and -- before migration 0505 -- unrepairable.
+    //
+    // THE INTERLEAVING IS STAGED, NOT HOPED FOR. The seat's transaction is
+    // committed by hand, exactly where gateZeroSeatConnection commits it, and the
+    // outer transaction is then rolled back: the durable state is precisely what
+    // a crash between the two leaves behind.
+    if (!DSN) {
+      assert.equal(REQUIRED, false,
+        "this proof was required and no database URL was given to it");
+      return t.skip("no DATABASE_URL / CARR_GATE_ZERO_RACE_DSN (the migration class provides one)");
+    }
+    assert.ok(LOOPBACK.test(DSN),
+      "REFUSED: this proof commits rows to an append-only record and runs against a throwaway only");
+    const pg = await import("pg");
+    const PG = pg.default ?? pg;
+
+    let setup;
+    let caller;
+    try {
+      setup = new PG.Client({ connectionString: DSN });
+      await setup.connect();
+      const roles = await ensureProducerRoles(setup);
+      caller = await seatedClient(PG, roles.login);
+    } catch (error) {
+      if (setup) await setup.end().catch(() => {});
+      if (caller) {
+        await caller.client.end().catch(() => {});
+        await caller.seat.end().catch(() => {});
+      }
+      assert.equal(REQUIRED, false,
+        `this proof was required and Postgres was unreachable: ${error.message}`);
+      return t.skip(`no reachable Postgres: ${error.message}`);
+    }
+    t.after(async () => {
+      await setup.end().catch(() => {});
+      await caller.client.end().catch(() => {});
+      await caller.seat.end().catch(() => {});
+    });
+
+    const seatRow = (await setup.query(
+      "select id from public.actor where slug = $1", [SEAT_SLUG])).rows[0];
+    assert.ok(seatRow, `this database has no ${SEAT_SLUG} actor to act as`);
+
+    // A CANDIDATE OF ITS OWN, so this proof's row is not the one the race above
+    // already recorded -- the record is append-only and both tests share one
+    // database. The world is left exactly as it is: what moves is one comment
+    // inside the sealed bytes, which moves the candidate manifest digest and
+    // therefore the candidate, and nothing the producer reads.
+    const { target, stamps } = stageTree({
+      candidateEdit: "the outer-failure heal proof's own candidate",
+      mutablePredecessorWorld: true,
+    });
+    globalThis[DYNAMIC_PREDECESSOR_WORLD] = "clean";
+    t.after(() => { delete globalThis[DYNAMIC_PREDECESSOR_WORLD]; });
+    const tools = await moduleOfTree(target, "tools.js");
+    const callVerb = correlationId => withStamps(stamps,
+      () => inServedReview(target, { correlationId },
+        actor => tools.executeRegisteredTool(caller,
+          Object.assign(actor, { id: seatRow.id }), VERB, { idempotency_key: randomUUID() })));
+
+    const eventsFor = async outcomeId => (await setup.query(
+      `select count(*)::int as n from event
+        where verb = 'record-gate-zero-read-only-outcome'
+          and subject_type = 'gate_zero_outcome' and subject_id = $1::uuid`,
+      [outcomeId])).rows[0].n;
+    const outcomesFor = async candidateDigest => (await setup.query(
+      "select count(*)::int as n from ops.gate_zero_read_only_outcome where candidate_digest = $1",
+      [candidateDigest])).rows[0].n;
+
+    // (1) THE CALL SUCCEEDS, AND THEN THE OUTER TRANSACTION FAILS. The seat's
+    //     work is committed where production commits it; everything the ordinary
+    //     writer did -- the audit event and the idempotency envelope's tool_call
+    //     row -- goes away with the rollback.
+    const served = await callVerb("1f7e4c20-6a35-4b8d-9c42-0e1a7b5d38f6");
+    assert.equal(served.served, true, "the recorded review bearer was not served");
+    const first = served.answered;
+    assert.equal(first.ok, true);
+    assert.equal(first.converged_onto_recorded_outcome, false,
+      "a first call reported itself as having converged onto somebody else's row");
+    assert.equal(first.receipt_status, "pass");
+    await caller.seat.query("commit");
+    await caller.client.query("rollback");
+
+    // (2) THE STATE THE REVIEWER NAMED, MEASURED. One outcome, no event.
+    assert.equal(await outcomesFor(first.candidate_digest), 1);
+    assert.equal(await eventsFor(first.outcome_id), 0,
+      "the outer rollback did not remove the audit event, so this proof is not staging the failure it claims");
+
+    // (3) THE RETRY, AFTER THE WORLD MOVES. A new request -- its own correlation
+    //     id, idempotency key and transactions -- reaches the same candidate,
+    //     but the predecessor join now fails. The candidate-scoped projection
+    //     therefore differs from the stored pass. Before 0505 the record layer
+    //     refused THIS retry, leaving the event unreachable.
+    globalThis[DYNAMIC_PREDECESSOR_WORLD] = "receipt-card-mismatch";
+    await caller.client.query("begin");
+    await caller.client.query(
+      "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
+    const retried = (await callVerb("2a8d5b31-7c46-4d9e-8f53-1b2c8e6a49b7")).answered;
+    assert.equal(retried.ok, true);
+    assert.equal(retried.outcome_id, first.outcome_id,
+      "the retry did not converge on the row the failed call left behind");
+    assert.equal(retried.converged_onto_recorded_outcome, true,
+      "the retry did not report that its changed evidence lost to the recorded row");
+    assert.notEqual(retried.offered_candidate_scoped_digest,
+      retried.candidate_scoped_digest,
+      "the changed-evidence retry did not actually change the candidate projection");
+    assert.equal(retried.receipt_status, "pass",
+      "the response did not report the status of the stored receipt");
+    assert.equal(retried.offered_receipt_status, "fail",
+      "the response did not label the changed run's offered status separately");
+    assert.equal(retried.producer_reason_id, null,
+      "a converged response attributed the offered run's reason to the stored row");
+    assert.ok(retried.offered_producer_reason_id,
+      "the changed run's offered reason was not reported separately");
+    await caller.seat.query("commit");
+    await caller.client.query("commit");
+
+    // (4) EXACTLY ONE ROW AND EXACTLY ONE EVENT. The healed state.
+    assert.equal(await outcomesFor(first.candidate_digest), 1,
+      "the retry minted a second outcome for one candidate");
+    assert.equal(await eventsFor(first.outcome_id), 1,
+      "the retry did not write the audit event the failed call lost");
+
+    // (5) AND A THIRD CALL WRITES NO SECOND EVENT. Healing a missing event and
+    //     duplicating an existing one are the same statement with the guard
+    //     removed, so the guard is asserted rather than assumed: one event per
+    //     outcome row, however many times the verb is called.
+    await caller.client.query("begin");
+    await caller.client.query(
+      "select set_config('carr.acting_actor_slug', $1, true)", [SEAT_SLUG]);
+    const thrice = (await callVerb("3b9e6c42-8d57-4e0f-9a64-2c3d9f7b5ac8")).answered;
+    assert.equal(thrice.outcome_id, first.outcome_id);
+    await caller.seat.query("commit");
+    await caller.client.query("commit");
+    assert.equal(await eventsFor(first.outcome_id), 1,
+      "a third call wrote a second audit event for one outcome row");
+    assert.equal(await outcomesFor(first.candidate_digest), 1);
+  });

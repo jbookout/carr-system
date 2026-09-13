@@ -908,18 +908,23 @@ async function checkConclusionRows(query) {
  *   authority credential, and a row whose maker somebody typed does not satisfy
  *   it and is not returned.
  *
- * WHY THIS READER IS EMPTY TODAY, AND WHAT FILLS IT, because a reader that
- * returns nothing should say which fact is missing rather than look broken.
- * Filing a row on a human authority credential needs that credential to hold
- * INSERT on ops.release, and it does not: migration 0161 built carr_authority as
- * a privilege bundle carrying no business-record table grant, 0273 made the two
- * partner logins members of exactly that bundle, and adding the grant is a new DB
+ * WHAT FILLS THIS READER, AND WHEN IT STARTED TO. Filing a row on a human
+ * authority credential needs that credential to hold INSERT on ops.release, and
+ * for a long time it did not: migration 0161 built carr_authority as a privilege
+ * bundle carrying no business-record table grant, 0273 made the two partner
+ * logins members of exactly that bundle, and adding the grant was a new DB
  * mutation capability that SIEP-11 admits only through a SCAC mutation-registry
- * successor — the one thing PR #1013 may not spawn under Joe's 2026-09-08
- * moratorium. So every row the wrapper files today is an honest UNAUTHENTICATED
- * record and this store reads none of them, which makes the subject-maker seat
- * unreachable rather than wrong. Open loop #594 carries the admission; the day it
- * lands, this reader starts answering with no change to this file.
+ * successor. Open loop #594 carried that admission and migration 0503 landed it,
+ * with the two column-scoped selects the table's invoker-rights trigger reads;
+ * migration 0505 then granted the two reads the FILING PATH needs — ops.service
+ * by key, and the ops.release columns its insert returns — and moved
+ * tools/ops-record.py's `release candidate` onto the authority connection. From
+ * that point the deploy wrapper's row is authority-verified and this store
+ * answers from it, with no change to this file.
+ *
+ * A ROW FILED ON THE LEDGER WRITER IS STILL IGNORED HERE, and that is the whole
+ * predicate rather than a leftover: 0504 marks such a row unauthenticated, and
+ * an unauthenticated maker is exactly what amendment 9(c) refuses to read.
  *
  * WHAT THIS DOES NOT CLAIM, said plainly: every row written before migration 0504
  * — including the ones an earlier round's recorder derived honestly and then

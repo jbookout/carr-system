@@ -134,28 +134,37 @@ function mockDatabase({ existing = null, seatConnection = true } = {}) {
       if (sql.includes("ops.gate_zero_record_read_only_outcome")) {
         const offered = JSON.parse(params[1]);
         state.persisted = offered;
-        // IDEMPOTENT ON THE CANDIDATE, exactly as the SQL writer is, INCLUDING
-        // what it compares (PR 1014, second correction). The row is kept when
-        // the candidate matches; what decides whether the offered outcome is the
-        // SAME outcome is the candidate-scoped digest, not the full receipt
-        // digest — so a second genuine call, with its own session_ref and its
-        // own instants, collapses onto the row that exists here exactly as it
-        // does in ops.gate_zero_record_read_only_outcome. A mock that answered
-        // otherwise would be a second implementation of the writer's rule.
-        if (state.recorded && state.recorded.candidate_digest === offered.candidate_digest) {
-          if (gateZeroOutcomeCandidateDigest(state.recorded)
-              !== gateZeroOutcomeCandidateDigest(offered))
-            throw new Error(
-              `a different Gate Zero outcome is already recorded for candidate ${offered.candidate_digest}`);
-        } else {
+        // IDEMPOTENT ON THE CANDIDATE, AND CONVERGENT, exactly as the SQL writer
+        // is from migration 0505 (the third release candidate's refusal, finding
+        // 3). The first row for a candidate is the durable one: a later call
+        // naming the same candidate NEVER replaces it and never raises — it
+        // receives that row and is told, by the digests read back, that it
+        // converged. A mock that raised here would be a second implementation of
+        // a rule the record layer no longer has, and it would hide exactly the
+        // state the refusal named: an outcome whose audit event a failed outer
+        // transaction lost, unreachable because the retry was refused.
+        if (!state.recorded || state.recorded.candidate_digest !== offered.candidate_digest)
           state.recorded = offered;
-        }
         return { rows: [{ id: OUTCOME_ID }] };
       }
+      // THE EVENT GUARD'S TWO STATEMENTS. A single-threaded mock cannot exhibit
+      // waiting, but it still requires the production blocking-lock statement;
+      // the existence read answers from what this mock has actually been asked
+      // to insert, so "one event per outcome row" is a property this mock can
+      // exhibit rather than one it asserts.
+      if (sql.includes("pg_advisory_xact_lock")) return { rows: [{ pg_advisory_xact_lock: null }] };
+      if (sql.includes("from event")) return { rows: state.eventWritten ? [{ "?column?": 1 }] : [] };
       if (sql.includes("from ops.gate_zero_read_only_outcome")) {
         const r = state.recorded;
         return { rows: [{
-          id: OUTCOME_ID, outcome_digest: digest(r),
+          id: OUTCOME_ID,
+          // THE RECIPE r7 DECLARES, written out here rather than borrowed from
+          // the module under test: this mock stands in for SQL, and a stand-in
+          // that called gateZeroOutcomeDigest() would agree with the gateway by
+          // construction and prove nothing. The SQL-against-JS agreement over
+          // these same bytes is proved against a real database in
+          // gate-zero-outcome-digest-tagged.test.mjs.
+          outcome_digest: digest([GATE_ZERO_RECEIPT_SCHEMA, r]),
           candidate_scoped_digest: gateZeroOutcomeCandidateDigest(r),
           candidate_digest: r.candidate_digest,
           status: r.status, receipt: r,
@@ -168,7 +177,7 @@ function mockDatabase({ existing = null, seatConnection = true } = {}) {
       // fresh mock), and the two audit writes are accepted.
       if (sql.includes("from tool_call where idempotency_key")) return { rows: [] };
       if (sql.includes("insert into tool_call")) return { rows: [] };
-      if (sql.includes("insert into event")) return { rows: [] };
+      if (sql.includes("insert into event")) { state.eventWritten = true; return { rows: [] }; }
       throw new Error(`mock database has no declared response for: ${sql}`);
     },
   };
@@ -440,27 +449,57 @@ test("CONTROL 5 — a second AUTHENTICATED call for the same candidate is idempo
     gateZeroOutcomeCandidateDigest(firstReceipt));
 });
 
-test("MUTATION — a second run that read DIFFERENT rows for one candidate still conflicts", async () => {
-  // THE OTHER EDGE OF THE SAME KEY. Narrowing what a retry is compared on is
-  // only safe if it still refuses a genuinely different outcome for one
-  // candidate. Here the candidate is held identical and the WORLD is changed
-  // under it, so the producer reaches a different verdict: the record layer must
-  // refuse rather than silently keep either one.
+test("MUTATION — a second run that read DIFFERENT rows for one candidate converges, and replaces nothing", async () => {
+  // THE OTHER EDGE OF THE SAME KEY, RE-DECIDED (2026-09-13, the third release
+  // candidate's refusal, finding 3). Here the candidate is held identical and
+  // the WORLD is changed under it, so the producer reaches a different verdict.
+  //
+  // WHAT THE RECORD LAYER USED TO DO, AND WHY IT COULD NOT KEEP DOING IT: it
+  // RAISED. The outcome row and its audit event are written by two different
+  // login roles and so two different transactions, the seat's committing first,
+  // and a failure between them leaves an outcome with no event. Evidence
+  // legitimately moves between two runs of one candidate, so the retry that was
+  // supposed to write the lost event was exactly the retry the raise refused.
+  // The outside reviewer's words: "an outcome-without-event state is reachable
+  // where subsequent retries using the now-current evidence cannot converge."
+  //
+  // WHAT IT DOES NOW, and the two halves are equally load-bearing: it RETURNS
+  // the recorded row, and it CHANGES NOTHING. The first receipt stays stored and
+  // stays digested; the later one is not persisted and not merged. Asserted
+  // below, because "converges" would otherwise be indistinguishable from
+  // "silently replaces" — which is the plan's own named failure condition.
   const client = mockDatabase();
   await recordIn({}, {}, { idempotency_key: KEY }, client);
   const recorded = client.state.recorded;
+  const recordedDigest = digest([GATE_ZERO_RECEIPT_SCHEMA, recorded]);
 
   // The same candidate digest, a different verdict — assembled by bending what
   // the producer emitted, the same way the identity mutations below do, and
   // pushed at the writer through the mock's own mirror of the SQL rule. The
-  // record layer's copy of this refusal is proved against a real PostgreSQL in
+  // record layer's copy of this behaviour is proved against a real PostgreSQL in
   // gate-zero-outcome-record-race.test.mjs; this is the gateway-side mirror.
   const divergent = { ...recorded, status: "fail" };
   assert.equal(divergent.candidate_digest, recorded.candidate_digest);
-  await assert.rejects(
-    client.query("select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
-      [SECOND_KEY, JSON.stringify(divergent)]),
-    /a different Gate Zero outcome is already recorded/);
+  assert.notEqual(gateZeroOutcomeCandidateDigest(divergent),
+    gateZeroOutcomeCandidateDigest(recorded),
+    "the divergent receipt projects to the same value, so this proves nothing");
+  const converged = await client.query(
+    "select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id",
+    [SECOND_KEY, JSON.stringify(divergent)]);
+  assert.equal(converged.rows[0].id, OUTCOME_ID,
+    "the converging call did not receive the row that already exists");
+
+  // NOTHING WAS REPLACED. The stored receipt is the first one, byte for byte,
+  // and so is the digest read back off the row — which is what the gateway then
+  // reports, so a consumer cannot mistake a converged call's answer for its own
+  // run's evidence.
+  assert.deepEqual(client.state.recorded, recorded,
+    "the divergent receipt replaced the recorded one");
+  assert.equal(client.state.recorded.status, "pass");
+  const readBack = await client.query(
+    "select id, outcome_digest from ops.gate_zero_read_only_outcome where id = $1::uuid",
+    [OUTCOME_ID]);
+  assert.equal(readBack.rows[0].outcome_digest, recordedDigest);
 
   // AND WHO THE MAKER IS STAYS INSIDE THE KEY, even though the maker's SESSION
   // does not. Step A's third correction made every session_ref per-call, the

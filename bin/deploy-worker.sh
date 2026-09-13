@@ -951,11 +951,28 @@ if [ "$VERSION_MODE" = "upload" ]; then
   # version id, and the provider-bound manifest whose plan hash Joe will approve.
   #
   # AND WHAT THAT MAKER IS TODAY, said here because a deploy log should not imply
-  # more than it has. The row is filed on the ledger writer, which is the only
-  # credential holding INSERT on ops.release — the authority bundle holds none and
-  # granting it one is the capability open loop #594 carries. So this record is an
-  # honest UNAUTHENTICATED one until that grant lands, and the line printed below
-  # reports what the database recorded rather than what anyone intended.
+  # more than it has. The row is filed on the AUTHORITY connection —
+  # CARR_DB_AUTHORITY_JOE_URL, the same credential `release approve` already runs
+  # on — so migration 0504's trigger records carr_authority_joe as the filing
+  # login and derives `maker_actor = joe` from it, and the generated
+  # `maker_authority_verified` column comes out TRUE. That is what standing-rule
+  # amendment 9(c) means by the authority identity, and it is why the Gate Zero
+  # seam store can read a subject maker back out of this row at all: the store
+  # reads only authority-verified rows and ignores every other one.
+  #
+  # WHAT CHANGED, AND WHAT CLOSED IT. Until 2026-09-13 this insert ran on the
+  # ledger writer, because the authority bundle held no INSERT on ops.release and
+  # granting it was a new DB mutation capability — open loop #594. Migration 0503
+  # is the SCAC registry successor that admitted it, and migration 0505 grants the
+  # two column-scoped reads the filing path needs (ops.service by key, and the
+  # five ops.release columns the insert returns). So the earlier honest
+  # UNAUTHENTICATED record is no longer what this wrapper writes.
+  #
+  # THIS STEP THEREFORE NEEDS THE AUTHORITY CREDENTIAL IN THE ENVIRONMENT. Absent
+  # it, ops-record.py refuses by name before it opens any connection and this
+  # wrapper fails the upload rather than filing a record no reader may believe.
+  # The line printed below still reports what the database recorded rather than
+  # what anyone intended.
   echo "== release candidate record =="
   "$PY" "$REPO/tools/ops-record.py" release candidate \
     --key "$RELEASE_KEY" --service carr-mcp --environment production \
