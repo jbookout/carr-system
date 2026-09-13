@@ -464,7 +464,9 @@ export async function executeWithTrustedPrincipal(actor, readback, requiredBundl
     }
     throw error;
   }
-  return handler({ ...actor, trusted_principal: trustedPrincipal });
+  // In place, not a copy: identity.js's authentication brand is object identity
+  // (amendment 8, 2026-09-13), so a spread here would strip it.
+  return handler(Object.assign(actor, { trusted_principal: trustedPrincipal }));
 }
 
 // Exported for deterministic no-network identity-gate tests. It remains the
@@ -623,7 +625,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
     if (!a.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug,
       hint: "the token authenticates as this actor but no row exists in the actor table — " +
             "provision the actor before any write verb will run" });
-    const actorWithId = { ...actor, id: a.rows[0].id };
+    // In place, not a copy — see executeWithTrustedPrincipal above.
+    const actorWithId = Object.assign(actor, { id: a.rows[0].id });
     await setWriterActorContext(client, actorWithId);
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
     if (principalReadback.rows.length !== 1)
@@ -671,7 +674,13 @@ export async function dispatch(request, env, ctx, actor) {
   // The authority class is server-derived from the authenticated actor. The
   // legacy ?profile= remains only a voluntary operational limiter: it can
   // reduce the listed/callable verbs, never select a sponsor or widen humanOnly.
-  const scopedActor = { ...actor,
+  // DECORATED IN PLACE. This used to be `{ ...actor, ... }`, and the copy was
+  // load-bearing in the wrong direction: identity.js's brand is now object
+  // identity (amendment 8), so an actor spread here reaches the verb dispatch
+  // authenticated as nobody. The fields a receipt identity is derived from were
+  // pinned at authentication and are not re-read off this object, so decorating
+  // it cannot move who the actor is either.
+  const scopedActor = Object.assign(actor, {
     authorization_class: authorizationClassForActor(actor),
     organization_tenant_id: organizationTenantForActor(actor),
     operational_profile: profile,
@@ -683,7 +692,7 @@ export async function dispatch(request, env, ctx, actor) {
     // every verb handler — means every write verb's existing withEnvelope()/
     // writeEvent() calls pick it up for free through auditIdentity(actor)
     // (tools.js), with zero change to any individual verb.
-    correlation_id: env.CORRELATION_ID || null };
+    correlation_id: env.CORRELATION_ID || null });
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 

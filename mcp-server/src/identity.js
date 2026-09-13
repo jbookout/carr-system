@@ -190,7 +190,7 @@ export function actorFromProps(props, currentNativeAgentBindings = null) {
   // uses the separately provisioned local credential.
   const continuity_surface = native_agent_verified && props.slug === "codex"
     ? "codex" : null;
-  return minted({ slug: props.slug, display: DISPLAY[props.slug], human,
+  return authenticateConnection({ slug: props.slug, display: DISPLAY[props.slug], human,
            via: props.via || null, client_id: props.client_id || null,
            sponsoring_human_slug,
            ...(native_agent_verified ? { native_agent_verified: true } : {}),
@@ -347,7 +347,7 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
   // codex/grok (absent from that map) stay unsponsored exactly as before.
   const sponsoring_human_slug = LOCAL_SPONSOR[slug] || null;
   const native_agent_verified = viaLabel === "local-token" && sponsoring_human_slug !== null;
-  return minted({ slug, display: `Agent (${slug})`, human: false, agent: true,
+  return authenticateConnection({ slug, display: `Agent (${slug})`, human: false, agent: true,
            via: viaLabel, client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false,
            ...(native_agent_verified ? { native_agent_verified: true } : {}) });
@@ -383,7 +383,7 @@ export function continuityActorForTokenMaps(
   }
   if (candidates.length !== 1) return null;
   const { surface, sponsor } = candidates[0];
-  return minted({
+  return authenticateConnection({
     slug: surface, display: DISPLAY[surface], human: false, agent: true,
     via: `${surface}-continuity-token`, client_id: null,
     sponsoring_human_slug: sponsor, human_slug: sponsor, sponsor_required: false,
@@ -464,7 +464,7 @@ export function hermesActorForToken(authorizationHeader, hermesTokensRaw) {
   const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!slug) return null;
   const sponsoring_human_slug = HERMES_SPONSOR[slug] || null;
-  return minted({ slug, display: `Hermes (${slug})`, human: false, hermes: true,
+  return authenticateConnection({ slug, display: `Hermes (${slug})`, human: false, hermes: true,
            via: "hermes-token", client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false });
 }
@@ -503,13 +503,14 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
   if (!tokens[slug] || tokens[slug] !== token) return null;
   const sponsoring_human_slug = HERMES_SPONSOR[slug];
   if (sponsoring_human_slug !== "joe") return null;
-  return minted({ slug, display: `Hermes CoS (${slug})`, human: false,
+  return authenticateConnection({ slug, display: `Hermes CoS (${slug})`, human: false,
            hermes: true, hermesCos: true, via: "hermes-cos-token", client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false });
 }
 
 // ---------------------------------------------------------------------------
-// THE AUTHENTICATED CALL (2026-09-12, PR 1013, SECOND correction round).
+// THE AUTHENTICATED CALL (2026-09-12, PR 1013 — THIRD correction round, under
+// standing-rule AMENDMENT 8, logged 2026-09-13).
 //
 // WHY IT EXISTS. r7's identity rule says every receipt identity is DERIVED from
 // authenticated execution context, and caller-supplied identity denies. A module
@@ -520,44 +521,66 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
 // out of a static declaration instead, so ANY process that imported it received
 // a receipt signed `codex-reviewer` without ever authenticating.
 //
-// WHAT THE FIRST CORRECTION GOT WRONG, and this one closes. It shipped
-// `runInAuthenticatedCall(actor, fn)` as a public export that took an ORDINARY
-// OBJECT. Anything that could type `{ slug: "codex-reviewer", review: true,
-// via: "review-token", correlation_id: <a uuid> }` could enter the context and
-// be signed for — which is caller-supplied identity wearing a context's
-// clothes, and the reviewer proved it by producing `authority_class:
-// "review_agent"` from a literal. Both names are gone.
+// WHAT THE FIRST CORRECTION GOT WRONG. It shipped `runInAuthenticatedCall(actor,
+// fn)` as a public export that took an ORDINARY OBJECT, so anything able to type
+// `{ slug: "codex-reviewer", review: true, ... }` could be signed for.
 //
-// WHAT MAKES THIS ONE DIFFERENT: THE BRAND, and it is the whole control. Every
-// actor this file mints from a real credential — an OAuth grant's props, an
-// agent bearer, a continuity bearer, a Hermes bearer, the review-token door
-// below — is stamped with `MINTED_HERE`, a module-private Symbol carrying a
-// module-private sentinel. Nothing outside this file can name that Symbol and
-// nothing outside this file can reach that sentinel, so nothing outside this
-// file can produce an object the derivation will speak for. The stamp is a
-// non-writable, non-configurable ENUMERABLE property, which is the one shape
-// that survives the four places the server legitimately re-spreads an actor
-// (`{ ...actor, authorization_class }` in mcp.js and its three siblings) while
-// still being impossible to write over.
+// WHAT THE SECOND CORRECTION GOT WRONG, and what amendment 8 closes. The brand
+// it added was a Symbol-keyed ENUMERABLE property, chosen precisely so it would
+// survive the places the server re-spreads an actor. A property that survives
+// the server's spread survives the FORGER'S spread too: the reviewer took a
+// branded partner actor, wrote `{ ...actor }`, rewrote the copy's slug as
+// `codex-reviewer`, put it through the real `executeRegisteredTool`, and was
+// signed for as a review agent. Two public doors made that easier still —
+// `reviewActorForToken` took the SERVER'S TOKEN MAP as a caller argument (so a
+// caller could verify a bearer of their choosing against a map of their
+// choosing), and `dispatchAuthenticatedCall` was an exported context entry.
 //
-// SO THE ENTRY POINT IS NOT A SETTER. `dispatchAuthenticatedCall` stores nothing
-// a caller supplies: it stores what `deriveCallIdentity` COMPUTES from an actor
-// this file minted, and an unbranded object — however perfectly shaped — derives
-// null and is signed for by nothing. The only identity a caller can "set" is the
-// one they already authenticated as, which is not a setter, it is a scope.
+// AMENDMENT 8, WHICH IS WHAT THIS SECTION NOW IS:
 //
-// WHERE IT IS ENTERED: once, at tools.js's single verb dispatch, the same choke
-// point every verb already funnels through. Inside a verb call the derived
-// identity is readable with no argument; outside one there is nothing to read
-// and `authenticatedCallReceiptIdentity()` answers null. A test, a CLI probe or
-// an unauthenticated import therefore cannot obtain an identity, which is the
-// property the producer's refusal stands on.
+//   * An actor is authenticated IF AND ONLY IF it is a member of
+//     AUTHENTICATED_ACTORS, a module-private WeakSet populated SOLELY by
+//     `authenticateConnection` below, at the moment a credential is verified
+//     against a map this module holds. THE BRAND IS OBJECT IDENTITY, NOT A
+//     PROPERTY: there is nothing written on the object, so a copy, a spread or a
+//     clone is a different object and is not authenticated. The forgery the
+//     second round admitted has nowhere to stand.
+//   * Because object identity is the brand, the server may no longer COPY an
+//     actor in order to decorate it. Every server decoration site — mcp.js's
+//     scoped actor, its actor-with-id and its trusted-principal handoff,
+//     index.js's continuity-compat surface, tour-runtime's runtime actor — now
+//     writes onto the authenticated object IN PLACE. Those objects are built per
+//     request by the doors above and are reachable from nothing else.
+//   * The fields an identity is derived FROM are pinned at the moment of
+//     authentication, in AUTHENTICATED_CREDENTIAL, and are never read back off
+//     the actor afterwards. In-place decoration therefore cannot rewrite who an
+//     actor is or what class it holds either — not the server's, and not a
+//     forger's. `{ slug }` and `{ review: true }` written onto a branded actor
+//     change nothing the receipt says.
+//   * THIS FILE EXPORTS NO FUNCTION THAT ENTERS AN IDENTITY CONTEXT AND NO
+//     FUNCTION THAT MINTS A BRANDED ACTOR FROM CALLER-SUPPLIED BYTES. The review
+//     door takes a BEARER ONLY, checked against the map the server sealed into
+//     this module. The context entry is `enterAuthenticatedCall`, which is not
+//     exported: the dispatch path reaches it only through the module-internal
+//     call the per-actor dispatcher closes over, and that dispatcher is closed
+//     over an identity DERIVED here — pointing it somewhere else is not a thing
+//     a caller can express.
+//
+// THE SEAL, and why there is one. A Cloudflare Worker secret is readable only
+// from a request's `env`, so the server hands this module its review-token map
+// once, on the first /mcp request, through `sealServerReviewTokens`. That call
+// is ONE-SHOT: a second map is refused and answers false, and until a map is
+// sealed no bearer authenticates at all. A caller reaching this module after the
+// server has booted therefore has nowhere to put a token map of its own, which
+// is exactly the property the second round lacked. Sealing brands nothing by
+// itself — it installs a credential map, and only `authenticateConnection` can
+// turn a match against that map into an authenticated actor.
 //
 // WHAT TRAVELS IS THE DERIVATION, NOT THE ACTOR. The store holds a frozen
 // three-field `authenticated-receipt-identity.v1` — actor_id, session_ref,
-// authority_class — computed here from the server-established actor. The actor
-// object itself is deliberately not stored: a consumer that could reach it could
-// read the grant props, and nothing downstream needs more than these three.
+// authority_class. The actor object itself is deliberately not stored: a
+// consumer that could reach it could read the grant props, and nothing
+// downstream needs more than these three.
 //
 // THE SESSION REF IS THE SERVER'S OWN CORRELATION ID, not a digest of whatever
 // the call happened to be looking at. correlation.js stamps one per request and
@@ -579,30 +602,22 @@ export function hermesCosActorForToken(authorizationHeader, hermesCosTokensRaw) 
 const AUTHENTICATED_CALL = new AsyncLocalStorage();
 
 /**
- * THE BRAND. A module-private Symbol and a module-private sentinel: an object
- * carries an authentic stamp only if this file put it there, because neither
- * half of the pair has a name anything else can write down.
+ * THE BRAND. Membership of a module-private WeakSet — object identity and
+ * nothing else. There is no name to write down, no property to copy, and no
+ * exported brander, because an exported brander is the forger this brand exists
+ * to stop.
  */
-const MINTED_HERE = Symbol("carr.identity.minted-from-a-credential");
-const MINT = Object.freeze({ minted_by: "mcp-server/src/identity.js" });
+const AUTHENTICATED_ACTORS = new WeakSet();
 
 /**
- * Stamp one freshly minted actor. Applied at every return in this file that
- * turns a CREDENTIAL into an actor, and nowhere else — there is no exported
- * brander, because an exported brander is the forger this brand exists to stop.
+ * What the credential SAID, frozen at the instant it was verified. Every field a
+ * receipt identity is built from is read from here rather than from the live
+ * actor, so decorating the actor later — however that happens — cannot move it.
  */
-function minted(actor) {
-  if (actor === null || typeof actor !== "object") return actor;
-  Object.defineProperty(actor, MINTED_HERE, {
-    value: MINT, enumerable: true, writable: false, configurable: false,
-  });
-  return actor;
-}
+const AUTHENTICATED_CREDENTIAL = new WeakMap();
 
-/** Did this file mint it? Asked of the sentinel, not of the Symbol's presence. */
-function mintedHere(actor) {
-  return actor !== null && typeof actor === "object" && actor[MINTED_HERE] === MINT;
-}
+/** The server's review-token map, once the server has sealed it. One-shot. */
+let SERVER_REVIEW_TOKENS = null;
 
 /**
  * Amendment 2's closed callable shape, for the exports added below: bound (so
@@ -623,84 +638,170 @@ const CALL_VIA = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CALL_CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * THE CONNECTION AUTHENTICATOR, and the ONLY writer of the brand.
+ *
+ * Called at every return in this file that turns a verified CREDENTIAL into an
+ * actor — the OAuth grant's props, the agent bearer, the two continuity bearers,
+ * the two Hermes bearers, and the review bearer below — and nowhere else. It is
+ * not exported.
+ *
+ * It brands only what it can also PIN: a slug, a recognizable server-written
+ * provenance, and a personal scope this file will stand behind. An actor it
+ * declines to brand is still returned unchanged and still works for every verb;
+ * what it cannot do is obtain a receipt identity.
+ */
+function authenticateConnection(actor) {
+  if (actor === null || typeof actor !== "object") return actor;
+  if (typeof actor.slug !== "string") return actor;
+  const via = typeof actor.via === "string" ? actor.via.toLowerCase() : "";
+  if (!CALL_VIA.test(via)) return actor;
+  if (personalScopeForActor(actor).status === "error") return actor;
+  AUTHENTICATED_ACTORS.add(actor);
+  AUTHENTICATED_CREDENTIAL.set(actor, Object.freeze({
+    slug: actor.slug, via, authority_class: authorizationClassForActor(actor),
+  }));
+  return actor;
+}
+
+/**
  * The `authenticated-receipt-identity.v1` for one server-established actor, or
  * null when this actor cannot be spoken for.
  *
- * THE FIRST QUESTION IS THE BRAND. An object this file did not mint from a
- * credential answers null here whatever else is written on it, which is what
- * makes the entry below a scope rather than a setter.
+ * THE FIRST QUESTION IS THE BRAND, asked as membership. An object this module's
+ * connection authenticator did not brand answers null here whatever is written
+ * on it — and so does a copy of one that it did.
  *
- * Every field is then computed here and now: the slug is the one identity.js
- * already accepted, the class is what authorizationClassForActor derives for it,
- * and the session is the server's correlation id. Nothing is read from a tool
- * argument and nothing is read from a stored row.
+ * Then every field comes from the PINNED credential: the slug the door accepted
+ * and the class derived for it at that instant. The only thing read off the live
+ * actor is the server's correlation id, which names a call rather than an
+ * authority, and which correlation.js — not any caller — writes.
  */
 function deriveCallIdentity(actor) {
-  if (!mintedHere(actor)) return null;
-  if (typeof actor.slug !== "string") return null;
-  if (personalScopeForActor(actor).status === "error") return null;
-  const via = typeof actor.via === "string" ? actor.via.toLowerCase() : "";
+  if (actor === null || typeof actor !== "object") return null;
+  if (!AUTHENTICATED_ACTORS.has(actor)) return null;
+  const credential = AUTHENTICATED_CREDENTIAL.get(actor);
+  if (credential === undefined) return null;
   const correlationId = typeof actor.correlation_id === "string"
     ? actor.correlation_id.toLowerCase() : "";
-  if (!CALL_VIA.test(via) || !CALL_CORRELATION_ID.test(correlationId)) return null;
+  if (!CALL_CORRELATION_ID.test(correlationId)) return null;
   return Object.freeze({
-    actor_id: actor.slug,
+    actor_id: credential.slug,
     session_ref: `session:${correlationId}`,
-    authority_class: authorizationClassForActor(actor),
+    authority_class: credential.authority_class,
   });
 }
 
 /**
- * REVIEW_TOKENS bearer -> the review council's machine actor, or null.
- *
- * MOVED HERE FROM index.js IN THIS CORRECTION, for the reason agentActorForToken
- * and hermesActorForToken were moved before it, plus one that is new. The old
- * ones: the Worker entrypoint imports from `cloudflare:` and cannot be loaded by
- * `node --test`, so a door that only exists there is a door nobody can prove.
- * The new one: a receipt identity may only be derived from an actor this file
- * minted, so the door that mints the ONE class r7's registry admits for an
- * independent control-plane oracle has to be a door this file owns. index.js's
- * reviewActorFor now reads its secret and delegates here; the fields it returns
- * are unchanged, byte for byte, including `review: true` — still the only thing
- * that can put mcp.js's dispatch into the locked `reviewer` profile.
- *
- * Fails closed on every path: no header, unparseable JSON, a non-object or empty
- * map, or a token that matches nothing.
+ * THE CONTEXT ENTRY, and it is NOT EXPORTED — amendment 8 in one line. The only
+ * way to reach it is the dispatcher `dispatchFor` hands back, which is closed
+ * over an identity this file derived and cannot be aimed at another one.
  */
-export const reviewActorForToken = closedCallable((authorizationHeader, reviewTokensRaw) => {
-  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
-  if (!token) return null;
+function enterAuthenticatedCall(identity, fn) {
+  return AUTHENTICATED_CALL.run(identity, fn);
+}
+
+/** A slug -> secret map the SERVER holds, or null when there is nothing usable. */
+function parsedTokenMap(raw) {
   let tokens;
   try {
-    tokens = JSON.parse(reviewTokensRaw || "{}");
+    tokens = JSON.parse(raw || "{}");
   } catch {
     return null;
   }
   if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return null;
-  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
-  if (!slug) return null;
-  // personalScopeForActor refuses any slug that is neither a DISPLAY actor nor a
-  // registered SERVER_MACHINE_IDENTITIES entry with this exact marker and
-  // provenance, so registration is enforced one layer down exactly as it was
-  // when this door lived in index.js.
-  return minted({ slug, display: `Reviewer (${slug})`, human: false, review: true,
-                  via: "review-token", client_id: null });
+  const entries = Object.entries(tokens).filter(([slug, secret]) =>
+    typeof slug === "string" && slug.length > 0
+    && typeof secret === "string" && secret.length > 0);
+  return entries.length === 0 ? null : Object.freeze(Object.fromEntries(entries));
+}
+
+/**
+ * THE SUBJECT MAKER'S REGISTRY — a commit's committer address to the registered
+ * partner it names.
+ *
+ * A FROZEN TABLE AND AN EXACT MATCH, never a pattern and never a domain rule.
+ * It is deliberately SEPARATE from ALLOW_LIST above: ALLOW_LIST says which
+ * Google identity may be ISSUED A TOKEN, and a committer address authenticates
+ * nothing at all — it is an attribution read out of a commit object. Mapping the
+ * two through one table would make a git address an authentication surface.
+ *
+ * THE NOREPLY ADDRESSES ARE WHY THIS EXISTS. Every commit GitHub's own merge
+ * path writes carries the author's `users.noreply.github.com` address as the
+ * committer, so a table holding only the Gmail addresses cannot name the maker
+ * of any merged head — which is exactly what the third review round found at
+ * head 0849b987.
+ *
+ * Joe's numeric-id form is the one observed on this repository's heads. Dell's
+ * is the legacy login form of the GitHub account observed authoring Dell's
+ * commits here (`dellmccraneycarrus-gif`); if Dell's account is set to the
+ * numeric-id form, that address is added HERE when it is first observed, never
+ * guessed at — an invented id would map a stranger.
+ *
+ * `noreply@github.com` — GitHub's shared web-flow committer — is deliberately
+ * absent: every web commit by every account carries it, so it names nobody.
+ */
+const COMMITTER_IDENTITIES = Object.freeze({
+  "joe.bookout.carr.us@gmail.com": "joe",
+  "64207374+jbookout@users.noreply.github.com": "joe",
+  "dell.mccraney.carr.us@gmail.com": "dell",
+  "dellmccraneycarrus-gif@users.noreply.github.com": "dell",
 });
 
 /**
- * Run `fn` inside the authenticated call this actor established.
+ * Seal the server's review-token map into this module. ONE-SHOT: answers true
+ * the first time it is given a usable map and false every time after, so the
+ * map a caller arrives with has nowhere to go. Brands nothing by itself.
+ */
+const sealServerReviewTokens = closedCallable((reviewTokensRaw) => {
+  if (SERVER_REVIEW_TOKENS !== null) return false;
+  const tokens = parsedTokenMap(reviewTokensRaw);
+  if (tokens === null) return false;
+  SERVER_REVIEW_TOKENS = tokens;
+  return true;
+});
+
+/**
+ * REVIEW bearer -> the review council's machine actor, or null.
  *
- * NOT A SETTER, and the difference is `deriveCallIdentity` above: what is stored
- * is computed here from an actor THIS FILE minted from a credential. Hand it an
- * object assembled anywhere else and the context is entered with null, so the
- * surfaces that read it refuse — a caller cannot name an identity, only occupy
- * the one they already hold.
+ * A BEARER AND NOTHING ELSE. The map it is checked against is the one the server
+ * sealed above; there is no second parameter, so "a bearer I chose plus a token
+ * map I chose" is not a call that can be written. Before the server seals, this
+ * door authenticates nobody.
  *
- * The one caller is tools.js's verb dispatch. Adding a second is a
+ * The fields are unchanged byte for byte from when this door lived in index.js,
+ * including `review: true` — still the only thing that can put mcp.js's dispatch
+ * into the locked `reviewer` profile. Registration is enforced one layer down:
+ * `personalScopeForActor`, inside the connection authenticator, refuses any slug
+ * that is neither a DISPLAY actor nor a registered SERVER_MACHINE_IDENTITIES
+ * entry with this exact marker and provenance, so a sealed map naming an
+ * unregistered slug brands nothing.
+ */
+const reviewActorForToken = closedCallable((authorizationHeader) => {
+  if (SERVER_REVIEW_TOKENS === null) return null;
+  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  const slug = Object.keys(SERVER_REVIEW_TOKENS).find(s => SERVER_REVIEW_TOKENS[s] === token);
+  if (!slug) return null;
+  return authenticateConnection({ slug, display: `Reviewer (${slug})`, human: false,
+                                  review: true, via: "review-token", client_id: null });
+});
+
+/**
+ * The dispatch path's door: the per-actor dispatcher for ONE verb call.
+ *
+ * NOT A CONTEXT ENTRY AND NOT A SETTER. It derives the identity HERE, from the
+ * brand and the pinned credential, and hands back a closure that can run a
+ * function inside that identity and no other. An actor this file did not brand
+ * derives null, and the closure then enters a CLEARED context — which is the
+ * fail-closed half: a nested call never inherits an outer call's identity.
+ *
+ * The one caller is tools.js's `executeRegisteredTool`. Adding a second is a
  * security-relevant change, not a convenience.
  */
-export const dispatchAuthenticatedCall = closedCallable((actor, fn) =>
-  AUTHENTICATED_CALL.run(deriveCallIdentity(actor), fn));
+const dispatchFor = closedCallable((actor) => {
+  const identity = deriveCallIdentity(actor);
+  return closedCallable(fn => enterAuthenticatedCall(identity, fn));
+});
 
 /**
  * The `authenticated-receipt-identity.v1` of the call this code is running
@@ -708,7 +809,61 @@ export const dispatchAuthenticatedCall = closedCallable((actor, fn) =>
  * nothing to supply, and returns a frozen three-field value rather than the
  * actor, so there is nothing to read back out of it either.
  */
-export const authenticatedCallReceiptIdentity = closedCallable(() => {
+const receiptIdentity = closedCallable(() => {
   const identity = AUTHENTICATED_CALL.getStore();
   return identity === undefined ? null : identity;
+});
+
+/**
+ * THE BUILD CONTEXT the dispatch path established, or null outside one.
+ *
+ * The candidate under review was built in some other session, and a receipt that
+ * names its maker still has to name a SESSION — the third review round's second
+ * finding was that the producer was manufacturing one out of the revision it
+ * happened to be reading, which is caller-side string assembly wearing a
+ * session's clothes. This derives it instead, from the one per-call identifier
+ * no caller writes: the authenticated call's own session ref, narrowed to the
+ * candidate-build seat within it. Outside an authenticated call there is no
+ * build context, so a run that cannot authenticate cannot name a maker either.
+ */
+const buildContext = closedCallable(() => {
+  const identity = AUTHENTICATED_CALL.getStore();
+  if (identity === undefined || identity === null) return null;
+  return Object.freeze({ session_ref: `${identity.session_ref}:candidate-build` });
+});
+
+/**
+ * A commit committer address -> the registered partner it names, with the
+ * authority class DERIVED for that partner, or null.
+ *
+ * NO ACTOR IS MINTED HERE, deliberately: a table lookup over an address read out
+ * of a commit must never be able to produce a branded actor, or the git object
+ * store would become an authentication surface. What comes back is an
+ * attribution — a slug and a derived class — and nothing that can be dispatched.
+ */
+const committerIdentity = closedCallable((email) => {
+  if (typeof email !== "string") return null;
+  const slug = COMMITTER_IDENTITIES[email.trim().toLowerCase()] ?? null;
+  if (slug === null || !isKnownPartner(slug)) return null;
+  return Object.freeze({
+    actor_id: slug,
+    authority_class: authorizationClassForActor({ slug, human: true }),
+  });
+});
+
+/**
+ * THE ONE EXPORT THIS SECTION ADDS, frozen, so the surface can be ENUMERATED
+ * rather than listed by hand: a test walks `Object.keys` of this object, and a
+ * seventh member added here arrives holding amendment 2's shape or arrives red.
+ *
+ * Read the members' own notes for what each is. What is NOT here is the point:
+ * no context entry, and no way to turn bytes into a branded actor.
+ */
+export const authenticatedIdentity = Object.freeze({
+  sealServerReviewTokens,
+  reviewActorForToken,
+  dispatchFor,
+  receiptIdentity,
+  buildContext,
+  committerIdentity,
 });

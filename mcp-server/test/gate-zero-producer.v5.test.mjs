@@ -133,23 +133,33 @@ const RECORDED_REVIEW_TOKENS = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: RECORDED
 const CORRELATION_ID = "3f2a6c18-9b4d-4e7a-8c11-5d0e2f7a6b93";
 
 /**
- * The reviewer seat, minted by the STAGED identity.js from the recorded context
- * and then decorated with the server's correlation id exactly as mcp.js
- * decorates it (`{ ...actor, correlation_id }` — the spread the brand is shaped
- * to survive). identity.js derives `review_agent` for it; nothing here says so.
+ * The reviewer seat, authenticated by the STAGED identity.js.
+ *
+ * TWO STEPS, BOTH THE SERVER'S, because amendment 8 moved the token map off the
+ * caller's side of the door. First the server SEALS its map into the module —
+ * one-shot, exactly as index.js does on the first /mcp request. Then the door
+ * takes a BEARER and nothing else: there is no parameter left for a caller to
+ * pair a bearer of its choosing with a map of its choosing.
+ *
+ * The correlation id is then written ON TO the authenticated object, the way
+ * mcp.js now decorates it. It is NOT a spread: the brand is object identity, so
+ * a copy of this actor authenticates as nobody — which is the whole design, and
+ * the control three tests down proves it. identity.js derives `review_agent`
+ * for the seat; nothing here says so.
  */
 function recordedReviewerActor(identity, correlationId = CORRELATION_ID) {
-  const actor = identity.reviewActorForToken(
-    `Bearer ${RECORDED_REVIEW_TOKEN}`, RECORDED_REVIEW_TOKENS);
-  assert.notEqual(actor, null, "the recorded review context minted no actor");
-  return { ...actor, correlation_id: correlationId };
+  identity.authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS);
+  const actor = identity.authenticatedIdentity
+    .reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`);
+  assert.notEqual(actor, null, "the recorded review context authenticated no actor");
+  return Object.assign(actor, { correlation_id: correlationId });
 }
 
-/** A verified partner, minted by the same file's OAuth-props path. NOT this oracle's class. */
+/** A verified partner, from the same file's OAuth-props path. NOT this oracle's class. */
 function recordedPartnerActor(identity, correlationId = CORRELATION_ID) {
   const actor = identity.actorFromProps(identity.propsForSlug("joe", { via: "oauth-google" }));
-  assert.notEqual(actor, null, "the recorded partner context minted no actor");
-  return { ...actor, correlation_id: correlationId };
+  assert.notEqual(actor, null, "the recorded partner context authenticated no actor");
+  return Object.assign(actor, { correlation_id: correlationId });
 }
 
 /**
@@ -165,8 +175,12 @@ function fabricatedReviewerActor() {
     correlation_id: CORRELATION_ID };
 }
 
-/** The committer identity.js maps, and the actor it maps to. */
+/** The committers identity.js's frozen registry maps, and the actor they map to. */
 const MAKER_EMAIL = "joe.bookout.carr.us@gmail.com";
+/** The address GitHub's own merge path writes as the committer of every merged
+ *  head — the form this PR's own HEAD carries, and the one the registry could
+ *  not name until amendment 8. */
+const MAKER_NOREPLY_EMAIL = "64207374+jbookout@users.noreply.github.com";
 const SUBJECT_MAKER_ACTOR = "joe";
 
 const staged = [];
@@ -566,8 +580,11 @@ test("RECEIPT: all twenty-one fields of consumer-gate-receipt.v1, and nothing el
   // system derives, admits or checks.
   assert.equal(receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
   assert.equal(receipt.subject_maker_identity.authority_class, "verified_partner");
+  // THE SESSION IS DERIVED, NOT MANUFACTURED: it is the candidate-build seat
+  // within the authenticated call the dispatch path established, so it moves
+  // with the server's correlation id and not with the revision.
   assert.equal(receipt.subject_maker_identity.session_ref,
-    `session:candidate-build:${REVISION_ALL_SUCCEED}`);
+    `session:${CORRELATION_ID}:candidate-build`);
   assert.notEqual(receipt.subject_maker_identity.actor_id, receipt.producer_identity.actor_id);
   assert.notEqual(receipt.subject_maker_identity.session_ref, receipt.producer_identity.session_ref);
 });
@@ -628,7 +645,7 @@ test("IDENTITY: an authenticated actor of the wrong derived class is refused", a
 
 test("IDENTITY: an actor with no server-stamped correlation id has no session, and is refused", async () => {
   const emitted = await emitFrom({},
-    identity => ({ ...recordedReviewerActor(identity), correlation_id: null }));
+    identity => Object.assign(recordedReviewerActor(identity), { correlation_id: null }));
   assert.equal(emitted.passable, false);
   assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
   assert.equal(emitted.producer_answer.receipt, null);
@@ -667,7 +684,7 @@ test("IDENTITY: a fabricated actor object obtains no identity and no receipt", a
   // door's actor answers a three-field identity there, the fabricated one null.
   const { target } = stageTree({});
   const identity = await moduleOfTree(target, IDENTITY_FILE);
-  const read = () => identity.authenticatedCallReceiptIdentity();
+  const read = () => identity.authenticatedIdentity.receiptIdentity();
   assert.deepEqual(await inDispatchedVerb(target, recordedReviewerActor(identity), read), {
     actor_id: REVIEWING_SEAT_ACTOR,
     session_ref: `session:${CORRELATION_ID}`,
@@ -675,9 +692,125 @@ test("IDENTITY: a fabricated actor object obtains no identity and no receipt", a
   });
   assert.equal(await inDispatchedVerb(target, fabricatedReviewerActor(), read), null);
 
-  // AND THE OLD SURFACE IS GONE BY NAME, so nothing can quietly go back to it.
-  for (const gone of ["runInAuthenticatedCall", "authenticatedCallIdentity"])
+  // AND EVERY SURFACE A PREVIOUS ROUND SHIPPED IS GONE BY NAME, so nothing can
+  // quietly go back to one. The last two are amendment 8's: the door that took
+  // the token map as an argument, and the exported context entry.
+  for (const gone of ["runInAuthenticatedCall", "authenticatedCallIdentity",
+    "reviewActorForToken", "dispatchAuthenticatedCall", "authenticatedCallReceiptIdentity"])
     assert.equal(Object.hasOwn(identity, gone), false, `${gone} is still exported`);
+});
+
+// ===========================================================================
+// CONTROL 13 — THE COPY, AND THE WRITE-OVER. Amendment 8's subject, and the
+// reviewer's own probe of the second correction round.
+//
+// The brand it replaced was an ENUMERABLE property, so it survived `{ ...actor }`
+// — including the forger's. The reviewer took a branded partner actor, spread
+// it, rewrote the copy as `codex-reviewer`, put it through the REAL
+// `executeRegisteredTool`, and was signed for as a review agent. The brand is
+// now membership of a module-private WeakSet, so the copy is simply a different
+// object; and the fields the identity is built from are pinned at the moment the
+// credential was verified, so writing over the ORIGINAL does not move them
+// either. Both halves are asserted, and both are asserted non-vacuously.
+// ===========================================================================
+
+test("IDENTITY: a spread copy of a branded actor, rewritten as the reviewer, is refused", async () => {
+  const rewrittenCopy = identity => ({
+    ...recordedPartnerActor(identity),
+    slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+    human: false, review: true, via: "review-token",
+  });
+
+  const emitted = await emitFrom({}, rewrittenCopy);
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.outcome_digest, null);
+  assert.equal(emitted.producer_answer.receipt, null);
+  assert.equal(JSON.stringify(emitted).includes("session:"), false,
+    "a session ref was minted for a copied actor");
+
+  // NON-VACUOUS, asked of identity.js from inside the SAME real dispatch: the
+  // object the copy was made FROM derives an identity, and the copy derives
+  // none. So what refuses above is the copying and nothing else.
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  const read = () => identity.authenticatedIdentity.receiptIdentity();
+  const branded = recordedPartnerActor(identity);
+  assert.deepEqual(await inDispatchedVerb(target, branded, read), {
+    actor_id: "joe",
+    session_ref: `session:${CORRELATION_ID}`,
+    authority_class: "verified_partner",
+  });
+  assert.equal(await inDispatchedVerb(target, rewrittenCopy(identity), read), null);
+});
+
+test("IDENTITY: writing the reviewer's fields onto a branded actor does not move what it is", async () => {
+  // THE OTHER HALF. Object identity alone would not stop this: the server now
+  // decorates actors IN PLACE, so a forger inside the process could write onto
+  // one too. The credential is pinned at the instant it was verified and is
+  // never re-read off the actor, so the receipt still names the partner — and
+  // the partner's class is not the one this oracle admits, so it refuses.
+  const writtenOver = identity => Object.assign(recordedPartnerActor(identity), {
+    slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+    human: false, review: true, via: "review-token",
+  });
+
+  const emitted = await emitFrom({}, writtenOver);
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.producer_answer.receipt, null);
+
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  assert.deepEqual(
+    await inDispatchedVerb(target, writtenOver(identity),
+      () => identity.authenticatedIdentity.receiptIdentity()),
+    { actor_id: "joe", session_ref: `session:${CORRELATION_ID}`,
+      authority_class: "verified_partner" },
+    "a field written onto a branded actor rewrote who it was");
+});
+
+test("IDENTITY: a caller-chosen bearer plus a caller token map authenticates nobody", async () => {
+  const { target } = stageTree({});
+  const identity = await moduleOfTree(target, IDENTITY_FILE);
+  const door = identity.authenticatedIdentity;
+  const CALLERS_OWN = "a-bearer-the-caller-chose";
+  const CALLERS_MAP = JSON.stringify({ [REVIEWING_SEAT_ACTOR]: CALLERS_OWN });
+
+  // THE DOOR TAKES A BEARER AND NOTHING ELSE, so the call the reviewer made is
+  // not one that can be written any more: a second argument is not read.
+  assert.equal(door.reviewActorForToken.length, 1);
+  assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`, CALLERS_MAP), null);
+  // And before the server seals a map, no bearer authenticates at all.
+  assert.equal(door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`), null);
+
+  // THE SERVER'S BOOTSTRAP, once. Everything after it is refused, so a caller
+  // arriving later has nowhere to put a map of its own.
+  assert.equal(door.sealServerReviewTokens(RECORDED_REVIEW_TOKENS), true);
+  assert.equal(door.sealServerReviewTokens(CALLERS_MAP), false);
+  assert.equal(door.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null);
+  // NON-VACUOUS: the map the server did seal still authenticates its own bearer.
+  assert.notEqual(door.reviewActorForToken(`Bearer ${RECORDED_REVIEW_TOKEN}`), null);
+
+  // AND THE CALLER'S BEARER IS REFUSED THROUGH THE REAL DISPATCH TOO, which is
+  // where the reviewer's probe ended: no actor, so no identity, so no receipt.
+  const emitted = await emitFrom({}, staged => {
+    // The server boots first, the way index.js boots it on the first request.
+    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens(RECORDED_REVIEW_TOKENS), true);
+    // The caller then arrives with a map of its own and is refused it, and its
+    // chosen bearer authenticates nothing against the map the server sealed.
+    assert.equal(staged.authenticatedIdentity.sealServerReviewTokens(CALLERS_MAP), false);
+    assert.equal(staged.authenticatedIdentity.reviewActorForToken(`Bearer ${CALLERS_OWN}`), null,
+      "a caller-chosen bearer authenticated against a caller-chosen map");
+    // So all it is left holding is an object it wrote itself, which is control
+    // 11's case again and refuses for the same reason.
+    return { slug: REVIEWING_SEAT_ACTOR, display: `Reviewer (${REVIEWING_SEAT_ACTOR})`,
+      human: false, review: true, via: "review-token", client_id: null,
+      correlation_id: CORRELATION_ID };
+  });
+  assert.equal(emitted.passable, false);
+  assert.equal(emitted.reason_id, "gate_zero_producer_identity_refused");
+  assert.equal(emitted.producer_answer.receipt, null);
 });
 
 test("DIGEST: each bound digest stands on its own artifact's bytes", async () => {
@@ -961,6 +1094,29 @@ test("IDENTITY: a subject maker that is the reviewing seat is denied", async () 
   assert.equal(emitted.producer_answer.receipt, null);
 });
 
+test("PRODUCED: a head written by GitHub's merge path still names its maker", async () => {
+  // THE THIRD REVIEW ROUND'S SECOND FINDING, as a control. Every head GitHub's
+  // own merge path writes carries the author's `users.noreply.github.com`
+  // address as the committer — it is what THIS PR's head carries — and a
+  // registry holding only the Gmail addresses reported `subject_maker` unnamed
+  // for the very branch under review.
+  const emitted = await emitFrom({ maker: MAKER_NOREPLY_EMAIL });
+  assert.equal(emitted.passable, true, emitted.unavailable_because ?? emitted.reason_id);
+  assert.equal(emitted.receipt.subject_maker_identity.actor_id, SUBJECT_MAKER_ACTOR);
+  assert.equal(emitted.receipt.subject_maker_identity.authority_class, "verified_partner");
+  assert.equal(emitted.receipt.subject_maker_identity.session_ref,
+    `session:${CORRELATION_ID}:candidate-build`);
+
+  // AND GITHUB'S SHARED WEB-FLOW COMMITTER STILL NAMES NOBODY. `noreply@github.com`
+  // is carried by every web commit by every account, so registering it would put
+  // a stranger's work under a partner's name. It is deliberately absent from the
+  // table, and this is the line that keeps it absent.
+  const shared = await emitFrom({ maker: "noreply@github.com" });
+  assert.equal(shared.passable, false);
+  assert.equal(shared.reason_id, "gate_zero_run_binding_unnamed");
+  assert.deepEqual(shared.producer_answer.unnamed_bindings, ["subject_maker"]);
+});
+
 test("ABSENCE: a committer this system does not register IS the absent ruled row", async () => {
   // A real, well-formed address identity.js's actor registry does not map. The
   // repository is intact and every sealed file is on disk; what is genuinely
@@ -1102,12 +1258,15 @@ test("SHAPE: the one callable wears amendment 2's closed shape", () => {
  *
  * The second review round's standards finding: the new exports were plain
  * function declarations — a prototype, constructable, and `instanceof` answered
- * by walking the left operand's chain. The enumeration below is by MODULE rather
- * than by name, so a tenth export added to any of them arrives holding the same
- * shape or arrives red.
+ * by walking the left operand's chain.
  *
- * identity.js is enumerated over its NEW exports only, named here: the file
- * predates the amendment and its older doors are not in this PR's changed
+ * THE ENUMERATION IS DYNAMIC, which the third round's third finding was about:
+ * the list used to be written out by hand here, so the claim "any future export
+ * arrives holding this shape or arrives red" was true of nothing. identity.js's
+ * whole new surface is now ONE frozen namespace export, and the test walks
+ * `Object.keys` of it — a seventh member added to that object is checked without
+ * anyone remembering to add a name here. The file's OLDER doors are deliberately
+ * out of scope: they predate the amendment and are not this PR's changed
  * surface. The testhelper is enumerated whole, because every callable in it is
  * new.
  */
@@ -1132,12 +1291,16 @@ function assertClosedShape(fn, where) {
 
 test("SHAPE: every callable this PR added to identity.js and the walker wears amendment 2's shape", async () => {
   const identity = await import("../src/identity.js");
-  const ADDED_TO_IDENTITY = ["reviewActorForToken", "dispatchAuthenticatedCall",
-    "authenticatedCallReceiptIdentity"];
-  for (const name of ADDED_TO_IDENTITY) {
-    assert.ok(Object.hasOwn(identity, name), `identity.js no longer exports ${name}`);
-    assertClosedShape(identity[name], `identity.js#${name}`);
-  }
+  const surface = identity.authenticatedIdentity;
+  assert.ok(Object.isFrozen(surface), "identity.js's new surface is not frozen");
+  // ENUMERATED, NOT LISTED. Every member of the namespace is checked, whatever
+  // it is called and however many there are.
+  const added = Object.keys(surface);
+  assert.ok(added.length >= 6, `identity.js's new surface shrank to ${added.length}`);
+  for (const name of added) assertClosedShape(surface[name], `identity.js#authenticatedIdentity.${name}`);
+  // AND THE SURFACE IS ALL OF IT: amendment 8 leaves identity.js with no other
+  // new top-level callable, so the enumeration above is not enumerating a subset.
+  assert.deepEqual(added.filter(name => typeof surface[name] !== "function"), []);
 
   const walker = await import("./gate-zero-reachability-walk.testhelper.mjs");
   const callables = Object.entries(walker).filter(([, value]) => typeof value === "function");

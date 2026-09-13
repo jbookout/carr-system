@@ -119,11 +119,14 @@
 // THE SUBJECT MAKER IS HEAD'S OWN COMMITTER — the `committer` line of HEAD's
 // commit OBJECT, not the reflog's last actor, which is whoever last moved this
 // worktree's HEAD and is a different person after every checkout. The address is
-// resolved through the SAME identity.js derivation the caller's identity uses:
-// the registry maps it to a slug, identity.js builds that slug's actor, and
-// `authorizationClassForActor` derives the class. Nothing is stated as a
-// constant — `candidate_builder`, which the first draft wrote into the field,
-// named a class no part of this system derives, admits or checks.
+// resolved by identity.js's frozen committer registry, which holds each
+// partner's Gmail address AND their GitHub noreply address: every head GitHub's
+// own merge path writes carries the latter, so a table without them could not
+// name the maker of any merged commit. That file derives the class too. Nothing
+// is stated as a constant — `candidate_builder`, which the first draft wrote
+// into the field, named a class no part of this system derives, admits or
+// checks — and the SESSION half is not assembled here either: it comes from the
+// authenticated build context the dispatch path established.
 //
 // CARD 9 IS STILL WHAT BINDS THE SEAM. An unstaffed seat still turns the whole
 // slice dark. What the seat no longer does is sign: naming who may sign and
@@ -143,10 +146,7 @@ import { inflateSync } from "node:zlib";
 
 import { artifactManifestDigest, canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
-import {
-  ORGANIZATION_TENANT_ID, actorFromProps, authenticatedCallReceiptIdentity,
-  authorizationClassForActor, isKnownActor, propsForSlug, slugForEmail,
-} from "./identity.js";
+import { ORGANIZATION_TENANT_ID, authenticatedIdentity } from "./identity.js";
 import {
   CONSUMER_GATE_RECEIPT_FIELDS,
   CONSUMER_GATE_RECEIPT_SCHEMA,
@@ -690,7 +690,7 @@ const SESSION_REF = /^session:[a-z0-9][a-z0-9:._/-]{8,199}$/;
  * re-checked here rather than trusted across the module boundary.
  */
 function authenticatedCaller() {
-  const identity = authenticatedCallReceiptIdentity();
+  const identity = authenticatedIdentity.receiptIdentity();
   if (identity === null || typeof identity !== "object") return null;
   if (typeof identity.actor_id !== "string" || !ACTOR_ID.test(identity.actor_id)) return null;
   if (typeof identity.session_ref !== "string" || !SESSION_REF.test(identity.session_ref))
@@ -699,26 +699,33 @@ function authenticatedCaller() {
 }
 
 /**
- * THE SUBJECT MAKER'S IDENTITY, resolved through the SAME derivation the
- * authenticated caller's is: the committer address goes through identity.js's
- * own registry (`slugForEmail`, then the actor that file builds for the slug),
- * and the authority class is whatever `authorizationClassForActor` derives for
- * that actor. It is not a constant — the first draft wrote `candidate_builder`
- * into the field, which named a class no part of this system derives, admits or
- * checks. An address the registry does not map answers null, and a receipt does
+ * THE SUBJECT MAKER'S IDENTITY — both halves derived, neither assembled here.
+ *
+ * THE PRINCIPAL comes from identity.js's frozen committer registry: HEAD's
+ * committer address, matched exactly, answering a registered partner and the
+ * authority class that file derives for them. It is not a constant — the first
+ * draft wrote `candidate_builder` into the field, which named a class no part of
+ * this system derives, admits or checks — and it is not this module's table
+ * either. An address the registry does not map answers null, and a receipt does
  * not name a principal this system does not register.
+ *
+ * THE SESSION comes from the authenticated build context the DISPATCH PATH
+ * established. The second correction manufactured it here, out of the revision
+ * this module happened to be reading, and the third review round was right that
+ * a string this file assembles is not a session anyone authenticated. Outside an
+ * authenticated call there is no build context and this answers null, which is
+ * the same fail-closed answer the producer identity gives.
  */
-function subjectMakerIdentityFor(email, headRevision) {
-  if (typeof email !== "string") return null;
-  const slug = slugForEmail(email);
-  if (typeof slug !== "string" || !ACTOR_ID.test(slug) || !isKnownActor(slug)) return null;
-  let actor;
-  try { actor = actorFromProps(propsForSlug(slug)); } catch { return null; }
-  if (actor === null) return null;
+function subjectMakerIdentityFor(email) {
+  const named = authenticatedIdentity.committerIdentity(email);
+  if (named === null) return null;
+  if (typeof named.actor_id !== "string" || !ACTOR_ID.test(named.actor_id)) return null;
+  const build = authenticatedIdentity.buildContext();
+  if (build === null || !SESSION_REF.test(build.session_ref)) return null;
   return deepFreeze({
-    actor_id: slug,
-    session_ref: `session:candidate-build:${headRevision}`,
-    authority_class: authorizationClassForActor(actor),
+    actor_id: named.actor_id,
+    session_ref: build.session_ref,
+    authority_class: named.authority_class,
   });
 }
 
@@ -1243,7 +1250,7 @@ async function produce() {
   // (2c) THE RULED ROW. The subject maker is HEAD's committer resolved through
   // identity.js's actor registry; an address that registry does not map is a
   // genuinely absent row, and `gate_zero_run_binding_unnamed` says which.
-  const subjectMakerIdentity = subjectMakerIdentityFor(commit.committer_email, headRevision);
+  const subjectMakerIdentity = subjectMakerIdentityFor(commit.committer_email);
   const unnamed = [
     ["subject_maker", subjectMakerIdentity !== null],
     ["scheduler_service_key", SERVICE_KEY.test(SCHEDULER_SERVICE_KEY)],

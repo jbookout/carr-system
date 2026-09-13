@@ -32,7 +32,7 @@ import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
-         personalScopeForActor, dispatchAuthenticatedCall } from "./identity.js";
+         personalScopeForActor, authenticatedIdentity } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
@@ -7620,10 +7620,14 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
     // to read and that surface refuses.
     //
     // THIS IS NOT AN IDENTITY SETTER, and identity.js's own note says why at
-    // length: what gets stored is DERIVED there from an actor that file minted
-    // from a credential and stamped with a Symbol nothing else can name. An
-    // object assembled anywhere else enters the scope as null.
-    return await dispatchAuthenticatedCall(actor, () => tool.handler(client, actor, args));
+    // length. Under amendment 8 the dispatch path does not enter the context at
+    // all: it asks identity.js for THIS actor's dispatcher, which that file
+    // closed over an identity it derived from the brand — membership of a
+    // module-private WeakSet — and the pinned credential behind it. An object
+    // that file did not authenticate, or any copy of one that it did, yields a
+    // dispatcher over a null identity, and the context is entered CLEARED.
+    const dispatchAuthenticated = authenticatedIdentity.dispatchFor(actor);
+    return await dispatchAuthenticated(() => tool.handler(client, actor, args));
   } catch (e) {
     if (e instanceof ToolError) throw e;
     throw pgConstraintError(e) || e;

@@ -23,19 +23,20 @@ import {
   isKnownPartner,
   agentActorForToken,
   continuityActorForTokenMaps,
-  reviewActorForToken,
+  authenticatedIdentity,
 } from "../src/identity.js";
+// The whole namespace, so the removed surfaces can be asserted absent by name.
+import * as identityModule from "../src/identity.js";
 
 /**
- * THE FIELDS AN ACTOR CARRIES, without the authentication brand.
+ * THE FIELDS AN ACTOR CARRIES.
  *
- * Since 2026-09-12 (PR 1013) every actor identity.js mints from a credential
- * also carries one module-private Symbol stamping it as minted THERE, which is
- * what lets a receipt identity be derived only from a real credential — see that
- * file's note. The stamp is enumerable so it survives the `{ ...actor }` spreads
- * the server does legitimately, and it is therefore visible to a strict deep
- * comparison, which is what this helper strips. The assertions below are about
- * the FIELDS a door returns; the stamp has its own assertions at the bottom.
+ * Under amendment 8 (2026-09-13) an actor carries NOTHING that marks it as
+ * authenticated: the brand is membership of a module-private WeakSet in
+ * identity.js, so it is object identity and not a property. The second
+ * correction's enumerable Symbol stamp is gone — a property that survives the
+ * server's spread survived a forger's spread too — and this helper is now a
+ * plain own-entries copy kept for the deep comparisons below.
  */
 const fieldsOf = actor => (actor === null ? null : Object.fromEntries(Object.entries(actor)));
 
@@ -384,50 +385,99 @@ test("local token is per-slug like every other agent token: a stray key does not
 });
 
 // ---------------------------------------------------------------------------
-// THE AUTHENTICATION BRAND (2026-09-12, PR 1013's second correction round).
+// THE AUTHENTICATION BRAND (2026-09-12, PR 1013; amendment 8, 2026-09-13).
+//
+// The brand is MEMBERSHIP OF A MODULE-PRIVATE WeakSet, so there is nothing on an
+// actor to look at. What is observable from out here is the only thing that ever
+// mattered: whether a receipt identity can be derived for it, which the dispatch
+// path's own door answers.
 // ---------------------------------------------------------------------------
 
-test("every door that mints an actor from a credential stamps it, and nothing else can", () => {
-  const doors = [
-    ["agent token", agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS)],
-    ["continuity token", continuityActorForTokenMaps("Bearer codex-secret",
-      JSON.stringify({ joe: "codex-secret" }), JSON.stringify({ dell: "claude-secret" }))],
-    ["review token", reviewActorForToken("Bearer review-secret-fixture",
-      JSON.stringify({ "codex-reviewer": "review-secret-fixture" }))],
-    ["oauth props", actorFromProps(propsForSlug("joe", { via: "oauth-google" }))],
-  ];
-  for (const [where, actor] of doors) {
-    assert.notEqual(actor, null, where);
-    const stamps = Object.getOwnPropertySymbols(actor);
-    assert.equal(stamps.length, 1, `${where} carries no stamp`);
-    const descriptor = Object.getOwnPropertyDescriptor(actor, stamps[0]);
-    // ENUMERABLE so `{ ...actor }` carries it — mcp.js spreads the actor to add
-    // the authority class and the correlation id, and an actor that lost its
-    // stamp there would reach the verb dispatch unauthenticated.
-    assert.equal(descriptor.enumerable, true, where);
-    // AND NON-WRITABLE, NON-CONFIGURABLE, so it cannot be forged onto an object
-    // by writing over it either.
-    assert.equal(descriptor.writable, false, where);
-    assert.equal(descriptor.configurable, false, where);
-    assert.ok(Object.isFrozen(descriptor.value), where);
-    // The spread a server path performs carries the stamp through unchanged.
-    const scoped = { ...actor, correlation_id: "00000000-0000-4000-8000-000000000000" };
-    assert.equal(scoped[stamps[0]], actor[stamps[0]], `${where} lost its stamp to a spread`);
-  }
+const A_CORRELATION_ID = "00000000-0000-4000-8000-000000000000";
+const REVIEW_SECRET = "review-secret-fixture";
 
-  // The four doors share ONE stamp, so a single check answers for all of them.
-  const symbols = doors.map(([, actor]) => Object.getOwnPropertySymbols(actor)[0]);
-  assert.equal(new Set(symbols).size, 1);
-  // And the Symbol is module-private: it is not in the global registry, so no
-  // other file can name it even knowing its description.
-  assert.equal(Symbol.keyFor(symbols[0]), undefined);
+/** What the verb dispatch sees for this actor, asked the way tools.js asks. */
+const identityFor = actor => authenticatedIdentity.dispatchFor(actor)(
+  () => authenticatedIdentity.receiptIdentity());
+
+/** The server's one-shot bootstrap, the way index.js performs it. */
+const sealedOnce = authenticatedIdentity.sealServerReviewTokens(
+  JSON.stringify({ "codex-reviewer": REVIEW_SECRET }));
+
+test("the authentication brand is object identity: a copy of an authenticated actor is not one", () => {
+  assert.equal(sealedOnce, true, "the server's review map did not seal");
+  const doors = [
+    ["agent token", agentActorForToken("Bearer grok-secret-fixture", AGENT_TOKENS), "grok"],
+    ["continuity token", continuityActorForTokenMaps("Bearer codex-secret",
+      JSON.stringify({ joe: "codex-secret" }), JSON.stringify({ dell: "claude-secret" })), "codex"],
+    ["review token", authenticatedIdentity.reviewActorForToken(`Bearer ${REVIEW_SECRET}`),
+      "codex-reviewer"],
+    ["oauth props", actorFromProps(propsForSlug("joe", { via: "oauth-google" })), "joe"],
+  ];
+  for (const [where, actor, slug] of doors) {
+    assert.notEqual(actor, null, where);
+    // NOTHING IS WRITTEN ON THE ACTOR. The second correction's enumerable Symbol
+    // stamp is gone, and its absence is the fix: a property survives a copy.
+    assert.deepEqual(Object.getOwnPropertySymbols(actor), [], `${where} carries a stamp`);
+
+    // Decorated IN PLACE, the way every server path now decorates it.
+    Object.assign(actor, { correlation_id: A_CORRELATION_ID });
+    assert.equal(identityFor(actor)?.actor_id, slug, `${where} derived no identity`);
+
+    // AND A COPY OF IT DERIVES NOTHING — spread, Object.assign onto a fresh
+    // object, and structural clone by JSON all answer the same way.
+    for (const copy of [{ ...actor }, Object.assign({}, actor),
+      JSON.parse(JSON.stringify(actor))])
+      assert.equal(identityFor(copy), null, `${where} authenticated a copy`);
+
+    // AND WRITING OVER THE ORIGINAL DOES NOT MOVE WHAT IT IS: every field the
+    // identity is built from was pinned when the credential was verified.
+    Object.assign(actor, { slug: "codex-reviewer", review: true, via: "review-token" });
+    assert.equal(identityFor(actor).actor_id, slug, `${where} was rewritten in place`);
+  }
 });
 
-test("a refused credential mints nothing to stamp", () => {
+test("a refused credential authenticates nothing", () => {
   assert.equal(agentActorForToken("Bearer wrong", AGENT_TOKENS), null);
-  assert.equal(reviewActorForToken("Bearer wrong",
-    JSON.stringify({ "codex-reviewer": "review-secret-fixture" })), null);
-  assert.equal(reviewActorForToken("", "{}"), null);
-  assert.equal(reviewActorForToken("Bearer x", "not json"), null);
-  assert.equal(reviewActorForToken("Bearer x", JSON.stringify(["x"])), null);
+  const review = authenticatedIdentity.reviewActorForToken;
+  assert.equal(review("Bearer wrong"), null);
+  assert.equal(review(""), null);
+  assert.equal(review(null), null);
+  // NON-VACUOUS: the bearer the server's sealed map does hold still works.
+  assert.notEqual(review(`Bearer ${REVIEW_SECRET}`), null);
+});
+
+test("the review door takes a bearer only, and the server's map seals once", () => {
+  // AMENDMENT 8. The door used to take the token map as its second argument, so
+  // a caller could verify a bearer of its choosing against a map of its
+  // choosing. There is no second parameter now, and the seal is one-shot.
+  assert.equal(authenticatedIdentity.reviewActorForToken.length, 1);
+  const callersMap = JSON.stringify({ "codex-reviewer": "a-bearer-the-caller-chose" });
+  assert.equal(authenticatedIdentity.sealServerReviewTokens(callersMap), false);
+  assert.equal(authenticatedIdentity.reviewActorForToken("Bearer a-bearer-the-caller-chose"), null);
+  assert.equal(
+    authenticatedIdentity.reviewActorForToken("Bearer a-bearer-the-caller-chose", callersMap), null);
+});
+
+test("identity.js exports no context entry and no brander", () => {
+  // The removed surfaces, by name, so nothing quietly goes back to one.
+  for (const gone of ["reviewActorForToken", "dispatchAuthenticatedCall",
+    "authenticatedCallReceiptIdentity", "runInAuthenticatedCall", "authenticatedCallIdentity"])
+    assert.equal(Object.hasOwn(identityModule, gone), false, `${gone} is still exported`);
+  assert.ok(Object.isFrozen(authenticatedIdentity));
+});
+
+test("a committer address maps through the frozen registry, noreply forms included", () => {
+  const committer = authenticatedIdentity.committerIdentity;
+  for (const email of ["joe.bookout.carr.us@gmail.com",
+    "64207374+jbookout@users.noreply.github.com", "  JOE.BOOKOUT.CARR.US@GMAIL.COM "])
+    assert.deepEqual(committer(email), { actor_id: "joe", authority_class: "verified_partner" }, email);
+  for (const email of ["dell.mccraney.carr.us@gmail.com",
+    "dellmccraneycarrus-gif@users.noreply.github.com"])
+    assert.deepEqual(committer(email), { actor_id: "dell", authority_class: "verified_partner" }, email);
+  // GitHub's SHARED web-flow committer names nobody, and neither does anything
+  // that merely looks like a noreply address.
+  for (const email of ["noreply@github.com", "someone.else@example.com",
+    "99999+stranger@users.noreply.github.com", "", null, undefined, { toString: () => "joe" }])
+    assert.equal(committer(email), null, String(email));
 });
