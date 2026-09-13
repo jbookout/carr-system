@@ -500,4 +500,3 @@ export function moduleImports(directory) {
   assert.equal(run.status, 0, `the module parser failed: ${run.stderr}`);
   return JSON.parse(run.stdout);
 }
-

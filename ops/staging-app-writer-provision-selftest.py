@@ -13,6 +13,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import uuid
 from typing import Any
 
@@ -537,8 +538,18 @@ commit;
               for secret in future_values.values())
           and all(secret in serialized for secret in future_values.values()))
     source = PROVISIONER.read_text(encoding="utf-8")
-    check("sequential Worker secret put is absent from the provisioner source",
-          '"secret", "put"' not in source and "put_worker_database_secret" not in source)
+    # THE STAGING CUTOVER MOVES A MATCHED SET and must stay atomic, so a
+    # sequential put is still forbidden THERE. The production Gate Zero seat
+    # publishes exactly ONE named secret and is the sole place `secret put` may
+    # appear; this pins that scope rather than the old blanket absence.
+    put_occurrences = source.count('"secret", "put"')
+    production_publisher = source.split("def put_production_gate_zero_secret", 1)
+    check("sequential Worker secret put exists only in the production seat publisher",
+          put_occurrences == 1 and len(production_publisher) == 2
+          and '"secret", "put"' not in production_publisher[0]
+          and "put_worker_database_secret" not in source)
+    check("the production seat publisher never names a wrangler --env",
+          '"--env"' not in production_publisher[1].split("\ndef ", 1)[0])
 
     class SecretFailureRunner:
         def __call__(self, args, **_kwargs):
@@ -1201,6 +1212,54 @@ commit;
             raise AssertionError(f"unsafe state accepted: {bad}")
     check("orphan final, uncredentialed role and unknown state refuse", True)
 
+    # ---- THE MIGRATION-CREATED SEAT'S OWN TRANSITION -----------------------
+    # migration 0502 creates carr_gate_zero_producer with no password, so
+    # role-present/credential-absent is where the production seat STARTS.
+    check("a migration-created seat adopts role-present/credential-absent",
+          provision.decide_profile_action(
+              role_exists_now=True, credential_state="absent",
+              role_created_by_migration=True) == "adopt")
+    check("a migration-created seat re-applies a pending password rather than assuming it",
+          provision.decide_profile_action(
+              role_exists_now=True, credential_state="pending",
+              role_created_by_migration=True) == "adopt")
+    check("adoption does not loosen the other rows",
+          provision.decide_profile_action(
+              role_exists_now=True, credential_state="final",
+              role_created_by_migration=True) == "reuse"
+          and provision.decide_profile_action(
+              role_exists_now=False, credential_state="absent",
+              role_created_by_migration=True) == "prepare_create")
+    for bad in ((False, "final"), (True, "unknown")):
+        try:
+            provision.decide_profile_action(
+                role_exists_now=bad[0], credential_state=bad[1],
+                role_created_by_migration=True)
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError(f"unsafe migration-created state accepted: {bad}")
+    check("an adopting profile still refuses orphan-final and unknown states", True)
+    # MUTATION CONTROL for the row above: the SAME state, asked for a profile
+    # this tool creates itself, must still refuse. If adoption ever widens to
+    # every profile, this check goes red rather than the suite staying green.
+    try:
+        provision.decide_profile_action(
+            role_exists_now=True, credential_state="absent",
+            role_created_by_migration=False)
+    except provision.ProvisioningRefusal:
+        check("mutation control: a tool-created role with a lost credential still refuses",
+              True)
+    else:
+        raise AssertionError("adoption widened to a tool-created profile")
+    check("exactly the seat profiles are marked migration-created",
+          {profile.label for profile in provision.PROFILES
+           if profile.created_by_migration} == {"gate_zero_producer"}
+          and provision.PRODUCTION_GATE_ZERO_PROFILE.created_by_migration
+          and provision.PRODUCTION_GATE_ZERO_PROFILE not in provision.PROFILES
+          and provision.PRODUCTION_GATE_ZERO_PROFILE.login_role
+          == provision.GATE_ZERO_PRODUCER_ROLE)
+
     events: list[str] = []
     def converge(profile):
         events.append("converge:" + profile.label)
@@ -1304,6 +1363,387 @@ commit;
         provision.role_exists = original_exists
         provision.collect_role_authority = original_bundle
         provision.collect_profile_closure = original_closure
+
+    # ======================================================================
+    # THE PRODUCTION GATE ZERO PRODUCER SEAT
+    # ======================================================================
+    # Migration 0502 creates carr_gate_zero_producer with NO password, so the
+    # state this suite exercises below -- role present, credential absent -- is
+    # where production actually starts. Before 2026-09-14 the tool refused it
+    # and DATABASE_URL_GATE_ZERO_WRITER had no way to exist in production.
+    seat = provision.PRODUCTION_GATE_ZERO_PROFILE
+    seat_plan = snapshot.load_current_grants_to_role(
+        REPO / "db/schema.sql", REPO / "migrations", seat.grant_role)
+    seat_facts = tuple(snapshot.acl_facts(seat_plan))
+    check("the production seat has a canonical direct-grant plan and its own file",
+          seat.bundle_role is None and len(seat_plan) >= 5
+          and provision.credential.profile(seat.label).paths.final
+          != provision.credential.profile("gate_zero_producer").paths.final
+          and provision.credential.profile(seat.label).key
+          != provision.credential.profile("gate_zero_producer").key)
+
+    holder: dict[str, Any] = {}
+
+    def migrated_closure(_cur, _profile):
+        """What the role actually looks like: converged once the timeouts are set."""
+        issued = any("statement_timeout" in str(statement)
+                     for statement in holder["conn"].cur.statements)
+        if issued:
+            return profile_closure(seat, seat_facts)
+        return provision.ProfileClosure(
+            login=provision.RoleAuthority(True, True, (), (), (), (), seat_facts, ()),
+            bundle=None,
+            creator_edges=(("neondb_owner", True, False, False,
+                            provision.BOOTSTRAP_SUPERUSER_OID),),
+        )
+
+    original_exists = provision.role_exists
+    original_authority = provision.collect_role_authority
+    original_closure = provision.collect_profile_closure
+    try:
+        provision.role_exists = lambda _cur, _role: True
+        provision.collect_role_authority = lambda _cur, _role: provision.RoleAuthority(
+            True, True, (), (), (), (), seat_facts, ())
+        provision.collect_profile_closure = migrated_closure
+
+        holder["conn"] = Connection()
+        created = provision.apply_login_profile(
+            holder["conn"], seat, seat_plan, "a" * 64,
+            expected_creator="neondb_owner", adopt=True)
+        adopted_statements = [repr(statement).lower()
+                              for statement in holder["conn"].cur.statements]
+        check("adopting sets a password on the existing role and creates no role",
+              not created and holder["conn"].commits == 1
+              and any("alter role" in statement and "password" in statement
+                      for statement in adopted_statements)
+              and not any("create role" in statement for statement in adopted_statements))
+        check("an adopted role is still held to the exact canonical closure",
+              any("statement_timeout" in statement for statement in adopted_statements)
+              and any("idle_in_transaction_session_timeout" in statement
+                      for statement in adopted_statements))
+
+        # MUTATION CONTROL. The same role in the same state, converged the way
+        # every other profile is (adopt=False), REFUSES -- which is exactly the
+        # P0 Sol found. If the adopt path is ever deleted, this refusal is what
+        # production would be left with.
+        holder["conn"] = Connection()
+        try:
+            provision.apply_login_profile(
+                holder["conn"], seat, seat_plan, "b" * 64,
+                expected_creator="neondb_owner")
+        except provision.ProvisioningRefusal:
+            check("mutation control: the pre-adopt path cannot converge a migrated seat",
+                  holder["conn"].commits == 0 and holder["conn"].rollbacks == 1
+                  and not any("alter role" in repr(statement).lower()
+                              and "password" in repr(statement).lower()
+                              for statement in holder["conn"].cur.statements))
+        else:
+            raise AssertionError("the pre-adopt path silently accepted a migrated seat")
+
+        holder["conn"] = Connection()
+        try:
+            provision.apply_login_profile(
+                holder["conn"], profiles["writer"], tiny_plan, "c" * 64,
+                expected_creator="neondb_owner", adopt=True)
+        except provision.ProvisioningRefusal as exc:
+            check("adoption is refused for a profile this tool creates itself",
+                  "may not be adopted" in str(exc))
+        else:
+            raise AssertionError("adoption widened past the migration-created seat")
+
+        provision.role_exists = lambda _cur, _role: False
+        holder["conn"] = Connection()
+        try:
+            provision.apply_login_profile(
+                holder["conn"], seat, seat_plan, "d" * 64,
+                expected_creator="neondb_owner", adopt=True)
+        except provision.ProvisioningRefusal as exc:
+            check("adoption refuses when the seat migration has not applied here",
+                  "does not exist" in str(exc))
+        else:
+            raise AssertionError("adoption invented a role the migration never created")
+    finally:
+        provision.role_exists = original_exists
+        provision.collect_role_authority = original_authority
+        provision.collect_profile_closure = original_closure
+
+    # ---- the production gate, unfaked where it can be ----------------------
+    try:
+        provision.require_merged_release_checkout("0" * 40)
+    except provision.ProvisioningRefusal as exc:
+        check("the production act refuses a SHA that is not this checkout's HEAD",
+              "HEAD is not the release SHA" in str(exc))
+    else:
+        raise AssertionError("the production act accepted a foreign release SHA")
+    try:
+        provision.require_merged_release_checkout("not-a-sha")
+    except provision.ProvisioningRefusal:
+        check("the production act refuses an abbreviated or malformed SHA", True)
+    else:
+        raise AssertionError("a malformed release SHA was accepted")
+
+    release_sha = "b" * 40
+
+    class ReleaseTruth:
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.calls: list[list[str]] = []
+
+        def __call__(self, args, **_kwargs):
+            self.calls.append(list(args))
+            return subprocess.CompletedProcess(args, self.returncode, self.stdout, "")
+
+    approved = ReleaseTruth(0, f"REL-2026-09-14-a {release_sha}\n")
+    key = provision.require_production_release_binding(
+        release_sha, "cloudflare-workers", str(CANDIDATE_OPERATION_ID), run=approved)
+    check("the production act is gated on deploy-worker.sh's own release-truth question",
+          key == "REL-2026-09-14-a"
+          and approved.calls[0][1:] == [
+              str(provision.OPS_RECORD), "release", "require",
+              "--environment", "production", "--provider", "cloudflare-workers",
+              "--provider-version-id", str(CANDIDATE_OPERATION_ID),
+              "--sha", release_sha])
+    for refusing in (ReleaseTruth(3, ""),
+                     ReleaseTruth(0, f"REL-other {'c' * 40}\n"),
+                     ReleaseTruth(0, "REL-only-a-key\n")):
+        try:
+            provision.require_production_release_binding(
+                release_sha, "cloudflare-workers", str(CANDIDATE_OPERATION_ID), run=refusing)
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError("an unapproved or mismatched release binding was accepted")
+    check("no approval, another release's approval, and a shapeless answer all refuse", True)
+
+    production_dsn = (
+        f"postgresql://carr_gate_zero_producer:production-seat-secret@{candidate.endpoint_host}/neondb?sslmode=require&channel_binding=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
+
+    class SecretRunner:
+        def __init__(self, returncode: int = 0, listing: Any = None):
+            self.returncode = returncode
+            self.listing = listing
+            self.calls: list[tuple[list[str], dict]] = []
+
+        def __call__(self, args, **kwargs):
+            self.calls.append((list(args), dict(kwargs)))
+            if "list" in args:
+                return subprocess.CompletedProcess(
+                    args, 0, json.dumps(self.listing or [
+                        {"name": name, "type": "secret_text"}
+                        for name in provision.WORKER_DATABASE_SECRET_NAMES]), "")
+            return subprocess.CompletedProcess(args, self.returncode, "", "")
+
+    publisher = SecretRunner()
+    provision.put_production_gate_zero_secret(
+        production_dsn, wrangler="wrangler", run=publisher, environ={"PATH": "/usr/bin"})
+    argv, kwargs = publisher.calls[0]
+    check("the production secret is published by name to the production Worker only",
+          argv == ["wrangler", "secret", "put", "DATABASE_URL_GATE_ZERO_WRITER",
+                   "--config", str(provision.WRANGLER_CONFIG),
+                   "--name", provision.PRODUCTION_WORKER_NAME]
+          and provision.PRODUCTION_WORKER_NAME != provision.STAGING_WORKER_NAME
+          and "--env" not in argv)
+    check("the production secret value reaches stdin and never argv or the child environment",
+          kwargs["input"] == production_dsn
+          and production_dsn not in json.dumps(argv)
+          and all(production_dsn not in str(value) for value in kwargs["env"].values())
+          and set(kwargs["env"]) <= set(provision.WORKER_ENV_ALLOWLIST)
+              | {"CLOUDFLARE_ACCOUNT_ID"}
+          and kwargs["env"]["CLOUDFLARE_ACCOUNT_ID"] == provision.CLOUDFLARE_ACCOUNT_ID)
+    try:
+        provision.put_production_gate_zero_secret(
+            production_dsn, wrangler="wrangler", run=SecretRunner(returncode=1),
+            environ={"PATH": "/usr/bin"})
+    except provision.ProvisioningRefusal as exc:
+        check("a failed production secret publication refuses without the value",
+              production_dsn not in str(exc))
+    else:
+        raise AssertionError("a failed production secret publication was accepted")
+    provision.verify_production_gate_zero_secret_binding(
+        wrangler="wrangler", run=SecretRunner(), environ={"PATH": "/usr/bin"})
+    for bad_listing in (
+        [{"name": "DATABASE_URL_READER"}, {"name": "DATABASE_URL_WRITER"}],
+        [{"name": name} for name in provision.WORKER_DATABASE_SECRET_NAMES]
+        + [{"name": "DATABASE_URL_GATE_ZERO_WRITER"}],
+        [{"name": "DATABASE_URL_GATE_ZERO_WRITE"}],
+    ):
+        try:
+            provision.verify_production_gate_zero_secret_binding(
+                wrangler="wrangler", run=SecretRunner(listing=bad_listing),
+                environ={"PATH": "/usr/bin"})
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError(f"a wrong production secret readback was accepted: {bad_listing}")
+    check("a missing, duplicated or misspelled production secret name refuses", True)
+
+    # ---- the whole production act, twice, against fakes --------------------
+    production_owner = (
+        f"postgresql://neondb_owner:production-owner-secret@{candidate.endpoint_host}/neondb?sslmode=require&channel_binding=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
+    saved_production = {
+        "require_merged_release_checkout": provision.require_merged_release_checkout,
+        "require_production_release_binding": provision.require_production_release_binding,
+        "require_direct_owner_identity": provision.require_direct_owner_identity,
+        "require_production_gate_zero_target": provision.require_production_gate_zero_target,
+        "role_exists": provision.role_exists,
+        "apply_login_profile": provision.apply_login_profile,
+        "validate_profile_login": provision.validate_profile_login,
+        "credential_profile": provision.credential.profile,
+        "exclusive_lock": provision.credential.exclusive_lock,
+        "load_grants": provision.snapshot_grants.load_current_grants_to_role,
+    }
+    with tempfile.TemporaryDirectory() as raw_root:
+        seat_root = pathlib.Path(raw_root)
+        seat_file = seat_root / "production-gate-zero-writer.env"
+        seat_paths = provision.credential.CredentialPaths(
+            final=seat_file, pending=pathlib.Path(str(seat_file) + ".pending"))
+        production_events: list[str] = []
+        published: list[str] = []
+        try:
+            def note(event: str):
+                production_events.append(event)
+
+            def fake_release_binding(*_args, **_kwargs) -> str:
+                note("release-truth")
+                return "REL-2026-09-14-a"
+
+            def fake_owner_identity(_cur) -> str:
+                note("owner-identity")
+                return "neondb_owner"
+
+            def fake_apply(*_args, **kwargs) -> bool:
+                note("adopt" if kwargs.get("adopt") else "converge")
+                return False
+
+            provision.require_merged_release_checkout = \
+                lambda _sha, **_kwargs: note("checkout")
+            provision.require_production_release_binding = fake_release_binding
+            provision.require_direct_owner_identity = fake_owner_identity
+            provision.require_production_gate_zero_target = \
+                lambda _cur: note("seat-migration")
+            provision.role_exists = lambda _cur, _role: True
+            provision.apply_login_profile = fake_apply
+            provision.validate_profile_login = \
+                lambda *_args, **_kwargs: note("login-proof")
+            provision.snapshot_grants.load_current_grants_to_role = \
+                lambda *_args, **_kwargs: list(seat_plan)
+            provision.credential.profile = lambda label, **_kwargs: \
+                provision.credential.CredentialProfile(
+                    label, provision.GATE_ZERO_PRODUCER_ROLE,
+                    provision.GATE_ZERO_PRODUCER_ROLE,
+                    provision.credential.PRODUCTION_GATE_ZERO_PRODUCER_KEY, seat_paths)
+            provision.credential.exclusive_lock = exclusive_lock
+
+            args = provision.parse_args([
+                "--production-gate-zero-writer", "--apply", "--sha", release_sha,
+                "--provider", "cloudflare-workers",
+                "--provider-version-id", str(CANDIDATE_OPERATION_ID),
+            ])
+            with contextlib.redirect_stdout(io.StringIO()) as first_out:
+                rc = provision.provision_production_gate_zero_writer(
+                    args, connect=lambda _dsn: FakeOwner(),
+                    resolve_owner_dsn=lambda: production_owner,
+                    publish=lambda value: published.append(value),
+                    verify=lambda: note("secret-readback"),
+                )
+            first_receipt = json.loads(first_out.getvalue())
+            check("the production act runs its gates before it touches the database",
+                  rc == 0
+                  and production_events[:4] == [
+                      "checkout", "release-truth", "owner-identity", "seat-migration"]
+                  and "adopt" in production_events
+                  and production_events.index("login-proof")
+                      < production_events.index("secret-readback"))
+            check("the first run adopts the migrated seat and publishes its DSN",
+                  first_receipt["role_outcome"] == "adopted"
+                  and first_receipt["credential_action"] == "adopt"
+                  and first_receipt["environment"] == "production"
+                  and first_receipt["release_key"] == "REL-2026-09-14-a"
+                  and first_receipt["worker"] == provision.PRODUCTION_WORKER_NAME
+                  and len(published) == 1 and published[0].startswith(
+                      "postgresql://carr_gate_zero_producer:"))
+            check("the minted credential is a private 0600 file and the receipt reveals nothing",
+                  seat_file.exists() and not seat_paths.pending.exists()
+                  and oct(seat_file.stat().st_mode & 0o777) == "0o600"
+                  and published[0] not in first_out.getvalue()
+                  and provision.credential.PRODUCTION_GATE_ZERO_PRODUCER_KEY
+                      in seat_file.read_text(encoding="utf-8"))
+
+            production_events.clear()
+            with contextlib.redirect_stdout(io.StringIO()) as second_out:
+                provision.provision_production_gate_zero_writer(
+                    args, connect=lambda _dsn: FakeOwner(),
+                    resolve_owner_dsn=lambda: production_owner,
+                    publish=lambda value: published.append(value),
+                    verify=lambda: note("secret-readback"),
+                )
+            second_receipt = json.loads(second_out.getvalue())
+            check("a second run reuses the credential and rotates nothing",
+                  second_receipt["role_outcome"] == "reused"
+                  and second_receipt["credential_action"] == "reuse"
+                  and "adopt" not in production_events
+                  and "converge" not in production_events
+                  and published[1] == published[0])
+
+            production_events.clear()
+            failed_publish: list[str] = []
+            provision.require_production_gate_zero_target = \
+                lambda _cur: (_ for _ in ()).throw(
+                    provision.ProvisioningRefusal("0502 is not applied on this database"))
+            try:
+                provision.provision_production_gate_zero_writer(
+                    args, connect=lambda _dsn: FakeOwner(),
+                    resolve_owner_dsn=lambda: production_owner,
+                    publish=lambda value: failed_publish.append(value),
+                    verify=lambda: note("secret-readback"),
+                )
+            except provision.ProvisioningRefusal:
+                check("a database that does not carry the seat migration publishes nothing",
+                      not failed_publish and "secret-readback" not in production_events)
+            else:
+                raise AssertionError("the production act ran against the wrong database")
+        finally:
+            provision.require_merged_release_checkout = \
+                saved_production["require_merged_release_checkout"]
+            provision.require_production_release_binding = \
+                saved_production["require_production_release_binding"]
+            provision.require_direct_owner_identity = \
+                saved_production["require_direct_owner_identity"]
+            provision.require_production_gate_zero_target = \
+                saved_production["require_production_gate_zero_target"]
+            provision.role_exists = saved_production["role_exists"]
+            provision.apply_login_profile = saved_production["apply_login_profile"]
+            provision.validate_profile_login = saved_production["validate_profile_login"]
+            provision.credential.profile = saved_production["credential_profile"]
+            provision.credential.exclusive_lock = saved_production["exclusive_lock"]
+            provision.snapshot_grants.load_current_grants_to_role = \
+                saved_production["load_grants"]
+
+    for bad_argv in (
+        ["--production-gate-zero-writer", "--sha", release_sha,
+         "--provider", "cloudflare-workers", "--provider-version-id", str(RECEIPT_ID)],
+        ["--production-gate-zero-writer", "--apply", "--sha", release_sha,
+         "--provider", "cloudflare-workers"],
+        ["--production-gate-zero-writer", "--apply", "--sha", release_sha,
+         "--provider", "cloudflare-workers", "--provider-version-id", str(RECEIPT_ID),
+         "--candidate-operation-id", str(CANDIDATE_OPERATION_ID)],
+        ["--candidate-operation-id", str(CANDIDATE_OPERATION_ID),
+         "--receipt-id", str(RECEIPT_ID), "--sha", EXPECTED_SHA, "--apply",
+         "--provider", "cloudflare-workers", "--provider-version-id", str(RECEIPT_ID)],
+        ["--sha", EXPECTED_SHA, "--apply"],
+    ):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                provision.parse_args(bad_argv)
+        except SystemExit as exc:
+            if exc.code != 2:
+                raise AssertionError(f"wrong exit for {bad_argv}")
+        else:
+            raise AssertionError(f"an incoherent argument set was accepted: {bad_argv}")
+    check("the two modes cannot borrow each other's inputs or skip the apply gate", True)
 
     check("Production project id is imported from the canonical db-tap pin",
           provision.PRODUCTION_PROJECT_ID

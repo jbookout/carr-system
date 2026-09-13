@@ -28,6 +28,14 @@ READER_KEY = "CARR_DB_STAGING_READER_URL"
 # role is: a credential sharing a file with the writer's would be one edit away
 # from being the writer's.
 GATE_ZERO_PRODUCER_KEY = "CARR_DB_STAGING_GATE_ZERO_WRITER_URL"
+# PRODUCTION's copy of the same seat, and it is a SEPARATE KEY AND FILE on
+# purpose. The seat role is cluster-wide and identically named in both places,
+# so the only thing that distinguishes a staging DSN from a production one is
+# the file it lives in and the key it is written under. Sharing either would
+# make "publish the gate zero writer secret" one typo away from publishing
+# staging's credential to the production Worker. The key names production out
+# loud for the same reason.
+PRODUCTION_GATE_ZERO_PRODUCER_KEY = "CARR_DB_PRODUCTION_GATE_ZERO_WRITER_URL"
 
 
 class CredentialRefusal(RuntimeError):
@@ -73,6 +81,11 @@ def profile(label: str, *, config_root: pathlib.Path | None = None) -> Credentia
         # bundle behind it, so the bundle column names the role itself.
         "gate_zero_producer": ("carr_gate_zero_producer", "carr_gate_zero_producer",
                                GATE_ZERO_PRODUCER_KEY, "staging-gate-zero-writer.env"),
+        # The production seat. Same role name, same direct-grant shape, its own
+        # key and its own file -- see PRODUCTION_GATE_ZERO_PRODUCER_KEY above.
+        "production_gate_zero_producer": (
+            "carr_gate_zero_producer", "carr_gate_zero_producer",
+            PRODUCTION_GATE_ZERO_PRODUCER_KEY, "production-gate-zero-writer.env"),
     }
     try:
         role_name, bundle_role, key, filename = profiles[label]

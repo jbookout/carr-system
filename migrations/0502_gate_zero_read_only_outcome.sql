@@ -153,6 +153,30 @@ end $v5_a02_gate_zero_outcome_preflight$;
 -- band by tools/provision-staging-app-writer.py, which carries this seat as a
 -- third LoginProfile beside the reader and the writer. A rebuilt schema still
 -- mints no secret.
+--
+-- WHAT PROVISIONS PRODUCTION, AND WHO RUNS IT. The state this migration leaves
+-- behind -- role present, no password, no credential file -- is the state the
+-- provisioner ADOPTS: the owner connection sets the password itself. For
+-- STAGING that happens inside the ordinary replacement cutover. For PRODUCTION
+-- it is one explicit command, and JOE RUNS IT BY HAND:
+--
+--   .venv/bin/python tools/provision-staging-app-writer.py \
+--     --production-gate-zero-writer --apply \
+--     --sha <approved release SHA> \
+--     --provider cloudflare-workers \
+--     --provider-version-id <approved immutable version id>
+--
+-- ORDER: bin/migrate-prod.sh applies this migration, bin/deploy-worker.sh
+-- --upload-version produces the immutable candidate and its approved release,
+-- THEN the command above mints and publishes the secret, THEN
+-- --promote-version puts that version in front of traffic. It is a human act
+-- rather than an orchestrated one for two reasons that are the same reason: the
+-- gate it must pass is `ops-record.py release require --environment production`
+-- -- the identical question deploy-worker.sh asks before it moves production --
+-- and the two inputs that question needs are approval artifacts a human holds.
+-- Anything able to supply them could promote the release itself. The command is
+-- idempotent (a second run proves the stored credential against the live role
+-- and republishes the same value; it rotates nothing) and prints no secret.
 do $v5_a02_gate_zero_producer_role$
 begin
   if not exists (select 1 from pg_roles where rolname = 'carr_gate_zero_producer') then

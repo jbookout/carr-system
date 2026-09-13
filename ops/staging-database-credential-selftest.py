@@ -229,6 +229,18 @@ def main() -> int:
     check("writer and reader profiles use separate files and keys",
           credential.profile("writer").key != credential.profile("reader").key
           and credential.profile("writer").paths.final != credential.profile("reader").paths.final)
+    # THE TWO GATE ZERO SEATS SHARE A ROLE NAME AND NOTHING ELSE. The role is
+    # cluster-wide and identically named in staging and production, so the file
+    # and the key are the only things that keep one environment's DSN from being
+    # published to the other's Worker.
+    staging_seat = credential.profile("gate_zero_producer")
+    production_seat = credential.profile("production_gate_zero_producer")
+    check("the staging and production Gate Zero seats share a role but never a credential",
+          staging_seat.role_name == production_seat.role_name == "carr_gate_zero_producer"
+          and staging_seat.key != production_seat.key
+          and staging_seat.paths.final != production_seat.paths.final
+          and "production" in production_seat.key.lower()
+          and "production" in production_seat.paths.final.name)
     print(f"PASS: staging database credential self-test ({checked} checks)")
     return 0
 

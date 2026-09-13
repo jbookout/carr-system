@@ -14,9 +14,18 @@
 #                         CONNECTION ROLE. Used by exactly one verb,
 #                         record-gate-zero-read-only-outcome, and by nothing else;
 #                         never widen it and never point it at app_writer.
-#                         Provisioned as the third LoginProfile in
+#                         STAGING is provisioned as the third LoginProfile in
 #                         tools/provision-staging-app-writer.py, which publishes
 #                         all three DSNs in one atomic bulk cutover.
+#                         PRODUCTION is one named human act, in the same tool:
+#                           tools/provision-staging-app-writer.py \
+#                             --production-gate-zero-writer --apply --sha <release sha> \
+#                             --provider cloudflare-workers --provider-version-id <id>
+#                         Joe runs it between bin/migrate-prod.sh and
+#                         bin/deploy-worker.sh --promote-version; it passes the
+#                         same production release-truth gate that promotion does,
+#                         adopts the passwordless role 0502 created, publishes
+#                         ONLY this secret, and prints no value.
 #   INGEST_TOKENS       — JSON map { "<source>": "<token>" } for the ingest socket
 #   PROBE_TOKENS        — JSON map { "<slug>": "<token>" } for the smoke suite ONLY
 #                         (loop #192, 2026-08-06). Authenticates as one locked-

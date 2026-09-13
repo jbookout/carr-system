@@ -5,11 +5,22 @@ Read-only planning is the default. ``--apply`` is the only mutating path. The
 caller must supply the full candidate-operation UUID, immutable receipt UUID,
 and merged source SHA; provider scopes, roles, DSNs, grants, and Worker names
 remain server- and repository-derived authority rather than caller choices.
+
+ONE SECOND MODE, AND IT IS PRODUCTION: ``--production-gate-zero-writer``.
+The Gate Zero producer seat is a login role that migration 0502 CREATES WITHOUT
+A PASSWORD, because a rebuilt schema must never mint a credential. Something
+still has to mint it, and for the production Worker that door is here rather
+than in a second tool -- the role, the canonical grant plan, the exact-closure
+validation and the credential file format are all already in this file, and a
+second copy of them is how two provisioning paths drift apart. See
+``provision_production_gate_zero_writer`` below for the gate, which is the same
+release-truth question bin/deploy-worker.sh asks before it moves production.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -54,6 +65,11 @@ READER_BUNDLE_ROLE = "carr_reader"
 # the snapshot seal for every other database in the same cluster until the
 # snapshot is regenerated. The migration's header carries the measurement.
 GATE_ZERO_PRODUCER_ROLE = "carr_gate_zero_producer"
+# The migration that creates the seat role. Its exact bytes are checked against
+# the production ledger before any production credential is minted, so this act
+# cannot run against a database carrying some other version of the seat.
+GATE_ZERO_MIGRATION_FILENAME = "0502_gate_zero_read_only_outcome.sql"
+PRODUCTION_RELEASE_PROVIDER_DEFAULT = "cloudflare-workers"
 LOCK_KEY = 7301961134306001
 BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
@@ -70,6 +86,8 @@ FORBIDDEN_ENV = (
     "CARR_DB_AUTHORITY_URL",
     "CARR_DB_STAGING_WRITER_URL",
     "CARR_DB_STAGING_READER_URL",
+    "CARR_DB_STAGING_GATE_ZERO_WRITER_URL",
+    "CARR_DB_PRODUCTION_GATE_ZERO_WRITER_URL",
     "PGHOST",
     "PGPORT",
     "PGDATABASE",
@@ -162,6 +180,22 @@ def _wrangler_account_id() -> str:
 CLOUDFLARE_ACCOUNT_ID = _wrangler_account_id()
 
 
+def _wrangler_production_worker_name() -> str:
+    """The production Worker name is the repository's, never a caller's."""
+    with WRANGLER_CONFIG.open("rb") as handle:
+        value = tomllib.load(handle).get("name")
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", value):
+        raise RuntimeError("wrangler.toml must pin one top-level production Worker name")
+    if value == STAGING_WORKER_NAME:
+        raise RuntimeError("the production Worker name must not be the staging Worker")
+    return value
+
+
+PRODUCTION_WORKER_NAME = _wrangler_production_worker_name()
+PRODUCTION_GATE_ZERO_SECRET_NAME = "DATABASE_URL_GATE_ZERO_WRITER"
+OPS_RECORD = REPO / "tools/ops-record.py"
+
+
 class ProvisioningRefusal(RuntimeError):
     """The requested action is outside the exact isolated-staging contract."""
 
@@ -233,6 +267,14 @@ class LoginProfile:
     # role itself rather than to a NOLOGIN capability bundle it is a member of.
     bundle_role: str | None
     secret_name: str
+    # True for a role a MIGRATION creates with no password. That is the one
+    # state `create role` cannot reach and `reuse` cannot describe: the role is
+    # already there and no credential has ever existed for it. Such a profile
+    # may be ADOPTED -- the owner connection sets the password itself -- and no
+    # other profile may be, because for a role this tool created, role-present
+    # and credential-absent means a credential was lost rather than never
+    # minted, and silently rotating it would cut off whatever is still using it.
+    created_by_migration: bool = False
 
     @property
     def grant_role(self) -> str:
@@ -256,7 +298,16 @@ PROFILES = (
     LoginProfile("reader", READER_ROLE, READER_BUNDLE_ROLE, "DATABASE_URL_READER"),
     LoginProfile("writer", APP_ROLE, BUNDLE_ROLE, "DATABASE_URL_WRITER"),
     LoginProfile("gate_zero_producer", GATE_ZERO_PRODUCER_ROLE,
-                 None, "DATABASE_URL_GATE_ZERO_WRITER"),
+                 None, "DATABASE_URL_GATE_ZERO_WRITER", created_by_migration=True),
+)
+
+# THE PRODUCTION SEAT. Same role, same direct-grant shape, same Worker secret
+# NAME -- and a different credential file, a different Worker, and a gate of its
+# own. It is deliberately NOT in PROFILES: nothing about the staging replacement
+# cutover may ever iterate onto production.
+PRODUCTION_GATE_ZERO_PROFILE = LoginProfile(
+    "production_gate_zero_producer", GATE_ZERO_PRODUCER_ROLE, None,
+    PRODUCTION_GATE_ZERO_SECRET_NAME, created_by_migration=True,
 )
 
 
@@ -1020,19 +1071,41 @@ def _profile_membership_sql(profile: LoginProfile) -> tuple[str, ...]:
 
 def apply_login_profile(
     conn: Any, profile: LoginProfile, grants: Sequence[str], password: str,
-    *, expected_creator: str, commit: bool = True,
+    *, expected_creator: str, commit: bool = True, adopt: bool = False,
 ) -> bool:
-    """Create/converge one login profile in one advisory-locked transaction."""
+    """Create/converge one login profile in one advisory-locked transaction.
+
+    ``adopt`` is the migration-created seat's path: the role is already there
+    with no password, so this sets one rather than creating the role. It is
+    refused for any other profile, and the same exact-closure validation runs at
+    the end of both paths, so an adopted role is held to the identical bar.
+    """
     cur = conn.cursor()
     created = False
+    if adopt and not profile.created_by_migration:
+        raise ProvisioningRefusal(
+            f"{profile.login_role} is not a migration-created seat and may not be adopted")
     try:
         cur.execute("select pg_advisory_xact_lock(%s)", (LOCK_KEY,))
         exists = role_exists(cur, profile.login_role)
-        if exists:
+        if exists and adopt:
+            authority = collect_role_authority(cur, profile.login_role)
+            if (
+                not authority.can_login or not authority.inherits_privileges
+                or authority.powerful_attributes or authority.owned_objects
+            ):
+                raise ProvisioningRefusal(
+                    f"{profile.login_role} is not a plain inheriting LOGIN role that owns nothing")
+            cur.execute(sql.SQL("alter role {} with password {}").format(
+                sql.Identifier(profile.login_role), sql.Literal(password)))
+        elif exists:
             validate_profile_closure(
                 collect_profile_closure(cur, profile), profile, grants,
                 exact=True, expected_creator=expected_creator,
             )
+        elif adopt:
+            raise ProvisioningRefusal(
+                f"{profile.login_role} does not exist; its migration has not applied here")
         else:
             if profile.bundle_role is not None:
                 bundle = collect_role_authority(cur, profile.bundle_role)
@@ -1171,6 +1244,301 @@ def verify_worker_database_secret_bindings(
         raise ProvisioningRefusal("Worker database secret name readback is not exact")
 
 
+# ---------------------------------------------------------------------------
+# The production Gate Zero producer seat.
+# ---------------------------------------------------------------------------
+# WHY IT IS A SINGLE `secret put` AND NOT THE ATOMIC BULK PAIR ABOVE. The
+# staging cutover replaces a MATCHED SET of DSNs that must move together or the
+# Worker serves half of one project and half of another; a sequential put there
+# is the defect the bulk door exists to prevent. This publishes exactly ONE
+# secret to production, the one the seat verb reads and nothing else does, and a
+# bulk write would mean resending production's reader and writer DSNs -- values
+# this tool has no business holding -- to change one name. `secret put` with the
+# value on stdin is the same door bin/staging-secrets.sh uses, for the same
+# reason: the value never reaches argv, a log, or this process's output.
+
+
+def put_production_gate_zero_secret(
+    value: str, *, wrangler: str = str(WRANGLER), run: Run = subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+        raise ProvisioningRefusal("the production Gate Zero secret value is not exact")
+    try:
+        result = run(
+            [wrangler, "secret", "put", PRODUCTION_GATE_ZERO_SECRET_NAME,
+             "--config", str(WRANGLER_CONFIG), "--name", PRODUCTION_WORKER_NAME],
+            input=value, capture_output=True, text=True, timeout=60,
+            env=worker_environment(environ if environ is not None else os.environ),
+        )
+    except Exception as exc:
+        raise ProvisioningRefusal(
+            "production Worker secret outcome is uncertain; output suppressed") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal(
+            f"production Worker secret publication failed (rc={result.returncode}); "
+            "output suppressed"
+        )
+
+
+def verify_production_gate_zero_secret_binding(
+    *, wrangler: str = str(WRANGLER), run: Run = subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Names only, exactly the three database secrets, each exactly once."""
+    try:
+        result = run(
+            [wrangler, "secret", "list", "--config", str(WRANGLER_CONFIG),
+             "--name", PRODUCTION_WORKER_NAME, "--format", "json"],
+            capture_output=True, text=True, timeout=60,
+            env=worker_environment(environ if environ is not None else os.environ),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisioningRefusal(
+            "production Worker secret readback did not complete; output suppressed") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal("production Worker secret readback failed; output suppressed")
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProvisioningRefusal(
+            "production Worker secret readback was not JSON; output suppressed") from exc
+    if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+        raise ProvisioningRefusal("production Worker secret name readback has the wrong shape")
+    names = [str(row.get("name") or "") for row in payload]
+    database_names = sorted(name for name in names if name.startswith("DATABASE_URL"))
+    if len(names) != len(set(names)) \
+            or database_names != sorted(WORKER_DATABASE_SECRET_NAMES):
+        raise ProvisioningRefusal(
+            "production Worker database secret name readback is not exact")
+
+
+def require_merged_release_checkout(sha: str, *, run: Run = subprocess.run) -> None:
+    """Production acts run from merged code only -- deploy-worker.sh's rule."""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ProvisioningRefusal("--sha must be the exact lowercase 40-character release SHA")
+
+    def git(*args: str, allow_failure: bool = False) -> subprocess.CompletedProcess:
+        try:
+            result = run(["git", "-C", str(REPO), *args],
+                         capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProvisioningRefusal(f"git {args[0]} did not complete in the checkout") from exc
+        if result.returncode != 0 and not allow_failure:
+            raise ProvisioningRefusal(f"git {args[0]} failed in the release checkout")
+        return result
+
+    if (git("rev-parse", "HEAD").stdout or "").strip() != sha:
+        raise ProvisioningRefusal("checkout HEAD is not the release SHA")
+    if (git("status", "--porcelain").stdout or "").strip():
+        raise ProvisioningRefusal("the release checkout is not clean")
+    git("fetch", "origin", "main", "--quiet")
+    if git("merge-base", "--is-ancestor", sha, "origin/main",
+           allow_failure=True).returncode != 0:
+        raise ProvisioningRefusal("the release SHA is not an ancestor of origin/main")
+
+
+def require_production_release_binding(
+    sha: str, provider: str, provider_version_id: str, *,
+    python: str = sys.executable, run: Run = subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """THE PRODUCTION GATE, and it is the one bin/deploy-worker.sh already uses.
+
+    `--promote-version` asks release truth whether a live approval binds
+    Production to this provider version, and ships nothing if the answer is no.
+    A production credential is published for exactly one reason -- the approved
+    candidate that reads it is about to serve -- so it is gated on the same
+    answer, with the SHA bound too: an approval for some other release cannot
+    authorize this act. Returns the release key for the receipt line.
+    """
+    if not provider or not provider_version_id \
+            or any(ch.isspace() for ch in provider + provider_version_id):
+        raise ProvisioningRefusal("production provider identity is not exact")
+    try:
+        result = run(
+            [python, str(OPS_RECORD), "release", "require",
+             "--environment", "production", "--provider", provider,
+             "--provider-version-id", provider_version_id, "--sha", sha],
+            capture_output=True, text=True, timeout=120,
+            env=dict(environ if environ is not None else os.environ),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisioningRefusal(
+            "the production release-truth check did not complete") from exc
+    if result.returncode != 0:
+        raise ProvisioningRefusal(
+            "no live approved production release binds this SHA to "
+            f"{provider}:{provider_version_id}"
+        )
+    fields = (result.stdout or "").split()
+    if len(fields) != 2 or fields[1].lower() != sha or not fields[0]:
+        raise ProvisioningRefusal(
+            "release truth returned no exact release/SHA binding for this act")
+    return fields[0]
+
+
+def production_owner_dsn(
+    *, resolve: Callable[[], str] | None = None,
+) -> ScopedDsn:
+    """The production owner DSN, from the project id db-tap PINS -- never a name
+    lookup and never an ambient environment variable."""
+    resolver = resolve or (
+        lambda: db_tap.dsn(project="production", role_name="neondb_owner"))
+    value = resolver()
+    if not isinstance(value, str) or not value.strip():
+        raise ProvisioningRefusal("the production owner DSN is empty; value suppressed")
+    username, endpoint, port, database = _dsn_parts(value.strip())
+    if (
+        username != "neondb_owner" or port != 5432 or database != "neondb"
+        or not endpoint.endswith(".neon.tech")
+    ):
+        raise ProvisioningRefusal(
+            "the production owner DSN is outside the pinned target; value suppressed")
+    # The branch and endpoint ids are EMPTY on purpose: production is pinned by
+    # project id, not resolved by a provider walk, so there is no resolved scope
+    # to record here and inventing one would read like there was. Nothing on
+    # this path consumes the scope -- validate_connection_scope, which would
+    # refuse these blanks, belongs to the staging cutover.
+    scope = ProviderScope(PRODUCTION_PROJECT_ID, "", "", endpoint, 5432, "neondb")
+    return ScopedDsn(scope, "neondb_owner", endpoint, 5432, "neondb", value.strip())
+
+
+def require_production_gate_zero_target(cur: Any) -> None:
+    """Prove this connection is a database carrying THIS checkout's seat migration."""
+    path = MIGRATIONS / GATE_ZERO_MIGRATION_FILENAME
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    cur.execute(
+        "select sha256 from public.schema_migrations where filename=%s",
+        (GATE_ZERO_MIGRATION_FILENAME,),
+    )
+    rows = cur.fetchall()
+    if len(rows) != 1 or str(rows[0][0]) != digest:
+        raise ProvisioningRefusal(
+            f"{GATE_ZERO_MIGRATION_FILENAME} is not applied on this database, or its "
+            "recorded bytes differ from this checkout"
+        )
+    if not role_exists(cur, GATE_ZERO_PRODUCER_ROLE):
+        raise ProvisioningRefusal(
+            f"{GATE_ZERO_PRODUCER_ROLE} does not exist on this database")
+
+
+def provision_production_gate_zero_writer(
+    args: argparse.Namespace, *, run: Run = subprocess.run,
+    connect: Connect = psycopg.connect,
+    resolve_owner_dsn: Callable[[], str] | None = None,
+    publish: Callable[[str], None] | None = None,
+    verify: Callable[[], None] | None = None,
+) -> int:
+    """Mint and publish the production Gate Zero writer credential, idempotently.
+
+    WHO RUNS THIS AND WHY. Joe does, by hand, from the canonical checkout at the
+    approved release SHA, after `bin/migrate-prod.sh` has applied 0502 and after
+    `bin/deploy-worker.sh --upload-version` has produced the immutable candidate
+    version bound to an approved production release -- and before
+    `--promote-version` puts that version in front of traffic. The two inputs
+    the gate demands, the approved release's provider version id and its SHA,
+    are approval artifacts a human holds; an orchestrator that could supply them
+    could also promote the release, and production credential changes are the
+    human half of the heavy path by standing rule. Nothing here is scheduled and
+    nothing calls it on a session's behalf.
+    """
+    profile = PRODUCTION_GATE_ZERO_PROFILE
+    sha = (args.sha or "").strip().lower()
+    require_merged_release_checkout(sha, run=run)
+    release_key = require_production_release_binding(
+        sha, args.provider, args.provider_version_id, run=run)
+    grants = snapshot_grants.load_current_grants_to_role(
+        SCHEMA, MIGRATIONS, profile.grant_role)
+    if not grants:
+        raise ProvisioningRefusal(
+            "the Gate Zero seat has no canonical grant plan in this checkout")
+    owner_dsn = production_owner_dsn(resolve=resolve_owner_dsn)
+    file_profile = credential.profile(profile.label)
+    lock_path = file_profile.paths.final.parent / ".production-gate-zero-seat.lock"
+    with credential.exclusive_lock(lock_path):
+        owner = connect(owner_dsn.value)
+        try:
+            cur = owner.cursor()
+            expected_creator = require_direct_owner_identity(cur)
+            require_production_gate_zero_target(cur)
+            exists = role_exists(cur, profile.login_role)
+            owner.commit()
+            try:
+                stored = credential.load_existing(
+                    file_profile.paths, key=file_profile.key,
+                    role_name=file_profile.role_name,
+                    expected_endpoint=owner_dsn.endpoint,
+                    expected_port=owner_dsn.port,
+                    expected_database=owner_dsn.database,
+                )
+            except credential.CredentialRefusal as exc:
+                if "is absent" not in str(exc):
+                    raise
+                action = decide_profile_action(
+                    role_exists_now=exists, credential_state="absent",
+                    role_created_by_migration=profile.created_by_migration,
+                )
+                stored = credential.prepare_pending(
+                    file_profile.paths, key=file_profile.key,
+                    role_name=file_profile.role_name, owner_uri=owner_dsn.value,
+                    expected_endpoint=owner_dsn.endpoint,
+                    expected_port=owner_dsn.port,
+                    expected_database=owner_dsn.database,
+                )
+            else:
+                action = decide_profile_action(
+                    role_exists_now=exists, credential_state=stored.state,
+                    role_created_by_migration=profile.created_by_migration,
+                )
+            if action == "reuse":
+                # THE IDEMPOTENT SECOND RUN. A credential this run already
+                # promoted is proved against the live role rather than reset, so
+                # running the command twice never rotates a working seat.
+                validate_profile_login(
+                    stored.value, profile, grants,
+                    expected_creator=expected_creator, connect=connect,
+                )
+                outcome = "reused"
+            else:
+                apply_login_profile(
+                    owner, profile, grants, stored.password,
+                    expected_creator=expected_creator, adopt=True,
+                )
+                validate_profile_login(
+                    stored.value, profile, grants,
+                    expected_creator=expected_creator, connect=connect,
+                )
+                outcome = "adopted"
+            if stored.state == "pending":
+                credential.promote_pending(
+                    file_profile.paths, key=file_profile.key,
+                    expected_value=stored.value,
+                )
+        finally:
+            try:
+                owner.rollback()
+            except (psycopg.Error, ValueError):
+                pass
+            owner.close()
+    (publish or (lambda value: put_production_gate_zero_secret(value, run=run)))(stored.value)
+    (verify or (lambda: verify_production_gate_zero_secret_binding(run=run)))()
+    print(json.dumps({
+        "environment": "production", "state": "provisioned",
+        "profile": profile.label, "login_role": profile.login_role,
+        "role_outcome": outcome, "credential_action": action,
+        "canonical_grants": len(grants),
+        "worker": PRODUCTION_WORKER_NAME,
+        "secret_name": PRODUCTION_GATE_ZERO_SECRET_NAME,
+        "worker_secret_update": "single_named_secret",
+        "release_key": release_key, "git_sha": sha,
+        "provider": args.provider, "provider_version_id": args.provider_version_id,
+        "production_project_id": PRODUCTION_PROJECT_ID,
+        "statement_timeout_seconds": 60, "idle_timeout_seconds": 120,
+    }, sort_keys=True))
+    return 0
+
+
 def publish_worker_cutover(
     candidate_values: Mapping[str, str], rollback_values: Mapping[str, str], *,
     preserve: Callable[[], None], bulk: Callable[[Mapping[str, str]], None],
@@ -1226,13 +1594,34 @@ def require_direct_owner_identity(cur: Any) -> str:
     return "neondb_owner"
 
 
-def decide_profile_action(*, role_exists_now: bool, credential_state: str) -> str:
+def decide_profile_action(
+    *, role_exists_now: bool, credential_state: str,
+    role_created_by_migration: bool = False,
+) -> str:
+    """Name the one safe action for an observed role/credential state.
+
+    THE ADOPT ROW IS NEW AND IT IS NARROW (2026-09-14). For an ordinary profile
+    this tool creates the role and mints its credential in the same operation,
+    so role-present/credential-absent means a credential was LOST and the only
+    safe answer is to refuse. The Gate Zero producer seat is different by
+    design: migration 0502 creates `carr_gate_zero_producer` with NO password,
+    so role-present/credential-absent is its NORMAL starting state and refusing
+    it left the declared DATABASE_URL_GATE_ZERO_WRITER with no way to exist.
+    ADOPT is that state's answer -- the owner connection sets the password --
+    and it is available only to a profile whose role a migration creates.
+    Pending is folded into adopt for the same profile because a crash between
+    minting the file and setting the password leaves the two disagreeing, and
+    re-applying the pending password makes them agree whichever way it fell.
+    """
     matrix = {
         (False, "absent"): "prepare_create",
         (False, "pending"): "create",
         (True, "pending"): "resume",
         (True, "final"): "reuse",
     }
+    if role_created_by_migration:
+        matrix[(True, "absent")] = "adopt"
+        matrix[(True, "pending")] = "adopt"
     action = matrix.get((role_exists_now, credential_state))
     if action is None:
         raise ProvisioningRefusal(
@@ -1264,17 +1653,50 @@ def redact_error(exc: BaseException) -> str:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate-operation-id", required=True,
+    parser.add_argument("--candidate-operation-id",
                         help="full UUIDv4 of the already-receipted replacement candidate")
-    parser.add_argument("--receipt-id", required=True,
+    parser.add_argument("--receipt-id",
                         help="full immutable replacement receipt UUIDv4")
-    parser.add_argument("--sha", required=True,
-                        help="full merged lowercase source SHA attested by the receipt")
+    parser.add_argument("--sha",
+                        help="full merged lowercase source SHA attested by the receipt, "
+                             "or the approved production release SHA")
     parser.add_argument("--apply", action="store_true",
                         help="converge candidate roles and atomically cut over both Worker secrets")
     parser.add_argument("--rollback-to-prior-staging", action="store_true",
                         help="atomically restore both untouched prior-staging Worker secrets")
+    parser.add_argument("--production-gate-zero-writer", action="store_true",
+                        help="mint and publish the PRODUCTION Gate Zero producer seat "
+                             "credential for the approved release (requires --apply)")
+    parser.add_argument("--provider",
+                        help="production release provider, e.g. cloudflare-workers")
+    parser.add_argument("--provider-version-id",
+                        help="immutable provider version id of the approved production release")
     args = parser.parse_args(argv)
+    if args.production_gate_zero_writer:
+        if not args.apply:
+            parser.error("--production-gate-zero-writer requires --apply; there is no "
+                         "read-only plan for a credential act")
+        if args.rollback_to_prior_staging:
+            parser.error("the staging rollback and the production seat act are different runs")
+        if args.candidate_operation_id or args.receipt_id:
+            parser.error("the production seat act takes no staging replacement candidate "
+                         "or receipt")
+        missing = [name for name, value in (
+            ("--sha", args.sha), ("--provider", args.provider),
+            ("--provider-version-id", args.provider_version_id),
+        ) if not value]
+        if missing:
+            parser.error("the production seat act requires " + ", ".join(missing))
+        return args
+    if args.provider or args.provider_version_id:
+        parser.error("--provider and --provider-version-id belong to the production seat "
+                     "act; staging is a source rehearsal, not a provider version")
+    missing = [name for name, value in (
+        ("--candidate-operation-id", args.candidate_operation_id),
+        ("--receipt-id", args.receipt_id), ("--sha", args.sha),
+    ) if not value]
+    if missing:
+        parser.error("staging provisioning requires " + ", ".join(missing))
     if args.rollback_to_prior_staging and not args.apply:
         parser.error("--rollback-to-prior-staging requires --apply")
     return args
@@ -1284,6 +1706,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         reject_unsafe_environment(os.environ)
+        if args.production_gate_zero_writer:
+            return provision_production_gate_zero_writer(args)
         target = replacement_target(
             args.candidate_operation_id, args.receipt_id, args.sha)
         plans = {
@@ -1375,7 +1799,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if "is absent" not in str(exc):
                             raise
                         action = decide_profile_action(
-                            role_exists_now=exists, credential_state="absent"
+                            role_exists_now=exists, credential_state="absent",
+                            role_created_by_migration=login_profile.created_by_migration,
                         )
                         stored = credential.prepare_pending(
                             file_profile.paths, key=file_profile.key,
@@ -1387,7 +1812,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     else:
                         action = decide_profile_action(
-                            role_exists_now=exists, credential_state=stored.state
+                            role_exists_now=exists, credential_state=stored.state,
+                            role_created_by_migration=login_profile.created_by_migration,
                         )
                     if action in {"resume", "reuse"}:
                         validate_profile_login(
@@ -1396,15 +1822,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                         outcome = "resumed" if action == "resume" else "reused"
                     else:
+                        # ADOPT is the migration-created seat's row: the role is
+                        # already there without a password, so the owner sets one
+                        # rather than creating a role that exists.
                         apply_login_profile(
                             owner, login_profile, plans[login_profile.label], stored.password,
-                            expected_creator=expected_creator,
+                            expected_creator=expected_creator, adopt=action == "adopt",
                         )
                         validate_profile_login(
                             stored.value, login_profile, plans[login_profile.label],
                             expected_creator=expected_creator,
                         )
-                        outcome = "created"
+                        outcome = "adopted" if action == "adopt" else "created"
                     if stored.state == "pending":
                         credential.promote_pending(
                             file_profile.paths, key=file_profile.key,
