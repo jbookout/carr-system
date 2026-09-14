@@ -157,6 +157,29 @@ function dealroomOrigin(env) {
   return `https://${host}`;
 }
 
+function doctorcreAppOrigin(env) {
+  const host = env?.DOCTORCRE_APP_HOST;
+  if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
+  return `https://${host}`;
+}
+
+function dealroomOriginForRequest(request, env) {
+  let requestOrigin;
+  try { requestOrigin = new URL(request.url).origin; }
+  catch { return null; }
+  for (const origin of [dealroomOrigin(env), doctorcreAppOrigin(env)]) {
+    if (origin && requestOrigin === origin) return origin;
+  }
+  return null;
+}
+
+function envForDealroomOrigin(env, origin) {
+  const scoped = Object.create(env || null);
+  scoped.PRIMARY_APP_HOST = env?.APP_HOST || env?.DEALROOM_HOST;
+  scoped.APP_HOST = new URL(origin).hostname;
+  return scoped;
+}
+
 function legacyDealroomOrigin(env) {
   const host = env?.LEGACY_DEALROOM_HOST;
   if (typeof host !== "string" || !DEALROOM_HOST_PATTERN.test(host)) return null;
@@ -332,6 +355,7 @@ async function completeLogin(request, env, dependencies) {
 
   await env.OAUTH_KV.put(sessionKey, JSON.stringify({
     props,
+    origin,
     createdAt: now,
     expiresAt: now + SESSION_IDLE_TTL * 1000,
     csrfToken: randomString(32),
@@ -350,6 +374,14 @@ async function sessionFor(request, env, dependencies) {
   if (!session) return null;
   const now = dependencies.now();
   const actor = dependencies.actorFromPropsFn(session.props);
+  const currentOrigin = dealroomOrigin(env);
+  const primaryHost = env?.PRIMARY_APP_HOST || env?.APP_HOST || env?.DEALROOM_HOST;
+  const primaryOrigin = typeof primaryHost === "string" && DEALROOM_HOST_PATTERN.test(primaryHost)
+    ? `https://${primaryHost}` : null;
+  // Sessions issued before the independent host existed had no origin field.
+  // They remain valid only on the primary host; new sessions stay pinned to
+  // the host that issued their host-only cookie.
+  if (session.origin ? session.origin !== currentOrigin : currentOrigin !== primaryOrigin) return null;
   const absoluteEnd = Number(session.createdAt) + SESSION_ABSOLUTE_TTL * 1000;
   if (!actor || !Number.isFinite(absoluteEnd) || session.expiresAt <= now || absoluteEnd <= now) {
     await env.OAUTH_KV.delete(key);
@@ -784,7 +816,7 @@ export function createDealroomHandler(overrides = {}) {
 }
 
 async function handleRequest(request, env, ctx, dependencies) {
-      const origin = dealroomOrigin(env);
+      const primaryOrigin = dealroomOrigin(env);
       const legacyOrigin = legacyDealroomOrigin(env);
       if (legacyOrigin && requestMatchesDealroomOrigin(request, legacyOrigin)) {
         const legacyUrl = new URL(request.url);
@@ -793,12 +825,14 @@ async function handleRequest(request, env, ctx, dependencies) {
         // never let API, machine, asset, or mutation requests become HTML
         // redirects by accident.
         if ((request.method === "GET" || request.method === "HEAD") &&
-            LEGACY_BROWSER_REDIRECT_PATHS.has(legacyUrl.pathname) && origin) {
-          return redirect(`${origin}/deals`);
+            LEGACY_BROWSER_REDIRECT_PATHS.has(legacyUrl.pathname) && primaryOrigin) {
+          return redirect(`${primaryOrigin}/deals`);
         }
         return json({ error: "not_found" }, 404);
       }
-      if (!origin || !requestMatchesDealroomOrigin(request, origin)) return json({ error: "not_found" }, 404);
+      const origin = dealroomOriginForRequest(request, env);
+      if (!origin) return json({ error: "not_found" }, 404);
+      env = envForDealroomOrigin(env, origin);
       const url = new URL(request.url);
       const publicResponse = await publicShellAsset(env, request, url.pathname);
       if (publicResponse) return publicResponse;
@@ -885,10 +919,9 @@ async function handleRequest(request, env, ctx, dependencies) {
 }
 
 export function isDealroomRequest(request, env) {
-  const origin = dealroomOrigin(env);
   const legacyOrigin = legacyDealroomOrigin(env);
   if (requestMatchesDealroomOrigin(request, legacyOrigin)) return true;
-  if (!requestMatchesDealroomOrigin(request, origin)) return false;
+  if (!dealroomOriginForRequest(request, env)) return false;
   const pathname = new URL(request.url).pathname;
   if (pathname === SYSTEM_WORK_PREFIX || DEALROOM_EXACT_PATHS.has(pathname) ||
       DEALROOM_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true;
