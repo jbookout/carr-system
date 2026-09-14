@@ -1997,6 +1997,44 @@ test("STORES: card 11's statements are read from ONE snapshot, not one each", as
   }
 });
 
+test("STORES: card 11 orders accepted receipts by the card's two-key current selector", async () => {
+  const target = stageWithFakePg({});
+  const staged = await import(pathToFileURL(join(target, STORES_FILE)).href);
+  const fakePg = await import(
+    pathToFileURL(join(dirname(target), "node_modules", "pg", "index.js")).href);
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  process.env.DATABASE_URL_READER = "postgres://fake/rows";
+  try {
+    const queries = fakePg.default.FAKE_QUERIES;
+    queries.length = 0;
+    const answer = await staged.fetchPredecessorOutcomeRows({
+      workRequestRef: fakePg.default.FAKE_ORDERED_ACCEPTANCES,
+    });
+    assert.deepEqual(
+      answer.rows.map(row => row.accepted_feedback_hash),
+      fakePg.default.FAKE_ORDERED_HASHES,
+      "the real store did not return newest acceptance first and descending UUID first on a tie",
+    );
+    const receiptSql = queries.find(sql => sql.includes(
+      "sourced_work_request_outcome_feedback_acceptance_receipt"));
+    assert.equal(typeof receiptSql, "string",
+      "the real store never issued its acceptance-receipt query");
+
+    const hasCanonicalOrder = sql =>
+      /order by r\.accepted_at desc\s*,\s*r\.id desc\s*$/i.test(sql);
+    assert.equal(hasCanonicalOrder(receiptSql), true,
+      "the receipt query does not preserve work_request_card's accepted_at/id currentness rule");
+    assert.equal(hasCanonicalOrder(receiptSql.replace("r.accepted_at desc", "r.accepted_at asc")), false,
+      "the assertion does not catch a reversed accepted_at ordering");
+    assert.equal(hasCanonicalOrder(receiptSql.replace(/\s*,\s*r\.id desc/i, "")), false,
+      "the assertion does not catch a missing UUID tie-breaker");
+    assert.equal(hasCanonicalOrder(receiptSql.replace("r.id desc", "r.id asc")), false,
+      "the assertion does not catch a reversed UUID tie-breaker");
+  } finally {
+    restoreEnv(savedEnv);
+  }
+});
+
 test("STORES: a revision with two authenticated candidate rows is refused, not picked",
   async () => {
     // THE SEVENTH REVIEW ROUND'S CARDINALITY FINDING, asked of the real store.
