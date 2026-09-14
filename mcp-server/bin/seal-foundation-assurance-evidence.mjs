@@ -40,6 +40,19 @@ export class FoundationAssuranceSealerError extends Error {
 }
 const fail = (code, detail) => { throw new FoundationAssuranceSealerError(code, detail); };
 
+function evaluatorIdentity(bindings) {
+  // correlation.js accepts this UUID as a request correlation and identity.js
+  // derives the corresponding authenticated session as `session:<uuid>`.
+  // Keeping the UUID unadorned makes the declared evaluator a session the
+  // review bearer can actually occupy; the former wr95-evidence- prefix could
+  // never be emitted by deriveCallIdentity and made coverage impossible.
+  return Object.freeze({
+    actor_id: "codex-fa-coverage",
+    session_ref: `session:${bindings.idempotency_key}`,
+    authority_class: "review_agent",
+  });
+}
+
 export function parseFoundationAssuranceArgs(argv) {
   const allowed = new Set(["--source-sha", "--source-tree", "--staging-provider-version",
     "--final-provider-version", "--release-key", "--staging-origin", "--idempotency-key"]);
@@ -94,9 +107,7 @@ export function assembleFoundationAssuranceEvidence(bindings, config, acquired) 
   const benchmark_payload = foundationAssuranceBenchmarkPayload(config, {
     subject_digest: subject, candidate_digest: candidate, policy_digest: policy,
     browser: acquired.browser, runtime_version: acquired.runtime_version,
-    evaluator_identities: [{ actor_id: "codex-fa-coverage",
-      session_ref: `session:wr95-evidence-${bindings.idempotency_key}`,
-      authority_class: "review_agent" }],
+    evaluator_identities: [evaluatorIdentity(bindings)],
   });
   const evidence = {
     schema_version: FOUNDATION_ASSURANCE_EVIDENCE_SCHEMA,
@@ -277,6 +288,10 @@ async function acknowledgementMeasurements(bindings, config, payload, token) {
       const started = performance.now();
       const response = await fetch(`${bindings.staging_origin}/mcp`, { method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json",
+          // Bind the live measurement call to the evaluator session sealed in
+          // the benchmark payload. The UUID grants no authority; the bearer
+          // still selects and authenticates the registered oracle seat.
+          "x-correlation-id": bindings.idempotency_key,
           ...(cell.cache_state === "cold" ? { "cache-control": "no-cache" } : {}) },
         body: JSON.stringify({ jsonrpc: "2.0", id: at + 1, method: "tools/call",
           params: { name: cell.subject, arguments: {} } }), signal: AbortSignal.timeout(30000) });
@@ -343,8 +358,7 @@ async function measureRuntime(bindings, config, readback, github_checks) {
     candidate_digest: digest(["doctorcre:wr95-candidate:v1", bindings.final_provider_version]),
     policy_digest: digest(validateFoundationAssuranceBenchmarkConfig(config)), browser,
     runtime_version: bindings.staging_provider_version,
-    evaluator_identities: [{ actor_id: "codex-fa-coverage",
-      session_ref: `session:wr95-evidence-${bindings.idempotency_key}`, authority_class: "review_agent" }],
+    evaluator_identities: [evaluatorIdentity(bindings)],
   });
   const browserResult = await chromeMeasurements(bindings, config, browser => {
     chosenBrowser = browser; return payloadFor(browser);

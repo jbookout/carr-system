@@ -35,7 +35,7 @@ function acquired() {
     candidate_digest: digest(["doctorcre:wr95-candidate:v1", bindings.final_provider_version]),
     policy_digest: digest(config), browser, runtime_version,
     evaluator_identities: [{ actor_id: "codex-fa-coverage",
-      session_ref: `session:wr95-evidence-${bindings.idempotency_key}`,
+      session_ref: `session:${bindings.idempotency_key}`,
       authority_class: "review_agent" }],
   });
   const cells = benchmarkRequiredCells(payload);
@@ -75,6 +75,11 @@ test("acquired matrix seals against release key without a release UUID", () => {
   assert.equal(bundle.seal.release_key, bindings.release_key);
   assert.equal(bundle.evidence.release.test_evidence_ref, bundle.seal.evidence_ref);
   assert.equal(bundle.seal.required_cell_count, 4);
+  assert.deepEqual(bundle.evidence.benchmark_payload.evaluator_identities, [{
+    actor_id: "codex-fa-coverage",
+    session_ref: `session:${bindings.idempotency_key}`,
+    authority_class: "review_agent",
+  }]);
 });
 
 test("missing or caller-shaped acquisition is refused", () => {

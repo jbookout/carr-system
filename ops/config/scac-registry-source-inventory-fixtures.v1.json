@@ -43121,8 +43121,8 @@
         "operation": "mcp-server/bin/seal-foundation-assurance-evidence.mjs",
         "effect_class": "administrative_mutation",
         "source_locator": "mcp-server/bin/seal-foundation-assurance-evidence.mjs",
-        "schema_digest": "cfd595d120fd9bb79f7e04a3dbfcd858b088a39cd12d547203b605f455023651",
-        "handler_digest": "cfd595d120fd9bb79f7e04a3dbfcd858b088a39cd12d547203b605f455023651",
+        "schema_digest": "46f73070820ea4139473de26c06c1fdc35cf2cdc9f0d7609fcf0df31b135aa71",
+        "handler_digest": "46f73070820ea4139473de26c06c1fdc35cf2cdc9f0d7609fcf0df31b135aa71",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -43186,7 +43186,7 @@
       }
     ],
     "expected_count": 856,
-    "expected_sha256": "dce721feb4a6a52347f81a444a85ea0bb24f9703aaeece9830fc8dd7830e01ff",
+    "expected_sha256": "4d513472304a3769896bd9222b15ecbe98c507aaf127484d5633353ee2cee1c4",
     "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted."
   },
   "historical_artifact_replay_review": {
