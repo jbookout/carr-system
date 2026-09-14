@@ -67,13 +67,39 @@ dependency. Run independent authorized work in parallel isolated worktrees.
 Existing production and destructive-action safeguards remain in force.
 <!-- carr-product-first-policy:end -->
 
-## This repo is the ONLY code home
+## Authorized code homes and repository boundaries
 
-`jbookout/carr-system`. The record layer, the MCP server, every migration and all
-durable code are here and nowhere else. If you cannot reach this repo, STOP and
-say so rather than improvising a home — a cloud session once filed an entire
-system audit into an unrelated empty scaffold repo, which is the same as losing
-it.
+Decision `1ceee300-7627-426f-b729-ab339d6984fc` supersedes the former
+single-code-home rule after Gate Zero. The current placement contract is STORE
+doctrine `doctorcre-v5-astra-integration-review`, section
+`3bb51d3e-2661-4ea2-a585-053540545b5d@1`, content hash
+`d36252e69e32aa8af7c5d79f8dc3cc5365848af83839e1a11c5db5548b3d5c5e`.
+Fetch the current section by stable ID at runtime; the observed version and hash
+above record this projection's provenance, not a current-version gate.
+
+The only authorized code homes are:
+
+- `jbookout/carr-system`: the CARR-specific runtime and authority — canonical
+  business records, domain rules and doctrine, versioned APIs and MCP,
+  migrations, runtime control plane, assurance fabric, authentication,
+  environments, and CARR releases.
+- `jbookout/doctorcre-app`: DoctorCRE's independently built and deployed human
+  application, including its UI, interaction logic, project knowledge, and
+  app-only state. It uses authenticated versioned CARR contracts and never
+  accesses the CARR database directly.
+- `jbookout/software-factory`: development-time orchestration and tooling —
+  bounded agent workflows, skills, prompts, templates, scaffolds, CI and review
+  conventions, evals, release helpers, and factory job/evidence records. It is
+  not a product runtime and owns no product data, domain rules, standing
+  credentials, or deployment authority.
+
+Do not improvise another repository or silently move code between these homes.
+Cross-repository work binds exact source revisions and versioned contracts.
+Products must not depend on the software factory at runtime. CARR runtime code
+remains here until a second real production consumer proves a neutral,
+independently pinnable, testable, and replaceable boundary with measurable
+duplication. If an authorized repository is unreachable, STOP and name the
+missing repository rather than substituting an unrelated scaffold.
 
 ## The shared root is NOT an agent work surface
 
