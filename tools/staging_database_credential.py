@@ -34,6 +34,7 @@ READER_KEY = "CARR_DB_STAGING_READER_URL"
 # controls (Neon Database SOP `01-connections-and-roles`, then Cloudflare Edge
 # SOP `02-secrets-and-tokens`), and nothing in this repository mints it.
 GATE_ZERO_PRODUCER_KEY = "CARR_DB_STAGING_GATE_ZERO_WRITER_URL"
+FOUNDATION_ASSURANCE_ORACLE_KEY = "CARR_DB_STAGING_FOUNDATION_ASSURANCE_WRITER_URL"
 
 
 class CredentialRefusal(RuntimeError):
@@ -79,6 +80,9 @@ def profile(label: str, *, config_root: pathlib.Path | None = None) -> Credentia
         # bundle behind it, so the bundle column names the role itself.
         "gate_zero_producer": ("carr_gate_zero_producer", "carr_gate_zero_producer",
                                GATE_ZERO_PRODUCER_KEY, "staging-gate-zero-writer.env"),
+        "foundation_assurance_oracle": (
+            "carr_foundation_assurance_oracle", "carr_foundation_assurance_oracle",
+            FOUNDATION_ASSURANCE_ORACLE_KEY, "staging-foundation-assurance-writer.env"),
     }
     try:
         role_name, bundle_role, key, filename = profiles[label]

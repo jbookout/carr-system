@@ -122,12 +122,17 @@ RELEASE_TEST_EVIDENCE=""
 RELEASE_SECURITY_EVIDENCE=""
 RELEASE_VERIFIER=""
 RELEASE_VERIFIER_EVIDENCE=""
+FOUNDATION_ASSURANCE_STAGING_PROVIDER=""
 RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
 EXACT_SOURCE_ROOT=""
 EXACT_RUNTIME_LINK=""
+WR95_STAGING_VERSION_JSON=""
+WR95_STAGING_RELEASE_JSON=""
+WR95_FINAL_VERSION_JSON=""
+WR95_SEAL_OUTPUT=""
 # Filled only from the exact immutable release manifest after preflight.
 EXPECTED_PROGRAM6_ACTIONS=""
 
@@ -137,6 +142,12 @@ EXPECTED_PROGRAM6_ACTIONS=""
 # after source and package-lock validation.  One cleanup hook owns all
 # ephemeral files so later receipt-specific traps cannot strand the link.
 cleanup_ephemeral() {
+  for wr95_tmp in "${WR95_STAGING_VERSION_JSON:-}" "${WR95_STAGING_RELEASE_JSON:-}" \
+      "${WR95_FINAL_VERSION_JSON:-}" "${WR95_SEAL_OUTPUT:-}"; do
+    if [ -n "$wr95_tmp" ] && [ -f "$wr95_tmp" ]; then
+      rm -f "$wr95_tmp"
+    fi
+  done
   if [ -n "${STAGING_RECEIPT:-}" ] && [ -e "$STAGING_RECEIPT" ]; then
     rm -f "$STAGING_RECEIPT"
   fi
@@ -194,6 +205,9 @@ while [ "$#" -gt 0 ]; do
     --verifier-evidence)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --verifier-evidence needs a reference" >&2; exit 64; }
       RELEASE_VERIFIER_EVIDENCE="$2"; shift ;;
+    --foundation-assurance-staging-provider)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-provider needs an immutable UUID" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_PROVIDER="$2"; shift ;;
     --recovery-attempt-id)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
@@ -304,15 +318,25 @@ fi
 #
 # WHY THE EVIDENCE REFS ARE REQUIRED RATHER THAN OPTIONAL. ops.release's
 # an_approved_release_carries_its_evidence constraint exempts `candidate` and
-# nothing beyond it, and no verb attaches evidence to a candidate afterwards: a
-# row filed without these two can never be approved, so filing one is filing a
-# dead key. The maker is NOT among these arguments and cannot be — migration 0504
-# records the login role that files the row and derives the maker from it.
+# nothing beyond it. The WR95 path is the sole closed exception: it files the
+# exact candidate first, then 0510 atomically attaches the live-derived evidence
+# ref while inserting the immutable evidence bytes. The maker is NOT among
+# these arguments: migration 0504 derives it from the filing login.
 if [ "$VERSION_MODE" = "upload" ]; then
   [ -n "$REQUESTED_RELEASE_KEY" ] \
     || fail "--upload-version files the release-candidate record itself and needs --release-key <canonical key>."
-  [ -n "$RELEASE_TEST_EVIDENCE" ] && [ -n "$RELEASE_SECURITY_EVIDENCE" ] \
-    || fail "--upload-version needs --test-evidence and --security-evidence; a candidate filed without them can never be approved."
+  [ -n "$RELEASE_SECURITY_EVIDENCE" ] \
+    || fail "--upload-version needs --security-evidence."
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    [ -z "$RELEASE_TEST_EVIDENCE" ] \
+      || fail "WR95 derives --test-evidence from live acquisition; caller evidence is refused."
+    printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" | grep -Eq \
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+      || fail "--foundation-assurance-staging-provider must be a lowercase immutable UUID."
+  else
+    [ -n "$RELEASE_TEST_EVIDENCE" ] \
+      || fail "--upload-version needs --test-evidence unless WR95 live acquisition is selected."
+  fi
   if [ -n "$RELEASE_VERIFIER$RELEASE_VERIFIER_EVIDENCE" ]; then
     [ -n "$RELEASE_VERIFIER" ] && [ -n "$RELEASE_VERIFIER_EVIDENCE" ] \
       || fail "--verifier and --verifier-evidence are an atomic pair."
@@ -420,6 +444,7 @@ else
 git -C "$REPO" fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
 
 HEAD_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+HEAD_TREE="$(git -C "$SOURCE_ROOT" rev-parse "${HEAD_SHA}^{tree}")"
 MAIN_SHA="$(git -C "$SOURCE_ROOT" rev-parse origin/main)"
 BRANCH="$(git -C "$SOURCE_ROOT" rev-parse --abbrev-ref HEAD)"
 
@@ -951,6 +976,32 @@ echo "== deploy =="
 cd "$WORKER_DIR"
 # -- provider-version upload --
 if [ "$VERSION_MODE" = "upload" ]; then
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    echo "== WR95 staging evidence target =="
+    WR95_STAGING_VERSION_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-staging-version.XXXXXX")"
+    WR95_STAGING_RELEASE_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-staging-release.XXXXXX")"
+    "$WRANGLER" versions view "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" --env staging --json \
+      > "$WR95_STAGING_VERSION_JSON" 2>/dev/null \
+      || fail "the named staging provider version is unavailable."
+    STAGING_TARGET_HOST="$($PY "$REPO/tools/ops-record.py" staging-target --field host)" \
+      || fail "the canonical staging host is unavailable."
+    curl -fsS --max-time 30 "https://$STAGING_TARGET_HOST/release" \
+      > "$WR95_STAGING_RELEASE_JSON" 2>/dev/null \
+      || fail "the staging release readback is unavailable."
+    "$PY" -c 'import json,sys
+version=json.load(open(sys.argv[1])); live=json.load(open(sys.argv[2])); wanted=sys.argv[3]; sha=sys.argv[4]
+def contains(value, needle):
+  if isinstance(value,dict): return any(contains(v,needle) for v in value.values())
+  if isinstance(value,list): return any(contains(v,needle) for v in value)
+  return value==needle
+if not contains(version,wanted): raise SystemExit("provider detail did not name the exact staging UUID")
+if live.get("git_sha")!=sha or (live.get("worker_version") or {}).get("id")!=wanted or (live.get("env") or {}).get("value")!="staging": raise SystemExit("staging /release binding differs")' \
+      "$WR95_STAGING_VERSION_JSON" "$WR95_STAGING_RELEASE_JSON" \
+      "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" "$HEAD_SHA" \
+      || fail "the named staging provider is not the exact serving source."
+    rm -f "$WR95_STAGING_VERSION_JSON" "$WR95_STAGING_RELEASE_JSON"
+    echo "  verified exact staging provider $FOUNDATION_ASSURANCE_STAGING_PROVIDER"
+  fi
   set +e
   VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" \
     --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
@@ -964,6 +1015,26 @@ if [ "$VERSION_MODE" = "upload" ]; then
     | tail -n 1 | tr 'A-F' 'a-f')"
   [ -n "$PROVIDER_VERSION_ID" ] \
     || fail "Cloudflare uploaded a version but returned no parseable immutable version id; traffic was not changed."
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    WR95_FINAL_VERSION_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-final-version.XXXXXX")"
+    "$WRANGLER" versions view "$PROVIDER_VERSION_ID" --json \
+      > "$WR95_FINAL_VERSION_JSON" 2>/dev/null \
+      || fail "the final uploaded provider version is unavailable for secret-binding verification."
+    "$PY" -c 'import json,sys
+value=json.load(open(sys.argv[1])); wanted=sys.argv[2]
+def bound(v):
+  if isinstance(v,dict):
+    if v.get("name")==wanted and "secret" in str(v.get("type","")).lower(): return True
+    return any(bound(x) for x in v.values())
+  if isinstance(v,list): return any(bound(x) for x in v)
+  return False
+if not bound(value): raise SystemExit("required secret binding is absent")' \
+      "$WR95_FINAL_VERSION_JSON" "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER" \
+      || fail "the final provider version does not carry DATABASE_URL_FOUNDATION_ASSURANCE_WRITER."
+    rm -f "$WR95_FINAL_VERSION_JSON"
+    WR95_FINAL_VERSION_JSON=""
+    echo "  verified final provider secret binding (name/type only)"
+  fi
   BOUND_RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-bound-release-manifest.XXXXXX")"
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
       --manifest "$RELEASE_MANIFEST" --provider "$PROVIDER" \
@@ -1022,17 +1093,45 @@ if [ "$VERSION_MODE" = "upload" ]; then
   # The line printed below still reports what the database recorded rather than
   # what anyone intended.
   echo "== release candidate record =="
-  "$PY" "$REPO/tools/ops-record.py" release candidate \
-    --key "$RELEASE_KEY" --service carr-mcp --environment production \
-    --provider "$PROVIDER" --provider-version-id "$PROVIDER_VERSION_ID" \
-    --manifest "$RELEASE_MANIFEST" \
-    --test-evidence "$RELEASE_TEST_EVIDENCE" \
-    --security-evidence "$RELEASE_SECURITY_EVIDENCE" \
-    ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
-    ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
-    >/dev/null \
-    || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no approval can name $PROVIDER_VERSION_ID until the record exists."
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    WR95_SEAL_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/wr95-foundation-seal.XXXXXX")"
+    WR95_EVIDENCE_IDEMPOTENCY="$($PY -c 'import sys,uuid; print(uuid.uuid5(uuid.UUID("d5fe8cc5-32f8-4f09-9aa8-f14466b65146"),sys.argv[1]+"\0"+sys.argv[2]))' "$RELEASE_KEY" "$PROVIDER_VERSION_ID")"
+    if ! "$PY" "$REPO/tools/ops-record.py" release candidate \
+      --key "$RELEASE_KEY" --service carr-mcp --environment production \
+      --provider "$PROVIDER" --provider-version-id "$PROVIDER_VERSION_ID" \
+      --manifest "$RELEASE_MANIFEST" \
+      --security-evidence "$RELEASE_SECURITY_EVIDENCE" \
+      ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
+      ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
+      >/dev/null; then
+      fail "the uploaded WR95 version could not be filed as a release candidate; evidence acquisition was not started."
+    fi
+    if ! node "$REPO/mcp-server/bin/seal-foundation-assurance-evidence.mjs" \
+      --source-sha "$HEAD_SHA" --source-tree "$HEAD_TREE" \
+      --staging-provider-version "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" \
+      --final-provider-version "$PROVIDER_VERSION_ID" --release-key "$RELEASE_KEY" \
+      --staging-origin "https://$STAGING_TARGET_HOST" \
+      --idempotency-key "$WR95_EVIDENCE_IDEMPOTENCY" > "$WR95_SEAL_OUTPUT"; then
+      fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; traffic was not changed and approval remains impossible."
+    fi
+    RELEASE_TEST_EVIDENCE="$($PY -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x["evidence_ref"])' "$WR95_SEAL_OUTPUT")" \
+      || fail "the WR95 evidence store returned no sealed evidence reference."
+    rm -f "$WR95_SEAL_OUTPUT"
+    WR95_SEAL_OUTPUT=""
+  else
+    "$PY" "$REPO/tools/ops-record.py" release candidate \
+      --key "$RELEASE_KEY" --service carr-mcp --environment production \
+      --provider "$PROVIDER" --provider-version-id "$PROVIDER_VERSION_ID" \
+      --manifest "$RELEASE_MANIFEST" \
+      --test-evidence "$RELEASE_TEST_EVIDENCE" \
+      --security-evidence "$RELEASE_SECURITY_EVIDENCE" \
+      ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
+      ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
+      >/dev/null \
+      || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no approval can name $PROVIDER_VERSION_ID until the record exists."
+  fi
   echo "  filed release candidate $RELEASE_KEY for $HEAD_SHA"
+  echo "  test evidence: $RELEASE_TEST_EVIDENCE"
   echo "  maker: recorded by the database from the filing login, not asserted"
   echo ""
   echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"

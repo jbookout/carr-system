@@ -149,6 +149,7 @@
 import { digest } from "./artifact-trust.js";
 import { authorizationClassForActor, isKnownPartner } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
+import { sealFoundationAssuranceEvidence } from "./foundation-assurance-evidence.v5.js";
 import {
   BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS, BENCHMARK_COMBINER, BENCHMARK_COST_VARIANCE_THRESHOLDS,
   BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_GATE_ID, BENCHMARK_MANIFEST_SCHEMA,
@@ -969,13 +970,16 @@ const ACCEPTANCE_EFFECTS = deepFreeze({
   grants_dispatch_activation_or_execution: false,
 });
 
-export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolError }) {
+export function benchmarkAcceptanceStoreTools({
+  withEnvelope, writeEvent, ToolError, authenticatedIdentity,
+}) {
   const digestSchema = { type: "string", pattern: "^sha256:[0-9a-f]{64}$" };
   const toolRefuse = (error, detail) => { throw new ToolError({ error, ...detail }); };
 
   /** Translate a module refusal into a tool refusal without losing the code. */
   const asToolError = (error) => {
-    if (error instanceof BenchmarkAcceptanceStoreError || error?.name === "BenchmarkMinimumError") {
+    if (error instanceof BenchmarkAcceptanceStoreError || error?.name === "BenchmarkMinimumError" ||
+        error?.name === "FoundationAssuranceEvidenceError") {
       toolRefuse(error.code, {
         message: error.message,
         ...(error.detail !== undefined ? { detail: error.detail } : {}),
@@ -1110,7 +1114,6 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           reviewed_payload_digest: digestSchema,
           verdict: { type: "string", enum: ["pass", "fail"] },
           review_summary: { type: "string" },
-          measurements: { type: "object" },
         },
         required: ["idempotency_key", "draft_id", "reviewed_payload_digest", "verdict", "review_summary"],
       },
@@ -1120,7 +1123,6 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           assertUuid(args.draft_id, "draft_id");
           assertDigestRef(args.reviewed_payload_digest, "reviewed_payload_digest");
           assertReviewSummary(args.review_summary, "review_summary");
-          assertNoSelfAssertedAuthority(args.measurements ?? {}, "measurements");
         });
 
         const live = await readLiveDraft(c, args.draft_id);
@@ -1135,12 +1137,16 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
         let measurementSetDigest = null;
         let attestation = null;
         if (args.verdict === "pass") {
-          if (!isPlainObject(args.measurements)) {
-            toolRefuse("benchmark_measurement_set_required",
-              { reason: "r7's pass rule requires every required matrix cell to be exercised and to meet its fixed SLO; a passing review must name the measurement set that shows it" });
-          }
+          const material = (await c.query(
+            "select ops.foundation_assurance_benchmark_review_material($1::uuid) as material",
+            [args.draft_id])).rows[0]?.material;
+          if (!material?.evidence || !material?.config)
+            toolRefuse("foundation_assurance_evidence_unavailable",
+              { reason: "a passing review reads the server-sealed release evidence; no caller measurement field exists" });
+          let seal;
           let coverage;
           try {
+            seal = sealFoundationAssuranceEvidence(material.evidence, material.config);
             // Proved against the payload REBUILT FROM THE STORED ROWS, not
             // against anything in this call. The kernel refuses a missing cell,
             // an unrequired one, a duplicate, a short warmup, an exclusion that
@@ -1155,13 +1161,18 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
             // invisible while the two agree and is the whole point when they do
             // not.
             coverage = evaluateBenchmarkWorkloadCoverage({
-              payload: live.payload, measurements: args.measurements,
+              payload: live.payload, measurements: material.evidence.measurements,
             });
           } catch (error) { return asToolError(error); }
+          if (coverage.benchmark_payload_digest !== seal.benchmark_payload_digest)
+            toolRefuse("benchmark_review_evidence_payload_mismatch", {
+              reviewed_payload_digest: live.payload_digest,
+              evidence_payload_digest: seal.benchmark_payload_digest,
+            });
           // The exact bytes that were proved ON THIS PATH. The samples stay
           // outside the record layer; the digest is what names them, and it is
           // computed here rather than accepted from the caller.
-          measurementSetDigest = digest(args.measurements);
+          measurementSetDigest = seal.measurement_set_digest;
           // THE ATTESTATION. Four values, none of them invented and none of them
           // supplied by the MCP caller: a closed source constant naming the
           // evaluator, the evaluator's own returned payload digest, the
@@ -1175,6 +1186,9 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
             measurement_set_digest: measurementSetDigest,
             evaluation_digest: digest(coverage),
           };
+          const reviewerIdentity = authenticatedIdentity?.receiptIdentity?.();
+          if (!reviewerIdentity || reviewerIdentity.actor_id !== actor.slug)
+            toolRefuse("benchmark_reviewer_identity_unavailable", {});
         }
 
         const reviewId = (await c.query(
