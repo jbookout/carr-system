@@ -2904,7 +2904,7 @@ export const TOOLS = {
                            jsonb_build_object('id', latest.id,
                              'recorded_at', to_jsonb(latest.recorded_at)#>>'{}'))
                     from (select distinct on (e.field) e.field, e.id, e.recorded_at
-                            from event e
+                            from v_deal_room_event e
                            where e.subject_type='deal' and e.subject_id=b.id
                              and e.field = any($3::text[])
                            order by e.field, e.recorded_at desc, e.id desc) latest

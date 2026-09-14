@@ -603,10 +603,21 @@ test("the two base statements hold together as written, since no test can run th
   // reader cannot check by eye: the correlation, the parameter count, and the
   // distinct-on/order-by agreement Postgres requires.
   const tools = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+  const dealRoomApi = await readFile(
+    new URL("../../migrations/0079_deal_room_api.sql", import.meta.url), "utf8");
 
   const board = tools.slice(tools.indexOf('"deal-room-board": {'),
     tools.indexOf("dealroom:board-field-base") + 200);
   assert.match(board, /from v_deal_room_board b\b/, "the outer relation is aliased, so b.id resolves");
+  assert.match(board, /from v_deal_room_event e\b/,
+    "the reader must use the granted deal-scoped event view");
+  assert.doesNotMatch(board, /from (?:public\.)?event e\b/,
+    "carr_reader is views-only and cannot read the event base table");
+  assert.match(dealRoomApi,
+    /grant select on v_deal_room_event,[\s\S]*?to carr_reader;/,
+    "the selected event view must be part of carr_reader's declared surface");
+  assert.doesNotMatch(dealRoomApi, /grant select on (?:table )?(?:public\.)?event\b/i,
+    "the fix must not widen carr_reader to the event base table");
   assert.match(board, /where e\.subject_type='deal' and e\.subject_id=b\.id/,
     "the subquery is correlated to the row it decorates, not to the whole table");
   assert.match(board, /distinct on \(e\.field\) e\.field, e\.id, e\.recorded_at[\s\S]*?order by e\.field, e\.recorded_at desc, e\.id desc/,
