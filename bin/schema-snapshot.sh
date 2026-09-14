@@ -323,6 +323,14 @@ case "$GATE_ZERO_OUTCOME_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Gate Zero outcome registry ledger state" >&2; exit 1 ;;
 esac
 
+FOUNDATION_ASSURANCE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0511_foundation_assurance_scac_successor.sql')" \
+  2>/dev/null)"
+case "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the foundation-assurance registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -393,6 +401,7 @@ declare
   jobs_can_login boolean;
   jobs_placeholder text;
   producer_can_login boolean;
+  foundation_oracle_can_login boolean;
 begin
   foreach r in array array[
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
@@ -428,6 +437,15 @@ begin
     execute format('create role %I login', 'carr_gate_zero_producer');
   elsif not producer_can_login then
     execute format('alter role %I login', 'carr_gate_zero_producer');
+  end if;
+
+  -- WR-000095 follows the same passwordless migration-created seat contract.
+  select rolcanlogin into foundation_oracle_can_login
+    from pg_roles where rolname='carr_foundation_assurance_oracle';
+  if not found then
+    execute format('create role %I login', 'carr_foundation_assurance_oracle');
+  elsif not foundation_oracle_can_login then
+    execute format('alter role %I login', 'carr_foundation_assurance_oracle');
   end if;
 
   -- THE AGING TRAP ONE LEVEL DOWN: not creating a role, but joining one.
@@ -1342,7 +1360,18 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$GATE_ZERO_OUTCOME_REGISTRY_APPLIED" = t ]; then
+  if [ "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=27
+    SCAC_VERSION_COUNT=27
+    SCAC_TOTAL_ENTRY_COUNT=40447
+    SCAC_CURRENT_ENTRY_COUNT=1776
+    SCAC_CURRENT_SOURCE_COUNT=856
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v27.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26'"
+    SCAC_FULL_SET_SEAL_COUNT=26
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v27_current()"
+  elif [ "$GATE_ZERO_OUTCOME_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=26
     SCAC_VERSION_COUNT=26
     SCAC_TOTAL_ENTRY_COUNT=38671
@@ -1585,15 +1614,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const allKeys=Array.from({length:25},(_,i)=>`scac-mutation-registry.v${i+1}`);
-    const count=Number(process.argv[2]); const keys=allKeys.slice(0,count);
+    const count=Number(process.argv[2]); const current=Number(process.argv[3]);
+    const allKeys=Array.from({length:current},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    const keys=allKeys.slice(0,count);
     if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
-        !Number.isInteger(count) || count<9 || count>25 ||
+        !Number.isInteger(count) || !Number.isInteger(current) ||
+        count<9 || count>=current || current<10 ||
         allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
     process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
-  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT")" || {
+  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT" "$SCAC_CURRENT_NUMBER")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
   }
   # WHAT THIS CHECK ASKS, AND WHAT IT DELIBERATELY DOES NOT. Every comparison
