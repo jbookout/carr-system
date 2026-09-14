@@ -228,11 +228,11 @@ CONTINUITY_SURFACE_ENFORCEMENT = "required"
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
-# One Worker + one asset binding is the smallest deployable structure. The
-# parallel Deal Room lane writes its no-build bundle directly under dealroom/;
-# src/dealroom-web.js also checks dist/ and falls back to public-shell/index.html.
+# One Worker + one asset binding is the smallest deployable structure. P2
+# materializes the exact digest-pinned DoctorCRE release into this ignored path
+# before Wrangler runs; editable dealroom/ source is no longer deployment input.
 [assets]
-directory = "../dealroom"
+directory = "../out/doctorcre-artifacts/current"
 binding = "ASSETS"
 run_worker_first = true
 
@@ -314,7 +314,7 @@ CONTINUITY_SURFACE_ENFORCEMENT = "required"
 binding = "CF_VERSION_METADATA"
 
 [env.staging.assets]
-directory = "../dealroom"
+directory = "../out/doctorcre-artifacts/current"
 binding = "ASSETS"
 run_worker_first = true
 

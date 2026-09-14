@@ -382,6 +382,18 @@ fi
 cd "$REPO"
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 [ -x "$PY" ] || fail "python not found; release truth cannot be checked."
+if [ "$VERSION_MODE" != "promote" ]; then
+  DOCTORCRE_PIN="$SOURCE_ROOT/ops/config/doctorcre-artifact.v1.json"
+  if [ -f "$DOCTORCRE_PIN" ]; then
+    DOCTORCRE_ROOT="$SOURCE_ROOT/out/doctorcre-artifacts"
+    "$PY" "$REPO/tools/release-manifest.py" doctorcre-artifact materialize \
+      --pin "$DOCTORCRE_PIN" --root "$DOCTORCRE_ROOT" \
+      || fail "the exact DoctorCRE artifact could not be verified and materialized."
+    [ -f "$DOCTORCRE_ROOT/current/workspace.html" ] \
+      || fail "the materialized DoctorCRE entrypoint is missing."
+    echo "  OK  DoctorCRE artifact materialized from the exact CARR pin"
+  fi
+fi
 if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBACK_PLAN_REF" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] && [ -n "$PERFORMANCE_BUDGET_MS" ] \
     && [ -n "$RECOVERY_STRATEGY" ] && [ -n "$ROLLBACK_PLAN_REF" ] \

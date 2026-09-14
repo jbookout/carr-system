@@ -1560,6 +1560,13 @@ check_binding() {
 # verb loss is caught before it is a release.
 check_artifact() {
   local shipping marker
+  if ! run_quiet "$LOGDIR/doctorcre-artifact.log" "$PY" \
+      tools/release-manifest.py doctorcre-artifact verify \
+      --pin ops/config/doctorcre-artifact.v1.json; then
+    tail -20 "$LOGDIR/doctorcre-artifact.log" >&2
+    bad artifact "the exact DoctorCRE release artifact did not match its CARR pin"
+    return
+  fi
   shipping="$(sh ops/verb-count.sh "$REPO/mcp-server" 2>"$LOGDIR/artifact.log")"
   if [ -z "$shipping" ]; then
     cat "$LOGDIR/artifact.log" >&2

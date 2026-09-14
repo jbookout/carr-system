@@ -24,7 +24,7 @@ import {
 } from "./workspace-business-read.js";
 import { isTourInternalRequest } from "./tour-internal-web.js";
 
-export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
+export const DEALROOM_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current"; // mirrors wrangler.toml [assets]
 
 const SESSION_COOKIE = "__Host-dealroom_session";
 const PENDING_COOKIE = "__Host-dealroom_oauth";
