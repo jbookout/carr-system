@@ -42,6 +42,7 @@ WHAT IT PROVES
 """
 
 import atexit
+import copy
 import importlib.util
 import json
 import shutil
@@ -117,6 +118,12 @@ def main() -> int:
           first.get("program6_actions") in (
               {"enabled": True, "posture": "enabled"},
               {"enabled": False, "posture": "disabled"}))
+    doctorcre = first.get("doctorcre_artifact")
+    check("0i. manifest binds the independent DoctorCRE source and archive",
+          isinstance(doctorcre, dict)
+          and doctorcre.get("source_commit") == "10c8741244a2eab458c1cc9481a3c54b17204711"
+          and doctorcre.get("archive_sha256") == "bab37e0ce0e43895dc3b88d7ac2ae13bcd74094c740876fde3d418b2c1c77c14"
+          and first.get("artifact_paths") == ["mcp-server"])
 
     # Seed the exact failure with the same numeric prefix but a different
     # filename/content pair.  A numeric-prefix comparison would incorrectly
@@ -285,12 +292,38 @@ def main() -> int:
     check("6g. changing the full applied-ledger digest moves the plan hash",
           out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
 
+    external_product = copy.deepcopy(first)
+    external_product["doctorcre_artifact"]["archive_sha256"] = "3" * 64
+    out = run("plan-hash", "--manifest", _tmp_json(external_product))
+    check("6h. changing the pinned DoctorCRE artifact moves the plan hash",
+          out.stdout.strip() and out.stdout.strip() != first["plan_hash"])
+    external_product["plan_hash"] = out.stdout.strip()
+    out = run("verify", "--manifest", _tmp_json(external_product))
+    check("6i. a self-consistent but false DoctorCRE pin fails rebuild verification",
+          out.returncode != 0)
+
     legacy_out = run("build", "--sha", tested_sha)
     legacy = json.loads(legacy_out.stdout) if legacy_out.returncode == 0 else {}
     legacy_path = _tmp_json(legacy)
     legacy_verify = run("verify", "--manifest", legacy_path)
-    check("6h. an all-absent historical assurance group still round-trips",
+    check("6j. an all-absent historical assurance group still round-trips",
           legacy_out.returncode == 0 and legacy_verify.returncode == 0)
+
+    historical_sha = None
+    for candidate in git("log", "-80", "--format=%H").split():
+        present = subprocess.run(
+            ("git", "-C", str(REPO), "cat-file", "-e",
+             f"{candidate}:ops/config/doctorcre-artifact.v1.json"),
+            capture_output=True)
+        if present.returncode != 0:
+            historical_sha = candidate
+            break
+    historical = build("--sha", historical_sha) if historical_sha else {}
+    historical_verify = run("verify", "--manifest", _tmp_json(historical)) if historical else None
+    check("6k. pre-P2 manifests retain the legacy joint-source recipe",
+          bool(historical_sha and historical.get("artifact_paths") == ["mcp-server", "dealroom"]
+               and "doctorcre_artifact" not in historical
+               and historical_verify and historical_verify.returncode == 0))
 
     # 7. Provider versions do not exist until Cloudflare has uploaded the
     # source. Binding that returned identity must preserve source evidence and
@@ -307,7 +340,7 @@ def main() -> int:
         source_fields = ("git_sha", "artifact_digest", "dependency_lock_digest",
                          "config_fingerprint", "migration_set",
                          "schema_highest_migration", "schema_applied_count",
-                         "schema_ledger_sha256")
+                         "schema_ledger_sha256", "doctorcre_artifact")
         check("7b. binding preserves the SHA and every source digest",
               all(bound.get(k) == first.get(k) for k in source_fields))
         check("7c. provider/version binding changes the approval plan hash",
@@ -356,6 +389,7 @@ def main() -> int:
                    "schema_ledger_sha256", "migration_set"),
         "config": ("config_fingerprint", "config_paths"),
         "plan": ("plan_hash",),
+        "doctorcre": ("doctorcre_artifact",),
     }
     missing = [f"{name}.{field}"
                for name, fields in classes.items()
