@@ -1248,6 +1248,26 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  if [ -f mcp-server/test/foundation-assurance-oracle-role-boundary.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_FOUNDATION_ASSURANCE_DB_REQUIRED=1 \
+         run_quiet "$LOGDIR/foundation-assurance-role-boundary.log" \
+         node --test mcp-server/test/foundation-assurance-oracle-role-boundary.v5.test.mjs; then
+      tail -30 "$LOGDIR/foundation-assurance-role-boundary.log" >&2
+      bad migration "the foundation-assurance oracle connection-role boundary proof failed"
+      return
+    fi
+  fi
+
+  if [ -f mcp-server/test/foundation-assurance-minimum-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/foundation-assurance-minimum-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/foundation-assurance-minimum-postgres.sql; then
+      tail -30 "$LOGDIR/foundation-assurance-minimum-postgres.log" >&2
+      bad migration "the foundation-assurance candidate/evidence atomic binding proof failed"
+      return
+    fi
+  fi
+
   if [ -f mcp-server/test/gate-zero-outcome-record-race.test.mjs ]; then
     if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
          run_quiet "$LOGDIR/gate-zero-outcome-race.log" \

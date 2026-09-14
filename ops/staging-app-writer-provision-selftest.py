@@ -773,15 +773,20 @@ commit;
     gate_zero_candidate = (
         f"postgresql://carr_gate_zero_producer:candidate-gate-zero-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
     )
+    foundation_candidate = (
+        f"postgresql://carr_foundation_assurance_oracle:candidate-foundation-secret@{candidate.endpoint_host}/neondb?sslmode=require"  # ci-secret-scan: allow — hermetic non-routable fixture
+    )
     candidate_by_role = {
         provision.READER_ROLE: reader_candidate,
         provision.APP_ROLE: writer_candidate,
         provision.GATE_ZERO_PRODUCER_ROLE: gate_zero_candidate,
+        provision.FOUNDATION_ASSURANCE_ORACLE_ROLE: foundation_candidate,
     }
     expected_candidate_values = {
         "DATABASE_URL_READER": reader_candidate,
         "DATABASE_URL_WRITER": writer_candidate,
         "DATABASE_URL_GATE_ZERO_WRITER": gate_zero_candidate,
+        "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER": foundation_candidate,
     }
     assert set(expected_candidate_values) == set(provision.WORKER_DATABASE_SECRET_NAMES), (
         "this suite and the tool disagree about which Worker database secrets exist")
@@ -932,7 +937,8 @@ commit;
         check("an already-credentialed seat is reused, never adopted",
               apply_output["role_outcomes"] == {
                   "reader": "reused", "writer": "reused",
-                  "gate_zero_producer": "reused"})
+                  "gate_zero_producer": "reused",
+                  "foundation_assurance_oracle": "reused"})
 
         # Every field in the readable business-state snapshot is immutable
         # across credential publication. Any drift restores the prior pair.
@@ -1288,9 +1294,10 @@ commit;
               True)
     else:
         raise AssertionError("adoption widened to a tool-created profile")
-    check("exactly one profile is marked migration-created",
+    check("exactly the two dedicated producer profiles are migration-created",
           {profile.label for profile in provision.PROFILES
-           if profile.created_by_migration} == {"gate_zero_producer"})
+           if profile.created_by_migration} == {
+               "gate_zero_producer", "foundation_assurance_oracle"})
 
     events: list[str] = []
     def converge(profile):
@@ -1427,11 +1434,12 @@ commit;
     seat = profiles["gate_zero_producer"]
     seat_plan = plans["gate_zero_producer"]
     seat_facts = tuple(snapshot.acl_facts(seat_plan))
-    check("the Gate Zero seat is a migration-created direct-grant profile",
+    check("the Gate Zero seat is one of the two migration-created direct-grant profiles",
           seat.created_by_migration and seat.bundle_role is None
           and seat.login_role == "carr_gate_zero_producer" and len(seat_plan) >= 5
-          and not any(other.created_by_migration
-                      for other in provision.PROFILES if other.label != seat.label))
+          and {other.label for other in provision.PROFILES
+               if other.created_by_migration}
+          == {"gate_zero_producer", "foundation_assurance_oracle"})
 
     holder: dict[str, Any] = {}
 

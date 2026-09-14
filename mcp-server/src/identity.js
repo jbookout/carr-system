@@ -36,6 +36,17 @@ const SERVER_MACHINE_IDENTITIES = Object.freeze({
   "smoke-probe": { marker: "probe", via: "probe-token" },
   "codex-reviewer": { marker: "review", via: "review-token" },
   "grok-reviewer": { marker: "review", via: "review-token" },
+  "codex-benchmark-author": { marker: "review", via: "review-token" },
+  "codex-benchmark-reviewer": { marker: "review", via: "review-token" },
+  "codex-fa-coverage": { marker: "review", via: "review-token" },
+  "codex-fa-assurance": { marker: "review", via: "review-token" },
+  "codex-fa-foundation": { marker: "review", via: "review-token" },
+  "codex-fa-execution": { marker: "review", via: "review-token" },
+  "codex-fa-phi": { marker: "review", via: "review-token" },
+  "codex-fa-prompt": { marker: "review", via: "review-token" },
+  "codex-fa-secrets": { marker: "review", via: "review-token" },
+  "codex-fa-source": { marker: "review", via: "review-token" },
+  "codex-fa-minimum": { marker: "review", via: "review-token" },
   // The R0 Hermes evaluation runtime (2026-08-16). Registered here for the
   // reason stated above: personalScopeForActor refuses any slug that is neither
   // a DISPLAY actor nor a registered machine identity, so an unregistered
@@ -849,7 +860,11 @@ function reviewActorForToken(authorizationHeader) {
   const slug = Object.keys(SERVER_REVIEW_TOKENS).find(s => SERVER_REVIEW_TOKENS[s] === token);
   if (!slug) return null;
   return authenticateConnection({ slug, display: `Reviewer (${slug})`, human: false,
-                                  review: true, via: "review-token", client_id: null },
+                                  review: true,
+                                  benchmarkAuthor: slug === "codex-benchmark-author",
+                                  benchmarkReviewer: slug === "codex-benchmark-reviewer",
+                                  foundationOracle: slug.startsWith("codex-fa-"),
+                                  via: "review-token", client_id: null },
                                 SERVER_REVIEW_TOKENS_RAW);
 }
 
@@ -1030,17 +1045,23 @@ export const serveAuthenticatedCall = closedCallable(
  * unstaffed answer from that tree's own module rather than from whatever this
  * process imported first.
  */
-async function staffedOracleLane() {
+async function staffedOracleLanes() {
+  const lanes = new Set();
   try {
     const { gateZeroOracleSeatLane } = await import("./gate-zero-outcome-store.v5.js");
-    return gateZeroOracleSeatLane();
-  } catch {
-    // THE SEAT IS UNREACHABLE, WHICH IS UNSTAFFED AND NOT AN ERROR. A tree that
-    // does not carry the outcome store at all (an older revision, a staged
-    // fixture) has no staffed oracle by definition, and a router door is the
-    // wrong place to turn that into a failed request.
-    return null;
-  }
+    const lane = gateZeroOracleSeatLane();
+    if (lane) lanes.add(lane);
+  } catch {}
+  try {
+    const { FOUNDATION_ASSURANCE_ORACLE_ACTORS } =
+      await import("./foundation-assurance-minimum-registration.v5.js");
+    for (const lane of FOUNDATION_ASSURANCE_ORACLE_ACTORS) lanes.add(lane);
+    lanes.add("codex-benchmark-author");
+    lanes.add("codex-benchmark-reviewer");
+  } catch {}
+  // Missing registration is unstaffed, not a router failure. Older Workers
+  // simply return an empty set and therefore enter no receipt context.
+  return lanes;
 }
 
 export const serveReviewRequest = closedCallable(async (request, env, ctx) => {
@@ -1049,8 +1070,8 @@ export const serveReviewRequest = closedCallable(async (request, env, ctx) => {
   const actor = reviewActorForToken(typeof header === "string" ? header : "");
   if (actor === null) return null;
   const { dispatch } = await import("./mcp.js");
-  const lane = await staffedOracleLane();
-  if (lane === null || actor.slug !== lane) return dispatch(request, env, ctx, actor);
+  const lanes = await staffedOracleLanes();
+  if (!lanes.has(actor.slug)) return dispatch(request, env, ctx, actor);
   const correlationId = env?.CORRELATION_ID;
   return enterAuthenticatedCall(
     deriveCallIdentity(actor, typeof correlationId === "string" ? correlationId : null),

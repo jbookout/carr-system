@@ -193,6 +193,14 @@ WRITE_ACTION_EXACT = {
     "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
                                   # exact because issue-style reads may exist elsewhere
     "presence-lease",
+    "produce-assurance-fabric-preactivation-receipt",
+    "produce-foundation-assurance-benchmark-coverage",
+    "produce-foundation-control-plane-preactivation-receipt",
+    "produce-global-execution-contract-receipt",
+    "produce-global-no-phi-boundary-receipt",
+    "produce-global-prompt-injection-boundary-receipt",
+    "produce-global-secrets-boundary-receipt",
+    "produce-global-source-authority-receipt",
     "project-room-queue",   # shape-checked unattended room projection write;
                               # "project" is not generalized because projection reads exist
     "report-problem",       # Program 6 additive Work Request capture; "report"
@@ -201,6 +209,8 @@ WRITE_ACTION_EXACT = {
                                   # "request" remains exact because request-shaped reads exist
     "review-and-triage",    # Program 6 human state transition; exact because
                               # other review-* actions include non-mutating reads
+    "review-benchmark-manifest-draft",  # persisted independent WR95 benchmark verdict;
+                                          # exact because other review-* actions are reads
     "rotate-tour-share-grant",  # supersedes an active share grant; exact rather than
                                   # widening every future rotate-* action
     "propose-ready-plan",   # Program 6 immutable plan proposal; explicit evidence coverage
@@ -230,6 +240,7 @@ WRITE_ACTION_EXACT = {
     "issue-execution-envelope",  # persists one immutable governed execution envelope
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
+    "record-foundation-assurance-minimum-outcome",
 }
 # The three reason classes that carry a latch identity. Named constants rather
 # than repeated literals, because an identity keyed on a string that drifts is
