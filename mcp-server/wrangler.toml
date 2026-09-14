@@ -304,6 +304,10 @@ routes = []
 [env.staging.vars]
 CARR_ENV = "staging"
 APP_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
+# The independent DoctorCRE staging Worker reaches this Worker only through a
+# private service binding. This exact host keeps OAuth redirects, host-only
+# sessions, CSRF, tenant checks, and authorization inside CARR.
+DOCTORCRE_APP_HOST = "doctorcre-app-staging.joe-bookout-carr-us.workers.dev"
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
 WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
 CONTINUITY_SURFACE_ENFORCEMENT = "required"
