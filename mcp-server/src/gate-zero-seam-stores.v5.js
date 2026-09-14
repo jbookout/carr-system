@@ -552,7 +552,7 @@ async function predecessorOutcomeRows(query) {
                from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
                join ops.work_request w on w.id = r.work_request_id
               where w.ref = $1
-              order by r.accepted_at desc`, params: [workRequestRef] },
+              order by r.accepted_at desc, r.id desc`, params: [workRequestRef] },
     { text: `select outcome_feedback, outcome_feedback_history
                from ops.work_request_card($1::text, $2::text)`,
       params: [workRequestRef, ORGANIZATION_TENANT_ID] },

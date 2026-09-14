@@ -1997,6 +1997,44 @@ test("STORES: card 11's statements are read from ONE snapshot, not one each", as
   }
 });
 
+test("STORES: card 11 orders accepted receipts by the card's two-key current selector", async () => {
+  const target = stageWithFakePg({});
+  const staged = await import(pathToFileURL(join(target, STORES_FILE)).href);
+  const fakePg = await import(
+    pathToFileURL(join(dirname(target), "node_modules", "pg", "index.js")).href);
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  process.env.DATABASE_URL_READER = "postgres://fake/rows";
+  try {
+    const queries = fakePg.default.FAKE_QUERIES;
+    queries.length = 0;
+    const answer = await staged.fetchPredecessorOutcomeRows({
+      workRequestRef: fakePg.default.FAKE_ORDERED_ACCEPTANCES,
+    });
+    assert.deepEqual(
+      answer.rows.map(row => row.accepted_feedback_hash),
+      fakePg.default.FAKE_ORDERED_HASHES,
+      "the real store did not return newest acceptance first and descending UUID first on a tie",
+    );
+    const receiptSql = queries.find(sql => sql.includes(
+      "sourced_work_request_outcome_feedback_acceptance_receipt"));
+    assert.equal(typeof receiptSql, "string",
+      "the real store never issued its acceptance-receipt query");
+
+    const hasCanonicalOrder = sql =>
+      /order by r\.accepted_at desc\s*,\s*r\.id desc\s*$/i.test(sql);
+    assert.equal(hasCanonicalOrder(receiptSql), true,
+      "the receipt query does not preserve work_request_card's accepted_at/id currentness rule");
+    assert.equal(hasCanonicalOrder(receiptSql.replace("r.accepted_at desc", "r.accepted_at asc")), false,
+      "the assertion does not catch a reversed accepted_at ordering");
+    assert.equal(hasCanonicalOrder(receiptSql.replace(/\s*,\s*r\.id desc/i, "")), false,
+      "the assertion does not catch a missing UUID tie-breaker");
+    assert.equal(hasCanonicalOrder(receiptSql.replace("r.id desc", "r.id asc")), false,
+      "the assertion does not catch a reversed UUID tie-breaker");
+  } finally {
+    restoreEnv(savedEnv);
+  }
+});
+
 test("STORES: a revision with two authenticated candidate rows is refused, not picked",
   async () => {
     // THE SEVENTH REVIEW ROUND'S CARDINALITY FINDING, asked of the real store.
@@ -3129,7 +3167,9 @@ test("RULED: the receipt's hash is the one consulted, not the proposal's", async
 
   // The mirror: the PROPOSAL carries the asked-about hash and no receipt does.
   const proposalOnly = await ruled.readPredecessorOutcomeEvidence({
-    stepRef: "step:wr40-repository-outcome", outcomeHash: asked });
+    stepRef: "step:wr40-repository-outcome",
+    outcomeHash: receiptStores.FIXTURE_PROPOSAL_ONLY_HASH,
+  });
   assert.equal(proposalOnly.finding, "predecessor_outcome_acceptance_receipt_hash_mismatch",
     "a row matched on its proposal hash instead of its receipt hash");
   assert.equal(proposalOnly.decision, "refuse");
@@ -3142,6 +3182,17 @@ test("RULED: the receipt's hash is the one consulted, not the proposal's", async
   assert.equal(detailAbsent.finding, "predecessor_outcome_detail_absent");
   assert.equal(detailAbsent.decision, "refuse");
   for (const result of [receiptMatches, proposalOnly, detailAbsent]) assertSwept("receipt", result);
+});
+
+test("RULED: an omitted hash resolves the current accepted predecessor revision", async () => {
+  const ruled = await stagedReaders({ storeFile: RECEIPT_STORE_FILE });
+  const current = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr40-repository-outcome",
+  });
+  assert.equal(current.finding, "predecessor_outcome_accepted_with_matching_hash");
+  assert.equal(current.decision, "report");
+  assert.equal(current.accepted_rows_seen, 3);
+  assert.equal(current.hash_match, "held");
 });
 
 test("RULED: card 12 reads the rows bin/run-scheduled.sh actually writes", async () => {

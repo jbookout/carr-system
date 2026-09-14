@@ -181,14 +181,21 @@ Object.freeze(SeamStoreUnreachableType.prototype);
 export const FIXTURE_ASKED_HASH = `sha256:${"4".repeat(64)}`;
 /** A different well-formed hash, used to separate the two fields. */
 export const FIXTURE_OTHER_HASH = `sha256:${"7".repeat(64)}`;
+/** Older accepted revisions for the same Work Request. */
+const FIXTURE_OLDER_HASH = `sha256:${"8".repeat(64)}`;
+const FIXTURE_OLDEST_HASH = `sha256:${"9".repeat(64)}`;
+export const FIXTURE_PROPOSAL_ONLY_HASH = `sha256:${"6".repeat(64)}`;
+const FIXTURE_OLDEST_PROPOSAL_HASH = `sha256:${"5".repeat(64)}`;
 
 /**
  * WR-000046  the receipt carries the asked-about hash and the PROPOSAL carries a
  *            different one. Must ADMIT — which proves the receipt's field is the
  *            one consulted.
- * WR-000040  the mirror: the proposal carries the asked-about hash and the
- *            receipt carries none. Must REFUSE on the hash — which proves the
- *            proposal's field is not consulted.
+ * WR-000040  three accepted revisions, newest first. The current receipt and
+ *            proposal agree; one historical proposal carries
+ *            FIXTURE_PROPOSAL_ONLY_HASH while no receipt does. An omitted hash
+ *            must select the current row, while naming the proposal-only hash
+ *            must refuse — proving both currentness and receipt-side matching.
  * WR-000054  an acceptance receipt whose work_request_card detail is absent.
  *            Must refuse as an incomplete row rather than be synthesized into an
  *            accepted one with a null outcome.
@@ -199,11 +206,23 @@ const PREDECESSOR_ROWS = Object.freeze({
     accepted_feedback_hash: FIXTURE_ASKED_HASH,
     feedback_hash: FIXTURE_OTHER_HASH,
   })]),
-  "WR-000040": Object.freeze([Object.freeze({
-    status: "accepted", detail_row_count: 1,
-    accepted_feedback_hash: null,
-    feedback_hash: FIXTURE_ASKED_HASH,
-  })]),
+  "WR-000040": Object.freeze([
+    Object.freeze({
+      status: "accepted", detail_row_count: 1,
+      accepted_feedback_hash: FIXTURE_OTHER_HASH,
+      feedback_hash: FIXTURE_OTHER_HASH,
+    }),
+    Object.freeze({
+      status: "accepted", detail_row_count: 1,
+      accepted_feedback_hash: FIXTURE_OLDER_HASH,
+      feedback_hash: FIXTURE_PROPOSAL_ONLY_HASH,
+    }),
+    Object.freeze({
+      status: "accepted", detail_row_count: 1,
+      accepted_feedback_hash: FIXTURE_OLDEST_HASH,
+      feedback_hash: FIXTURE_OLDEST_PROPOSAL_HASH,
+    }),
+  ]),
   "WR-000054": Object.freeze([Object.freeze({
     status: "accepted", detail_row_count: 0,
     accepted_feedback_hash: FIXTURE_ASKED_HASH,

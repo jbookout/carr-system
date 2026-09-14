@@ -30,6 +30,9 @@ const T2 = "2026-09-11T17:00:31.000Z";
 
 const ACCEPTED_HASH = `sha256:${"4".repeat(64)}`;
 const PENDING_HASH = `sha256:${"5".repeat(64)}`;
+const ORDERED_OLD_HASH = `sha256:${"a".repeat(64)}`;
+const ORDERED_TIED_LOW_ID_HASH = `sha256:${"b".repeat(64)}`;
+const ORDERED_TIED_HIGH_ID_HASH = `sha256:${"c".repeat(64)}`;
 
 /** The marker the test greps for: no answer may contain it. */
 const MARKER = "HOSTILEMARKERTEXT";
@@ -72,9 +75,12 @@ const THROWS = Object.freeze({
  * and the test asks which one the store's own statement gets.
  */
 const CONCURRENT = "WR-CONCURRENT-ACCEPTANCE";
+const ORDERED_ACCEPTANCES = "WR-ORDERED-ACCEPTANCES";
 
 /** Every `begin` this fake has been given, in order, for the test to read back. */
 const BEGINS = [];
+/** Every SQL statement observed by the fake, in call order. */
+const QUERIES = [];
 
 /** The live world the concurrent writer commits into. One per pool. */
 const LIVE = { detail_committed: false };
@@ -100,6 +106,41 @@ const RECEIPT_ROWS = [
   { accepted_feedback_hash: ACCEPTED_HASH, accepted_at: "green", approved: true,
     note: `${MARKER}-receipt` },
 ];
+
+// Deliberately NOT in canonical order: the old timestamp comes first, followed
+// by equal latest timestamps in ascending UUID order. The fake applies only the
+// ORDER BY terms the real store actually sent, so the behavioral test goes red
+// when either key is absent or points in the wrong direction.
+const ORDERED_RECEIPT_ROWS = [
+  { id: "ffffffff-ffff-ffff-ffff-ffffffffffff", accepted_at: T0,
+    accepted_feedback_hash: ORDERED_OLD_HASH },
+  { id: "00000000-0000-0000-0000-000000000001", accepted_at: T2,
+    accepted_feedback_hash: ORDERED_TIED_LOW_ID_HASH },
+  { id: "00000000-0000-0000-0000-000000000002", accepted_at: T2,
+    accepted_feedback_hash: ORDERED_TIED_HIGH_ID_HASH },
+];
+
+function orderedReceiptRows(sql) {
+  const rows = ORDERED_RECEIPT_ROWS.map(row => ({ ...row }));
+  const acceptedAt = /r\.accepted_at\s+(asc|desc)/i.exec(sql)?.[1]?.toLowerCase();
+  const receiptId = /r\.id\s+(asc|desc)/i.exec(sql)?.[1]?.toLowerCase();
+  if (acceptedAt === undefined) return rows;
+  const timeDirection = acceptedAt === "desc" ? -1 : 1;
+  const idDirection = receiptId === "desc" ? -1 : receiptId === "asc" ? 1 : 0;
+  return rows.sort((left, right) => {
+    const byTime = Date.parse(left.accepted_at) - Date.parse(right.accepted_at);
+    if (byTime !== 0) return byTime * timeDirection;
+    return idDirection === 0 ? 0 : left.id.localeCompare(right.id) * idDirection;
+  });
+}
+
+const ORDERED_CARD_ROWS = [{
+  outcome_feedback: { feedback_hash: ORDERED_TIED_HIGH_ID_HASH },
+  outcome_feedback_history: [
+    { feedback_hash: ORDERED_TIED_LOW_ID_HASH },
+    { feedback_hash: ORDERED_OLD_HASH },
+  ],
+}];
 
 // A receipt whose hash is not a hash at all — the shape a `text` column can hold
 // and a pattern cannot. It must be dropped to null rather than carried, and the
@@ -249,9 +290,13 @@ function rowsFor(text, params) {
       : addressedValue === CANDIDATE_ONE_ROW ? CANDIDATE_ROWS_ONE
       : [];
   if (text.includes("acceptance_receipt"))
-    return addressedValue === UNPATTERNED ? UNPATTERNED_RECEIPT_ROWS : RECEIPT_ROWS;
-  if (text.includes("work_request_card")) return CARD_ROWS;
-  if (text.includes("pending_sourced")) return PENDING_ROWS;
+    return addressedValue === ORDERED_ACCEPTANCES
+      ? orderedReceiptRows(text)
+      : addressedValue === UNPATTERNED ? UNPATTERNED_RECEIPT_ROWS : RECEIPT_ROWS;
+  if (text.includes("work_request_card"))
+    return addressedValue === ORDERED_ACCEPTANCES ? ORDERED_CARD_ROWS : CARD_ROWS;
+  if (text.includes("pending_sourced"))
+    return addressedValue === ORDERED_ACCEPTANCES ? [] : PENDING_ROWS;
   if (text.includes("ops.service"))
     return addressedValue === FOREIGN_RECEIPT_SERVICE ? LEDGER_FOREIGN_RECEIPT_ROWS
       : addressedValue === STALE_RECEIPT_SERVICE ? LEDGER_STALE_RECEIPT_ROWS
@@ -268,6 +313,7 @@ class Client {
 
   async query(text, params) {
     const sql = String(text);
+    QUERIES.push(sql);
     if (/^\s*(begin|start\s+transaction)/i.test(sql)) {
       BEGINS.push(sql);
       this.snapshotIsolated = /isolation\s+level\s+(repeatable\s+read|serializable)/i.test(sql);
@@ -313,7 +359,10 @@ class Pool {
 module.exports = {
   Pool,
   FAKE_BEGINS: BEGINS,
+  FAKE_QUERIES: QUERIES,
   FAKE_CONCURRENT: CONCURRENT,
+  FAKE_ORDERED_ACCEPTANCES: ORDERED_ACCEPTANCES,
+  FAKE_ORDERED_HASHES: [ORDERED_TIED_HIGH_ID_HASH, ORDERED_TIED_LOW_ID_HASH, ORDERED_OLD_HASH],
   FAKE_ACCEPTED_HASH_CONCURRENT: ACCEPTED_HASH,
   FAKE_MARKER: MARKER,
   FOREIGN_RECEIPT_SERVICE,
