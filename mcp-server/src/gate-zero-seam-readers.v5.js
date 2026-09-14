@@ -607,15 +607,18 @@ function derived(id, facts) {
 // a hash learns only whether the store agrees with it.
 /**
  * The acceptance-receipt hash this reader compares against when the caller named
- * none: the PROPOSAL hash the card carries for the accepted row. Null when the
- * rows do not hold exactly one accepted row with its detail, which fails the
- * comparison below rather than inventing a value that would pass it.
+ * none: the PROPOSAL hash the card carries for the CURRENT accepted row. The
+ * store preserves work_request_card's canonical newest-first order
+ * (accepted_at DESC, receipt id DESC), so append-only historical acceptances do
+ * not make the current receipt ambiguous. Null when that current row lacks its
+ * detail, which fails the comparison below rather than inventing a value that
+ * would pass it.
  */
 function derivedAcceptanceHash(rows) {
-  const accepted = (Array.isArray(rows) ? rows : [])
-    .filter(row => text(row?.status) === "accepted" && row?.detail_row_count === 1);
-  if (accepted.length !== 1) return null;
-  const proposal = text(accepted[0]?.feedback_hash);
+  const current = (Array.isArray(rows) ? rows : [])
+    .find(row => text(row?.status) === "accepted");
+  if (current?.detail_row_count !== 1) return null;
+  const proposal = text(current?.feedback_hash);
   return proposal !== null && OUTCOME_HASH.test(proposal) ? proposal : null;
 }
 

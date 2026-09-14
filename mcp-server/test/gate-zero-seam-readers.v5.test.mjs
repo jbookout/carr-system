@@ -3129,7 +3129,9 @@ test("RULED: the receipt's hash is the one consulted, not the proposal's", async
 
   // The mirror: the PROPOSAL carries the asked-about hash and no receipt does.
   const proposalOnly = await ruled.readPredecessorOutcomeEvidence({
-    stepRef: "step:wr40-repository-outcome", outcomeHash: asked });
+    stepRef: "step:wr40-repository-outcome",
+    outcomeHash: receiptStores.FIXTURE_PROPOSAL_ONLY_HASH,
+  });
   assert.equal(proposalOnly.finding, "predecessor_outcome_acceptance_receipt_hash_mismatch",
     "a row matched on its proposal hash instead of its receipt hash");
   assert.equal(proposalOnly.decision, "refuse");
@@ -3142,6 +3144,17 @@ test("RULED: the receipt's hash is the one consulted, not the proposal's", async
   assert.equal(detailAbsent.finding, "predecessor_outcome_detail_absent");
   assert.equal(detailAbsent.decision, "refuse");
   for (const result of [receiptMatches, proposalOnly, detailAbsent]) assertSwept("receipt", result);
+});
+
+test("RULED: an omitted hash resolves the current accepted predecessor revision", async () => {
+  const ruled = await stagedReaders({ storeFile: RECEIPT_STORE_FILE });
+  const current = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr40-repository-outcome",
+  });
+  assert.equal(current.finding, "predecessor_outcome_accepted_with_matching_hash");
+  assert.equal(current.decision, "report");
+  assert.equal(current.accepted_rows_seen, 3);
+  assert.equal(current.hash_match, "held");
 });
 
 test("RULED: card 12 reads the rows bin/run-scheduled.sh actually writes", async () => {
