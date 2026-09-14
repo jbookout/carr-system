@@ -176,7 +176,6 @@ compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
 routes = [
   { pattern = "api.practicecre.com", custom_domain = true },
   { pattern = "api.doctorcre.com", custom_domain = true },
-  { pattern = "app.doctorcre.com", custom_domain = true },
   { pattern = "dealroom.doctorcre.com", custom_domain = true },
   { pattern = "reports.doctorcre.com", custom_domain = true }
 ]

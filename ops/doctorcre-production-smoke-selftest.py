@@ -32,7 +32,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as directory:
         wrangler = Path(directory) / "wrangler.toml"
         wrangler.write_text(
-            'routes = [{ pattern = "api.practicecre.com" }, { pattern = "api.doctorcre.com" }, { pattern = "app.doctorcre.com" }, { pattern = "dealroom.doctorcre.com" }]\n',
+            'routes = [{ pattern = "api.practicecre.com" }, { pattern = "api.doctorcre.com" }, { pattern = "dealroom.doctorcre.com" }, { pattern = "reports.doctorcre.com" }]\n',
             encoding="utf-8",
         )
         calls: list[str] = []
@@ -41,6 +41,15 @@ def main() -> int:
             calls.append(url)
             if url.endswith("/release"):
                 return reply(200, {"ok": True, "env": {"value": "production"}, "verb_count": 12})
+            if url.endswith("/app-release"):
+                return reply(200, {
+                    "service": "doctorcre-app",
+                    "environment": "production",
+                    "source_commit": "a" * 40,
+                    "provider_version_id": "12345678-1234-4123-8123-123456789abc",
+                    "carr_contract": {"schema": "doctorcre-carr-interface.v1", "version": "1.1.0"},
+                    "route_contract": {"schema": "doctorcre-app-routes.v1", "version": "1.0.0"},
+                })
             if url.startswith("https://app.doctorcre.com/"):
                 return reply(302, location="/auth/login?return_to=%2F")
             return reply(302, location="https://app.doctorcre.com/deals")
@@ -48,7 +57,7 @@ def main() -> int:
         failures = smoke.run("https://api.doctorcre.com", "https://app.doctorcre.com",
                              wrangler, "production", 10, good_reader)
         check(not failures, f"healthy fixture failed: {failures}")
-        check(calls == ["https://api.doctorcre.com/release", "https://app.doctorcre.com/", "https://dealroom.doctorcre.com/?stale=1"],
+        check(calls == ["https://api.doctorcre.com/release", "https://app.doctorcre.com/app-release", "https://app.doctorcre.com/", "https://dealroom.doctorcre.com/?stale=1"],
               f"unexpected requests: {calls}")
 
         def bad_reader(url: str, timeout: int = 15) -> Any:
@@ -61,6 +70,13 @@ def main() -> int:
         check(any("environment" in item for item in failures), "wrong environment was not caught")
         check(any("verb_count" in item for item in failures), "verb floor was not caught")
         check(any("auth" in item for item in failures), "missing auth redirect was not caught")
+        check(any("/app-release" in item for item in failures), "wrong app release was not caught")
+
+        old_wrangler = Path(directory) / "old-wrangler.toml"
+        old_wrangler.write_text(wrangler.read_text() + 'routes = [{ pattern = "app.doctorcre.com" }]\n', encoding="utf-8")
+        check(any("still claims" in item for item in smoke.host_result(
+            old_wrangler, "https://api.doctorcre.com", "https://app.doctorcre.com")),
+            "the prior CARR-owned app host was accepted")
 
         failures = smoke.host_result(wrangler, "https://evil.invalid", "https://app.doctorcre.com")
         check(any("API URL origin" in item for item in failures), "wrong API host was not caught")
