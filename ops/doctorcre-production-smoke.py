@@ -3,7 +3,7 @@
 
 The check makes only GET/HEAD requests.  It intentionally does not call
 ``/mcp`` or any mutation endpoint: its purpose is to answer whether the
-configured Worker and Deal Room are the deployment we think they are.
+independent app Worker and the CARR Worker are the deployments we think they are.
 """
 from __future__ import annotations
 
@@ -89,6 +89,33 @@ def auth_result(reply: Reply, app: str) -> list[str]:
     return failures
 
 
+def app_release_result(reply: Reply, expected_env: str) -> list[str]:
+    failures: list[str] = []
+    try:
+        payload = json.loads(reply.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ["/app-release returned non-JSON"]
+    if reply.status != 200:
+        failures.append(f"/app-release HTTP {reply.status}")
+    if not isinstance(payload, dict) or payload.get("service") != "doctorcre-app":
+        failures.append("/app-release service is not doctorcre-app")
+    if not isinstance(payload, dict) or payload.get("environment") != expected_env:
+        failures.append(f"/app-release environment {payload.get('environment') if isinstance(payload, dict) else None!r}, expected {expected_env!r}")
+    if not isinstance(payload, dict) or not re.fullmatch(r"[0-9a-f]{40}", payload.get("source_commit", "")):
+        failures.append("/app-release source_commit is not a full Git SHA")
+    if not isinstance(payload, dict) or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            payload.get("provider_version_id", ""), re.IGNORECASE):
+        failures.append("/app-release provider_version_id is not an immutable version ID")
+    if not isinstance(payload, dict) or payload.get("carr_contract") != {
+            "schema": "doctorcre-carr-interface.v1", "version": "1.1.0"}:
+        failures.append("/app-release CARR contract is not doctorcre-carr-interface.v1 1.1.0")
+    if not isinstance(payload, dict) or payload.get("route_contract") != {
+            "schema": "doctorcre-app-routes.v1", "version": "1.0.0"}:
+        failures.append("/app-release route contract is not doctorcre-app-routes.v1 1.0.0")
+    return failures
+
+
 def legacy_result(reply: Reply, app: str) -> list[str]:
     failures: list[str] = []
     if reply.status not in (301, 302, 303, 307, 308):
@@ -107,9 +134,11 @@ def configured_hosts(wrangler_path: Path) -> list[str]:
 
 
 def host_result(wrangler_path: Path, api: str, app: str, legacy: str = DEFAULT_LEGACY) -> list[str]:
-    expected = {"api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com", "dealroom.doctorcre.com"}
+    expected = {"api.practicecre.com", "api.doctorcre.com", "dealroom.doctorcre.com", "reports.doctorcre.com"}
     configured = set(configured_hosts(wrangler_path))
     failures = [f"wrangler config missing expected host {host}" for host in sorted(expected - configured)]
+    if "app.doctorcre.com" in configured:
+        failures.append("CARR wrangler config still claims independent app host app.doctorcre.com")
     api_url = urllib.parse.urlparse(api)
     app_url = urllib.parse.urlparse(app)
     if not (api_url.scheme == "https" and api_url.hostname == "api.doctorcre.com"
@@ -138,6 +167,10 @@ def run(api: str, app: str, wrangler_path: Path, expected_env: str, minimum_verb
         failures += release_result(reader(api.rstrip("/") + "/release"), expected_env, minimum_verbs)
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         failures.append(f"/release unreadable ({type(error).__name__}: {error})")
+    try:
+        failures += app_release_result(reader(app.rstrip("/") + "/app-release"), expected_env)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        failures.append(f"/app-release unreadable ({type(error).__name__}: {error})")
     try:
         # The root is the unauthenticated surface.  /auth/login itself starts
         # the upstream Google flow and therefore redirects somewhere else.
@@ -169,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         for failure in failures:
             print(f"doctorcre-production-smoke: FAIL {failure}", file=sys.stderr)
         return 1
-    print("doctorcre-production-smoke: OK /release, app auth redirect, legacy redirect, environment, verb floor, and host config")
+    print("doctorcre-production-smoke: OK CARR /release, DoctorCRE /app-release, app auth redirect, legacy redirect, environment, verb floor, and host ownership")
     return 0
 
 
