@@ -376,8 +376,8 @@ cat > "$TMP" <<'ROLES'
 -- spring of this trap cost a bisect of the guard's five sub-conditions. Five
 -- for five, still none caught by the change that created the role.
 --
--- All privilege bundles whose creating migrations are in the snapshot ledger
--- are created here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
+-- All repository-owned roles whose creating migrations are in the snapshot
+-- ledger are created here. carr_backup (LOGIN) is deliberately NOT: it is the backup credential,
 -- bin/backup-dump.sh supplies it, no gate asks for it, and creating a second
 -- login role with a placeholder password to satisfy nothing is a cost with no
 -- buyer. If a gate ever needs it, add it the way carr_jobs is added, not by
@@ -385,9 +385,9 @@ cat > "$TMP" <<'ROLES'
 -- carr_reader, carr_writer, carr_exporter, carr_authority,
 -- carr_device_evidence, the four calendar-prebrief roles, and the renewal
 -- source-attestor role are privilege
--- bundles, so they stay NOLOGIN. carr_jobs and carr_gate_zero_producer are the
--- narrow machine identities — the unattended runtime and the Gate Zero producer
--- seat — and a fresh rebuild must make each of them LOGIN. That is not cosmetic:
+-- bundles, so they stay NOLOGIN. carr_jobs, carr_gate_zero_producer, and
+-- carr_foundation_assurance_oracle are narrow machine identities, and a fresh
+-- rebuild must make each of them LOGIN. That is not cosmetic:
 -- the v26 role-authority projection counts the NOLOGIN carr_* roles, so minting
 -- either of these as NOLOGIN moves that count off its seal and breaks the
 -- restore in a second place. carr_jobs takes a fresh random placeholder
@@ -408,9 +408,18 @@ begin
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
     'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver',
     'carr_program5_forward_fix_verifiers',
-    'carr_renewal_source_attestors'
+    'carr_renewal_source_attestors',
+    'carr_foundation_assurance_oracle'
   ] loop
-    if not exists (select 1 from pg_roles where rolname = r) then
+    if r = 'carr_foundation_assurance_oracle' then
+      select rolcanlogin into foundation_oracle_can_login
+        from pg_roles where rolname = r;
+      if not found then
+        execute format('create role %I login', r);
+      elsif not foundation_oracle_can_login then
+        execute format('alter role %I login', r);
+      end if;
+    elsif not exists (select 1 from pg_roles where rolname = r) then
       execute format('create role %I nologin', r);
     end if;
   end loop;
@@ -437,15 +446,6 @@ begin
     execute format('create role %I login', 'carr_gate_zero_producer');
   elsif not producer_can_login then
     execute format('alter role %I login', 'carr_gate_zero_producer');
-  end if;
-
-  -- WR-000095 follows the same passwordless migration-created seat contract.
-  select rolcanlogin into foundation_oracle_can_login
-    from pg_roles where rolname='carr_foundation_assurance_oracle';
-  if not found then
-    execute format('create role %I login', 'carr_foundation_assurance_oracle');
-  elsif not foundation_oracle_can_login then
-    execute format('alter role %I login', 'carr_foundation_assurance_oracle');
   end if;
 
   -- THE AGING TRAP ONE LEVEL DOWN: not creating a role, but joining one.

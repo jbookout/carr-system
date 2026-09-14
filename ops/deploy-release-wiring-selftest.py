@@ -300,6 +300,39 @@ def main() -> int:
           and '[ "$HEAD_SHA" != "$CANDIDATE_SEALER_INTRODUCTION_SHA" ]' in provenance_gate,
           "file deletion after stamp introduction could impersonate a legacy source")
 
+    upload_start = source.index('if [ "$VERSION_MODE" = "upload" ]; then',
+                                source.index("== deploy =="))
+    upload_end = source.index("# -- provider-version promotion --", upload_start)
+    upload = source[upload_start:upload_end]
+    staging_view_at = upload.find(
+        'versions view "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" --env staging --json')
+    version_upload_at = upload.find("versions upload")
+    candidate_at = upload.find('"$REPO/tools/ops-record.py" release candidate')
+    sealer_at = upload.find('node "$REPO/mcp-server/bin/seal-foundation-assurance-evidence.mjs"')
+    final_view_at = upload.find('versions view "$PROVIDER_VERSION_ID" --json')
+    check("11. WR95 accepts only a verified staging UUID and refuses caller test evidence",
+          "--foundation-assurance-staging-provider" in source
+          and "WR95 derives --test-evidence from live acquisition; caller evidence is refused." in source,
+          "the final evidence route can accept caller evidence or an unbound target")
+    check("11b. exact staging provider/readback precede final upload",
+          0 <= staging_view_at < version_upload_at
+          and 'worker_version") or {}).get("id")!=wanted' in upload,
+          "evidence could be acquired from a different staging build")
+    check("11c. candidate commits before synchronous sealer storage",
+          0 <= candidate_at < sealer_at
+          and 'WR95_SEAL_PID' not in upload
+          and '> "$WR95_SEAL_OUTPUT" &' not in upload,
+          "background acquisition can race the candidate row or survive its failure")
+    check("11d. final provider secret binding is authenticated before candidacy",
+          0 <= version_upload_at < final_view_at < candidate_at
+          and "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER" in upload,
+          "the release row can name a provider whose required secret is absent")
+    check("11e. WR95 temporary artifacts are owned by the cleanup trap",
+          all(name in source[source.index("cleanup_ephemeral() {"):source.index("cleanup_on_signal() {")]
+              for name in ("WR95_STAGING_VERSION_JSON", "WR95_STAGING_RELEASE_JSON",
+                           "WR95_FINAL_VERSION_JSON", "WR95_SEAL_OUTPUT")),
+          "an interrupted upload can strand evidence-bearing temporary files")
+
     print()
     if FAILURES:
         print(f"deploy-release-wiring-selftest: {len(FAILURES)} FAILED")

@@ -31,20 +31,27 @@ import { tourSharingTools } from "./tour-sharing.js";
 import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
-import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
-         personalScopeForActor } from "./identity.js";
+import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
+         permittedActionOwnerSlugs, personalScopeForActor } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 import { assertGateZeroReceipt, deriveGateZeroProducerSeat, gateZeroOracleSeatLane,
          gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest,
          GATE_ZERO_RECEIPT_SCHEMA } from "./gate-zero-outcome-store.v5.js";
 import { GATE_ZERO_WRITER_SECRET_NAME } from "./gate-zero-seat-connection.v5.js";
+import {
+  assertFoundationAssuranceOracleSeat,
+  foundationAssuranceOracleLane,
+} from "./foundation-assurance-minimum-registration.v5.js";
 // THE RECEIPT'S ONE SOURCE. The gate's producer seam is bound to Step A's
 // zero-argument producer, so this is how a receipt enters the write path: by
 // being produced, inside this call, from rows three ruled readers took from
 // three ruled stores. There is no other import that could supply one and no
 // argument that could carry one.
 import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
+import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
+import { foundationAssuranceMinimumTools } from
+  "./foundation-assurance-minimum-producer.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -7875,7 +7882,8 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // flag alone would be a label, which is the defect WR-000021 found on
   // humanOnly between 2026-08-26 and 2026-09-11.
   if (tool.oracleSeatOnly === true) {
-    const lane = gateZeroOracleSeatLane();
+    const foundation = tool.oracleFamily === "foundation-assurance";
+    const lane = foundation ? foundationAssuranceOracleLane(name) : gateZeroOracleSeatLane();
     const actorClass = authorizationClassForActor(actor);
     if (lane === null || actorClass !== "review_agent" || actor?.human === true || actor?.slug !== lane)
       throw new ToolError({ error: "oracle_seat_verb_requires_the_staffed_seat",
@@ -7885,6 +7893,13 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
               "the one review-token seat that holds it — including verified partners, sponsored agents, and a " +
               "second review-token lane deriving the same authority class. Report what you would have recorded " +
               "and let the seat run it." });
+    if (foundation) {
+      try { assertFoundationAssuranceOracleSeat(actor, name); }
+      catch (error) {
+        throw new ToolError({ error: error.code || "foundation_assurance_oracle_seat_required",
+          ...(error.detail || {}) });
+      }
+    }
   }
   await assertRegisteredToolInput(name, tool, args);
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
@@ -7967,6 +7982,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "tour-map-promotion": "mcp-server/src/tour-map-promotion.js",
   "tour-sharing": "mcp-server/src/tour-sharing.js",
   "tour-artifacts": "mcp-server/src/tour-artifacts.js",
+  "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
+  "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9009,5 +9026,12 @@ registerTools(tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }), 
 registerTools(tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }), "tour-map-promotion");
 registerTools(tourSharingTools({ withEnvelope, writeEvent, ToolError }), "tour-sharing");
 registerTools(tourArtifactTools({ withEnvelope, writeEvent, ToolError }), "tour-artifacts");
+registerTools(benchmarkAcceptanceStoreTools({
+  withEnvelope, writeEvent, ToolError, authenticatedIdentity,
+}),
+  "benchmark-acceptance");
+registerTools(foundationAssuranceMinimumTools({
+  withEnvelope, ToolError, authenticatedIdentity,
+}), "foundation-assurance");
 
 Object.freeze(TOOLS);

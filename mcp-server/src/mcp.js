@@ -21,10 +21,33 @@ import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
+import { foundationAssuranceSeatConnection } from
+  "./foundation-assurance-seat-connection.v5.js";
+import { stampedGitSha } from "./build-stamp.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+
+export const FOUNDATION_ASSURANCE_RUNTIME_BINDING_SCHEMA =
+  "doctorcre-v5-foundation-assurance-runtime-binding.v1";
+
+// The foundation oracle must prove which deployed Worker is answering before
+// the record layer exposes any material. These values are runtime/provider
+// facts, not caller input: the source comes from the same deploy stamp used by
+// /release and the provider id comes from Cloudflare's immutable metadata
+// binding. Missing values remain null so the SQL boundary can refuse by name.
+export function foundationAssuranceRuntimeBinding(env) {
+  const providerId = typeof env?.CF_VERSION_METADATA?.id === "string"
+    ? env.CF_VERSION_METADATA.id.trim() : "";
+  return Object.freeze({
+    schema_version: FOUNDATION_ASSURANCE_RUNTIME_BINDING_SCHEMA,
+    environment: typeof env?.CARR_ENV === "string" ? env.CARR_ENV : null,
+    source_sha: stampedGitSha(env),
+    provider: "cloudflare-workers",
+    provider_version: providerId || null,
+  });
+}
 
 // Transaction-local actor context for SECURITY DEFINER functions that must
 // derive authorship from the authenticated server principal rather than accept
@@ -35,10 +58,21 @@ export async function setWriterActorContext(client, actor) {
   const authorizationClass = actor?.authorization_class || authorizationClassForActor(actor);
   const verifiedHumanSlug = actor?.human === true &&
     authorizationClass === "verified_partner" ? actor.slug : "";
+  const receiptSessionRef = typeof actor?.correlation_id === "string" && actor.correlation_id
+    ? `session:${actor.correlation_id.toLowerCase()}` : null;
+  if (receiptSessionRef === null) {
+    await client.query(
+      "select set_config('carr.acting_actor_slug',$1::text,true), " +
+      "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",
+      [actor.slug, verifiedHumanSlug],
+    );
+    return;
+  }
   await client.query(
     "select set_config('carr.acting_actor_slug',$1::text,true), " +
-    "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",
-    [actor.slug, verifiedHumanSlug],
+    "set_config('carr.verified_human_actor_slug',$2::text,true), " +
+    "set_config('carr.receipt_session_ref',$3::text,true) /* writer-actor-context */",
+    [actor.slug, verifiedHumanSlug, receiptSessionRef],
   );
 }
 
@@ -203,7 +237,24 @@ export const PROFILES = {
   // registration and refuses every lane but that one. Both are kept: the
   // profile keeps a reviewer out of the other two hundred write verbs, and the
   // seat gate keeps the wrong reviewer out of this one.
-  reviewer: new Set(["record-finding", "record-gate-zero-read-only-outcome"]),
+  reviewer: new Set([
+    "record-finding", "record-gate-zero-read-only-outcome",
+    "produce-foundation-assurance-benchmark-coverage",
+    "produce-assurance-fabric-preactivation-receipt",
+    "produce-foundation-control-plane-preactivation-receipt",
+    "produce-global-execution-contract-receipt",
+    "produce-global-no-phi-boundary-receipt",
+    "produce-global-prompt-injection-boundary-receipt",
+    "produce-global-secrets-boundary-receipt",
+    "produce-global-source-authority-receipt",
+    "record-foundation-assurance-minimum-outcome",
+  ]),
+
+  // The benchmark subject author and independent reviewer are separate
+  // server-locked Codex review-token actors. Each gets only its half of the
+  // exact-digest rail; neither can accept the benchmark or call an oracle.
+  "benchmark-author": new Set(["propose-benchmark-manifest-draft"]),
+  "benchmark-reviewer": new Set(["review-benchmark-manifest-draft"]),
 
   // HERMES (R0 runtime evaluation, 2026-08-16). The write set is EMPTY, which
   // is the whole design: the 2026-08-12 frontier council cleared Hermes for a
@@ -353,6 +404,8 @@ export function profileForActor(actor, request) {
   if (actor?.continuity_surface === "claude" && actor?.via === "claude-continuity-token")
     return "claude-continuity";
   if (actor?.probe) return "probe";
+  if (actor?.benchmarkAuthor === true && actor?.via === "review-token") return "benchmark-author";
+  if (actor?.benchmarkReviewer === true && actor?.via === "review-token") return "benchmark-reviewer";
   if (actor?.review) return "reviewer";
   if (actor?.hermesCos === true && actor?.via === "hermes-cos-token") return "hermes-cos";
   if (actor?.hermes) return "hermes";
@@ -636,7 +689,12 @@ export async function callTool(env, actor, name, args, profile = "full") {
   // rather than opening it — nothing connects unless the handler calls it, and a
   // Worker with no such secret gets null, which the handler refuses by name
   // instead of silently falling back to the writer connection.
-  if (tool.oracleSeatOnly) client.seatConnection = gateZeroSeatConnection(env, Pool);
+  if (tool.oracleSeatOnly === true && tool.oracleFamily !== "foundation-assurance")
+    client.seatConnection = gateZeroSeatConnection(env, Pool);
+  if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
+    client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
+  if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
+    client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
