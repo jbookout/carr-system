@@ -591,7 +591,7 @@ export const GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   runtime_dml_grants: { count: 308, digest: "sha256:810aa3a9ad94e182e5d1b3f985e51ccbaab8e48e40ad070ba7c45199a226a813" },
 });
 
-// Measured after migrations 0507-0510 on disposable PostgreSQL. The dedicated
+// Measured after migrations 0508-0511 on disposable PostgreSQL. The dedicated
 // oracle is a LOGIN and therefore intentionally remains outside role_authority;
 // its only mutation authority is EXECUTE on the closed producer functions.
 export const FOUNDATION_ASSURANCE_PRE_V27_DB_CATALOG_BASELINE = Object.freeze({
@@ -9353,19 +9353,19 @@ comment on function ops.scac_mutation_catalog_v26_current() is 'Historical v26 l
     `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
     `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'Foundation assurance pre-v27 role-authority receipt drifted'; end if;`,
     "Foundation assurance pre-v27 role receipt");
-  const domainMigrationPath = "migrations/0510_foundation_assurance_minimum_outcome.sql";
+  const domainMigrationPath = "migrations/0511_foundation_assurance_minimum_outcome.sql";
   const domainMigration = readFileSync(resolve(REPO_ROOT, domainMigrationPath), "utf8");
   const domainMigrationHash = sha256(domainMigration);
-  if (domainMigrationHash !== "90ec22e5690314ba5472b7d178430b2991985576afc91cc7a53948f9a3b2d462")
+  if (domainMigrationHash !== "f04c1f243da1cac01947fff76d68697f254165d45ce29f49196d2371a6409329")
     throw new Error(`foundation assurance domain migration changed: ${domainMigrationHash}`);
   const predecessorPreflight =
-`-- Exact disposable-Postgres post-0510 receipt. Refuse before any v27 function
+`-- Exact disposable-Postgres post-0511 receipt. Refuse before any v27 function
 -- exists; this registry-only successor changes no domain DDL or business rows.
 do $foundation_assurance_preflight$
 declare observed_count integer; observed_digest text; grant_snapshot jsonb;
 begin
-  if (select count(*) from public.schema_migrations where filename='0510_foundation_assurance_minimum_outcome.sql')<>1
-     or not exists(select 1 from public.schema_migrations where filename='0510_foundation_assurance_minimum_outcome.sql'
+  if (select count(*) from public.schema_migrations where filename='0511_foundation_assurance_minimum_outcome.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0511_foundation_assurance_minimum_outcome.sql'
        and sha256='${domainMigrationHash}') then
     raise exception 'Foundation assurance pre-v27 migration ledger receipt drifted';
   end if;
@@ -9716,7 +9716,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V27_VERSION,
       dbCatalogBaseline: FOUNDATION_ASSURANCE_FORWARD_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0511_foundation_assurance_scac_successor.sql"] =
+  artifacts["migrations/0512_foundation_assurance_scac_successor.sql"] =
     renderFoundationAssuranceRegistrySqlFrozen(v27Rows,
       FOUNDATION_ASSURANCE_FORWARD_DB_CATALOG_BASELINE, {
         migration: artifacts["migrations/0503_gate_zero_outcome_and_scac_successor.sql"],
@@ -10224,7 +10224,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-foundation-assurance-registry-migration") {
     const target = resolve(process.argv[3] ||
-      "migrations/0511_foundation_assurance_scac_successor.sql");
+      "migrations/0512_foundation_assurance_scac_successor.sql");
     await writeFile(target, renderFoundationAssuranceForwardRegistrySql());
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {

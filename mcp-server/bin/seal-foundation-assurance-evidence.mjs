@@ -321,7 +321,7 @@ async function stagingDatabaseFacts() {
 
 function comparatorRows(bindings, facts, readback, github_checks) {
   const checks = {
-    "assurance-fabric-preactivation": facts.migration === "0511_foundation_assurance_scac_successor.sql",
+    "assurance-fabric-preactivation": facts.migration === "0512_foundation_assurance_scac_successor.sql",
     "foundation-control-plane-preactivation": facts.oracle_role === true && Number(facts.oracle_functions) === 3,
     "global-execution-contract": facts.registry_current === true,
     "global-no-phi-boundary": facts.raw_table_write === false,

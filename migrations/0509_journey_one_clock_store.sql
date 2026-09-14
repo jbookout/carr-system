@@ -3,7 +3,7 @@
 -- decision Q008.D1; gates journey-one-preactivation-contract-bound and
 -- journey-one-production-accepted).
 --
--- Migration 0508. tools/migrate.py owns the transaction and records the file
+-- Migration 0509. tools/migrate.py owns the transaction and records the file
 -- digest only after every statement succeeds. Production application remains a
 -- separate Joe-gated act under accepted WR-000095 plan v7.
 --

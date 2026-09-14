@@ -737,7 +737,7 @@ function foundationEvidence(body = payload(), measurementSet = measurements(body
       source_sha: "a".repeat(40), test_evidence_ref: "pending",
     },
     database: {
-      environment: "staging", migration: "0511_foundation_assurance_scac_successor.sql",
+      environment: "staging", migration: "0512_foundation_assurance_scac_successor.sql",
       read_only: true, source: "tools/db-tap.py --project staging",
     },
     github_checks: FOUNDATION_ASSURANCE_GITHUB_CHECKS.map((name, index) => ({

@@ -72,7 +72,7 @@ const MIGRATION = readFileSync(
 const CONVERGENCE_MIGRATION = readFileSync(
   new URL("../../migrations/0506_gate_zero_applied_0505_recovery.sql", import.meta.url), "utf8");
 const FOUNDATION_ASSURANCE_MIGRATION_PRESENT = existsSync(
-  new URL("../../migrations/0507_foundation_assurance_minimum_receipt.sql", import.meta.url),
+  new URL("../../migrations/0508_foundation_assurance_minimum_receipt.sql", import.meta.url),
 );
 const FOUNDATION_ASSURANCE_ORACLE_VERBS = [
   "produce-assurance-fabric-preactivation-receipt",

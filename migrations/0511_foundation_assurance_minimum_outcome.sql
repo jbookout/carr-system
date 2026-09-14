@@ -10,14 +10,14 @@
 do $wr95_preflight$
 begin
   if not exists (select 1 from public.schema_migrations
-    where filename = '0509_journey_one_clock_input_store.sql'
-      and sha256 = '55fc32cf3fc460480867704168d25ce50d50cbba40a3ddc58aa1b6c5221e585e') then
-    raise exception '0510 requires the exact 0509 Journey One clock input store';
+    where filename = '0510_journey_one_clock_input_store.sql'
+      and sha256 = 'bd6e8332f07ec128ef7f56a2d69165192d1b742c1b8e7ddbdd1615496de48703') then
+    raise exception '0511 requires the exact 0510 Journey One clock input store';
   end if;
   if to_regprocedure('ops.benchmark_payload_preimage(uuid)') is null
      or to_regprocedure('ops.j1_clock_scope_digest(jsonb)') is null
      or to_regprocedure('ops.j1_minimum_receipt_digest(jsonb)') is null then
-    raise exception '0510 requires migrations 0507 through 0509';
+    raise exception '0511 requires migrations 0508 through 0510';
   end if;
 end $wr95_preflight$;
 
@@ -48,7 +48,7 @@ begin
   ] loop
     if not exists (select 1 from public.actor
       where slug=v_slug and kind='automation' and active) then
-      raise exception '0510 requires active automation actor %', v_slug;
+      raise exception '0511 requires active automation actor %', v_slug;
     end if;
   end loop;
 end $wr95_actor_shape$;
@@ -544,7 +544,7 @@ revoke all on function ops.foundation_assurance_benchmark_review_material(uuid)
 grant execute on function ops.foundation_assurance_benchmark_review_material(uuid)
   to carr_writer,carr_authority;
 
--- The generic 0509 append path may no longer admit this minimum. 0510's
+-- The generic 0510 append path may no longer admit this minimum. 0511's
 -- family-seat writer is the sole atomic outcome/admission/event route.
 revoke execute on function ops.j1_minimum_open_inventory(jsonb,bigint,text),
   ops.j1_minimum_append_admission(text,text,uuid,text,text,text,jsonb,jsonb)

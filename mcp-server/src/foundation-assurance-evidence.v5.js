@@ -153,7 +153,7 @@ export function sealFoundationAssuranceEvidence(evidence, config) {
       evidence.release.source_sha !== evidence.source_sha) fail("release_binding_mismatch");
   closed(evidence.database, ["environment","migration","read_only","source"], "evidence.database");
   if (evidence.database.environment !== "staging" || evidence.database.read_only !== true ||
-      evidence.database.migration !== "0511_foundation_assurance_scac_successor.sql" ||
+      evidence.database.migration !== "0512_foundation_assurance_scac_successor.sql" ||
       evidence.database.source !== "tools/db-tap.py --project staging")
     fail("database_provenance_invalid");
   exactSet(list(evidence.github_checks, "evidence.github_checks").map(row => row.name),

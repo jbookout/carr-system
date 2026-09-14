@@ -156,7 +156,7 @@ assert "SCAC_CURRENT_ENTRY_COUNT=1776" in GENERATOR
 assert "SCAC_CURRENT_SOURCE_COUNT=856" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=26" in GENERATOR
 assert "ops.scac_mutation_catalog_v27_current()" in GENERATOR
-assert "0511_foundation_assurance_scac_successor.sql" in GENERATOR
+assert "0512_foundation_assurance_scac_successor.sql" in GENERATOR
 # The v26 frontier stays a selectable branch behind the new one.
 assert "SCAC_CURRENT_NUMBER=26" in GENERATOR
 assert "SCAC_TOTAL_ENTRY_COUNT=38671" in GENERATOR

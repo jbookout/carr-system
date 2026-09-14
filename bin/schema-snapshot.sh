@@ -324,7 +324,7 @@ case "$GATE_ZERO_OUTCOME_REGISTRY_APPLIED" in
 esac
 
 FOUNDATION_ASSURANCE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0511_foundation_assurance_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0512_foundation_assurance_scac_successor.sql')" \
   2>/dev/null)"
 case "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" in
   t|f) ;;

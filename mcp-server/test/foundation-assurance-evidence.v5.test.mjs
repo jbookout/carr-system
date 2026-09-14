@@ -48,7 +48,7 @@ function fixture() {
     },
     database: {
       environment: "staging",
-      migration: "0511_foundation_assurance_scac_successor.sql",
+      migration: "0512_foundation_assurance_scac_successor.sql",
       read_only: true,
       source: "tools/db-tap.py --project staging",
     },

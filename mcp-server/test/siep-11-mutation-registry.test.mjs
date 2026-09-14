@@ -226,7 +226,7 @@ const v26Migration = fs.readFileSync(
 const generatedV27 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v27.generated.js", import.meta.url), "utf8");
 const v27Migration = fs.readFileSync(
-  new URL("../../migrations/0511_foundation_assurance_scac_successor.sql",
+  new URL("../../migrations/0512_foundation_assurance_scac_successor.sql",
     import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
@@ -2016,7 +2016,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 35);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0511"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 26);
   assert.equal(paths.length, 61);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
@@ -2041,7 +2041,7 @@ test("the complete frontier renders when every generated target is absent", () =
     })).map(entry => entry.path);
     for (const trackedPath of new Set([
       ...trackedPaths,
-      "migrations/0510_foundation_assurance_minimum_outcome.sql",
+      "migrations/0511_foundation_assurance_minimum_outcome.sql",
     ])) {
       if (frontierSet.has(trackedPath)) continue;
       const source = path.join(repoRoot, trackedPath);

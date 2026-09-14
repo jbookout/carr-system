@@ -2,7 +2,7 @@
 -- HISTORY the Journey 1 clock projection's `minimum_history` is read from
 -- (requirement Q008, decision Q008.D1; gate foundation-assurance-minimum-accepted).
 --
--- Migration 0509. tools/migrate.py owns the transaction and records the file
+-- Migration 0510. tools/migrate.py owns the transaction and records the file
 -- digest only after every statement succeeds. Production application remains a
 -- separate Joe-gated act under accepted WR-000095 plan v7.
 --

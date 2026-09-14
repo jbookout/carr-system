@@ -2,7 +2,7 @@
 -- exact-hash human acceptance rail (requirement Q012, decisions Q008.D1,
 -- Q128.D1, Q143.D1; gate benchmark-contract-accepted).
 --
--- Migration 0507. tools/migrate.py owns the transaction and records the file
+-- Migration 0508. tools/migrate.py owns the transaction and records the file
 -- digest only after every statement succeeds. Production application remains a
 -- separate Joe-gated act under accepted WR-000095 plan v7.
 --

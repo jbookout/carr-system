@@ -20,7 +20,7 @@ import { authorizationClassForActor } from "../src/identity.js";
 
 const humanOnlyVerbs = Object.keys(TOOLS).filter((name) => TOOLS[name].humanOnly === true).sort();
 const foundationAssuranceMigrationPresent = existsSync(
-  new URL("../../migrations/0507_foundation_assurance_minimum_receipt.sql", import.meta.url),
+  new URL("../../migrations/0508_foundation_assurance_minimum_receipt.sql", import.meta.url),
 );
 
 // The exact reproduction principal from the release review: a verified NONHUMAN
