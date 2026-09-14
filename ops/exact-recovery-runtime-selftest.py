@@ -122,6 +122,11 @@ def test_wrangler_dry_run() -> None:
         shutil.copytree(ROOT / "mcp-server", root / "mcp-server",
                         ignore=shutil.ignore_patterns("node_modules"))
         shutil.copytree(ROOT / "dealroom", root / "dealroom")
+        # Wrangler validates the generated assets directory before a dry-run.
+        # Artifact identity/tamper/rollback behavior is exercised separately by
+        # doctorcre-artifact-selftest; this fixture only proves runtime bundling.
+        shutil.copytree(ROOT / "dealroom",
+                        root / "out" / "doctorcre-artifacts" / "current")
         worker_deps = root / "mcp-server" / "node_modules"
         assert not worker_deps.exists()
         worker_deps.symlink_to(RUNTIME)
