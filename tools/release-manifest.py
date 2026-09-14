@@ -49,6 +49,7 @@ USAGE
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import re
@@ -661,10 +662,24 @@ def verify(manifest: dict) -> int:
     return 0
 
 
+def run_doctorcre_artifact(args: list[str]) -> int:
+    """Keep artifact mechanics in a library behind this registered release CLI."""
+    path = Path(__file__).with_name("doctorcre-artifact.py")
+    spec = importlib.util.spec_from_file_location("doctorcre_artifact", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("DoctorCRE artifact library could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.run_cli(args)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    dc = sub.add_parser("doctorcre-artifact", help="verify, materialize, or activate the pinned DoctorCRE artifact")
+    dc.add_argument("doctorcre_args", nargs=argparse.REMAINDER)
 
     b = sub.add_parser("build", help="compute the manifest for a SHA")
     b.add_argument("--sha", default="HEAD")
@@ -703,6 +718,13 @@ def main() -> int:
     sc.add_argument("--sha", required=True)
 
     args = p.parse_args()
+
+    if args.cmd == "doctorcre-artifact":
+        try:
+            return run_doctorcre_artifact(args.doctorcre_args)
+        except (OSError, ValueError, tarfile.TarError) as exc:
+            print(f"doctorcre-artifact: {exc}", file=sys.stderr)
+            return 1
 
     if args.cmd == "source-contract":
         print(json.dumps(source_contract(args.sha), indent=2, sort_keys=True))

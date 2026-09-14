@@ -1561,7 +1561,8 @@ check_binding() {
 check_artifact() {
   local shipping marker
   if ! run_quiet "$LOGDIR/doctorcre-artifact.log" "$PY" \
-      tools/doctorcre-artifact.py verify --pin ops/config/doctorcre-artifact.v1.json; then
+      tools/release-manifest.py doctorcre-artifact verify \
+      --pin ops/config/doctorcre-artifact.v1.json; then
     tail -20 "$LOGDIR/doctorcre-artifact.log" >&2
     bad artifact "the exact DoctorCRE release artifact did not match its CARR pin"
     return

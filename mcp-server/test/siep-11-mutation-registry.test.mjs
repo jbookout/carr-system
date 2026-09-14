@@ -2127,10 +2127,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // command-line main and the predicate no longer admits it. The number went
   // up and came back down, which is exactly the movement a pinned count exists
   // to make visible.
-  // P2 adds one reviewed non-authorizing CLI, tools/doctorcre-artifact.py. It
-  // verifies and materializes a digest-pinned public archive locally; it owns
-  // no database, provider, release approval, traffic, or production mutation.
-  assert.equal(rows.length, 548);
+  assert.equal(rows.length, 547);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2143,12 +2140,11 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // to 539 while Step A's build-time candidate sealer carried a shebang and is
   // back to 538 now that Step A's final correction made that sealer a library
   // bin/deploy-worker.sh IMPORTS rather than a file it executes.
-  assert.equal(scripts.length, 539);
+  assert.equal(scripts.length, 538);
   // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
   // ingress this branch's registry successor does not seal, and the whole point
   // of the predicate is that intent does not enter it.
   assert.equal(scripts.some(path => path === "mcp-server/bin/seal-candidate-manifest.mjs"), false);
-  assert.equal(scripts.some(path => path === "tools/doctorcre-artifact.py"), true);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

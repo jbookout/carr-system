@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Verify and atomically stage the exact DoctorCRE artifact pinned by CARR."""
 # doctrine: doctorcre-v5-astra-integration-review
 
@@ -247,7 +246,8 @@ def materialize(root: Path, pin: dict[str, Any], archive: bytes,
     return saved
 
 
-def main() -> int:
+def run_cli(argv: list[str] | None = None) -> int:
+    """Library entry used only by the already-registered release CLI."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("verify", "materialize", "activate"))
     parser.add_argument("--pin", type=Path)
@@ -255,7 +255,7 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--root", type=Path)
     parser.add_argument("--sha256")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.command == "activate":
         if args.root is None or not valid_sha(args.sha256):
             parser.error("activate requires --root and a full --sha256")
@@ -276,10 +276,3 @@ def main() -> int:
     saved = materialize(args.root, pin, archive, manifest_bytes)
     print(json.dumps({key: saved[key] for key in ("schema", "repository", "release_tag", "source_commit", "archive_sha256", "manifest_sha256", "file_count")}, sort_keys=True))
     return 0
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except (OSError, ValueError, tarfile.TarError) as exc:
-        raise SystemExit(f"doctorcre-artifact: {exc}") from exc
