@@ -49,6 +49,8 @@ RECOVERY_ARGS = (
     "--recovery-prior-release-key", "prior",
     "--staging-receipt-idempotency-key", "22222222-2222-4333-8444-555555555555",
 )
+LEGACY_RELEASE_SHA = "11161a011f47d415d8fefdfd9cac842849bdbcce"
+STAMP_INTRODUCTION_SHA = "ab9678a86f427e8f9e5d1f75597a21b920630995"
 
 
 def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
@@ -89,6 +91,16 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
         subprocess.run(["git", "-C", str(root), "update-ref",
                         "refs/remotes/origin/main", sha], check=True, env=FIXTURE_GIT_ENV)
     return holder, root, sha
+
+
+def historical_source(sha: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    holder = tempfile.TemporaryDirectory(prefix="exact-historical-source-")
+    root = Path(holder.name) / "repo"
+    subprocess.run(["git", "clone", "-q", "--no-checkout", str(ROOT), str(root)],
+                   check=True, env=FIXTURE_GIT_ENV)
+    subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", sha],
+                   check=True, env=FIXTURE_GIT_ENV)
+    return holder, root
 
 
 def wrapper(root: Path, sha: str) -> subprocess.CompletedProcess[str]:
@@ -172,7 +184,8 @@ def shell_function(source: str, name: str) -> str:
 
 def test_legacy_prior_omits_candidate_stamps(source: str) -> None:
     """An exact pre-stamp rollback source still reaches Wrangler safely."""
-    holder, exact_root, exact_sha = make_source(legacy_without_stamp=True)
+    holder, exact_root = historical_source(LEGACY_RELEASE_SHA)
+    exact_sha = LEGACY_RELEASE_SHA
     try:
       with tempfile.TemporaryDirectory(prefix="legacy-prior-stamp-") as raw:
         root = Path(raw)
@@ -190,13 +203,16 @@ def test_legacy_prior_omits_candidate_stamps(source: str) -> None:
         harness = root / "harness.sh"
         harness.write_text(
             "#!/bin/sh\nset -eu\n"
-            f"WORKER_DIR={worker}\nWRANGLER={wrangler}\n"
+            f"SOURCE_ROOT={exact_root}\nWORKER_DIR={worker}\nWRANGLER={wrangler}\n"
             "VERSION_MODE=ordinary\nTARGET_ENV=staging\nRECOVERY_STEP=prior\n"
             f"EXACT_SOURCE_ROOT={exact_root}\n"
             f"HEAD_SHA={exact_sha}\n"
             "DEPLOY_TAG=carr-staging-22222222222243338444555555555555\n"
+            f"BUILD_STAMP_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
+            f"CANDIDATE_SEALER_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
             "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
             "seal_candidate_field() { echo unexpected-sealer-call; exit 91; }\n"
+            + shell_function(source, "exact_source_predates_candidate_stamps") + "\n"
             + shell_function(source, "prepare_candidate_stamps") + "\n"
             + shell_function(source, "deploy_staging_worker") + "\n"
             "prepare_candidate_stamps\ndeploy_staging_worker\n",
@@ -222,6 +238,46 @@ def test_legacy_prior_omits_candidate_stamps(source: str) -> None:
         holder.cleanup()
 
 
+def test_post_introduction_deletion_cannot_claim_legacy(source: str) -> None:
+    holder, exact_root = historical_source(STAMP_INTRODUCTION_SHA)
+    try:
+        subprocess.run(["git", "-C", str(exact_root), "config", "user.email",
+                        "selftest@example.invalid"], check=True, env=FIXTURE_GIT_ENV)
+        subprocess.run(["git", "-C", str(exact_root), "config", "user.name", "selftest"],
+                       check=True, env=FIXTURE_GIT_ENV)
+        subprocess.run(["git", "-C", str(exact_root), "rm", "-q",
+                        "mcp-server/bin/seal-candidate-manifest.mjs",
+                        "mcp-server/src/build-stamp.js"], check=True, env=FIXTURE_GIT_ENV)
+        subprocess.run(["git", "-C", str(exact_root), "commit", "-qm",
+                        "delete both stamp files"], check=True, env=FIXTURE_GIT_ENV)
+        exact_sha = subprocess.check_output(
+            ["git", "-C", str(exact_root), "rev-parse", "HEAD"],
+            text=True, env=FIXTURE_GIT_ENV).strip()
+        with tempfile.TemporaryDirectory(prefix="post-stamp-delete-") as raw:
+            root = Path(raw)
+            harness = root / "harness.sh"
+            harness.write_text(
+                "#!/bin/sh\nset -eu\n"
+                f"SOURCE_ROOT={exact_root}\nWORKER_DIR={exact_root / 'mcp-server'}\n"
+                "VERSION_MODE=ordinary\nTARGET_ENV=staging\nRECOVERY_STEP=prior\n"
+                f"EXACT_SOURCE_ROOT={exact_root}\nHEAD_SHA={exact_sha}\n"
+                f"BUILD_STAMP_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
+                f"CANDIDATE_SEALER_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
+                "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
+                "seal_candidate_field() { echo should-not-run; exit 91; }\n"
+                + shell_function(source, "exact_source_predates_candidate_stamps") + "\n"
+                + shell_function(source, "prepare_candidate_stamps") + "\n"
+                "prepare_candidate_stamps\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(["sh", str(harness)], capture_output=True,
+                                    text=True, check=False, env=FIXTURE_GIT_ENV)
+            assert result.returncode != 0, (result.stdout, result.stderr)
+            assert "candidate sealer is missing" in result.stderr
+    finally:
+        holder.cleanup()
+
+
 def test_missing_candidate_sealer_refuses_every_other_route(source: str) -> None:
     for step, mode, target, exact_root in (
             ("current_before", "ordinary", "staging", True),
@@ -239,9 +295,13 @@ def test_missing_candidate_sealer_refuses_every_other_route(source: str) -> None
                 "#!/bin/sh\nset -eu\n"
                 f"WORKER_DIR={worker}\nVERSION_MODE={mode}\nTARGET_ENV={target}\n"
                 f"RECOVERY_STEP={step}\nEXACT_SOURCE_ROOT={'/exact' if exact_root else ''}\n"
+                f"SOURCE_ROOT={root}\n"
                 "HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+                f"BUILD_STAMP_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
+                f"CANDIDATE_SEALER_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
                 "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
                 "seal_candidate_field() { echo should-not-run; exit 91; }\n"
+                + shell_function(source, "exact_source_predates_candidate_stamps") + "\n"
                 + shell_function(source, "prepare_candidate_stamps") + "\n"
                 "prepare_candidate_stamps\n",
                 encoding="utf-8",
@@ -267,10 +327,13 @@ def test_declared_candidate_stamp_contract_requires_sealer(source: str) -> None:
         harness.write_text(
             "#!/bin/sh\nset -eu\n"
             f"WORKER_DIR={worker}\nVERSION_MODE=ordinary\nTARGET_ENV=staging\n"
-            "RECOVERY_STEP=prior\nEXACT_SOURCE_ROOT=/exact\n"
+            f"SOURCE_ROOT={root}\nRECOVERY_STEP=prior\nEXACT_SOURCE_ROOT=/exact\n"
             "HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            f"BUILD_STAMP_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
+            f"CANDIDATE_SEALER_INTRODUCTION_SHA={STAMP_INTRODUCTION_SHA}\n"
             "fail() { echo \"REFUSED: $1\" >&2; exit 1; }\n"
             "seal_candidate_field() { echo should-not-run; exit 91; }\n"
+            + shell_function(source, "exact_source_predates_candidate_stamps") + "\n"
             + shell_function(source, "prepare_candidate_stamps") + "\n"
             "prepare_candidate_stamps\n",
             encoding="utf-8",
@@ -313,6 +376,7 @@ def main() -> int:
     test_cleanup_traps(source)
     test_wrangler_dry_run()
     test_legacy_prior_omits_candidate_stamps(source)
+    test_post_introduction_deletion_cannot_claim_legacy(source)
     test_missing_candidate_sealer_refuses_every_other_route(source)
     test_declared_candidate_stamp_contract_requires_sealer(source)
     print("exact-recovery-runtime: lock gate, dry-run bundle, and cleanup passed")

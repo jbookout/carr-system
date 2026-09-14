@@ -885,13 +885,27 @@ seal_candidate_field() {
 CANDIDATE_MANIFEST=""
 CANDIDATE_MANIFEST_DIGEST=""
 LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=0
+# Both stamp components first entered canonical main in this reviewed commit.
+# Keep independently named boundaries so a future split introduction cannot be
+# collapsed into file absence, which a later source can manufacture by delete.
+BUILD_STAMP_INTRODUCTION_SHA="ab9678a86f427e8f9e5d1f75597a21b920630995"
+CANDIDATE_SEALER_INTRODUCTION_SHA="ab9678a86f427e8f9e5d1f75597a21b920630995"
+exact_source_predates_candidate_stamps() {
+  [ "$HEAD_SHA" != "$BUILD_STAMP_INTRODUCTION_SHA" ] \
+    && [ "$HEAD_SHA" != "$CANDIDATE_SEALER_INTRODUCTION_SHA" ] \
+    && git -C "$SOURCE_ROOT" merge-base --is-ancestor \
+      "$HEAD_SHA" "$BUILD_STAMP_INTRODUCTION_SHA" \
+    && git -C "$SOURCE_ROOT" merge-base --is-ancestor \
+      "$HEAD_SHA" "$CANDIDATE_SEALER_INTRODUCTION_SHA"
+}
 prepare_candidate_stamps() {
   [ "$VERSION_MODE" != "promote" ] || return 0
   SEALER="$WORKER_DIR/bin/seal-candidate-manifest.mjs"
   if [ ! -f "$SEALER" ]; then
     if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "staging" ] \
         && [ "$RECOVERY_STEP" = "prior" ] && [ -n "$EXACT_SOURCE_ROOT" ] \
-        && [ ! -e "$WORKER_DIR/src/build-stamp.js" ]; then
+        && [ ! -e "$WORKER_DIR/src/build-stamp.js" ] \
+        && exact_source_predates_candidate_stamps; then
       LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=1
       echo "  legacy prior source predates the candidate-stamp contract; candidate stamps omitted"
       return 0
