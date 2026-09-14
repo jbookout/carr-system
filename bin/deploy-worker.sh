@@ -884,10 +884,34 @@ seal_candidate_field() {
 # carries are the ones its own upload wrote.
 CANDIDATE_MANIFEST=""
 CANDIDATE_MANIFEST_DIGEST=""
-if [ "$VERSION_MODE" != "promote" ]; then
+LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=0
+# Both stamp components first entered canonical main in this reviewed commit.
+# Keep independently named boundaries so a future split introduction cannot be
+# collapsed into file absence, which a later source can manufacture by delete.
+BUILD_STAMP_INTRODUCTION_SHA="ab9678a86f427e8f9e5d1f75597a21b920630995"
+CANDIDATE_SEALER_INTRODUCTION_SHA="ab9678a86f427e8f9e5d1f75597a21b920630995"
+exact_source_predates_candidate_stamps() {
+  [ "$HEAD_SHA" != "$BUILD_STAMP_INTRODUCTION_SHA" ] \
+    && [ "$HEAD_SHA" != "$CANDIDATE_SEALER_INTRODUCTION_SHA" ] \
+    && git -C "$SOURCE_ROOT" merge-base --is-ancestor \
+      "$HEAD_SHA" "$BUILD_STAMP_INTRODUCTION_SHA" \
+    && git -C "$SOURCE_ROOT" merge-base --is-ancestor \
+      "$HEAD_SHA" "$CANDIDATE_SEALER_INTRODUCTION_SHA"
+}
+prepare_candidate_stamps() {
+  [ "$VERSION_MODE" != "promote" ] || return 0
   SEALER="$WORKER_DIR/bin/seal-candidate-manifest.mjs"
-  [ -f "$SEALER" ] \
-    || fail "the candidate sealer is missing at $SEALER; the Gate Zero producer would ship unable to name its candidate."
+  if [ ! -f "$SEALER" ]; then
+    if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "staging" ] \
+        && [ "$RECOVERY_STEP" = "prior" ] && [ -n "$EXACT_SOURCE_ROOT" ] \
+        && [ ! -e "$WORKER_DIR/src/build-stamp.js" ] \
+        && exact_source_predates_candidate_stamps; then
+      LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=1
+      echo "  legacy prior source predates the candidate-stamp contract; candidate stamps omitted"
+      return 0
+    fi
+    fail "the candidate sealer is missing at $SEALER; the Gate Zero producer would ship unable to name its candidate."
+  fi
   CANDIDATE_MANIFEST="$(seal_candidate_field manifest)" \
     || fail "could not seal the candidate manifest for $HEAD_SHA."
   CANDIDATE_MANIFEST_DIGEST="$(seal_candidate_field digest)" \
@@ -895,7 +919,19 @@ if [ "$VERSION_MODE" != "promote" ]; then
   [ -n "$CANDIDATE_MANIFEST" ] && [ -n "$CANDIDATE_MANIFEST_DIGEST" ] \
     || fail "the candidate sealer produced an empty manifest or digest for $HEAD_SHA."
   echo "  sealed candidate manifest $CANDIDATE_MANIFEST_DIGEST for $HEAD_SHA"
-fi
+}
+prepare_candidate_stamps
+
+deploy_staging_worker() {
+  if [ "$LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP" = "1" ]; then
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --tag "$DEPLOY_TAG"
+  else
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" --tag "$DEPLOY_TAG"
+  fi
+}
 
 # ---------- deploy ----------
 echo ""
@@ -1162,9 +1198,7 @@ else
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \
         || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
-      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
-        --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
-        --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" --tag "$DEPLOY_TAG"
+      deploy_staging_worker
     fi
   else
     "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \

@@ -261,6 +261,45 @@ def main() -> int:
           and "structurally outside the three\nreceipt tables" in rollback_runbook,
           "a repair could be routed through current_after and forge a bundle leg")
 
+    check("10. only an exact legacy prior may omit candidate stamps",
+          'LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=0' in source
+          and '[ "$VERSION_MODE" = "ordinary" ]' in source
+          and '[ "$TARGET_ENV" = "staging" ]' in source
+          and '[ "$RECOVERY_STEP" = "prior" ]' in source
+          and '[ -n "$EXACT_SOURCE_ROOT" ]' in source
+          and '[ ! -e "$WORKER_DIR/src/build-stamp.js" ]' in source,
+          "a non-prior, non-exact, or stamp-aware source could bypass sealing")
+    check("10b. legacy prior keeps SHA/tag and omits only candidate stamps",
+          'deploy_staging_worker()' in source
+          and 'if [ "$LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP" = "1" ]; then' in source
+          and '"$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"' in source
+          and '--tag "$DEPLOY_TAG"' in source,
+          "the compatibility route can lose deterministic deployment provenance")
+    stamp_intro = "ab9678a86f427e8f9e5d1f75597a21b920630995"
+    intro_paths = (
+        "mcp-server/src/build-stamp.js",
+        "mcp-server/bin/seal-candidate-manifest.mjs",
+    )
+    intro_has_both = all(subprocess.run(
+        ["git", "cat-file", "-e", f"{stamp_intro}:{path}"], cwd=REPO,
+        capture_output=True, check=False).returncode == 0 for path in intro_paths)
+    parent_has_either = any(subprocess.run(
+        ["git", "cat-file", "-e", f"{stamp_intro}^:{path}"], cwd=REPO,
+        capture_output=True, check=False).returncode == 0 for path in intro_paths)
+    check("10c. both pinned boundaries are their canonical introduction",
+          f'BUILD_STAMP_INTRODUCTION_SHA="{stamp_intro}"' in source
+          and f'CANDIDATE_SEALER_INTRODUCTION_SHA="{stamp_intro}"' in source
+          and intro_has_both and not parent_has_either,
+          "the pinned provenance boundary does not match canonical Git history")
+    provenance_start = source.index("exact_source_predates_candidate_stamps() {")
+    provenance_end = source.index("\n}\n", provenance_start) + 2
+    provenance_gate = source[provenance_start:provenance_end]
+    check("10d. legacy qualification requires strict ancestry to both boundaries",
+          provenance_gate.count('git -C "$SOURCE_ROOT" merge-base --is-ancestor') == 2
+          and '[ "$HEAD_SHA" != "$BUILD_STAMP_INTRODUCTION_SHA" ]' in provenance_gate
+          and '[ "$HEAD_SHA" != "$CANDIDATE_SEALER_INTRODUCTION_SHA" ]' in provenance_gate,
+          "file deletion after stamp introduction could impersonate a legacy source")
+
     print()
     if FAILURES:
         print(f"deploy-release-wiring-selftest: {len(FAILURES)} FAILED")
