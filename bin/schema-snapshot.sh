@@ -596,7 +596,8 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
+         ('carr_foundation_assurance_oracle')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -614,7 +615,8 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
+         ('carr_foundation_assurance_oracle')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -634,7 +636,8 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
+         ('carr_foundation_assurance_oracle')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -655,7 +658,8 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
+         ('carr_foundation_assurance_oracle')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -673,7 +677,8 @@ with app(rolname) as (
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
-         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer')
+         ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
+         ('carr_foundation_assurance_oracle')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
 -- The snapshot has no grantor field, so render each semantically identical
