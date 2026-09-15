@@ -936,12 +936,45 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // file and are NOT part of the recited counts — the verb's numbers
         // must match the files' numbers exactly or the recitation audit
         // (rule 4f7c348f) breaks the day a session compares them.
-        const allRules = (await c.query(
-          `select statement, human_quote, taught_by, personal_to, scope, id
-             from v_compiled_rules
-            where (personal_to is null or ($1::text is not null and personal_to = $1))
-              and coalesce(scope->>'kind','') <> 'intro_politics'
-            order by personal_to nulls first, activated_at, statement`, [who])).rows;
+        // These four stable baseline reads used to be four sequential network
+        // round trips. Keep the independently fail-soft, rolling-deploy reads
+        // below separate, but take one database snapshot for the core corpus,
+        // action queue, proposed rules, and generation counter.
+        const baselineResult = await c.query(
+          `select
+             (select coalesce(jsonb_agg(to_jsonb(r) - 'activated_at'
+                                order by r.personal_to nulls first,r.activated_at,r.statement),
+                              '[]'::jsonb)
+                from (
+                  select statement,human_quote,taught_by,personal_to,scope,id,activated_at
+                    from v_compiled_rules
+                   where (personal_to is null or ($1::text is not null and personal_to = $1))
+                     and coalesce(scope->>'kind','') <> 'intro_politics'
+                ) r) as all_rules,
+             (select coalesce(jsonb_agg(to_jsonb(a) - 'render_seq' order by a.render_seq),
+                              '[]'::jsonb)
+                from (
+                  select number,title,body,owner,render_seq
+                    from loop_item
+                   where kind = 'action_required' and status = 'open'
+                ) a) as action_required,
+             (select coalesce(jsonb_agg(to_jsonb(p) order by p.created_at),'[]'::jsonb)
+                from (
+                  select id,statement,taught_by,personal_to,created_at
+                    from rule
+                   where status = 'proposed'
+                     and (personal_to is null or ($1::text is not null and personal_to = $1))
+                ) p) as proposed_rules,
+             (select generation from doctrine_meta where id=1) as doctrine_generation
+             /* standing-context:baseline-batch */`,
+          [who]);
+        // Existing unit fakes historically return the old rule-row shape for
+        // any SQL containing v_compiled_rules. Falling back keeps those tests
+        // meaningful and also fails safely if an older proxy rewrites the
+        // statement rather than returning the aggregate contract.
+        const baseline = baselineResult.rows[0] || {};
+        const baselineBatched = Array.isArray(baseline.all_rules);
+        const allRules = baselineBatched ? baseline.all_rules : baselineResult.rows;
         // The typed registry deliberately changes what is loaded at boot, not
         // what the recited coverage count means. Until a human activates the
         // registry this path is behavior-identical to the compiled-rule path.
@@ -1097,7 +1130,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           ? [...shared, ...personal].filter(r => !deliverable(r))
               .map(r => String(r.id).slice(0, 8))
           : plan.filter(r => !r.selected).map(r => r.short_id);
-        const actionReq = (await c.query(
+        const actionReq = baselineBatched ? baseline.action_required : (await c.query(
           `select number, title, body, owner
              from loop_item
             where kind = 'action_required' and status = 'open'
@@ -1117,7 +1150,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // the binding text is one standing-context call away with rule_ids, and
         // a wall of unapproved prose at session start would be skimmed like
         // every other wall.
-        const proposedRules = (await c.query(
+        const proposedRules = baselineBatched ? baseline.proposed_rules : (await c.query(
           `select id, statement, taught_by, personal_to, created_at
              from rule
             where status = 'proposed'
@@ -1139,7 +1172,9 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
              from v_defect_class
             order by caught_by_human desc, occurrences desc, last_seen desc
             limit 5`).catch(() => ({ rows: [] }))).rows;
-        const gen = (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
+        const gen = baselineBatched
+          ? { generation: baseline.doctrine_generation }
+          : (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
         // PAYLOAD NOTE (2026-08-08, Joe's yes): detail=full returned ~183KB at
         // 147 rules and overflowed the tool-result limit on the very first live
         // call — the verb that is the OPENING ACT of every session could not be

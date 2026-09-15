@@ -1,0 +1,91 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { executeRegisteredTool } from "../src/tools.js";
+
+const ACTOR = {
+  id: "11111111-1111-4111-8111-111111111111",
+  slug: "joe",
+  human: true,
+  via: "oauth-google",
+};
+
+const RULES = [
+  {
+    id: "1fddcffb-0000-4000-8000-000000000001",
+    statement: "A shared standing rule with enough words to produce a stable gist for this regression test.",
+    human_quote: "shared quote",
+    taught_by: "Joe Bookout",
+    personal_to: null,
+    scope: {},
+  },
+  {
+    id: "7e9739f2-0000-4000-8000-000000000002",
+    statement: "A personal standing rule with enough words to produce a stable gist for this regression test.",
+    human_quote: "personal quote",
+    taught_by: "Joe Bookout",
+    personal_to: "joe",
+    scope: {},
+  },
+];
+
+function client() {
+  const calls = [];
+  return {
+    calls,
+    query: async (sql) => {
+      calls.push(sql);
+      if (/standing-context:baseline-batch/.test(sql)) {
+        return { rows: [{
+          all_rules: RULES,
+          action_required: [{ number: 9, title: "Act", body: "Do it", owner: "joe" }],
+          proposed_rules: [{
+            id: "aaaaaaaa-0000-4000-8000-000000000003",
+            statement: "A proposed rule with enough words to make its gist deterministic in this focused test.",
+            taught_by: "Joe Bookout",
+            personal_to: null,
+            created_at: "2026-09-15T00:00:00.000Z",
+          }],
+          doctrine_generation: 1165,
+        }] };
+      }
+      if (/v_guidance_registry_state/.test(sql)) return { rows: [] };
+      if (/with registry as/.test(sql)) {
+        return { rows: [{
+          mode: "shadow",
+          map_versions: 1,
+          map_digest: "d".repeat(64),
+          tagged_rules: 1,
+          delivery_plan: [{
+            short_id: "1fddcffb",
+            load_layer: "layer0",
+            packs: [],
+            scope: "shared",
+            selected: true,
+          }],
+          pack_index: [],
+        }] };
+      }
+      if (/from v_defect_class/.test(sql)) return { rows: [] };
+      throw new Error(`unexpected standalone standing-context query: ${sql}`);
+    },
+  };
+}
+
+test("standing-context batches stable baseline reads without changing its payload", async () => {
+  const c = client();
+  const out = await executeRegisteredTool(c, ACTOR, "standing-context", {});
+
+  assert.match(out.recite, /1 shared, 1 joe-personal/);
+  assert.equal(out.action_required.length, 1);
+  assert.equal(out.awaiting_activation.count, 1);
+  assert.equal(out.doctrine.generation, 1165);
+  assert.equal(c.calls.filter(sql => /standing-context:baseline-batch/.test(sql)).length, 1);
+  assert.equal(c.calls.some(sql => /from loop_item/.test(sql) &&
+    !/standing-context:baseline-batch/.test(sql)), false);
+  assert.equal(c.calls.some(sql => /from rule\s+where status = 'proposed'/.test(sql) &&
+    !/standing-context:baseline-batch/.test(sql)), false);
+  assert.equal(c.calls.some(sql => /from doctrine_meta/.test(sql) &&
+    !/standing-context:baseline-batch/.test(sql)), false);
+  assert.equal(c.calls.length, 4,
+    "baseline, optional registry, delivery snapshot, and fail-soft defects are the whole inactive path");
+});
