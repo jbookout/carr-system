@@ -496,7 +496,7 @@ if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" > "$SCHEMA_BODY"; then
   exit 1
 fi
 if ! awk '
-$0 == "CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO carr_backup USING (true);" {
+function emit_carr_backup_policy() {
   print "do $carr_backup_snapshot_policy$"
   print "begin"
   print "  if exists (select 1 from pg_roles where rolname = '\''carr_backup'\'') then"
@@ -505,7 +505,21 @@ $0 == "CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO car
   print "  end if;"
   print "end"
   print "$carr_backup_snapshot_policy$;"
+}
+$0 == "CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO carr_backup USING (true);" {
+  emit_carr_backup_policy()
+  carr_backup_policy_seen = 1
   next
+}
+$0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !carr_backup_policy_seen {
+  print "-- Name: work_request carr_backup_full_read; Type: POLICY; Schema: ops; Owner: -"
+  print "--"
+  print ""
+  emit_carr_backup_policy()
+  print ""
+  print ""
+  print "--"
+  carr_backup_policy_seen = 1
 }
 { print }
 ' "$SCHEMA_BODY" >> "$TMP"; then

@@ -43190,8 +43190,8 @@
         "operation": "bin/schema-snapshot.sh",
         "effect_class": "administrative_mutation",
         "source_locator": "bin/schema-snapshot.sh",
-        "schema_digest": "57498ebd6f3420bf84f5ef128366893295af4e94eb3629a557aec7a4b2e0446d",
-        "handler_digest": "57498ebd6f3420bf84f5ef128366893295af4e94eb3629a557aec7a4b2e0446d",
+        "schema_digest": "27a8aa40e009d4ab7d50b7efbcbac31c083a7ebee6a4100c82a00ec8cace6f7d",
+        "handler_digest": "27a8aa40e009d4ab7d50b7efbcbac31c083a7ebee6a4100c82a00ec8cace6f7d",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -43508,7 +43508,7 @@
       }
     ],
     "expected_count": 856,
-    "expected_sha256": "b1788aa2f3dd94c0a25ff19c7d0258a5a2ee249d9df329c166b9440b6bff1011",
+    "expected_sha256": "60bfe23cd6d4d69adb7e4737a035cb259d83414f2a5f5eaa9e17ebbbae847de4",
     "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation, including the already-registered local PostgreSQL lane changed by the merged F03 source. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted."
   },
   "historical_artifact_replay_review": {
