@@ -123,6 +123,9 @@ RELEASE_SECURITY_EVIDENCE=""
 RELEASE_VERIFIER=""
 RELEASE_VERIFIER_EVIDENCE=""
 FOUNDATION_ASSURANCE_STAGING_PROVIDER=""
+FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION=""
+FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT=""
+FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE=""
 RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
@@ -208,6 +211,15 @@ while [ "$#" -gt 0 ]; do
     --foundation-assurance-staging-provider)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-provider needs an immutable UUID" >&2; exit 64; }
       FOUNDATION_ASSURANCE_STAGING_PROVIDER="$2"; shift ;;
+    --foundation-assurance-staging-candidate-operation)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-candidate-operation needs an immutable UUID" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION="$2"; shift ;;
+    --foundation-assurance-staging-replacement-receipt)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-replacement-receipt needs an immutable UUID" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT="$2"; shift ;;
+    --foundation-assurance-staging-replacement-source)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-replacement-source needs a full SHA" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE="$2"; shift ;;
     --recovery-attempt-id)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
@@ -333,6 +345,12 @@ if [ "$VERSION_MODE" = "upload" ]; then
     printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" | grep -Eq \
       '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
       || fail "--foundation-assurance-staging-provider must be a lowercase immutable UUID."
+    printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION" \
+      "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT" | grep -Eqv \
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+      && fail "WR95 live acquisition needs exact staging candidate-operation and replacement-receipt UUIDs."
+    printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE" | grep -Eq '^[0-9a-f]{40}$' \
+      || fail "WR95 live acquisition needs the exact staging replacement source SHA."
   else
     [ -n "$RELEASE_TEST_EVIDENCE" ] \
       || fail "--upload-version needs --test-evidence unless WR95 live acquisition is selected."
@@ -1111,6 +1129,9 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
       --staging-provider-version "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" \
       --final-provider-version "$PROVIDER_VERSION_ID" --release-key "$RELEASE_KEY" \
       --staging-origin "https://$STAGING_TARGET_HOST" \
+      --staging-candidate-operation-id "$FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION" \
+      --staging-replacement-receipt-id "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT" \
+      --staging-replacement-source-sha "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE" \
       --idempotency-key "$WR95_EVIDENCE_IDEMPOTENCY" > "$WR95_SEAL_OUTPUT"; then
       fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; traffic was not changed and approval remains impossible."
     fi
