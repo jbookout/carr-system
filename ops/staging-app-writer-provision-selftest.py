@@ -585,15 +585,14 @@ commit;
     check("Worker publishes both database secrets in one stdin JSON bulk request",
           worker_runner.calls[0][0] == [
               "wrangler", "secret", "bulk", "--env", "staging",
-              "--config", str(provision.WRANGLER_CONFIG), "--name", "carr-mcp-staging",
+              "--config", str(provision.WRANGLER_CONFIG),
           ]
           and json.loads(worker_runner.calls[0][1]["input"]) == future_values
           and sum("bulk" in call[0] for call in worker_runner.calls) == 1
           and all("put" not in call[0] for call in worker_runner.calls)
           and worker_runner.calls[1][0] == [
               "wrangler", "secret", "list", "--env", "staging",
-              "--config", str(provision.WRANGLER_CONFIG), "--name", "carr-mcp-staging",
-              "--format", "json",
+              "--config", str(provision.WRANGLER_CONFIG), "--format", "json",
           ])
 
     class LegacyWorkerRunner:

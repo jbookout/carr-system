@@ -72,7 +72,6 @@ LOCK_KEY = 7301961134306001
 BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
 WRANGLER_CONFIG = REPO / "mcp-server/wrangler.toml"
-STAGING_WORKER_NAME = "carr-mcp-staging"
 
 FORBIDDEN_ENV = (
     "CARR_BREAK_GLASS",
@@ -1343,8 +1342,7 @@ def bulk_worker_database_secrets(
     try:
         result = run(
             [wrangler, "secret", "bulk", "--env", "staging",
-             "--config", str(WRANGLER_CONFIG),
-             "--name", STAGING_WORKER_NAME],
+             "--config", str(WRANGLER_CONFIG)],
             input=payload, capture_output=True, text=True, timeout=60,
             env=worker_environment(environ if environ is not None else os.environ),
         )
@@ -1364,8 +1362,7 @@ def read_worker_database_secret_names(
     try:
         result = run(
             [wrangler, "secret", "list", "--env", "staging",
-             "--config", str(WRANGLER_CONFIG), "--name", STAGING_WORKER_NAME,
-             "--format", "json"],
+             "--config", str(WRANGLER_CONFIG), "--format", "json"],
             capture_output=True, text=True, timeout=60,
             env=worker_environment(environ if environ is not None else os.environ),
         )
