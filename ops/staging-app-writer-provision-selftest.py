@@ -523,6 +523,60 @@ commit;
               "--config", str(provision.WRANGLER_CONFIG), "--name", "carr-mcp-staging",
               "--format", "json",
           ])
+
+    class LegacyWorkerRunner:
+        def __init__(self):
+            self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        def __call__(self, args, **kwargs):
+            self.calls.append((list(args), kwargs))
+            if "bulk" in args:
+                return subprocess.CompletedProcess(args, 0, "bulk complete", "")
+            return subprocess.CompletedProcess(args, 0, json.dumps([
+                {"name": "DATABASE_URL_READER", "type": "secret_text"},
+                {"name": "DATABASE_URL_WRITER", "type": "secret_text"},
+            ]), "")
+
+    legacy_runner = LegacyWorkerRunner()
+    legacy_values = dict(future_values)
+    legacy_values["DATABASE_URL_GATE_ZERO_WRITER"] = None
+    legacy_values["DATABASE_URL_FOUNDATION_ASSURANCE_WRITER"] = None
+    provision.bulk_worker_database_secrets(
+        legacy_values, wrangler="wrangler", run=legacy_runner, environ={})
+    provision.verify_worker_database_secret_bindings(
+        expected_names={"DATABASE_URL_READER", "DATABASE_URL_WRITER"},
+        wrangler="wrangler", run=legacy_runner, environ={})
+    check("legacy rollback atomically deletes migration-created secrets with JSON null",
+          json.loads(legacy_runner.calls[0][1]["input"]) == legacy_values)
+
+    saved_profile = provision.credential.profile
+    saved_load_existing = provision.credential.load_existing
+    saved_secret_names = provision.read_worker_database_secret_names
+    try:
+        provision.read_worker_database_secret_names = lambda: {
+            "DATABASE_URL_READER", "DATABASE_URL_WRITER"}
+        def load_legacy_credential(_paths, *, role_name, **_kwargs):
+            if role_name in {
+                provision.GATE_ZERO_PRODUCER_ROLE,
+                provision.FOUNDATION_ASSURANCE_ORACLE_ROLE,
+            }:
+                raise provision.credential.CredentialRefusal("staging credential is absent")
+            return provision.credential.StoredCredential(
+                "final", pathlib.Path("/fixture/final"), f"dsn-{role_name}",
+                "fixture-password", "legacy.example", 5432, "neondb")
+        provision.credential.load_existing = load_legacy_credential
+        rollback_values = provision.load_rollback_worker_values(
+            type("OldScope", (), {"endpoint_host": "legacy.example"})())
+    finally:
+        provision.credential.profile = saved_profile
+        provision.credential.load_existing = saved_load_existing
+        provision.read_worker_database_secret_names = saved_secret_names
+    check("legacy rollback derives absence only for migration-created seats",
+          rollback_values == {
+              "DATABASE_URL_READER": "dsn-app_reader",
+              "DATABASE_URL_WRITER": "dsn-app_writer",
+              "DATABASE_URL_GATE_ZERO_WRITER": None,
+              "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER": None,
+          })
     check("Worker child environment is an exact allowlist with pinned account",
           all(set(call[1]["env"]) == {
               "PATH", "HOME", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"
@@ -888,7 +942,7 @@ commit;
                 raise AssertionError("Worker bulk ran outside the global cutover lock")
             orchestration_events.append(("bulk", dict(values)))
         provision.bulk_worker_database_secrets = record_bulk
-        def record_verify() -> None:
+        def record_verify(**_kwargs) -> None:
             if worker_lock not in active_locks:
                 raise AssertionError("Worker readback ran outside the global cutover lock")
             orchestration_events.append(("verify", None))

@@ -632,20 +632,42 @@ def resolve_replacement_binding(
         target, production, old, candidate, dict(source_manifest), dict(receipt), owner)
 
 
-def load_rollback_worker_values(old: Any) -> dict[str, str]:
-    values: dict[str, str] = {}
+def load_rollback_worker_values(old: Any) -> dict[str, str | None]:
+    live_names = read_worker_database_secret_names()
+    values: dict[str, str | None] = {}
     for login_profile in PROFILES:
         file_profile = credential.profile(login_profile.label)
-        stored = credential.load_existing(
-            file_profile.paths, key=file_profile.key,
-            role_name=file_profile.role_name,
-            expected_endpoint=old.endpoint_host, expected_port=5432,
-            expected_database="neondb",
-        )
+        try:
+            stored = credential.load_existing(
+                file_profile.paths, key=file_profile.key,
+                role_name=file_profile.role_name,
+                expected_endpoint=old.endpoint_host, expected_port=5432,
+                expected_database="neondb",
+            )
+        except credential.CredentialRefusal as exc:
+            if (
+                str(exc) == "staging credential is absent"
+                and login_profile.created_by_migration
+                and login_profile.secret_name not in live_names
+            ):
+                # The prior Worker predates this migration-created seat.  JSON
+                # null is Wrangler's atomic bulk-delete representation, so a
+                # rollback restores the observed absence instead of inventing
+                # a credential that never existed.
+                values[login_profile.secret_name] = None
+                continue
+            raise
         if stored.state != "final":
             raise ProvisioningRefusal(
                 "canonical old-staging rollback credential is not final")
+        if login_profile.secret_name not in live_names:
+            raise ProvisioningRefusal(
+                "canonical old-staging credential has no matching Worker secret")
         values[login_profile.secret_name] = stored.value
+    expected_names = {name for name, value in values.items() if value is not None}
+    if live_names != expected_names:
+        raise ProvisioningRefusal(
+            "old-staging Worker database secret names differ from rollback material")
     return values
 
 
@@ -1265,11 +1287,12 @@ def validate_profile_login(
 
 
 def bulk_worker_database_secrets(
-    values: Mapping[str, str], *, wrangler: str = str(WRANGLER),
+    values: Mapping[str, str | None], *, wrangler: str = str(WRANGLER),
     run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
 ) -> None:
     if set(values) != set(WORKER_DATABASE_SECRET_NAMES) \
-            or any(not isinstance(value, str) or not value for value in values.values()):
+            or any(value is not None and (not isinstance(value, str) or not value)
+                   for value in values.values()):
         raise ProvisioningRefusal("Worker database secret bulk payload is not exact")
     payload = json.dumps({name: values[name] for name in WORKER_DATABASE_SECRET_NAMES},
                          sort_keys=True, separators=(",", ":"))
@@ -1290,10 +1313,10 @@ def bulk_worker_database_secrets(
         )
 
 
-def verify_worker_database_secret_bindings(
+def read_worker_database_secret_names(
     *, wrangler: str = str(WRANGLER),
     run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
-) -> None:
+) -> set[str]:
     try:
         result = run(
             [wrangler, "secret", "list", "--env", "staging",
@@ -1314,21 +1337,34 @@ def verify_worker_database_secret_bindings(
         raise ProvisioningRefusal("Worker secret name readback has the wrong shape")
     names = [str(row.get("name") or "") for row in payload]
     database_names = sorted(name for name in names if name.startswith("DATABASE_URL"))
-    if len(names) != len(set(names)) \
-            or database_names != sorted(WORKER_DATABASE_SECRET_NAMES):
+    if len(names) != len(set(names)):
+        raise ProvisioningRefusal("Worker secret name readback contains duplicates")
+    return set(database_names)
+
+
+def verify_worker_database_secret_bindings(
+    *, expected_names: set[str] | frozenset[str] = frozenset(WORKER_DATABASE_SECRET_NAMES),
+    wrangler: str = str(WRANGLER), run: Run = subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    if read_worker_database_secret_names(
+        wrangler=wrangler, run=run, environ=environ,
+    ) != set(expected_names):
         raise ProvisioningRefusal("Worker database secret name readback is not exact")
 
 
 def publish_worker_cutover(
-    candidate_values: Mapping[str, str], rollback_values: Mapping[str, str], *,
-    preserve: Callable[[], None], bulk: Callable[[Mapping[str, str]], None],
-    verify: Callable[[], None], postflight: Callable[[], None] = lambda: None,
+    candidate_values: Mapping[str, str], rollback_values: Mapping[str, str | None], *,
+    preserve: Callable[[], None], bulk: Callable[[Mapping[str, str | None]], None],
+    verify: Callable[[], None], rollback_verify: Callable[[], None] | None = None,
+    postflight: Callable[[], None] = lambda: None,
 ) -> None:
     """Publish one atomic pair; restore the old pair if postflight refuses."""
     if set(candidate_values) != set(WORKER_DATABASE_SECRET_NAMES) \
             or set(rollback_values) != set(WORKER_DATABASE_SECRET_NAMES):
         raise ProvisioningRefusal("Worker cutover and rollback secret sets are not exact")
     preserve()
+    verify_rollback = rollback_verify or verify
     try:
         bulk(candidate_values)
         verify()
@@ -1337,7 +1373,7 @@ def publish_worker_cutover(
     except Exception as exc:
         try:
             bulk(rollback_values)
-            verify()
+            verify_rollback()
             preserve()
         except Exception as rollback_exc:
             raise ProvisioningRefusal(
@@ -1395,8 +1431,8 @@ def settle_adopted_seats(
 
 
 def rollback_worker_to_prior(
-    rollback_values: Mapping[str, str], *, preserve: Callable[[], None],
-    bulk: Callable[[Mapping[str, str]], None], verify: Callable[[], None],
+    rollback_values: Mapping[str, str | None], *, preserve: Callable[[], None],
+    bulk: Callable[[Mapping[str, str | None]], None], verify: Callable[[], None],
 ) -> None:
     """Atomically restore the untouched old-staging pair through the same door."""
     if set(rollback_values) != set(WORKER_DATABASE_SECRET_NAMES):
@@ -1535,11 +1571,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.rollback_to_prior_staging:
             rollback_values = load_rollback_worker_values(binding.old)
+            rollback_names = {name for name, value in rollback_values.items()
+                              if value is not None}
             with credential.exclusive_lock(worker_cutover_lock_path()):
                 rollback_worker_to_prior(
                     rollback_values, preserve=preserve_provider_scopes,
                     bulk=lambda values: bulk_worker_database_secrets(values),
-                    verify=lambda: verify_worker_database_secret_bindings(),
+                    verify=lambda: verify_worker_database_secret_bindings(
+                        expected_names=rollback_names),
                 )
             print(json.dumps({
                 "environment": "staging", "state": "rolled_back_to_prior_staging",
@@ -1575,6 +1614,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         preserve_provider_scopes()
         rollback_values = load_rollback_worker_values(binding.old)
+        rollback_names = {name for name, value in rollback_values.items()
+                          if value is not None}
         config_root = replacement_credential_root(target.candidate_operation_id)
         lock_path = config_root / ".staging-role-operation.lock"
         outcomes: dict[str, str] = {}
@@ -1696,6 +1737,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             preserve=preserve_provider_scopes,
                             bulk=lambda values: bulk_worker_database_secrets(values),
                             verify=lambda: verify_worker_database_secret_bindings(),
+                            rollback_verify=lambda: verify_worker_database_secret_bindings(
+                                expected_names=rollback_names),
                             postflight=verify_final_candidate_state,
                         )
 
@@ -1720,7 +1763,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             rollback_values,
                             preserve=preserve_provider_scopes,
                             bulk=lambda values: bulk_worker_database_secrets(values),
-                            verify=lambda: verify_worker_database_secret_bindings(),
+                            verify=lambda: verify_worker_database_secret_bindings(
+                                expected_names=rollback_names),
                         )
 
                 # Publication happens while the adopt transaction is STILL OPEN;

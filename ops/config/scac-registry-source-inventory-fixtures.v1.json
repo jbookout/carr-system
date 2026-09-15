@@ -43505,11 +43505,34 @@
         "owner_package": "11",
         "implementation_state": "source_guarded_not_deployed",
         "classification_authorizing": false
+      },
+      {
+        "ingress_key": "external-admin:tools/provision-staging-app-writer.py",
+        "ingress_kind": "external_admin",
+        "operation": "tools/provision-staging-app-writer.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "tools/provision-staging-app-writer.py",
+        "schema_digest": "4f7263028b4d7db7deb0670f91d9cb39e025cbb25e7463a285c4f5a7af38ea0e",
+        "handler_digest": "4f7263028b4d7db7deb0670f91d9cb39e025cbb25e7463a285c4f5a7af38ea0e",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
       }
     ],
     "expected_count": 856,
-    "expected_sha256": "3bf239a1d4f3f439b5ba27b570568d7e4f2f9c9a3d9d0798bdcaff503b0fb50e",
-    "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation, including the already-registered local PostgreSQL lane changed by the merged F03 source. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted."
+    "expected_sha256": "b7dc0285a42480cf8f813f43decf18755abeddaf507248f9e1884e47d2506165",
+    "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation, including the already-registered local PostgreSQL lane changed by the merged F03 source. WR-000095 also re-digests the already-registered staging app-writer provisioner after correcting rollback to restore migration-created Worker secrets to their observed absent state. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",
