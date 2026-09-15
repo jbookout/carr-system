@@ -119,6 +119,37 @@ def main() -> int:
           and candidate_binding_calls[1][0] == "binding"
           and candidate_binding_calls[1][2] is True)
 
+    requested_headers: dict[str, str | None] = {}
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def fake_urlopen(request, *, timeout):
+        requested_headers["user-agent"] = request.get_header("User-agent")
+        requested_headers["accept"] = request.get_header("Accept")
+        requested_headers["timeout"] = str(timeout)
+        return JsonResponse()
+
+    real_urlopen = rehearsal.urllib.request.urlopen
+    rehearsal.urllib.request.urlopen = fake_urlopen
+    try:
+        request_result = rehearsal.request_json("https://staging.invalid/release")
+    finally:
+        rehearsal.urllib.request.urlopen = real_urlopen
+    check("candidate rehearsal identifies its HTTP client instead of using urllib's blocked default",
+          request_result == {"ok": True}
+          and requested_headers == {
+              "user-agent": rehearsal.HTTP_USER_AGENT,
+              "accept": "application/json",
+              "timeout": "30",
+          })
+
     schema_text = (REPO / "db/schema.sql").read_text(encoding="utf-8")
     extracted = snapshot.grants_to_role(schema_text, "carr_writer")
     section = snapshot.carr_grants_section_lines(schema_text)
