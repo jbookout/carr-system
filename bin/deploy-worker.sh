@@ -995,7 +995,7 @@ def contains(value, needle):
   if isinstance(value,list): return any(contains(v,needle) for v in value)
   return value==needle
 if not contains(version,wanted): raise SystemExit("provider detail did not name the exact staging UUID")
-if live.get("git_sha")!=sha or (live.get("worker_version") or {}).get("id")!=wanted or (live.get("env") or {}).get("value")!="staging": raise SystemExit("staging /release binding differs")' \
+if (live.get("git_sha") or {}).get("value")!=sha or (live.get("worker_version") or {}).get("id")!=wanted or (live.get("env") or {}).get("value")!="staging": raise SystemExit("staging /release binding differs")' \
       "$WR95_STAGING_VERSION_JSON" "$WR95_STAGING_RELEASE_JSON" \
       "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" "$HEAD_SHA" \
       || fail "the named staging provider is not the exact serving source."

@@ -316,6 +316,7 @@ def main() -> int:
           "the final evidence route can accept caller evidence or an unbound target")
     check("11b. exact staging provider/readback precede final upload",
           0 <= staging_view_at < version_upload_at
+          and '(live.get("git_sha") or {}).get("value")!=sha' in upload
           and 'worker_version") or {}).get("id")!=wanted' in upload,
           "evidence could be acquired from a different staging build")
     check("11c. candidate commits before synchronous sealer storage",
