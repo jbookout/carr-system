@@ -949,16 +949,18 @@ async function candidateBuildRecordRows(query) {
            r.maker_actor,
            r.correlation_id::text as correlation_id,
            r.observed_at
-      from ops.release r
+     from ops.release r
      where r.git_sha = $1
+       and r.environment = 'production'
        and r.maker_authority_verified
        and r.source_kind = 'wrapper'
        and r.maker_verification_ref = '${MAKER_AUTHORITY_PREFIX}' || r.maker_actor
      order by r.observed_at desc nulls last`, params: [gitSha] }]);
   const answered = Array.isArray(raw) ? raw : [];
-  // EXACTLY ONE, OR NOBODY. Migration 0504's partial unique index is what makes
-  // this the normal case rather than a hope, and this is the reader's own half of
-  // the same rule: a second row for one revision would leave the producer
+  // EXACTLY ONE PRODUCTION ROW, OR NOBODY. Migration 0513's partial unique index
+  // is what makes this the normal case rather than a hope while still permitting
+  // an authority-filed staging record for the same revision. This is the reader's
+  // own half of the same rule: a second Production row for one revision would leave the producer
   // CHOOSING which authenticated maker to name, and a store that hands its
   // consumer an ambiguity has already made that choice for it. So the ambiguity
   // is the refusal, and it says which store it is about.

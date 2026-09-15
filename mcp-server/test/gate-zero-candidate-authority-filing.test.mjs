@@ -72,6 +72,8 @@ const PROVIDER = "cloudflare-workers";
 const AUTHORITY_LOGIN = "carr_authority_joe";
 const PROVIDER_VERSION_AUTHORITY = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const PROVIDER_VERSION_WRITER = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+const PROVIDER_VERSION_STAGING = "cccccccc-3333-4333-8333-cccccccccccc";
+const PROVIDER_VERSION_DUPLICATE = "dddddddd-4444-4444-8444-dddddddddddd";
 
 /**
  * EVERY VARIABLE tools/ops-record.py WILL READ A DSN FROM, read out of the tool
@@ -227,10 +229,10 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     // synthetic shape would be refused by the intake path before any credential
     // was reached, which would prove nothing about the credential.
     const head = execFileSync("git", ["-C", REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const buildManifest = versionId => {
+    const buildManifest = (versionId, environment = "production") => {
       const source = spawnSync(PYTHON,
         [join(REPO, "tools", "release-manifest.py"), "build", "--sha", head,
-          "--environment", "production",
+          "--environment", environment,
           "--performance-budget-ref", "runbook:worker-performance-v1",
           "--performance-budget-ms", "1500",
           "--recovery-strategy", "rollback",
@@ -240,6 +242,7 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
         `the source manifest did not build: ${(source.stderr || "").slice(-400)}`);
       const sourcePath = join(work, `source-${versionId}.json`);
       writeFileSync(sourcePath, source.stdout);
+      if (environment !== "production") return sourcePath;
       const bound = spawnSync(PYTHON,
         [join(REPO, "tools", "release-manifest.py"), "bind-provider",
           "--manifest", sourcePath, "--provider", PROVIDER,
@@ -252,19 +255,25 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
       return boundPath;
     };
 
-    const fileCandidate = (key, versionId, env) => opsRecord(env,
-      "release", "candidate", "--key", key, "--manifest", buildManifest(versionId),
-      "--service", "carr-mcp", "--environment", "production",
-      "--provider", PROVIDER, "--provider-version-id", versionId,
-      "--test-evidence", "ops/ci.sh#candidate-filing-proof",
-      "--security-evidence", "ops/ci.sh#candidate-filing-proof");
+    const fileCandidate = (key, versionId, environment, env) => {
+      const providerArgs = environment === "production"
+        ? ["--provider", PROVIDER, "--provider-version-id", versionId]
+        : [];
+      return opsRecord(env,
+        "release", "candidate", "--key", key,
+        "--manifest", buildManifest(versionId, environment),
+        "--service", "carr-mcp", "--environment", environment,
+        ...providerArgs,
+        "--test-evidence", "ops/ci.sh#candidate-filing-proof",
+        "--security-evidence", "ops/ci.sh#candidate-filing-proof");
+    };
 
     // ── (1) THE REAL COMMAND, ON THE AUTHORITY CONNECTION ───────────────────
     // Only CARR_DB_AUTHORITY_JOE_URL points anywhere real. DATABASE_URL stays
     // blinded to a dead port, so a command that reached for the writer
     // connection instead would fail rather than quietly file an unauthenticated
     // row — which is the exact defect this proof exists for.
-    const filed = fileCandidate("gate-zero-authority-filing", PROVIDER_VERSION_AUTHORITY,
+    const filed = fileCandidate("gate-zero-authority-filing", PROVIDER_VERSION_AUTHORITY, "production",
       { CARR_DB_AUTHORITY_JOE_URL: authorityDsn });
     assert.equal(filed.status, 0,
       `the candidate did not file on the authority connection: ${(filed.stderr || "").slice(-600)}`);
@@ -304,6 +313,33 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     assert.equal(bound.rows.length, 1,
       "the Gate Zero store did not bind exactly the authority-filed candidate");
     assert.equal(bound.rows[0].maker_actor, "joe");
+
+    // The same authority and SHA may also have a staging record. It must coexist
+    // in the ledger but remain invisible to the Production-only Gate Zero reader.
+    const staged = fileCandidate("gate-zero-authority-staging", PROVIDER_VERSION_STAGING, "staging",
+      { CARR_DB_AUTHORITY_JOE_URL: authorityDsn });
+    assert.equal(staged.status, 0,
+      `staging history could not share the Production SHA: ${(staged.stderr || "").slice(-600)}`);
+    const environments = (await client.query(
+      `select environment from ops.release
+        where git_sha = $1 and maker_authority_verified order by environment`, [head]))
+      .rows.map(item => item.environment);
+    assert.deepEqual(environments, ["production", "staging"]);
+    const stillBound = await fetchCandidateBuildRecordRows({ gitSha: head });
+    assert.equal(isSeamStoreUnreachable(stillBound), false);
+    assert.equal(stillBound.rows.length, 1);
+    assert.equal(stillBound.rows[0].environment_digest,
+      bound.rows[0].environment_digest,
+      "staging history changed the Production candidate selected by Gate Zero");
+
+    // The widened ledger is not widened inside Production: a second authenticated
+    // Production row for the same SHA must still fail at the database boundary.
+    const duplicate = fileCandidate("gate-zero-authority-duplicate", PROVIDER_VERSION_DUPLICATE,
+      "production", { CARR_DB_AUTHORITY_JOE_URL: authorityDsn });
+    assert.notEqual(duplicate.status, 0,
+      "a second authority-filed Production candidate for one SHA was accepted");
+    assert.match(`${duplicate.stdout}\n${duplicate.stderr}`,
+      /release_authority_candidate_sha_uniq|duplicate key value/);
 
     // ── (4) THE FALSIFIER: THE WRITER-FILED ROW IS NOT READ ─────────────────
     // The same command, same manifest shape, on the ordinary ledger writer —
