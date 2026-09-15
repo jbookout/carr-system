@@ -285,6 +285,35 @@ def main() -> int:
     else:
         raise AssertionError("--through was allowed to expose the v11/v12 catalog gap")
 
+    # WR95 adds its live mutation surfaces in 0508-0511 and seals the resulting
+    # SCAC successor in 0512. Production's deferred policy-epoch trigger must
+    # never observe or commit one of those intermediate catalogs.
+    foundation_assurance = [
+        item for item in loaded if item[0].startswith(
+            ("0508_", "0509_", "0510_", "0511_", "0512_")
+        )
+    ]
+    assert [item[0] for item in foundation_assurance] == [
+        "0508_foundation_assurance_minimum_receipt.sql",
+        "0509_journey_one_clock_store.sql",
+        "0510_journey_one_clock_input_store.sql",
+        "0511_foundation_assurance_minimum_outcome.sql",
+        "0512_foundation_assurance_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(foundation_assurance) == [
+        foundation_assurance
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            foundation_assurance,
+            "0511_foundation_assurance_minimum_outcome.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError("--through was allowed to expose WR95 before its SCAC seal")
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

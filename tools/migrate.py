@@ -125,6 +125,17 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0502_gate_zero_read_only_outcome.sql",
         "0503_gate_zero_outcome_and_scac_successor.sql",
     ),
+    # WR95 creates its benchmark, Journey One input, and Foundation Assurance
+    # mutation surfaces in 0508-0511; 0512 seals their SCAC v27 successor. The
+    # deferred policy-epoch trigger correctly refuses every intermediate
+    # catalog, so these reviewed files must commit as one transaction.
+    (
+        "0508_foundation_assurance_minimum_receipt.sql",
+        "0509_journey_one_clock_store.sql",
+        "0510_journey_one_clock_input_store.sql",
+        "0511_foundation_assurance_minimum_outcome.sql",
+        "0512_foundation_assurance_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
