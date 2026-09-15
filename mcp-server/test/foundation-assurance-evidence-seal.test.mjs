@@ -16,6 +16,7 @@ import {
   canonicalStagingOriginFromRegistry,
   parseFoundationAssuranceArgs,
   selectProductionEvidenceDsn,
+  stagingReleaseSource,
 } from "../bin/seal-foundation-assurance-evidence.mjs";
 
 const config = JSON.parse(await readFile(new URL(
@@ -92,6 +93,11 @@ test("canonical staging registry shape fails closed", () => {
   ambiguous.services[0].environments.push({ environment: "staging" });
   assert.throws(() => canonicalStagingOriginFromRegistry(ambiguous),
     /canonical_staging_origin_unavailable/);
+});
+
+test("staging release source reads the typed release envelope", () => {
+  assert.equal(stagingReleaseSource({ git_sha: { value: "a".repeat(40), reason: null } }),
+    "a".repeat(40));
 });
 
 test("acquired matrix seals against release key without a release UUID", () => {

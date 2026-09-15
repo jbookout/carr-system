@@ -43236,8 +43236,8 @@
         "operation": "mcp-server/bin/seal-foundation-assurance-evidence.mjs",
         "effect_class": "administrative_mutation",
         "source_locator": "mcp-server/bin/seal-foundation-assurance-evidence.mjs",
-        "schema_digest": "c054001e229d7316215f84b9d2b6066197c5e78ce7397bb0f7f8660a2404725e",
-        "handler_digest": "c054001e229d7316215f84b9d2b6066197c5e78ce7397bb0f7f8660a2404725e",
+        "schema_digest": "b5fc929e9b4425d524849f02adf45c0280a4b5f7174848ef1644fb8caac94ca3",
+        "handler_digest": "b5fc929e9b4425d524849f02adf45c0280a4b5f7174848ef1644fb8caac94ca3",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -43577,8 +43577,8 @@
       }
     ],
     "expected_count": 856,
-    "expected_sha256": "951179e338017845c1b337c36f9377a9e36e775714c0f1af8e962d430a5f0128",
-    "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation, including the already-registered local PostgreSQL lane changed by the merged F03 source. WR-000095 also re-digests the already-registered staging app-writer provisioner after correcting rollback to restore migration-created Worker secrets to their observed absent state. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted. WR-000095 now also excludes LOGIN identities from snapshot bundle-membership replay and transactionally removes only the exact legacy duplicate creator edge before first credential adoption. The WR-000095 candidate rehearsal now binds its invariant snapshot to the exact replacement receipt and source, reads through the receipt-verified candidate owner inside a read-only transaction, and snapshots the fresh Gate Zero row count without invoking acceptance. The staging secret publisher now relies on the configured staging environment name instead of overriding it with a second Worker-name selector. The rehearsal HTTP client now carries an explicit stable user-agent because the staging edge rejects urllib's default identity, and parses the live typed git_sha envelope. The production upload wrapper now parses that same typed git_sha envelope before evidence acquisition."
+    "expected_sha256": "abcdd3d877facbfb6544298d3748fa79e36356e1672e92726ac60abf52a481bd",
+    "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation, including the already-registered local PostgreSQL lane changed by the merged F03 source. WR-000095 also re-digests the already-registered staging app-writer provisioner after correcting rollback to restore migration-created Worker secrets to their observed absent state. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted. WR-000095 now also excludes LOGIN identities from snapshot bundle-membership replay and transactionally removes only the exact legacy duplicate creator edge before first credential adoption. The WR-000095 candidate rehearsal now binds its invariant snapshot to the exact replacement receipt and source, reads through the receipt-verified candidate owner inside a read-only transaction, and snapshots the fresh Gate Zero row count without invoking acceptance. The staging secret publisher now relies on the configured staging environment name instead of overriding it with a second Worker-name selector. The rehearsal HTTP client now carries an explicit stable user-agent because the staging edge rejects urllib's default identity, and parses the live typed git_sha envelope. The production upload wrapper and its evidence sealer now parse that same typed git_sha envelope before evidence acquisition."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",

@@ -191,10 +191,14 @@ async function stagingReadback(bindings) {
   if (!response.ok) fail("staging_release_unavailable", response.status);
   const body = await response.json();
   const provider = body.worker_version?.id ?? body.provider_version ?? body.provider_version_id;
-  const source = body.git_sha ?? body.source_sha;
+  const source = stagingReleaseSource(body);
   if (provider !== bindings.staging_provider_version || source !== bindings.source_sha)
     fail("staging_release_binding_mismatch", { provider, source });
   return body;
+}
+
+export function stagingReleaseSource(body) {
+  return body?.git_sha?.value ?? body?.source_sha;
 }
 
 class Cdp {
