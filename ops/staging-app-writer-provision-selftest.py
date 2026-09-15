@@ -1271,6 +1271,62 @@ commit;
             raise AssertionError(f"missing or drifted creator edge accepted: {creator_edges!r}")
     check("missing, extra, option-drifted or non-bootstrap creator edges refuse", True)
 
+    class SnapshotEdgeCursor:
+        def __init__(self):
+            self.statements = []
+        def execute(self, statement, params=None):
+            self.statements.append((statement, params))
+        def fetchone(self):
+            return (16392,)
+
+    original_creator_edges = provision.collect_creator_edges
+    try:
+        edge_cursor = SnapshotEdgeCursor()
+        edge_reads = iter((
+            (("neondb_owner", True, False, False,
+              provision.BOOTSTRAP_SUPERUSER_OID),
+             ("neondb_owner", False, True, True, 16392)),
+            (("neondb_owner", True, False, False,
+              provision.BOOTSTRAP_SUPERUSER_OID),),
+        ))
+        provision.collect_creator_edges = lambda _cur, _role: next(edge_reads)
+        check("migration-created seat repairs only the old snapshot duplicate edge",
+              provision.repair_snapshot_creator_edge(
+                  edge_cursor, profiles["gate_zero_producer"],
+                  expected_creator="neondb_owner",
+              ) is True
+              and any("revoke" in repr(statement).lower()
+                      and "carr_gate_zero_producer" in repr(statement)
+                      for statement, _params in edge_cursor.statements))
+
+        provision.collect_creator_edges = lambda _cur, _role: (
+            ("neondb_owner", True, False, False,
+             provision.BOOTSTRAP_SUPERUSER_OID),
+        )
+        check("already-exact migration-created creator edge is unchanged",
+              provision.repair_snapshot_creator_edge(
+                  SnapshotEdgeCursor(), profiles["foundation_assurance_oracle"],
+                  expected_creator="neondb_owner",
+              ) is False)
+
+        provision.collect_creator_edges = lambda _cur, _role: (
+            ("neondb_owner", True, False, False,
+             provision.BOOTSTRAP_SUPERUSER_OID),
+            ("other", False, True, True, 16392),
+        )
+        try:
+            provision.repair_snapshot_creator_edge(
+                SnapshotEdgeCursor(), profiles["gate_zero_producer"],
+                expected_creator="neondb_owner",
+            )
+        except provision.ProvisioningRefusal:
+            pass
+        else:
+            raise AssertionError("unsafe creator-edge drift was repaired")
+        check("creator-edge repair refuses every non-snapshot shape", True)
+    finally:
+        provision.collect_creator_edges = original_creator_edges
+
     expected_actions = {
         (False, "absent"): "prepare_create",
         (False, "pending"): "create",
@@ -1513,8 +1569,13 @@ commit;
     original_exists = provision.role_exists
     original_authority = provision.collect_role_authority
     original_closure = provision.collect_profile_closure
+    original_repair = provision.repair_snapshot_creator_edge
     try:
         provision.role_exists = lambda _cur, _role: True
+        # The repair helper's exact and drifted rows are exercised above. These
+        # adoption fixtures model a post-repair closure and keep their cursor
+        # focused on the password transaction.
+        provision.repair_snapshot_creator_edge = lambda *_args, **_kwargs: False
         provision.collect_role_authority = lambda _cur, _role: provision.RoleAuthority(
             True, True, (), (), (), (), seat_facts, ())
         provision.collect_profile_closure = migrated_closure
@@ -1633,6 +1694,7 @@ commit;
         provision.role_exists = original_exists
         provision.collect_role_authority = original_authority
         provision.collect_profile_closure = original_closure
+        provision.repair_snapshot_creator_edge = original_repair
 
     # ---- PUBLISH FIRST, COMMIT SECOND, AND THE FAILURE IS THE UNDO ---------
     # The ordering is a named function precisely so it can be executed here

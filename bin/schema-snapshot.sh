@@ -702,6 +702,7 @@ select distinct format('grant %s to %s;', gr.rolname, mem.rolname)
   join pg_roles gr  on gr.oid  = m.roleid
   join pg_roles mem on mem.oid = m.member
  where gr.rolname in (select rolname from app)
+   and not gr.rolcanlogin
    and mem.rolname in (select rolname from app union select 'neondb_owner')
  order by 1;
 GRANTSQL

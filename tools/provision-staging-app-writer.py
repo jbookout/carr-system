@@ -1008,6 +1008,47 @@ def role_exists(cur: Any, role: str) -> bool:
     return cur.fetchone() == (True,)
 
 
+def repair_snapshot_creator_edge(
+    cur: Any, profile: LoginProfile, *, expected_creator: str,
+) -> bool:
+    """Remove only the redundant membership emitted by an older snapshot.
+
+    PostgreSQL 17 creates the creator's ADMIN/SET-FALSE edge automatically.
+    The old snapshot membership renderer then replayed the same LOGIN role with
+    a plain GRANT, adding a second SET-TRUE edge granted by the creator.  A
+    migration-created seat may repair exactly that two-edge shape inside the
+    same transaction as adoption; every other shape still refuses.
+    """
+    if not profile.created_by_migration:
+        return False
+    expected = (
+        (expected_creator, True, False, False, BOOTSTRAP_SUPERUSER_OID),
+    )
+    observed = collect_creator_edges(cur, profile.login_role)
+    if observed == expected:
+        return False
+    cur.execute("select oid::bigint from pg_roles where rolname=%s", (expected_creator,))
+    row = cur.fetchone()
+    if row is None or len(row) != 1:
+        raise ProvisioningRefusal("expected creator has no single role OID")
+    creator_oid = int(row[0])
+    redundant = (expected_creator, False, True, True, creator_oid)
+    if len(observed) != 2 or set(observed) != {expected[0], redundant}:
+        raise ProvisioningRefusal(
+            f"{profile.login_role} creator ADMIN edge is not safely repairable"
+        )
+    cur.execute(sql.SQL("revoke {} from {} granted by {}").format(
+        sql.Identifier(profile.login_role),
+        sql.Identifier(expected_creator),
+        sql.Identifier(expected_creator),
+    ))
+    if collect_creator_edges(cur, profile.login_role) != expected:
+        raise ProvisioningRefusal(
+            f"{profile.login_role} redundant snapshot creator edge did not clear"
+        )
+    return True
+
+
 def collect_profile_closure(cur: Any, profile: LoginProfile) -> ProfileClosure:
     return ProfileClosure(
         collect_role_authority(cur, profile.login_role),
@@ -1169,6 +1210,9 @@ def apply_login_profile(
         cur.execute("select pg_advisory_xact_lock(%s)", (LOCK_KEY,))
         exists = role_exists(cur, profile.login_role)
         if exists and adopt:
+            repair_snapshot_creator_edge(
+                cur, profile, expected_creator=expected_creator,
+            )
             authority = collect_role_authority(cur, profile.login_role)
             if (
                 not authority.can_login or not authority.inherits_privileges

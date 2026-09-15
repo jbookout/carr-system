@@ -217,6 +217,14 @@ def main():
     )
     check("membership renderer de-duplicates only identical rendered lines",
           membership_query is not None)
+    check("membership renderer excludes LOGIN roles from bundle replay",
+          membership_query is not None
+          and "and not gr.rolcanlogin" in membership_query.group(0))
+
+    for direct_login in ("carr_jobs", "carr_gate_zero_producer",
+                         "carr_foundation_assurance_oracle"):
+        check(f"snapshot does not replay {direct_login} as a membership bundle",
+              f"grant {direct_login} to neondb_owner;" not in canonical_section)
 
     check("all five ACL renderers retain the foundation-assurance oracle",
           generator.count("('carr_foundation_assurance_oracle')") == 5)
