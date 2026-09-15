@@ -42,6 +42,10 @@ APPROVED_0494 = (
     "0494_codex_continuity_archive_registry.sql",
     "0494a_codex_continuity_reference_manifest.sql",
 )
+APPROVED_0507 = (
+    "0507_export_views_one_row_per_subject.sql",
+    "0507a_engineering_slice_plan_validators.sql",
+)
 EXPECTED_LEGACY_ALIASES = {
     "0134_control_plane_admission.sql": "0148_control_plane_admission.sql",
     "0135_control_plane_jobs.sql": "0149_control_plane_jobs.sql",
@@ -69,10 +73,12 @@ def refuses(names: tuple[str, ...], expected: str, **kwargs: Any) -> None:
 
 def allocator_refuses_interstitial(
     actual: tuple[str, ...], names: tuple[str, ...], expected: str,
+    interstitial: tuple[str, ...],
 ) -> None:
     """Exercise the allocator's own-worktree rejection for an incomplete pair."""
-    remote_names = [name for name in actual if name != APPROVED_0494[1]]
-    with tempfile.TemporaryDirectory(prefix="migration-number-contract-0494-") as tmp:
+    remote_names = [name for name in actual if name != interstitial[1]]
+    slot = interstitial[0][:4]
+    with tempfile.TemporaryDirectory(prefix=f"migration-number-contract-{slot}-") as tmp:
         migration_dir = Path(tmp) / "migrations"
         migration_dir.mkdir()
         for name in names:
@@ -107,7 +113,11 @@ def main() -> int:
     assert FROZEN_COLLISIONS | APPROVED_INTERSTITIAL_COLLISIONS == report, report
     assert report["0169"] == FROZEN_0169
     assert report["0494"] == APPROVED_0494
-    assert APPROVED_INTERSTITIAL_COLLISIONS == {"0494": APPROVED_0494}
+    assert report["0507"] == APPROVED_0507
+    assert APPROVED_INTERSTITIAL_COLLISIONS == {
+        "0494": APPROVED_0494,
+        "0507": APPROVED_0507,
+    }
     assert LEGACY_APPLIED_ALIASES == EXPECTED_LEGACY_ALIASES
 
     refuses(("0171_alpha.sql", "0171_beta.sql"), "unregistered collision 0171")
@@ -133,16 +143,51 @@ def main() -> int:
         actual,
         tuple(name for name in actual if name != APPROVED_0494[0]),
         "approved interstitial collision 0494 changed",
+        APPROVED_0494,
     )
     allocator_refuses_interstitial(
         actual,
         tuple(name for name in actual if name != APPROVED_0494[1]),
         "approved interstitial collision 0494 changed",
+        APPROVED_0494,
     )
     allocator_refuses_interstitial(
         actual,
         actual + ("0494b_codex_continuity_unapproved.sql",),
         "approved interstitial collision 0494 changed",
+        APPROVED_0494,
+    )
+    refuses(APPROVED_0507[:1], "approved interstitial collision 0507 changed")
+    refuses((APPROVED_0507[1],), "approved interstitial collision 0507 changed")
+    validate_migration_names(
+        APPROVED_0507[:1], allow_approved_interstitial_base=True
+    )
+    refuses(
+        (APPROVED_0507[1],),
+        "approved interstitial collision 0507 changed",
+        allow_approved_interstitial_base=True,
+    )
+    refuses(
+        APPROVED_0507 + ("0507b_unapproved.sql",),
+        "approved interstitial collision 0507 changed",
+    )
+    allocator_refuses_interstitial(
+        actual,
+        tuple(name for name in actual if name != APPROVED_0507[0]),
+        "approved interstitial collision 0507 changed",
+        APPROVED_0507,
+    )
+    allocator_refuses_interstitial(
+        actual,
+        tuple(name for name in actual if name != APPROVED_0507[1]),
+        "approved interstitial collision 0507 changed",
+        APPROVED_0507,
+    )
+    allocator_refuses_interstitial(
+        actual,
+        actual + ("0507b_unapproved.sql",),
+        "approved interstitial collision 0507 changed",
+        APPROVED_0507,
     )
     missing_frozen = tuple(name for name in actual if name != "0074_deal_city_lane.sql")
     try:
