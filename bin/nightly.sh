@@ -125,6 +125,18 @@ fi
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
 
+# ── WHERE THIS RUN'S LINES BEGIN, so the trim below cannot eat them ──────────
+# The rolling trim at the end of carr_chain_exit keeps the last 2000 lines, and
+# its comment used to say that was "several months". It is not: one chain now
+# emits well over 2000 lines on its own, so the trim was deleting the FIRST half
+# of the very run that had just written it. Measured 2026-09-15: the whole log
+# held 36 timestamped lines, all from 07:14Z onward, and the exports step at
+# 07:05Z — the step that had failed twelve nights running — was gone before
+# anyone could read why. A chain that destroys its own diagnostics is worse than
+# one that keeps none, because the green-looking remainder reads as the whole run.
+LOG_START_LINES=0
+[ -f "$LOG" ] && LOG_START_LINES="$(wc -l < "$LOG" | tr -d ' ')"
+
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
 # ── THE DEATH THAT LEFT NO LINE (2026-08-23) ─────────────────────────────────
@@ -205,6 +217,24 @@ carr_chain_exit() {             # carr_chain_exit <exit-status>
     print -r -- "nightly receipt: died_before_completion=1 exit=$rc"
     print -r -- "nightly result: chain_failed"
   fi
+  # ── KEEP THIS RUN'S OWN LOG BEFORE THE ROLLING TRIM ────────────────────────
+  # Here rather than at the foot of the script because the foot is only reached
+  # by a chain that completes, and a chain that DIES is exactly the one whose
+  # log is worth keeping. carr_chain_exit runs on both paths.
+  local runlog_dir="$REPO/out/nightly-runs"
+  mkdir -p "$runlog_dir" 2>/dev/null || true
+  if [ -f "$LOG" ] && [ -d "$runlog_dir" ]; then
+    tail -n "+$(( LOG_START_LINES + 1 ))" "$LOG" \
+      > "$runlog_dir/nightly-$(date -u '+%Y%m%dT%H%M%SZ').log" 2>/dev/null || true
+    # Last 14 runs. Bounded on purpose: the point is diagnosing the last two
+    # weeks of nightlies, not keeping an archive nobody prunes.
+    ls -1t "$runlog_dir"/nightly-*.log 2>/dev/null | tail -n +15 | while read -r stale; do
+      rm -f "$stale"
+    done
+  fi
+  # Keep the rolling log from growing without bound. The per-run archive above
+  # is what a diagnosis reads; this file is the recent-history tail.
+  tail -n 2000 "$LOG" > "$LOG.trim" 2>/dev/null && mv "$LOG.trim" "$LOG"
   [ "$LOCK_HELD" -eq 1 ] && carr_release_lock
   return 0
 }
@@ -1423,6 +1453,6 @@ else
   print -r -- "nightly result: chain_failed"
 fi
 
-# Keep the log from growing without bound: last 2000 lines is several months.
-tail -n 2000 "$LOG" > "$LOG.trim" && mv "$LOG.trim" "$LOG"
+# The trim moved into carr_chain_exit, which runs on the dead path too, and it
+# now happens AFTER this run has been archived to out/nightly-runs/.
 exit "$rc_total"
