@@ -206,8 +206,11 @@ def main() -> int:
     print("F03 production migration: exact reviewed composition; runner owns atomicity")
     dsn = os.environ.get("CARR_CI_DATABASE_URL")
     psql = os.environ.get("CARR_F03_PSQL")
-    if dsn or psql:
-        assert dsn and psql, "CARR_CI_DATABASE_URL and CARR_F03_PSQL must travel together"
+    # The hosted gates class carries an ambient CARR_CI_DATABASE_URL for other
+    # checks.  CARR_F03_PSQL is the local-db runner's explicit opt-in to this
+    # test's PostgreSQL fixture, which otherwise runs after canonical CI.
+    if psql:
+        assert dsn, "CARR_F03_PSQL requires CARR_CI_DATABASE_URL"
         run_postgres_acceptance(dsn, psql)
     return 0
 
