@@ -1348,6 +1348,8 @@ test("PROVENANCE: the store admits only the row the database itself named a make
     const recorder = readFileSync(join(REPO, "tools", "ops-record.py"), "utf8");
     const migration = readFileSync(
       join(REPO, "migrations", "0504_release_maker_session_provenance.sql"), "utf8");
+    const environmentIdentity = readFileSync(
+      join(REPO, "migrations", "0513_release_candidate_environment_identity.sql"), "utf8");
     const candidateQuery = storeSource.slice(storeSource.indexOf("from ops.release r"));
     assert.match(candidateQuery, /and r\.source_kind = 'wrapper'/,
       "the candidate store no longer requires the one writer's own source kind");
@@ -1370,6 +1372,8 @@ test("PROVENANCE: the store admits only the row the database itself named a make
     // makes the two text columns above believable rather than merely conventional.
     assert.match(candidateQuery, /and r\.maker_authority_verified/,
       "the candidate store trusts the two text columns without the database's own mark");
+    assert.match(candidateQuery, /and r\.environment = 'production'/,
+      "the candidate store can confuse staging history with its Production subject");
 
     // THE RECORDER FILES THE ROW ON THE AUTHORITY CREDENTIAL, and asserts
     // nothing about who made it. The seventh round put the insert behind a
@@ -1412,7 +1416,13 @@ test("PROVENANCE: the store admits only the row the database itself named a make
       "a typed derivation marker is no longer refused in words");
     assert.match(migration,
       /create unique index if not exists release_authority_candidate_sha_uniq\s*\n\s*on ops\.release \(git_sha\) where maker_authority_verified;/,
-      "one revision may still carry two authority-filed rows");
+      "0504's original global authority uniqueness changed instead of receiving a forward migration");
+    assert.match(environmentIdentity,
+      /drop index ops\.release_authority_candidate_sha_uniq;/,
+      "the forward repair does not replace 0504's global index");
+    assert.match(environmentIdentity,
+      /create unique index release_authority_candidate_sha_uniq\s*\n\s*on ops\.release \(git_sha\)\s*\n\s*where maker_authority_verified and environment = 'production';/,
+      "authority-filed Production candidates are not unique independently of staging history");
 
     // AND THE ONE LINE THIS MIGRATION DOES NOT CARRY IS A DECISION, asserted so it
     // cannot become drift. Neither spelling of the capability is here: not the
