@@ -30,6 +30,7 @@ CHECKS = (
     "local-db-ci --class migration",
     "main canary (gates, migration, types, freshness)",
 )
+HTTP_USER_AGENT = "DoctorCRE-WR95-Rehearsal/1.0"
 
 
 class RehearsalError(RuntimeError):
@@ -79,7 +80,7 @@ def staging_host() -> str:
 
 def request_json(url: str, *, token: str | None = None,
                  payload: dict | None = None) -> dict:
-    headers = {"accept": "application/json"}
+    headers = {"accept": "application/json", "user-agent": HTTP_USER_AGENT}
     data = None
     if payload is not None:
         data = json.dumps(payload).encode()
