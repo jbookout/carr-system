@@ -6,16 +6,13 @@
 // what the module SENDS, what it REFUSES, and what it refuses to send — and it
 // is not, and is not treated as, a claim about durable behaviour. The
 // transaction-scoped proofs against a real PostgreSQL live in
-// benchmark-acceptance-postgres.sql, and NO benchmark has been accepted by
-// running either file: acceptance fails closed on the unbound Gate Zero
-// binding, which the last group below asserts directly.
+// benchmark-acceptance-postgres.sql. NO benchmark is durably accepted by
+// running this mock-backed file; the last group proves both the reachable
+// success response and the fail-closed prerequisite paths.
 //
-// The strongest test in this file is the smallest: the acceptance verb issues
-// ZERO statements. A refusal that happens after a query is a refusal that can
-// be mistaken for an acceptance that nearly worked. That assertion survives the
-// coverage binding becoming a real read, because Gate Zero still throws first —
-// and it now means "nothing reaches the database while Gate Zero is unbound"
-// rather than "nothing reaches the database", which is what the module says.
+// Refusal tests assert that prerequisite failures issue only reads and no audit
+// event. The success fixture reaches the full handler and pins its truthful
+// accepted status, effects, and positional audit call.
 //
 // WHAT THIS FILE CAN AND CANNOT REACH, named rather than left implicit.
 // readMeasurementCoverageBinding is still private and still not injectable —
@@ -23,17 +20,15 @@
 // be called directly from here. It IS now exercised, through the review path,
 // which reads the attestation back through the same reader acceptance uses: the
 // four refusals below drive it by handing the mock a record that does not hold
-// up. What still cannot be observed here is that reader firing INSIDE THE
-// ACCEPTANCE PATH, because Gate Zero refuses before it on purpose. That is a
-// consequence of the ordering the module chose, not a gap in it, and
-// benchmark-acceptance-postgres.sql covers the acceptance-side behaviour by
-// calling ops.benchmark_measurement_coverage_binding() directly.
+// up. The successful-acceptance fixture also exercises it inside the acceptance
+// path; benchmark-acceptance-postgres.sql remains the durable database proof.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { digest } from "../src/artifact-trust.js";
 import {
+  BENCHMARK_CELL_DOMAIN_TAG,
   BENCHMARK_COST_VARIANCE_THRESHOLDS, BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_GATE_ID,
   BENCHMARK_MEASUREMENT_SET_SCHEMA, BENCHMARK_PAYLOAD_DOMAIN_TAG, BENCHMARK_PAYLOAD_FIELDS,
   BENCHMARK_PRODUCER_ROLE, BENCHMARK_SLO_THRESHOLDS, BENCHMARK_STEP_REF, GATE_ZERO_STEP_REF,
@@ -50,6 +45,10 @@ import {
   benchmarkDraftRows, benchmarkPayloadFromRows, deriveBenchmarkAcceptor,
   validateBenchmarkDraftPayload,
 } from "../src/benchmark-acceptance-store.v5.js";
+import {
+  FOUNDATION_ASSURANCE_COMPARATORS, FOUNDATION_ASSURANCE_GITHUB_CHECKS,
+  foundationAssuranceEvidenceDigest,
+} from "../src/foundation-assurance-evidence.v5.js";
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -59,6 +58,8 @@ const copy = x => JSON.parse(JSON.stringify(x));
 const DRAFT_ID = "11111111-2222-4333-8444-555555555555";
 const REVIEW_ID = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const KEY = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+const FOUNDATION_CONFIG = JSON.parse(readFileSync(new URL(
+  "../../ops/config/foundation-assurance-benchmark.v1.json", import.meta.url), "utf8"));
 
 /**
  * One minimal admissible payload. Every environment dimension carries exactly
@@ -162,7 +163,10 @@ const writeEvent = async (c, actor, verb, subjectType, subjectId, fields) => {
   c.events.push({ actor, verb, subjectType, subjectId, fields });
 };
 
-const tools = benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolError });
+const tools = benchmarkAcceptanceStoreTools({
+  withEnvelope, writeEvent, ToolError,
+  authenticatedIdentity: { receiptIdentity: () => ({ actor_id: "joe" }) },
+});
 
 const PARTNER = { slug: "joe", human: true, via: "oauth-google" };
 const AGENT = { slug: "codex", human: false, sponsoring_human_slug: "joe" };
@@ -714,6 +718,54 @@ function liveDraftResponse(body = payload()) {
   };
 }
 
+function foundationEvidence(body = payload(), measurementSet = measurements(body)) {
+  const cells = benchmarkRequiredCells(body);
+  const evidence = {
+    schema_version: "doctorcre-v5-foundation-assurance-evidence.v1",
+    source_sha: "a".repeat(40), source_tree: "b".repeat(40),
+    staging_provider_version: "00000000-0000-4000-8000-000000000010",
+    final_provider_version: "00000000-0000-4000-8000-000000000011",
+    release: {
+      key: "release.foundation-assurance.minimum.v1",
+      provider_version: "00000000-0000-4000-8000-000000000011",
+      source_sha: "a".repeat(40), test_evidence_ref: "pending",
+    },
+    database: {
+      environment: "staging", migration: "0512_foundation_assurance_scac_successor.sql",
+      read_only: true, source: "tools/db-tap.py --project staging",
+    },
+    github_checks: FOUNDATION_ASSURANCE_GITHUB_CHECKS.map((name, index) => ({
+      name, conclusion: "success", head_sha: "a".repeat(40), run_id: index + 1,
+      url: `https://github.com/jbookout/carr-system/actions/runs/${index + 1}`,
+    })),
+    benchmark_config_digest: digest(FOUNDATION_CONFIG),
+    benchmark_payload: body,
+    measurements: measurementSet,
+    sample_provenance: cells.map((cell, index) => ({
+      cell_digest: digest([BENCHMARK_CELL_DOMAIN_TAG, cell]),
+      origin: `https://staging.doctorcre.com/measurement/${index}`,
+      sample_count: FOUNDATION_CONFIG.samples_per_cell,
+      warmup_count: FOUNDATION_CONFIG.warmup_runs,
+    })),
+    comparators: FOUNDATION_ASSURANCE_COMPARATORS.map(id => ({
+      id, status: "pass", detail_digest: digest({ id, ok: true }),
+      origin: `https://staging.doctorcre.com/comparator/${id}`,
+    })),
+    captured_at: "2026-09-14T13:30:00.000Z",
+  };
+  const evidenceDigest = foundationAssuranceEvidenceDigest(evidence);
+  evidence.release.test_evidence_ref = `safe:wr95-evidence/${evidenceDigest.slice(7)}`;
+  return evidence;
+}
+
+function reviewMaterialResponse(body = payload(), measurementSet = measurements(body)) {
+  return {
+    foundation_assurance_benchmark_review_material: [{
+      material: { config: FOUNDATION_CONFIG, evidence: foundationEvidence(body, measurementSet) },
+    }],
+  };
+}
+
 /**
  * The row the private coverage reader's own statement comes back with.
  *
@@ -741,6 +793,7 @@ function coverageBindingResponse(body = payload(), overrides = {}) {
 function passingReview(body, extraResponses = {}) {
   const c = mockDatabase({
     ...liveDraftResponse(body),
+    ...reviewMaterialResponse(body),
     benchmark_review_manifest_draft: [{ id: REVIEW_ID }],
     ...coverageBindingResponse(body),
     ...extraResponses,
@@ -749,7 +802,6 @@ function passingReview(body, extraResponses = {}) {
     idempotency_key: KEY, draft_id: DRAFT_ID,
     reviewed_payload_digest: benchmarkPayloadDigest(body),
     verdict: "pass", review_summary: "matrix complete, every cell inside its fixed SLO",
-    measurements: measurements(body),
   })];
 }
 
@@ -757,6 +809,7 @@ test("a passing review proves coverage against the stored payload and binds its 
   const body = payload();
   const c = mockDatabase({
     ...liveDraftResponse(body),
+    ...reviewMaterialResponse(body),
     benchmark_review_manifest_draft: [{ id: REVIEW_ID }],
     ...coverageBindingResponse(body),
   });
@@ -765,13 +818,12 @@ test("a passing review proves coverage against the stored payload and binds its 
     idempotency_key: KEY, draft_id: DRAFT_ID,
     reviewed_payload_digest: benchmarkPayloadDigest(body),
     verdict: "pass", review_summary: "matrix complete, every cell inside its fixed SLO",
-    measurements: evidence,
   });
 
-  // THREE STATEMENTS NOW, NOT TWO: read the draft, write the review with its
-  // attestation, read the attestation back. The third is the point of the unit.
-  assert.equal(c.calls.length, 3);
-  const params = c.calls[1].params;
+  // FOUR STATEMENTS: read the draft, read server-derived evidence, write the
+  // review with its attestation, then read the attestation back.
+  assert.equal(c.calls.length, 4);
+  const params = c.calls[2].params;
   // The digest written is the one read back from the rows, not the one supplied.
   assert.equal(params[2], benchmarkPayloadDigest(body));
   assert.equal(params[3], "pass");
@@ -804,7 +856,7 @@ test("the attestation carries the evaluator's OWN returned payload digest, not a
   const body = payload();
   const [c, promise] = passingReview(body);
   await promise;
-  const attestation = JSON.parse(c.calls[1].params[6]);
+  const attestation = JSON.parse(c.calls[2].params[6]);
   // FOUR FIELDS, CLOSED. An extra one would be a value the SQL side refuses.
   assert.deepEqual(Object.keys(attestation).sort(), [
     "benchmark_payload_digest", "coverage_proved_by", "evaluation_digest",
@@ -829,17 +881,16 @@ test("the attestation carries the evaluator's OWN returned payload digest, not a
 test("the attestation is never a caller input: it is not in the verb's schema", () => {
   const schema = tools["review-benchmark-manifest-draft"].inputSchema;
   assert.equal(schema.additionalProperties, false);
-  // "a coverage verdict supplied by a caller" is refused, and this is the check
-  // that keeps it refused: the MCP caller supplies measurements and nothing else
-  // about coverage. Every attested value is derived on the write path.
+  // Every coverage input and attested value is derived from server-held release
+  // evidence; none is accepted from the MCP caller.
   for (const key of ["coverage_proved_by", "coverage", "coverage_attestation",
     "benchmark_payload_digest", "evaluation_digest", "measurement_set_digest"]) {
     assert.equal(Object.hasOwn(schema.properties, key), false,
       `${key} is a caller input on the review verb`);
   }
   assert.deepEqual(Object.keys(schema.properties).sort(), [
-    "draft_id", "idempotency_key", "measurements", "review_summary",
-    "reviewed_payload_digest", "verdict",
+    "draft_id", "idempotency_key", "review_summary", "reviewed_payload_digest",
+    "verdict",
   ]);
 });
 
@@ -961,46 +1012,47 @@ test("an astral review summary is measured in UTF-16 code units, as SQL measures
   assert.equal(c.calls.length, 0);
 });
 
-test("a passing review with no measurement set is refused", async () => {
-  const c = mockDatabase(liveDraftResponse());
+test("a passing review with no server-derived evidence is refused", async () => {
+  const c = mockDatabase({
+    ...liveDraftResponse(),
+    foundation_assurance_benchmark_review_material: [{ material: null }],
+  });
   const refused = await refusal(tools["review-benchmark-manifest-draft"].handler(c, PARTNER, {
     idempotency_key: KEY, draft_id: DRAFT_ID,
     reviewed_payload_digest: benchmarkPayloadDigest(payload()),
     verdict: "pass", review_summary: "looks fine",
   }));
-  assert.equal(refused.error, "benchmark_measurement_set_required");
-  assert.equal(c.calls.length, 1, "the review reached the database without measurements");
+  assert.equal(refused.error, "foundation_assurance_evidence_unavailable");
+  assert.equal(c.calls.length, 2);
 });
 
-test("a passing review whose measurements miss a required cell is refused", async () => {
+test("a passing review whose server evidence misses a required cell is refused", async () => {
   const body = payload();
-  const c = mockDatabase(liveDraftResponse(body));
   const evidence = measurements(body);
   evidence.cells = evidence.cells.slice(1);
+  const c = mockDatabase({ ...liveDraftResponse(body), ...reviewMaterialResponse(body, evidence) });
   const refused = await refusal(tools["review-benchmark-manifest-draft"].handler(c, PARTNER, {
     idempotency_key: KEY, draft_id: DRAFT_ID,
     reviewed_payload_digest: benchmarkPayloadDigest(body),
     verdict: "pass", review_summary: "partial run",
-    measurements: evidence,
   }));
   assert.equal(refused.error, "benchmark_matrix_coverage_incomplete");
-  assert.equal(c.calls.length, 1);
+  assert.equal(c.calls.length, 2);
 });
 
-test("a passing review whose measurements miss an SLO is refused", async () => {
+test("a passing review whose server evidence misses an SLO is refused", async () => {
   const body = payload();
-  const c = mockDatabase(liveDraftResponse(body));
   const evidence = measurements(body);
   const ack = evidence.cells.find(entry => entry.cell.metric === "command_acknowledgement_ms");
   ack.samples = Array.from({ length: 20 }, () => 5000);
+  const c = mockDatabase({ ...liveDraftResponse(body), ...reviewMaterialResponse(body, evidence) });
   const refused = await refusal(tools["review-benchmark-manifest-draft"].handler(c, PARTNER, {
     idempotency_key: KEY, draft_id: DRAFT_ID,
     reviewed_payload_digest: benchmarkPayloadDigest(body),
     verdict: "pass", review_summary: "slow ack",
-    measurements: evidence,
   }));
   assert.equal(refused.error, "benchmark_slo_not_met");
-  assert.equal(c.calls.length, 1);
+  assert.equal(c.calls.length, 2);
 });
 
 test("a review naming a digest the draft no longer produces is refused", async () => {
@@ -1061,7 +1113,7 @@ test("a review writes its audit event with a real actor, verb and subject", asyn
   assert.equal(reviewed.fields.new.measurement_set_digest, digest(measurements(body)));
 });
 
-// --- acceptance, which fails closed -----------------------------------------
+// --- acceptance: reachable success and fail-closed prerequisites ------------
 
 test("acceptance fails closed when no Gate Zero outcome has been recorded, and writes nothing", async () => {
   // THE ASSERTION MOVED WITH THE POLICY, AND THIS IS THE HONEST FORM OF IT.
@@ -1137,11 +1189,9 @@ test("a current Gate Zero row whose stored digest diverges from its receipt refu
   assert.match(c.calls[0].sql, /^\s*select/i);
 });
 
-test("the acceptance audit call is positional, checked at the source because it is unreachable", () => {
-  // Driving this call needs all three durable prerequisites at once; the focused
-  // refusal tests deliberately stop at the first missing or inconsistent one.
-  // Keep the positional audit-call contract pinned at its only call site until a
-  // full acceptance fixture can reach it without weakening those prerequisites.
+test("the acceptance audit call remains positional at its source call site", () => {
+  // Keep the exact call shape pinned in addition to the successful handler
+  // fixture so a future argument-order regression fails at the smallest seam.
   const source = readFileSync(new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
   const call = source.match(/writeEvent\([^;]*"accept-benchmark-manifest-draft"[^;]*;/);
   assert.ok(call, "the acceptance path no longer writes an audit event");
@@ -1175,6 +1225,39 @@ test("the acceptance verb says all three bindings are bound AND that it still re
   assert.ok(/not a claim of lineage/i.test(description));
 });
 
+test("a successful acceptance truthfully reports that acceptance was enabled", async () => {
+  const receipt = {
+    candidate_digest: D(2), status: "pass", evidence_ref: "safe:test:gate-zero",
+  };
+  const outcomeDigest = digest(["consumer-gate-receipt.v1", receipt]);
+  const c = mockDatabase({
+    "from ops.gate_zero_read_only_outcome": [{
+      step_ref: GATE_ZERO_STEP_REF,
+      receipt,
+      outcome_digest: outcomeDigest,
+      observed_at: "2026-09-14T15:00:00Z",
+    }],
+    ...coverageBindingResponse(),
+    ...liveDraftResponse(),
+    benchmark_accept_manifest_draft: [{ id: "dddddddd-eeee-4fff-8000-111111111111" }],
+  });
+
+  const result = await tools["accept-benchmark-manifest-draft"].handler(c, PARTNER, {
+    idempotency_key: KEY,
+    draft_id: DRAFT_ID,
+    accepted_payload_digest: benchmarkPayloadDigest(payload()),
+    review_id: REVIEW_ID,
+    portfolio_ref: "WR-DOCTORCRE-V5",
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.status, "accepted");
+  assert.equal(result.effects.acceptance_enabled, true);
+  assert.equal(result.effects.benchmark_gate_closed_for_draft, true);
+  assert.equal(result.effects.draft_content_frozen, true);
+  assert.equal(c.events.length, 1);
+});
+
 test("acceptance refuses a non-partner before it reaches the Gate Zero refusal", async () => {
   const c = mockDatabase();
   const refused = await refusal(tools["accept-benchmark-manifest-draft"].handler(c, AGENT, {
@@ -1187,9 +1270,9 @@ test("acceptance refuses a non-partner before it reaches the Gate Zero refusal",
   assert.equal(c.calls.length, 0);
 });
 
-test("no verb in this module can report an accepted benchmark today", async () => {
-  // Propose and review both say so in their own results; acceptance cannot
-  // produce a result at all. Together that is the whole surface.
+test("proposal and review do not claim acceptance, and acceptance refuses without Gate Zero", async () => {
+  // Propose and review both say so in their own results; an acceptance without
+  // a current Gate Zero outcome still refuses before any write.
   const c = mockDatabase({
     "select exists (select 1 from ops.gate_zero_read_only_outcome)": [{ recorded: false }],
     "from ops.gate_zero_read_only_outcome": [],

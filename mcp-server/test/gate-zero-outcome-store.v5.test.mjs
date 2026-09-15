@@ -36,7 +36,7 @@
 
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { types } from "node:util";
@@ -71,6 +71,20 @@ const MIGRATION = readFileSync(
   new URL("../../migrations/0502_gate_zero_read_only_outcome.sql", import.meta.url), "utf8");
 const CONVERGENCE_MIGRATION = readFileSync(
   new URL("../../migrations/0506_gate_zero_applied_0505_recovery.sql", import.meta.url), "utf8");
+const FOUNDATION_ASSURANCE_MIGRATION_PRESENT = existsSync(
+  new URL("../../migrations/0508_foundation_assurance_minimum_receipt.sql", import.meta.url),
+);
+const FOUNDATION_ASSURANCE_ORACLE_VERBS = [
+  "produce-assurance-fabric-preactivation-receipt",
+  "produce-foundation-assurance-benchmark-coverage",
+  "produce-foundation-control-plane-preactivation-receipt",
+  "produce-global-execution-contract-receipt",
+  "produce-global-no-phi-boundary-receipt",
+  "produce-global-prompt-injection-boundary-receipt",
+  "produce-global-secrets-boundary-receipt",
+  "produce-global-source-authority-receipt",
+  "record-foundation-assurance-minimum-outcome",
+];
 
 test("the public verb description promises immutable, transparent convergence", () => {
   const description = TOOLS[VERB].description;
@@ -294,10 +308,14 @@ test("the verb's input is one idempotency key and nothing else", () => {
   assert.equal(tool.inputSchema.additionalProperties, false);
   assert.deepEqual(Object.keys(tool.inputSchema.properties), ["idempotency_key"]);
   assert.deepEqual(tool.inputSchema.required, ["idempotency_key"]);
-  // IT IS THE ONLY VERB CARRYING THE FLAG. A second one arriving without its own
-  // coverage is exactly what this assertion is for.
+  // Gate Zero is the only oracle verb until the foundation-assurance migration
+  // exists. From that migration onward, its complete reviewed oracle set is
+  // mandatory; an unrelated addition or later removal still fails this pin.
   const flagged = Object.entries(TOOLS).filter(([, t]) => t.oracleSeatOnly === true).map(([n]) => n);
-  assert.deepEqual(flagged, [VERB]);
+  assert.deepEqual(flagged, [
+    VERB,
+    ...(FOUNDATION_ASSURANCE_MIGRATION_PRESENT ? FOUNDATION_ASSURANCE_ORACLE_VERBS : []),
+  ]);
 });
 
 test("MUTATION — every receipt-shaped argument is refused as unregistered, and nothing is written", async () => {

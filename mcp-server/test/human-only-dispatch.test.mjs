@@ -14,10 +14,14 @@
 // noticed.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { TOOLS, ToolError, executeRegisteredTool } from "../src/tools.js";
 import { authorizationClassForActor } from "../src/identity.js";
 
 const humanOnlyVerbs = Object.keys(TOOLS).filter((name) => TOOLS[name].humanOnly === true).sort();
+const foundationAssuranceMigrationPresent = existsSync(
+  new URL("../../migrations/0508_foundation_assurance_minimum_receipt.sql", import.meta.url),
+);
 
 // The exact reproduction principal from the release review: a verified NONHUMAN
 // local actor that partner-authority.js resolves to sponsor 'joe', i.e. the one
@@ -73,6 +77,7 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
   // over: it means a verb gained or lost the flag, and that is a decision
   // somebody should see in a diff.
   assert.deepEqual(humanOnlyVerbs, [
+    ...(foundationAssuranceMigrationPresent ? ["accept-benchmark-manifest-draft"] : []),
     "accept-outcome-feedback",
     "accept-portfolio-revision",
     "accept-ready-plan",

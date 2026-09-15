@@ -75,6 +75,7 @@ ROLE_GRANT_MIGRATIONS = {
     "carr_program5_forward_fix_verifiers": "0315_program5_forward_fix_rehearsal.sql",
     "carr_renewal_source_attestors": "0249_renewal_signed_source_ingress.sql",
     "carr_gate_zero_producer": "0502_gate_zero_read_only_outcome.sql",
+    "carr_foundation_assurance_oracle": "0511_foundation_assurance_minimum_outcome.sql",
 }
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence",
@@ -82,7 +83,7 @@ APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver",
              "carr_program5_forward_fix_verifiers",
              "carr_renewal_source_attestors",
-             "carr_gate_zero_producer"]
+             "carr_gate_zero_producer", "carr_foundation_assurance_oracle"]
 MEMBERSHIP_ONLY = ["neondb_owner"]
 
 failures: list[str] = []
@@ -216,6 +217,9 @@ def main():
     )
     check("membership renderer de-duplicates only identical rendered lines",
           membership_query is not None)
+
+    check("all five ACL renderers retain the foundation-assurance oracle",
+          generator.count("('carr_foundation_assurance_oracle')") == 5)
 
     # THE WIDENING GUARD. Every grantee in the file must be an app role —
     # or neondb_owner, on membership lines only. Anything else means some

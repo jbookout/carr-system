@@ -67,6 +67,7 @@ READER_BUNDLE_ROLE = "carr_reader"
 # the snapshot seal for every other database in the same cluster until the
 # snapshot is regenerated. The migration's header carries the measurement.
 GATE_ZERO_PRODUCER_ROLE = "carr_gate_zero_producer"
+FOUNDATION_ASSURANCE_ORACLE_ROLE = "carr_foundation_assurance_oracle"
 LOCK_KEY = 7301961134306001
 BOOTSTRAP_SUPERUSER_OID = 10
 WRANGLER = REPO / "mcp-server/node_modules/.bin/wrangler"
@@ -84,6 +85,7 @@ FORBIDDEN_ENV = (
     "CARR_DB_STAGING_WRITER_URL",
     "CARR_DB_STAGING_READER_URL",
     "CARR_DB_STAGING_GATE_ZERO_WRITER_URL",
+    "CARR_DB_STAGING_FOUNDATION_ASSURANCE_WRITER_URL",
     "PGHOST",
     "PGPORT",
     "PGDATABASE",
@@ -149,6 +151,7 @@ REPLACEMENT_VERIFIER_KEY = "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL"
 REPLACEMENT_VERIFIER_ROLE = "carr_program5_forward_fix_verifier"
 WORKER_DATABASE_SECRET_NAMES = (
     "DATABASE_URL_READER", "DATABASE_URL_WRITER", "DATABASE_URL_GATE_ZERO_WRITER",
+    "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER",
 )
 WORKER_ENV_ALLOWLIST = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL",
@@ -295,6 +298,9 @@ PROFILES = (
     LoginProfile("writer", APP_ROLE, BUNDLE_ROLE, "DATABASE_URL_WRITER"),
     LoginProfile("gate_zero_producer", GATE_ZERO_PRODUCER_ROLE,
                  None, "DATABASE_URL_GATE_ZERO_WRITER", created_by_migration=True),
+    LoginProfile("foundation_assurance_oracle", FOUNDATION_ASSURANCE_ORACLE_ROLE,
+                 None, "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER",
+                 created_by_migration=True),
 )
 
 
