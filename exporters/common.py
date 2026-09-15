@@ -71,8 +71,28 @@ KEEP_GENERATIONS = 7
 # ops/export-generation-retry-selftest.py pins both the total wall-clock budget
 # and that relationship, because a budget is the part of a retry that silently
 # regresses to a value which still looks like a retry.
+#
+# ETIMEDOUT JOINED THE SET ON 2026-09-15, AND IT IS THE ONE THAT WAS ACTUALLY
+# FIRING. Measured on this Mac at 16:35Z against the six live export files:
+# every one of them is a dehydrated OneDrive placeholder (st_blocks == 0), so
+# the nightly's FIRST read of each is a cold cloud download. That read returned
+# errno 60, ETIMEDOUT -- not EAGAIN and not EDEADLK -- which was NOT in this set,
+# so it escaped on attempt one and the backoff below was never entered at all.
+# Six straight nights (2026-09-10 through 09-15) lost all six targets that way,
+# twelve nights running lost at least one, while every by-hand run in the same
+# span succeeded.
+#
+# THE TIMEOUT IS ITSELF THE FIX'S EVIDENCE: the failed read is what asks the
+# FileProvider to hydrate the file, so the very next read returns instantly.
+# Measured in the same session -- attempt 1 ETIMEDOUT after 1.04s, attempts 2
+# through 6 OK in 0.00s. One retry would have carried it. The earlier reading of
+# this failure, that the budget was being exhausted, was wrong in the other
+# direction and is corrected here: the budget was never entered.
+#
+# EACCES and friends stay non-retryable on purpose. A permission, path or
+# storage failure is not a hydration stall and must reach the exporter.
 GENERATION_COPY_ATTEMPTS = 6
-GENERATION_COPY_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EDEADLK})
+GENERATION_COPY_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EDEADLK, errno.ETIMEDOUT})
 GENERATION_COPY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 5.0, 15.0)
 
 

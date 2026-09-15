@@ -119,8 +119,13 @@ def main():
         # 35, and on Linux those numbers swap. Exact in both directions, so a
         # permission or storage failure still escapes instead of burning the
         # budget and surfacing late.
-        check("only the two FileProvider transients are retryable",
-              common.GENERATION_COPY_RETRY_ERRNOS == frozenset({errno.EAGAIN, errno.EDEADLK}),
+        # ETIMEDOUT joined on 2026-09-15 and is the one that was actually
+        # firing nightly: a dehydrated OneDrive file's first read times out
+        # rather than returning either of the other two. Exact set, still, so a
+        # permission or storage failure escapes instead of burning the budget.
+        check("exactly the three FileProvider transients are retryable",
+              common.GENERATION_COPY_RETRY_ERRNOS ==
+              frozenset({errno.EAGAIN, errno.EDEADLK, errno.ETIMEDOUT}),
               repr(sorted(common.GENERATION_COPY_RETRY_ERRNOS)))
 
         print("3. EAGAIN is transient, but exhaustion remains an error")
@@ -179,6 +184,39 @@ def main():
         check("permanent failure publishes no generation", not generation_files(permanent_target))
         check("permanent failure removes its staged file",
               not list(gen_dir_for(permanent_target).glob(".*")))
+
+        print("4b. a cold-cloud read timeout retries and then publishes")
+        # THE REAL NIGHTLY FAILURE, pinned. A dehydrated OneDrive file's first
+        # read returns ETIMEDOUT, and that read is what triggers hydration, so
+        # the retry succeeds. Before 2026-09-15 this errno was not in the retry
+        # set and escaped on attempt one, which cost six consecutive nights of
+        # exports. The case asserts BOTH halves: it retries, and it publishes.
+        timeout_target = tmp / "vendors-timeout.md"
+        timeout_target.write_bytes(b"hydrates on the second read\n")
+        timeout_reads, timeout_sleeps = [], []
+
+        def timed_out_once(path):
+            if path == timeout_target and not timeout_reads:
+                timeout_reads.append(path)
+                raise OSError(errno.ETIMEDOUT, "Operation timed out")
+            if path == timeout_target:
+                timeout_reads.append(path)
+            return real_read_bytes(path)
+
+        Path.read_bytes = timed_out_once
+        common.time.sleep = timeout_sleeps.append
+        try:
+            common.keep_generation(timeout_target)
+        finally:
+            Path.read_bytes, common.time.sleep = real_read_bytes, real_sleep
+        check("cold-read timeout is retried rather than escaping",
+              len(timeout_reads) == 2 and timeout_sleeps == [common.GENERATION_COPY_BACKOFF_SECONDS[0]],
+              f"reads={len(timeout_reads)} sleeps={timeout_sleeps}")
+        check("cold-read timeout still publishes one complete generation",
+              len(generation_files(timeout_target)) == 1,
+              repr(generation_files(timeout_target)))
+        check("ETIMEDOUT is declared retryable",
+              errno.ETIMEDOUT in common.GENERATION_COPY_RETRY_ERRNOS)
 
         print("5. an existing same-second generation is never overwritten")
         collision_target = tmp / "client-roster.md"
