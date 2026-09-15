@@ -6,16 +6,13 @@
 // what the module SENDS, what it REFUSES, and what it refuses to send — and it
 // is not, and is not treated as, a claim about durable behaviour. The
 // transaction-scoped proofs against a real PostgreSQL live in
-// benchmark-acceptance-postgres.sql, and NO benchmark has been accepted by
-// running either file: acceptance fails closed on the unbound Gate Zero
-// binding, which the last group below asserts directly.
+// benchmark-acceptance-postgres.sql. NO benchmark is durably accepted by
+// running this mock-backed file; the last group proves both the reachable
+// success response and the fail-closed prerequisite paths.
 //
-// The strongest test in this file is the smallest: the acceptance verb issues
-// ZERO statements. A refusal that happens after a query is a refusal that can
-// be mistaken for an acceptance that nearly worked. That assertion survives the
-// coverage binding becoming a real read, because Gate Zero still throws first —
-// and it now means "nothing reaches the database while Gate Zero is unbound"
-// rather than "nothing reaches the database", which is what the module says.
+// Refusal tests assert that prerequisite failures issue only reads and no audit
+// event. The success fixture reaches the full handler and pins its truthful
+// accepted status, effects, and positional audit call.
 //
 // WHAT THIS FILE CAN AND CANNOT REACH, named rather than left implicit.
 // readMeasurementCoverageBinding is still private and still not injectable —
@@ -23,11 +20,8 @@
 // be called directly from here. It IS now exercised, through the review path,
 // which reads the attestation back through the same reader acceptance uses: the
 // four refusals below drive it by handing the mock a record that does not hold
-// up. What still cannot be observed here is that reader firing INSIDE THE
-// ACCEPTANCE PATH, because Gate Zero refuses before it on purpose. That is a
-// consequence of the ordering the module chose, not a gap in it, and
-// benchmark-acceptance-postgres.sql covers the acceptance-side behaviour by
-// calling ops.benchmark_measurement_coverage_binding() directly.
+// up. The successful-acceptance fixture also exercises it inside the acceptance
+// path; benchmark-acceptance-postgres.sql remains the durable database proof.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -1119,7 +1113,7 @@ test("a review writes its audit event with a real actor, verb and subject", asyn
   assert.equal(reviewed.fields.new.measurement_set_digest, digest(measurements(body)));
 });
 
-// --- acceptance, which fails closed -----------------------------------------
+// --- acceptance: reachable success and fail-closed prerequisites ------------
 
 test("acceptance fails closed when no Gate Zero outcome has been recorded, and writes nothing", async () => {
   // THE ASSERTION MOVED WITH THE POLICY, AND THIS IS THE HONEST FORM OF IT.
@@ -1195,11 +1189,9 @@ test("a current Gate Zero row whose stored digest diverges from its receipt refu
   assert.match(c.calls[0].sql, /^\s*select/i);
 });
 
-test("the acceptance audit call is positional, checked at the source because it is unreachable", () => {
-  // Driving this call needs all three durable prerequisites at once; the focused
-  // refusal tests deliberately stop at the first missing or inconsistent one.
-  // Keep the positional audit-call contract pinned at its only call site until a
-  // full acceptance fixture can reach it without weakening those prerequisites.
+test("the acceptance audit call remains positional at its source call site", () => {
+  // Keep the exact call shape pinned in addition to the successful handler
+  // fixture so a future argument-order regression fails at the smallest seam.
   const source = readFileSync(new URL("../src/benchmark-acceptance-store.v5.js", import.meta.url), "utf8");
   const call = source.match(/writeEvent\([^;]*"accept-benchmark-manifest-draft"[^;]*;/);
   assert.ok(call, "the acceptance path no longer writes an audit event");
@@ -1233,6 +1225,39 @@ test("the acceptance verb says all three bindings are bound AND that it still re
   assert.ok(/not a claim of lineage/i.test(description));
 });
 
+test("a successful acceptance truthfully reports that acceptance was enabled", async () => {
+  const receipt = {
+    candidate_digest: D(2), status: "pass", evidence_ref: "safe:test:gate-zero",
+  };
+  const outcomeDigest = digest(["consumer-gate-receipt.v1", receipt]);
+  const c = mockDatabase({
+    "from ops.gate_zero_read_only_outcome": [{
+      step_ref: GATE_ZERO_STEP_REF,
+      receipt,
+      outcome_digest: outcomeDigest,
+      observed_at: "2026-09-14T15:00:00Z",
+    }],
+    ...coverageBindingResponse(),
+    ...liveDraftResponse(),
+    benchmark_accept_manifest_draft: [{ id: "dddddddd-eeee-4fff-8000-111111111111" }],
+  });
+
+  const result = await tools["accept-benchmark-manifest-draft"].handler(c, PARTNER, {
+    idempotency_key: KEY,
+    draft_id: DRAFT_ID,
+    accepted_payload_digest: benchmarkPayloadDigest(payload()),
+    review_id: REVIEW_ID,
+    portfolio_ref: "WR-DOCTORCRE-V5",
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.status, "accepted");
+  assert.equal(result.effects.acceptance_enabled, true);
+  assert.equal(result.effects.benchmark_gate_closed_for_draft, true);
+  assert.equal(result.effects.draft_content_frozen, true);
+  assert.equal(c.events.length, 1);
+});
+
 test("acceptance refuses a non-partner before it reaches the Gate Zero refusal", async () => {
   const c = mockDatabase();
   const refused = await refusal(tools["accept-benchmark-manifest-draft"].handler(c, AGENT, {
@@ -1245,9 +1270,9 @@ test("acceptance refuses a non-partner before it reaches the Gate Zero refusal",
   assert.equal(c.calls.length, 0);
 });
 
-test("no verb in this module can report an accepted benchmark today", async () => {
-  // Propose and review both say so in their own results; acceptance cannot
-  // produce a result at all. Together that is the whole surface.
+test("proposal and review do not claim acceptance, and acceptance refuses without Gate Zero", async () => {
+  // Propose and review both say so in their own results; an acceptance without
+  // a current Gate Zero outcome still refuses before any write.
   const c = mockDatabase({
     "select exists (select 1 from ops.gate_zero_read_only_outcome)": [{ recorded: false }],
     "from ops.gate_zero_read_only_outcome": [],

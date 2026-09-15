@@ -957,14 +957,14 @@ const RECORD_LAYER_EFFECTS = deepFreeze({
  * origin is the first current passing foundation-assurance-minimum receipt,
  * which this rail neither issues nor reaches.
  *
- * `acceptance_enabled: false` is on it because this object is UNREACHABLE today.
- * Two bindings are unbound, both refuse before any query, and no benchmark has
- * been or can be accepted through this verb; a result shape written out in
- * advance must not read as though the path it describes is live.
+ * This object is returned only after every prerequisite answers and the
+ * acceptance transaction succeeds, so `acceptance_enabled` must be true. A
+ * false value here would contradict both the accepted status and the durable
+ * gate-closing effects reported beside it.
  */
 const ACCEPTANCE_EFFECTS = deepFreeze({
   ...RECORD_LAYER_EFFECTS,
-  acceptance_enabled: false,
+  acceptance_enabled: true,
   benchmark_gate_closed_for_draft: true,
   draft_content_frozen: true,
   grants_dispatch_activation_or_execution: false,
@@ -1371,8 +1371,7 @@ export function benchmarkAcceptanceStoreTools({
           // closes the benchmark gate for this draft and freezes the draft's
           // content. It does not start the Journey 1 clock — that origin is the
           // first current passing foundation-assurance-minimum receipt, which
-          // this rail neither issues nor reaches — and it is not reachable
-          // today, which ACCEPTANCE_EFFECTS says in its own field.
+          // this rail neither issues nor reaches.
           effects: ACCEPTANCE_EFFECTS,
         };
       }),
