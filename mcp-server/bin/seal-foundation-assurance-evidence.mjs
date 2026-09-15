@@ -372,7 +372,7 @@ function comparatorRows(bindings, facts, readback, github_checks) {
     "global-no-phi-boundary": facts.raw_table_write === false,
     "global-prompt-injection-boundary": github_checks.every(row => row.conclusion === "success"),
     "global-secrets-boundary": facts.oracle_role === true && facts.raw_table_write === false,
-    "global-source-authority": readback.git_sha === bindings.source_sha,
+    "global-source-authority": stagingReleaseSource(readback) === bindings.source_sha,
   };
   return FOUNDATION_ASSURANCE_COMPARATORS.map(id => {
     if (checks[id] !== true) fail("live_comparator_failed", id);
