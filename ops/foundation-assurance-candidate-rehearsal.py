@@ -175,6 +175,43 @@ def staging_snapshot(snapshot_dsn: str, *, connect=psycopg.connect) -> dict:
     return row[0]
 
 
+def foundation_assurance_facts(snapshot_dsn: str, *, connect=psycopg.connect) -> dict:
+    """Acquire the WR95 database comparators from the receipted replacement."""
+    sql = """select jsonb_build_object(
+ 'migration',(select max(filename collate "C") from public.schema_migrations),
+ 'registry_current',ops.scac_mutation_catalog_v27_current(),
+ 'oracle_role',exists(select 1 from pg_roles where rolname='carr_foundation_assurance_oracle'
+   and rolcanlogin and not rolsuper and not rolcreaterole and not rolcreatedb and not rolbypassrls),
+ 'oracle_functions',(select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+   where n.nspname='ops' and p.proname in ('foundation_assurance_store_evidence',
+     'foundation_assurance_producer_material','foundation_assurance_record_production')),
+ 'journey_one_outcomes',(select count(*) from ops.foundation_assurance_production
+   where kind='minimum_outcome'),
+ 'raw_table_write',has_table_privilege('carr_foundation_assurance_oracle',
+   'ops.foundation_assurance_evidence','insert,update,delete,truncate'));
+"""
+    try:
+        conn = connect(snapshot_dsn)
+        try:
+            cur = conn.cursor()
+            cur.execute("begin transaction read only")
+            cur.execute("select session_user,current_user")
+            if tuple(cur.fetchone() or ()) != ("neondb_owner", "neondb_owner"):
+                raise RehearsalError("candidate facts owner identity differs")
+            cur.execute(sql)
+            row = cur.fetchone()
+            conn.rollback()
+        finally:
+            conn.close()
+    except RehearsalError:
+        raise
+    except Exception as exc:
+        raise RehearsalError("staging database evidence was unavailable") from exc
+    if not row or not isinstance(row[0], dict):
+        raise RehearsalError("staging database evidence was unavailable")
+    return row[0]
+
+
 def hosted_checks(sha: str) -> list[dict]:
     raw = subprocess.check_output(
         ["gh", "api", "--paginate", f"repos/jbookout/carr-system/commits/{sha}/check-runs"],
@@ -204,18 +241,29 @@ def compact(receipt: dict) -> dict:
 
 def run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--release-key", required=True)
-    parser.add_argument("--prior-release-key", required=True)
+    parser.add_argument("--release-key")
+    parser.add_argument("--prior-release-key")
     parser.add_argument("--current-sha", required=True)
-    parser.add_argument("--prior-sha", required=True)
+    parser.add_argument("--prior-sha")
     parser.add_argument("--candidate-operation-id", required=True)
     parser.add_argument("--receipt-id", required=True)
     parser.add_argument("--environment", default="staging")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--read-foundation-facts", action="store_true")
     args = parser.parse_args(argv)
     if args.environment != "staging":
         raise RehearsalError("candidate rehearsal is structurally staging-only")
     current = exact_sha(args.current_sha)
+    if args.read_foundation_facts:
+        if args.execute or args.release_key or args.prior_release_key:
+            raise RehearsalError("foundation facts mode accepts only immutable staging bindings")
+        provision = load_provision_module()
+        snapshot_dsn = candidate_snapshot_dsn(
+            provision, args.candidate_operation_id, args.receipt_id, current)
+        print(json.dumps(foundation_assurance_facts(snapshot_dsn), sort_keys=True))
+        return 0
+    if not args.release_key or not args.prior_release_key or not args.prior_sha:
+        raise RehearsalError("candidate rehearsal requires current/prior release keys and prior SHA")
     prior = exact_sha(args.prior_sha)
     if not args.execute:
         print(json.dumps({"ok": True, "planned": True, "environment": "staging",

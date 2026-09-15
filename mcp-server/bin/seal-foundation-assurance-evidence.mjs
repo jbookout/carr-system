@@ -3,7 +3,7 @@
 // bindings only; measurements, conclusions, identities, time and pass/fail are
 // acquired by this process and cannot be supplied by its caller.
 
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -31,6 +31,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../..");
 const CONFIG = resolve(REPO, "ops/config/foundation-assurance-benchmark.v1.json");
 const SERVICES = resolve(REPO, "ops/config/services.json");
+const REHEARSAL = resolve(REPO, "ops/foundation-assurance-candidate-rehearsal.py");
 const SHA = /^[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const RELEASE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -81,7 +82,9 @@ function evaluatorIdentity(bindings) {
 
 export function parseFoundationAssuranceArgs(argv) {
   const allowed = new Set(["--source-sha", "--source-tree", "--staging-provider-version",
-    "--final-provider-version", "--release-key", "--staging-origin", "--idempotency-key"]);
+    "--final-provider-version", "--release-key", "--staging-origin", "--idempotency-key",
+    "--staging-candidate-operation-id", "--staging-replacement-receipt-id",
+    "--staging-replacement-source-sha"]);
   const values = {};
   for (let at = 0; at < argv.length; at += 2) {
     const flag = argv[at];
@@ -100,11 +103,17 @@ export function parseFoundationAssuranceArgs(argv) {
     final_provider_version: values["--final-provider-version"],
     release_key: values["--release-key"], staging_origin: values["--staging-origin"],
     idempotency_key: values["--idempotency-key"],
+    staging_candidate_operation_id: values["--staging-candidate-operation-id"],
+    staging_replacement_receipt_id: values["--staging-replacement-receipt-id"],
+    staging_replacement_source_sha: values["--staging-replacement-source-sha"],
   };
   if (!SHA.test(parsed.source_sha) || !SHA.test(parsed.source_tree)) fail("invalid_source_binding");
   if (!UUID.test(parsed.staging_provider_version) || !UUID.test(parsed.final_provider_version) ||
       parsed.staging_provider_version === parsed.final_provider_version) fail("invalid_provider_binding");
   if (!UUID.test(parsed.idempotency_key)) fail("invalid_idempotency_key");
+  if (!UUID.test(parsed.staging_candidate_operation_id) ||
+      !UUID.test(parsed.staging_replacement_receipt_id)) fail("invalid_staging_database_binding");
+  if (!SHA.test(parsed.staging_replacement_source_sha)) fail("invalid_staging_database_binding");
   if (!RELEASE_KEY.test(parsed.release_key)) fail("invalid_release_key");
   let origin;
   try { origin = new URL(parsed.staging_origin); } catch { fail("invalid_staging_origin"); }
@@ -248,6 +257,43 @@ async function waitFor(path, timeout = 10000) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
+function waitForChildExit(child, timeout = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise(resolvePromise => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.off("exit", finish);
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, timeout);
+    child.once("exit", finish);
+  });
+}
+
+export async function closeChromeProfile(chrome, profile, remove = rm) {
+  if (chrome.exitCode === null && chrome.signalCode === null) {
+    chrome.kill("SIGTERM");
+    await waitForChildExit(chrome);
+  }
+  if (chrome.exitCode === null && chrome.signalCode === null) {
+    chrome.kill("SIGKILL");
+    await waitForChildExit(chrome, 2000);
+  }
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await remove(profile, { recursive: true, force: true }); return; }
+    catch (error) {
+      last = error;
+      if (error?.code !== "ENOTEMPTY") throw error;
+      await new Promise(ok => setTimeout(ok, 100));
+    }
+  }
+  throw last;
+}
+
 function chromePath() {
   const candidates = [process.env.CHROME_BIN,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -303,8 +349,7 @@ async function chromeMeasurements(bindings, config, payload) {
     return { browser, measured, provenance };
   } finally {
     try { cdp?.close(); } catch {}
-    chrome.kill("SIGTERM");
-    await rm(profile, { recursive: true, force: true });
+    await closeChromeProfile(chrome, profile);
   }
 }
 
@@ -338,35 +383,21 @@ async function acknowledgementMeasurements(bindings, config, payload, token) {
   return { measured, provenance };
 }
 
-async function stagingDatabaseFacts() {
-  const root = await mkdtemp(join(tmpdir(), "wr95-db-read-"));
-  const sqlPath = join(root, "facts.sql");
-  const sql = `select jsonb_build_object(
-    'migration',(select max(filename collate "C") from public.schema_migrations),
-    'registry_current',ops.scac_mutation_catalog_v27_current(),
-    'oracle_role',exists(select 1 from pg_roles where rolname='carr_foundation_assurance_oracle'
-      and rolcanlogin and not rolsuper and not rolcreaterole and not rolcreatedb and not rolbypassrls),
-    'oracle_functions',(select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
-      where n.nspname='ops' and p.proname in ('foundation_assurance_store_evidence',
-        'foundation_assurance_producer_material','foundation_assurance_record_production')),
-    'journey_one_outcomes',(select count(*) from ops.foundation_assurance_production
-      where kind='minimum_outcome'),
-    'raw_table_write',has_table_privilege('carr_foundation_assurance_oracle',
-      'ops.foundation_assurance_evidence','insert,update,delete,truncate'));
-`;
-  await writeFile(sqlPath, sql, { mode: 0o600 });
-  try {
-    const raw = await command(resolve(REPO, ".venv/bin/python"),
-      [resolve(REPO, "tools/db-tap.py"), "--project", "staging", "sql", sqlPath]);
-    const line = raw.trim().split(/\r?\n/).find(value => value.startsWith("{"));
-    if (!line) fail("staging_database_evidence_unavailable");
-    return JSON.parse(line);
-  } finally { await rm(root, { recursive: true, force: true }); }
+async function stagingDatabaseFacts(bindings) {
+  const raw = await command(resolve(REPO, ".venv/bin/python"), [REHEARSAL,
+    "--current-sha", bindings.staging_replacement_source_sha,
+    "--candidate-operation-id", bindings.staging_candidate_operation_id,
+    "--receipt-id", bindings.staging_replacement_receipt_id,
+    "--read-foundation-facts"]);
+  const line = raw.trim().split(/\r?\n/).find(value => value.startsWith("{"));
+  if (!line) fail("staging_database_evidence_unavailable");
+  return JSON.parse(line);
 }
 
 function comparatorRows(bindings, facts, readback, github_checks) {
   const checks = {
-    "assurance-fabric-preactivation": facts.migration === "0512_foundation_assurance_scac_successor.sql",
+    "assurance-fabric-preactivation": facts.migration ===
+      readback?.schema?.highest_applied_migration,
     "foundation-control-plane-preactivation": facts.oracle_role === true && Number(facts.oracle_functions) === 3,
     "global-execution-contract": facts.registry_current === true,
     "global-no-phi-boundary": facts.raw_table_write === false,
@@ -396,7 +427,7 @@ async function measureRuntime(bindings, config, readback, github_checks) {
   const payload = payloadFor(chosenBrowser);
   const ack = await acknowledgementMeasurements(bindings, config, payload,
     process.env.CARR_WR95_STAGING_REVIEW_TOKEN);
-  const facts = await stagingDatabaseFacts();
+  const facts = await stagingDatabaseFacts(bindings);
   const allCells = [...browserResult.measured, ...ack.measured];
   const order = new Map(benchmarkRequiredCells(payload).map((cell, at) =>
     [digest([BENCHMARK_CELL_DOMAIN_TAG, cell]), at]));
@@ -407,7 +438,7 @@ async function measureRuntime(bindings, config, readback, github_checks) {
   return {
     browser: chosenBrowser, runtime_version: bindings.staging_provider_version,
     database: { environment: "staging", migration: facts.migration, read_only: true,
-      source: "tools/db-tap.py --project staging" },
+      source: "ops/foundation-assurance-candidate-rehearsal.py --read-foundation-facts" },
     measurements: { schema_version: "doctorcre-v5-benchmark-measurement-set.v1",
       outlier_rule: payload.outlier_rule, p95_aggregation_method: payload.p95_aggregation_method,
       captured_at_ms: Date.now(), cells: allCells }, sample_provenance,

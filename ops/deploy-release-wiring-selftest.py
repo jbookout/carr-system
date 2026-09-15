@@ -312,6 +312,9 @@ def main() -> int:
     final_view_at = upload.find('versions view "$PROVIDER_VERSION_ID" --json')
     check("11. WR95 accepts only a verified staging UUID and refuses caller test evidence",
           "--foundation-assurance-staging-provider" in source
+          and "--foundation-assurance-staging-candidate-operation" in source
+          and "--foundation-assurance-staging-replacement-receipt" in source
+          and "--foundation-assurance-staging-replacement-source" in source
           and "WR95 derives --test-evidence from live acquisition; caller evidence is refused." in source,
           "the final evidence route can accept caller evidence or an unbound target")
     check("11b. exact staging provider/readback precede final upload",
@@ -321,6 +324,9 @@ def main() -> int:
           "evidence could be acquired from a different staging build")
     check("11c. candidate commits before synchronous sealer storage",
           0 <= candidate_at < sealer_at
+          and '--staging-candidate-operation-id "$FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION"' in upload
+          and '--staging-replacement-receipt-id "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT"' in upload
+          and '--staging-replacement-source-sha "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE"' in upload
           and 'WR95_SEAL_PID' not in upload
           and '> "$WR95_SEAL_OUTPUT" &' not in upload,
           "background acquisition can race the candidate row or survive its failure")
