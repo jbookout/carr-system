@@ -14,14 +14,16 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 
+import psycopg
+
 ROOT = Path(__file__).resolve().parents[1]
 RECOVERY_PATH = ROOT / "tools" / "staging-recovery-rehearsal.py"
+PROVISION_PATH = ROOT / "tools" / "provision-staging-app-writer.py"
 EXACT_SHA = set("0123456789abcdef")
 CHECKS = (
     "ops/ci.sh --strict",
@@ -39,6 +41,16 @@ def load_recovery_module():
     if spec is None or spec.loader is None:
         raise RehearsalError("staging recovery controller is unavailable")
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_provision_module():
+    spec = importlib.util.spec_from_file_location("carr_staging_provision", PROVISION_PATH)
+    if spec is None or spec.loader is None:
+        raise RehearsalError("staging candidate binding is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -112,9 +124,26 @@ def assert_prior_containment(origin: str, token: str) -> dict:
     return {"old_verb": "pass", "wr95_issuance": "unreachable"}
 
 
-def staging_snapshot() -> dict:
+def candidate_snapshot_dsn(provision, operation_id: str, receipt_id: str, sha: str) -> str:
+    try:
+        target = provision.replacement_target(operation_id, receipt_id, sha)
+        binding = provision.resolve_replacement_binding(target, environ=os.environ)
+    except Exception as exc:
+        raise RehearsalError(
+            "exact staging replacement snapshot binding refused; output suppressed"
+        ) from exc
+    if (
+        binding.owner.role_name != provision.replacement.OWNER_ROLE
+        or binding.owner.endpoint != binding.candidate.endpoint_host
+        or binding.owner.database != "neondb"
+    ):
+        raise RehearsalError("exact staging replacement snapshot scope differs")
+    return binding.owner.value
+
+
+def staging_snapshot(snapshot_dsn: str, *, connect=psycopg.connect) -> dict:
     sql = """select jsonb_build_object(
- 'gate_zero',ops.benchmark_gate_zero_outcome(),
+ 'gate_zero_outcomes',(select count(*) from ops.gate_zero_read_only_outcome),
  'foundation_evidence',(select count(*) from ops.foundation_assurance_evidence),
  'foundation_production',(select count(*) from ops.foundation_assurance_production),
  'j1_clocks',(select count(*) from ops.j1_clock),
@@ -122,17 +151,26 @@ def staging_snapshot() -> dict:
  'j1_inventory',(select count(*) from ops.j1_minimum_inventory),
  'j1_admissions',(select count(*) from ops.j1_minimum_admission));
 """
-    with tempfile.NamedTemporaryFile("w", suffix=".sql", encoding="utf-8") as handle:
-        handle.write(sql)
-        handle.flush()
-        output = subprocess.check_output(
-            [str(ROOT / ".venv/bin/python"), str(ROOT / "tools/db-tap.py"),
-             "--project", "staging", "sql", handle.name], cwd=ROOT, text=True
-        )
-    for line in output.splitlines():
-        if line.startswith("{"):
-            return json.loads(line)
-    raise RehearsalError("staging invariant snapshot was unavailable")
+    try:
+        conn = connect(snapshot_dsn)
+        try:
+            cur = conn.cursor()
+            cur.execute("begin transaction read only")
+            cur.execute("select session_user,current_user")
+            if tuple(cur.fetchone() or ()) != ("neondb_owner", "neondb_owner"):
+                raise RehearsalError("candidate snapshot owner identity differs")
+            cur.execute(sql)
+            row = cur.fetchone()
+            conn.rollback()
+        finally:
+            conn.close()
+    except RehearsalError:
+        raise
+    except Exception as exc:
+        raise RehearsalError("staging invariant snapshot was unavailable") from exc
+    if not row or not isinstance(row[0], dict):
+        raise RehearsalError("staging invariant snapshot was unavailable")
+    return row[0]
 
 
 def hosted_checks(sha: str) -> list[dict]:
@@ -168,6 +206,8 @@ def run(argv: list[str]) -> int:
     parser.add_argument("--prior-release-key", required=True)
     parser.add_argument("--current-sha", required=True)
     parser.add_argument("--prior-sha", required=True)
+    parser.add_argument("--candidate-operation-id", required=True)
+    parser.add_argument("--receipt-id", required=True)
     parser.add_argument("--environment", default="staging")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
@@ -184,8 +224,11 @@ def run(argv: list[str]) -> int:
     if not token:
         raise RehearsalError("CARR_WR95_STAGING_REVIEW_TOKEN is required")
     recovery = load_recovery_module()
+    provision = load_provision_module()
+    snapshot_dsn = candidate_snapshot_dsn(
+        provision, args.candidate_operation_id, args.receipt_id, current)
     origin = "https://" + staging_host()
-    before = staging_snapshot()
+    before = staging_snapshot(snapshot_dsn)
     checks = hosted_checks(current)
     attempt = str(uuid.uuid4())
     receipts: list[dict] = []
@@ -203,7 +246,7 @@ def run(argv: list[str]) -> int:
             if step == "current_after":
                 restored = True
         final = release_readback(origin, current)
-        after = staging_snapshot()
+        after = staging_snapshot(snapshot_dsn)
         if after != before:
             raise RehearsalError("Gate Zero, foundation, or Journey One state changed during rehearsal")
     except Exception:

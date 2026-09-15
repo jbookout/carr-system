@@ -14,12 +14,14 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import types
 import uuid
 from typing import Any
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 PROVISIONER = REPO / "tools" / "provision-staging-app-writer.py"
+REHEARSAL = REPO / "ops" / "foundation-assurance-candidate-rehearsal.py"
 CANDIDATE_OPERATION_ID = uuid.UUID("f870b3e2-f99a-4bf2-ba16-629d9725ba6d")
 RECEIPT_ID = uuid.UUID("c4cddf05-03bd-4f9e-8691-b54dac7be8f4")
 EXPECTED_SHA = "07d13398824dad987c40331ae7c2092db07b75d8"
@@ -37,6 +39,7 @@ def load_module(name: str, path: pathlib.Path):
 
 def main() -> int:
     provision = load_module("staging_app_writer_provision", PROVISIONER)
+    rehearsal = load_module("foundation_assurance_candidate_rehearsal", REHEARSAL)
     snapshot = load_module("schema_snapshot_grants_for_test", REPO / "tools/schema_snapshot_grants.py")
     checked = 0
 
@@ -46,6 +49,75 @@ def main() -> int:
         if not condition:
             raise AssertionError(label)
         print(f"  ok  {label}")
+
+    class SnapshotCursor:
+        def __init__(self):
+            self.rows = []
+            self.statements = []
+
+        def execute(self, statement, _params=None):
+            self.statements.append(str(statement))
+            if "session_user,current_user" in str(statement):
+                self.rows = [("neondb_owner", "neondb_owner")]
+            elif "jsonb_build_object" in str(statement):
+                self.rows = [({"foundation_evidence": 0, "j1_clocks": 0},)]
+            else:
+                self.rows = []
+
+        def fetchone(self):
+            return self.rows.pop(0) if self.rows else None
+
+    class SnapshotConnection:
+        def __init__(self):
+            self.cur = SnapshotCursor()
+            self.rollbacks = 0
+            self.closed = False
+
+        def cursor(self):
+            return self.cur
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed = True
+
+    snapshot_conn = SnapshotConnection()
+    snapshot_result = rehearsal.staging_snapshot(
+        "postgresql://app_reader:test@candidate.invalid/neondb?sslmode=require",
+        connect=lambda _dsn: snapshot_conn,
+    )
+    check("candidate rehearsal snapshots through an explicit read-only owner transaction",
+          snapshot_result == {"foundation_evidence": 0, "j1_clocks": 0}
+          and snapshot_conn.cur.statements[0] == "begin transaction read only"
+          and snapshot_conn.rollbacks == 1 and snapshot_conn.closed)
+
+    candidate_binding_calls: list[tuple[Any, ...]] = []
+    def fake_replacement_target(operation, receipt, sha):
+        candidate_binding_calls.append(("target", operation, receipt, sha))
+        return types.SimpleNamespace(candidate_operation_id="candidate-operation")
+
+    def fake_replacement_binding(target, *, environ):
+        candidate_binding_calls.append(("binding", target, environ is os.environ))
+        return types.SimpleNamespace(
+            candidate=types.SimpleNamespace(endpoint_host="candidate.example"),
+            owner=types.SimpleNamespace(
+                role_name="neondb_owner", endpoint="candidate.example",
+                database="neondb", value="candidate-owner-dsn"))
+
+    fake_provision = types.SimpleNamespace(
+        replacement=types.SimpleNamespace(OWNER_ROLE="neondb_owner"),
+        replacement_target=fake_replacement_target,
+        resolve_replacement_binding=fake_replacement_binding,
+    )
+    bound_dsn = rehearsal.candidate_snapshot_dsn(
+        fake_provision, "operation-id", "receipt-id", EXPECTED_SHA)
+    check("candidate rehearsal binds its snapshot owner to the exact operation, receipt, source and endpoint",
+          bound_dsn == "candidate-owner-dsn"
+          and candidate_binding_calls[0]
+              == ("target", "operation-id", "receipt-id", EXPECTED_SHA)
+          and candidate_binding_calls[1][0] == "binding"
+          and candidate_binding_calls[1][2] is True)
 
     schema_text = (REPO / "db/schema.sql").read_text(encoding="utf-8")
     extracted = snapshot.grants_to_role(schema_text, "carr_writer")
