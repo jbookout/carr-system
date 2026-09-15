@@ -8,6 +8,8 @@ const MATERIAL =
   "ops.foundation_assurance_producer_material(text,jsonb,jsonb)";
 const RECORD =
   "ops.foundation_assurance_record_production(text,uuid,jsonb,jsonb)";
+const STORE =
+  "ops.foundation_assurance_store_evidence(uuid,jsonb,jsonb,jsonb)";
 
 async function connection(pg) {
   const client = new pg.Client({ connectionString: DSN });
@@ -53,6 +55,16 @@ test("foundation assurance write authority is the dedicated connection role", as
   assert.equal((await owner.query(
     "select has_function_privilege('carr_foundation_assurance_oracle',$1,'execute') ok",
     [RECORD])).rows[0].ok, true);
+
+  const storeAcl = (await owner.query(
+    `select has_function_privilege('carr_foundation_assurance_oracle',$1,'execute') oracle,
+            has_function_privilege('carr_writer',$1,'execute') writer,
+            has_function_privilege('carr_reader',$1,'execute') reader,
+            has_function_privilege('carr_jobs',$1,'execute') jobs,
+            has_function_privilege('carr_authority',$1,'execute') authority`,
+    [STORE])).rows[0];
+  assert.deepEqual(storeAcl, { oracle: false, writer: false, reader: false,
+    jobs: false, authority: true });
 
   const identity = { actor_id: "codex-fa-secrets",
     session_ref: "session:wr95-role-boundary",

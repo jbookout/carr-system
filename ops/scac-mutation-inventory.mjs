@@ -596,7 +596,7 @@ export const GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
 // its only mutation authority is EXECUTE on the closed producer functions.
 export const FOUNDATION_ASSURANCE_PRE_V27_DB_CATALOG_BASELINE = Object.freeze({
   ...GATE_ZERO_OUTCOME_FORWARD_DB_CATALOG_BASELINE,
-  secdef_execute: { count: 608, digest: "sha256:0fcf6a737f9e02aab3fd34f8043afccd76e5f231f034da83105324c3a231b138" },
+  secdef_execute: { count: 607, digest: "sha256:392bd3eb4b77fbba2d4fd56cc3c8b31180796508c176b7d0e49b026b5b41c078" },
 });
 
 // The v27 successor installs the same four seal/catalog functions as the other
@@ -605,7 +605,7 @@ export const FOUNDATION_ASSURANCE_PRE_V27_DB_CATALOG_BASELINE = Object.freeze({
 export const FOUNDATION_ASSURANCE_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   ...FOUNDATION_ASSURANCE_PRE_V27_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v27",
-  secdef_execute: { count: 612, digest: "sha256:6dba59936b4eb51d2884902acf3c205f2c526466b730f1c010697bbbf2c59d2a" },
+  secdef_execute: { count: 611, digest: "sha256:678ff45807098ad65e5e417f0c409f82afb039f96e84e3c29316f1ca6a5411df" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -9356,7 +9356,7 @@ comment on function ops.scac_mutation_catalog_v26_current() is 'Historical v26 l
   const domainMigrationPath = "migrations/0511_foundation_assurance_minimum_outcome.sql";
   const domainMigration = readFileSync(resolve(REPO_ROOT, domainMigrationPath), "utf8");
   const domainMigrationHash = sha256(domainMigration);
-  if (domainMigrationHash !== "f04c1f243da1cac01947fff76d68697f254165d45ce29f49196d2371a6409329")
+  if (domainMigrationHash !== "8573dbf39e01b02174ab88aa9650fbfb84679d8912ee19549904febdd3a47245")
     throw new Error(`foundation assurance domain migration changed: ${domainMigrationHash}`);
   const predecessorPreflight =
 `-- Exact disposable-Postgres post-0511 receipt. Refuse before any v27 function

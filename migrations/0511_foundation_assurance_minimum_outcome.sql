@@ -270,10 +270,8 @@ returns jsonb language plpgsql security definer set search_path=pg_catalog,ops,p
 as $$
 declare v_actor uuid; v_session text; v_release ops.release%rowtype; v_existing ops.foundation_assurance_evidence%rowtype;
 begin
-  -- EXECUTE is granted only to the writer and authority bundles below. Do not
-  -- compare session_user to a login name here: staging uses carr_writer_app as
-  -- the LOGIN holding the carr_writer bundle, while Production authority uses
-  -- a partner-specific LOGIN holding carr_authority.
+  -- EXECUTE is granted only to the authority bundle below. Evidence and its
+  -- candidate binding are authority decisions, not routine writer actions.
   v_actor:=ops.portfolio_writer_actor_id();
   v_session:=nullif(current_setting('carr.receipt_session_ref',true),'');
   if v_session is null then raise exception 'foundation assurance evidence requires session provenance'; end if;
@@ -530,7 +528,7 @@ revoke insert,update,delete,truncate on ops.foundation_assurance_evidence,ops.fo
 revoke all on function ops.foundation_assurance_store_evidence(uuid,jsonb,jsonb,jsonb)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_foundation_assurance_oracle;
 grant execute on function ops.foundation_assurance_store_evidence(uuid,jsonb,jsonb,jsonb)
-  to carr_writer,carr_authority;
+  to carr_authority;
 
 revoke all on function ops.foundation_assurance_producer_material(text,jsonb,jsonb),
   ops.foundation_assurance_record_production(text,uuid,jsonb,jsonb)

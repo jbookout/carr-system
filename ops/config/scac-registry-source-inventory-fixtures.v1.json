@@ -43190,8 +43190,8 @@
         "operation": "bin/schema-snapshot.sh",
         "effect_class": "administrative_mutation",
         "source_locator": "bin/schema-snapshot.sh",
-        "schema_digest": "6286473747628c6827569de7e23b86ca0cd848f7aa3b9327fa68346cdba85f98",
-        "handler_digest": "6286473747628c6827569de7e23b86ca0cd848f7aa3b9327fa68346cdba85f98",
+        "schema_digest": "57498ebd6f3420bf84f5ef128366893295af4e94eb3629a557aec7a4b2e0446d",
+        "handler_digest": "57498ebd6f3420bf84f5ef128366893295af4e94eb3629a557aec7a4b2e0446d",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -43259,8 +43259,8 @@
         "operation": "ops/scac-mutation-inventory.mjs",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/scac-mutation-inventory.mjs",
-        "schema_digest": "59d70fdf9803752941120c401e1f1bfe271fe233be0a884f3561f614e060d7ba",
-        "handler_digest": "59d70fdf9803752941120c401e1f1bfe271fe233be0a884f3561f614e060d7ba",
+        "schema_digest": "77a2a4146b95a4f5d169e8bfabd20ab9460341bb8c97be3e93b7f9a9277a86d0",
+        "handler_digest": "77a2a4146b95a4f5d169e8bfabd20ab9460341bb8c97be3e93b7f9a9277a86d0",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -43301,7 +43301,7 @@
       }
     ],
     "expected_count": 856,
-    "expected_sha256": "13d0095fb85f8d2b85c45392394be82768974eff1b6ffbeaacf5c538c13f5019",
+    "expected_sha256": "db734b9f0893a08bd65407e39cfdb10ba50955b07472fea1e3af306fe8bae3d3",
     "reason": "WR-000104 mechanically re-derived this current-source overlay after the accepted five-migration renumber and current-main reconciliation, including the already-registered local PostgreSQL lane changed by the merged F03 source. The reviewed rows are existing v27 ingresses whose source bytes changed; no new ingress or authority is admitted."
   },
   "historical_artifact_replay_review": {
