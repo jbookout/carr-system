@@ -123,9 +123,8 @@ function materializePlan(corpus, vector) {
 
 // --- the two structural judgements, both stated in the header -----------------
 
-function sqlVerdict(corpus, vector) {
-  const base = corpus.bases[vector.base];
-  if (base.schema_version !== "engineering-slice-plan.v2") {
+function sqlVerdict(plan, vector) {
+  if (plan.schema_version === "engineering-slice-plan.v1") {
     return { expect: "accepted", divergent: vector.expect !== "accepted" };
   }
   return { expect: vector.expect, divergent: false };
@@ -215,8 +214,9 @@ function planPart(corpus, corpusDigest) {
   const rows = [];
   const divergences = [];
   for (const vector of corpus.vectors) {
-    const verdict = sqlVerdict(corpus, vector);
-    rows.push({ vector, expect: verdict.expect, plan: materializePlan(corpus, vector) });
+    const plan = materializePlan(corpus, vector);
+    const verdict = sqlVerdict(plan, vector);
+    rows.push({ vector, expect: verdict.expect, plan });
     if (verdict.divergent) divergences.push(vector);
   }
 

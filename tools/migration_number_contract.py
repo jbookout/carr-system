@@ -60,6 +60,13 @@ APPROVED_INTERSTITIAL_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0494_codex_continuity_archive_registry.sql",
         "0494a_codex_continuity_reference_manifest.sql",
     ),
+    # WR-000106 / PLAN-f9c7165052ad-v2. Production already carries the
+    # 0507 base migration; this exact reviewed validator companion is the only
+    # permitted lettered member of the slot.
+    "0507": (
+        "0507_export_views_one_row_per_subject.sql",
+        "0507a_engineering_slice_plan_validators.sql",
+    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before

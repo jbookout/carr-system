@@ -332,6 +332,18 @@ def run_local_ci(
                 file=sys.stderr,
             )
             return pre_apply.returncode
+        # The canonical ownership gate compares the current frontier against a
+        # pre-0450 catalog fingerprint. Migration 0507a intentionally replaces
+        # engineering_record_slice_receipt, so prepare that one reviewed seam
+        # in the isolated baseline before capturing the fingerprint. The
+        # companion candidate remains frontier-only: its ownership functions
+        # are exactly what the unchanged comparator must continue to inspect.
+        if not setup(
+            [binaries.psql, "-h", "127.0.0.1", "-p", str(port),
+             "-U", "carr_ci", "-d", pre_database, "-v", "ON_ERROR_STOP=1",
+             "-q", "-f", repo / "ops/f03-receipt-validator.candidate.sql"]
+        ):
+            return exit_code
         fingerprint_env = dict(clean_env)
         fingerprint_env["CARR_LOCAL_PG_DSN"] = pre_dsn
         pre_fingerprint = command_runner.run(
@@ -369,6 +381,24 @@ def run_local_ci(
         if exit_code:
             print("local-db-ci: canonical CI failed", file=sys.stderr)
         else:
+            f03_env = dict(ci_env)
+            f03_env["CARR_F03_PSQL"] = str(binaries.psql)
+            f03_acceptance = command_runner.run(
+                [acceptance_python, repo / "tools/test-f03-production-migration.py"],
+                env=f03_env,
+                cwd=repo,
+                capture=True,
+            )
+            if f03_acceptance.returncode:
+                print(
+                    "local-db-ci: F03 production validator acceptance failed: "
+                    f"{_failure_detail(f03_acceptance)}",
+                    file=sys.stderr,
+                )
+                exit_code = f03_acceptance.returncode
+            else:
+                print(f03_acceptance.stdout, end="")
+        if exit_code == 0:
             # The continuity handler suite has a real PostgreSQL branch.  Run it
             # on this same disposable cluster so its bounded integration proof
             # cannot become a permanent skip in hosted migration CI.  Neon’s
