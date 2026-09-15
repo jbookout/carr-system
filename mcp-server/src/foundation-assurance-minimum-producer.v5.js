@@ -169,6 +169,11 @@ export function foundationAssuranceMinimumTools({
         throw new ToolError({ error: "foundation_assurance_runtime_binding_unavailable" });
       try {
         return await c.seatConnection(async seat => {
+          const replay = (await seat.query(
+            "select ops.foundation_assurance_record_production($1::text,$2::uuid,$3::jsonb,$4::jsonb) as result",
+            [verb, args.idempotency_key, JSON.stringify(identity), null]))
+            .rows[0]?.result;
+          if (replay) return replay;
           const material = (await seat.query(
             "select ops.foundation_assurance_producer_material($1::text,$2::jsonb,$3::jsonb) as material",
             [verb, JSON.stringify(identity), JSON.stringify(c.foundationAssuranceRuntime)]))

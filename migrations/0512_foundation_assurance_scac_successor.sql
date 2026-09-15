@@ -5,7 +5,7 @@ declare observed_count integer; observed_digest text; grant_snapshot jsonb;
 begin
   if (select count(*) from public.schema_migrations where filename='0511_foundation_assurance_minimum_outcome.sql')<>1
      or not exists(select 1 from public.schema_migrations where filename='0511_foundation_assurance_minimum_outcome.sql'
-       and sha256='8573dbf39e01b02174ab88aa9650fbfb84679d8912ee19549904febdd3a47245') then
+       and sha256='118a031e32e7db3a6447e66177c4e2ab19a29cced85ebb85ab7c00470ec92f74') then
     raise exception 'Foundation assurance pre-v27 migration ledger receipt drifted';
   end if;
   grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();

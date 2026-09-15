@@ -419,18 +419,21 @@ declare v_actor uuid; v_existing ops.foundation_assurance_production%rowtype;
         v_at text; v_admission uuid; v_event uuid; v_link text; v_evidence_row ops.foundation_assurance_evidence%rowtype;
 begin
   v_actor:=ops.foundation_assurance_require_seat(p_verb,p_identity);
-  if p_idempotency_key is null or jsonb_typeof(p_produced)<>'object' then
-    raise exception 'foundation assurance production requires an idempotency key and object';
+  if p_idempotency_key is null then
+    raise exception 'foundation assurance production requires an idempotency key';
   end if;
   perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,0));
-  v_digest:='sha256:'||encode(public.digest(convert_to(ops.portfolio_canonical_json(p_produced),'UTF8'),'sha256'),'hex');
   select * into v_existing from ops.foundation_assurance_production where idempotency_key=p_idempotency_key;
   if found then
-    if v_existing.verb is distinct from p_verb or v_existing.artifact_digest is distinct from v_digest then
+    if v_existing.verb is distinct from p_verb or v_existing.actor_id is distinct from v_actor
+       or (p_produced is not null and v_existing.artifact_digest is distinct from
+         'sha256:'||encode(public.digest(convert_to(ops.portfolio_canonical_json(p_produced),'UTF8'),'sha256'),'hex')) then
       raise exception 'foundation assurance idempotency key was reused for different production';
     end if;
     return v_existing.result||jsonb_build_object('replayed',true);
   end if;
+  if jsonb_typeof(p_produced)<>'object' then return null; end if;
+  v_digest:='sha256:'||encode(public.digest(convert_to(ops.portfolio_canonical_json(p_produced),'UTF8'),'sha256'),'hex');
   if p_verb='produce-foundation-assurance-benchmark-coverage' then
     v_kind:='benchmark_coverage'; v_evidence:=p_produced->>'evidence_digest';
     if p_produced#>>'{fact,status}'<>'pass' or p_produced#>>'{fact,evaluator_identity,actor_id}'<>'codex-fa-coverage' then

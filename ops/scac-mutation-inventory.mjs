@@ -9356,7 +9356,7 @@ comment on function ops.scac_mutation_catalog_v26_current() is 'Historical v26 l
   const domainMigrationPath = "migrations/0511_foundation_assurance_minimum_outcome.sql";
   const domainMigration = readFileSync(resolve(REPO_ROOT, domainMigrationPath), "utf8");
   const domainMigrationHash = sha256(domainMigration);
-  if (domainMigrationHash !== "8573dbf39e01b02174ab88aa9650fbfb84679d8912ee19549904febdd3a47245")
+  if (domainMigrationHash !== "118a031e32e7db3a6447e66177c4e2ab19a29cced85ebb85ab7c00470ec92f74")
     throw new Error(`foundation assurance domain migration changed: ${domainMigrationHash}`);
   const predecessorPreflight =
 `-- Exact disposable-Postgres post-0511 receipt. Refuse before any v27 function

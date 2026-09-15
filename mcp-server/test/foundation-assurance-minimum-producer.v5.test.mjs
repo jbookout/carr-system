@@ -21,6 +21,7 @@ import {
 import {
   evaluateFoundationAssuranceMinimum,
   foundationAssuranceMemberReceipt,
+  foundationAssuranceMinimumTools,
 } from "../src/foundation-assurance-minimum-producer.v5.js";
 import { FOUNDATION_ASSURANCE_PRODUCER_REGISTRATION } from
   "../src/foundation-assurance-minimum-registration.v5.js";
@@ -142,4 +143,65 @@ test("a member seat cannot attest its own subject", () => {
     comparator: f.evidence.comparators.find(item => item.id === row.comparator_id),
     observed_at: "2026-09-14T13:37:00.000Z", ttl_ms: 3600000 }),
   /foundation_assurance_member_self_attestation/);
+});
+
+test("an ambiguous post-commit retry replays before rebuilding issuance material", async () => {
+  const registration = FOUNDATION_ASSURANCE_PRODUCER_REGISTRATION.producers
+    .find(row => row.kind === "member_receipt");
+  const verb = registration.verb;
+  const producerIdentity = identity(registration.actor_slug);
+  const actor = { slug: registration.actor_slug, review: true,
+    via: "review-token" };
+  const f = fixture();
+  const comparator = f.evidence.comparators
+    .find(item => item.id === registration.comparator_id);
+  const durable = new Map();
+  let materialReads = 0;
+  let recordCalls = 0;
+  const seat = {
+    async query(sql, params) {
+      if (sql.includes("foundation_assurance_producer_material")) {
+        materialReads += 1;
+        return { rows: [{ material: { ...f, config,
+          subject_maker_identity: author, comparator,
+          observed_at: `2026-09-14T13:${36 + materialReads}:00.000Z` } }] };
+      }
+      if (sql.includes("foundation_assurance_record_production")) {
+        const key = `${params[0]}:${params[1]}:${JSON.parse(params[2]).actor_id}`;
+        if (params[3] === null) return { rows: [{ result: durable.get(key) || null }] };
+        recordCalls += 1;
+        const produced = JSON.parse(params[3]);
+        const stored = durable.get(key);
+        if (stored && stored.produced_digest !== digest(produced)) {
+          const error = new Error("foundation_assurance_idempotency_conflict");
+          error.code = "foundation_assurance_idempotency_conflict";
+          throw error;
+        }
+        if (stored) return { rows: [{ result: stored }] };
+        const result = { status: "recorded", produced_digest: digest(produced) };
+        durable.set(key, result);
+        return { rows: [{ result }] };
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+  class ToolError extends Error {
+    constructor(payload) { super(payload.error); Object.assign(this, payload); }
+  }
+  const tools = foundationAssuranceMinimumTools({
+    withEnvelope: (_c, _actor, _verb, _args, callback) => callback(),
+    ToolError,
+    authenticatedIdentity: { receiptIdentity: () => producerIdentity },
+  });
+  const context = { seatConnection: callback => callback(seat),
+    foundationAssuranceRuntime: { schema_version:
+      "doctorcre-v5-foundation-assurance-runtime-binding.v1" } };
+  const args = { idempotency_key: "00000000-0000-4000-8000-000000000099" };
+
+  const first = await tools[verb].handler(context, actor, args);
+  const replay = await tools[verb].handler(context, actor, args);
+
+  assert.deepEqual(replay, first);
+  assert.equal(materialReads, 1);
+  assert.equal(recordCalls, 1);
 });
