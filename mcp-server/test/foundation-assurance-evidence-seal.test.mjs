@@ -12,6 +12,7 @@ import {
 } from "../src/foundation-assurance-evidence.v5.js";
 import {
   assembleFoundationAssuranceEvidence,
+  canonicalStagingOrigin,
   parseFoundationAssuranceArgs,
   selectProductionEvidenceDsn,
 } from "../bin/seal-foundation-assurance-evidence.mjs";
@@ -23,7 +24,7 @@ const bindings = parseFoundationAssuranceArgs([
   "--staging-provider-version", "00000000-0000-4000-8000-000000000010",
   "--final-provider-version", "00000000-0000-4000-8000-000000000011",
   "--release-key", "release.foundation-assurance.minimum.v1",
-  "--staging-origin", "https://staging.doctorcre.com",
+  "--staging-origin", canonicalStagingOrigin(),
   "--idempotency-key", "00000000-0000-4000-8000-000000000012",
 ]);
 
@@ -68,6 +69,14 @@ test("CLI accepts immutable bindings and refuses caller evidence", () => {
   assert.throws(() => parseFoundationAssuranceArgs([
     "--pass", "true",
   ]), /caller_evidence_input_refused/);
+  assert.throws(() => parseFoundationAssuranceArgs([
+    "--source-sha", "a".repeat(40), "--source-tree", "b".repeat(40),
+    "--staging-provider-version", "00000000-0000-4000-8000-000000000010",
+    "--final-provider-version", "00000000-0000-4000-8000-000000000011",
+    "--release-key", "release.foundation-assurance.minimum.v1",
+    "--staging-origin", "https://attacker.example",
+    "--idempotency-key", "00000000-0000-4000-8000-000000000012",
+  ]), /invalid_staging_origin/);
 });
 
 test("acquired matrix seals against release key without a release UUID", () => {

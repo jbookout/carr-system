@@ -4,7 +4,7 @@
 // acquired by this process and cannot be supplied by its caller.
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -30,6 +30,7 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../..");
 const CONFIG = resolve(REPO, "ops/config/foundation-assurance-benchmark.v1.json");
+const SERVICES = resolve(REPO, "ops/config/services.json");
 const SHA = /^[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const RELEASE_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -39,6 +40,22 @@ export class FoundationAssuranceSealerError extends Error {
   constructor(code, detail) { super(code); this.code = code; this.detail = detail; }
 }
 const fail = (code, detail) => { throw new FoundationAssuranceSealerError(code, detail); };
+
+export function canonicalStagingOrigin() {
+  let services;
+  try { services = JSON.parse(readFileSync(SERVICES, "utf8")); }
+  catch { fail("canonical_staging_origin_unavailable"); }
+  const matches = (services?.services || []).filter(service => service?.key === "carr-mcp")
+    .flatMap(service => service.environments || [])
+    .filter(environment => environment?.environment === "staging" && environment?.endpoint);
+  if (matches.length !== 1) fail("canonical_staging_origin_unavailable");
+  let origin;
+  try { origin = new URL(`https://${matches[0].endpoint}`); }
+  catch { fail("canonical_staging_origin_unavailable"); }
+  if (origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/")
+    fail("canonical_staging_origin_unavailable");
+  return origin.origin;
+}
 
 function evaluatorIdentity(bindings) {
   // correlation.js accepts this UUID as a request correlation and identity.js
@@ -83,7 +100,7 @@ export function parseFoundationAssuranceArgs(argv) {
   let origin;
   try { origin = new URL(parsed.staging_origin); } catch { fail("invalid_staging_origin"); }
   if (origin.protocol !== "https:" || origin.username || origin.password || origin.search ||
-      origin.hash || origin.pathname !== "/" || /(?:localhost|127\.0\.0\.1)/i.test(origin.hostname))
+      origin.hash || origin.pathname !== "/" || origin.origin !== canonicalStagingOrigin())
     fail("invalid_staging_origin");
   parsed.staging_origin = origin.origin;
   return Object.freeze(parsed);
