@@ -35,21 +35,18 @@ function client() {
     query: async (sql) => {
       calls.push(sql);
       if (/standing-context:baseline-batch/.test(sql)) {
-        assert.match(sql,
-          /personal_to =\s*retrieval_visibility_actor_id\(\$1\)/,
-          "the sponsor slug must resolve through the read-safe UUID function");
+        assert.doesNotMatch(sql, /from rule\b/,
+          "the mandatory batch must not absorb the intentionally fail-soft proposed-rule read");
         return { rows: [{
           all_rules: RULES,
           action_required: [{ number: 9, title: "Act", body: "Do it", owner: "joe" }],
-          proposed_rules: [{
-            id: "aaaaaaaa-0000-4000-8000-000000000003",
-            statement: "A proposed rule with enough words to make its gist deterministic in this focused test.",
-            taught_by: "Joe Bookout",
-            personal_to: null,
-            created_at: "2026-09-15T00:00:00.000Z",
-          }],
           doctrine_generation: 1165,
         }] };
+      }
+      if (/from rule\s+where status = 'proposed'/.test(sql)) {
+        assert.match(sql, /personal_to =\s*retrieval_visibility_actor_id\(\$1\)/,
+          "the sponsor slug must resolve through the read-safe UUID function");
+        throw Object.assign(new Error("permission denied for table rule"), { code: "42501" });
       }
       if (/v_guidance_registry_state/.test(sql)) return { rows: [] };
       if (/with registry as/.test(sql)) {
@@ -80,15 +77,16 @@ test("standing-context batches stable baseline reads without changing its payloa
 
   assert.match(out.recite, /1 shared, 1 joe-personal/);
   assert.equal(out.action_required.length, 1);
-  assert.equal(out.awaiting_activation.count, 1);
+  assert.equal(out.awaiting_activation, undefined,
+    "a denied proposed-rule read stays fail-soft instead of killing standing-context");
   assert.equal(out.doctrine.generation, 1165);
   assert.equal(c.calls.filter(sql => /standing-context:baseline-batch/.test(sql)).length, 1);
   assert.equal(c.calls.some(sql => /from loop_item/.test(sql) &&
     !/standing-context:baseline-batch/.test(sql)), false);
-  assert.equal(c.calls.some(sql => /from rule\s+where status = 'proposed'/.test(sql) &&
-    !/standing-context:baseline-batch/.test(sql)), false);
+  assert.equal(c.calls.filter(sql => /from rule\s+where status = 'proposed'/.test(sql) &&
+    !/standing-context:baseline-batch/.test(sql)).length, 1);
   assert.equal(c.calls.some(sql => /from doctrine_meta/.test(sql) &&
     !/standing-context:baseline-batch/.test(sql)), false);
-  assert.equal(c.calls.length, 4,
-    "baseline, optional registry, delivery snapshot, and fail-soft defects are the whole inactive path");
+  assert.equal(c.calls.length, 5,
+    "baseline, fail-soft proposals, optional registry, delivery snapshot, and defects are the inactive path");
 });

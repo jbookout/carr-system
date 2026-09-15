@@ -936,10 +936,12 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // file and are NOT part of the recited counts — the verb's numbers
         // must match the files' numbers exactly or the recitation audit
         // (rule 4f7c348f) breaks the day a session compares them.
-        // These four stable baseline reads used to be four sequential network
-        // round trips. Keep the independently fail-soft, rolling-deploy reads
-        // below separate, but take one database snapshot for the core corpus,
-        // action queue, proposed rules, and generation counter.
+        // These three stable baseline reads used to be three sequential network
+        // round trips. Keep the independently fail-soft reads below separate:
+        // carr_reader intentionally cannot read rule, so absorbing the proposed-
+        // rule query into this mandatory batch would turn its safe denial into a
+        // standing-context failure. Take one snapshot only for the core corpus,
+        // action queue, and generation counter.
         const baselineResult = await c.query(
           `select
              (select coalesce(jsonb_agg(to_jsonb(r) - 'activated_at'
@@ -958,14 +960,6 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
                     from loop_item
                    where kind = 'action_required' and status = 'open'
                 ) a) as action_required,
-             (select coalesce(jsonb_agg(to_jsonb(p) order by p.created_at),'[]'::jsonb)
-                from (
-                  select id,statement,taught_by,personal_to,created_at
-                    from rule
-                   where status = 'proposed'
-                     and (personal_to is null or ($1::text is not null and personal_to =
-                           retrieval_visibility_actor_id($1)))
-                ) p) as proposed_rules,
              (select generation from doctrine_meta where id=1) as doctrine_generation
              /* standing-context:baseline-batch */`,
           [who]);
@@ -1151,11 +1145,12 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // the binding text is one standing-context call away with rule_ids, and
         // a wall of unapproved prose at session start would be skimmed like
         // every other wall.
-        const proposedRules = baselineBatched ? baseline.proposed_rules : (await c.query(
+        const proposedRules = (await c.query(
           `select id, statement, taught_by, personal_to, created_at
              from rule
             where status = 'proposed'
-              and (personal_to is null or ($1::text is not null and personal_to = $1))
+              and (personal_to is null or ($1::text is not null and personal_to =
+                    retrieval_visibility_actor_id($1)))
             order by created_at`, [who]).catch(() => ({ rows: [] }))).rows;
         // THE DEFECT CLASSES (0103, loop #185). Surfaced HERE for the same reason the
         // proposed rules are: this verb is the opening act of every session, and the
