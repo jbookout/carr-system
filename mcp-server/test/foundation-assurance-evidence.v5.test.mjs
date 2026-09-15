@@ -48,9 +48,9 @@ function fixture() {
     },
     database: {
       environment: "staging",
-      migration: "0512_foundation_assurance_scac_successor.sql",
+      migration: "0513_release_candidate_environment_identity.sql",
       read_only: true,
-      source: "tools/db-tap.py --project staging",
+      source: "ops/foundation-assurance-candidate-rehearsal.py --read-foundation-facts",
     },
     github_checks: FOUNDATION_ASSURANCE_GITHUB_CHECKS.map((name, index) => ({
       name, conclusion: "success", head_sha: "a".repeat(40), run_id: index + 1,
@@ -97,6 +97,21 @@ test("seal binds source, providers, release, checks, samples and comparators", (
   assert.equal(seal.required_cell_count, 4);
   assert.equal(seal.final_provider_version, evidence.final_provider_version);
   assert.equal(seal.release_key, evidence.release.key);
+});
+
+test("seal accepts the receipted replacement database reader provenance", () => {
+  const evidence = fixture();
+  assert.doesNotThrow(() => sealFoundationAssuranceEvidence(evidence, config));
+
+  const staleAlias = fixture();
+  staleAlias.database.source = "tools/db-tap.py --project staging";
+  assert.throws(() => sealFoundationAssuranceEvidence(staleAlias, config),
+    /database_provenance_invalid/);
+
+  const beforeFoundation = fixture();
+  beforeFoundation.database.migration = "0511_foundation_assurance_scac_successor.sql";
+  assert.throws(() => sealFoundationAssuranceEvidence(beforeFoundation, config),
+    /database_provenance_invalid/);
 });
 
 test("seal rejects caller/synthetic provenance and provider drift", () => {

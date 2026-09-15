@@ -152,9 +152,11 @@ export function sealFoundationAssuranceEvidence(evidence, config) {
       evidence.release.provider_version !== evidence.final_provider_version ||
       evidence.release.source_sha !== evidence.source_sha) fail("release_binding_mismatch");
   closed(evidence.database, ["environment","migration","read_only","source"], "evidence.database");
+  const migration = /^(\d{4})[a-z]?_[a-z0-9_]+\.sql$/.exec(evidence.database.migration || "");
   if (evidence.database.environment !== "staging" || evidence.database.read_only !== true ||
-      evidence.database.migration !== "0512_foundation_assurance_scac_successor.sql" ||
-      evidence.database.source !== "tools/db-tap.py --project staging")
+      !migration || Number(migration[1]) < 512 ||
+      evidence.database.source !==
+        "ops/foundation-assurance-candidate-rehearsal.py --read-foundation-facts")
     fail("database_provenance_invalid");
   exactSet(list(evidence.github_checks, "evidence.github_checks").map(row => row.name),
     FOUNDATION_ASSURANCE_GITHUB_CHECKS, "github_check_set_mismatch");
