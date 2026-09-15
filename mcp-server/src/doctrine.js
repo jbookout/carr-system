@@ -963,7 +963,8 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
                   select id,statement,taught_by,personal_to,created_at
                     from rule
                    where status = 'proposed'
-                     and (personal_to is null or ($1::text is not null and personal_to = $1))
+                     and (personal_to is null or ($1::text is not null and personal_to =
+                           retrieval_visibility_actor_id($1)))
                 ) p) as proposed_rules,
              (select generation from doctrine_meta where id=1) as doctrine_generation
              /* standing-context:baseline-batch */`,
