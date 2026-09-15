@@ -41,20 +41,29 @@ export class FoundationAssuranceSealerError extends Error {
 }
 const fail = (code, detail) => { throw new FoundationAssuranceSealerError(code, detail); };
 
+export function canonicalStagingOriginFromRegistry(services) {
+  const serviceMatches = (services?.services || []).filter(service => service?.key === "carr-mcp");
+  if (serviceMatches.length !== 1 || !Array.isArray(serviceMatches[0].environments))
+    fail("canonical_staging_origin_unavailable");
+  const matches = serviceMatches[0].environments
+    .filter(environment => environment?.environment === "staging");
+  if (matches.length !== 1 || typeof matches[0].endpoint !== "string" ||
+      !/^[a-z0-9.-]+$/.test(matches[0].endpoint))
+    fail("canonical_staging_origin_unavailable");
+  let origin;
+  try { origin = new URL(`https://${matches[0].endpoint}`); }
+  catch { fail("canonical_staging_origin_unavailable"); }
+  if (origin.hostname !== matches[0].endpoint || origin.port || origin.username || origin.password ||
+      origin.search || origin.hash || origin.pathname !== "/")
+    fail("canonical_staging_origin_unavailable");
+  return origin.origin;
+}
+
 export function canonicalStagingOrigin() {
   let services;
   try { services = JSON.parse(readFileSync(SERVICES, "utf8")); }
   catch { fail("canonical_staging_origin_unavailable"); }
-  const matches = (services?.services || []).filter(service => service?.key === "carr-mcp")
-    .flatMap(service => service.environments || [])
-    .filter(environment => environment?.environment === "staging" && environment?.endpoint);
-  if (matches.length !== 1) fail("canonical_staging_origin_unavailable");
-  let origin;
-  try { origin = new URL(`https://${matches[0].endpoint}`); }
-  catch { fail("canonical_staging_origin_unavailable"); }
-  if (origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/")
-    fail("canonical_staging_origin_unavailable");
-  return origin.origin;
+  return canonicalStagingOriginFromRegistry(services);
 }
 
 function evaluatorIdentity(bindings) {

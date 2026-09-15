@@ -13,6 +13,7 @@ import {
 import {
   assembleFoundationAssuranceEvidence,
   canonicalStagingOrigin,
+  canonicalStagingOriginFromRegistry,
   parseFoundationAssuranceArgs,
   selectProductionEvidenceDsn,
 } from "../bin/seal-foundation-assurance-evidence.mjs";
@@ -77,6 +78,20 @@ test("CLI accepts immutable bindings and refuses caller evidence", () => {
     "--staging-origin", "https://attacker.example",
     "--idempotency-key", "00000000-0000-4000-8000-000000000012",
   ]), /invalid_staging_origin/);
+});
+
+test("canonical staging registry shape fails closed", () => {
+  const registry = endpoint => ({ services: [{ key: "carr-mcp", environments: [
+    { environment: "staging", ...(endpoint === undefined ? {} : { endpoint }) },
+  ] }] });
+  assert.throws(() => canonicalStagingOriginFromRegistry(registry("attacker.example?")),
+    /canonical_staging_origin_unavailable/);
+  assert.throws(() => canonicalStagingOriginFromRegistry(registry(undefined)),
+    /canonical_staging_origin_unavailable/);
+  const ambiguous = registry("one.example");
+  ambiguous.services[0].environments.push({ environment: "staging" });
+  assert.throws(() => canonicalStagingOriginFromRegistry(ambiguous),
+    /canonical_staging_origin_unavailable/);
 });
 
 test("acquired matrix seals against release key without a release UUID", () => {
