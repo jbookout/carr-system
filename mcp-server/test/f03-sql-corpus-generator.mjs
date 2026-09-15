@@ -124,7 +124,7 @@ function materializePlan(corpus, vector) {
 // --- the two structural judgements, both stated in the header -----------------
 
 function sqlVerdict(plan, vector) {
-  if (plan.schema_version !== "engineering-slice-plan.v2") {
+  if (plan.schema_version === "engineering-slice-plan.v1") {
     return { expect: "accepted", divergent: vector.expect !== "accepted" };
   }
   return { expect: vector.expect, divergent: false };
