@@ -150,6 +150,26 @@ def main() -> int:
               "timeout": "30",
           })
 
+    real_request_json = rehearsal.request_json
+    rehearsal.request_json = lambda _url: {
+        "git_sha": {"value": EXPECTED_SHA, "reason": None},
+        "env": {"value": "staging", "reason": None},
+        "worker_version": {
+            "id": "7350ff40-e650-49f3-85a8-4b63e9fd3137",
+            "tag": "carr-staging-test",
+            "reason": None,
+        },
+    }
+    try:
+        release_result = rehearsal.release_readback("https://staging.invalid", EXPECTED_SHA)
+    finally:
+        rehearsal.request_json = real_request_json
+    check("candidate rehearsal parses the live typed release identity envelope",
+          release_result == {
+              "git_sha": EXPECTED_SHA,
+              "provider_version": "7350ff40-e650-49f3-85a8-4b63e9fd3137",
+          })
+
     schema_text = (REPO / "db/schema.sql").read_text(encoding="utf-8")
     extracted = snapshot.grants_to_role(schema_text, "carr_writer")
     section = snapshot.carr_grants_section_lines(schema_text)

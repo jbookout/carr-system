@@ -98,7 +98,8 @@ def request_json(url: str, *, token: str | None = None,
 
 def release_readback(origin: str, sha: str) -> dict:
     body = request_json(origin + "/release")
-    if body.get("git_sha") != sha or (body.get("env") or {}).get("value") != "staging":
+    if (body.get("git_sha") or {}).get("value") != sha \
+            or (body.get("env") or {}).get("value") != "staging":
         raise RehearsalError("staging release readback differs from the exact rehearsal step")
     provider = (body.get("worker_version") or {}).get("id")
     if not isinstance(provider, str) or len(provider) != 36:
