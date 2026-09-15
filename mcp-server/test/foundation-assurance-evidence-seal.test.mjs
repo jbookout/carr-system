@@ -68,8 +68,9 @@ function acquired() {
   const cells = benchmarkRequiredCells(payload);
   return {
     browser, runtime_version,
-    database: { environment: "staging", migration: "0512_foundation_assurance_scac_successor.sql",
-      read_only: true, source: "tools/db-tap.py --project staging" },
+    database: { environment: "staging", migration: "0513_release_candidate_environment_identity.sql",
+      read_only: true,
+      source: "ops/foundation-assurance-candidate-rehearsal.py --read-foundation-facts" },
     github_checks: FOUNDATION_ASSURANCE_GITHUB_CHECKS.map((name, index) => ({
       name, conclusion: "success", head_sha: bindings.source_sha, run_id: index + 1,
       url: `https://github.com/jbookout/carr-system/actions/runs/${index + 1}` })),

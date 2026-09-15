@@ -35,8 +35,8 @@ function fixture() {
       provider_version: "00000000-0000-4000-8000-000000000011",
       source_sha: "a".repeat(40), test_evidence_ref: "pending" },
     database: { environment: "staging",
-      migration: "0512_foundation_assurance_scac_successor.sql", read_only: true,
-      source: "tools/db-tap.py --project staging" },
+      migration: "0513_release_candidate_environment_identity.sql", read_only: true,
+      source: "ops/foundation-assurance-candidate-rehearsal.py --read-foundation-facts" },
     github_checks: FOUNDATION_ASSURANCE_GITHUB_CHECKS.map((name, run_id) => ({
       name, conclusion: "success", head_sha: "a".repeat(40), run_id: run_id + 1,
       url: `https://github.com/jbookout/carr-system/actions/runs/${run_id + 1}` })),
