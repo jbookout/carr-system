@@ -35,6 +35,9 @@ function client() {
     query: async (sql) => {
       calls.push(sql);
       if (/standing-context:baseline-batch/.test(sql)) {
+        assert.match(sql,
+          /personal_to =\s*retrieval_visibility_actor_id\(\$1\)/,
+          "the sponsor slug must resolve through the read-safe UUID function");
         return { rows: [{
           all_rules: RULES,
           action_required: [{ number: 9, title: "Act", body: "Do it", owner: "joe" }],
