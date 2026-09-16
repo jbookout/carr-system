@@ -717,6 +717,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
             "provision the actor before any write verb will run" });
     // In place, not a copy — see executeWithTrustedPrincipal above.
     const actorWithId = Object.assign(actor, { id: a.rows[0].id });
+    if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
+      client.foundationAssuranceActorSlug = actorWithId.slug;
     await setWriterActorContext(client, actorWithId,
       { partnerAuthorityAct: tool.humanOnly === true });
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
