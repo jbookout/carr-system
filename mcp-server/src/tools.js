@@ -7813,45 +7813,25 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
-  // HUMAN-ONLY IS ENFORCED HERE, AND THIS IS THE ONLY PLACE THAT ENFORCES IT
-  // (2026-09-11, WR-000021 criterion FLAG-TELLS-THE-TRUTH). Between 2026-08-26
-  // and today the flag was a label. Joe's ruling dc57f62d retired the refusal
-  // that stood on this line, and his complaint was exact: the SAME verb
-  // answered differently through two doors, succeeding through the connector
-  // and returning authority_connection_unavailable through `./run.sh call`.
-  // THAT half of the fix stands untouched — partner-authority.js still admits
-  // joe-local and dell-local, authorityOnly is not narrowed here, and both
-  // doors still reach all 220 verbs that are not humanOnly.
+  // HUMAN-ONLY MEANS PARTNER AUTHORITY, NOT A SECOND CHAT WINDOW. A verified
+  // partner passes directly. A native Codex/Claude grant or local machine door
+  // passes only when partner-authority.js can derive its sponsor from
+  // server-held identity state and bind it to that sponsor's authority DB
+  // credential. Probe, review, unknown, unverified, and merely caller-claimed
+  // sponsors still refuse before schema validation or database access.
   //
-  // WHAT BRINGS THE GATE BACK is a verb whose entire product meaning is the
-  // human act. accept-portfolio-revision records a partner accepting the
-  // DoctorCRE v5 constitution; ops.portfolio_accept_revision derives the
-  // acceptor from the authenticated authority session, so an agent invoking it
-  // over its sponsor's authority connection mints a receipt saying Joe
-  // accepted when Joe never did. A signature a machine can write is not a
-  // signature, and the ledger has no second field that would show the
-  // difference (WR-000021's three facts).
-  //
-  // STRICTER THAN THE REFUSAL IT REPLACES, deliberately. The old one admitted
-  // a verified partner OR any sponsored Codex/Claude session, so it would not
-  // have stopped this either. The test is now the one the flag always claimed:
-  // the server-derived actor class must be `verified_partner`, the only class
-  // identity.js gives an authenticated human partner. probe_agent,
-  // review_agent, sponsored_agent and unsponsored_agent are all refused,
-  // whichever connection they hold — an agent cannot reach a humanOnly verb by
-  // holding its sponsor's authority DSN.
-  //
-  // TWELVE VERBS carry the flag today. test/human-only-dispatch.test.mjs
-  // enumerates them FROM THE REGISTRY rather than from a list written by hand,
-  // so a thirteenth cannot be added without its coverage arriving with it.
+  // This restores the useful part of Joe's 2026-08-26 ruling and removes the
+  // WR-000021 overcorrection: the ledger still keeps acting_actor_slug as the
+  // actual machine actor while mcp.js separately records the verified sponsor.
+  // The registry-wide test covers every present and future humanOnly verb.
   if (tool.humanOnly === true) {
     const actorClass = authorizationClassForActor(actor);
-    if (actorClass !== "verified_partner")
+    if (actorClass !== "verified_partner" && !canExercisePartnerAuthority(actor))
       throw new ToolError({ error: "human_only_verb_requires_verified_partner",
         verb: name, actor_class: actorClass,
-        hint: "this verb records a human act and refuses every agent class, sponsored or not, " +
-              "on every connection. Report what you would have done and let an interactive " +
-              "partner session run it." });
+        hint: "this verb records a partner-authority act and requires either the verified partner " +
+              "or a server-verified native/local agent bound to that partner's sponsor-scoped " +
+              "authority connection." });
   }
   // ORACLE-SEAT-ONLY IS ENFORCED HERE, AND THIS IS THE ONLY PLACE THAT
   // ENFORCES IT (2026-09-13, DoctorCRE v5 slice V5-A02 Step B). It is a THIRD

@@ -22,6 +22,21 @@ test("writer transactions set server-derived actor context before Tour mutations
   const sponsored = client();
   await setWriterActorContext(sponsored, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
+    sponsoring_human_slug: "joe", native_agent_verified: true,
   });
   assert.deepEqual(sponsored.calls[0].params, ["codex", ""]);
+
+  const delegated = client();
+  await setWriterActorContext(delegated, {
+    slug: "codex", human: false, authorization_class: "sponsored_agent",
+    sponsoring_human_slug: "joe", native_agent_verified: true,
+  }, { partnerAuthorityAct: true });
+  assert.deepEqual(delegated.calls[0].params, ["codex", "joe"]);
+
+  const unverified = client();
+  await setWriterActorContext(unverified, {
+    slug: "codex", human: false, authorization_class: "sponsored_agent",
+    sponsoring_human_slug: "joe", native_agent_verified: false,
+  }, { partnerAuthorityAct: true });
+  assert.deepEqual(unverified.calls[0].params, ["codex", ""]);
 });
