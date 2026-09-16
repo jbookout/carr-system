@@ -170,6 +170,7 @@ const tools = benchmarkAcceptanceStoreTools({
 
 const PARTNER = { slug: "joe", human: true, via: "oauth-google" };
 const AGENT = { slug: "codex", human: false, sponsoring_human_slug: "joe" };
+const VERIFIED_AGENT = { ...AGENT, native_agent_verified: true };
 
 async function refusal(promise) {
   try {
@@ -540,6 +541,15 @@ test("a verified partner's authority class is derived from the live actor", () =
   assert.equal(acceptor.actor_id, "joe");
   assert.equal(acceptor.authority_class, "verified_partner");
   assert.equal(acceptor.authority_class_source, "identity.authorizationClassForActor");
+  assert.equal(acceptor.producer_role, BENCHMARK_PRODUCER_ROLE);
+});
+
+test("a verified native agent derives the benchmark acceptor from its server-held sponsor", () => {
+  const acceptor = deriveBenchmarkAcceptor(VERIFIED_AGENT);
+  assert.equal(acceptor.actor_id, "joe");
+  assert.equal(acceptor.authority_class, "verified_partner");
+  assert.equal(acceptor.authority_class_source,
+    "partner-authority.partnerAuthoritySlugForActor");
   assert.equal(acceptor.producer_role, BENCHMARK_PRODUCER_ROLE);
 });
 
