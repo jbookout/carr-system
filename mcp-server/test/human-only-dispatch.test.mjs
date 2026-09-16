@@ -1,12 +1,9 @@
-// THE HUMAN-ONLY DISPATCH GATE (WR-000021, criterion FLAG-TELLS-THE-TRUTH).
+// THE PARTNER-AUTHORITY DISPATCH GATE.
 //
 // What this pins: `humanOnly: true` is a refusal on the deployed path, not a
-// label. Between 2026-08-26 and 2026-09-11 it was a label — mcp.js read only
-// `authorityOnly`, and partner-authority.js hands a sponsored agent its
-// sponsor's authority DSN, so an agent could invoke accept-portfolio-revision
-// and the ledger would record Joe as the acceptor of the DoctorCRE v5
-// constitution. The reviewer of release 5b5f5ff8 reproduced that path with a
-// verified nonhuman `joe-local` principal, which is the first actor below.
+// label. It now means the verified partner OR a server-verified native/local
+// agent whose sponsor and sponsor-scoped authority connection are both derived
+// by the server. It does not mean "open a second chat and repeat yourself."
 //
 // THE ENUMERATION IS FROM THE REGISTRY, never a hand-written list: a thirteenth
 // humanOnly verb added tomorrow is covered the moment it is declared, and the
@@ -54,11 +51,14 @@ const joe = {
 };
 
 const REFUSED_ACTORS = [
-  ["sponsored_agent (joe-local, the reviewer's reproduction)", joeLocal, "sponsored_agent"],
-  ["sponsored_agent (connector Claude for Joe)", claudeForJoe, "sponsored_agent"],
   ["probe_agent", probe, "probe_agent"],
   ["review_agent", reviewer, "review_agent"],
   ["unsponsored_agent", stranger, "unsponsored_agent"],
+];
+
+const SPONSORED_PARTNER_ACTORS = [
+  ["sponsored_agent (joe-local)", joeLocal],
+  ["sponsored_agent (connector Claude for Joe)", claudeForJoe],
 ];
 
 // A client that answers nothing. Reaching it at all means the gate let the call
@@ -101,8 +101,39 @@ test("the actor classes this gate refuses are the classes identity.js derives", 
 
 // THE BLOCKING FINDING ITSELF, named on its own so a failure reads as the
 // release defect it is rather than as one row of a loop.
-test("accept-portfolio-revision refuses the verified nonhuman joe-local principal", async () => {
-  const error = await executeRegisteredTool(forbiddenClient, joeLocal, "accept-portfolio-revision", {
+test("accept-portfolio-revision admits the verified nonhuman joe-local principal", async () => {
+  const receiptId = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+  const client = {
+    query: async (text) => {
+      if (text.includes("from tool_call where idempotency_key")) return { rows: [] };
+      if (text.includes("ops.portfolio_accept_revision")) return { rows: [{ id: receiptId }] };
+      if (text.includes("insert into tool_call") || text.includes("insert into event")) return { rows: [] };
+      throw new Error(`unexpected SQL: ${text}`);
+    },
+  };
+  const out = await executeRegisteredTool(client, joeLocal, "accept-portfolio-revision", {
+    idempotency_key: "9f1d0c2e-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+    revision_id: "2d3e4f50-6172-4839-8a9b-0c1d2e3f4a5b",
+    accepted_digest: `sha256:${"a".repeat(64)}`,
+    review_id: "3e4f5061-7283-494a-9b0c-1d2e3f4a5b6c",
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.receipt_id, receiptId);
+});
+
+test("verified sponsor-bound agents pass every humanOnly identity gate", async () => {
+  for (const verb of humanOnlyVerbs) {
+    for (const [label, actor] of SPONSORED_PARTNER_ACTORS) {
+      const error = await executeRegisteredTool(forbiddenClient, actor, verb, {})
+        .then(() => null, (e) => e);
+      assert.notEqual(error?.payload?.error, "human_only_verb_requires_verified_partner", `${verb}: ${label}`);
+    }
+  }
+});
+
+test("an unverified actor cannot self-assert Joe as sponsor", async () => {
+  const unverified = { ...joeLocal, native_agent_verified: false };
+  const error = await executeRegisteredTool(forbiddenClient, unverified, "accept-portfolio-revision", {
     idempotency_key: "9f1d0c2e-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
     revision_id: "2d3e4f50-6172-4839-8a9b-0c1d2e3f4a5b",
     accepted_digest: `sha256:${"a".repeat(64)}`,

@@ -14,7 +14,7 @@
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
-import { partnerAuthoritySlugForActor } from "./partner-authority.js";
+import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
   personalScopeForActor, verifiedAgentSlugForClient } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
@@ -51,13 +51,21 @@ export function foundationAssuranceRuntimeBinding(env) {
 
 // Transaction-local actor context for SECURITY DEFINER functions that must
 // derive authorship from the authenticated server principal rather than accept
-// it in a caller payload.  The verified-human setting is deliberately empty
-// for sponsored and machine actors; Tour entrance verification checks it as a
-// second, narrower boundary.
-export async function setWriterActorContext(client, actor) {
+// it in a caller payload. Sponsored actors receive the verified sponsor only
+// for a registry-declared humanOnly act; ordinary writes keep the setting empty
+// so unrelated human-presence gates do not widen.
+export async function setWriterActorContext(client, actor, { partnerAuthorityAct = false } = {}) {
   const authorizationClass = actor?.authorization_class || authorizationClassForActor(actor);
-  const verifiedHumanSlug = actor?.human === true &&
-    authorizationClass === "verified_partner" ? actor.slug : "";
+  // A partner-authority agent is not reclassified as a human: acting_actor_slug
+  // remains the authenticated Codex/Claude/local-machine actor.  The separate
+  // verified-human setting names the server-derived sponsor whose authority
+  // connection this transaction is already using.  This lets SECURITY DEFINER
+  // functions preserve both facts instead of forcing a second interactive
+  // session merely to restate an approval the partner gave in the active task.
+  const verifiedHumanSlug = authorizationClass === "verified_partner"
+    ? actor.slug
+    : (partnerAuthorityAct && canExercisePartnerAuthority(actor)
+        ? partnerAuthoritySlugForActor(actor) : "");
   const receiptSessionRef = typeof actor?.correlation_id === "string" && actor.correlation_id
     ? `session:${actor.correlation_id.toLowerCase()}` : null;
   if (receiptSessionRef === null) {
@@ -709,7 +717,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
             "provision the actor before any write verb will run" });
     // In place, not a copy — see executeWithTrustedPrincipal above.
     const actorWithId = Object.assign(actor, { id: a.rows[0].id });
-    await setWriterActorContext(client, actorWithId);
+    await setWriterActorContext(client, actorWithId,
+      { partnerAuthorityAct: tool.humanOnly === true });
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
     if (principalReadback.rows.length !== 1)
       throw new ToolError({ error: "trusted_database_principal_unavailable" });
