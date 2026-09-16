@@ -740,6 +740,38 @@ function serverHeldCredential(bytes) {
 const SERVER_REVIEW_TOKENS_RAW = serverEnvironmentSecret("REVIEW_TOKENS");
 const SERVER_REVIEW_TOKENS = parsedTokenMap(SERVER_REVIEW_TOKENS_RAW);
 
+const REQUIRED_REVIEW_TOKEN_ACTORS = Object.freeze(Object.entries(SERVER_MACHINE_IDENTITIES)
+  .filter(([, identity]) => identity.marker === "review" && identity.via === "review-token")
+  .map(([slug]) => slug)
+  .sort());
+
+/**
+ * Public, secret-free readback of whether every registered review seat is
+ * reachable through its own bearer. A repeated bearer makes every seat that
+ * shares it unreachable because reviewActorForToken resolves only one slug.
+ */
+function reviewTokenCoverage() {
+  const tokens = SERVER_REVIEW_TOKENS || {};
+  const counts = new Map();
+  for (const secret of Object.values(tokens))
+    counts.set(secret, (counts.get(secret) || 0) + 1);
+  const duplicateActorSlugs = REQUIRED_REVIEW_TOKEN_ACTORS.filter(slug =>
+    typeof tokens[slug] === "string" && counts.get(tokens[slug]) > 1);
+  const duplicateActors = new Set(duplicateActorSlugs);
+  const reachable = REQUIRED_REVIEW_TOKEN_ACTORS.filter(slug =>
+    typeof tokens[slug] === "string" && !duplicateActors.has(slug));
+  const reachableActors = new Set(reachable);
+  return Object.freeze({
+    schema_version: "carr-review-token-coverage.v1",
+    required_count: REQUIRED_REVIEW_TOKEN_ACTORS.length,
+    reachable_count: reachable.length,
+    complete: reachable.length === REQUIRED_REVIEW_TOKEN_ACTORS.length,
+    missing_actor_slugs: Object.freeze(REQUIRED_REVIEW_TOKEN_ACTORS
+      .filter(slug => !reachableActors.has(slug))),
+    duplicate_actor_slugs: Object.freeze(duplicateActorSlugs),
+  });
+}
+
 /** The shapes a derived session ref is built from. Server-written, both of them. */
 const CALL_VIA = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CALL_CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -1055,9 +1087,14 @@ async function staffedOracleLanes() {
   try {
     const { FOUNDATION_ASSURANCE_ORACLE_ACTORS } =
       await import("./foundation-assurance-minimum-registration.v5.js");
-    for (const lane of FOUNDATION_ASSURANCE_ORACLE_ACTORS) lanes.add(lane);
-    lanes.add("codex-benchmark-author");
-    lanes.add("codex-benchmark-reviewer");
+    // Registration names the seats; credential coverage staffs them. Keep the
+    // WR95 cohort atomic so a partially provisioned secret cannot author the
+    // first irreversible receipt and strand the chain at a later missing seat.
+    if (reviewTokenCoverage().complete) {
+      for (const lane of FOUNDATION_ASSURANCE_ORACLE_ACTORS) lanes.add(lane);
+      lanes.add("codex-benchmark-author");
+      lanes.add("codex-benchmark-reviewer");
+    }
   } catch {}
   // Missing registration is unstaffed, not a router failure. Older Workers
   // simply return an empty set and therefore enter no receipt context.
@@ -1070,12 +1107,27 @@ export const serveReviewRequest = closedCallable(async (request, env, ctx) => {
   const actor = reviewActorForToken(typeof header === "string" ? header : "");
   if (actor === null) return null;
   const { dispatch } = await import("./mcp.js");
+  const coverage = reviewTokenCoverage();
   const lanes = await staffedOracleLanes();
-  if (!lanes.has(actor.slug)) return dispatch(request, env, ctx, actor);
-  const correlationId = env?.CORRELATION_ID;
-  return enterAuthenticatedCall(
-    deriveCallIdentity(actor, typeof correlationId === "string" ? correlationId : null),
-    () => dispatch(request, env, ctx, actor));
+  let response;
+  if (!lanes.has(actor.slug)) response = await dispatch(request, env, ctx, actor);
+  else {
+    const correlationId = env?.CORRELATION_ID;
+    response = await enterAuthenticatedCall(
+      deriveCallIdentity(actor, typeof correlationId === "string" ? correlationId : null),
+      () => dispatch(request, env, ctx, actor));
+  }
+  // Authenticated, secret-free operational readback. Release verification can
+  // prove the complete cohort before the first receipt write without learning
+  // any bearer value or widening the identity module's frozen export surface.
+  if (typeof response?.headers?.set === "function") {
+    response.headers.set("x-carr-review-token-coverage",
+      `${coverage.reachable_count}/${coverage.required_count}`);
+    response.headers.set("x-carr-review-token-coverage-complete", String(coverage.complete));
+    response.headers.set("x-carr-review-token-missing", coverage.missing_actor_slugs.join(","));
+    response.headers.set("x-carr-review-token-duplicates", coverage.duplicate_actor_slugs.join(","));
+  }
+  return response;
 });
 
 /**
