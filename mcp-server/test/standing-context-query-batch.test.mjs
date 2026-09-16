@@ -87,6 +87,43 @@ test("standing-context batches stable baseline reads without changing its payloa
     !/standing-context:baseline-batch/.test(sql)).length, 1);
   assert.equal(c.calls.some(sql => /from doctrine_meta/.test(sql) &&
     !/standing-context:baseline-batch/.test(sql)), false);
-  assert.equal(c.calls.length, 5,
-    "baseline, fail-soft proposals, optional registry, delivery snapshot, and defects are the inactive path");
+  assert.equal(c.calls.length, 3,
+    "baseline, fail-soft proposals, and the optional guidance/delivery snapshot are the inactive path");
+});
+
+test("standing-context launches independent snapshot reads concurrently", async () => {
+  let release;
+  let timedOut = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Set();
+  const timer = setTimeout(() => {
+    timedOut = true;
+    release();
+  }, 100);
+  const c = {
+    query: async (sql) => {
+      const marker = /standing-context:baseline-batch/.test(sql) ? "baseline"
+        : /v_guidance_registry_state/.test(sql) ? "registry"
+        : /from rule\s+where status = 'proposed'/.test(sql) ? "proposed"
+        : "unexpected";
+      started.add(marker);
+      if (started.size === 3) release();
+      await gate;
+      if (marker === "baseline") return { rows: [{
+        all_rules: RULES, action_required: [], doctrine_generation: 1165,
+      }] };
+      if (marker === "registry") return { rows: [] };
+      if (marker === "proposed") {
+        throw Object.assign(new Error("permission denied for table rule"), { code: "42501" });
+      }
+      throw new Error(`unexpected standing-context query: ${sql}`);
+    },
+  };
+
+  const out = await executeRegisteredTool(c, { ...ACTOR }, "standing-context", {});
+  clearTimeout(timer);
+  assert.equal(timedOut, false,
+    "independent reads must all start before any one network round trip completes");
+  assert.deepEqual([...started].sort(), ["baseline", "proposed", "registry"]);
+  assert.match(out.recite, /1 shared, 1 joe-personal/);
 });

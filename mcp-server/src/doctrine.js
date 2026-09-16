@@ -910,7 +910,6 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         tier: { type: "string", description: "Optional work tier used to select applicable typed constraints." } },
         },
       handler: async (c, actor, args) => {
-        await actorId(c, actor);
         // Personal rules come only from the verified sponsor embedded in the
         // authenticated actor. `partner` was deliberately removed from this
         // schema: a tool argument must never select another human's brain.
@@ -931,18 +930,27 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const who = scope.sponsor;
         const detail = args.detail === "full" ? "full" : "gist";
         const wanted = new Set((args.rule_ids || []).map(s => String(s).trim().toLowerCase()));
+        const requestedPacks = [...new Set(
+          [...(Array.isArray(args.packs) ? args.packs : []),
+           ...(args.workflow ? [args.workflow] : [])]
+            .map(s => String(s || "").trim().toLowerCase()).filter(Boolean))];
         // Same filter set as the compiled-rules exporter (_fetch_rules +
         // _is_intro, ORDER 37): intro-politics rules render to their own intro
         // file and are NOT part of the recited counts — the verb's numbers
         // must match the files' numbers exactly or the recitation audit
         // (rule 4f7c348f) breaks the day a session compares them.
-        // These three stable baseline reads used to be three sequential network
+        // These four stable baseline reads used to be sequential network
         // round trips. Keep the independently fail-soft reads below separate:
         // carr_reader intentionally cannot read rule, so absorbing the proposed-
         // rule query into this mandatory batch would turn its safe denial into a
         // standing-context failure. Take one snapshot only for the core corpus,
         // action queue, and generation counter.
-        const baselineResult = await c.query(
+        // The three requests below are independent. The Neon HTTP client pays
+        // one public-network round trip per awaited query, so the old serial
+        // path accumulated avoidable waits. Keep the proposed-rule denial in
+        // its own fail-soft request, combine the optional guidance/delivery
+        // reads into one coherent snapshot, and overlap all three requests.
+        const baselinePromise = c.query(
           `select
              (select coalesce(jsonb_agg(to_jsonb(r) - 'activated_at'
                                 order by r.personal_to nulls first,r.activated_at,r.statement),
@@ -960,9 +968,63 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
                     from loop_item
                    where kind = 'action_required' and status = 'open'
                 ) a) as action_required,
-             (select generation from doctrine_meta where id=1) as doctrine_generation
+             (select generation from doctrine_meta where id=1) as doctrine_generation,
+             (select coalesce(jsonb_agg(to_jsonb(d)
+                                order by d.caught_by_human desc,d.occurrences desc,d.last_seen desc),
+                              '[]'::jsonb)
+                from (
+                  select defect_class,occurrences,caught_by_human,first_seen,last_seen,
+                         sources_unread
+                    from v_defect_class
+                   order by caught_by_human desc,occurrences desc,last_seen desc
+                   limit 5
+                ) d) as defect_classes
              /* standing-context:baseline-batch */`,
           [who]);
+        const optionalSnapshotPromise = c.query(
+          `with guidance_registry as (
+             select state,manifest_digest from ops.v_guidance_registry_state limit 1
+           ), delivery_registry as (
+             select count(distinct map_digest)::integer as map_versions,
+                    min(map_digest) as map_digest,
+                    count(*)::integer as tagged_rules
+               from ops.rule_load_layer
+           ), plan as (
+             select coalesce(jsonb_agg(to_jsonb(p) order by p.load_layer,p.short_id),'[]'::jsonb) as rows
+               from ops.rule_delivery_plan($5,$6) p
+           ), packs as (
+             select coalesce(jsonb_agg(to_jsonb(i) order by i.pack),'[]'::jsonb) as rows
+               from ops.rule_pack_index() i
+           )
+           select guidance_registry.state,guidance_registry.manifest_digest,
+                  case when guidance_registry.state = 'active' then
+                    (select coalesce(jsonb_agg(to_jsonb(g)),'[]'::jsonb)
+                       from (
+                         select source_rule_id as id,statement,human_quote,taught_by,personal_to,
+                                scope,guidance_type,is_constitution
+                           from ops.standing_guidance($1,$2,$3,$4)
+                       ) g)
+                  else '[]'::jsonb end as standing_rules,
+                  case when guidance_registry.state = 'active' then
+                    (select coalesce(jsonb_agg(to_jsonb(p) order by p.guidance_type),'[]'::jsonb)
+                       from ops.v_guidance_projection_summary p)
+                  else '[]'::jsonb end as projection_summary,
+                  (select mode from ops.rule_delivery_policy limit 1) as mode,
+                  delivery_registry.map_versions,delivery_registry.map_digest,
+                  delivery_registry.tagged_rules,
+                  plan.rows as delivery_plan,packs.rows as pack_index
+             from guidance_registry cross join delivery_registry cross join plan cross join packs`,
+          [who, args.workflow || null, args.surface || actor.slug, args.tier || null,
+            scope.status === "personal" ? who : null, requestedPacks])
+          .catch(() => ({ rows: [] }));
+        const proposedRulesPromise = c.query(
+          `select id, statement, taught_by, personal_to, created_at
+             from rule
+            where status = 'proposed'
+              and (personal_to is null or ($1::text is not null and personal_to =
+                    retrieval_visibility_actor_id($1)))
+            order by created_at`, [who]).catch(() => ({ rows: [] }));
+        const baselineResult = await baselinePromise;
         // Existing unit fakes historically return the old rule-row shape for
         // any SQL containing v_compiled_rules. Falling back keeps those tests
         // meaningful and also fails safely if an older proxy rewrites the
@@ -974,24 +1036,13 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // what the recited coverage count means. Until a human activates the
         // registry this path is behavior-identical to the compiled-rule path.
         // A missing migration is also inactive so rolling deploys remain safe.
-        const registryState = (await c.query(
-          `select state,manifest_digest from ops.v_guidance_registry_state limit 1`)
-          .catch(() => ({ rows: [] }))).rows[0];
+        const optionalSnapshot = (await optionalSnapshotPromise).rows[0] || {};
+        const registryState = optionalSnapshot;
         const registryActive = registryState?.state === "active";
-        let standingRules = [];
-        let projectionSummary = [];
-        if (registryActive) {
-          standingRules = (await c.query(
-            `select source_rule_id as id,statement,human_quote,taught_by,personal_to,
-                    scope,guidance_type,is_constitution
-               from ops.standing_guidance($1,$2,$3,$4)`,
-            [who, args.workflow || null, args.surface || actor.slug,
-              args.tier || null])).rows;
-          projectionSummary = (await c.query(
-            `select guidance_type,active_items,projection_digest
-               from ops.v_guidance_projection_summary
-              order by guidance_type`)).rows;
-        }
+        const standingRules = registryActive && Array.isArray(registryState.standing_rules)
+          ? registryState.standing_rules : [];
+        const projectionSummary = registryActive && Array.isArray(registryState.projection_summary)
+          ? registryState.projection_summary : [];
         // Full is an explicit request for the whole corpus. Short-id lookups
         // likewise remain authoritative even when typed boot loading is active.
         const selectedById = new Map((registryActive && detail !== "full"
@@ -1026,33 +1077,11 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // EVERY QUERY HERE FAILS SOFT. A worker running ahead of migration 0291
         // must behave exactly as it did before, not error at the one verb every
         // session calls first.
-        const requestedPacks = [...new Set(
-          [...(Array.isArray(args.packs) ? args.packs : []),
-           ...(args.workflow ? [args.workflow] : [])]
-            .map(s => String(s || "").trim().toLowerCase()).filter(Boolean))];
         // One statement means policy, map digest, selector rows, and pack index
         // describe the same database snapshot. Four independent reads under
         // READ COMMITTED could otherwise advertise one map while delivering a
         // plan compiled from another during a registry sync.
-        const deliverySnapshot = (await c.query(
-          `with registry as (
-             select count(distinct map_digest)::integer as map_versions,
-                    min(map_digest) as map_digest,
-                    count(*)::integer as tagged_rules
-               from ops.rule_load_layer
-           ), plan as (
-             select coalesce(jsonb_agg(to_jsonb(p) order by p.load_layer,p.short_id),'[]'::jsonb) as rows
-               from ops.rule_delivery_plan($1,$2) p
-           ), packs as (
-             select coalesce(jsonb_agg(to_jsonb(i) order by i.pack),'[]'::jsonb) as rows
-               from ops.rule_pack_index() i
-           )
-           select (select mode from ops.rule_delivery_policy limit 1) as mode,
-                  registry.map_versions,registry.map_digest,registry.tagged_rules,
-                  plan.rows as delivery_plan,packs.rows as pack_index
-             from registry cross join plan cross join packs`,
-          [scope.status === "personal" ? who : null, requestedPacks])
-          .catch(() => ({ rows: [] }))).rows[0] || {};
+        const deliverySnapshot = optionalSnapshot;
         const deliveryMode = deliverySnapshot.mode || null;
         const deliveryMapVersions = Number(deliverySnapshot.map_versions || 0);
         const deliveryMapDigest = deliveryMapVersions === 1
@@ -1145,13 +1174,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // the binding text is one standing-context call away with rule_ids, and
         // a wall of unapproved prose at session start would be skimmed like
         // every other wall.
-        const proposedRules = (await c.query(
-          `select id, statement, taught_by, personal_to, created_at
-             from rule
-            where status = 'proposed'
-              and (personal_to is null or ($1::text is not null and personal_to =
-                    retrieval_visibility_actor_id($1)))
-            order by created_at`, [who]).catch(() => ({ rows: [] }))).rows;
+        const proposedRules = (await proposedRulesPromise).rows;
         // THE DEFECT CLASSES (0103, loop #185). Surfaced HERE for the same reason the
         // proposed rules are: this verb is the opening act of every session, and the
         // loop's acceptance criterion is literally "a session can be told at start
@@ -1162,12 +1185,8 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // catches itself is working as designed; a class a partner keeps finding is the
         // one that should change how this session reads today. Capped at five, because a
         // wall at session start is skimmed like every other wall.
-        const defectClasses = (await c.query(
-          `select defect_class, occurrences, caught_by_human, first_seen, last_seen,
-                  sources_unread
-             from v_defect_class
-            order by caught_by_human desc, occurrences desc, last_seen desc
-            limit 5`).catch(() => ({ rows: [] }))).rows;
+        const defectClasses = baselineBatched && Array.isArray(baseline.defect_classes)
+          ? baseline.defect_classes : [];
         const gen = baselineBatched
           ? { generation: baseline.doctrine_generation }
           : (await c.query(`select generation from doctrine_meta where id=1`)).rows[0];
