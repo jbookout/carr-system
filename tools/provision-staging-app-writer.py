@@ -670,6 +670,122 @@ def load_rollback_worker_values(old: Any) -> dict[str, str | None]:
     return values
 
 
+def repair_prior_rollback_credentials(
+    old: Any, plans: Mapping[str, Sequence[str]], *,
+    run: Run = subprocess.run, environ: Mapping[str, str] | None = None,
+    connect: Connect = psycopg.connect,
+) -> dict[str, str]:
+    """Complete the canonical rollback project without touching the Worker.
+
+    Forward migrations can add a new migration-owned login seat after the
+    original staging credentials were minted.  A later candidate cutover must
+    not delete that live Worker binding merely because the untouched rollback
+    project predates it, and it must not rotate a credential whose local file
+    was lost.  This door closes that gap narrowly: only a migration-created,
+    still-passwordless seat may be adopted; ordinary missing credentials and
+    already-passworded seats continue to refuse.
+    """
+    try:
+        owner_secret = replacement.derive_dsn(
+            old, replacement.OWNER_ROLE, run=run,
+            environ=environ if environ is not None else os.environ)
+    except replacement.ReplacementRefusal as exc:
+        raise ProvisioningRefusal(
+            "prior staging owner DSN derivation refused; output suppressed") from exc
+    local = _local_scope(old)
+    owner_dsn = ScopedDsn(
+        local, replacement.OWNER_ROLE, old.endpoint_host, 5432, "neondb",
+        owner_secret.value,
+    )
+    config_root = credential.profile("reader").paths.final.parent
+    lock_path = config_root / ".staging-prior-rollback-role.lock"
+    outcomes: dict[str, str] = {}
+    with credential.exclusive_lock(lock_path):
+        owner = connect(owner_dsn.value)
+        try:
+            expected_creator = require_direct_owner_identity(owner.cursor())
+            owner.commit()
+            for profile in PROFILES:
+                file_profile = credential.profile(profile.label)
+                try:
+                    stored = credential.load_existing(
+                        file_profile.paths, key=file_profile.key,
+                        role_name=file_profile.role_name,
+                        expected_endpoint=owner_dsn.endpoint,
+                        expected_port=owner_dsn.port,
+                        expected_database=owner_dsn.database,
+                    )
+                except credential.CredentialRefusal as exc:
+                    if "is absent" not in str(exc):
+                        raise
+                    if not profile.created_by_migration:
+                        raise ProvisioningRefusal(
+                            f"canonical rollback credential for {profile.label} is absent")
+                    cur = owner.cursor()
+                    cur.execute("select exists(select 1 from pg_roles where rolname=%s)",
+                                (profile.login_role,))
+                    exists = cur.fetchone() == (True,)
+                    passwordless = role_is_passwordless(cur, profile.login_role) if exists else None
+                    action = decide_profile_action(
+                        role_exists_now=exists, credential_state="absent",
+                        role_created_by_migration=True,
+                        role_passwordless=passwordless,
+                    )
+                    if action != "adopt":
+                        raise ProvisioningRefusal(
+                            f"canonical rollback seat {profile.login_role} is not adoptable")
+                    stored = credential.prepare_pending(
+                        file_profile.paths, key=file_profile.key,
+                        role_name=file_profile.role_name,
+                        owner_uri=owner_dsn.value,
+                        expected_endpoint=owner_dsn.endpoint,
+                        expected_port=owner_dsn.port,
+                        expected_database=owner_dsn.database,
+                    )
+                else:
+                    cur = owner.cursor()
+                    cur.execute("select exists(select 1 from pg_roles where rolname=%s)",
+                                (profile.login_role,))
+                    exists = cur.fetchone() == (True,)
+                    passwordless = (
+                        role_is_passwordless(cur, profile.login_role)
+                        if exists and profile.created_by_migration else None
+                    )
+                    action = decide_profile_action(
+                        role_exists_now=exists, credential_state=stored.state,
+                        role_created_by_migration=profile.created_by_migration,
+                        role_passwordless=passwordless,
+                    )
+                if action in {"resume", "reuse"}:
+                    validate_profile_login(
+                        stored.value, profile, plans[profile.label],
+                        expected_creator=expected_creator, connect=connect,
+                    )
+                    outcome = "resumed" if action == "resume" else "reused"
+                elif action == "adopt":
+                    apply_login_profile(
+                        owner, profile, plans[profile.label], stored.password,
+                        expected_creator=expected_creator, adopt=True,
+                    )
+                    validate_profile_login(
+                        stored.value, profile, plans[profile.label],
+                        expected_creator=expected_creator, connect=connect,
+                    )
+                    outcome = "adopted"
+                else:
+                    raise ProvisioningRefusal(
+                        f"canonical rollback credential repair refused action {action}")
+                if stored.state == "pending":
+                    credential.promote_pending(
+                        file_profile.paths, key=file_profile.key,
+                        expected_value=stored.value,
+                    )
+                outcomes[profile.label] = outcome
+        finally:
+            owner.close()
+    return outcomes
+
+
 def validate_provider_scope(
     projects: Sequence[dict[str, Any]], branches: Sequence[dict[str, Any]],
     endpoints: Sequence[dict[str, Any]],
@@ -1582,9 +1698,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="converge candidate roles and atomically cut over both Worker secrets")
     parser.add_argument("--rollback-to-prior-staging", action="store_true",
                         help="atomically restore both untouched prior-staging Worker secrets")
+    parser.add_argument("--repair-prior-rollback-credentials", action="store_true",
+                        help="adopt only missing passwordless migration seats on the prior "
+                             "staging rollback project; never changes Worker secrets")
     args = parser.parse_args(argv)
+    if args.rollback_to_prior_staging and args.repair_prior_rollback_credentials:
+        parser.error("rollback and prior credential repair are mutually exclusive")
     if args.rollback_to_prior_staging and not args.apply:
         parser.error("--rollback-to-prior-staging requires --apply")
+    if args.repair_prior_rollback_credentials and not args.apply:
+        parser.error("--repair-prior-rollback-credentials requires --apply")
     return args
 
 
@@ -1609,6 +1732,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ProvisioningRefusal(
                     "replacement provider preservation readback refused; output suppressed"
                 ) from exc
+
+        if args.repair_prior_rollback_credentials:
+            preserve_provider_scopes()
+            repair_outcomes = repair_prior_rollback_credentials(binding.old, plans)
+            preserve_provider_scopes()
+            print(json.dumps({
+                "environment": "staging",
+                "state": "prior_rollback_credentials_repaired",
+                "candidate_operation_id": str(target.candidate_operation_id),
+                "receipt_id": str(target.receipt_id), "git_sha": target.expected_sha,
+                "prior_staging_project_id": binding.old.project_id,
+                "role_outcomes": repair_outcomes, "worker_secret_update": "none",
+            }, sort_keys=True))
+            return 0
 
         if args.rollback_to_prior_staging:
             rollback_values = load_rollback_worker_values(binding.old)
