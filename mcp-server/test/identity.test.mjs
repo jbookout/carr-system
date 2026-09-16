@@ -427,6 +427,30 @@ process.env.AGENT_TOKENS = AGENT_TOKENS;
 process.env.CODEX_CONTINUITY_TOKENS = CONTINUITY_TOKENS;
 process.env.GOOGLE_CLIENT_SECRET = GRANT_WITNESS;
 const booted = await import("../src/identity.js?server-credentials-in-the-environment");
+const REQUIRED_REVIEW_ACTORS = [
+  "codex-benchmark-author",
+  "codex-benchmark-reviewer",
+  "codex-fa-assurance",
+  "codex-fa-coverage",
+  "codex-fa-execution",
+  "codex-fa-foundation",
+  "codex-fa-minimum",
+  "codex-fa-phi",
+  "codex-fa-prompt",
+  "codex-fa-secrets",
+  "codex-fa-source",
+  "codex-reviewer",
+  "grok-reviewer",
+];
+const partialReviewTokens = process.env.REVIEW_TOKENS;
+process.env.REVIEW_TOKENS = JSON.stringify(Object.fromEntries(
+  REQUIRED_REVIEW_ACTORS.map((slug, index) => [slug, `review-secret-${index}`])));
+const fullyStaffed = await import("../src/identity.js?fully-staffed-review-credentials");
+process.env.REVIEW_TOKENS = JSON.stringify(Object.fromEntries(
+  REQUIRED_REVIEW_ACTORS.map((slug, index) => [slug,
+    index < 2 ? "duplicated-review-secret" : `review-secret-${index}`])));
+const duplicatedSeat = await import("../src/identity.js?duplicated-review-credential");
+process.env.REVIEW_TOKENS = partialReviewTokens;
 
 /**
  * WHAT A BEARER ESTABLISHES, asked the way a route asks.
@@ -518,7 +542,32 @@ test("the router door serves a review-council request and enters no context", as
     { CORRELATION_ID: A_CORRELATION_ID }, {});
   assert.notEqual(dispatched, null, "the server's own bearer was not dispatched");
   assert.equal(dispatched.status, 405);
+  assert.equal(dispatched.headers.get("x-carr-review-token-coverage"), "1/13");
+  assert.equal(dispatched.headers.get("x-carr-review-token-coverage-complete"), "false");
+  assert.equal(dispatched.headers.get("x-carr-review-token-duplicates"), "");
+  assert.equal(dispatched.headers.get("x-carr-review-token-missing"),
+    REQUIRED_REVIEW_ACTORS.filter(slug => slug !== "codex-reviewer").join(","));
   assert.equal(booted.authenticatedIdentity.receiptIdentity(), null);
+});
+
+test("review-token coverage readback requires thirteen distinct reachable actors", async () => {
+  const request = bearer => new Request("https://x/mcp", {
+    method: "GET", headers: { authorization: `Bearer ${bearer}` },
+  });
+  const full = await fullyStaffed.serveReviewRequest(request("review-secret-3"), {}, {});
+  assert.equal(full.headers.get("x-carr-review-token-coverage"), "13/13");
+  assert.equal(full.headers.get("x-carr-review-token-coverage-complete"), "true");
+  assert.equal(full.headers.get("x-carr-review-token-missing"), "");
+  assert.equal(full.headers.get("x-carr-review-token-duplicates"), "");
+
+  const duplicated = await duplicatedSeat.serveReviewRequest(
+    request("review-secret-3"), {}, {});
+  assert.equal(duplicated.headers.get("x-carr-review-token-coverage"), "11/13");
+  assert.equal(duplicated.headers.get("x-carr-review-token-coverage-complete"), "false");
+  assert.equal(duplicated.headers.get("x-carr-review-token-missing"),
+    "codex-benchmark-author,codex-benchmark-reviewer");
+  assert.equal(duplicated.headers.get("x-carr-review-token-duplicates"),
+    "codex-benchmark-author,codex-benchmark-reviewer");
 });
 
 test("a credential map the CALLER supplies authenticates an actor but establishes nothing", () => {
