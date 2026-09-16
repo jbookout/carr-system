@@ -65,6 +65,20 @@ function mockClient() {
 function activeGuidanceClient() {
   const base = mockClient();
   return { query: async (sql, params = []) => {
+    if (sql.includes("with guidance_registry as")) {
+      return { rows: [{ state: "active", manifest_digest: "a".repeat(64),
+        standing_rules: [
+          { ...shared[0], guidance_type: "doctrine", is_constitution: true },
+          { ...shared[1], guidance_type: "constraint", is_constitution: false },
+          { ...joePersonal[0], guidance_type: "constraint", is_constitution: false },
+        ],
+        projection_summary: [
+          { guidance_type: "constraint", active_items: 2, projection_digest: "b".repeat(64) },
+          { guidance_type: "doctrine", active_items: 4, projection_digest: "c".repeat(64) },
+          { guidance_type: "rubric", active_items: 3, projection_digest: "d".repeat(64) },
+        ], mode: null, map_versions: 0, map_digest: null, tagged_rules: 0,
+        delivery_plan: [], pack_index: [] }] };
+    }
     if (sql.includes("from ops.v_guidance_registry_state")) {
       return { rows: [{ state: "active", manifest_digest: "a".repeat(64) }] };
     }

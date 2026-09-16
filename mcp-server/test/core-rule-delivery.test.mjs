@@ -57,6 +57,17 @@ function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX } = {}) {
     query: async (sql, params = []) => {
       if (/from v_compiled_rules/i.test(sql))
         return { rows: [...rows(SHARED, false), ...rows(PERSONAL, true)] };
+      if (/with guidance_registry as/i.test(sql)) {
+        const declared = params[5] || [];
+        const deliveryPlan = plan
+          .filter(r => r.scope === "shared" || (params[4] && r.scope === params[4]))
+          .map(r => ({ ...r, selected: r.load_layer === "layer0"
+                       || r.packs.some(p => declared.includes(p)) }));
+        return { rows: [{ state: null, manifest_digest: null,
+          standing_rules: [], projection_summary: [], mode, map_versions: 1,
+          map_digest: "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2",
+          tagged_rules: plan.length, delivery_plan: deliveryPlan, pack_index: packIndex }] };
+      }
       if (/v_guidance_registry_state/i.test(sql)) return { rows: [] };
       if (/with registry as/i.test(sql) && /plan\.rows as delivery_plan/i.test(sql)) {
         const declared = params[1] || [];
