@@ -50,6 +50,9 @@ def main() -> int:
             raise AssertionError(label)
         print(f"  ok  {label}")
 
+    check("prior rollback credentials have a first-class repair door",
+          callable(getattr(provision, "repair_prior_rollback_credentials", None)))
+
     class SnapshotCursor:
         def __init__(self):
             self.rows = []
@@ -931,6 +934,84 @@ commit;
 
         def close(self) -> None:
             self.closed = True
+
+    repair_events: list[tuple[str, str]] = []
+    repair_owner = FakeOwner()
+    repair_saved = {
+        "derive_dsn": provision.replacement.derive_dsn,
+        "profile": provision.credential.profile,
+        "load_existing": provision.credential.load_existing,
+        "prepare_pending": provision.credential.prepare_pending,
+        "promote_pending": provision.credential.promote_pending,
+        "exclusive_lock": provision.credential.exclusive_lock,
+        "require_owner": provision.require_direct_owner_identity,
+        "apply": provision.apply_login_profile,
+        "validate": provision.validate_profile_login,
+    }
+    repair_root = pathlib.Path("/fixture/prior-rollback")
+    repair_profiles = {
+        profile.label: types.SimpleNamespace(
+            key=f"KEY_{profile.label}", role_name=profile.login_role,
+            paths=provision.credential.CredentialPaths(
+                repair_root / f"{profile.label}.env",
+                repair_root / f"{profile.label}.env.pending"),
+        ) for profile in provision.PROFILES
+    }
+    try:
+        provision.replacement.derive_dsn = lambda *_args, **_kwargs: \
+            types.SimpleNamespace(value="prior-owner-dsn")
+        provision.credential.profile = lambda label, **_kwargs: repair_profiles[label]
+        def repair_load(_paths, *, role_name, expected_endpoint, **_kwargs):
+            profile = next(row for row in provision.PROFILES if row.login_role == role_name)
+            if profile.created_by_migration:
+                raise provision.credential.CredentialRefusal("staging credential is absent")
+            return provision.credential.StoredCredential(
+                "final", repair_root / f"{profile.label}.env",
+                f"dsn-{profile.label}", "fixture-password", expected_endpoint, 5432, "neondb")
+        provision.credential.load_existing = repair_load
+        def repair_prepare(_paths, *, role_name, expected_endpoint, **_kwargs):
+            profile = next(row for row in provision.PROFILES if row.login_role == role_name)
+            repair_events.append(("prepare", profile.label))
+            return provision.credential.StoredCredential(
+                "pending", repair_root / f"{profile.label}.env.pending",
+                f"dsn-{profile.label}", "fixture-password", expected_endpoint, 5432, "neondb")
+        provision.credential.prepare_pending = repair_prepare
+        provision.credential.promote_pending = lambda _paths, *, key, **_kwargs: \
+            repair_events.append(("promote", key.removeprefix("KEY_")))
+        provision.credential.exclusive_lock = exclusive_lock
+        provision.require_direct_owner_identity = lambda _cur: "neondb_owner"
+        provision.apply_login_profile = lambda _owner, profile, *_args, **_kwargs: \
+            repair_events.append(("adopt", profile.label))
+        provision.validate_profile_login = lambda _dsn, profile, *_args, **_kwargs: \
+            repair_events.append(("validate", profile.label))
+        repaired = provision.repair_prior_rollback_credentials(
+            old, {profile.label: () for profile in provision.PROFILES},
+            connect=lambda _dsn: repair_owner)
+    finally:
+        provision.replacement.derive_dsn = repair_saved["derive_dsn"]
+        provision.credential.profile = repair_saved["profile"]
+        provision.credential.load_existing = repair_saved["load_existing"]
+        provision.credential.prepare_pending = repair_saved["prepare_pending"]
+        provision.credential.promote_pending = repair_saved["promote_pending"]
+        provision.credential.exclusive_lock = repair_saved["exclusive_lock"]
+        provision.require_direct_owner_identity = repair_saved["require_owner"]
+        provision.apply_login_profile = repair_saved["apply"]
+        provision.validate_profile_login = repair_saved["validate"]
+    check("prior rollback repair adopts only missing migration-created seats",
+          repaired == {
+              "reader": "reused", "writer": "reused",
+              "gate_zero_producer": "adopted",
+              "foundation_assurance_oracle": "adopted",
+          }
+          and repair_events == [
+              ("validate", "reader"), ("validate", "writer"),
+              ("prepare", "gate_zero_producer"), ("adopt", "gate_zero_producer"),
+              ("validate", "gate_zero_producer"), ("promote", "gate_zero_producer"),
+              ("prepare", "foundation_assurance_oracle"),
+              ("adopt", "foundation_assurance_oracle"),
+              ("validate", "foundation_assurance_oracle"),
+              ("promote", "foundation_assurance_oracle"),
+          ] and repair_owner.closed)
 
     orchestration_events: list[tuple[str, Any]] = []
     profile_roots: list[pathlib.Path | None] = []
