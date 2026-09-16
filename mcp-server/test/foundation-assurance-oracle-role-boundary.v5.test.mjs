@@ -107,6 +107,43 @@ test("foundation assurance write authority is the dedicated connection role", as
   assert.equal(replayProbe.rows[0].result, null,
     "a missing idempotent production must return a cache miss before material is built");
 
+  const scope = { tenant: "carr-internal", scope_ref: "safe:wr95-regex-proof",
+    clock_origin_gate_id: "foundation-assurance-minimum-accepted",
+    clock_terminus_gate_id: "journey-one-kernel-production-accepted",
+    benchmark_subject_digest: `sha256:${"1".repeat(64)}`,
+    benchmark_candidate_digest: `sha256:${"2".repeat(64)}`,
+    benchmark_policy_digest: `sha256:${"3".repeat(64)}` };
+  const scopeDigest = (await owner.query(
+    "select ops.j1_clock_scope_digest($1::jsonb) as digest", [JSON.stringify(scope)]))
+    .rows[0].digest;
+  assert.match(scopeDigest, /^sha256:[0-9a-f]{64}$/,
+    "the production-shaped Journey One scope must compile and hash in PostgreSQL");
+
+  const definitions = (await owner.query(
+    `select pg_get_functiondef(p.oid) as definition
+       from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+      where n.nspname='ops' and p.proname in
+        ('j1_clock_scope_digest','j1_minimum_append_guard',
+         'foundation_assurance_producer_material')
+      union all
+     select pg_get_constraintdef(c.oid)
+       from pg_constraint c
+      where c.conname in
+        ('j1_clock_scope_binding_clock_scope_ref_check',
+         'j1_clock_revision_verifier_ref_check',
+         'j1_minimum_inventory_clock_scope_ref_check',
+         'j1_minimum_admission_source_ref_check')`)).rows;
+  assert.equal(definitions.length, 7);
+  for (const { definition } of definitions)
+    assert.doesNotMatch(definition,
+      /'\^(?:safe|session):[^']*\{\d+,\d{3,}\}\$'/,
+      "PostgreSQL regexes must not use unsupported finite repetition bounds above 255");
+  const materialDefinition = definitions.map(row => row.definition)
+    .find(definition => definition.includes("foundation_assurance_producer_material"));
+  assert.match(materialDefinition,
+    /'gate_zero',ops\.benchmark_gate_zero_outcome\(\),'observed_at',to_jsonb\(now\(\)\)\)/,
+    "the minimum receipt and its admission must share the transaction timestamp");
+
   const role = (await owner.query(
     `select rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls
        from pg_roles where rolname='carr_foundation_assurance_oracle'`)).rows[0];
