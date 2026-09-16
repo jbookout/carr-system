@@ -148,6 +148,7 @@
 
 import { digest } from "./artifact-trust.js";
 import { authorizationClassForActor, isKnownPartner } from "./identity.js";
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { sealFoundationAssuranceEvidence } from "./foundation-assurance-evidence.v5.js";
 import {
@@ -888,17 +889,16 @@ export function benchmarkAcceptancePrerequisites() {
 }
 
 /**
- * Derive the acceptor from the LIVE authenticated actor.
+ * Derive the acceptor from the LIVE authenticated actor or its verified sponsor.
  *
- * Three checks that would each be sufficient, kept as three on purpose.
- * authorizationClassForActor returns "verified_partner" exactly when the actor
- * is a human known partner today, so the partner and human tests are redundant
- * WITH THE CURRENT DEFINITION — which is why they are written out: if that
- * definition is ever widened, a benchmark acceptance must not widen with it by
- * accident. This rail wants a verified human partner, and says so three ways.
+ * A direct partner must still be a live known human partner. A native agent may
+ * name that same acceptor only through partnerAuthoritySlugForActor, whose
+ * sponsor comes from the server-held grant or local-token binding and requires
+ * native-agent verification. The runtime remains the envelope/event actor; the
+ * returned identity is the partner whose authority the act exercises.
  *
- * The class is computed here and now, from the actor object the server built.
- * It is never read from `args`, and never from a stored row.
+ * The identity is computed here and now from server-built actor state. It is
+ * never read from `args`, and never from a stored row.
  */
 export function deriveBenchmarkAcceptor(actor) {
   if (!isPlainObject(actor)) {
@@ -906,17 +906,24 @@ export function deriveBenchmarkAcceptor(actor) {
       "a benchmark acceptance requires an authenticated actor; none was supplied", { path: "actor" });
   }
   const authority_class = authorizationClassForActor(actor);
-  if (actor.human !== true || !isKnownPartner(actor.slug) || authority_class !== "verified_partner") {
+  const directPartner = actor.human === true && isKnownPartner(actor.slug) &&
+    authority_class === "verified_partner" ? actor.slug : null;
+  const sponsoredPartner = directPartner === null ? partnerAuthoritySlugForActor(actor) : null;
+  const acceptorSlug = directPartner || sponsoredPartner;
+  if (acceptorSlug === null) {
     refuse("verified_partner_required",
       "only a verified partner may accept a benchmark manifest; this actor's derived authority class does not permit it",
       { derived_authority_class: authority_class, required_producer_role: BENCHMARK_PRODUCER_ROLE });
   }
   return deepFreeze({
-    actor_id: actor.slug,
-    // DERIVED at this instant from identity.js over the live actor, exactly as
-    // global-boundaries.v5.js does. Never a payload field, never a stored one.
-    authority_class,
-    authority_class_source: "identity.authorizationClassForActor",
+    actor_id: acceptorSlug,
+    // Direct sessions derive the partner from the live actor. Sponsored native
+    // agents derive the same partner from the server-held grant/local-token
+    // binding; caller input never selects or overrides that sponsor.
+    authority_class: "verified_partner",
+    authority_class_source: directPartner !== null
+      ? "identity.authorizationClassForActor"
+      : "partner-authority.partnerAuthoritySlugForActor",
     producer_role: BENCHMARK_PRODUCER_ROLE,
   });
 }
