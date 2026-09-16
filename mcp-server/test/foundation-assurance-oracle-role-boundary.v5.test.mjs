@@ -99,6 +99,14 @@ test("foundation assurance write authority is the dedicated connection role", as
   assert.match(acceptedSeat.message,
     /foundation assurance evidence is unavailable for the serving Worker/);
 
+  const replayProbe = await oracle.query(
+    `select ops.foundation_assurance_record_production(
+       $1,$2::uuid,$3::jsonb,null::jsonb) as result`,
+    ["produce-global-secrets-boundary-receipt",
+      "00000000-0000-4000-8000-000000000095", JSON.stringify(identity)]);
+  assert.equal(replayProbe.rows[0].result, null,
+    "a missing idempotent production must return a cache miss before material is built");
+
   const role = (await owner.query(
     `select rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls
        from pg_roles where rolname='carr_foundation_assurance_oracle'`)).rows[0];
