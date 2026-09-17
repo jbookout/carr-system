@@ -18,6 +18,8 @@ import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js"
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
 import { workspaceCommandCenterEnabled } from "./workspace-feature-flag.js";
 import { COMMAND_CENTER_PATH } from "./workspace-command-center.js";
+import { neon } from "@neondatabase/serverless";
+import { readWorkInventoryCensus, WORK_INVENTORY_PATH } from "./work-inventory-census.v5.js";
 import {
   BUSINESS_ASSET_PATH, CLIENTS_ROUTE, VENDORS_ROUTE,
   createWorkspaceBusinessReader, isBusinessApiPath,
@@ -735,6 +737,64 @@ async function commandCenterResponse(request, env, session, dependencies) {
   }
 }
 
+// Default census reader. Built from the SAME client factory index.js uses for
+// commandCenterReader — neon() over DATABASE_URL_READER, wrapped so .query()
+// returns { rows } — imported from @neondatabase/serverless directly rather
+// than from index.js, which must stay free of any dependency on this route.
+async function defaultWorkInventoryReader(env, actor, correlationId, params = {}) {
+  const sql = neon(env.DATABASE_URL_READER);
+  const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+  return readWorkInventoryCensus({
+    client, actor, correlationId: correlationId || env.CORRELATION_ID,
+    cursor: params.cursor, limit: params.limit, kinds: params.kinds, statuses: params.statuses,
+  });
+}
+
+/**
+ * GET /api/v1/work-inventory — the V5-UX-C10 complete work inventory census.
+ *
+ * Mounted exactly like the Command Center read: same feature flag, same typed
+ * error-to-status map, same dependency-injected reader so the route carries no
+ * database knowledge. The three query parameters (cursor, limit, kinds,
+ * statuses) are handed to the reader unparsed — the reader owns bounding and
+ * refusal so the paging semantics keep ONE definition.
+ */
+async function workInventoryResponse(request, env, session, dependencies) {
+  if (!workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+  const url = new URL(request.url);
+  const allowed = new Set(["cursor", "limit", "kinds", "statuses"]);
+  if ([...url.searchParams.keys()].some((key) => !allowed.has(key))) {
+    return json({ error: "AUTHORIZATION_REFUSED" }, 403);
+  }
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { allow: "GET, HEAD, OPTIONS", "cache-control": "no-store" } });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }), {
+      status: 405, headers: { ...JSON_HEADERS, allow: "GET, HEAD, OPTIONS" },
+    });
+  }
+  // The census route owns its own default reader, so the surface is reachable
+  // without index.js wiring it; an injected reader (the web test's, or a future
+  // caller's) still wins. The default is READER-role only: this is a read.
+  const reader = typeof dependencies.workInventoryReader === "function"
+    ? dependencies.workInventoryReader : defaultWorkInventoryReader;
+  try {
+    const payload = await reader(env, session.actor, env.CORRELATION_ID, {
+      cursor: url.searchParams.get("cursor"),
+      limit: url.searchParams.get("limit"),
+      kinds: url.searchParams.get("kinds"),
+      statuses: url.searchParams.get("statuses"),
+    });
+    if (request.method === "HEAD") return new Response(null, { status: 200, headers: JSON_HEADERS });
+    return json(payload);
+  } catch (error) {
+    const code = ["AUTHORIZATION_REFUSED", "TENANT_SCOPE_REFUSED", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"].includes(error?.code) ? error.code : "INTERNAL_ERROR";
+    const status = code === "AUTHORIZATION_REFUSED" ? 403 : code === "TENANT_SCOPE_REFUSED" ? 404 : code === "FRESHNESS_UNKNOWN" ? 409 : code === "DEPENDENCY_UNAVAILABLE" ? 503 : 500;
+    return json({ error: code }, status);
+  }
+}
+
 /**
  * GET /api/v1/business/{clients,vendors}[/<uuid>] — the Journey 1 business read.
  *
@@ -844,9 +904,11 @@ async function handleRequest(request, env, ctx, dependencies) {
       // The business read is the ONLY addition to that surface, and it is
       // admitted by an exact path parser rather than a prefix.
       if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH &&
+          url.pathname !== WORK_INVENTORY_PATH &&
           !isBusinessApiPath(url.pathname)) return json({ error: "not_found" }, 404);
       // Home, Clients and Vendors are one workspace surface and share its flag.
-      if ((url.pathname === COMMAND_CENTER_PATH || isBusinessApiPath(url.pathname) ||
+      if ((url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
+           isBusinessApiPath(url.pathname) ||
            BUSINESS_VIEW_PATHS.has(url.pathname) || url.pathname === BUSINESS_ASSET_PATH) &&
           !workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
       if (url.pathname === "/workspace" || url.pathname === "/workspace.html") return redirect(`${origin}/`);
@@ -866,7 +928,8 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
-        if (url.pathname === COMMAND_CENTER_PATH || isBusinessApiPath(url.pathname)) {
+        if (url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
+            isBusinessApiPath(url.pathname)) {
           return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
         }
         if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
@@ -905,6 +968,8 @@ async function handleRequest(request, env, ctx, dependencies) {
       else if (url.pathname === "/pipeline/changes") response = await dependencies.pipelineHandler(request, env, ctx, session.actor);
       else if (url.pathname === COMMAND_CENTER_PATH) {
         response = await commandCenterResponse(request, env, session, dependencies);
+      } else if (url.pathname === WORK_INVENTORY_PATH) {
+        response = await workInventoryResponse(request, env, session, dependencies);
       } else if (isBusinessApiPath(url.pathname)) {
         response = await businessResponse(request, env, session, dependencies);
       } else if (url.pathname.startsWith("/api/v1/")) {
