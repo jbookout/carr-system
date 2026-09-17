@@ -9,6 +9,7 @@ import errno
 import shutil
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +33,93 @@ def gen_dir_for(target: Path) -> Path:
 def generation_files(target: Path) -> list[Path]:
     directory = gen_dir_for(target)
     return sorted(path for path in directory.iterdir() if not path.name.startswith(".")) if directory.exists() else []
+
+
+def check_provider_wait(tmp: Path) -> None:
+    """The shared wait in front of the sweep, on the outcomes that matter.
+
+    Its NO must be as trustworthy as its YES, so a provider that never recovers
+    and one that fails for a non-transient reason are tested as hard as the
+    happy path. The clock is injected, so none of this sleeps.
+    """
+    target = tmp / "probe.xlsx"
+    target.write_bytes(b"rows\n")
+    slept: list[float] = []
+
+    check("a ready provider returns nothing cold",
+          common.wait_for_provider([target]) == [])
+
+    check("a path that does not exist is not waited for",
+          common.wait_for_provider([tmp / "absent.xlsx"]) == [])
+
+    # A provider that refuses twice and then serves must PASS, because the
+    # 02:05 outage is transient and giving up early is the whole bug.
+    state = {"calls": 0}
+    real_open = Path.open
+
+    def flaky(self, *args, **kwargs):
+        if self == target:
+            state["calls"] += 1
+            if state["calls"] <= 2:
+                raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+        return real_open(self, *args, **kwargs)
+
+    Path.open = flaky  # type: ignore[method-assign]
+    try:
+        cold = common.wait_for_provider([target], poll_seconds=0, sleep=slept.append)
+        check("a transient refusal that clears returns ready", cold == [])
+        check("it actually waited rather than passing blind", state["calls"] >= 3,
+              f"{state['calls']} probe(s)")
+
+        # One that never clears must give the caller the list, not hang and not
+        # raise: each target still runs and records its own receipt.
+        def never(self, *args, **kwargs):
+            if self == target:
+                raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+            return real_open(self, *args, **kwargs)
+
+        Path.open = never  # type: ignore[method-assign]
+        slept.clear()
+
+        # This records the interval AND actually elapses it. A recording-only
+        # stub would advance no clock, so the deadline could only ever be
+        # reached by the probe's own runtime and the loop would spin — which is
+        # what this stub did on its first draft, at 19,307 iterations. The
+        # floor's guarantee is that a poll takes real time; a fake sleep tests
+        # the opposite of the thing under test.
+        def timed_sleep(interval):
+            slept.append(interval)
+            time.sleep(interval)
+
+        cold = common.wait_for_provider([target], budget_seconds=0.05, poll_seconds=0,
+                                        sleep=timed_sleep)
+        check("an exhausted budget reports the cold file", len(cold) == 1)
+        check("an exhausted budget does not raise", True)
+
+        # A floor stops a zero poll becoming a busy loop against the provider
+        # the wait exists to give room to. The BOUND is the property, not the
+        # size of any one interval: the final sleep is deliberately clipped to
+        # whatever budget is left, so it can be shorter than the floor without
+        # anything being wrong. Asserting every interval met the floor failed
+        # here for exactly that reason.
+        check("a zero poll cannot busy-spin",
+              len(slept) <= int(0.05 / 0.01) + 2,
+              f"{len(slept)} sleep(s): {[round(i, 4) for i in slept]}")
+
+        # A permission failure reads the same on the last attempt as the first.
+        def denied(self, *args, **kwargs):
+            if self == target:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_open(self, *args, **kwargs)
+
+        Path.open = denied  # type: ignore[method-assign]
+        slept.clear()
+        cold = common.wait_for_provider([target], budget_seconds=600, poll_seconds=0,
+                                        sleep=slept.append)
+        check("a hard error is reported at once", len(cold) == 1)
+        check("a hard error is not waited out", slept == [], f"{len(slept)} sleep(s)")
+    finally:
+        Path.open = real_open  # type: ignore[method-assign]
 
 
 def main():
@@ -300,6 +388,8 @@ def main():
         kept = generation_files(prune_target)
         check("prunes to configured cap", len(kept) == common.KEEP_GENERATIONS, f"found {len(kept)}")
         check("newest generation survives pruning", any(path.read_bytes() == b"newest\n" for path in kept))
+
+        check_provider_wait(tmp)
 
     print()
     if fails:
