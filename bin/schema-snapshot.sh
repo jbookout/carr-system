@@ -331,6 +331,14 @@ case "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the foundation-assurance registry ledger state" >&2; exit 1 ;;
 esac
 
+DEAL_FIELD_PROVENANCE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0516_deal_field_change_provenance_and_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DEAL_FIELD_PROVENANCE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the deal-field provenance registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1380,7 +1388,21 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" = t ]; then
+  if [ "$DEAL_FIELD_PROVENANCE_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=28
+    SCAC_VERSION_COUNT=28
+    SCAC_TOTAL_ENTRY_COUNT=42225
+    SCAC_CURRENT_ENTRY_COUNT=1779
+    SCAC_CURRENT_SOURCE_COUNT=856
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v28.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27'"
+    # Same one-behind rule as every branch below: the v27 full entry set became
+    # readable only once 0516 sealed it, so this branch is where that seal is
+    # first required. All 27 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=27
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v28_current()"
+  elif [ "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=27
     SCAC_VERSION_COUNT=27
     SCAC_TOTAL_ENTRY_COUNT=40446

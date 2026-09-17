@@ -4,10 +4,11 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v27 is the runtime selector because WR-000095 adds the closed benchmark and
-// foundation-assurance producer verbs. Older registries must continue to refuse
-// those operations as unknown.
-} from "./scac-mutation-registry.v27.generated.js";
+// v28 is the runtime selector because WR-000109 admits two optional provenance
+// properties on patch-deal-field, which moves that operation's schema_digest.
+// Older registries must continue to refuse the new shape as a contract
+// mismatch: a registry that has not sealed the change does not know it.
+} from "./scac-mutation-registry.v28.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
