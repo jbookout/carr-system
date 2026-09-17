@@ -836,23 +836,6 @@ step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetc
 # the cutoff. The seventh was a markdown render, retired with the other 38 and
 # counted as a survivor by mistake. The retired renders stay retired: each still
 # prints RETIRED here rather than being rewritten.
-# WAIT FOR THE PROVIDER BEFORE ASKING IT FOR ANYTHING (2026-09-17). The chain
-# failed 26 of its last 27 launchd runs, always with EDEADLK out of the export's
-# read of the previous OneDrive copy. The cause is not this code: `pmset repeat
-# wakeorpoweron` wakes the Mac at 01:55, launchd fires at 02:05, and every file
-# in the CARR OneDrive tree is cloud-only because the volume is 97% full — so
-# the first thing the exports do is ask a File Provider that is ten minutes into
-# a dark wake to fetch 1.4 GiB of evicted content back. It answers EDEADLK for
-# 8-10 minutes, which no per-target retry budget can outlast. Re-running the
-# identical export by hand at 06:08 the same morning published all six clean.
-#
-# So the gate goes HERE, before the first cloud-touching step, rather than
-# inside each target: one wait the whole chain shares, instead of six budgets
-# that each expire alone. It exits 1 if the provider never comes up, which is a
-# real finding, and 78 on a machine with no export home at all.
-step "cloud provider ready (OneDrive can serve the exports)" \
-  ./.venv/bin/python ops/cloud-provider-ready.py
-
 step "exports (6 targets -> OneDrive)" env CARR_EXPORT_LIVE=1 ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 

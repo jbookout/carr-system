@@ -95,6 +95,18 @@ GENERATION_COPY_ATTEMPTS = 6
 GENERATION_COPY_RETRY_ERRNOS = frozenset({errno.EAGAIN, errno.EDEADLK, errno.ETIMEDOUT})
 GENERATION_COPY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 5.0, 15.0)
 
+# 20 minutes, against a measured 8-10 minute provider outage after a scheduled
+# dark wake. Long enough to cover roughly double the worst observed wait, short
+# enough that a genuinely dead provider is reported the same night rather than
+# hanging until morning. Polling faster than 20s buys nothing from something
+# that takes minutes, and only multiplies the log.
+PROVIDER_WAIT_BUDGET_SECONDS = float(os.environ.get("CARR_PROVIDER_WAIT_SECONDS", 1200))
+PROVIDER_WAIT_POLL_SECONDS = float(os.environ.get("CARR_PROVIDER_POLL_SECONDS", 20))
+# Materialization is per FILE, not per byte: the provider must fetch the content
+# before it can answer the first read at all, so one chunk proves what a full
+# read proves at a fraction of the cost on a 9320-row workbook.
+PROVIDER_PROBE_BYTES = 1 << 16
+
 
 def connect():
     url = os.environ.get("CARR_DB_EXPORTER_URL")
@@ -250,6 +262,70 @@ def _generation_destinations(gen_dir: Path, final_path: Path, stamp: str):
     yield gen_dir / f"{stamp}-{final_path.name}"
     for sequence in range(1, 100):
         yield gen_dir / f"{stamp}-{sequence:02d}-{final_path.name}"
+
+
+def wait_for_provider(paths, budget_seconds=None, poll_seconds=None, sleep=time.sleep):
+    """Block until the cloud file provider can actually serve `paths`.
+
+    WHY A WAIT AND NOT A LONGER RETRY, measured 2026-09-17. The nightly chain
+    failed 26 of its last 27 launchd runs, every time with EDEADLK out of
+    keep_generation() reading the previous OneDrive copy. The per-target budget
+    above is 23.5s, and the outage it is up against lasts eight to ten minutes:
+    `pmset repeat wakeorpoweron` wakes this Mac at 01:55 and launchd fires the
+    chain at 02:05, so the first export lands ten minutes into a scheduled dark
+    wake while OneDrive's File Provider is still coming up. Every file in the
+    tree is cloud-only — Files On-Demand evicted 687 of 861 files because the
+    volume is 97% full — so each read is a fetch request, not a disk read, and
+    the provider answers EDEADLK until it is ready. Running the identical export
+    by hand at 06:08 the same morning published all six targets clean.
+
+    So the six budgets are spent SEQUENTIALLY on a condition that is shared:
+    target one waits 23.5s and fails, target two waits its own 23.5s and fails
+    the same way, six times over, and the step reports six unrelated-looking
+    tracebacks for one provider that was not up. This waits ONCE for the thing
+    they all need, before any of them starts.
+
+    IT IS NOT A REPAIR. Nothing here stops OneDrive evicting the tree; pinning
+    the folder or freeing disk does that. This only stops the chain starting
+    work that cannot succeed yet, and says plainly which files are still cold.
+
+    A non-transient errno is returned immediately rather than waited out: a
+    permission or path failure reads the same on the last attempt as the first,
+    so spending the budget on it only delays the report.
+
+    Returns the list of (path, error) still unreadable, empty when ready. The
+    caller decides what an exhausted budget means; this never raises.
+    """
+    budget = PROVIDER_WAIT_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+    poll = PROVIDER_WAIT_POLL_SECONDS if poll_seconds is None else poll_seconds
+    # A floor, so a zero poll cannot turn the wait into a busy loop that
+    # competes for the very provider it is waiting on.
+    poll = max(poll, 0.01)
+    probes = [path for path in paths if path.exists()]
+    if not probes:
+        return []
+
+    deadline = time.monotonic() + budget
+    while True:
+        cold = []
+        for path in probes:
+            try:
+                with path.open("rb") as stream:
+                    stream.read(PROVIDER_PROBE_BYTES)
+            except OSError as error:
+                cold.append((path, error))
+        if not cold:
+            return []
+        if any(error.errno not in GENERATION_COPY_RETRY_ERRNOS for _p, error in cold):
+            return cold
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return cold
+        names = ", ".join(sorted(path.name for path, _e in cold))
+        print(f"[provider] {len(cold)} file(s) still cold ({names}); "
+              f"{remaining:.0f}s left before the exports start anyway",
+              file=sys.stderr, flush=True)
+        sleep(min(poll, remaining))
 
 
 class _PublishedGenerationCleanupError(RuntimeError):
