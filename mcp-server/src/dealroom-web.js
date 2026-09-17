@@ -70,9 +70,16 @@ const PUBLIC_SHELL = new Map([
   ["/offline.html", "/public-shell/offline.html"],
 ]);
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// DoctorCRE's own page routes. The app Worker serves the HTML itself but first
+// forwards the request here, unchanged, as its sign-in gate and requires a 200.
+// A page path missing from this list falls through to the OAuth provider and the
+// gate refuses it, whatever the app has shipped (defect 4ef6ce10: the V5-UX-C10
+// inventory screen was delivered without this entry). Each new app page adds its
+// route here; they share the workspace flag with Home, Clients and Vendors.
+const APP_DOCUMENT_PATHS = new Set(["/work-inventory", "/tasks", "/business", "/pipeline"]);
 const DEALROOM_EXACT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html", "/system-work.html", "/room.html", "/queue.html",
-  CLIENTS_ROUTE, VENDORS_ROUTE, BUSINESS_ASSET_PATH,
+  CLIENTS_ROUTE, VENDORS_ROUTE, BUSINESS_ASSET_PATH, ...APP_DOCUMENT_PATHS,
   "/manifest.webmanifest", "/sw.js", "/offline.html", "/tours",
 ]);
 // Clients and Vendors are two views of one authenticated business asset. The
@@ -966,7 +973,8 @@ async function handleRequest(request, env, ctx, dependencies) {
       if ((url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
            url.pathname === ATLAS_GRAPH_PATH ||
            isBusinessApiPath(url.pathname) ||
-           BUSINESS_VIEW_PATHS.has(url.pathname) || url.pathname === BUSINESS_ASSET_PATH) &&
+           BUSINESS_VIEW_PATHS.has(url.pathname) || url.pathname === BUSINESS_ASSET_PATH ||
+           APP_DOCUMENT_PATHS.has(url.pathname)) &&
           !workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
       if (url.pathname === "/workspace" || url.pathname === "/workspace.html") return redirect(`${origin}/`);
       // /clients and /vendors are the addresses; the asset file is not a second one.
