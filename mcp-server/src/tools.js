@@ -1958,7 +1958,12 @@ async function latestFieldConflict(c, dealId, field, baseEventId) {
   return newer.rows[0] || null;
 }
 
-async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb) {
+// `provenance` is optional and defaults to empty: revert-deal-field and
+// resolve-conflict pass nothing and keep automation semantics, which is what
+// they are. patch-deal-field passes the partner's words through when the caller
+// carried them (WR-000109), and never synthesises a cause — writeEvent derives
+// it from the presence of a verbatim quote, and that derivation is the point.
+async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb, provenance = {}) {
   assertDealRoomField(field, value);
   if (field === "operating_state") value = {
     state: value.state,
@@ -2008,6 +2013,8 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     field,
     old: { [field]: oldRow.rows[0].value },
     new: { [field]: value },
+    human_quote: provenance.human_quote || null,
+    agent_rationale: provenance.change_reason || null,
     idempotency_key: idempotencyKey,
   });
   // The committed identity of the event this write just made, READ BACK from the
@@ -8113,6 +8120,8 @@ registerTools({
       idempotency_key: { type: "string" }, deal: { type: "string" },
       field: { type: "string", enum: DEAL_ROOM_FIELDS }, value: {},
       base_event_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+      change_reason: { type: "string", description: "why this cell changed; lands on the event as agent_rationale" },
+      human_quote: { type: "string", description: "the partner's verbatim words, when they directed the change" },
     }, required: ["idempotency_key", "deal", "field", "value", "base_event_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "patch-deal-field", args, async () => {
       assertDealRoomField(args.field, args.value);
@@ -8135,7 +8144,8 @@ registerTools({
           value_b: args.value, actor_b: actor.slug } };
       }
       const applied = await applyDealRoomField(c, actor, s.id, args.field, args.value,
-        args.idempotency_key, "patch-deal-field");
+        args.idempotency_key, "patch-deal-field",
+        { change_reason: args.change_reason, human_quote: args.human_quote });
       return { ok: true, deal_id: s.id, field: args.field, ...applied };
     }),
   },

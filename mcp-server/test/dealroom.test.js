@@ -48,9 +48,11 @@ class FakeClient {
   }
   addEvent({ actor = actors.joe, verb = "seed", subject_type = "deal", subject_id = ids.deal,
     field = null, old_value = null, new_value = null, recorded_at = this.now.toISOString(),
-    id = this.uuid(), idempotency_key = null }) {
+    id = this.uuid(), idempotency_key = null,
+    cause = null, human_quote = null, agent_rationale = null }) {
     const row = { id, recorded_at, actor: actor.slug, actor_id: actor.id, verb, subject_type,
-      subject_id, field, old_value, new_value, idempotency_key };
+      subject_id, field, old_value, new_value, idempotency_key,
+      cause, human_quote, agent_rationale };
     this.events.push(row);
     return row;
   }
@@ -166,6 +168,12 @@ class FakeClient {
         // $11 in writeEvent's insert: the operation's key, which is how the row
         // it just wrote is found again without a `returning` clause.
         idempotency_key: params[10] ?? null,
+        // The provenance columns writeEvent actually writes. `cause` is not a
+        // parameter: writeEvent interpolates it into the statement text, so it
+        // is read back out of the text, from the one position it can occupy.
+        cause: (sql.match(/, '([a-z_]+)', \$9,/) || [])[1] ?? null,
+        human_quote: params[8] ?? null,
+        agent_rationale: params[9] ?? null,
         recorded_at: this.now.toISOString() });
       return { rows: [] };
     }
@@ -1045,4 +1053,52 @@ test("pipeline polling includes capture status snapshots with string timestamps"
   assert.equal(result.capture_sessions[0].state, "distilling");
   assert.equal(typeof result.capture_sessions[0].started_at, "string");
   assert.equal(typeof result.capture_sessions[0].state_at, "string");
+});
+
+// AC-EVENT-QUOTE (WR-000109). The partner's verbatim words reach the event
+// column that stores them, byte for byte, and the reason reaches the column
+// that stores a rationale. The cause is NOT passed by the verb: writeEvent
+// derives it from the presence of the quote, so asserting human_stated here
+// asserts that the quote actually arrived, not that a literal was copied.
+test("patch-deal-field carries the partner's quote and reason onto the event", async () => {
+  const db = new FakeClient();
+  const quote = "Move Alpha to negotiation — they signed the LOI this morning.";
+  const reason = "Partner directed the phase change on the 8:40 call.";
+  const patched = await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "quote-1", deal: "Deal Alpha", field: "phase",
+    value: "negotiation", base_event_id: null,
+    change_reason: reason, human_quote: quote,
+  });
+  assert.equal(patched.ok, true);
+  assert.equal(db.events.length, 1);
+  const [event] = db.events;
+  assert.equal(event.human_quote, quote);
+  assert.equal(event.agent_rationale, reason);
+  assert.equal(event.cause, "human_stated");
+});
+
+// AC-NO-QUOTE-UNCHANGED. Without a quote nothing about the existing behaviour
+// moves: the write is an automation job, which is what it is, and a reason on
+// its own does not promote it. The bare call is the pre-WR-000109 shape and
+// must still record exactly what it recorded before.
+test("patch-deal-field without a quote stays an automation job", async () => {
+  const db = new FakeClient();
+  const reason = "Swept forward by the nightly stage reconciliation.";
+  const reasonOnly = await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "quote-2", deal: "Deal Alpha", field: "phase",
+    value: "negotiation", base_event_id: null, change_reason: reason,
+  });
+  assert.equal(reasonOnly.ok, true);
+  assert.equal(db.events[0].cause, "automation_job");
+  assert.equal(db.events[0].human_quote, null);
+  assert.equal(db.events[0].agent_rationale, reason);
+
+  const bare = await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "quote-3", deal: "Deal Alpha", field: "attention",
+    value: true, base_event_id: null,
+  });
+  assert.equal(bare.ok, true);
+  assert.equal(db.events[1].cause, "automation_job");
+  assert.equal(db.events[1].human_quote, null);
+  assert.equal(db.events[1].agent_rationale, null);
 });
