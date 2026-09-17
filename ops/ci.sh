@@ -1258,6 +1258,33 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # WR-000110. The V5-F02 program-controller seam boundary: which connection
+  # role may record which fact kind, and whether the column-scoped SELECT grants
+  # actually reach the writer bundle the admission door connects as. Both are
+  # properties of real grants and a real session_user, which no mock can show.
+  if [ -f mcp-server/test/program-controller-census-role-boundary.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_PROGRAM_CONTROLLER_DB_REQUIRED=1 \
+         run_quiet "$LOGDIR/program-controller-role-boundary.log" \
+         node --test mcp-server/test/program-controller-census-role-boundary.v5.test.mjs; then
+      tail -30 "$LOGDIR/program-controller-role-boundary.log" >&2
+      bad migration "the program-controller seam connection-role boundary proof failed"
+      return
+    fi
+  fi
+
+  # The measured catalog-delta proof: exactly two secdef rows for the privileged
+  # writer and none for public, no relation or column DML row naming any of the
+  # seven new tables, and four rows for the one v29 registration function.
+  if [ -f mcp-server/test/program-controller-census-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/program-controller-census-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/program-controller-census-postgres.sql; then
+      tail -30 "$LOGDIR/program-controller-census-postgres.log" >&2
+      bad migration "the program-controller seam catalog and ledger proof failed"
+      return
+    fi
+  fi
+
   if [ -f mcp-server/test/foundation-assurance-minimum-postgres.sql ]; then
     if ! run_quiet "$LOGDIR/foundation-assurance-minimum-postgres.log" \
          "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \

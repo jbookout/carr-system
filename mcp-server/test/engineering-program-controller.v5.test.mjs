@@ -779,11 +779,29 @@ test("resume: a catalog-sourced census refuses here too, before any checkpoint f
 // 4. Release.
 // ---------------------------------------------------------------------------
 
-// THE DECISION. There is exactly one thing to prove about the release decision
-// as it stands: it cannot say yes. The facts it decides on live in an
-// authoritative receipt store that does not exist in this repository, the
-// module binds that seam itself, and no caller can supply one — so every check
-// refuses, naming the seam that is owed.
+// THE DECISION. The facts the release decision is made of live in an
+// authoritative receipt store that DOES now exist — ops.release_receipt, added
+// by WR-000110 — and the module binds its in-process holder itself. What this
+// file proves is the property the store's arrival does not change: a BOUND
+// holder that does not hold the cited receipt still refuses, by name, and NO
+// CALLER-SUPPLIED HOLDER IS EVER CONSULTED.
+//
+// THE REGIME THIS FILE RUNS IN, and it is the key to reading every assertion
+// below. The holder resolves from a module-level snapshot that is empty until
+// the census reader installs one. THIS FILE NEVER IMPORTS THE HOLDER MODULE AND
+// NEVER INSTALLS A SNAPSHOT, and node --test gives each test file its own
+// process, so the snapshot is empty for the whole of this file. The holder is
+// therefore BOUND AND HOLDS NOTHING: every resolveReceipt answers null and every
+// check refuses `release_receipt_unresolvable`. The allow is proved elsewhere,
+// on a seeded cluster, where a snapshot is legitimately installed.
+//
+// THAT MAKES THE FORGERY TEST BELOW STRICTLY STRONGER, and it must stay that
+// way. Before the bind, a refused forgery attempt was explained by the null
+// holder alone. Now the counterfeit holds a complete, working six-receipt set
+// while the module-bound holder holds nothing — so every attempt still refusing
+// is positive proof that the counterfeit was never consulted. Installing the
+// honest snapshot in this file would make the attempts refuse for a different
+// reason and destroy that proof.
 //
 // THE CLAUSES. Everything the decision WILL be made of the day that seam exists
 // is proved below as pure predicates over fixture receipt shapes:
@@ -793,18 +811,24 @@ test("resume: a catalog-sourced census refuses here too, before any checkpoint f
 // predicate takes a receipt body, never a ledger, so proving one proves a
 // clause and can never manufacture a release.
 
-test("release: the decision cannot reach allow, and names the seam it is owed", () => {
+test("release: the decision cannot reach allow, and names the receipt it is owed", () => {
   const answer = release();
   assert.equal(answer.decision, "refuse");
-  assert.equal(answer.reason_id, "release_state_holder_unavailable");
+  assert.equal(answer.reason_id, "release_receipt_unresolvable");
   assert.equal(answer.blocking_check, V5_RELEASE_CHECKS[0]);
   assert.equal(answer.released, false);
   assert.equal(answer.merge_admitted, false);
-  assert.equal(answer.state_holder_bound, false);
+  assert.equal(answer.state_holder_bound, true);
   assert.equal(answer.state_holder_is_caller_supplied, false);
   assert.equal(answer.release_state_holder_seam, V5_RELEASE_STATE_HOLDER_SEAM);
-  assert.equal(answer.check_states[V5_RELEASE_CHECKS[0]].detail.required_seam,
-    V5_RELEASE_STATE_HOLDER_SEAM);
+  // The detail is still proved — the honest one. A bound holder that resolves
+  // nothing names the receipt it could not resolve, not a seam it is owed.
+  const blockingDetail = answer.check_states[V5_RELEASE_CHECKS[0]].detail;
+  assert.equal(blockingDetail.receipt_kind, V5_RELEASE_CHECK_RECEIPT_KINDS[V5_RELEASE_CHECKS[0]]);
+  assert.equal(blockingDetail.receipt_ref,
+    releaseCase().request.receipts[V5_RELEASE_CHECK_RECEIPT_KINDS[V5_RELEASE_CHECKS[0]]]);
+  assert.equal(blockingDetail.required_seam, undefined,
+    "the seam is bound, so no check is owed one");
   assert.equal(answer.observed_head_sha, null, "no observation is restated as a fact");
   assert.deepEqual(answer.receipt_refs_verified, []);
   assert.equal(answer.caller_stated_release_facts, false);
@@ -815,11 +839,16 @@ test("release: the decision cannot reach allow, and names the seam it is owed", 
     [...V5_RELEASE_RECEIPT_KINDS].sort());
 });
 
-test("release: no caller-supplied input reaches allow while the holder is unavailable", () => {
+test("release: no caller-supplied input reaches allow while the bound holder holds no receipt", () => {
   // Every route a caller has: perfect evidence, the counterfeit holder the
   // second review of PR 980 built, the holder smuggled in as a request field,
   // as a global, or onto the prototype of the request. None of them decides
   // anything, because the module never reads a holder from a caller at all.
+  //
+  // THE COUNTERFEIT BELOW IS A COMPLETE, WORKING SIX-RECEIPT SET, and it must
+  // stay working: the module's own holder is bound and empty in this file, so
+  // every attempt refusing on RECEIPT grounds is proof that the counterfeit was
+  // never consulted rather than merely out-voted.
   const counterfeitHolder = () => {
     const store = new Map();
     const bodies = releaseBodies();
@@ -863,12 +892,36 @@ test("release: no caller-supplied input reaches allow while the holder is unavai
       continue;
     }
     assert.equal(answer.decision, "refuse", `${what} produced a decision other than refuse`);
-    assert.equal(answer.reason_id, "release_state_holder_unavailable", what);
+    assert.equal(answer.reason_id, "release_receipt_unresolvable", what);
     assert.equal(answer.released, false, what);
     assert.equal(answer.merge_admitted, false, what);
-    assert.equal(answer.state_holder_bound, false, what);
+    assert.equal(answer.state_holder_bound, true, what);
+    // The two caller-facing statements the bind is what makes provable: the
+    // holder that decided was the module's, and nothing the caller offered was
+    // ever verified.
+    assert.equal(answer.state_holder_is_caller_supplied, false, what);
+    assert.equal(answer.receipt_refs_verified.length, 0, what);
     assert.deepEqual(answer.receipt_refs_verified, [], what);
   }
+
+  // And after all nine: the module-bound holder STILL resolves nothing. The
+  // honest request, evaluated once more, verifies zero receipts and refuses on
+  // the first one it could not resolve — so no attempt installed anything into
+  // the holder, and the counterfeit is proved UNCONSULTED rather than merely
+  // outvoted. (This file never imports the holder module; that it holds nothing
+  // is exactly what makes these refusals evidence.)
+  const after = release();
+  assert.equal(after.receipt_refs_verified.length, 0,
+    "an attempt installed something into the module-bound holder");
+  assert.equal(after.reason_id, "release_receipt_unresolvable");
+  assert.equal(after.state_holder_bound, true);
+  // The counterfeit really was a complete, working set, which is the other half
+  // of why the refusals mean something.
+  const counterfeit = counterfeitHolder();
+  const bodies = releaseBodies();
+  for (const kind of V5_RELEASE_RECEIPT_KINDS)
+    assert.ok(counterfeit.resolveReceipt(`receipt:${digest(bodies[kind])}`),
+      `the counterfeit holder did not actually hold ${kind}`);
 });
 
 test("release: the state holder is not an argument, and nothing exported binds one", () => {
@@ -887,9 +940,12 @@ test("release: the state holder is not an argument, and nothing exported binds o
     .filter(([name, value]) => typeof value === "function" && /holder|ledger|inject/i.test(name));
   assert.deepEqual(binders.map(([name]) => name), [],
     "an exported function naming the holder would be a door back into the hole");
-  assert.equal(v5ProgramControllerPolicyPreimage().release_allow_reachable, false);
+  // The seam is bound, so an allow is reachable — from six receipts the bound
+  // holder resolves and from nothing else. The middle assertion is the one that
+  // must never move: no caller may supply the holder, bound or not.
+  assert.equal(v5ProgramControllerPolicyPreimage().release_allow_reachable, true);
   assert.equal(v5ProgramControllerPolicyPreimage().caller_may_supply_release_state_holder, false);
-  assert.equal(v5ProgramControllerPolicyPreimage().release_state_holder_available, false);
+  assert.equal(v5ProgramControllerPolicyPreimage().release_state_holder_available, true);
 });
 
 test("release: auto-release is unavailable and names the receipts it waits on", () => {

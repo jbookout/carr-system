@@ -1491,6 +1491,91 @@ export async function resolveSourceMergeAuthority(c, args, ToolError) {
 // transaction) and the supervised worker (jobs transaction).  They return
 // only server-derived bindings; callers never select identity, authority,
 // provider, model, or native session continuity.
+/**
+ * The V5-F02 census reader, loaded lazily.
+ *
+ * WHY LAZILY. program-controller-census.v5.js imports
+ * engineering-program-controller.v5.js, which imports ENGINEERING_REPOSITORY_ACTIONS
+ * from THIS file. A static import here would close that into a module cycle
+ * whose evaluation order decides whether a frozen constant is defined. A lazy
+ * import inside the door resolves after every module has finished evaluating,
+ * so there is no order to get wrong. It is cached, so the cost is paid once.
+ */
+const PROGRAM_CONTROLLER_READ_FAILURES = new Set([
+  "DEPENDENCY_UNAVAILABLE", "FRESHNESS_UNKNOWN", "TENANT_SCOPE_REFUSED",
+  "AUTHORIZATION_REFUSED", "INTERNAL_ERROR",
+]);
+let programControllerCensusModule = null;
+async function programControllerCensus() {
+  if (programControllerCensusModule === null)
+    programControllerCensusModule = await import("./program-controller-census.v5.js");
+  return programControllerCensusModule;
+}
+
+/**
+ * The slice-admission decision, or `null` when the records the decision is made
+ * of are not there.
+ *
+ * A TYPED DEPENDENCY FAILURE IS NOT A DECISION, and it is deliberately not
+ * turned into one. The evaluator refuses on FACTS; "there is no recorded lease
+ * for this slice yet" is the reader saying it has nothing to decide from, and
+ * manufacturing a refusal out of it would be this module inventing the very
+ * kind of fact the controller refuses to let anyone invent. Nothing is recorded
+ * and the door continues exactly as it did before the seam existed. Only a real
+ * refusal — an evaluator answer whose decision is not `allow` — stops a slice.
+ *
+ * `programRef` is the Work Request's own SERVER-DERIVED typed reference from
+ * the passport facts (`wr:<uuid>`), never args.work_request: the caller names a
+ * Work Request, the passport decides which one it is.
+ */
+async function programControllerAdmissionDecision(c, programRef, sliceRef) {
+  const census = await programControllerCensus();
+  try {
+    const answer = await census.evaluateSliceAdmissionForSlice({ client: c, sliceRef, programRef });
+    return { decision: answer.decision, reason_id: answer.reason_id,
+      blocking_check: answer.blocking_check, decided_at: new Date().toISOString(), answer };
+  } catch (error) {
+    // Only the census reader's OWN typed read failures are "nothing to decide
+    // from". A V5BoundaryError is a contract violation and still throws.
+    if (!PROGRAM_CONTROLLER_READ_FAILURES.has(error?.code)) throw error;
+    return null;
+  }
+}
+
+/**
+ * The resume decision, or `null` when the slice has no checkpoint row at all and
+ * on the same typed read failure, for the same reason.
+ */
+async function programControllerResumeDecision(c, sliceRef) {
+  const census = await programControllerCensus();
+  try {
+    const answer = await census.evaluateCheckpointResumeForSlice({ client: c, sliceRef });
+    return answer === null ? null : { decision: answer.decision, reason_id: answer.reason_id,
+      blocking_check: answer.blocking_check, decided_at: new Date().toISOString(), answer };
+  } catch (error) {
+    if (!PROGRAM_CONTROLLER_READ_FAILURES.has(error?.code)) throw error;
+    return null;
+  }
+}
+
+/**
+ * Record one refused decision through the single privileged writer. The door
+ * runs as carr_writer, which 0517 grants EXECUTE limited to this one fact kind,
+ * so this is the only fact the door can mint — it cannot give itself a lease, a
+ * width row or a receipt.
+ */
+async function recordProgramControllerRefusal(c, idempotencyKey, sliceRef, decision) {
+  await c.query(
+    "select ops.record_program_controller_fact('admission_refusal', $1::uuid, $2::jsonb) as fact",
+    [idempotencyKey, JSON.stringify({
+      slice_ref: sliceRef, reason_id: decision.reason_id, blocking_check: decision.blocking_check,
+      decided_at: decision.decided_at,
+      decision_digest: canonicalDigest(decision.answer ?? {
+        refused_without_answer: true, reason_id: decision.reason_id,
+        dependency_code: decision.dependency_code ?? null }),
+    })]);
+}
+
 export async function admitEngineeringSlice(c, actor, args, ToolError, writeEvent) {
   if (typeof writeEvent !== "function") throw new TypeError("engineering admission requires an event writer");
   exactAuthorityFree(args, ToolError);
@@ -1610,17 +1695,66 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
     error(ToolError, { error: "engineering_admission_serialization_restart" });
   priorEnvelope = serializedPriorEnvelope;
 
+  // DOOR 1 — V5-F02 SLICE ADMISSION (WR-000110). Inside the serialization
+  // boundary, after the prior-envelope reconciliation and BEFORE the replay
+  // branch opens below, because a refusal here must be a refusal before any
+  // edit and before any insert.
+  //
+  // THE REFUSAL RETURNS; IT DOES NOT THROW. mcp.js commits a handler that
+  // returns and rolls back one that throws, so a thrown refusal would erase its
+  // own evidence. Returning commits the fact-ledger row, the event and the
+  // tool_call replay row together, and a key replay returns the identical
+  // refusal without re-deciding. That is a deliberate divergence from the
+  // door's other refusals, which throw because they are contract violations: an
+  // admission refusal is a DECIDED OUTCOME, and it is the one thing this Work
+  // Request requires to be persisted.
+  //
+  // Every fact the evaluator reads comes from ops.* relations through the
+  // census reader, never from args: exactAuthorityFree closed the argument
+  // schema to three keys before any of this ran.
+  // The program the width is earned for is the Work Request's own typed
+  // reference from the passport facts -- `wr:<uuid>`, server-derived -- never
+  // args.work_request, which is a name the caller supplied.
+  const admission = await programControllerAdmissionDecision(c, source.work.id, sliceRef);
+  if (admission && admission.decision !== "allow") {
+    await recordProgramControllerRefusal(c, args.idempotency_key, sliceRef, admission);
+    await writeEvent(c, actor, "admit-engineering-slice", "ops_work_request", source.work.id.replace(/^wr:/, ""), {
+      new: { admission_refused: admission.reason_id, blocking_check: admission.blocking_check,
+        slice_ref: sliceRef }, idempotency_key: args.idempotency_key,
+    });
+    return { ok: false, admitted: false, refusal: "engineering_slice_admission_refused",
+      reason_id: admission.reason_id, blocking_check: admission.blocking_check,
+      slice_ref: sliceRef, decision: admission.answer ?? null };
+  }
+
   if (priorEnvelope) {
     const priorSlicePlanId = uuid(priorBinding.slice_plan_id, "prior_envelope.slice_plan_id", ToolError);
     await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-envelope:${priorSlicePlanId}:${sliceRef}`]);
     // A terminal session is a predecessor, never a replay candidate. Active
     // sessions retain the existing currentness and dispatch-runway boundary.
     if (priorSessionIsActive) {
+      // DOOR 2 — V5-F02 CHECKPOINT RESUME (WR-000110). This branch IS the resume
+      // door: it hands back a prior envelope and the slice carries on. Asking
+      // whether the checkpoint it resumes from is current, lease-bound and
+      // record-derived belongs here, before the currentness query.
+      //
+      // A slice with NO ops.slice_checkpoint row returns null and the branch is
+      // exactly what it was: there is nothing to resume FROM RECORDS, the
+      // existing currentness logic still governs, and the absence is reported
+      // rather than fabricated into a checkpoint.
+      const resume = await programControllerResumeDecision(c, sliceRef);
+      if (resume && resume.decision !== "allow") {
+        await recordProgramControllerRefusal(c, args.idempotency_key, sliceRef, resume);
+        return { ok: false, admitted: false, refusal: "engineering_slice_resume_refused",
+          reason_id: resume.reason_id, blocking_check: resume.blocking_check,
+          slice_ref: sliceRef, checkpoint_absent: false };
+      }
+      const checkpointAbsent = resume === null;
       const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
       const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
       if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
           currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
-        return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
+        return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id, checkpoint_absent: checkpointAbsent };
       if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true)
         error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
     }

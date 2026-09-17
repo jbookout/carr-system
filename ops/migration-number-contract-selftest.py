@@ -314,6 +314,33 @@ def main() -> int:
     else:
         raise AssertionError("--through was allowed to expose WR95 before its SCAC seal")
 
+    # WR-000110 adds the program-controller seam tables, the one privileged
+    # writer function and its grants in 0517, and seals the resulting SCAC v29
+    # successor in 0518. The same deferred policy-epoch trigger refuses the
+    # intermediate catalog, so the reviewed pair must commit as one transaction.
+    program_controller = [
+        item for item in loaded if item[0].startswith(("0517_", "0518_"))
+    ]
+    assert [item[0] for item in program_controller] == [
+        "0517_program_controller_seams.sql",
+        "0518_program_controller_seams_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(program_controller) == [
+        program_controller
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            program_controller,
+            "0517_program_controller_seams.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000110 before its SCAC seal"
+        )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.
