@@ -4,11 +4,13 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v28 is the runtime selector because WR-000109 admits two optional provenance
-// properties on patch-deal-field, which moves that operation's schema_digest.
-// Older registries must continue to refuse the new shape as a contract
-// mismatch: a registry that has not sealed the change does not know it.
-} from "./scac-mutation-registry.v28.generated.js";
+// v29 is the runtime selector because WR-000110 installs the V5-F02
+// program-controller seams: one new SECURITY DEFINER writer with two grantees,
+// and an edit to engineering-runtime.js that re-digests every mcp-tool row
+// registered from it. Older registries must continue to refuse the new shapes
+// as a contract mismatch: a registry that has not sealed the change does not
+// know it.
+} from "./scac-mutation-registry.v29.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

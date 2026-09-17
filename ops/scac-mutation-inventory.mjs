@@ -80,6 +80,15 @@ export const REGISTRY_V27_VERSION = "scac-mutation-registry.v27";
 // only ever re-digest source bytes, so a successor is the only surface that
 // can carry it.
 export const REGISTRY_V28_VERSION = "scac-mutation-registry.v28";
+// v29 seals the WR-000110 V5-F02 program-controller seams. Two independent
+// moves ride it: ops.record_program_controller_fact is a new SECURITY DEFINER
+// ingress with TWO explicit grantees, and the engineering-runtime.js edit that
+// wires the two doors re-digests every mcp-tool row registered from that file.
+// Two inventoried script entrypoints move with them -- ops/ci.sh gains the two
+// new database proofs, and tools/migrate.py and
+// ops/foundation-assurance-candidate-rehearsal.py are edited. One successor
+// carries all four reasons.
+export const REGISTRY_V29_VERSION = "scac-mutation-registry.v29";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -140,8 +149,15 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   // loading through 0515, for the reason every seal above it is read rather
   // than recomputed: a number this file derives could drift with this file.
   v27: Object.freeze({ version: REGISTRY_V27_VERSION, digest: "sha256:72bb5aa1520b02da401b4f7b74f2cf2bfa6117a580812f975629f5966cfc585b", entryCount: 1775, sourceEntryCount: 856 }),
+  // READ FROM THE CLUSTER, not carried forward from this file: a disposable
+  // PostgreSQL built from db/schema.sql and every migration through 0517 holds
+  // this ops.scac_mutation_registry_version row after 0516. A number this file
+  // derived could drift with this file, which is the whole point of a seal.
+  v28: Object.freeze({ version: REGISTRY_V28_VERSION, digest: "sha256:dda28b6627818dd818d30cfdf3d2fc621108b4a8d5d7de21eb741f873c8bbbc5", entryCount: 1779, sourceEntryCount: 856 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
+  "migrations/0516_deal_field_change_provenance_and_scac_successor.sql": "2e3ff8af70548b6c0b8e384bd766ca90d0e4bee49b5d88efa0afd7e4003f7256",
+  "mcp-server/src/scac-mutation-registry.v28.generated.js": "765c046332186c04528b9a787933c46f3ed0ce910edfd1e36246264f9cf260fb",
   "migrations/0512_foundation_assurance_scac_successor.sql": "df42b1bf2b4bd6036520fdb8ee4958a1da2ca0ae461fdedf62787181624a17c5",
   "mcp-server/src/scac-mutation-registry.v27.generated.js": "559156eca564cd06f18dacc50c12c6af70a5977b905cd8afb55bd60557997f8c",
   "migrations/0503_gate_zero_outcome_and_scac_successor.sql": "3153daf34e54b01101dd09f430343c8d2342ad4cc3a17e5f6f80a8730095d2b0",
@@ -640,6 +656,33 @@ export const DEAL_FIELD_PROVENANCE_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 615, digest: "sha256:cae0583d93eefe61b32d7627d741e7339b4f8ec3eb42e037e7a363aebefee041" },
 });
 
+// MEASURED on a disposable PostgreSQL after migrations/0517_program_controller_seams.sql
+// loads, never predicted and never inherited. 0517 adds ONE security-definer
+// function with TWO explicit grantees, and the catalog counts one row per
+// (function, grantee) pair -- so secdef_execute moves by exactly two and its
+// digest moves with it. The seven new tables move NOTHING: their column-scoped
+// SELECT grants are not admitted by the relation projection (which takes only
+// INSERT/UPDATE/DELETE/TRUNCATE) or by the column projection (INSERT/UPDATE),
+// and the DML revoke on privileges nobody held adds no ACL row. Those three
+// zero deltas are measurements that happened to match the prediction, not
+// predictions that were kept.
+export const PROGRAM_CONTROLLER_PRE_V29_DB_CATALOG_BASELINE = Object.freeze({
+  ...DEAL_FIELD_PROVENANCE_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v28",
+  secdef_execute: { count: 617, digest: "sha256:916e22eb5e5f47ee10090f4c5597165fb4ffd2cb2e2f9a9f27375832ee5ca722" },
+});
+
+// The v29 successor installs ONE registration function granted to FOUR roles,
+// which is its whole catalog delta: the seal and catalog functions it also
+// installs are in the mass revoke and carry an owner-only ACL, which the
+// projection excludes. Blessed only from disposable PostgreSQL after the
+// generated migration is loaded.
+export const PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...PROGRAM_CONTROLLER_PRE_V29_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v29",
+  secdef_execute: { count: 621, digest: "sha256:5bef3feacd879079c3e7fb7eb857814cf4b817629539fd29b4bcd0db0e97deb8" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -724,7 +767,7 @@ select v.registry_version,
   const output = execFileSync("psql", [dsn, "-X", "-A", "-t", "-F", "\t",
     "-v", "ON_ERROR_STOP=1", "-c", sql], { encoding: "utf8" });
   const rows = output.trim().split("\n").filter(Boolean).map(line => line.split("\t"));
-  const currentVersion = Number(REGISTRY_V28_VERSION.split(".v").at(-1));
+  const currentVersion = Number(REGISTRY_V29_VERSION.split(".v").at(-1));
   const expectedVersions = Array.from({ length: currentVersion }, (_, index) =>
     `scac-mutation-registry.v${index + 1}`);
   if (rows.length !== expectedVersions.length ||
@@ -1314,6 +1357,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V26_VERSION]: "v26",
   [REGISTRY_V27_VERSION]: "v27",
   [REGISTRY_V28_VERSION]: "v28",
+  [REGISTRY_V29_VERSION]: "v29",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1369,7 +1413,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V28_VERSION) {
+  version = REGISTRY_V29_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1429,7 +1473,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
     REGISTRY_V23_VERSION, REGISTRY_V24_VERSION,
     REGISTRY_V25_VERSION, REGISTRY_V26_VERSION, REGISTRY_V27_VERSION,
-    REGISTRY_V28_VERSION].includes(version))
+    REGISTRY_V28_VERSION, REGISTRY_V29_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -9694,6 +9738,286 @@ export const renderDealFieldProvenanceForwardRegistrySql =
     frozenInventory(REGISTRY_V28_VERSION),
     DEAL_FIELD_PROVENANCE_FORWARD_DB_CATALOG_BASELINE));
 
+const PROGRAM_CONTROLLER_V28_MIGRATION_PATH =
+  "migrations/0516_deal_field_change_provenance_and_scac_successor.sql";
+const PROGRAM_CONTROLLER_V28_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v28.generated.js";
+const PROGRAM_CONTROLLER_DOMAIN_MIGRATION_PATH =
+  "migrations/0517_program_controller_seams.sql";
+const PROGRAM_CONTROLLER_DOMAIN_MIGRATION_SHA256 =
+  "eb9b4ab76b306ade48863219ce27215f62f69ead7603c83c2106cd76caffde50";
+
+function assertProgramControllerV29TrustRootFrozen() {
+  const { v28: seal } = HISTORICAL_REGISTRY_SEALS;
+  if (seal?.version !== REGISTRY_V28_VERSION ||
+      !/^sha256:[0-9a-f]{64}$/.test(seal?.digest ?? "") ||
+      seal.entryCount !== 1779 || seal.sourceEntryCount !== 856)
+    throw new Error("program controller v29 predecessor seal is unbound");
+  assertFoundationAssuranceCatalogBaseline("predecessor v29",
+    PROGRAM_CONTROLLER_PRE_V29_DB_CATALOG_BASELINE,
+    "scac-db-catalog-projection.v28");
+  assertFoundationAssuranceCatalogBaseline("successor v29",
+    PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE,
+    "scac-db-catalog-projection.v29");
+  for (const path of [PROGRAM_CONTROLLER_V28_MIGRATION_PATH,
+    PROGRAM_CONTROLLER_V28_RUNTIME_PATH])
+    if (!FOUNDATION_ASSURANCE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`program controller v29 predecessor artifact pin is unbound: ${path}`);
+}
+
+function renderProgramControllerRegistrySqlFrozen(rows,
+  dbCatalogBaseline = PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v28 artifact
+  // hashes are fixed production constants, asserted by the shared v29 trust
+  // root that every v29 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertProgramControllerV29TrustRootFrozen();
+  const { v28: v28Seal } = HISTORICAL_REGISTRY_SEALS;
+  const sealedPredecessorBaseline = DEAL_FIELD_PROVENANCE_FORWARD_DB_CATALOG_BASELINE;
+  const predecessorDbCatalogBaseline = PROGRAM_CONTROLLER_PRE_V29_DB_CATALOG_BASELINE;
+  const artifactShaRe = FOUNDATION_ASSURANCE_ARTIFACT_SHA_RE;
+  assertFoundationAssuranceCatalogBaseline("successor v29", dbCatalogBaseline,
+    "scac-db-catalog-projection.v29");
+
+  const v29Digest = registryDigestFor(REGISTRY_V29_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v28MigrationPath = PROGRAM_CONTROLLER_V28_MIGRATION_PATH;
+  const v28RuntimePath = PROGRAM_CONTROLLER_V28_RUNTIME_PATH;
+  const v28Rows = frozenInventory(REGISTRY_V28_VERSION);
+  const v28Migration = predecessorArtifacts?.migration ??
+    readFileSync(resolve(REPO_ROOT, v28MigrationPath), "utf8");
+  const v28Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v28Rows, {
+    version: REGISTRY_V28_VERSION,
+    dbCatalogBaseline: sealedPredecessorBaseline,
+  });
+  for (const [path, source] of [
+    [v28MigrationPath, v28Migration], [v28RuntimePath, v28Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`program controller v29 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v28 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v28 after the WR-000109 deal-field change provenance.";
+  const coreStart = v28Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v28Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v28 migration has no exact successor core boundary");
+  const v28Core = v28Migration.slice(coreStart);
+  const currentV28Marker = "create or replace function ops.scac_mutation_catalog_v28_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v27;";
+  const currentV28Start = v28Core.indexOf(currentV28Marker);
+  const secondCurrentV28 = v28Core.indexOf(
+    currentV28Marker, currentV28Start + currentV28Marker.length);
+  const v27HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v27_current() rename to scac_mutation_catalog_v27_live_at_seal;";
+  const v27HistoryStart = v28Core.indexOf(v27HistoryMarker);
+  const secondV27History = v28Core.indexOf(
+    v27HistoryMarker, v27HistoryStart + v27HistoryMarker.length);
+  const policyStart = v28Core.indexOf(policyMarker);
+  const secondPolicy = v28Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v27HistoryStart < 0 || secondV27History >= 0 || currentV28Start <= v27HistoryStart ||
+      secondCurrentV28 >= 0 || policyStart <= currentV28Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v28 migration has no exact catalog successor boundary");
+  const installedV27History = v28Core.slice(v27HistoryStart, currentV28Start);
+  const v28Current = v28Core.slice(currentV28Start, policyStart);
+  const v28History =
+`alter function ops.scac_mutation_catalog_v28_current() rename to scac_mutation_catalog_v28_live_at_seal;
+create or replace function ops.scac_mutation_registry_v28_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v28')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v28_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v28_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v28_seal_available() is 'Exact immutable v28 registry seal; separate from whether the live catalog still equals v28.';
+comment on function ops.scac_mutation_catalog_v28_current() is 'Historical v28 live-catalog validator; expected to become false after the v29 authority surface is installed.';
+
+`;
+  const renderV29Current = baseline => {
+    let current = v28Current
+      .replaceAll("scac_mutation_catalog_v28_current", "scac_mutation_catalog_v29_current")
+      .replaceAll("scac-mutation-registry.v28", "scac-mutation-registry.v29");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${sealedPredecessorBaseline[category].count} or observed_digest<>'${sealedPredecessorBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `Program controller v29 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${sealedPredecessorBaseline.role_authority.count} and observed_digest='${sealedPredecessorBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Program controller v29 role-authority baseline");
+  };
+  const v29Current = renderV29Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v28Core, v28Current,
+    "__PROGRAM_CONTROLLER_V28_CATALOG_SUCCESSOR__",
+    "Program controller v28 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV27History, "",
+    "Program controller already-installed v27 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v29 after the WR-000110 program-controller seams.",
+    "Program controller migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v28", "scac-mutation-registry.v29")
+    .replaceAll("_v28", "_v29")
+    .replaceAll(" v28", " v29");
+  sql = replaceExactlyOnce(sql, JSON.stringify(sealedPredecessorBaseline),
+    JSON.stringify(dbCatalogBaseline), "Program controller v29 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v28Seal.digest}',${v28Seal.entryCount},${v28Seal.sourceEntryCount},`,
+    `'sha256:${v29Digest}',${entryCount},${rows.length},`,
+    "Program controller v29 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v29('${v28Seal.digest}',`,
+    `ops.scac_mutation_registration_v29('sha256:${v29Digest}',`,
+    "Program controller v29 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v27;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v28;",
+    "Program controller policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__PROGRAM_CONTROLLER_V28_CATALOG_SUCCESSOR__",
+    `${v28History}${v29Current}`, "Program controller v28 catalog history insertion");
+
+  const versionsThrough28 = Array.from({ length: 28 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough27 = Array.from({ length: 27 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough27},'scac-mutation-registry.v29'))`,
+    `check (registry_version in (${versionsThrough28},'scac-mutation-registry.v29'))`,
+    "Program controller registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough27}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough28}) then return false; end if;`,
+    "Program controller historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v27' then '${HISTORICAL_REGISTRY_SEALS.v27.digest}' end;`,
+    `    when 'scac-mutation-registry.v27' then '${HISTORICAL_REGISTRY_SEALS.v27.digest}'\n    when '${v28Seal.version}' then '${v28Seal.digest}' end;`,
+    "Program controller historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v27' then '${JSON.stringify(FOUNDATION_ASSURANCE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v27' then '${JSON.stringify(FOUNDATION_ASSURANCE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v28Seal.version}' then '${JSON.stringify(sealedPredecessorBaseline)}'::jsonb end;`,
+    "Program controller historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v27','${HISTORICAL_REGISTRY_SEALS.v27.digest}',${HISTORICAL_REGISTRY_SEALS.v27.entryCount},${HISTORICAL_REGISTRY_SEALS.v27.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v27','${HISTORICAL_REGISTRY_SEALS.v27.digest}',${HISTORICAL_REGISTRY_SEALS.v27.entryCount},${HISTORICAL_REGISTRY_SEALS.v27.sourceEntryCount}),\n    ('${v28Seal.version}','${v28Seal.digest}',${v28Seal.entryCount},${v28Seal.sourceEntryCount})\n`,
+    "Program controller historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v27_seal_available()) then",
+    "    ops.scac_mutation_registry_v27_seal_available() and\n    ops.scac_mutation_registry_v28_seal_available()) then",
+    "Program controller snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v29' and r.registry_digest='${v28Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v28' and r.registry_digest='${v28Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v29' and r.registry_digest='sha256:${v29Digest}')`,
+    "Program controller epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v29' and registry_digest='${v28Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v28' and registry_digest='${v28Seal.digest}') or\n  (registry_version='scac-mutation-registry.v29' and registry_digest='sha256:${v29Digest}')`,
+    "Program controller epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v28Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v29Digest}'::text)`,
+    "Program controller snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v27_seal_available(),ops.scac_mutation_catalog_v29_current()",
+    "ops.scac_mutation_registry_v27_seal_available(),ops.scac_mutation_catalog_v28_live_at_seal(),ops.scac_mutation_catalog_v28_current(),ops.scac_mutation_registry_v28_seal_available(),ops.scac_mutation_catalog_v29_current()",
+    "Program controller historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Deal field provenance successor snapshot: current policy epochs bind mutation registry v29 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24/v25/v26/v27 epochs remain immutable.",
+    "Program controller successor snapshot: current policy epochs bind mutation registry v29 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24/v25/v26/v27/v28 epochs remain immutable.",
+    "Program controller policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v29')<>${v28Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v29')<>${entryCount}`,
+    "Program controller v29 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v27')<>'${HISTORICAL_REGISTRY_SEALS.v27.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v27')<>${HISTORICAL_REGISTRY_SEALS.v27.entryCount} then raise exception 'sealed SCAC mutation registry v27 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v28Seal.version}')<>'${v28Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v28Seal.version}')<>${v28Seal.entryCount} then raise exception 'sealed SCAC mutation registry v28 changed during successor creation'; end if;`,
+    "Program controller predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot_v26(),ops.scac_policy_epoch_snapshot_v27(),",
+    "ops.scac_policy_epoch_snapshot_v26(),ops.scac_policy_epoch_snapshot_v27(),ops.scac_policy_epoch_snapshot_v28(),",
+    "Program controller historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v28 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV29Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v29 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Program controller pre-v29 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'Program controller pre-v29 role-authority receipt drifted'; end if;`,
+    "Program controller pre-v29 role receipt");
+  // TWO artifact pins, because a DOMAIN migration precedes this successor: the
+  // predecessor registry migration (0516, pinned above) and 0517 itself, whose
+  // authority surface this successor is sealing.
+  const frontierMigrationPath = PROGRAM_CONTROLLER_DOMAIN_MIGRATION_PATH;
+  const frontierMigration = readFileSync(resolve(REPO_ROOT, frontierMigrationPath), "utf8");
+  const frontierMigrationHash = sha256(frontierMigration);
+  if (frontierMigrationHash !== PROGRAM_CONTROLLER_DOMAIN_MIGRATION_SHA256)
+    throw new Error(`program controller domain migration changed: ${frontierMigrationHash}`);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0517 receipt. Refuse before any v29 function
+-- exists. Unlike the registry-only successors before it, this one follows a
+-- DOMAIN migration in the same reviewed atomic group, so the receipt below is
+-- measured AFTER 0517 has installed its authority surface.
+do $program_controller_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0517_program_controller_seams.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0517_program_controller_seams.sql'
+       and sha256='${frontierMigrationHash}') then
+    raise exception 'Program controller pre-v29 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'Program controller pre-v29 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $program_controller_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+export const assertProgramControllerV29TrustRoot =
+  closedExport(() => assertProgramControllerV29TrustRootFrozen());
+export const renderProgramControllerForwardRegistrySql =
+  closedExport(() => renderProgramControllerRegistrySqlFrozen(
+    frozenInventory(REGISTRY_V29_VERSION),
+    PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE));
+
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
   // in v21 artifacts, and every input to the guard is a fixed module constant.
@@ -10043,9 +10367,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v27.generated.js"],
       });
 
+  const v29Rows = frozenInventory(REGISTRY_V29_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v29.generated.js"] =
+    renderRuntimeProjection(v29Rows, {
+      version: REGISTRY_V29_VERSION,
+      dbCatalogBaseline: PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0518_program_controller_seams_scac_successor.sql"] =
+    renderProgramControllerRegistrySqlFrozen(v29Rows,
+      PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0516_deal_field_change_provenance_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v28.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 36 || runtimeCount !== 27 || Object.keys(artifacts).length !== 63)
+  if (migrationCount !== 37 || runtimeCount !== 28 || Object.keys(artifacts).length !== 65)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -10560,9 +10897,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       "migrations/0516_deal_field_change_provenance_and_scac_successor.sql");
     await writeFile(target, renderDealFieldProvenanceForwardRegistrySql());
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v29") {
+    assertProgramControllerV29TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v29.generated.js");
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V29_VERSION), {
+      version: REGISTRY_V29_VERSION,
+      dbCatalogBaseline: PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-program-controller-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0518_program_controller_seams_scac_successor.sql");
+    await writeFile(target, renderProgramControllerForwardRegistrySql());
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V28_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V29_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

@@ -136,6 +136,17 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0511_foundation_assurance_minimum_outcome.sql",
         "0512_foundation_assurance_scac_successor.sql",
     ),
+    # WR-000110 creates the program-controller seam tables, the one authority
+    # writer function and its grants in 0517; 0518 is its SEALED REGISTRY
+    # SUCCESSOR. ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint
+    # trigger on public.schema_migrations, so a commit of 0517 alone asks the
+    # v28 snapshot to bless the new authority surface and must fail. Both files
+    # therefore share ONE runner-owned transaction and --through may not cut
+    # them.
+    (
+        "0517_program_controller_seams.sql",
+        "0518_program_controller_seams_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

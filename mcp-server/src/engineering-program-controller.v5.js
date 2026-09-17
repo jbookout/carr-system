@@ -16,45 +16,54 @@
 // `effects: V5_NO_EFFECTS`, and an `allow` says the registered negatives did
 // not fire on the facts as reported.
 //
-// NOTHING IN THIS REPOSITORY CALLS THESE FOUR FUNCTIONS YET, AND THAT IS THE
-// HONEST STATE, not an oversight to be papered over with a fabricated caller.
-// The independent review of PR 980 named it, and the seam census below is the
-// answer, one decision at a time. The test is: (a) does a code path here
-// PERFORM the action being gated, (b) does that path hold the facts the
-// decision consumes from a source other than the party being gated, and (c) can
-// the call be made without a new migration, table, entrypoint or registry seal?
+// THESE FOUR FUNCTIONS ARE NOW CALLED, AND THE SEAM CENSUS BELOW RECORDS WHICH
+// DOOR CALLS EACH ONE. Until WR-000110 nothing in this repository called them,
+// and the census below said so rather than papering the gap over with a
+// fabricated caller. The test each seam had to pass is unchanged: (a) does a
+// code path here PERFORM the action being gated, (b) does that path hold the
+// facts the decision consumes from a source other than the party being gated,
+// and (c) can the call be made without a new migration, table, entrypoint or
+// registry seal? WR-000110 answered (b) with records rather than with arguments,
+// and paid (c) in full — migrations/0517_program_controller_seams.sql and the
+// v29 registry successor 0518.
 //
 //   * SLICE ADMISSION. (a) YES — admitEngineeringSlice in engineering-runtime.js
 //     is the door that issues the execution envelope authorizing a slice to be
-//     worked, and a refusal there is a hard stop before any edit. (b) NO. That
-//     door decides over Work Requests, accepted slice plans, envelopes and agent
-//     sessions. It has no source-path lease, no worktree path, no per-slice base
-//     commit (it writes a sentinel, ENGINEERING_SESSION_SOURCE) and no
-//     width-evidence record. No relation in db/schema.sql stores a live lease
-//     census. Building that request from what the door holds would mean
-//     inventing the very facts this module refuses to let a caller invent.
-//     MISSING SEAM: a live worktree/source-path lease census and an earned-width
-//     evidence ledger.
-//   * CHECKPOINT RESUME. (a) NO. There is no resume-admission door. The nearest
-//     relative, isCanonicalResetReconstruction in engineering-runtime.js, checks
-//     a receipt AFTER the work, which is a different decision at a different
-//     time. MISSING SEAM: a resume door that reads a durable checkpoint record.
-//   * RELEASE ELIGIBILITY. (a) NO. There is no Deployment Controller in this
-//     repository — the only occurrence of the phrase is this file. (b) NO. No
-//     store here holds hosted-CI conclusions, a merge slot or a post-merge
-//     readback. MISSING SEAM: `seam:deployment-controller-release-receipt-store`
-//     (V5_RELEASE_STATE_HOLDER_SEAM), the authoritative holder of release
-//     receipts. Because it does not exist, evaluateReleaseEligibility CANNOT
-//     RETURN AN ALLOW AT ALL: it refuses every check with
-//     `release_state_holder_unavailable`, naming the seam it is owed. The
-//     deterministic clauses are still real and still proved — as PURE
+//     worked, and a refusal there is a hard stop before any edit. (b) NOW YES.
+//     The door decides over Work Requests, accepted slice plans, envelopes and
+//     agent sessions, and it reads the facts THIS module needs from
+//     ops.slice_source_lease, ops.program_width_state, ops.program_width_evidence
+//     and ops.program_origin_head_observation through
+//     program-controller-census.v5.js. None of them comes from `args`:
+//     exactAuthorityFree closes the argument schema to three keys, so there is
+//     no field through which a gated party could assert its own lease, its own
+//     width or its own base. The evaluator is called inside the door's
+//     serialization boundary and before any insert, and a refusal is RETURNED
+//     so the recorded reason commits with the transaction.
+//   * CHECKPOINT RESUME. (a) YES — the replay branch of admitEngineeringSlice IS
+//     the resume door: it returns a prior envelope for an active session, which
+//     resumes a slice. (b) YES, from the newest ops.slice_checkpoint row for the
+//     slice, bound to the same live census. A slice with no checkpoint row
+//     replays exactly as it did before and says `checkpoint_absent`; a
+//     checkpoint is never invented.
+//   * RELEASE ELIGIBILITY. (a) YES for the read: the program-controller census
+//     route answers the release question from records. (b) YES.
+//     `seam:deployment-controller-release-receipt-store`
+//     (V5_RELEASE_STATE_HOLDER_SEAM) is the authoritative holder of release
+//     receipts, and it EXISTS: ops.release_receipt is its store, and
+//     program-controller-release-state-holder.v5.js is the module-bound
+//     in-process snapshot this module binds below. So an `allow` is reachable —
+//     and reachable ONLY from six receipts that holder resolves, each content
+//     addressed and rehashed. A bound holder that does not hold the cited
+//     receipt still refuses, by name, and no caller-supplied holder is ever
+//     consulted. The deterministic clauses stay exactly what they were: PURE
 //     PREDICATES over receipt shapes (verifyReleaseReceipt,
-//     evaluateReleaseCheck), which is the honest thing a module can prove
-//     before its ledger exists.
+//     evaluateReleaseCheck).
 //
-// So the decision layer is built, closed and proved against its own contract,
-// and it is not yet load-bearing. Saying so is the point: a controller claimed
-// to gate work it does not gate is worse than one that says it gates nothing.
+// So the decision layer is built, closed, proved against its own contract, and
+// load-bearing at two doors and one read. Saying which is the point: a
+// controller claimed to gate work it does not gate is worse than one that says
+// it gates nothing.
 // The same reasoning forbids a hole a caller can climb through in the meantime:
 // an earlier correction let the caller PASS IN the release receipt store, which
 // made release authority forgeable by anyone who could write a plausible object.
@@ -158,6 +167,7 @@ import { canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { ENGINEERING_REPOSITORY_ACTIONS } from "./engineering-runtime.js";
+import { RELEASE_RECEIPT_HOLDER } from "./program-controller-release-state-holder.v5.js";
 import { GATE_ZERO_STEP_REF, MINIMUM_REQUIRED_MEMBERS } from "./benchmark-minimum.v5.js";
 
 export const V5_PROGRAM_CONTROLLER_SCHEMA_VERSION =
@@ -1047,15 +1057,16 @@ export function evaluateCheckpointResume(request) {
 // A decided party that supplies the ledger is still deciding its own case.
 //
 // So there is NO INJECTABLE PORT. The holder is bound by this module, under the
-// name V5_RELEASE_STATE_HOLDER_SEAM, and that seam DOES NOT EXIST IN THIS
-// REPOSITORY: there is no Deployment Controller and no release receipt store
-// (the file header's seam census gives the search that establishes it). So the
-// binding is `null`, every check refuses `release_state_holder_unavailable`
-// naming the owed seam, and `evaluateReleaseEligibility` CANNOT RETURN AN ALLOW
-// FROM ANY INPUT — it takes exactly one argument, a request of references, and
-// a second argument is unreadable rather than a port. This is the same honest
-// shape defect 2 was deferred in: the decision is not proven because the thing
-// it must read does not exist yet, and the module says which thing.
+// name V5_RELEASE_STATE_HOLDER_SEAM, and since WR-000110 that seam EXISTS:
+// ops.release_receipt is the store and program-controller-release-state-holder.v5.js
+// is the module-bound in-process snapshot the census reader fills from it. The
+// binding below is that holder. `evaluateReleaseEligibility` still takes exactly
+// one argument, a request of references, and a second argument is unreadable
+// rather than a port — so an allow is reachable ONLY through six receipts the
+// module-bound holder resolves, and a holder a caller builds reaches nothing.
+// When the bound holder does not hold a cited receipt the check refuses
+// `release_receipt_unresolvable` by name; when the binding itself is unusable
+// the module falls back to `release_state_holder_unavailable` and fails closed.
 //
 // THE DETERMINISTIC CLAUSES ARE STILL REAL CODE, and they are what the seam
 // will be judged by the day it exists: `verifyReleaseReceipt` (content address,
@@ -1172,14 +1183,18 @@ function validateReceiptShape(kind, body, path) {
 export const V5_RELEASE_STATE_HOLDER_SEAM = "seam:deployment-controller-release-receipt-store";
 
 /**
- * And here is the binding: `null`, because the seam above does not exist. There
- * is no Deployment Controller in this repository and no release receipt store —
- * see the seam census in the file header for the search that establishes it.
- * When that seam is built, this constant is the single place it binds, and the
- * day it does, `verifyReleaseReceipt` and `evaluateReleaseCheck` below are the
- * clauses it will be read through.
+ * And here is the binding. The seam above exists as of WR-000110: its store is
+ * ops.release_receipt (migrations/0517_program_controller_seams.sql) and its
+ * in-process face is the module-bound snapshot in
+ * program-controller-release-state-holder.v5.js, filled from that store by
+ * program-controller-census.v5.js immediately before an evaluation.
+ *
+ * THIS IS STILL THE SINGLE PLACE IT BINDS. It is a module constant, not a
+ * parameter, not a setter and not an export: the holder arrives by import or it
+ * does not arrive. `verifyReleaseReceipt` and `evaluateReleaseCheck` below are
+ * the clauses every receipt it resolves is read through.
  */
-const V5_RELEASE_STATE_HOLDER = null;
+const V5_RELEASE_STATE_HOLDER = RELEASE_RECEIPT_HOLDER;
 
 /** The bound holder, or null when the seam is unavailable. Takes no input. */
 function authoritativeReleaseStateHolder() {
@@ -1331,15 +1346,19 @@ export function evaluateReleaseCheck(check, body, binding) {
 
 /**
  * The ONLY door from a release check to a release fact. It asks the module for
- * its bound state holder and gets `null`, because the seam named above does not
- * exist — so every check refuses, naming the seam that is owed. No argument
- * reaches this function that could change that answer.
+ * its bound state holder and gets it. A check refuses when the holder does not
+ * hold the receipt that was cited — `release_receipt_unresolvable`, from
+ * verifyReleaseReceipt — which is a different and more honest answer than "the
+ * seam is missing". The null branch below stays as the FAIL-CLOSED path: if the
+ * binding ever yields something that is not a holder, every check refuses
+ * `release_state_holder_unavailable` again rather than deciding on nothing. No
+ * argument reaches this function that could change either answer.
  */
 function resolveReleaseFact(kind, request) {
   const holder = authoritativeReleaseStateHolder();
   if (holder === null)
     return { ok: false, reasonId: "release_state_holder_unavailable",
-      note: "a release fact is read only from the authoritative state holder this module binds, and that seam does not exist yet",
+      note: "a release fact is read only from the authoritative state holder this module binds, and that binding is not a usable holder",
       detail: { receipt_kind: kind, required_seam: V5_RELEASE_STATE_HOLDER_SEAM } };
   let body = null;
   try {
@@ -1361,10 +1380,13 @@ function resolveReleaseFact(kind, request) {
  * released.
  *
  * THERE IS NO STATE-HOLDER ARGUMENT. Release facts come from the module-bound
- * seam V5_RELEASE_STATE_HOLDER_SEAM and from nowhere else; that seam does not
- * exist yet, so every check refuses and this function cannot return an allow
- * from any input. A second argument is a contract violation, not a port: a
- * caller offering its own ledger is a caller deciding its own case.
+ * seam V5_RELEASE_STATE_HOLDER_SEAM and from nowhere else. That seam is bound,
+ * so an allow IS reachable — from six receipts the bound holder resolves, each
+ * content addressed and rehashed, and from nothing else. A second argument is
+ * still a contract violation rather than a port: a caller offering its own
+ * ledger is a caller deciding its own case, and the arity check below is what
+ * says so. That is the paragraph's actual point, and the bind does not weaken
+ * it.
  */
 export function evaluateReleaseEligibility(request) {
   // eslint-disable-next-line prefer-rest-params -- the arity IS the boundary.
@@ -1413,8 +1435,10 @@ export function evaluateReleaseEligibility(request) {
     observed_head_sha: headObservation?.ok ? headObservation.body.observed_head_sha : null,
     merge_admitted: mergeAdmitted,
     released,
-    // The seam this decision reads from, and whether it was there. False today,
-    // for every caller, on every input: the seam does not exist.
+    // The seam this decision reads from, and whether it was there. Bound since
+    // WR-000110, so `state_holder_bound` is true; the line below it is the
+    // unconditional literal `false` and stays that way, because no caller
+    // supplies a holder whether or not one is bound.
     release_state_holder_seam: V5_RELEASE_STATE_HOLDER_SEAM,
     state_holder_bound: holderBound,
     state_holder_is_caller_supplied: false,
