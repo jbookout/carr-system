@@ -19,6 +19,7 @@ from pathlib import Path
 OPS = Path(__file__).resolve().parent
 MODULE_PATH = OPS / "jev_rule_select.py"
 SPEC = importlib.util.spec_from_file_location("jev_rule_select", MODULE_PATH)
+assert SPEC and SPEC.loader
 sel = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sel)
 
