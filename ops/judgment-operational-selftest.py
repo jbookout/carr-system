@@ -143,6 +143,81 @@ class DefectClassAdvisoryTests(unittest.TestCase):
                                   "-- the failure that scored 426 regions at zero")
 
 
+class TollsHoldThePushTests(unittest.TestCase):
+    """The advisory stopped being advice on 2026-09-18.
+
+    It had scored inventory_reseal at 0.94 on a push, named the exact remedy,
+    and been pushed past; hosted CI failed 25 minutes later on that same toll.
+    These hold the shape of the fix rather than the score: the model picks
+    which deterministic check to run, the check decides, and anything that
+    cannot run lets the push through.
+    """
+
+    def setUp(self):
+        self.module = load("jev_change_tolls")
+
+    def test_a_probability_never_refuses_a_push_on_its_own(self):
+        """Every toll that can hold a push names a real command to run."""
+        for name, entry in self.module.VERIFIERS.items():
+            argv, reason = entry
+            self.assertIsInstance(argv, list)
+            self.assertTrue(argv and all(isinstance(a, str) for a in argv),
+                            f"{name} has no runnable command, so its score "
+                            f"would be the thing refusing the push")
+            self.assertIn(name, self.module.TOLLS,
+                          f"{name} verifies a toll that does not exist")
+            self.assertTrue(reason.strip(), f"{name} fails without saying why")
+
+    def test_a_verifier_that_cannot_run_does_not_hold_the_push(self):
+        """The fail-closed trap this must never become.
+
+        A missing interpreter, an unreachable service, a renamed script: none
+        of those are evidence the change owes anything. Blocking on them would
+        turn an advisory into an outage.
+        """
+        module = self.module
+        original = dict(module.VERIFIERS)
+        try:
+            module.VERIFIERS.clear()
+            module.VERIFIERS["inventory_reseal"] = (
+                ["/nonexistent/interpreter/that/is/not/here"], "cannot run")
+            state = {"files": {"added": [], "edited": ["hooks/delegation-gate.py"]},
+                     "added_files_with_a_shebang_or_main_guard": [],
+                     "edited_files_that_are_script_entrypoints": ["hooks/delegation-gate.py"],
+                     "this_branch_merged_another_branch": False}
+            failures = module.verify(state)
+            for name, _p, reason, _o in failures:
+                self.assertIn("could not run", reason,
+                              "a verifier that failed to LAUNCH was reported as "
+                              "a failed check, which would block a correct push")
+        finally:
+            module.VERIFIERS.clear()
+            module.VERIFIERS.update(original)
+
+    def test_the_push_hook_actually_stops_on_a_failed_check(self):
+        """Wiring, not behaviour. The function can be perfect and the hook can
+        still `|| true` it into silence -- which is exactly what happened to
+        this same advisory's stderr in the commit that added it."""
+        hook = (pathlib.Path(self.module.REPO) / "ops" / "githooks" / "pre-push"
+                ).read_text(encoding="utf-8")
+        self.assertIn("module.verify(", hook,
+                      "the push hook does not run the verifiers at all")
+        self.assertIn("sys.exit(3)", hook,
+                      "the hook prints failures without exiting nonzero")
+        block = hook[hook.index("module.verify("):]
+        self.assertNotIn("|| true", block.split("TOLLS")[0],
+                         "`|| true` on the toll block swallows the refusal, "
+                         "which is how this check got wired to nothing once already")
+        self.assertIn('if [ "$status" -eq 3 ]', hook,
+                      "the shell never translates the refusal into a failed push")
+
+    def test_the_skip_door_still_exists(self):
+        """A door with no handle gets taken off its hinges."""
+        hook = (pathlib.Path(self.module.REPO) / "ops" / "githooks" / "pre-push"
+                ).read_text(encoding="utf-8")
+        self.assertIn("CARR_SKIP_TOLL_ADVISORY", hook)
+
+
 class ChangeCollectorTests(unittest.TestCase):
     """What the advisory SEES, which needs no credential and so runs in CI too.
 
