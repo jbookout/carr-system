@@ -45,17 +45,17 @@ begin
   -- The read is STABLE, so it can run inside the writer connection's
   -- `begin read only` transaction; the write is VOLATILE.
   if (select provolatile from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-       where n.nspname = 'ops' and p.proname = 'notification_preference_facts') <> 's' then
+       where n.nspname = 'ops' and p.proname = 'notification_preference_facts') is distinct from 's' then
     raise exception 'WR-000116: the read door is not STABLE and would fail read-only in production';
   end if;
   if (select provolatile from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-       where n.nspname = 'ops' and p.proname = 'set_notification_preference') <> 'v' then
+       where n.nspname = 'ops' and p.proname = 'set_notification_preference') is distinct from 'v' then
     raise exception 'WR-000116: the write door is not VOLATILE';
   end if;
 
   -- ZERO ARGUMENTS, not merely "no actor argument".
   if (select pronargs from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-       where n.nspname = 'ops' and p.proname = 'notification_preference_facts') <> 0 then
+       where n.nspname = 'ops' and p.proname = 'notification_preference_facts') is distinct from 0 then
     raise exception 'WR-000116: the read door takes an argument; it must take none at all';
   end if;
   if (select pg_get_function_identity_arguments(p.oid) from pg_proc p
@@ -109,13 +109,13 @@ begin
 
   -- DEFAULTS WITHOUT AN INSERT. The count is the whole assertion: the returned
   -- object would be identical if the read had written the row.
-  if v_after <> v_before then
+  if v_after is distinct from v_before then
     raise exception 'WR-000116: the read INSERTED a row -- % before, % after', v_before, v_after;
   end if;
   if v_answer->>'exists' is distinct from 'false'
      or v_answer->>'device_opt_in' is distinct from 'false'
-     or v_answer->'quiet_hours_start' <> 'null'::jsonb
-     or v_answer->'quiet_hours_end' <> 'null'::jsonb
+     or v_answer->'quiet_hours_start' is distinct from 'null'::jsonb
+     or v_answer->'quiet_hours_end' is distinct from 'null'::jsonb
      or v_answer->>'timezone' is distinct from 'UTC'
      or v_answer->>'version' is distinct from '1'
      or v_answer->>'quiet_now' is distinct from 'false' then
@@ -141,7 +141,7 @@ begin
     raise exception 'WR-000116: a stale base_version was not refused as version_conflict: %', r;
   end if;
   select version into v_version from ops.notification_preference where actor = v_actor;
-  if v_version <> 2 then
+  if v_version is distinct from 2 then
     raise exception 'WR-000116: a refused compare-and-swap moved the version to %', v_version;
   end if;
 
@@ -156,10 +156,10 @@ begin
     raise exception 'WR-000116: a replayed idempotency key did not return the same result: %', r;
   end if;
   select version into v_version from ops.notification_preference where actor = v_actor;
-  if v_version <> 3 then
+  if v_version is distinct from 3 then
     raise exception 'WR-000116: a REPLAY moved the stored version to %', v_version;
   end if;
-  if (select count(*) from ops.notification_preference_write where idempotency_key = v_key) <> 1 then
+  if (select count(*) from ops.notification_preference_write where idempotency_key = v_key) is distinct from 1 then
     raise exception 'WR-000116: one idempotency key did not leave exactly one receipt';
   end if;
 
@@ -170,7 +170,7 @@ begin
     raise exception 'WR-000116: an incomplete quiet-hours pair was not refused by name: %', r;
   end if;
   select version into v_version from ops.notification_preference where actor = v_actor;
-  if v_version <> 3 then
+  if v_version is distinct from 3 then
     raise exception 'WR-000116: a refusal happened AFTER a write; version is now %', v_version;
   end if;
 
@@ -240,7 +240,7 @@ begin
   -- CLEARED MARKS NONE, and both columns really are null.
   r := ops.set_notification_preference((r->>'version')::integer, null, null, null, null, true,
                                        gen_random_uuid());
-  if r->'quiet_hours_start' <> 'null'::jsonb or r->'quiet_hours_end' <> 'null'::jsonb then
+  if r->'quiet_hours_start' is distinct from 'null'::jsonb or r->'quiet_hours_end' is distinct from 'null'::jsonb then
     raise exception 'WR-000116: clear_quiet_hours did not null BOTH columns: %', r;
   end if;
   if ops.notification_preference_facts()->>'quiet_now' is distinct from 'false' then

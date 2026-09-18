@@ -1452,7 +1452,7 @@ test("v33 seals the notification preference pair and preserves v32", () => {
 // registers, so not one mcp-tool row sourced from tools.js re-digests. If a
 // derived v33 overlay ever contains those rows, something edited tools.js and
 // this case is where that shows up.
-test("the notification preference pair adds exactly two ingresses and moves no tools.js row", () => {
+test("the notification preference pair adds exactly two ingresses and moves no tools.js schema digest", () => {
   const v32Rows = frozenInventory(REGISTRY_V32_VERSION);
   const v33Rows = frozenInventory(REGISTRY_V33_VERSION);
   const v32ByKey = new Map(v32Rows.map(row => [row.ingress_key, row]));
@@ -1463,12 +1463,27 @@ test("the notification preference pair adds exactly two ingresses and moves no t
   ]);
   assert.deepEqual([...v32ByKey.keys()].filter(key => !v33Keys.has(key)), [],
     "a seal may admit an ingress; it may never drop one");
-  // NOT ONE row whose source_locator is tools.js moved.
-  const movedFromToolsJs = v33Rows.filter(row =>
-    row.source_locator === "mcp-server/src/tools.js" &&
-    JSON.stringify(v32ByKey.get(row.ingress_key)) !== JSON.stringify(row));
-  assert.deepEqual(movedFromToolsJs, [],
-    "tools.js is not edited by this build, so no row sourced from it may re-digest");
+  // TOOLS.JS IS NOT EDITED BY THIS BUILD, BUT TRUNK EDITED IT. b64b4c5a
+  // ("Judge the code as it is written", #1090) added an enum-validation helper
+  // to mcp-server/src/tools.js, so every row sourced from that file carries a
+  // new source_digest after the merge. That is trunk's byte change, not this
+  // build's: what this build must prove is that NO ROW SOURCED FROM tools.js
+  // MOVED ITS schema_digest, which is the contract, and that the file gained
+  // no verb. A source_digest that moves is a file edit; a schema_digest that
+  // moves is a contract change, and only the latter would be this pair's doing.
+  const toolsJsRows = v33Rows.filter(row => row.source_locator === "mcp-server/src/tools.js");
+  assert.equal(toolsJsRows.length, 100,
+    "trunk's tools.js change registered no new verb");
+  const movedSchemaFromToolsJs = toolsJsRows.filter(row => {
+    const before = v32ByKey.get(row.ingress_key);
+    return !before || before.schema_digest !== row.schema_digest;
+  }).map(row => row.ingress_key);
+  assert.deepEqual(movedSchemaFromToolsJs, [],
+    "no tools.js-sourced verb changed its inputSchema, so no schema digest may move");
+  const movedSourceFromToolsJs = toolsJsRows.filter(row =>
+    v32ByKey.get(row.ingress_key).source_digest !== row.source_digest);
+  assert.equal(movedSourceFromToolsJs.length, 100,
+    "trunk edited the file, so every row sourced from it re-digests together");
   // The two siblings that DO move share notifications.js, whose bytes moved.
   const movedFromFamily = v33Rows.filter(row =>
     row.source_locator === "mcp-server/src/notifications.js" &&
