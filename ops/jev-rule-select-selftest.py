@@ -114,6 +114,21 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in failed], ["bbbbbbbb"],
                          "a rule that could not be judged must stay visible")
 
+    def test_concurrency_does_not_change_the_answer(self):
+        """The whole corpus asked serially took over a minute on the first live
+        run, so select() asks in parallel. The risk that introduces is order:
+        a pool that returns out of sequence would silently reshuffle ties."""
+        rules = [{"id": f"{i:08d}", "gist": f"rule {i}", "context": ""}
+                 for i in range(30)]
+        scores = {f"rule {i}": 0.5 + i / 100 for i in range(30)}
+        serial = sel.select("a moment", rules, floor=0.5, limit=30,
+                            client=FakeClient, judge=FakeJudge(scores), workers=1)
+        parallel = sel.select("a moment", rules, floor=0.5, limit=30,
+                              client=FakeClient, judge=FakeJudge(scores), workers=16)
+        self.assertEqual([r["id"] for r in serial], [r["id"] for r in parallel])
+        self.assertEqual([r["probability"] for r in serial],
+                         [r["probability"] for r in parallel])
+
     def test_an_outage_does_not_raise_at_the_caller(self):
         judge = FakeJudge(default=0.99, fail_on={r["gist"] for r in RULES})
         out = sel.select("a moment", RULES, client=FakeClient, judge=judge)

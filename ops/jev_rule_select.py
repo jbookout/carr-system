@@ -51,6 +51,7 @@ a selector that surfaces noise trains a session to ignore rules, which is worse
 than delivering none.
 """
 
+import concurrent.futures as cf
 import importlib.util
 import json
 import os
@@ -69,6 +70,11 @@ BIND_AT = 0.85
 # A moment that surfaces twenty rules has surfaced none, because nobody reads
 # twenty. The cap is part of the design, not a performance concern.
 MAX_SURFACED = 5
+
+# The corpus asked serially took over a minute live. These requests are
+# independent by construction, so the only cost of asking them at once is the
+# vendor's rate limit, which the client already backs off from.
+WORKERS = 16
 
 
 def _sibling(name):
@@ -158,7 +164,7 @@ def binding_question(client=None):
 
 
 def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
-           client=None, api_key=None, judge=None):
+           client=None, api_key=None, judge=None, workers=WORKERS):
     """Rank rules by whether they bind to `situation`. One request per rule.
 
     Returns [{"id", "gist", "probability"}] over the floor, longest odds last,
@@ -168,19 +174,29 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
     """
     rules = load_rules() if rules is None else rules
     judge = judge or _sibling("jev_judge")
-    scored = []
     question = {"binds": binding_question(client)}
-    for rule in rules:
+
+    def score(rule):
         subject = {"situation": situation,
                    "rule": rule["gist"],
                    "rule_context": rule["context"]}
         try:
             answer = judge.judge(subject, question, client=client, api_key=api_key)
-            probability = float(answer["answers"]["binds"]["noul"])
+            return {**rule, "probability": float(answer["answers"]["binds"]["noul"])}
         except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
-            scored.append({**rule, "probability": None})
-            continue
-        scored.append({**rule, "probability": probability})
+            return {**rule, "probability": None}
+
+    # CONCURRENT ON PURPOSE, AND THE REASON IS A MEASUREMENT. One request per
+    # rule is the method, but the whole corpus asked serially took well over a
+    # minute on the first live run — and this module's stated home is a hook
+    # that sits in somebody's way. The requests are independent by construction
+    # (no rule's state carries another's), so there is nothing to serialise.
+    # The work is entirely network wait, so threads are the right tool.
+    if workers > 1 and len(rules) > 1:
+        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            scored = list(pool.map(score, rules))
+    else:
+        scored = [score(rule) for rule in rules]
     over = [row for row in scored if row["probability"] is not None
             and row["probability"] >= floor]
     over.sort(key=lambda row: -row["probability"])
