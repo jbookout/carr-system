@@ -261,5 +261,116 @@ class EntrypointTests(unittest.TestCase):
         self.assertIsNone(guard.search(source), "no main guard")
 
 
+
+class RankingPassTests(unittest.TestCase):
+    """The cheap Choice that narrows 211 rules before any is judged alone.
+
+    Added after the fact, and the reason is worth recording: the existing
+    twenty-one cases all passed unchanged when the ranking pass went in, which
+    means none of them covered it. A suite that stays green through a new stage
+    is not vouching for that stage.
+    """
+
+    class _RankJudge:
+        def __init__(self, probabilities, fail=False):
+            self.probabilities = probabilities
+            self.fail = fail
+            self.calls = []
+
+        def judge(self, state, questions, **kwargs):
+            self.calls.append((state, questions))
+            if self.fail:
+                raise RuntimeError("service did not answer")
+            return {"answers": {"rank": {"type": "choice",
+                                         "probabilities": dict(self.probabilities)}}}
+
+    class _RankClient:
+        @staticmethod
+        def choice(instructions, options):
+            return {"type": "choice", "instructions": instructions,
+                    "criteria": dict(options)}
+
+        @staticmethod
+        def noul(instructions, true=None, false=None):
+            return {"type": "noul", "instructions": instructions,
+                    "criteria": {"true": true, "false": false}}
+
+    def _roster(self, count=60):
+        return [{"id": f"rule{i:03d}", "gist": f"gist {i}", "context": f"context {i}"}
+                for i in range(count)]
+
+    def test_the_whole_roster_is_ranked_in_one_request(self):
+        rules = self._roster()
+        fake = self._RankJudge({"rule007": 0.6, sel.NONE_BIND: 0.2})
+        sel.narrow("a moment", rules, judge=fake, client=self._RankClient())
+        self.assertEqual(len(fake.calls), 1)
+        options = fake.calls[0][1]["rank"]["criteria"]
+        self.assertIn("rule007", options)
+
+    def test_the_shortlist_is_what_the_ranking_put_on_top(self):
+        rules = self._roster()
+        fake = self._RankJudge({"rule042": 0.5, "rule007": 0.3, sel.NONE_BIND: 0.2})
+        got = sel.narrow("a moment", rules, limit=2, judge=fake,
+                       client=self._RankClient())
+        self.assertEqual([r["id"] for r in got], ["rule042", "rule007"])
+
+    def test_a_roster_already_under_the_limit_is_not_ranked_at_all(self):
+        """Paying for a ranking pass to narrow five rules to twenty is waste."""
+        fake = self._RankJudge({})
+        got = sel.narrow("a moment", self._roster(5), judge=fake,
+                       client=self._RankClient())
+        self.assertEqual(len(fake.calls), 0)
+        self.assertEqual(len(got), 5)
+
+    def test_the_none_binds_option_is_offered(self):
+        """Most moments bind no rule, and a Choice with no way to decline must
+        return one anyway."""
+        fake = self._RankJudge({sel.NONE_BIND: 0.9})
+        sel.narrow("a moment", self._roster(), judge=fake, client=self._RankClient())
+        options = fake.calls[0][1]["rank"]["criteria"]
+        self.assertIn(sel.NONE_BIND, options)
+        self.assertIn("ALREADY COMPLYING", options[sel.NONE_BIND])
+
+    def test_the_none_binds_option_never_becomes_a_rule(self):
+        fake = self._RankJudge({sel.NONE_BIND: 0.9, "rule001": 0.05})
+        got = sel.narrow("a moment", self._roster(), judge=fake,
+                       client=self._RankClient())
+        self.assertNotIn(sel.NONE_BIND, [r["id"] for r in got])
+
+    def test_rubrics_are_truncated_for_the_ranking_pass(self):
+        rules = [{"id": "wordy", "gist": "g" * 900, "context": "c"}] + self._roster()
+        fake = self._RankJudge({"wordy": 0.9})
+        sel.narrow("a moment", rules, judge=fake, client=self._RankClient())
+        rubric = fake.calls[0][1]["rank"]["criteria"]["wordy"]
+        self.assertLessEqual(len(rubric), sel.RUBRIC_CHARS)
+
+    def test_the_option_cap_is_respected(self):
+        fake = self._RankJudge({"rule001": 0.9})
+        sel.narrow("a moment", self._roster(400), judge=fake, client=self._RankClient())
+        options = fake.calls[0][1]["rank"]["criteria"]
+        self.assertLessEqual(len(options), sel.MAX_OPTIONS + 1)
+
+    def test_a_failed_ranking_falls_back_to_the_whole_roster(self):
+        """Judging everything is slower and more expensive, not wrong. It is
+        what this module did before the ranking pass existed."""
+        rules = self._roster()
+        got = sel.narrow("a moment", rules, judge=self._RankJudge({}, fail=True),
+                       client=self._RankClient())
+        self.assertEqual(len(got), len(rules))
+
+    def test_an_empty_ranking_falls_back_to_the_whole_roster(self):
+        rules = self._roster()
+        got = sel.narrow("a moment", rules, judge=self._RankJudge({}),
+                       client=self._RankClient())
+        self.assertEqual(len(got), len(rules))
+
+    def test_a_ranking_naming_nothing_real_falls_back(self):
+        rules = self._roster()
+        got = sel.narrow("a moment", rules,
+                       judge=self._RankJudge({"invented": 0.9, sel.NONE_BIND: 0.1}),
+                       client=self._RankClient())
+        self.assertEqual(len(got), len(rules))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

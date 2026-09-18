@@ -108,6 +108,34 @@ MAX_SURFACED = 5
 # vendor's rate limit, which the client already backs off from.
 WORKERS = 16
 
+# THE CHEAP RANKING PASS. A Choice carrying every rule, which narrows 211 to
+# this many before any rule is judged on its own. The vendor's own shape for
+# picking from a roster: a cheap ranking over everything, then a close look at
+# a few. Their skill selector ranks 182 candidates this way and then examines
+# three; measured on defect classes here, one Choice over the roster beat one
+# Noul per candidate on accuracy AND cost, 69% top-1 against 38%.
+#
+# WHY THE CLOSE LOOK SURVIVES HERE AND NOT THERE. Defect classes compete for
+# one slot, so the Choice IS the answer. Rules do not: several can bind to one
+# moment and usually none do, which is independently true or false per rule and
+# therefore a Noul each. So the Choice narrows and the Nouls decide — and the
+# Nouls now run over a shortlist, which is the only place the reranking rule
+# ever applied.
+SHORTLIST = 20
+
+# A Choice carries at most 255 options; one slot is kept for the escape.
+MAX_OPTIONS = 254
+
+# Rank on short text, judge on full text. 254 full-length rubrics returns
+# HTTP 400 max_tokens_exceeded.
+RUBRIC_CHARS = 150
+
+# Without an explicit way to decline, a Choice must return a rule for every
+# moment — and MOST MOMENTS BIND NO RULE AT ALL. This option is what lets the
+# ranking say so, and it is the same failure the binding question already
+# guards against: a rule that matches the topic while its condition is unmet.
+NONE_BIND = "no rule here binds to this moment"
+
 
 def _sibling(name):
     """Load a sibling ops/ module by path. ops/ is not a package, and the whole
@@ -198,9 +226,70 @@ def binding_question(client=None):
               "question, and a rule that binds everywhere binds nothing.")
 
 
+def rank_question(rules, client=None):
+    """The cheap pass: one Choice carrying every rule, ranked in one request.
+
+    This does NOT decide what binds — it decides what is worth asking about.
+    The none-binds option is why it can be trusted to narrow rather than to
+    invent: most moments bind no rule, and an option that says so keeps the
+    ranking honest about a roster full of rules that have nothing to do with
+    the moment in hand.
+    """
+    tsc = client or _sibling("typesafe_client")
+    options = {rule["id"]: (rule.get("gist") or "")[:RUBRIC_CHARS]
+               for rule in rules[:MAX_OPTIONS]}
+    options[NONE_BIND] = (
+        "None of the rules listed binds to this moment. Choose this when the "
+        "others are merely ABOUT this kind of work rather than triggered by it "
+        "— including a rule the session is ALREADY COMPLYING WITH, which does "
+        "not bind. Most moments bind no rule at all, so this is the common "
+        "answer and not a failure to find one.")
+    return tsc.choice(
+        "The moment a session is in is described in `state.situation`. Which of "
+        "these standing rules is most likely to BIND to it — to change what the "
+        "session should do right now? Topic overlap is not binding.", options)
+
+
+def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
+           judge=None):
+    """The rules worth judging one at a time, from one cheap ranking request.
+
+    Returns the shortlist, or the whole roster when the ranking is unavailable
+    — falling back to judging everything is slower and more expensive but not
+    wrong, and it is what this module did before the ranking pass existed.
+    """
+    if len(rules) <= limit:
+        return list(rules)
+    judge = judge or _sibling("jev_judge")
+    try:
+        answer = judge.judge({"situation": situation},
+                             {"rank": rank_question(rules, client)},
+                             client=client, api_key=api_key)
+        probabilities = answer["answers"]["rank"].get("probabilities") or {}
+    except Exception:
+        return list(rules)
+    if not probabilities:
+        return list(rules)
+    by_id = {rule["id"]: rule for rule in rules}
+    ranked = sorted(((rule_id, float(p)) for rule_id, p in probabilities.items()
+                     if rule_id != NONE_BIND and rule_id in by_id),
+                    key=lambda item: (-item[1], item[0]))
+    return [by_id[rule_id] for rule_id, _ in ranked[:limit]] or list(rules)
+
+
 def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
-           client=None, api_key=None, judge=None, workers=WORKERS):
-    """Rank rules by whether they bind to `situation`. One request per rule.
+           client=None, api_key=None, judge=None, workers=WORKERS,
+           shortlist=SHORTLIST):
+    """Rank rules by whether they bind to `situation`.
+
+    TWO STAGES. One Choice over the whole roster narrows it to a shortlist,
+    then one Noul per shortlisted rule decides independently whether it binds —
+    because several rules can bind to one moment and usually none do, which a
+    single Choice cannot express. That is the only shape the one-request-per-
+    candidate rule ever governed: a shortlist a cheap pass produced first.
+
+    The first version judged all 211 rules one at a time. That cost ten times
+    the requests for the same answer.
 
     Returns [{"id", "gist", "probability"}] over the floor, longest odds last,
     capped at `limit`. A rule whose request fails is reported with probability
@@ -209,6 +298,8 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
     """
     rules = load_rules() if rules is None else rules
     judge = judge or _sibling("jev_judge")
+    rules = narrow(situation, rules, limit=shortlist, client=client,
+                   api_key=api_key, judge=judge)
     question = {"binds": binding_question(client)}
 
     def score(rule):
