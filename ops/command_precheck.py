@@ -129,10 +129,37 @@ def _log(record):
         pass
 
 
-def check(command):
+def repo_root(cwd):
+    """The checkout a command's relative paths are written against.
+
+    THE HOOK DOES NOT RUN WHERE THE SESSION RUNS. Hooks execute from the
+    canonical checkout, so resolving `ops/foo.py` against this file's own
+    location asks whether the file exists in CANONICAL — and most work here
+    happens in a worktree. The first live run of this pre-check flagged a file
+    the session had just written, at 0.94, because canonical had never seen it.
+    A gate that cries wolf on every new file in every worktree is a gate a
+    session learns to scroll past, which is worse than not having one.
+
+    Walks up from the session's own directory to the enclosing checkout rather
+    than assuming cwd IS the root, because a command can be run from a
+    subdirectory while naming paths from the root. Falls back to this file's
+    checkout when there is no usable cwd, which is the single-checkout case.
+    """
+    path = os.path.abspath(os.path.expanduser(cwd or ""))
+    for _ in range(12):
+        if os.path.exists(os.path.join(path, ".git")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return REPO
+
+
+def check(command, repo=REPO):
     """(probability, facts) for a command, or (None, facts) when nothing was asked."""
     precheck = _sibling("jev_precheck")
-    facts = precheck.environment_facts(command)
+    facts = precheck.environment_facts(command, repo)
     if not facts:
         return None, {}
     judge = _sibling("jev_judge")
@@ -168,11 +195,12 @@ def advisory(payload):
         if not command.strip() or is_pure_read(command):
             return None
 
-        probability, facts = check(command)
+        repo = repo_root(payload.get("cwd") or payload.get("workingDirectory") or "")
+        probability, facts = check(command, repo)
         if probability is None:
             return None
         _log({"command": command[:400], "p": probability, "facts": facts,
-              "warned": probability >= WARN_AT})
+              "repo": repo, "warned": probability >= WARN_AT})
         if probability < WARN_AT:
             return None
 
