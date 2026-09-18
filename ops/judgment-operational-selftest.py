@@ -36,6 +36,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import pathlib
 import unittest
 
 OPS = os.path.dirname(os.path.abspath(__file__))
@@ -140,6 +141,52 @@ class DefectClassAdvisoryTests(unittest.TestCase):
         self.assertIn("0.", note, "a shortlist with no probabilities in it means "
                                   "the scores are being read from the wrong key "
                                   "-- the failure that scored 426 regions at zero")
+
+
+class ChangeCollectorTests(unittest.TestCase):
+    """What the advisory SEES, which needs no credential and so runs in CI too.
+
+    Separated from the judgment tests on purpose: the questions need the model,
+    but the file list handed to them is ordinary git plumbing, and both bugs
+    found on 2026-09-18 were in the plumbing rather than in the judgment. A
+    perfect answer about the wrong files is still the wrong answer.
+    """
+
+    def setUp(self):
+        self.module = load("jev_change_tolls")
+
+    def test_every_path_the_advisory_names_is_a_file_that_exists(self):
+        """A path that does not resolve means the list was mis-parsed.
+
+        `git status --porcelain` puts the status in two COLUMNS, so an
+        unstaged edit reads " M path" with a leading space. Stripping the
+        whole blob before splitting it ate that space on the FIRST line only
+        and shifted that one path by a character -- the advisory reported an
+        edit to "cp-server/src/tools.js", which does not exist, while every
+        other row came through clean. One silently wrong row per run is the
+        hardest kind to notice, so this asserts the property rather than the
+        parse.
+        """
+        state = self.module.change()
+        named = state["files"]["added"] + state["files"]["edited"]
+        missing = [rel for rel in named
+                   if not (pathlib.Path(self.module.REPO) / rel).exists()]
+        self.assertEqual(
+            missing, [],
+            "the change advisory named paths that do not exist, so its file "
+            "list is being mis-parsed and every judgment it makes is about "
+            "the wrong change: " + ", ".join(missing))
+
+    def test_it_sees_uncommitted_work(self):
+        """The advisory is most useful mid-edit, which is when the first
+        version was blind: it diffed origin/main...HEAD only."""
+        source = (pathlib.Path(self.module.__file__).read_text(encoding="utf-8")
+                  if getattr(self.module, "__file__", None) else "")
+        self.assertIn(
+            "status", source,
+            "jev_change_tolls.change() no longer consults git status, so it "
+            "cannot see uncommitted work -- the exact moment a session most "
+            "needs to be told what its change owes")
 
 
 @unittest.skipUnless(has_credential(), SKIP)

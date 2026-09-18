@@ -139,15 +139,41 @@ def change(base="origin/main", repo=REPO):
     reports every line those commits added as though it were this change.
     """
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, timeout=120)
+    # COMMITTED AND UNCOMMITTED BOTH. The first version diffed only
+    # origin/main...HEAD, which is right at push time and useless while
+    # working: on 2026-09-18 a session edited mcp-server/src/tools.js, asked
+    # what the change owed, and was told about two other files -- because the
+    # edit it was asking about had not been committed yet. The toll it needed
+    # was the expensive one: 100 of the 864 inventory rows name that file as
+    # their source, so its bytes moving re-digests every one of them.
+    # NOT .strip() BEFORE .splitlines(). Porcelain's status is two COLUMNS,
+    # so an unstaged edit is " M path" with a leading space -- and stripping
+    # the whole blob eats that space on the FIRST line only, shifting its
+    # path by one character. Caught 2026-09-18 when the advisory reported an
+    # edit to "cp-server/src/tools.js", a file that does not exist: one row
+    # silently mis-parsed while every row after it was fine.
     names = subprocess.run(["git", "diff", "--name-status", f"{base}...HEAD"],
                            capture_output=True, text=True, cwd=repo,
-                           timeout=60).stdout.strip().splitlines()
+                           timeout=60).stdout.splitlines()
+    names += subprocess.run(["git", "status", "--porcelain=v1"],
+                            capture_output=True, text=True, cwd=repo,
+                            timeout=60).stdout.splitlines()
     added, edited = [], []
     for row in names:
-        parts = row.split("\t")
-        if len(parts) < 2:
+        # Two shapes reach here. `git diff --name-status` gives "M\tpath";
+        # `git status --porcelain` gives "?? path" or " M path". Untracked and
+        # added both count as ADDED, because what decides the toll is whether
+        # the file is new to the repository, not how it got there.
+        if "\t" in row:
+            parts = row.split("\t")
+            status, path = parts[0], parts[-1]
+        else:
+            status, path = row[:2].strip() or "M", row[3:].strip()
+        if not path:
             continue
-        (added if parts[0].startswith("A") else edited).append(parts[-1])
+        target = added if status.startswith(("A", "??")) else edited
+        if path not in target:
+            target.append(path)
     # Whether a file is an entrypoint is a fact the questions CANNOT see, so
     # it is gathered here for every touched file rather than inferred from a
     # path. Two mistakes in the first version of this function, both of which
