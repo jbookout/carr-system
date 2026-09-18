@@ -156,26 +156,95 @@ def repo_root(cwd):
     return REPO
 
 
+# One narrow question per KIND of fact, asked together in one request.
+#
+# The first version asked a single broad question — "is this command likely to
+# fail?" — which is the thing the vendor's build guide names as the mistake to
+# avoid: a broad question hides several judgments behind one number, and a
+# blended 0.84 cannot tell a session WHICH of its facts is the problem. Their
+# worked example decomposes one spam question into six independent checks.
+#
+# Decomposing costs nothing here. Independent questions about one state ride in
+# ONE request, run in parallel, and each is scored on its own against the state
+# — measured by the vendor at 12.2 times cheaper and 10 times faster than
+# asking them separately. So this is the same one request it always was, and it
+# now comes back with a probability per reason instead of one blended number.
+#
+# Each entry is (question id, the facts key it needs, how to phrase it). A
+# question is only asked when its fact is actually present, so a command with
+# one kind of problem costs one question rather than five.
+QUESTIONS = (
+    ("undeclared_option", "undeclared_options",
+     ("This command passes an option the script does not accept, so the script "
+      "will exit on an unrecognised argument.",
+      "The option named in `state.environment.undeclared_options` is genuinely "
+      "not accepted by the script this command runs, and the script rejects "
+      "unknown arguments rather than ignoring them.",
+      "The option is accepted after all, or it belongs to a different command "
+      "in the line, or the script passes its arguments through to something "
+      "that does accept it.")),
+    ("bad_import", "import_notes",
+     ("This command runs an import that the directory layout does not support.",
+      "The import named in `state.environment.import_notes` will raise, because "
+      "the directory it imports from is not a package.",
+      "The import is written in a form that works anyway, such as an absolute "
+      "import or a path-based load, or the command never reaches it.")),
+    ("missing_path", "paths_that_do_not_exist",
+     ("This command names a repository path that is not there, and needs it to "
+      "exist.",
+      "A path in `state.environment.paths_that_do_not_exist` is one the command "
+      "READS or executes, so its absence stops the command.",
+      "The command CREATES or writes that path, or names it only as an "
+      "argument to something that tolerates it being absent — a path being "
+      "absent is not a problem when the command's job is to make it.")),
+    ("guard_refusal", "guard_refusals",
+     ("A guard refuses this command before it runs.",
+      "The refusal in `state.environment.guard_refusals` applies to this "
+      "command as written.",
+      "The pattern matched something that is not actually the refused action, "
+      "such as the phrase appearing inside a quoted string or a comment.")),
+    ("wrong_interface", "module_interfaces",
+     ("This command uses a module in a shape that module does not expose.",
+      "The command calls a name, or reads a result, that is not in the "
+      "interface listed under `state.environment.module_interfaces`.",
+      "Everything the command touches is present in the listed interface, or "
+      "the command does not call into that module at all. A module merely "
+      "being NAMED is not evidence of misuse.")),
+)
+
+
 def check(command, repo=REPO):
-    """(probability, facts) for a command, or (None, facts) when nothing was asked."""
+    """(probability, facts, reasons) — or (None, {}, {}) when nothing was asked.
+
+    `reasons` maps each asked question to its probability, so a caller can say
+    which fact is the problem rather than quoting one blended number.
+    """
     precheck = _sibling("jev_precheck")
     facts = precheck.environment_facts(command, repo)
     if not facts:
-        return None, {}
+        return None, {}, {}
     judge = _sibling("jev_judge")
     client = _sibling("typesafe_client")
-    question = {"will_fail": client.noul(
-        "This command is likely to FAIL or be refused, given the facts in "
-        "`state.environment`.",
-        true="Something in the command contradicts a fact in `state.environment`: an "
-             "option the script does not declare, an import the directory layout does "
-             "not support, a path that does not exist, an interface used in a shape the "
-             "module does not expose, or an action a guard refuses.",
-        false="Nothing in the command contradicts the facts given. A thin environment is "
-              "NOT evidence of a problem — with nothing contradicting it, the answer is no.")}
+    questions = {}
+    for key, needs, (instruction, yes, no) in QUESTIONS:
+        if facts.get(needs):
+            questions[key] = client.noul(instruction, true=yes, false=no)
+    if not questions:
+        return None, facts, {}
     answer = judge.judge({"command": command[:1500], "environment": facts},
-                         question, timeout=TIMEOUT_SECONDS)
-    return float(answer["answers"]["will_fail"]["noul"]), facts
+                         questions, timeout=TIMEOUT_SECONDS)
+    reasons = {}
+    for key in questions:
+        try:
+            reasons[key] = float(answer["answers"][key]["noul"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not reasons:
+        return None, facts, {}
+    # Combined in code, not by the model. Any ONE of these being true is enough
+    # to sink the command, so the highest is the command's probability — a
+    # weighted average would let four confident "no"s bury one confident "yes".
+    return max(reasons.values()), facts, reasons
 
 
 def advisory(payload):
@@ -196,20 +265,28 @@ def advisory(payload):
             return None
 
         repo = repo_root(payload.get("cwd") or payload.get("workingDirectory") or "")
-        probability, facts = check(command, repo)
+        probability, facts, reasons = check(command, repo)
         if probability is None:
             return None
         _log({"command": command[:400], "p": probability, "facts": facts,
-              "repo": repo, "warned": probability >= WARN_AT})
+              "reasons": reasons, "repo": repo, "warned": probability >= WARN_AT})
         if probability < WARN_AT:
             return None
 
         lines = [f"PRE-CHECK {probability:.2f} — this command looks likely to fail. "
                  "It has NOT been blocked; run it anyway if you disagree."]
-        for key, value in facts.items():
+        # Show only the facts whose OWN question came back high. The broad
+        # single question this replaced could not do that: it returned one
+        # blended number and the warning had to print every fact beside it,
+        # including the ones the judgment had quietly dismissed.
+        needs = {key: fact for key, fact, _ in QUESTIONS}
+        for key, reason in sorted(reasons.items(), key=lambda item: -item[1]):
+            if reason < WARN_AT:
+                continue
+            value = facts.get(needs.get(key), [])
             shown = value if isinstance(value, list) else [str(value)]
             for item in shown[:3]:
-                lines.append(f"  · {item}")
+                lines.append(f"  · {reason:.2f}  {item}")
         return "\n".join(lines)[:1800]
     except Exception:
         return None  # fails open, always

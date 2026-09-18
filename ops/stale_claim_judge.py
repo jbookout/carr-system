@@ -34,11 +34,26 @@ invent a match. A search that finds something for every query would be worse
 than the matcher, not better, because this gate's silence is load-bearing:
 reporting real breakage is core work and must never need an argument.
 
-SO THIS READS EVERY COMMIT IN THE WINDOW, ONE REQUEST PER COMMIT. Around 214 of
-them, about four seconds across the pool, a fraction of a cent, and only on a
-message that already looks like a staleness claim. One request per candidate
-and never one request carrying all of them: a state holding every commit lets
-each judgment see its competitors and does not reproduce the published method.
+SO THIS READS EVERY COMMIT IN THE WINDOW, IN ONE REQUEST. The first version
+asked one question per commit — 214 requests, 4.2 seconds — on the belief that
+the published method forbids carrying every candidate in one state. That belief
+was a misreading. One request per candidate is the RERANKING rule and it
+applies to a shortlist of thirty that a keyword search produced first; picking
+one item from a roster is a Choice question carrying the whole roster, which is
+how the vendor ranks 182 agent skills and scores 218 document lines.
+
+Re-measured on the same four claims: ONE request, 0.6 seconds, the same four
+answers out of four. The commits that answer a claim came back at 0.90 and
+0.88, and on the two claims nothing answers, the explicit "no commit here
+answers this" option came back at 0.96 and 0.77. That option is why this reads
+better than the old floor did — declining is now a calibrated answer the model
+gives rather than a threshold chosen by hand.
+
+A Choice carries up to 255 options and the window holds around 214, so it fits
+with room. If a window ever exceeds the cap, trim it by date before asking
+rather than splitting into two requests: probabilities sum to one WITHIN a
+request, so scores from two separate Choices are not comparable and pooling
+them across normalizations is a measurement error, not a workaround.
 
 THE STEM MATCHER REMAINS THE FALLBACK, not a competitor. When the judgment is
 unavailable for any reason — no credential, a timeout, an outage, a malformed
@@ -54,22 +69,27 @@ described here and never spelled. ops/typesafe_client.py carries the long form.
 
 import importlib.util
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# A commit at or above this refutes the claim. The measured true positives sit
-# at 0.84 and 0.89 and the best score against a window holding no answer at all
-# was 0.66, so this sits in the gap rather than on a knife edge. Re-derive it
-# from real traffic rather than defending the number.
-CONFIRM_AT = 0.75
+# The chosen commit is announced when it beats the none-of-these option by this
+# much. Measured: real answers took 0.90 and 0.88 against a none option at 0.07
+# and 0.08, while the two claims with no answer put none at 0.96 and 0.77. The
+# gap is wide in both directions, so this is not a knife edge. Re-derive it from
+# real traffic rather than defending the number.
+CONFIRM_AT = 0.50
 
 # Never announce more than this, matching the gate's own cap. A wall of commits
 # is not more useful than the best few.
 MAX_HITS = 4
 
-# The whole window goes out at once; this is what keeps it inside four seconds.
-WORKERS = 32
+# A Choice carries at most this many options. The window is trimmed to the most
+# recent when it runs over, because two Choices cannot be compared to each other.
+MAX_OPTIONS = 254
+
+# The escape hatch. Without an explicit none-of-these option a Choice must pick
+# something, and this gate's silence is load-bearing.
+NONE_OF_THESE = "no commit here answers this claim"
 
 # Short enough that a Stop door does not notice, long enough to be answered.
 TIMEOUT_SECONDS = 15.0
@@ -93,53 +113,49 @@ def _sibling(name):
     return module
 
 
-def addresses_question(client=None):
-    """The one question. The false criterion is the whole contract.
+def build_question(commits, client=None):
+    """The one Choice, carrying every commit in the window.
 
-    A claim and a commit that share vocabulary are exactly what a stem matcher
-    finds and exactly what it cannot tell apart from a real match, so a
-    criterion that does not name shared vocabulary as the boundary case simply
-    re-implements the matcher's mistake at greater expense.
+    The none-of-these option is the whole contract. Choice probabilities sum to
+    one across the options, so without an explicit way to decline, the model
+    must hand back a commit for every claim — and a gate that finds something
+    every time is worse than the stem matcher it replaces, because this gate's
+    silence is load-bearing. Its rubric names the boundary the stem matcher
+    cannot see: shared vocabulary is not a shared problem.
+
+    `commits` is a list of (hash, subject). Option names are the hashes, which
+    is what the caller needs back; each subject is that option's rubric, cut to
+    150 characters because a ranking pass over hundreds of full-length options
+    returns HTTP 400 max_tokens_exceeded.
     """
     tsc = client or _sibling("typesafe_client")
-    return tsc.noul(
-        "The state holds a claim a session is about to make — that something "
-        "is broken, unbuilt, blocked or still failing — and the subject line "
-        "of one commit from the last two weeks. Does that commit address the "
-        "very problem the claim describes?",
-        true="A reader who knew about this commit would treat the claim as "
-             "already answered, or would at least have to explain why the "
-             "commit does not cover it. The commit is about the same specific "
-             "problem, not merely the same area of the system.",
-        false="The commit is about a different problem. THIS IS THE CASE THAT "
-              "IS EASY TO GET WRONG: a claim and a commit can name the same "
-              "file, the same tool, the same command or the same corner of the "
-              "system and still concern different things, and most commits in "
-              "any window have nothing to do with any given claim. Also false "
-              "when the commit touches the right subject but plainly does not "
-              "resolve what the claim says is wrong. Answering no to every "
-              "commit is the correct outcome when nothing in the window "
-              "answers the claim, and that is the common case.")
-
-
-def _score(claim, commit, question, judge, api_key, client):
-    try:
-        answer = judge.judge({"claim": claim[:1500], "commit_subject": commit[1]},
-                             {"addresses": question}, timeout=TIMEOUT_SECONDS,
-                             client=client, api_key=api_key)
-        return commit, float(answer["answers"]["addresses"]["noul"])
-    except Exception:
-        return commit, None
+    options = {commit: (subject or "")[:150] for commit, subject in commits}
+    options[NONE_OF_THESE] = (
+        "None of the commits listed answers this claim. Choose this when the "
+        "others only share words with it — the same file, the same tool, the "
+        "same corner of the system — rather than fixing the very thing the "
+        "claim says is wrong. THIS IS THE COMMON CASE: most windows hold "
+        "nothing that answers any given claim, and saying so is the right "
+        "answer rather than a failure to find one.")
+    return tsc.choice(
+        "The claim in `state.claim` says something is broken, unbuilt, blocked "
+        "or still failing. Which of these recent commit subjects already "
+        "answers it — fixes or delivers the very thing the claim says is "
+        "missing?", options)
 
 
 def refuting_commits(claim, commits, *, floor=CONFIRM_AT, limit=MAX_HITS,
-                     client=None, api_key=None, judge=None, workers=WORKERS):
+                     client=None, api_key=None, judge=None):
     """Commits that answer the claim, best first, or None when unavailable.
 
-    Returns a list of (hash, subject, why) triples in the gate's own hit shape,
-    where `why` is the probability rendered for a reader. An EMPTY LIST is a
-    real answer and means the window holds nothing that refutes the claim —
-    the measured common case, and the one the gate must stay silent on.
+    ONE request carrying every commit, because the candidates are competing for
+    a single slot rather than each being independently true. Returns a list of
+    (hash, subject, why) triples in the gate's own hit shape.
+
+    An EMPTY LIST is a real answer and means the window holds nothing that
+    refutes the claim — the measured common case, and the one the gate must
+    stay silent on. It is returned when the none-of-these option wins, or when
+    no commit clears the floor.
 
     Returns None, distinct from an empty list, when no judgment could be
     obtained at all. A caller then falls back to the stem matcher, which is
@@ -149,22 +165,32 @@ def refuting_commits(claim, commits, *, floor=CONFIRM_AT, limit=MAX_HITS,
         return []
     if os.environ.get(DISABLE) == "0":
         return None
+    # Trim by recency rather than splitting: probabilities sum to one WITHIN a
+    # request, so two Choices produce numbers that cannot be compared and
+    # pooling them across normalizations is a measurement error.
+    commits = list(commits)[:MAX_OPTIONS]
+    subjects = dict(commits)
     try:
         judge = judge or _sibling("jev_judge")
-        question = addresses_question(client)
-        with ThreadPoolExecutor(max(1, min(workers, len(commits)))) as executor:
-            scored = list(executor.map(
-                lambda commit: _score(claim, commit, question, judge, api_key, client),
-                commits))
+        question = build_question(commits, client)
+        answer = judge.judge({"claim": claim[:1500]}, {"pick": question},
+                             timeout=TIMEOUT_SECONDS, client=client,
+                             api_key=api_key)
+        picked = answer["answers"]["pick"]
     except Exception:
         return None
-    answered = [(commit, probability) for commit, probability in scored
-                if probability is not None]
-    if not answered:
-        # Every request failed. That is an outage, not a finding of "nothing
-        # refutes this", and the two must never look the same to the caller.
+    probabilities = picked.get("probabilities") or {}
+    if not probabilities:
         return None
-    answered.sort(key=lambda item: -item[1])
-    return [(commit[0], commit[1], "read as answering this claim (%.2f)" % probability)
-            for commit, probability in answered
+    declined = float(probabilities.get(NONE_OF_THESE, 0.0))
+    ranked = sorted(((commit, float(p)) for commit, p in probabilities.items()
+                     if commit != NONE_OF_THESE and commit in subjects),
+                    key=lambda item: -item[1])
+    # The model declining outright ends it, whatever the runners-up scored.
+    if not ranked or declined >= ranked[0][1]:
+        return []
+    return [(commit, subjects[commit],
+             "read as answering this claim (%.2f, against %.2f that nothing here does)"
+             % (probability, declined))
+            for commit, probability in ranked
             if probability >= floor][:limit]
