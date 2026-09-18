@@ -97,7 +97,28 @@ DECLARED_INERT: dict[str, str] = {
         "matched call. Better still, the corpus this change adds carries the "
         "rule statements locally, so a judged selector can deliver the text "
         "itself and DROP that round trip -- net latency flat or lower, not "
-        "additive. WHAT REMAINS is only the wiring. Loop 620.",
+        "additive. MEASURED 2026-09-18 against the real telemetry rather "
+        "than argued: across 9368 recorded PreToolUse hook executions, this "
+        "one hook is 731 of the 881 total seconds, 83%, at a 422ms median "
+        "over 1445 calls, while every other pre-tool hook combined is 150 "
+        "seconds across 7923 runs at 5-42ms each. That 422ms is not the "
+        "regex, which is free -- it is the standing-context round trip, "
+        "timed at 0.49s over three runs. So there is nothing to win "
+        "anywhere else; the whole latency budget IS this hook. "
+        "THE SHAPE THE WIRING SHOULD TAKE, also measured: the ranking Choice "
+        "alone costs 0.51s, statistically the same as the 0.49s call it "
+        "replaces, and is decisive when ONE rule dominates (0.75 and 0.96 on "
+        "two probes). It is NOT sufficient when several rules independently "
+        "apply, because a Choice normalises across its options: on a probe "
+        "where four rules genuinely bound, the Choice topped out at 0.36 "
+        "while the two-stage pass found all four at 0.79-0.91. Full two-stage "
+        "is 1.39s. The answer is therefore a CASCADE, which is the documented "
+        "pattern for exactly this: run the Choice, deliver on it alone when "
+        "one rule clearly dominates and the rest are negligible -- one round "
+        "trip, today's cost -- and spend the second stage only when the "
+        "distribution is flat, which is the signal that several rules apply. "
+        "WHAT REMAINS is only the wiring, and its design is now settled. "
+        "Loop 620.",
 }
 
 
