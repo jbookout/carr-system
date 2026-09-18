@@ -384,4 +384,134 @@ begin
   end if;
 end $wr114_rename_guard$;
 
+-- ---------------------------------------------------------------------------
+-- WR-000114 review B1 -- DOC-FLAG-ONLY: FOUR SEPARATELY NAMED POSITIVE CASES.
+--
+-- The DOC-CREATOR-ONLY/pin and /archive cases above are NEGATIVE: they prove a
+-- non-creator is refused. These four prove the ACT itself, one case per act,
+-- against the version/flag pair only a database can read back: the intended
+-- stamp moved, the version rose by exactly one, the OTHER stamp and the title
+-- are byte-identical, no title revision was appended, and a stale base version
+-- is refused without moving the row. The two `else null` arms of the
+-- compare-and-swap -- the arms that perform an unpin and an unarchive -- are
+-- executed only here.
+-- ---------------------------------------------------------------------------
+
+do $wr114_flag_only$
+declare
+  r record;
+  v_conversation uuid; v_result jsonb; v_base integer;
+  v_title_before text; v_pinned_before timestamptz; v_archived_before timestamptz;
+  v_version_after integer; v_title_after text;
+  v_pinned_after timestamptz; v_archived_after timestamptz;
+  v_revisions integer;
+begin
+  perform set_config('carr.acting_actor_slug', 'wr114-author', true);
+  for r in
+    select * from (values
+      -- name,             setup pin, setup archive, act pin, act archive,
+      -- expect pin stamp, expect archive stamp,     the field this act owns
+      ('DOC-PIN-ONLY',       null::boolean, null::boolean, true::boolean,  null::boolean, true,  false, 'pinned_at'),
+      -- unpin runs against an ARCHIVED conversation, so an unpin that reached
+      -- archived_at instead of its own field cannot hide behind a null.
+      ('DOC-UNPIN-ONLY',     true,          true,          false,          null,          false, true,  'pinned_at'),
+      ('DOC-ARCHIVE-ONLY',   null,          null,          null,           true,          false, true,  'archived_at'),
+      ('DOC-UNARCHIVE-ONLY', true,          true,          null,           false,         true,  false, 'archived_at')
+    ) as t(name, setup_pinned, setup_archived, act_pinned, act_archived,
+           expect_pinned, expect_archived, owns)
+  loop
+    v_conversation := gen_random_uuid();
+    perform ops.create_doc_conversation(r.name || ' fixture', 'private', v_conversation);
+
+    -- Setup. Each step is its own compare-and-swap, so the act below starts
+    -- from a row that is genuinely pinned and/or archived.
+    if r.setup_pinned is not null then
+      select version into v_base from ops.doc_conversation where id = v_conversation;
+      v_result := ops.rename_doc_conversation(v_conversation, v_base, null,
+        r.setup_pinned, null, gen_random_uuid());
+      if not (v_result->>'ok')::boolean then
+        raise exception '%: the pin setup was refused: %', r.name, v_result;
+      end if;
+    end if;
+    if r.setup_archived is not null then
+      select version into v_base from ops.doc_conversation where id = v_conversation;
+      v_result := ops.rename_doc_conversation(v_conversation, v_base, null,
+        null, r.setup_archived, gen_random_uuid());
+      if not (v_result->>'ok')::boolean then
+        raise exception '%: the archive setup was refused: %', r.name, v_result;
+      end if;
+    end if;
+
+    select version, title, pinned_at, archived_at
+      into v_base, v_title_before, v_pinned_before, v_archived_before
+      from ops.doc_conversation where id = v_conversation;
+
+    -- THE ACT.
+    v_result := ops.rename_doc_conversation(v_conversation, v_base, null,
+      r.act_pinned, r.act_archived, gen_random_uuid());
+    if not (v_result->>'ok')::boolean then
+      raise exception '%: the act was refused: %', r.name, v_result;
+    end if;
+
+    select version, title, pinned_at, archived_at
+      into v_version_after, v_title_after, v_pinned_after, v_archived_after
+      from ops.doc_conversation where id = v_conversation;
+
+    -- 1. The intended flag moved, in the direction asked for.
+    if (v_pinned_after is not null) <> r.expect_pinned
+       or (v_archived_after is not null) <> r.expect_archived then
+      raise exception '%: the flags read back wrong (pinned_at %, archived_at %)',
+        r.name, v_pinned_after, v_archived_after;
+    end if;
+    if (v_result->>'pinned')::boolean <> r.expect_pinned
+       or (v_result->>'archived')::boolean <> r.expect_archived then
+      raise exception '%: the answer disagrees with the stored row: %', r.name, v_result;
+    end if;
+    if r.owns = 'pinned_at' and v_pinned_after is not distinct from v_pinned_before then
+      raise exception '%: pinned_at did not move at all', r.name;
+    end if;
+    if r.owns = 'archived_at' and v_archived_after is not distinct from v_archived_before then
+      raise exception '%: archived_at did not move at all', r.name;
+    end if;
+
+    -- 2. The version rose by exactly one.
+    if v_version_after <> v_base + 1 or (v_result->>'version')::integer <> v_base + 1 then
+      raise exception '%: the version went % -> % (answer %)',
+        r.name, v_base, v_version_after, v_result->>'version';
+    end if;
+
+    -- 3. The OTHER flag and the title are byte-identical, and no revision landed.
+    if r.owns = 'pinned_at' and v_archived_after is distinct from v_archived_before then
+      raise exception '%: archived_at moved (% -> %), and this act does not own it',
+        r.name, v_archived_before, v_archived_after;
+    end if;
+    if r.owns = 'archived_at' and v_pinned_after is distinct from v_pinned_before then
+      raise exception '%: pinned_at moved (% -> %), and this act does not own it',
+        r.name, v_pinned_before, v_pinned_after;
+    end if;
+    if v_title_after is distinct from v_title_before or v_result->>'title' is distinct from v_title_before then
+      raise exception '%: the title moved (% -> %)', r.name, v_title_before, v_title_after;
+    end if;
+    select count(*) into v_revisions from ops.doc_conversation_title_revision
+     where conversation_id = v_conversation;
+    if v_revisions <> 0 then
+      raise exception '%: a flag write appended % title revisions', r.name, v_revisions;
+    end if;
+
+    -- 4. The now-stale base version is refused, and moves nothing.
+    v_result := ops.rename_doc_conversation(v_conversation, v_base, null,
+      r.act_pinned, r.act_archived, gen_random_uuid());
+    if (v_result->>'ok')::boolean or v_result->>'reason_id' <> 'version_conflict' then
+      raise exception '%: a stale base version was not refused: %', r.name, v_result;
+    end if;
+    if exists (select 1 from ops.doc_conversation
+                where id = v_conversation
+                  and (version <> v_version_after
+                       or pinned_at is distinct from v_pinned_after
+                       or archived_at is distinct from v_archived_after)) then
+      raise exception '%: a REFUSED flag write moved the row', r.name;
+    end if;
+  end loop;
+end $wr114_flag_only$;
+
 select 'WR-000114 Doc conversation write doors: creator-only inside the definer, revoke stamps, grants writer-bound' as proof;

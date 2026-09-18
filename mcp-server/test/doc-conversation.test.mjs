@@ -563,20 +563,146 @@ test("DOC-RENAME-RETAINS: the title moves, the prior title is retained, every tu
       [key])).rows[0].count;
     assert.equal(Number(stillOne), 1,
       "a REFUSED rename appended no revision -- the step-2 version guard holds");
+  });
 
-    // Pin and archive move only their own field, under the same compare-and-swap.
-    const pinned = await verbs["rename-doc-conversation"].handler(c, actor,
-      { idempotency_key: randomUUID(), conversation_id: key,
-        base_version: renamed.version, pinned: true });
-    assert.equal(pinned.pinned, true);
-    assert.equal(pinned.archived, false, "pinning did not move the archive field");
-    assert.equal(pinned.title, "after the rename", "pinning did not move the title");
-    const archived = await verbs["rename-doc-conversation"].handler(c, actor,
-      { idempotency_key: randomUUID(), conversation_id: key,
-        base_version: pinned.version, archived: true });
-    assert.equal(archived.archived, true);
-    assert.equal(archived.pinned, true, "archiving did not clear the pin");
-    assert.equal(Number((await client.query(
-      "select count(*) from ops.doc_conversation_title_revision where conversation_id=$1",
-      [key])).rows[0].count), 1, "pin and archive appended no title revision");
+// ---------------------------------------------------------------------------
+// WR-000114 review B1: pin, unpin, archive and unarchive, each under its OWN
+// named case. The rename case above no longer carries them even by implication
+// -- a flag that moved a field it does not own has to go red HERE, in the case
+// that names the act, and nowhere else.
+//
+// Each case asserts four things: the intended flag moved, the version rose by
+// exactly one, the OTHER flag and the title and every turn are byte-identical,
+// and a stale base version is refused without moving anything.
+// ---------------------------------------------------------------------------
+
+/** A conversation owned by wr112-author, carrying two turns, ready to flag. */
+async function flagFixture(t, pg, title = "the flag fixture") {
+  const client = await connect(pg, "wr112-author");
+  t.after(() => client.end().catch(() => {}));
+  const c = { query: (text, values = []) => client.query(text, values) };
+  const { author } = await actors(client);
+  const verbs = docConversationTools({ ...harness(), ToolError });
+  const actor = { id: author.id, slug: "wr112-author" };
+  const key = randomUUID();
+  const created = await verbs["create-doc-conversation"].handler(c, actor,
+    { idempotency_key: key, title });
+  for (const body of ["turn one", "turn two"]) {
+    await client.query(
+      `insert into ops.doc_conversation_turn(conversation_id, sequence, role, body, msg_id, origin_actor)
+       select $1, coalesce((select max(sequence)+1 from ops.doc_conversation_turn where conversation_id=$1),0),
+              'human', $2, $3, 'wr112-author'`, [key, body, randomUUID()]);
+  }
+  return { client, c, verbs, actor, key, version: created.version, title };
+}
+
+/** The stamps and the title, read straight out of the row. */
+async function flagRow(client, key) {
+  return (await client.query(
+    "select title, version, pinned_at, archived_at from ops.doc_conversation where id=$1",
+    [key])).rows[0];
+}
+
+async function turnsOf(client, key) {
+  return (await client.query(
+    "select sequence, msg_id, body from ops.doc_conversation_turn where conversation_id=$1 order by sequence",
+    [key])).rows;
+}
+
+/** Set one flag as a setup step, returning the new version. */
+async function setFlag(fixture, version, args) {
+  const result = await fixture.verbs["rename-doc-conversation"].handler(fixture.c, fixture.actor,
+    { idempotency_key: randomUUID(), conversation_id: fixture.key, base_version: version, ...args });
+  assert.equal(result.ok ?? true, true);
+  return result.version;
+}
+
+/**
+ * The shared body of all four cases. `act` is the flag write under test, and
+ * `expect` is what must be true of the row afterwards; everything NOT named in
+ * `act` is compared against the row as it stood before the act.
+ */
+async function provesOneFlag(t, pg, name, { setup = [], act, expect }) {
+  const fixture = await flagFixture(t, pg, `${name} fixture`);
+  const { client, c, verbs, actor, key } = fixture;
+  let version = fixture.version;
+  for (const step of setup) version = await setFlag(fixture, version, step);
+
+  const before = await flagRow(client, key);
+  const turnsBefore = await turnsOf(client, key);
+  assert.equal(before.version, version);
+
+  const moved = await verbs["rename-doc-conversation"].handler(c, actor,
+    { idempotency_key: randomUUID(), conversation_id: key, base_version: version, ...act });
+  const after = await flagRow(client, key);
+
+  // 1. The intended flag moved, in the direction asked for.
+  assert.equal(moved.pinned, expect.pinned, `${name}: the pinned flag is wrong`);
+  assert.equal(moved.archived, expect.archived, `${name}: the archived flag is wrong`);
+  assert.equal(after.pinned_at !== null, expect.pinned, `${name}: pinned_at disagrees with the answer`);
+  assert.equal(after.archived_at !== null, expect.archived, `${name}: archived_at disagrees with the answer`);
+  assert.equal(expect.moves === "pinned_at"
+    ? after.pinned_at?.getTime() !== before.pinned_at?.getTime()
+    : after.archived_at?.getTime() !== before.archived_at?.getTime(),
+    true, `${name}: ${expect.moves} did not move at all`);
+
+  // 2. The version rose by exactly one.
+  assert.equal(moved.version, before.version + 1, `${name}: the version did not rise by exactly one`);
+  assert.equal(after.version, before.version + 1);
+
+  // 3. The OTHER flag, the title and every turn are byte-identical.
+  const other = expect.moves === "pinned_at" ? "archived_at" : "pinned_at";
+  assert.deepEqual(after[other], before[other],
+    `${name}: ${other} moved, and this act does not own it`);
+  assert.equal(after.title, before.title, `${name}: the title moved`);
+  assert.equal(moved.title, before.title);
+  assert.deepEqual(await turnsOf(client, key), turnsBefore, `${name}: a turn moved`);
+  assert.equal(Number((await client.query(
+    "select count(*) from ops.doc_conversation_title_revision where conversation_id=$1",
+    [key])).rows[0].count), 0, `${name}: a flag write appended a title revision`);
+
+  // 4. A stale base version is refused, and moves nothing.
+  await assert.rejects(
+    verbs["rename-doc-conversation"].handler(c, actor,
+      { idempotency_key: randomUUID(), conversation_id: key, base_version: before.version, ...act }),
+    error => error.error === "version_conflict",
+    `${name}: a stale base version was not refused`);
+  assert.deepEqual(await flagRow(client, key), after,
+    `${name}: a REFUSED flag write moved the row`);
+}
+
+test("DOC-PIN-ONLY: a pin sets pinned_at, raises the version by one, and moves neither the archive flag nor the title",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    await provesOneFlag(t, pg, "DOC-PIN-ONLY",
+      { act: { pinned: true }, expect: { pinned: true, archived: false, moves: "pinned_at" } });
+  });
+
+test("DOC-UNPIN-ONLY: an unpin clears pinned_at and leaves an ARCHIVED conversation archived",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    // Archived first, so an unpin that reached archived_at instead of its own
+    // field could not hide behind a null.
+    await provesOneFlag(t, pg, "DOC-UNPIN-ONLY",
+      { setup: [{ pinned: true }, { archived: true }],
+        act: { pinned: false }, expect: { pinned: false, archived: true, moves: "pinned_at" } });
+  });
+
+test("DOC-ARCHIVE-ONLY: an archive sets archived_at, raises the version by one, and moves neither the pin flag nor the title",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    await provesOneFlag(t, pg, "DOC-ARCHIVE-ONLY",
+      { act: { archived: true }, expect: { pinned: false, archived: true, moves: "archived_at" } });
+  });
+
+test("DOC-UNARCHIVE-ONLY: an unarchive clears archived_at and leaves a PINNED conversation pinned",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    await provesOneFlag(t, pg, "DOC-UNARCHIVE-ONLY",
+      { setup: [{ pinned: true }, { archived: true }],
+        act: { archived: false }, expect: { pinned: true, archived: false, moves: "archived_at" } });
   });
