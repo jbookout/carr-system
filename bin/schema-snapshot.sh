@@ -351,6 +351,19 @@ case "$PROGRAM_CONTROLLER_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the program controller registry ledger state" >&2; exit 1 ;;
 esac
 
+# WR-000111/112/113. 0522 is the registry successor half of the atomic
+# (0519,0520,0521,0522) group, so probing the SUCCESSOR and not any of the three
+# domain migrations is what says the v30 registry surface exists. A snapshot
+# taken between them would be taken inside a transaction that has not
+# committed, which cannot happen.
+PRODUCER_TRIO_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0522_producer_trio_scac_successor.sql')" \
+  2>/dev/null)"
+case "$PRODUCER_TRIO_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the producer trio registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1400,7 +1413,21 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$PROGRAM_CONTROLLER_REGISTRY_APPLIED" = t ]; then
+  if [ "$PRODUCER_TRIO_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=30
+    SCAC_VERSION_COUNT=30
+    SCAC_TOTAL_ENTRY_COUNT=45815
+    SCAC_CURRENT_ENTRY_COUNT=1805
+    SCAC_CURRENT_SOURCE_COUNT=860
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v30.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29'"
+    # Same one-behind rule as every branch below: the v29 full entry set became
+    # readable only once 0522 sealed it, so this branch is where that seal is
+    # first required. All 29 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=29
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v30_current()"
+  elif [ "$PROGRAM_CONTROLLER_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=29
     SCAC_VERSION_COUNT=29
     SCAC_TOTAL_ENTRY_COUNT=44010

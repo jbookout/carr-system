@@ -154,6 +154,11 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
+                                 # receipt a session could report as "I cleared that".
+                                 # EXACT rather than a prefix for adjudicate's reason --
+                                 # "acknowledge" would cover exactly one verb today and
+                                 # would silently capture a future read named the same.
     "claude-checkpoint",     # durable Claude semantic checkpoint write
     "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write

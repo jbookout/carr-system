@@ -147,6 +147,21 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0517_program_controller_seams.sql",
         "0518_program_controller_seams_scac_successor.sql",
     ),
+    # WR111/112/113 create the producer cost ledger, the Doc conversation store
+    # and the R03 notification store in 0519-0521; 0522 seals their SCAC v30
+    # successor. Same deferred policy-epoch boundary as the groups above:
+    # ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint trigger on
+    # public.schema_migrations, so committing any of the three domain files
+    # without the seal asks the old v29 snapshot to bless an intentionally-new
+    # surface and must fail. The four SQL bodies and their four immutable ledger
+    # rows therefore commit in ONE runner-owned transaction, and a caller may not
+    # cut this group with --through.
+    (
+        "0519_producer_cost_ledger.sql",
+        "0520_doc_conversation_store.sql",
+        "0521_r03_notifications.sql",
+        "0522_producer_trio_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

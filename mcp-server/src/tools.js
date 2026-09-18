@@ -9,6 +9,8 @@
 import { doctrineTools } from "./doctrine.js";
 import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
+import { docConversationTools } from "./doc-conversation.js";
+import { notificationTools } from "./notifications.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
@@ -7948,6 +7950,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "doctrine": "mcp-server/src/doctrine.js",
   "situation-retrieval": "mcp-server/src/situation-retrieval.js",
   "investigation": "mcp-server/src/investigation.js",
+  "doc-conversation": "mcp-server/src/doc-conversation.js",
+  "notifications": "mcp-server/src/notifications.js",
   "capability-program": "mcp-server/src/capability-program.js",
   "work-shape": "mcp-server/src/work-shape.js",
   "work-request-intake": "mcp-server/src/work-request-intake.js",
@@ -8953,6 +8957,17 @@ registerTools(situationRetrievalTools({ withEnvelope, writeEvent, ToolError }), 
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.
 registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "investigation");
+
+// WR-000112: the Doc conversation store. The append is authority-only because
+// ops.append_doc_conversation_turn is granted to carr_authority alone; the read
+// runs on the writer connection because that is the only one that installs the
+// acting-actor context ops.doc_conversation_facts is handed.
+registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "doc-conversation");
+
+// WR-000113: the R03 notification feed and its acknowledgement receipt.
+// acknowledge-notification writes ops.notification_read and nothing else, which
+// is why a session may never report it as having moved a task.
+registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");

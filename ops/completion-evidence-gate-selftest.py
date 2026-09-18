@@ -603,11 +603,33 @@ def registry_prefix_coverage():
         return True
     writes = json.loads(result.stdout)
     missing = [name for name in writes if not mod.is_write_action(name)]
-    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find"]
+    # notification-feed and read-doc-conversation are WR-000113/112 READS and must
+    # stay False: a prefix that captured either would make every future read named
+    # the same way a write.
+    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
+             "notification-feed", "read-doc-conversation"]
     false_writes = [name for name in reads if mod.is_write_action(name)]
     ok = not missing and not false_writes
     print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "
           f"{len(writes) - len(missing)}/{len(writes)} writes classified"
+          + (f"; missing={','.join(missing)}" if missing else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
+def r03_notification_classification():
+    """acknowledge-notification is a WRITE_ACTION_EXACT entry; its siblings are reads.
+
+    Positive and negative in one case, because the pair is the point: the entry
+    is EXACT so it covers exactly the one verb that writes a durable receipt,
+    and the two reads named next to it stay unclassified.
+    """
+    positives = ["acknowledge-notification", "add-doc-conversation-turn"]
+    negatives = ["notification-feed", "read-doc-conversation"]
+    missing = [action for action in positives if not mod.is_write_action(action)]
+    false_writes = [action for action in negatives if mod.is_write_action(action)]
+    ok = not missing and not false_writes
+    print(f"{'PASS' if ok else 'FAIL'}  R03 notification and Doc conversation classification"
           + (f"; missing={','.join(missing)}" if missing else "")
           + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
     return ok
@@ -904,6 +926,7 @@ def main():
     outcomes.append(review_portfolio_revision_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
+    outcomes.append(r03_notification_classification())
     outcomes.append(latch_cases())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1

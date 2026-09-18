@@ -4,13 +4,17 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v29 is the runtime selector because WR-000110 installs the V5-F02
+// v30 is the runtime selector because WR-000111/112/113 install the producer
+// cost ledger, the Doc conversation store and the R03 notification store.
+// The line below is the ONE place the runtime version is chosen.
+// Superseded note (WR-000110): v29 was the selector because that request
+// installed the V5-F02
 // program-controller seams: one new SECURITY DEFINER writer with two grantees,
 // and an edit to engineering-runtime.js that re-digests every mcp-tool row
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v29.generated.js";
+} from "./scac-mutation-registry.v30.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

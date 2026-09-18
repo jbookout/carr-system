@@ -341,6 +341,34 @@ def main() -> int:
             "--through was allowed to expose WR-000110 before its SCAC seal"
         )
 
+    # WR111/112/113 add the producer cost ledger, the Doc conversation store and
+    # the R03 notification store in 0519-0521, and seal the resulting SCAC v30
+    # successor in 0522. The same deferred policy-epoch trigger refuses every
+    # intermediate catalog, so the reviewed FOUR must commit as one transaction.
+    producer_trio = [
+        item for item in loaded if item[0].startswith(("0519_", "0520_", "0521_", "0522_"))
+    ]
+    assert [item[0] for item in producer_trio] == [
+        "0519_producer_cost_ledger.sql",
+        "0520_doc_conversation_store.sql",
+        "0521_r03_notifications.sql",
+        "0522_producer_trio_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(producer_trio) == [producer_trio]
+    for cut in (
+        "0519_producer_cost_ledger.sql",
+        "0520_doc_conversation_store.sql",
+        "0521_r03_notifications.sql",
+    ):
+        try:
+            migration_runner.migrations_through(loaded, producer_trio, cut)
+        except ValueError as exc:
+            assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+        else:
+            raise AssertionError(
+                f"--through {cut} was allowed to expose WR111/112/113 before its SCAC seal"
+            )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.
