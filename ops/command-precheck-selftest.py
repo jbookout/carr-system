@@ -75,14 +75,14 @@ class NeverDeniesTests(unittest.TestCase):
 
     def test_a_certain_failure_still_returns_a_note_not_a_refusal(self):
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"}},
-                        check=lambda command: (0.99, {"undeclared_options": ["--nope"]}),
+                        check=lambda command, repo=None: (0.99, {"undeclared_options": ["--nope"]}),
                         _log=lambda record: None)
         self.assertEqual(code, 0, "a warning is not a denial")
         self.assertIn("NOT been blocked", out)
 
     def test_the_warning_names_the_reason(self):
         _, out = run({"tool_name": "Bash", "tool_input": {"command": "x"}},
-                     check=lambda command: (0.95, {"guard_refusals": ["the guard refuses this"]}),
+                     check=lambda command, repo=None: (0.95, {"guard_refusals": ["the guard refuses this"]}),
                      _log=lambda record: None)
         self.assertIn("the guard refuses this", out,
                       "a warning without its reason is noise a session learns to skip")
@@ -93,14 +93,14 @@ class FailsOpenTests(unittest.TestCase):
         self.assertEqual(run("not json at all")[0], 0)
 
     def test_a_missing_credential_is_silent(self):
-        def boom(command):
+        def boom(command, repo=None):
             raise RuntimeError("cannot read the TypeSafe credential")
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}}, check=boom)
         self.assertEqual(code, 0)
         self.assertEqual(out, "", "an outage must not print at the session")
 
     def test_a_service_outage_is_silent(self):
-        def boom(command):
+        def boom(command, repo=None):
             raise TimeoutError("service did not answer")
         self.assertEqual(run({"tool_name": "Bash",
                               "tool_input": {"command": "git push"}}, check=boom)[0], 0)
@@ -109,7 +109,7 @@ class FailsOpenTests(unittest.TestCase):
         def boom(record):
             raise OSError("disk full")
         code, _ = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                      check=lambda command: (0.99, {"x": ["y"]}), _log=boom)
+                      check=lambda command, repo=None: (0.99, {"x": ["y"]}), _log=boom)
         self.assertEqual(code, 0)
 
 
@@ -120,19 +120,19 @@ class SpendsNothingUnnecessarilyTests(unittest.TestCase):
     def test_a_non_bash_tool_never_reaches_the_judgment(self):
         called = []
         run({"tool_name": "Read", "tool_input": {"file_path": "x"}},
-            check=lambda command: called.append(command))
+            check=lambda command, repo=None: called.append(command))
         self.assertEqual(called, [])
 
     def test_a_pure_read_never_reaches_the_judgment(self):
         called = []
         run({"tool_name": "Bash", "tool_input": {"command": "grep -n foo ops/ai_eval.py"}},
-            check=lambda command: called.append(command))
+            check=lambda command, repo=None: called.append(command))
         self.assertEqual(called, [], "about two thirds of real traffic stops here")
 
     def test_an_empty_command_never_reaches_the_judgment(self):
         called = []
         run({"tool_name": "Bash", "tool_input": {"command": "   "}},
-            check=lambda command: called.append(command))
+            check=lambda command, repo=None: called.append(command))
         self.assertEqual(called, [])
 
     def test_no_facts_means_no_request_was_made(self):
@@ -152,22 +152,78 @@ class SpendsNothingUnnecessarilyTests(unittest.TestCase):
         called = []
         with mock.patch.dict(os.environ, {"CARR_PRECHECK": "0"}):
             code, _ = run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"}},
-                          check=lambda command: called.append(command))
+                          check=lambda command, repo=None: called.append(command))
         self.assertEqual(code, 0)
         self.assertEqual(called, [])
 
 
 class _Facts:
     @staticmethod
-    def environment_facts(command):
+    def environment_facts(command, repo=None):
         return {}
+
+
+class RepoRootTests(unittest.TestCase):
+    """The hook runs in the canonical checkout; the session usually does not.
+
+    The first live run of this pre-check warned at 0.94 about a file the session
+    had just written, because canonical had never seen it. A gate that cries
+    wolf on every new file in every worktree gets scrolled past.
+    """
+
+    def test_the_session_directory_wins_over_this_files_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            Path(os.path.join(root, ".git")).write_text("gitdir: elsewhere\n")
+            self.assertEqual(hook.repo_root(root), root)
+
+    def test_a_subdirectory_resolves_to_its_checkout(self):
+        """A command can run from a subdirectory while naming paths from the
+        root, so cwd is not itself the answer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            Path(os.path.join(root, ".git")).mkdir()
+            deep = os.path.join(root, "a", "b", "c")
+            os.makedirs(deep)
+            self.assertEqual(hook.repo_root(deep), root)
+
+    def test_no_checkout_above_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(hook.repo_root(os.path.join(tmp, "nowhere")), hook.REPO)
+
+    def test_an_empty_cwd_falls_back(self):
+        self.assertEqual(hook.repo_root(""), hook.REPO)
+        self.assertEqual(hook.repo_root(None), hook.REPO)
+
+    def test_the_payload_cwd_actually_reaches_the_fact_gatherer(self):
+        """Without this the fix is inert: repo_root can be perfect and the
+        value still never leave advisory()."""
+        seen = []
+        run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"},
+             "cwd": "/somewhere/else"},
+            check=lambda command, repo=None: seen.append(repo) or (None, {}))
+        self.assertEqual(seen, [hook.REPO],
+                         "a cwd outside any checkout must still be passed explicitly")
+
+    def test_check_passes_its_repo_through(self):
+        seen = {}
+
+        class _Facts:
+            @staticmethod
+            def environment_facts(command, repo):
+                seen["repo"] = repo
+                return {}
+
+        with mock.patch.object(hook, "_sibling", side_effect=lambda n: _Facts()):
+            hook.check("git push", "/a/checkout")
+        self.assertEqual(seen["repo"], "/a/checkout")
 
 
 class ThresholdTests(unittest.TestCase):
     def test_below_the_floor_is_silent_but_still_logged(self):
         logged = []
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                        check=lambda command: (hook.WARN_AT - 0.01, {"a": ["b"]}),
+                        check=lambda command, repo=None: (hook.WARN_AT - 0.01, {"a": ["b"]}),
                         _log=logged.append)
         self.assertEqual(out, "", "below the floor nothing is said")
         self.assertEqual(len(logged), 1, "but it is recorded, so the floor can be re-derived")
@@ -175,7 +231,7 @@ class ThresholdTests(unittest.TestCase):
 
     def test_the_floor_is_inclusive(self):
         _, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                     check=lambda command: (hook.WARN_AT, {"a": ["b"]}),
+                     check=lambda command, repo=None: (hook.WARN_AT, {"a": ["b"]}),
                      _log=lambda record: None)
         self.assertIn("PRE-CHECK", out)
 
