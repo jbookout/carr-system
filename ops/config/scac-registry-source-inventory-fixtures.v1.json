@@ -47724,6 +47724,52 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:ops/ai_eval.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/ai_eval.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/ai_eval.py",
+          "schema_digest": "7d92eb14f7392781ffd0f2884abf1c1923a155afb6a508574f47d991af256ea0",
+          "handler_digest": "7d92eb14f7392781ffd0f2884abf1c1923a155afb6a508574f47d991af256ea0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/ai_gateway_decision.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/ai_gateway_decision.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/ai_gateway_decision.py",
+          "schema_digest": "ddd95a2411ec7efeca0ffe78693a82f7ca08508be8a8ac03efb6ed4af93b69c2",
+          "handler_digest": "ddd95a2411ec7efeca0ffe78693a82f7ca08508be8a8ac03efb6ed4af93b69c2",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:ops/ci.sh",
           "ingress_kind": "script_entrypoint",
           "operation": "ops/ci.sh",
@@ -47840,15 +47886,15 @@
         }
       ],
       "expected_count": 864,
-      "expected_sha256": "d14ed96093a275950d22d41b30468c7493854ba9b89f40127134b38ef4234863"
+      "expected_sha256": "70aabb37d61e070e58b861044b6600787070227710bc236f01451dd4493e5418"
     }
   ],
   "current_source_review": {
     "base_version": "v32",
     "upsert": [],
     "expected_count": 864,
-    "expected_sha256": "d14ed96093a275950d22d41b30468c7493854ba9b89f40127134b38ef4234863",
-    "reason": "WR-000115 admits the Doc conversation LIST door, taking the source inventory from 863 to 864: 1 new ingress (list-doc-conversations) and 12 re-digested rows, with no removals. The one verb joins mcp-server/src/doc-conversation.js, a family file tools.js ALREADY registers, so mcp-server/src/tools.js is not edited and NOT ONE mcp-tool row sourced from it re-digests -- the same property the v31 overlay established, asserted again here rather than assumed. The 5 sibling rows that do move (mcp-tool:add-doc-conversation-turn, mcp-tool:create-doc-conversation, mcp-tool:read-doc-conversation, mcp-tool:rename-doc-conversation, mcp-tool:share-doc-conversation) share doc-conversation.js as their source_locator, whose bytes moved. The remaining 7 are inventoried entry points this branch edited: bin/schema-snapshot.sh, ops/ci.sh, ops/foundation-assurance-candidate-rehearsal.py, ops/scac-mutation-inventory.mjs, ops/siep11-mutation-registry-local-pg-gate.py, ops/siep18-reference-monitor-local-pg-gate.py, tools/migrate.py. The new postgres proof mcp-server/test/doc-conversation-list-postgres.sql is not an ingress -- ops/ci.sh runs it, which is why ops/ci.sh is in the changed list and the proof is not; ops/migration-number-contract-selftest.py and ops/schema-snapshot-registry-seed-selftest.py are not inventoried entry points either, which is why they are edited by this branch and absent from this overlay. migrations/0525_doc_conversation_list.sql adds ONE SECURITY DEFINER function granted to carr_writer and carr_authority; those two db-function-acl rows are CATALOG rows measured on a disposable PostgreSQL, not source rows, so they move secdef_execute from 647 to 649 and never appear in this overlay.\n\nTHE LARGEST DIFFERENCE FROM v31 IS WHAT IS ABSENT. v31 carried two hooks/ rows -- script-entrypoint:hooks/completion-evidence-gate.py, which it edited to add two WRITE_ACTION_EXACT entries, and script-entrypoint:hooks/guard-unattended.py, which arrived from main mid-build. Neither recurs. list-doc-conversations is a READ: its action prefix is `list`, which is not in WRITE_ACTION_PREFIXES, and the verb is not in WRITE_ACTION_EXACT, so the gate classifies it False without any edit and the whole bless/selftest/baseline cascade v31 owed is owed by nothing here. No hooks/ row re-digests in this overlay, and the frontier moves by exactly one, from 863 to 864."
+    "expected_sha256": "70aabb37d61e070e58b861044b6600787070227710bc236f01451dd4493e5418",
+    "reason": "WR-000115 admits the Doc conversation LIST door, taking the source inventory from 863 to 864: 1 new ingress (list-doc-conversations) and 14 re-digested rows, with no removals. The one verb joins mcp-server/src/doc-conversation.js, a family file tools.js ALREADY registers, so mcp-server/src/tools.js is not edited and NOT ONE mcp-tool row sourced from it re-digests -- the same property the v31 overlay established, asserted again here rather than assumed. The 5 sibling rows that do move (mcp-tool:add-doc-conversation-turn, mcp-tool:create-doc-conversation, mcp-tool:read-doc-conversation, mcp-tool:rename-doc-conversation, mcp-tool:share-doc-conversation) share doc-conversation.js as their source_locator, whose bytes moved. Seven more are inventoried entry points this branch edited: bin/schema-snapshot.sh, ops/ci.sh, ops/foundation-assurance-candidate-rehearsal.py, ops/scac-mutation-inventory.mjs, ops/siep11-mutation-registry-local-pg-gate.py, ops/siep18-reference-monitor-local-pg-gate.py, tools/migrate.py. The new postgres proof mcp-server/test/doc-conversation-list-postgres.sql is not an ingress -- ops/ci.sh runs it, which is why ops/ci.sh is in the changed list and the proof is not; ops/migration-number-contract-selftest.py and ops/schema-snapshot-registry-seed-selftest.py are not inventoried entry points either, which is why they are edited by this branch and absent from this overlay. migrations/0525_doc_conversation_list.sql adds ONE SECURITY DEFINER function granted to carr_writer and carr_authority; those two db-function-acl rows are CATALOG rows measured on a disposable PostgreSQL, not source rows, so they move secdef_execute from 647 to 649 and never appear in this overlay.\n\nCorrection round 1 (2026-09-18) accounts for the last 2 of the 14. While WR-000115 was in build, 4c5ec7f4 (WR-AI-001, \"Make the evaluation harness's digest bindings and canary floor real\") landed on main and re-digested two ingresses this branch never touched: script-entrypoint:ops/ai_eval.py, which now derives its route and policy digests instead of trusting caller-supplied ones and enforces a canary floor on the finished artifact, and script-entrypoint:ops/ai_gateway_decision.py, which re-pins the one evidence digest that moved with that fixture. Those two reached main as an upsert on the v31 review overlay; merging main into WR-000115 folds them into the v32 patch instead, exactly as the v31 seal folded hooks/guard-unattended.py from the v30 overlay, and the v31 overlay is left empty. The frontier is unaffected by them: both were already inventoried script entrypoints, so the transition is still 863 to 864 on the strength of list-doc-conversations alone, and no second successor is owed. The same merge brought ops/ai-eval-selftest.py, three evals/ai/*.json files, ops/jev_judge.py, ops/typesafe_client.py and two further selftests; NONE of them is an inventoried ingress, which is a measurement here and not an assumption -- re-deriving fullInventory against the merged tree yields exactly one added key, mcp-tool:list-doc-conversations, and zero removals.\n\nTHE LARGEST DIFFERENCE FROM v31 IS WHAT IS ABSENT. v31 carried two hooks/ rows -- script-entrypoint:hooks/completion-evidence-gate.py, which it edited to add two WRITE_ACTION_EXACT entries, and script-entrypoint:hooks/guard-unattended.py, which arrived from main mid-build. Neither recurs. list-doc-conversations is a READ: its action prefix is `list`, which is not in WRITE_ACTION_PREFIXES, and the verb is not in WRITE_ACTION_EXACT, so the gate classifies it False without any edit and the whole bless/selftest/baseline cascade v31 owed is owed by nothing here. No hooks/ row re-digests in this overlay, and the frontier moves by exactly one, from 863 to 864."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",
