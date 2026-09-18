@@ -1,0 +1,213 @@
+"""Offline suite for ops/command_precheck.py and its dispatch. No credential, no network, no spend.
+
+Every model call arrives through an injected fake. The cases that earn their
+place are the ones that decide whether it is safe to put this in front of every
+shell call in every session: it must never deny, it must fail open on every
+failure it can meet, and it must not spend money on a command it has nothing to
+say about.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import os
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+REPO = Path(__file__).resolve().parent.parent
+HOOK_PATH = REPO / "ops" / "command_precheck.py"
+SPEC = importlib.util.spec_from_file_location("command_precheck", HOOK_PATH)
+assert SPEC and SPEC.loader
+hook = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(hook)
+
+
+def run(payload, **patches):
+    """Drive advisory() with a payload; return (0, note-or-empty).
+
+    The tuple shape is kept from when this was a hook with an exit code, because
+    every test below asserts the first element is 0 — that assertion IS the "it
+    never denies" contract, and advisory() keeps it by never raising.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    with mock.patch.multiple(hook, **patches) if patches else _null():
+        note = hook.advisory(payload)
+    return 0, (note or "")
+
+
+class _null:
+    def __enter__(self): return None
+    def __exit__(self, *a): return False
+
+
+class NeverDeniesTests(unittest.TestCase):
+    """A probabilistic refusal in front of every shell call turns a model's
+    uncertainty into a blocked session. This must never happen."""
+
+    def test_the_library_contains_no_denial(self):
+        source = HOOK_PATH.read_text(encoding="utf-8")
+        for forbidden in ("exit(2)", "exit (2)", '"block"', "'block'", "permissionDecision"):
+            self.assertNotIn(forbidden, source,
+                             f"{forbidden} would let this gate stop a session")
+        dispatcher = (REPO / "hooks" / "delegation-gate.py").read_text(encoding="utf-8")
+        self.assertIn("command_precheck(payload)", dispatcher,
+                      "the dispatch must actually be wired into a hook that runs")
+
+    def test_the_library_is_not_a_script_entrypoint(self):
+        """A file with a shebang or a main guard is a NEW sealed ingress, and
+        admitting one costs a registry successor with a production migration.
+        Uses the inventory's own regex, not a substring search."""
+        import re as _re
+        source = HOOK_PATH.read_text(encoding="utf-8")
+        self.assertFalse(source.startswith("#!"), "no shebang")
+        self.assertIsNone(
+            _re.compile(r"if\s+__name__\s*==\s*[\"\']__main__[\"\']\s*:").search(source),
+            "no main guard")
+
+    def test_a_certain_failure_still_returns_a_note_not_a_refusal(self):
+        code, out = run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"}},
+                        check=lambda command: (0.99, {"undeclared_options": ["--nope"]}),
+                        _log=lambda record: None)
+        self.assertEqual(code, 0, "a warning is not a denial")
+        self.assertIn("NOT been blocked", out)
+
+    def test_the_warning_names_the_reason(self):
+        _, out = run({"tool_name": "Bash", "tool_input": {"command": "x"}},
+                     check=lambda command: (0.95, {"guard_refusals": ["the guard refuses this"]}),
+                     _log=lambda record: None)
+        self.assertIn("the guard refuses this", out,
+                      "a warning without its reason is noise a session learns to skip")
+
+
+class FailsOpenTests(unittest.TestCase):
+    def test_unparseable_payload(self):
+        self.assertEqual(run("not json at all")[0], 0)
+
+    def test_a_missing_credential_is_silent(self):
+        def boom(command):
+            raise RuntimeError("cannot read the TypeSafe credential")
+        code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}}, check=boom)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "", "an outage must not print at the session")
+
+    def test_a_service_outage_is_silent(self):
+        def boom(command):
+            raise TimeoutError("service did not answer")
+        self.assertEqual(run({"tool_name": "Bash",
+                              "tool_input": {"command": "git push"}}, check=boom)[0], 0)
+
+    def test_a_logging_failure_never_reaches_the_session(self):
+        def boom(record):
+            raise OSError("disk full")
+        code, _ = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
+                      check=lambda command: (0.99, {"x": ["y"]}), _log=boom)
+        self.assertEqual(code, 0)
+
+
+class SpendsNothingUnnecessarilyTests(unittest.TestCase):
+    """Three free filters run before any request. Each one is asserted, because
+    a filter that silently stops working costs money on every command."""
+
+    def test_a_non_bash_tool_never_reaches_the_judgment(self):
+        called = []
+        run({"tool_name": "Read", "tool_input": {"file_path": "x"}},
+            check=lambda command: called.append(command))
+        self.assertEqual(called, [])
+
+    def test_a_pure_read_never_reaches_the_judgment(self):
+        called = []
+        run({"tool_name": "Bash", "tool_input": {"command": "grep -n foo ops/ai_eval.py"}},
+            check=lambda command: called.append(command))
+        self.assertEqual(called, [], "about two thirds of real traffic stops here")
+
+    def test_an_empty_command_never_reaches_the_judgment(self):
+        called = []
+        run({"tool_name": "Bash", "tool_input": {"command": "   "}},
+            check=lambda command: called.append(command))
+        self.assertEqual(called, [])
+
+    def test_no_facts_means_no_request_was_made(self):
+        """With nothing on disk contradicting the command there is nothing to
+        ask about, and asking anyway is what produced the measured 0.44."""
+        asked = []
+        precheck = importlib.util.module_from_spec(
+            importlib.util.spec_from_file_location("p", REPO / "ops" / "jev_precheck.py"))
+        self.assertEqual(hook.check.__module__, "command_precheck")
+        with mock.patch.object(hook, "_sibling", side_effect=lambda n: asked.append(n) or _Facts()):
+            probability, facts = hook.check("git push origin HEAD")
+        self.assertIsNone(probability)
+        self.assertEqual(asked, ["jev_precheck"],
+                         "the judging modules must not even be loaded")
+
+    def test_the_kill_switch_stops_everything(self):
+        called = []
+        with mock.patch.dict(os.environ, {"CARR_PRECHECK": "0"}):
+            code, _ = run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"}},
+                          check=lambda command: called.append(command))
+        self.assertEqual(code, 0)
+        self.assertEqual(called, [])
+
+
+class _Facts:
+    @staticmethod
+    def environment_facts(command):
+        return {}
+
+
+class ThresholdTests(unittest.TestCase):
+    def test_below_the_floor_is_silent_but_still_logged(self):
+        logged = []
+        code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
+                        check=lambda command: (hook.WARN_AT - 0.01, {"a": ["b"]}),
+                        _log=logged.append)
+        self.assertEqual(out, "", "below the floor nothing is said")
+        self.assertEqual(len(logged), 1, "but it is recorded, so the floor can be re-derived")
+        self.assertFalse(logged[0]["warned"])
+
+    def test_the_floor_is_inclusive(self):
+        _, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
+                     check=lambda command: (hook.WARN_AT, {"a": ["b"]}),
+                     _log=lambda record: None)
+        self.assertIn("PRE-CHECK", out)
+
+
+class ReadDetectionTests(unittest.TestCase):
+    def test_reads_are_recognised(self):
+        for command in ("grep -n foo bar.py", "cat ops/ci.sh", "git status",
+                        "sed -n '1,10p' x.py", "ls ops | wc -l",
+                        "git log --oneline -5 | head -3"):
+            self.assertTrue(hook.is_pure_read(command), command)
+
+    def test_writes_are_never_mistaken_for_reads(self):
+        for command in ("git push origin HEAD", "rm -rf build", "cat x > y",
+                        "grep -n foo bar.py && git commit -m x",
+                        "echo hi > /tmp/f", "cp a b", "sed -i s/a/b/ x"):
+            self.assertFalse(hook.is_pure_read(command), command)
+
+    def test_a_read_piped_into_a_write_is_not_a_read(self):
+        self.assertFalse(hook.is_pure_read("cat x | tee /tmp/out"))
+
+
+class LogSizeTests(unittest.TestCase):
+    def test_the_log_is_capped_by_size_not_by_count(self):
+        """A count cap is not a size cap: one enormous line defeats it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "log.jsonl")
+            Path(path).write_text("x" * (hook.LOG_MAX_BYTES + 10_000) + "\n")
+            with mock.patch.object(hook, "LOG", path):
+                hook._log({"command": "y", "p": 0.1, "facts": {}, "warned": False})
+            self.assertLess(os.path.getsize(path), hook.LOG_MAX_BYTES,
+                            "the cap must actually shrink an oversized log")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
