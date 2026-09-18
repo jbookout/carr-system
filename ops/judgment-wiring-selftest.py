@@ -66,20 +66,6 @@ DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals",
 # reason and the loop, in the open. An entry here is a debt, not an excuse, and
 # the list is meant to shrink.
 DECLARED_INERT: dict[str, str] = {
-    "jev_code_review.py":
-        "A whole-codebase scan for slop and bugs: a deterministic pass finds "
-        "candidate regions, then one request per region asks eight narrow "
-        "questions together. It has RUN -- 1,387 sources, 426 regions, 37 "
-        "seconds -- but has no repeating caller, and choosing one is not a "
-        "session's call. It must never go inside ops/ci.sh as a blocking "
-        "check: it returns probabilities, and the standing rule is that this "
-        "model advises beside the deterministic layer rather than deciding "
-        "inside it, so a scan that can fail a merge is the exact shape that "
-        "rule forbids. Loop 621 carries the choice between an on-demand tool, "
-        "a weekly report and a pull-request advisory scoped to the diff, plus "
-        "the one known instrument fault: the swallow question is phrased "
-        "counterfactually and so answers about hypotheticals in regions that "
-        "contain no exception handling at all.",
     "jev_rule_select.py":
         "Built and measured (0.92 on rule e313a3ca, ~21 requests over 211 "
         "rules) but deliberately not wired, because the door it wants is "

@@ -133,11 +133,93 @@ def surface_for(path):
     return None
 
 
+def code_review(payload):
+    """Judge the lines just written, at the moment they are written.
+
+    JOE, 2026-09-18: "make sure you are using jev to assist you during all
+    these activities. if its not automatically doing that at this point the
+    first thing you need to do is fix it so that jev is automatically involved
+    without you having to remember or ask."
+
+    That is the gap this closes. Three judgments already fire on their own --
+    before a shell command, before a defect is filed, before a push -- and none
+    of them looks at code while it is being written. ops/jev_code_review.py
+    existed all day and ran exactly twice, both times because a session
+    remembered it. A capability that depends on being remembered is the failure
+    this whole session has been about.
+
+    SCOPED TO THE DIFF, never the file. A changed hunk plus context is a few
+    hundred tokens; a file is thousands of tokens of code nobody touched, and
+    accuracy falls as a state fills with detail unrelated to the decision.
+
+    ADVISORY AND POST-WRITE. It runs AFTER the edit has already landed, so it
+    cannot block, cannot refuse, and cannot lose work. It returns on every
+    failure -- no credential, no network, no git, bad payload -- and a session
+    editing while the judgment is down edits exactly as it does today.
+    """
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    if tool not in ("Write", "Edit", "MultiEdit"):
+        return
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    path = ti.get("file_path") or ti.get("filePath") or ""
+    if not path or not path.endswith((".py", ".js", ".mjs", ".sql", ".sh")):
+        return
+    try:
+        import importlib.util
+        import subprocess
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True,
+                              cwd=os.path.dirname(path) or ".",
+                              timeout=15).stdout.strip()
+        if not root:
+            return
+        # The hunk that was just written, with enough around it to be judged.
+        diff = subprocess.run(["git", "diff", "-U12", "--", path],
+                              capture_output=True, text=True, cwd=root,
+                              timeout=20).stdout
+        if not diff.strip():
+            diff = subprocess.run(["git", "diff", "--cached", "-U12", "--", path],
+                                  capture_output=True, text=True, cwd=root,
+                                  timeout=20).stdout
+        added = [line[1:] for line in diff.splitlines()
+                 if line.startswith("+") and not line.startswith("+++")]
+        # Nothing added, or a diff so large it is a rewrite rather than an edit:
+        # both are outside what one scoped judgment can usefully read.
+        if not added or len(added) > 400:
+            return
+        spec = importlib.util.spec_from_file_location(
+            "jev_code_review", os.path.join(root, "ops", "jev_code_review.py"))
+        if spec is None or spec.loader is None:
+            return
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        region = {"path": os.path.relpath(path, root), "line": 0,
+                  "kind": "just written by this session",
+                  "code": "\n".join(added)[:2600]}
+        scores = module.review_one(region)
+        hits = sorted(((name, value) for name, value in scores.items()
+                       if not name.startswith("_") and value >= 0.70),
+                      key=lambda pair: -pair[1])
+        if not hits:
+            return
+        lines = ["WHAT WAS JUST WRITTEN, read back (advisory — the edit is "
+                 "already saved, and none of this is a decision):"]
+        for name, value in hits:
+            lines.append("  %.2f  %s" % (value, name.replace("_", " ")))
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": "\n".join(lines)}}))
+    except Exception:
+        return
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
         sys.exit(0)
+
+    code_review(payload)
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
