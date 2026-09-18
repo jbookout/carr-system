@@ -78,7 +78,7 @@ const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-
 // gate refuses it, whatever the app has shipped (defect 4ef6ce10: the V5-UX-C10
 // inventory screen was delivered without this entry). Each new app page adds its
 // route here; they share the workspace flag with Home, Clients and Vendors.
-const APP_DOCUMENT_PATHS = new Set(["/work-inventory", "/tasks", "/business", "/pipeline", "/control-room", "/incidents"]);
+const APP_DOCUMENT_PATHS = new Set(["/work-inventory", "/tasks", "/business", "/pipeline", "/control-room", "/incidents", "/notifications"]);
 const DEALROOM_EXACT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html", "/system-work.html", "/room.html", "/queue.html",
   CLIENTS_ROUTE, VENDORS_ROUTE, BUSINESS_ASSET_PATH, ...APP_DOCUMENT_PATHS,
