@@ -49,10 +49,18 @@ TOLLS = {
         "anything under hooks/, bin/, tools/, pipelines/, ops/ that carries a "
         "shebang or a main guard, or any file under mcp-server/src/? Editing "
         "one changes its digest and the seal must be re-derived.",
-        "run `node ops/scac-mutation-inventory.mjs`, union the row into "
-        "current_source_review.upsert in ops/config/"
-        "scac-registry-source-inventory-fixtures.v1.json, and pin the derived "
-        "digest -- AFTER your last edit, never before it"),
+        "union the row into current_source_review.upsert in ops/config/"
+        "scac-registry-source-inventory-fixtures.v1.json, then pin the digest "
+        "the ASSERTION reports, not the generator's. They are different "
+        "numbers: the generator prints a digest of the raw rows, while the "
+        "seal covers the REVIEWED set, which is the base version with the "
+        "upserts applied. Run it and read the observed value back: node "
+        "--input-type=module -e \"import "
+        "{assertCurrentSourceInventoryMatchesFixture} from "
+        "'./ops/scac-mutation-inventory.mjs'; import {TOOLS} from "
+        "'./mcp-server/src/tools.js'; "
+        "assertCurrentSourceInventoryMatchesFixture(TOOLS)\" -- and run it "
+        "AFTER your last edit, never before"),
 
     "new_ingress_admitted": (
         "Does this change ADD a new file that carries a shebang line or an "
