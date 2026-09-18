@@ -994,13 +994,28 @@ def _scorecard_projection(scorecard: Any) -> dict[str, Any]:
             "summary": summary, "cases": cases}
 
 
-def project_scorecard_entry(scorecard: Any, observed_on: str, sequence: int) -> dict[str, Any]:
-    """Create the redacted, immutable projection a baseline history can retain."""
+def project_scorecard_entry(
+    scorecard: Any, observed_on: str, sequence: int, suite: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Create the redacted, immutable projection a baseline history can retain.
+
+    PASS THE SUITE. This is the SECOND path that emits an artifact carrying the
+    attribution block, and on 2026-09-18 it was the one the canary floor did not
+    cover — the floor sat at the end of evaluate_provider_run only, so a
+    scorecard assembled by a caller rather than produced by that function could
+    be projected into a retained history with a canary still in it. Jev flagged
+    exactly this when asked to name the change's biggest remaining weakness, and
+    it was right: a guarantee enforced at one call site is not a guarantee.
+
+    `suite` stays optional only so an existing caller does not break at import;
+    every caller in this repository passes it, and a projection made without it
+    is unchecked and should be treated as such.
+    """
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
         raise SuiteError("history entry sequence must be a positive integer")
     projected = _scorecard_projection(scorecard)
     _validate_observed_on(observed_on, "history entry observed_on")
-    return {
+    entry = {
         "sequence": sequence,
         "observed_on": observed_on,
         "run_id": projected["run_id"],
@@ -1008,6 +1023,9 @@ def project_scorecard_entry(scorecard: Any, observed_on: str, sequence: int) -> 
         "summary": projected["summary"],
         "cases": projected["cases"],
     }
+    if suite is not None:
+        assert_no_canary_escaped(entry, suite, "baseline history entry")
+    return entry
 
 
 def _validate_baseline_history(history: Any) -> dict[str, Any]:

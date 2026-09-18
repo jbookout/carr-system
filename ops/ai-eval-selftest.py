@@ -308,7 +308,7 @@ class SuiteTests(unittest.TestCase):
     def test_baseline_history_projects_one_observed_scorecard_without_raw_output(self):
         history = ai_eval.load_baseline_history(BASELINE_HISTORY_PATH)
         scorecard = ai_eval.evaluate_provider_run(self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
-        entry = ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=1)
+        entry = ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=1, suite=self.suite)
         self.assertEqual(history["entries"], [entry])
         comparison = ai_eval.compare_scorecard_to_history(scorecard, history)
         self.assertEqual(comparison["sample_count"], 1)
@@ -381,7 +381,7 @@ class SuiteTests(unittest.TestCase):
             scorecard["results"][0].update(passed=False, violation_codes=codes)
             scorecard["summary"] = {"total": 10, "passed": 9, "failed": 1}
             with self.subTest(codes=codes), self.assertRaisesRegex(ai_eval.SuiteError, "violation codes"):
-                ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=2)
+                ai_eval.project_scorecard_entry(scorecard, observed_on="2026-08-15", sequence=2, suite=self.suite)
 
     def test_response_envelope_v1_binds_the_loaded_suite_case_and_known_references(self):
         fixture = ai_eval.load_response_envelope_fixture(ENVELOPE_FIXTURE_PATH, self.suite)
@@ -561,6 +561,23 @@ class DerivedBindingAndCanaryFloorTests(unittest.TestCase):
             ai_eval.assert_no_canary_escaped(
                 {"some": {"field": ["added", f"later {canary.lower()}"]}}, self.suite, "probe")
         ai_eval.assert_no_canary_escaped({"some": {"field": "clean"}}, self.suite, "probe")
+
+    def test_the_history_projection_is_behind_the_same_floor(self):
+        # Jev named this as the change's biggest remaining weakness and it was
+        # right: the floor sat at ONE call site, so a scorecard assembled by a
+        # caller could be projected into a retained history with a canary in it.
+        canary = ai_eval.suite_forbidden_substrings(self.suite)[0]
+        clean = ai_eval.evaluate_provider_run(
+            self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
+        tainted = copy.deepcopy(clean)
+        tainted["attribution"]["route_id"] = f"route-{canary}"
+        with self.assertRaises(ai_eval.SuiteError) as caught:
+            ai_eval.project_scorecard_entry(
+                tainted, observed_on="2026-08-15", sequence=1, suite=self.suite)
+        self.assertIn("canary", str(caught.exception))
+        # and the clean one still projects
+        ai_eval.project_scorecard_entry(
+            clean, observed_on="2026-08-15", sequence=1, suite=self.suite)
 
     def test_the_suite_actually_declares_canaries_to_check_against(self):
         # Without this, every canary assertion above passes vacuously the day
