@@ -398,7 +398,12 @@ fi
 # allowed to be one of them, so a wrong answer costs a reader a few seconds
 # rather than costing a correct change its push.
 if [ -z "$CARR_SKIP_TOLL_ADVISORY" ] && [ -f "$REPO_ROOT/ops/jev_change_tolls.py" ]; then
-  REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS' 2>/dev/null || true
+  # NOT 2>/dev/null. The advisory writes to stderr, so silencing stderr wired
+  # it to a door and made it invisible in the same commit -- the exact failure
+  # this session built ops/judgment-wiring-selftest.py to catch, committed by
+  # the person who built it. The block below catches every exception itself and
+  # exits 0, so there is nothing left to suppress.
+  REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS' || true
 import importlib.util, os, sys
 root = os.environ.get("REPO_ROOT") or os.getcwd()
 try:
