@@ -81,13 +81,40 @@ class ControlTests(unittest.TestCase):
 
     def test_paths_outside_the_repository_are_not_claimed_about(self):
         """Claiming a fact about a machine this module cannot see invites a
-        confident wrong answer."""
+        confident wrong answer.
+
+        The escape case matters more than the obvious one and is why this test
+        names it: a path that walks UP out of the repository still starts with a
+        repository-shaped first segment, so only the guard stops it. Mutation
+        testing caught that the earlier version of this test passed with that
+        guard removed, because /etc/hosts was already excluded for a different
+        reason and nothing exercised the boundary."""
         facts = pre.environment_facts("cat /etc/hosts ~/.config/carr/typesafe.env")
         self.assertEqual(facts.get("paths_that_do_not_exist", []), [])
+        escaping = pre.referenced_paths("cat ops/../../../etc/passwd")
+        self.assertEqual([f["path"] for f in escaping], [],
+                         "a path walking out of the repository must be dropped")
 
 
 class HonestUnknownTests(unittest.TestCase):
     """"Could not tell" and "nothing there" must never look the same."""
+
+    def test_a_script_that_is_not_there_reports_none_not_empty(self):
+        """The file that cannot be opened at all, which is a different path
+        through the function from the one whose parser cannot be followed.
+        Mutation testing caught that nothing covered it: turning that branch
+        into an empty list left the whole suite green, and an empty list there
+        would mean a missing script is reported as accepting no options."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(pre.declared_flags("ops/absent.sh", repo=tmp))
+            self.assertEqual(pre.unknown_flags("./ops/absent.sh --anything", repo=tmp), [],
+                             "a script that is not there yields no option finding")
+
+    def test_a_non_shell_file_reports_none_not_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(os.path.join(tmp, "thing.py")).write_text("x = 1\n")
+            self.assertIsNone(pre.declared_flags("thing.py", repo=tmp),
+                              "options are not read from a Python file at all")
 
     def test_unreadable_options_report_none_not_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

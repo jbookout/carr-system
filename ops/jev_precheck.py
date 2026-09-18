@@ -192,7 +192,12 @@ def declared_flags(path, repo=REPO):
     accepting nothing, because that turns "unknown" into a confident refusal.
     """
     source = _read(os.path.join(repo, path))
-    if source is None or not path.endswith((".sh", "")):
+    # An extensionless file is a shell script here by convention, so both are
+    # allowed. Spelling that as endswith((".sh", "")) does NOT work and shipped
+    # in the first version: the empty string is a suffix of everything, so the
+    # guard admitted every file and a Python module was read for shell options.
+    basename = os.path.basename(path)
+    if source is None or not (basename.endswith(".sh") or "." not in basename):
         return None
     flags = set()
     for arm in CASE_ARM.findall(source):
