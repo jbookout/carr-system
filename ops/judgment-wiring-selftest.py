@@ -67,18 +67,32 @@ DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals",
 # the list is meant to shrink.
 DECLARED_INERT: dict[str, str] = {
     "jev_rule_select.py":
-        "Built and measured (0.92 on rule e313a3ca, ~21 requests over 211 "
-        "rules) but deliberately not wired, because the door it wants is "
-        "already occupied: hooks/rule-pack-preuse-reselection.py delivers "
-        "rules every turn from the keyword table ops/config/"
-        "rule-jit-triggers.v1.json. Hanging this off UserPromptSubmit beside "
-        "it would create a SECOND rule-delivery path giving a different answer "
-        "about which rules bind, which is worse than not wiring it at all. Its "
-        "home is inside that path, replacing or backing the keyword detector — "
-        "the real fault there being that 132 of 211 active rules have no "
-        "detector entry and can never reach a session. Loop 620 carries it, "
-        "blocked on Joe ruling replace-versus-fallback, since that changes live "
-        "rule delivery for every session.",
+        "DECIDED 2026-09-18: it REPLACES the keyword table rather than backing "
+        "it up, on Joe's steer that a rule Jev cannot detect should be "
+        "re-engineered rather than kept on a regex crutch. Still listed here "
+        "because the wiring into hooks/rule-pack-preuse-reselection.py is not "
+        "done, and an inert module must stay declared until it has a caller. "
+        "THE EVIDENCE, and it is worth reading before anyone reopens this. "
+        "Three separate times this module read as weaker than the regexes and "
+        "all three were the measuring instrument. The last one: load_rules() "
+        "was feeding the model title_gist, which is a HEADLINE -- median 87 "
+        "characters, all 211 ending without terminal punctuation because a "
+        "title has no sentence to end -- plus `reason`, which is triage "
+        "metadata about where a rule is delivered. The rule's actual statement "
+        "was never sent. Feeding the real text moved the origin-not-HEAD rule "
+        "from 0.39 to 0.96 on a moment its condition covers, and 0.15 on the "
+        "near-miss. Nine rules that a 12-moment sweep called undetectable all "
+        "separated cleanly once given a situation that met their condition "
+        "(positives 0.75-0.95, every negative below the 0.75 floor), including "
+        "two -- end with one next action, and show the shape rather than "
+        "narrating it -- that carry no token a regex could ever match. Across "
+        "211 rules by 12 moments, 2532 judgments in 45 seconds, ZERO rules "
+        "bound to nine or more moments: nothing is over-broad. "
+        "WHAT REMAINS is the wiring itself and the one open question it turns "
+        "on: the selector costs ~1.3s per call (one ranking Choice over the "
+        "roster, then parallel nouls over a shortlist of 20) and its home is "
+        "PreToolUse, which fires on every tool call. That budget, not the "
+        "quality of the judgment, is what the wiring has to answer. Loop 620.",
 }
 
 
