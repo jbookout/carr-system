@@ -8,7 +8,7 @@ import { createDealroomHandler, isDealroomRequest } from "../src/dealroom-web.js
 // answers exactly like Home: redirect when signed out, 404 with the flag off,
 // 200 with a session. Session bootstrap copied from work-inventory-census-web.
 const HOST = "dealroom.doctorcre.com";
-const APP_PAGES = ["/work-inventory", "/tasks", "/business", "/pipeline", "/control-room", "/incidents", "/notifications"];
+const APP_PAGES = ["/work-inventory", "/tasks", "/business", "/pipeline", "/control-room", "/incidents", "/notifications", "/conversations"];
 
 class Kv {
   constructor() { this.values = new Map(); }
