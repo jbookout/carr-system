@@ -150,6 +150,21 @@ KNOWN_HOSTS = (
     # strip the link, which quietly drops the attribution it exists to give.
     "arxiv.org", "anthropic.com", "claude.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
+    # TypeSafe, added 2026-09-17 on Joe's ruling. docs.typesafe.ai is the
+    # documentation host and is a plain research read like the row above it;
+    # api.typesafe.ai is the inference endpoint for Jev, a model that takes text
+    # plus typed questions and returns probabilities rather than written text.
+    # Joe ruled the same day that CARR content INCLUDING CLIENT AND DEAL
+    # MATERIAL may be sent there, overruling this session's reading that
+    # third-party client confidentiality was a floor: his reasoning is that the
+    # practice already sends the same material to several model vendors, so
+    # singling this one out protects nothing. That makes api.typesafe.ai a
+    # CONTENT-BEARING host, unlike every research host listed above it, which is
+    # why it is called out here rather than folded into that line. It is listed
+    # in CODE rather than derived from the record because it is fixed
+    # infrastructure somebody decides once, which is what this half of the list
+    # is reserved for.
+    "docs.typesafe.ai", "api.typesafe.ai",
     # blotato.io: the media-upload backend of the ALREADY-SANCTIONED Blotato
     # connector. Its create-post tool takes public mediaUrls, and the only way
     # to get a local PNG there is the presigned PUT its own tool description
