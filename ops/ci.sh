@@ -1341,6 +1341,21 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # WR-000115: the Doc conversation list door, proved where only a database can
+  # prove it -- the returned SET following the acting-actor context set directly
+  # rather than any argument, the three-part cursor surviving a pin that lands
+  # between page one and page two (the case a two-part cursor fails), and the
+  # execute grant on the exact argument types.
+  if [ -f mcp-server/test/doc-conversation-list-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/doc-conversation-list-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/doc-conversation-list-postgres.sql; then
+      tail -30 "$LOGDIR/doc-conversation-list-postgres.log" >&2
+      bad migration "the Doc conversation list attribution, paging and grant proof failed"
+      return
+    fi
+  fi
+
   # WR-000113: the mint's grant from both sides, the recipient resolver on the
   # WRITER login, the no-sponsor no-op, quiet hours and the status boundary.
   if [ -f mcp-server/test/r03-notifications-postgres.sql ]; then

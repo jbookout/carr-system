@@ -4,7 +4,11 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v31 is the runtime selector because WR-000114 installs the three Doc
+// v32 is the runtime selector because WR-000115 installs the Doc conversation
+// LIST door -- ONE new security-definer ingress and ONE new verb in the
+// already-registered doc-conversation family file.
+//
+// Superseded note (WR-000114): v31 was the selector because it installed the three Doc
 // conversation write doors -- create, share/revoke and rename/pin/archive --
 // as new SECURITY DEFINER ingresses, and the selector must name the sealed
 // version that admits them.
@@ -20,7 +24,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v31.generated.js";
+} from "./scac-mutation-registry.v32.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
