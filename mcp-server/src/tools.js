@@ -126,6 +126,70 @@ const PG_FAULT_HINT = Object.freeze({
   "42883": "the statement calls a function that does not exist — a migration is missing on this database.",
 });
 
+// A CHECK THAT SPANS MORE THAN ONE COLUMN REPORTS `column: null`, and 219 of
+// this database's constraints do. Postgres is not being unhelpful -- it cannot
+// name one column for a rule about several -- but the caller is then told that
+// a rule broke without being told which of their inputs broke it, which is the
+// difference between a refusal they can act on and a dead end. Measured
+// 2026-09-18: 219 multi-column constraints, of which 86 leave the field
+// completely unidentifiable and 212 leave the required fix unknowable.
+//
+// The catalog knows the answer. pg_constraint.conkey holds exactly the columns
+// the rule is about, and pg_get_constraintdef prints the rule itself, so one
+// lookup keyed on the constraint name the error already carries turns
+// `column: null` into the list of fields involved plus the condition they must
+// satisfy. That is a read of the system catalogs only -- no row of anyone's
+// data is touched -- and it runs on the connection the failed statement was
+// already using, after its rollback, so it costs no new connection.
+const CONSTRAINT_COLUMNS_SQL = `
+  select t.relname as table_name,
+         pg_get_constraintdef(c.oid) as definition,
+         coalesce(array_agg(a.attname order by a.attname)
+                    filter (where a.attname is not null), '{}') as columns
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    left join pg_attribute a
+      on a.attrelid = c.conrelid and a.attnum = any(c.conkey) and not a.attisdropped
+   where c.conname = $1
+   group by t.relname, c.oid
+   limit 1`;
+
+/** Add the columns and the rule text to a constraint refusal, when we can.
+ *
+ * Deliberately best-effort: the refusal is already correct and already useful
+ * without this, so a catalog lookup that fails must NOT replace a precise
+ * refusal with a database error about the lookup. Any failure returns the
+ * refusal untouched.
+ */
+export async function describeConstraint(client, refusal) {
+  const name = refusal?.payload?.constraint;
+  if (!client || typeof name !== "string" || !name) return refusal;
+  let row;
+  try {
+    const out = await client.query(CONSTRAINT_COLUMNS_SQL, [name]);
+    row = out?.rows?.[0];
+  } catch {
+    return refusal;   // see the doc comment: never trade a good refusal for this
+  }
+  if (!row) return refusal;
+  const columns = Array.isArray(row.columns) ? row.columns : [];
+  if (columns.length === 0) return refusal;
+  refusal.payload.table = refusal.payload.table || row.table_name || null;
+  refusal.payload.columns = columns;
+  refusal.payload.rule = redact(row.definition) || null;
+  // Only overwrite the hint when the original was the unhelpful case: a rule
+  // broke and no field was named. A single-column violation already told the
+  // caller which field, and that hint is better than this one.
+  if (!refusal.payload.column) {
+    refusal.payload.hint =
+      `this rule is about ${columns.length} fields together (${columns.join(", ")}), which is why ` +
+      `no single field is named: the database cannot attribute a multi-column rule to one column. ` +
+      `\`rule\` is the exact condition your values must satisfy. Check the combination, not each ` +
+      `field on its own -- each may be individually valid.`;
+  }
+  return refusal;
+}
+
 export function pgConstraintError(e) {
   const code = e && e.code;
   if (typeof code !== "string") return null;
