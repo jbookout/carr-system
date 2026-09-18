@@ -1368,6 +1368,19 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # WR-000116: defaults without an insert, the compare-and-swap, the first save,
+  # the replay, the two named refusals and quiet_now across a midnight
+  # wrap-around in a zone the proof's own SQL chooses.
+  if [ -f mcp-server/test/notification-preferences-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/notification-preferences-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/notification-preferences-postgres.sql; then
+      tail -30 "$LOGDIR/notification-preferences-postgres.log" >&2
+      bad migration "the notification preference read, write and quiet-hours proof failed"
+      return
+    fi
+  fi
+
   if [ -f mcp-server/test/foundation-assurance-minimum-postgres.sql ]; then
     if ! run_quiet "$LOGDIR/foundation-assurance-minimum-postgres.log" \
          "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
