@@ -101,6 +101,15 @@ export const REGISTRY_V29_VERSION = "scac-mutation-registry.v29";
 // script entrypoints ops/ci.sh, tools/migrate.py and the completion-evidence gate
 // move with them. One successor carries every reason.
 export const REGISTRY_V30_VERSION = "scac-mutation-registry.v30";
+// v31 seals the WR-000114 Doc conversation write doors. 0523 installs THREE new
+// SECURITY DEFINER ingresses on the WR-000112 store -- ops.create_doc_conversation,
+// ops.share_doc_conversation and ops.rename_doc_conversation -- each granted to
+// carr_writer AND carr_authority, which is six db-function-acl rows. Three new
+// verbs join the ALREADY-REGISTERED doc-conversation family file, so
+// mcp-server/src/tools.js is not edited at all and its mcp-tool rows do not
+// re-digest: only the two sibling rows sourced from doc-conversation.js move
+// with it. The inventoried script entrypoints this branch edits move too.
+export const REGISTRY_V31_VERSION = "scac-mutation-registry.v31";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -171,8 +180,15 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   // 0518 holds this ops.scac_mutation_registry_version row. A number this file
   // derived could drift with this file, which is the whole point of a seal.
   v29: Object.freeze({ version: REGISTRY_V29_VERSION, digest: "sha256:a87638b8780376e147a45994d69b3a3dd9443e72b8f9e21a4ee589ccd2f4ef86", entryCount: 1785, sourceEntryCount: 856 }),
+  // READ FROM THE CLUSTER, for the same reason as every seal above it: a
+  // disposable PostgreSQL built from db/schema.sql holds this
+  // ops.scac_mutation_registry_version row after 0522. A number this file
+  // derived could drift with this file, which is the whole point of a seal.
+  v30: Object.freeze({ version: REGISTRY_V30_VERSION, digest: "sha256:37699037cdfa6521796bef2725c90c39a08134694bd675faefd01e32ac165255", entryCount: 1805, sourceEntryCount: 860 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
+  "migrations/0522_producer_trio_scac_successor.sql": "3e5710d122ce4c703094151ceaa00be69a2e5475d2f2fe7fc26231a3937278af",
+  "mcp-server/src/scac-mutation-registry.v30.generated.js": "12a83b7307125986b6718552d798d24d1c1a59863f2bac43ae415f92cdc73cb7",
   "migrations/0518_program_controller_seams_scac_successor.sql": "1e4aa9acd713ea43393ea8d04a5ef80e0d2cf09b04bfed94b4fac9ba3755240c",
   "mcp-server/src/scac-mutation-registry.v29.generated.js": "6bc77538014526def94d03f5a77b2fc95a792d4a9bcfd439a1445882d5f25242",
   "migrations/0516_deal_field_change_provenance_and_scac_successor.sql": "2e3ff8af70548b6c0b8e384bd766ca90d0e4bee49b5d88efa0afd7e4003f7256",
@@ -730,6 +746,32 @@ export const PRODUCER_TRIO_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 637, digest: "sha256:43ecf3d81de2da204dd63ec34b2fe78f75d15b19c678399c3591caabed72355b" },
 });
 
+// MEASURED on a disposable PostgreSQL loaded from db/schema.sql through 0523,
+// never predicted and never inherited. 0523 adds THREE security definer
+// functions and the catalog counts one row per (function, grantee) pair; all
+// three are granted to carr_writer AND carr_authority, so secdef_execute moves
+// by SIX rather than by three: 637 -> 643. relation_dml, column_dml,
+// role_authority and runtime_dml_grants do not move at all -- 0523 creates no
+// relation, grants no table privilege and grants no column, and a revoke of a
+// privilege nobody held adds no ACL row. Those four zero deltas are
+// measurements that happened to match the prediction, not predictions kept.
+export const DOC_CONVERSATION_WRITE_DOORS_PRE_V31_DB_CATALOG_BASELINE = Object.freeze({
+  ...PRODUCER_TRIO_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v30",
+  secdef_execute: { count: 643, digest: "sha256:2ed73c7b169b3242fb2b4a1c4cd85fbf19f3c51354215ef78966e5eabf06a407" },
+});
+
+// The v31 successor installs ONE registration function granted to FOUR roles,
+// which is its whole catalog delta: the seal and catalog functions it also
+// installs are in the mass revoke and carry an owner-only ACL, which the
+// projection excludes. Blessed only from disposable PostgreSQL after the
+// generated migration is loaded.
+export const DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...DOC_CONVERSATION_WRITE_DOORS_PRE_V31_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v31",
+  secdef_execute: { count: 647, digest: "sha256:d7e028711dd3ee62eacea66b34606b126032f00a29c9bca9c7cb35f78db82660" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -814,7 +856,7 @@ select v.registry_version,
   const output = execFileSync("psql", [dsn, "-X", "-A", "-t", "-F", "\t",
     "-v", "ON_ERROR_STOP=1", "-c", sql], { encoding: "utf8" });
   const rows = output.trim().split("\n").filter(Boolean).map(line => line.split("\t"));
-  const currentVersion = Number(REGISTRY_V30_VERSION.split(".v").at(-1));
+  const currentVersion = Number(REGISTRY_V31_VERSION.split(".v").at(-1));
   const expectedVersions = Array.from({ length: currentVersion }, (_, index) =>
     `scac-mutation-registry.v${index + 1}`);
   if (rows.length !== expectedVersions.length ||
@@ -1406,6 +1448,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V28_VERSION]: "v28",
   [REGISTRY_V29_VERSION]: "v29",
   [REGISTRY_V30_VERSION]: "v30",
+  [REGISTRY_V31_VERSION]: "v31",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1461,7 +1504,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V30_VERSION) {
+  version = REGISTRY_V31_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1522,7 +1565,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V23_VERSION, REGISTRY_V24_VERSION,
     REGISTRY_V25_VERSION, REGISTRY_V26_VERSION, REGISTRY_V27_VERSION,
     REGISTRY_V28_VERSION, REGISTRY_V29_VERSION,
-    REGISTRY_V30_VERSION].includes(version))
+    REGISTRY_V30_VERSION, REGISTRY_V31_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -10360,6 +10403,296 @@ export const renderProducerTrioForwardRegistrySql =
     frozenInventory(REGISTRY_V30_VERSION),
     PRODUCER_TRIO_FORWARD_DB_CATALOG_BASELINE));
 
+const DOC_CONVERSATION_WRITE_DOORS_V30_MIGRATION_PATH =
+  "migrations/0522_producer_trio_scac_successor.sql";
+const DOC_CONVERSATION_WRITE_DOORS_V30_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v30.generated.js";
+// ONE domain migration rides this successor inside ONE reviewed atomic group:
+// 0523, the three Doc conversation write doors. Its predecessor 0520 is pinned
+// inside 0523 itself, so the chain 0520 -> 0523 -> 0524 is closed without this
+// file naming 0520 a second time. The one hash below is asserted again, against
+// the ledger, in the generated migration's own preflight.
+const DOC_CONVERSATION_WRITE_DOORS_DOMAIN_MIGRATION_SHA256 = Object.freeze({
+  "migrations/0523_doc_conversation_write_doors.sql":
+    "cc53998cf7350fccaae6d8389ec1ab6999a71192f97320aca2a33465a7f02b26",
+});
+
+function assertDocConversationWriteDoorsV31TrustRootFrozen() {
+  const { v30: seal } = HISTORICAL_REGISTRY_SEALS;
+  if (seal?.version !== REGISTRY_V30_VERSION ||
+      !/^sha256:[0-9a-f]{64}$/.test(seal?.digest ?? "") ||
+      seal.entryCount !== 1805 || seal.sourceEntryCount !== 860)
+    throw new Error("doc conversation write doors v31 predecessor seal is unbound");
+  assertFoundationAssuranceCatalogBaseline("predecessor v31",
+    DOC_CONVERSATION_WRITE_DOORS_PRE_V31_DB_CATALOG_BASELINE,
+    "scac-db-catalog-projection.v30");
+  assertFoundationAssuranceCatalogBaseline("successor v31",
+    DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE,
+    "scac-db-catalog-projection.v31");
+  for (const path of [DOC_CONVERSATION_WRITE_DOORS_V30_MIGRATION_PATH,
+    DOC_CONVERSATION_WRITE_DOORS_V30_RUNTIME_PATH])
+    if (!FOUNDATION_ASSURANCE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`doc conversation write doors v31 predecessor artifact pin is unbound: ${path}`);
+}
+
+function renderDocConversationWriteDoorsRegistrySqlFrozen(rows,
+  dbCatalogBaseline = DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v30 artifact
+  // hashes are fixed production constants, asserted by the shared v31 trust
+  // root that every v31 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertDocConversationWriteDoorsV31TrustRootFrozen();
+  const { v30: v30Seal } = HISTORICAL_REGISTRY_SEALS;
+  const sealedPredecessorBaseline = PRODUCER_TRIO_FORWARD_DB_CATALOG_BASELINE;
+  const predecessorDbCatalogBaseline = DOC_CONVERSATION_WRITE_DOORS_PRE_V31_DB_CATALOG_BASELINE;
+  const artifactShaRe = FOUNDATION_ASSURANCE_ARTIFACT_SHA_RE;
+  assertFoundationAssuranceCatalogBaseline("successor v31", dbCatalogBaseline,
+    "scac-db-catalog-projection.v31");
+
+  const v31Digest = registryDigestFor(REGISTRY_V31_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v30MigrationPath = DOC_CONVERSATION_WRITE_DOORS_V30_MIGRATION_PATH;
+  const v30RuntimePath = DOC_CONVERSATION_WRITE_DOORS_V30_RUNTIME_PATH;
+  const v30Rows = frozenInventory(REGISTRY_V30_VERSION);
+  const v30Migration = predecessorArtifacts?.migration ??
+    readFileSync(resolve(REPO_ROOT, v30MigrationPath), "utf8");
+  const v30Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v30Rows, {
+    version: REGISTRY_V30_VERSION,
+    dbCatalogBaseline: sealedPredecessorBaseline,
+  });
+  for (const [path, source] of [
+    [v30MigrationPath, v30Migration], [v30RuntimePath, v30Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`doc conversation write doors v31 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v30 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v30 after the WR-000111/112/113 producer trio.";
+  const coreStart = v30Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v30Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v30 migration has no exact successor core boundary");
+  const v30Core = v30Migration.slice(coreStart);
+  const currentV30Marker = "create or replace function ops.scac_mutation_catalog_v30_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v29;";
+  const currentV30Start = v30Core.indexOf(currentV30Marker);
+  const secondCurrentV30 = v30Core.indexOf(
+    currentV30Marker, currentV30Start + currentV30Marker.length);
+  const v30PredecessorHistoryMarker =
+    "alter function ops.scac_mutation_catalog_v29_current() rename to scac_mutation_catalog_v29_live_at_seal;";
+  const v30PredecessorHistoryStart = v30Core.indexOf(v30PredecessorHistoryMarker);
+  const secondPredecessorHistory = v30Core.indexOf(
+    v30PredecessorHistoryMarker, v30PredecessorHistoryStart + v30PredecessorHistoryMarker.length);
+  const policyStart = v30Core.indexOf(policyMarker);
+  const secondPolicy = v30Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v30PredecessorHistoryStart < 0 || secondPredecessorHistory >= 0 || currentV30Start <= v30PredecessorHistoryStart ||
+      secondCurrentV30 >= 0 || policyStart <= currentV30Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v30 migration has no exact catalog successor boundary");
+  const installedV29History = v30Core.slice(v30PredecessorHistoryStart, currentV30Start);
+  const v30Current = v30Core.slice(currentV30Start, policyStart);
+  const v30History =
+`alter function ops.scac_mutation_catalog_v30_current() rename to scac_mutation_catalog_v30_live_at_seal;
+create or replace function ops.scac_mutation_registry_v30_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v30')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v30_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v30_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v30_seal_available() is 'Exact immutable v30 registry seal; separate from whether the live catalog still equals v30.';
+comment on function ops.scac_mutation_catalog_v30_current() is 'Historical v30 live-catalog validator; expected to become false after the v31 authority surface is installed.';
+
+`;
+  const renderV31Current = baseline => {
+    let current = v30Current
+      .replaceAll("scac_mutation_catalog_v30_current", "scac_mutation_catalog_v31_current")
+      .replaceAll("scac-mutation-registry.v30", "scac-mutation-registry.v31");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${sealedPredecessorBaseline[category].count} or observed_digest<>'${sealedPredecessorBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `Doc conversation write doors v31 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${sealedPredecessorBaseline.role_authority.count} and observed_digest='${sealedPredecessorBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Doc conversation write doors v31 role-authority baseline");
+  };
+  const v31Current = renderV31Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v30Core, v30Current,
+    "__DOC_CONVERSATION_WRITE_DOORS_V30_CATALOG_SUCCESSOR__",
+    "Doc conversation write doors v30 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV29History, "",
+    "Doc conversation write doors already-installed v29 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v31 after the WR-000114 Doc conversation write doors.",
+    "Doc conversation write doors migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v30", "scac-mutation-registry.v31")
+    .replaceAll("_v30", "_v31")
+    .replaceAll(" v30", " v31");
+  sql = replaceExactlyOnce(sql, JSON.stringify(sealedPredecessorBaseline),
+    JSON.stringify(dbCatalogBaseline), "Doc conversation write doors v31 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v30Seal.digest}',${v30Seal.entryCount},${v30Seal.sourceEntryCount},`,
+    `'sha256:${v31Digest}',${entryCount},${rows.length},`,
+    "Doc conversation write doors v31 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v31('${v30Seal.digest}',`,
+    `ops.scac_mutation_registration_v31('sha256:${v31Digest}',`,
+    "Doc conversation write doors v31 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v29;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v30;",
+    "Doc conversation write doors policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__DOC_CONVERSATION_WRITE_DOORS_V30_CATALOG_SUCCESSOR__",
+    `${v30History}${v31Current}`, "Doc conversation write doors v30 catalog history insertion");
+
+  const versionsThrough30 = Array.from({ length: 30 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough29 = Array.from({ length: 29 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough29},'scac-mutation-registry.v31'))`,
+    `check (registry_version in (${versionsThrough30},'scac-mutation-registry.v31'))`,
+    "Doc conversation write doors registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough29}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough30}) then return false; end if;`,
+    "Doc conversation write doors historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v29' then '${HISTORICAL_REGISTRY_SEALS.v29.digest}' end;`,
+    `    when 'scac-mutation-registry.v29' then '${HISTORICAL_REGISTRY_SEALS.v29.digest}'\n    when '${v30Seal.version}' then '${v30Seal.digest}' end;`,
+    "Doc conversation write doors historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v29' then '${JSON.stringify(PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v29' then '${JSON.stringify(PROGRAM_CONTROLLER_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v30Seal.version}' then '${JSON.stringify(sealedPredecessorBaseline)}'::jsonb end;`,
+    "Doc conversation write doors historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v29','${HISTORICAL_REGISTRY_SEALS.v29.digest}',${HISTORICAL_REGISTRY_SEALS.v29.entryCount},${HISTORICAL_REGISTRY_SEALS.v29.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v29','${HISTORICAL_REGISTRY_SEALS.v29.digest}',${HISTORICAL_REGISTRY_SEALS.v29.entryCount},${HISTORICAL_REGISTRY_SEALS.v29.sourceEntryCount}),\n    ('${v30Seal.version}','${v30Seal.digest}',${v30Seal.entryCount},${v30Seal.sourceEntryCount})\n`,
+    "Doc conversation write doors historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v29_seal_available()) then",
+    "    ops.scac_mutation_registry_v29_seal_available() and\n    ops.scac_mutation_registry_v30_seal_available()) then",
+    "Doc conversation write doors snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v31' and r.registry_digest='${v30Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v30' and r.registry_digest='${v30Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v31' and r.registry_digest='sha256:${v31Digest}')`,
+    "Doc conversation write doors epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v31' and registry_digest='${v30Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v30' and registry_digest='${v30Seal.digest}') or\n  (registry_version='scac-mutation-registry.v31' and registry_digest='sha256:${v31Digest}')`,
+    "Doc conversation write doors epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v30Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v31Digest}'::text)`,
+    "Doc conversation write doors snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v29_seal_available(),ops.scac_mutation_catalog_v31_current()",
+    "ops.scac_mutation_registry_v29_seal_available(),ops.scac_mutation_catalog_v30_live_at_seal(),ops.scac_mutation_catalog_v30_current(),ops.scac_mutation_registry_v30_seal_available(),ops.scac_mutation_catalog_v31_current()",
+    "Doc conversation write doors historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Producer trio successor snapshot: current policy epochs bind mutation registry v31 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24/v25/v26/v27/v28/v29 epochs remain immutable.",
+    "Doc conversation write doors successor snapshot: current policy epochs bind mutation registry v31 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23/v24/v25/v26/v27/v28/v29/v30 epochs remain immutable.",
+    "Doc conversation write doors policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v31')<>${v30Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v31')<>${entryCount}`,
+    "Doc conversation write doors v31 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v29')<>'${HISTORICAL_REGISTRY_SEALS.v29.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v29')<>${HISTORICAL_REGISTRY_SEALS.v29.entryCount} then raise exception 'sealed SCAC mutation registry v29 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='${v30Seal.version}')<>'${v30Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='${v30Seal.version}')<>${v30Seal.entryCount} then raise exception 'sealed SCAC mutation registry v30 changed during successor creation'; end if;`,
+    "Doc conversation write doors predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot_v28(),ops.scac_policy_epoch_snapshot_v29(),",
+    "ops.scac_policy_epoch_snapshot_v28(),ops.scac_policy_epoch_snapshot_v29(),ops.scac_policy_epoch_snapshot_v30(),",
+    "Doc conversation write doors historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v30 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV31Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v31 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Doc conversation write doors pre-v31 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'Doc conversation write doors pre-v31 role-authority receipt drifted'; end if;`,
+    "Doc conversation write doors pre-v31 role receipt");
+  // FOUR artifact pins, because THREE domain migrations precede this successor:
+  // the predecessor registry migration (0518, pinned above) and 0519, 0520 and
+  // 0521 themselves, whose authority surfaces this successor is sealing.
+  for (const [path, expected] of Object.entries(DOC_CONVERSATION_WRITE_DOORS_DOMAIN_MIGRATION_SHA256)) {
+    const observed = sha256(readFileSync(resolve(REPO_ROOT, path), "utf8"));
+    if (observed !== expected)
+      throw new Error(`doc conversation write doors domain migration changed: ${path}: ${observed}`);
+  }
+  const domainLedgerReceipts = Object.entries(DOC_CONVERSATION_WRITE_DOORS_DOMAIN_MIGRATION_SHA256)
+    .map(([path, expected]) => {
+      const filename = path.slice("migrations/".length);
+      return `  if (select count(*) from public.schema_migrations where filename='${filename}')<>1
+     or not exists(select 1 from public.schema_migrations where filename='${filename}'
+       and sha256='${expected}') then
+    raise exception 'Doc conversation write doors pre-v31 migration ledger receipt drifted';
+  end if;
+`;
+    }).join("");
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0523 receipt. Refuse before any v31 function
+-- exists. Like the v30 successor before it this one follows a DOMAIN migration
+-- in the same reviewed atomic group -- ONE of them -- so the receipt below is
+-- measured AFTER 0523 has installed its three write-door authority surfaces.
+do $doc_conversation_write_doors_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+${domainLedgerReceipts}  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'Doc conversation write doors pre-v31 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $doc_conversation_write_doors_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+export const assertDocConversationWriteDoorsV31TrustRoot =
+  closedExport(() => assertDocConversationWriteDoorsV31TrustRootFrozen());
+export const renderDocConversationWriteDoorsForwardRegistrySql =
+  closedExport(() => renderDocConversationWriteDoorsRegistrySqlFrozen(
+    frozenInventory(REGISTRY_V31_VERSION),
+    DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE));
+
 
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
@@ -10736,9 +11069,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v29.generated.js"],
       });
 
+  const v31Rows = frozenInventory(REGISTRY_V31_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v31.generated.js"] =
+    renderRuntimeProjection(v31Rows, {
+      version: REGISTRY_V31_VERSION,
+      dbCatalogBaseline: DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0524_doc_conversation_write_doors_scac_successor.sql"] =
+    renderDocConversationWriteDoorsRegistrySqlFrozen(v31Rows,
+      DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0522_producer_trio_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v30.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 38 || runtimeCount !== 29 || Object.keys(artifacts).length !== 67)
+  if (migrationCount !== 39 || runtimeCount !== 30 || Object.keys(artifacts).length !== 69)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -11279,9 +11625,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       "migrations/0522_producer_trio_scac_successor.sql");
     await writeFile(target, renderProducerTrioForwardRegistrySql());
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v31") {
+    assertDocConversationWriteDoorsV31TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v31.generated.js");
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V31_VERSION), {
+      version: REGISTRY_V31_VERSION,
+      dbCatalogBaseline: DOC_CONVERSATION_WRITE_DOORS_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-doc-conversation-write-doors-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0524_doc_conversation_write_doors_scac_successor.sql");
+    await writeFile(target, renderDocConversationWriteDoorsForwardRegistrySql());
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V30_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V31_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

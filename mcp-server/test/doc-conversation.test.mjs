@@ -329,3 +329,380 @@ test("DOC-PRIVATE-INVISIBLE: a granted actor sees it, and a REVOKED grant takes 
     verbs["read-doc-conversation"].handler(c, { id: guest.id }, { conversation_id: conversation.id }),
     error => error.error === "doc_conversation_not_found");
 });
+
+// ---------------------------------------------------------------------------
+// WR-000114 — the three write doors.
+// ---------------------------------------------------------------------------
+
+const WRITE_DOORS = ["create-doc-conversation", "share-doc-conversation",
+  "rename-doc-conversation"];
+
+test("DOC-APP-CALLABLE: none of the three is authorityOnly, and each is a write on the writer connection",
+  () => {
+    for (const name of WRITE_DOORS) {
+      assert.ok(TOOLS[name], `${name} is not registered`);
+      assert.equal(TOOLS[name].write, true, `${name} must declare write`);
+      assert.equal(TOOLS[name].writerConnection, true,
+        `${name} reaches its function on carr_writer, which is the writer connection`);
+      // mcp.js:616-618 refuses an authority-only call before any grant is
+      // consulted, and the app holds no authority binding. Copying the
+      // append's authorityOnly would fail HERE rather than at release time.
+      assert.equal(TOOLS[name].authorityOnly, undefined,
+        `${name} must not be authorityOnly: the app calls it as the signed-in partner`);
+    }
+    // Widening an unattended profile is a separate ruling.
+    for (const profile of ["capture", "away"]) {
+      for (const name of WRITE_DOORS) {
+        assert.ok(!PROFILES[profile].has(name), `${name} must not be in the ${profile} profile`);
+      }
+    }
+  });
+
+test("DOC-ATTRIBUTION-SERVER-SIDE: no write-door schema can name an actor, a grantor or a moment",
+  () => {
+    for (const name of WRITE_DOORS) {
+      const schema = TOOLS[name].inputSchema;
+      assert.equal(schema.additionalProperties, false, `${name} accepts undeclared arguments`);
+      for (const forbidden of ["created_by", "creator", "granted_by", "granted_by_actor",
+        "grantee_actor", "actor", "acting_actor", "acting_actor_slug", "at", "granted_at",
+        "created_at", "updated_at", "version"]) {
+        assert.ok(!Object.hasOwn(schema.properties, forbidden),
+          `${name} lets a caller name ${forbidden}`);
+      }
+    }
+    // base_version is the caller's OWN read-back version, which is the one
+    // version-shaped argument a compare-and-swap requires.
+    assert.deepEqual(Object.keys(TOOLS["create-doc-conversation"].inputSchema.properties).sort(),
+      ["idempotency_key", "title", "visibility"]);
+    assert.deepEqual(Object.keys(TOOLS["share-doc-conversation"].inputSchema.properties).sort(),
+      ["conversation_id", "granted", "grantee_slug", "idempotency_key"]);
+    assert.deepEqual(Object.keys(TOOLS["rename-doc-conversation"].inputSchema.properties).sort(),
+      ["archived", "base_version", "conversation_id", "idempotency_key", "pinned", "title"]);
+  });
+
+test("DOC-CREATE-READBACK: a created conversation reads back byte-identical, and a replayed key is one row",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const client = await connect(pg, "wr112-author");
+    t.after(() => client.end().catch(() => {}));
+    const c = { query: (text, values = []) => client.query(text, values) };
+    const { author } = await actors(client);
+    const verbs = docConversationTools({ ...harness(), ToolError });
+    const actor = { id: author.id, slug: "wr112-author" };
+
+    // Punctuation and a non-ASCII character, so a shaper that normalised or
+    // trimmed would be caught by an EQUALITY assertion rather than a substring.
+    const title = "Q4 review — Dr. Reyes' suite, 1,200 sq ft";
+    const key = randomUUID();
+    const created = await verbs["create-doc-conversation"].handler(c, actor,
+      { idempotency_key: key, title, visibility: "private" });
+    assert.equal(created.ok, true);
+    assert.equal(created.deduplicated, false);
+    assert.equal(created.conversation_id, key, "the row id IS the idempotency key");
+
+    const read = await verbs["read-doc-conversation"].handler(c, actor,
+      { conversation_id: key });
+    assert.equal(read.identity.title, title, "the title reads back byte-identical");
+    assert.equal(read.identity.visibility, "private");
+    assert.equal(read.identity.created_by, author.id,
+      "the creator is the derived actor, not anything a caller could name");
+
+    // THE ENVELOPE IS DELIBERATELY BYPASSED: a FRESH harness, so the store path
+    // really runs a second time. An implementation that minted a fresh uuid per
+    // call and leaned on the envelope for idempotency stores a SECOND row here.
+    const fresh = docConversationTools({ ...harness(), ToolError });
+    const replay = await fresh["create-doc-conversation"].handler(c, actor,
+      { idempotency_key: key, title, visibility: "private" });
+    assert.equal(replay.deduplicated, true, "the replay reached the store and deduplicated there");
+    assert.equal(replay.conversation_id, key, "the replay returned the same identifier");
+    const rows = Number((await client.query(
+      "select count(*) from ops.doc_conversation where id = $1", [key])).rows[0].count);
+    assert.equal(rows, 1, "one replayed key, one STORED row");
+  });
+
+test("DOC-SHARE-TOGGLE: a grant appears in the grantee's read AND count, a revoke removes it from both, and a non-creator cannot do either",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const client = await connect(pg, "wr112-author");
+    t.after(() => client.end().catch(() => {}));
+    const c = { query: (text, values = []) => client.query(text, values) };
+    const { author, guest } = await actors(client);
+    const verbs = docConversationTools({ ...harness(), ToolError });
+    const actor = { id: author.id, slug: "wr112-author" };
+    const key = randomUUID();
+    await verbs["create-doc-conversation"].handler(c, actor,
+      { idempotency_key: key, title: "shared then withdrawn" });
+
+    // The grantee's OWN conversation, so the guest always has one to count
+    // against -- the count assertion must not depend on the shared row alone.
+    const guestOwn = randomUUID();
+    await client.query(
+      "insert into ops.doc_conversation(id, title, created_by_actor) values ($1,$2,$3)",
+      [guestOwn, "the guest's own", guest.id]);
+    const guestCount = async () => (await verbs["read-doc-conversation"].handler(
+      c, { id: guest.id }, { conversation_id: guestOwn })).visible_conversation_count;
+    const before = await guestCount();
+
+    await verbs["share-doc-conversation"].handler(c, actor,
+      { idempotency_key: randomUUID(), conversation_id: key,
+        grantee_slug: "wr112-guest", granted: true });
+    const granted = await verbs["read-doc-conversation"].handler(c, { id: guest.id },
+      { conversation_id: key });
+    assert.equal(granted.identity.id, key, "the grantee's read returns it");
+    assert.equal(await guestCount(), before + 1,
+      "the COUNT rose by exactly one -- a count computed outside the access-list join would not");
+
+    await verbs["share-doc-conversation"].handler(c, actor,
+      { idempotency_key: randomUUID(), conversation_id: key,
+        grantee_slug: "wr112-guest", granted: false });
+    await assert.rejects(
+      verbs["read-doc-conversation"].handler(c, { id: guest.id }, { conversation_id: key }),
+      error => error.error === "doc_conversation_not_found");
+    assert.equal(await guestCount(), before, "and the count dropped back");
+
+    // THE ROW SURVIVES THE REVOKE, stamped rather than deleted, with its
+    // grantor and its moment intact. Deletion could not assert this at all.
+    const stamped = (await client.query(
+      `select granted_by_actor, granted_at, revoked_at from ops.doc_conversation_grant
+        where conversation_id = $1 and grantee_actor = $2`, [key, guest.id])).rows;
+    assert.equal(stamped.length, 1, "the revoke stamped the row rather than deleting it");
+    assert.equal(stamped[0].granted_by_actor, author.id, "the grantor survives for the audit");
+    assert.ok(stamped[0].revoked_at instanceof Date, "and the withdrawal is stamped");
+
+    // A NON-CREATOR is refused, for the grant and for the withdrawal alike.
+    const asGuest = await connect(pg, "wr112-guest");
+    t.after(() => asGuest.end().catch(() => {}));
+    const g = { query: (text, values = []) => asGuest.query(text, values) };
+    await verbs["share-doc-conversation"].handler(c, actor,
+      { idempotency_key: randomUUID(), conversation_id: key,
+        grantee_slug: "wr112-guest", granted: true });
+    for (const granting of [true, false]) {
+      await assert.rejects(
+        verbs["share-doc-conversation"].handler(g, { id: guest.id, slug: "wr112-guest" },
+          { idempotency_key: randomUUID(), conversation_id: key,
+            grantee_slug: "wr112-guest", granted: granting }),
+        error => error.error === "doc_conversation_creator_only",
+        `a non-creator ${granting ? "grant" : "revoke"} must be refused by name`);
+    }
+
+    // A GRANT WIDENS NOTHING BUT THIS CONVERSATION, asserted NEGATIVELY against
+    // the functions' own statements: there is no join from the grant table to
+    // any source record. public.actor is the one non-conversation relation
+    // either function names, and it is a slug lookup, not a record.
+    const bodies = (await client.query(
+      `select pg_get_functiondef(p.oid) body from pg_proc p join pg_namespace n
+         on n.oid = p.pronamespace where n.nspname='ops'
+        and p.proname in ('share_doc_conversation','rename_doc_conversation')`)).rows;
+    assert.equal(bodies.length, 2);
+    for (const { body } of bodies) {
+      // The CREATE header names the function itself; the BODY is what reaches
+      // relations, so the header line is dropped before the scan.
+      const statements = body.slice(body.indexOf("$function$"));
+      for (const match of statements.matchAll(/\bops\.([a-z_]+)/g)) {
+        assert.ok(["doc_conversation", "doc_conversation_grant", "doc_conversation_turn",
+          "doc_conversation_title_revision", "portfolio_writer_actor_id"].includes(match[1]),
+          `a write door reaches ops.${match[1]}, outside the Doc conversation store`);
+      }
+      for (const match of statements.matchAll(/\bpublic\.([a-z_]+)/g)) {
+        assert.equal(match[1], "actor",
+          `a write door reaches public.${match[1]}; only the actor slug lookup is allowed`);
+      }
+    }
+  });
+
+test("DOC-RENAME-RETAINS: the title moves, the prior title is retained, every turn is byte-identical, and a stale version is refused",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const client = await connect(pg, "wr112-author");
+    t.after(() => client.end().catch(() => {}));
+    const c = { query: (text, values = []) => client.query(text, values) };
+    const { author } = await actors(client);
+    const verbs = docConversationTools({ ...harness(), ToolError });
+    const actor = { id: author.id, slug: "wr112-author" };
+    const key = randomUUID();
+    const created = await verbs["create-doc-conversation"].handler(c, actor,
+      { idempotency_key: key, title: "before the rename" });
+
+    for (const body of ["turn one", "turn two"]) {
+      await client.query(
+        `insert into ops.doc_conversation_turn(conversation_id, sequence, role, body, msg_id, origin_actor)
+         select $1, coalesce((select max(sequence)+1 from ops.doc_conversation_turn where conversation_id=$1),0),
+                'human', $2, $3, 'wr112-author'`, [key, body, randomUUID()]);
+    }
+    const before = (await client.query(
+      "select sequence, msg_id, body from ops.doc_conversation_turn where conversation_id=$1 order by sequence",
+      [key])).rows;
+
+    const renamed = await verbs["rename-doc-conversation"].handler(c, actor,
+      { idempotency_key: randomUUID(), conversation_id: key,
+        base_version: created.version, title: "after the rename" });
+    assert.equal(renamed.title, "after the rename");
+    assert.equal(renamed.version, created.version + 1, "the version rose by exactly one");
+
+    const revisions = (await client.query(
+      "select title from ops.doc_conversation_title_revision where conversation_id=$1", [key])).rows;
+    assert.deepEqual(revisions.map(row => row.title), ["before the rename"],
+      "exactly one revision, carrying the PRIOR title");
+    const after = (await client.query(
+      "select sequence, msg_id, body from ops.doc_conversation_turn where conversation_id=$1 order by sequence",
+      [key])).rows;
+    assert.deepEqual(after, before, "every turn's order, identifier and body is byte-identical");
+
+    // THE NOW-STALE base version. The refusal must append NOTHING: the revision
+    // table is immutable, so an orphan could never be cleaned up.
+    await assert.rejects(
+      verbs["rename-doc-conversation"].handler(c, actor,
+        { idempotency_key: randomUUID(), conversation_id: key,
+          base_version: created.version, title: "a third title" }),
+      error => error.error === "version_conflict");
+    const stillOne = (await client.query(
+      "select count(*) from ops.doc_conversation_title_revision where conversation_id=$1",
+      [key])).rows[0].count;
+    assert.equal(Number(stillOne), 1,
+      "a REFUSED rename appended no revision -- the step-2 version guard holds");
+  });
+
+// ---------------------------------------------------------------------------
+// WR-000114 review B1: pin, unpin, archive and unarchive, each under its OWN
+// named case. The rename case above no longer carries them even by implication
+// -- a flag that moved a field it does not own has to go red HERE, in the case
+// that names the act, and nowhere else.
+//
+// Each case asserts four things: the intended flag moved, the version rose by
+// exactly one, the OTHER flag and the title and every turn are byte-identical,
+// and a stale base version is refused without moving anything.
+// ---------------------------------------------------------------------------
+
+/** A conversation owned by wr112-author, carrying two turns, ready to flag. */
+async function flagFixture(t, pg, title = "the flag fixture") {
+  const client = await connect(pg, "wr112-author");
+  t.after(() => client.end().catch(() => {}));
+  const c = { query: (text, values = []) => client.query(text, values) };
+  const { author } = await actors(client);
+  const verbs = docConversationTools({ ...harness(), ToolError });
+  const actor = { id: author.id, slug: "wr112-author" };
+  const key = randomUUID();
+  const created = await verbs["create-doc-conversation"].handler(c, actor,
+    { idempotency_key: key, title });
+  for (const body of ["turn one", "turn two"]) {
+    await client.query(
+      `insert into ops.doc_conversation_turn(conversation_id, sequence, role, body, msg_id, origin_actor)
+       select $1, coalesce((select max(sequence)+1 from ops.doc_conversation_turn where conversation_id=$1),0),
+              'human', $2, $3, 'wr112-author'`, [key, body, randomUUID()]);
+  }
+  return { client, c, verbs, actor, key, version: created.version, title };
+}
+
+/** The stamps and the title, read straight out of the row. */
+async function flagRow(client, key) {
+  return (await client.query(
+    "select title, version, pinned_at, archived_at from ops.doc_conversation where id=$1",
+    [key])).rows[0];
+}
+
+async function turnsOf(client, key) {
+  return (await client.query(
+    "select sequence, msg_id, body from ops.doc_conversation_turn where conversation_id=$1 order by sequence",
+    [key])).rows;
+}
+
+/** Set one flag as a setup step, returning the new version. */
+async function setFlag(fixture, version, args) {
+  const result = await fixture.verbs["rename-doc-conversation"].handler(fixture.c, fixture.actor,
+    { idempotency_key: randomUUID(), conversation_id: fixture.key, base_version: version, ...args });
+  assert.equal(result.ok ?? true, true);
+  return result.version;
+}
+
+/**
+ * The shared body of all four cases. `act` is the flag write under test, and
+ * `expect` is what must be true of the row afterwards; everything NOT named in
+ * `act` is compared against the row as it stood before the act.
+ */
+async function provesOneFlag(t, pg, name, { setup = [], act, expect }) {
+  const fixture = await flagFixture(t, pg, `${name} fixture`);
+  const { client, c, verbs, actor, key } = fixture;
+  let version = fixture.version;
+  for (const step of setup) version = await setFlag(fixture, version, step);
+
+  const before = await flagRow(client, key);
+  const turnsBefore = await turnsOf(client, key);
+  assert.equal(before.version, version);
+
+  const moved = await verbs["rename-doc-conversation"].handler(c, actor,
+    { idempotency_key: randomUUID(), conversation_id: key, base_version: version, ...act });
+  const after = await flagRow(client, key);
+
+  // 1. The intended flag moved, in the direction asked for.
+  assert.equal(moved.pinned, expect.pinned, `${name}: the pinned flag is wrong`);
+  assert.equal(moved.archived, expect.archived, `${name}: the archived flag is wrong`);
+  assert.equal(after.pinned_at !== null, expect.pinned, `${name}: pinned_at disagrees with the answer`);
+  assert.equal(after.archived_at !== null, expect.archived, `${name}: archived_at disagrees with the answer`);
+  assert.equal(expect.moves === "pinned_at"
+    ? after.pinned_at?.getTime() !== before.pinned_at?.getTime()
+    : after.archived_at?.getTime() !== before.archived_at?.getTime(),
+    true, `${name}: ${expect.moves} did not move at all`);
+
+  // 2. The version rose by exactly one.
+  assert.equal(moved.version, before.version + 1, `${name}: the version did not rise by exactly one`);
+  assert.equal(after.version, before.version + 1);
+
+  // 3. The OTHER flag, the title and every turn are byte-identical.
+  const other = expect.moves === "pinned_at" ? "archived_at" : "pinned_at";
+  assert.deepEqual(after[other], before[other],
+    `${name}: ${other} moved, and this act does not own it`);
+  assert.equal(after.title, before.title, `${name}: the title moved`);
+  assert.equal(moved.title, before.title);
+  assert.deepEqual(await turnsOf(client, key), turnsBefore, `${name}: a turn moved`);
+  assert.equal(Number((await client.query(
+    "select count(*) from ops.doc_conversation_title_revision where conversation_id=$1",
+    [key])).rows[0].count), 0, `${name}: a flag write appended a title revision`);
+
+  // 4. A stale base version is refused, and moves nothing.
+  await assert.rejects(
+    verbs["rename-doc-conversation"].handler(c, actor,
+      { idempotency_key: randomUUID(), conversation_id: key, base_version: before.version, ...act }),
+    error => error.error === "version_conflict",
+    `${name}: a stale base version was not refused`);
+  assert.deepEqual(await flagRow(client, key), after,
+    `${name}: a REFUSED flag write moved the row`);
+}
+
+test("DOC-PIN-ONLY: a pin sets pinned_at, raises the version by one, and moves neither the archive flag nor the title",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    await provesOneFlag(t, pg, "DOC-PIN-ONLY",
+      { act: { pinned: true }, expect: { pinned: true, archived: false, moves: "pinned_at" } });
+  });
+
+test("DOC-UNPIN-ONLY: an unpin clears pinned_at and leaves an ARCHIVED conversation archived",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    // Archived first, so an unpin that reached archived_at instead of its own
+    // field could not hide behind a null.
+    await provesOneFlag(t, pg, "DOC-UNPIN-ONLY",
+      { setup: [{ pinned: true }, { archived: true }],
+        act: { pinned: false }, expect: { pinned: false, archived: true, moves: "pinned_at" } });
+  });
+
+test("DOC-ARCHIVE-ONLY: an archive sets archived_at, raises the version by one, and moves neither the pin flag nor the title",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    await provesOneFlag(t, pg, "DOC-ARCHIVE-ONLY",
+      { act: { archived: true }, expect: { pinned: false, archived: true, moves: "archived_at" } });
+  });
+
+test("DOC-UNARCHIVE-ONLY: an unarchive clears archived_at and leaves a PINNED conversation pinned",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    await provesOneFlag(t, pg, "DOC-UNARCHIVE-ONLY",
+      { setup: [{ pinned: true }, { archived: true }],
+        act: { archived: false }, expect: { pinned: true, archived: false, moves: "archived_at" } });
+  });

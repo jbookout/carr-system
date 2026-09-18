@@ -28,5 +28,6 @@
   "scac-mutation-registry.v27": "sha256:ff614aafa8d0aff48ac85d1add1612484dfce5d429cfb8f24590000d582f039b",
   "scac-mutation-registry.v28": "sha256:a877a41053754d753afd3a34255ced8c8720bcea5e609076d2fa0ccceb44106f",
   "scac-mutation-registry.v29": "sha256:313775c40a66be17d7319b28d6560a05965a47cc6c7eaae6d963890764088959",
-  "scac-mutation-registry.v30": "sha256:8a488982f1316582d0d86653bc166e8327a52e35c0f815a13ac275f76ce40e49"
+  "scac-mutation-registry.v30": "sha256:8a488982f1316582d0d86653bc166e8327a52e35c0f815a13ac275f76ce40e49",
+  "scac-mutation-registry.v31": "sha256:75d39d0b9363011f7dfc1b06493d124c511e602969b9908ff484108c47feab74"
 }

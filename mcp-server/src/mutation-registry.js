@@ -4,7 +4,13 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v30 is the runtime selector because WR-000111/112/113 install the producer
+// v31 is the runtime selector because WR-000114 installs the three Doc
+// conversation write doors -- create, share/revoke and rename/pin/archive --
+// as new SECURITY DEFINER ingresses, and the selector must name the sealed
+// version that admits them.
+//
+// Superseded note (WR-000111/112/113): v30 was the selector because those
+// requests installed the producer
 // cost ledger, the Doc conversation store and the R03 notification store.
 // The line below is the ONE place the runtime version is chosen.
 // Superseded note (WR-000110): v29 was the selector because that request
@@ -14,7 +20,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v30.generated.js";
+} from "./scac-mutation-registry.v31.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

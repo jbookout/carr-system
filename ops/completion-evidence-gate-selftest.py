@@ -635,6 +635,30 @@ def r03_notification_classification():
     return ok
 
 
+def doc_conversation_write_door_classification():
+    """WR-000114: the three write doors classify as writes; the read still does not.
+
+    Positive and negative in ONE case, added together, because the pair is the
+    point (a policy flip that only moves the positives leaves the negative
+    silently asserting the old world). create-doc-conversation is covered by the
+    EXISTING "create" prefix and is asserted here anyway, so a future narrowing
+    of that prefix fails a case that names this verb. share- and rename- are
+    WRITE_ACTION_EXACT entries rather than new prefixes, so the negatives below
+    include the same two words in READ positions: a "share" or "rename" prefix
+    would turn both of them into writes and fail this case.
+    """
+    positives = ["create-doc-conversation", "share-doc-conversation",
+                 "rename-doc-conversation"]
+    negatives = ["read-doc-conversation", "share-preview", "rename-preview"]
+    missing = [action for action in positives if not mod.is_write_action(action)]
+    false_writes = [action for action in negatives if mod.is_write_action(action)]
+    ok = not missing and not false_writes
+    print(f"{'PASS' if ok else 'FAIL'}  Doc conversation write-door classification"
+          + (f"; missing={','.join(missing)}" if missing else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
 def authority_family_coverage():
     """Human-only acceptance/retirement and future proposal/approval writes stay gated."""
     actions = [
@@ -927,6 +951,7 @@ def main():
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(r03_notification_classification())
+    outcomes.append(doc_conversation_write_door_classification())
     outcomes.append(latch_cases())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
