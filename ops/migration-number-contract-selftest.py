@@ -424,6 +424,35 @@ def main() -> int:
             "--through was allowed to expose WR-000115 before its SCAC seal"
         )
 
+    # WR-000116 adds the notification-preference pair in 0527 and seals the
+    # resulting SCAC v33 successor in 0528.  The same deferred policy-epoch
+    # trigger refuses the intermediate catalog, so the reviewed pair must commit
+    # as one transaction and --through may not cut it.  The write verb's name
+    # already classifies as a write through the completion-evidence gate's own
+    # `set` prefix, so no gate entry is owed; the pair still owes this group.
+    notification_preferences = [
+        item for item in loaded if item[0].startswith(("0527_", "0528_"))
+    ]
+    assert [item[0] for item in notification_preferences] == [
+        "0527_notification_preferences.sql",
+        "0528_notification_preferences_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(notification_preferences) == [
+        notification_preferences
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            notification_preferences,
+            "0527_notification_preferences.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000116 before its SCAC seal"
+        )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

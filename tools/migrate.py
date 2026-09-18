@@ -191,6 +191,24 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0525_doc_conversation_list.sql",
         "0526_doc_conversation_list_scac_successor.sql",
     ),
+    # WR-000116 adds the notification-preference PAIR -- one read door and one
+    # write door, two SECURITY DEFINER functions with their revokes and grants
+    # plus the one replay ledger the write's idempotency clause needs, and
+    # nothing else -- in 0527; 0528 is its SEALED REGISTRY SUCCESSOR, admitting
+    # the two new ingresses and resealing the source inventory. Same deferred
+    # policy-epoch boundary as every group above: ops.scac_policy_epoch_refresh()
+    # is a DEFERRABLE constraint trigger on public.schema_migrations, so
+    # committing 0527 alone asks the old v32 snapshot to bless an
+    # intentionally-new definer surface and must fail. The two SQL bodies and
+    # their two immutable ledger rows therefore commit in ONE runner-owned
+    # transaction, and a caller may not cut this group with --through. The write
+    # verb's name already classifies as a write through the gate's own `set`
+    # prefix, so no completion-evidence gate entry is owed -- and the pair still
+    # owes this group.
+    (
+        "0527_notification_preferences.sql",
+        "0528_notification_preferences_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
