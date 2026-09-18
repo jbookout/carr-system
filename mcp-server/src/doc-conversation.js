@@ -26,6 +26,13 @@
 // acting_actor or at. additionalProperties:false turns an attempt to name one
 // into a schema error, which is the point -- the creator, the grantor and
 // every timestamp are derived inside the definer functions.
+//
+// WR-000115 adds the LIST door on the same store. It is a READ: it declares
+// writerConnection with NO write flag, because mcp.js opens `begin read only`
+// for exactly that combination and ops.list_doc_conversations is `stable`. It
+// is never authorityOnly, carries no envelope and writes no event -- there is
+// nothing to record. Its schema has no `required` key at all and exactly three
+// optional fields, none of which names an actor, an offset or a sort.
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -68,6 +75,37 @@ export function docConversationProjection(facts, ToolError) {
         granted_by_actor: grant.granted_by_actor,
       })),
     visible_conversation_count: facts.visible_conversation_count ?? null,
+  };
+}
+
+/**
+ * The list verb's shaper. Pure, for the same reason the read's is: it refuses
+ * anything that is not ops.list_doc_conversations' own shape rather than
+ * passing an unknown object through to a caller.
+ */
+export function docConversationListProjection(listed, ToolError) {
+  if (!listed || typeof listed !== "object" || listed.ok !== true) {
+    throw new ToolError({ error: listed?.reason_id || "doc_conversation_not_found" });
+  }
+  if (!Array.isArray(listed.conversations)) {
+    throw new ToolError({ error: "doc_conversation_not_found" });
+  }
+  return {
+    ok: true,
+    conversations: listed.conversations.map(row => ({
+      id: row.id,
+      title: row.title,
+      visibility: row.visibility,
+      pinned_at: row.pinned_at ?? null,
+      archived_at: row.archived_at ?? null,
+      version: row.version,
+      created_by: row.created_by,
+      latest_sequence: row.latest_sequence,
+      latest_turn_at: row.latest_turn_at ?? null,
+    })),
+    more: listed.more === true,
+    next_cursor: listed.next_cursor ?? null,
+    visible_conversation_count: listed.visible_conversation_count ?? null,
   };
 }
 
@@ -276,6 +314,38 @@ export function docConversationTools({ withEnvelope, writeEvent, ToolError }) {
           [args.conversation_id, a.id, args.after_sequence ?? 0, args.limit ?? 200]);
         if (!r.rows[0]?.facts?.ok) throw new ToolError({ error: "doc_conversation_not_found" });
         return docConversationProjection(r.rows[0].facts, ToolError);
+      },
+    },
+
+    "list-doc-conversations": {
+      // A READ. NO write flag: mcp.js opens `begin read only` for a tool that
+      // declares writerConnection without write, which is the transaction
+      // ops.list_doc_conversations is written for. The writer connection is
+      // still the right one, because it is the only path that installs the
+      // acting-actor context the definer derives the actor from.
+      writerConnection: true,
+      description: "List the Doc conversations the signed-in actor may see: the ones they created and the ones granted to them and not revoked, pinned first then most recently updated, paged by cursor.",
+      // NOTHING HERE NAMES AN ACTOR, and there is no offset and no sort field.
+      // Every field is optional: the first page of the signed-in partner's own
+      // list is {}. additionalProperties:false turns an attempt to name an
+      // actor into a schema error, which is the point.
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        cursor:           { type: "string" },
+        limit:            { type: "integer", minimum: 1, maximum: 100 },
+        include_archived: { type: "boolean" },
+      } },
+      // `a` is deliberately unused: unlike read-doc-conversation above, which
+      // passes a.id, this handler passes NO actor at all. That absence is the
+      // criterion -- grep this handler for a.id and find nothing.
+      handler: async (c, a, args) => {
+        const r = await c.query(
+          "select ops.list_doc_conversations($1::text,$2::integer,$3::boolean) as listed",
+          [args.cursor ?? null, args.limit ?? null, args.include_archived ?? null]);
+        const listed = r.rows[0]?.listed;
+        if (!listed || listed.ok !== true) {
+          throw new ToolError({ error: listed?.reason_id || "doc_conversation_not_found" });
+        }
+        return docConversationListProjection(listed, ToolError);
       },
     },
   };

@@ -176,6 +176,21 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0523_doc_conversation_write_doors.sql",
         "0524_doc_conversation_write_doors_scac_successor.sql",
     ),
+    # WR-000115 adds the Doc conversation LIST door -- one SECURITY DEFINER
+    # function with its revoke and grant, and nothing else -- in 0525; 0526 is
+    # its SEALED REGISTRY SUCCESSOR, admitting the one new ingress and resealing
+    # the source inventory. Same deferred policy-epoch boundary as every group
+    # above: ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint trigger
+    # on public.schema_migrations, so committing 0525 alone asks the old v31
+    # snapshot to bless an intentionally-new definer surface and must fail. The
+    # two SQL bodies and their two immutable ledger rows therefore commit in ONE
+    # runner-owned transaction, and a caller may not cut this group with
+    # --through. A read verb owes no completion-evidence gate entry, but it is
+    # still a new ingress and still owes the successor.
+    (
+        "0525_doc_conversation_list.sql",
+        "0526_doc_conversation_list_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

@@ -396,6 +396,34 @@ def main() -> int:
             "--through was allowed to expose WR-000114 before its SCAC seal"
         )
 
+    # WR-000115 adds the Doc conversation list door in 0525 and seals the
+    # resulting SCAC v32 successor in 0526.  The same deferred policy-epoch
+    # trigger refuses the intermediate catalog, so the reviewed pair must commit
+    # as one transaction and --through may not cut it.  A read verb owes no
+    # completion-evidence gate entry; it still owes this group.
+    doc_conversation_list = [
+        item for item in loaded if item[0].startswith(("0525_", "0526_"))
+    ]
+    assert [item[0] for item in doc_conversation_list] == [
+        "0525_doc_conversation_list.sql",
+        "0526_doc_conversation_list_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(doc_conversation_list) == [
+        doc_conversation_list
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            doc_conversation_list,
+            "0525_doc_conversation_list.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000115 before its SCAC seal"
+        )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.
