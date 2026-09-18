@@ -54,13 +54,18 @@ PATH_TOKEN = re.compile(r"(?<![\w/.-])((?:\.{1,2}/)?(?:[\w.-]+/)+[\w.-]+)")
 # `--flag` or `-f` as written on a command line.
 FLAG_TOKEN = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
 
-# What a script declares it accepts. Covers the three spellings used across
-# this repository's shell entry points: a case arm, a long-option test, and a
-# getopts string. A script whose options cannot be read this way reports no
-# declared flags rather than an empty set, because "I could not tell" and
-# "it accepts nothing" must not look the same.
+# What a script declares it accepts. Covers the spellings used across this
+# repository's shell entry points: a case arm and a long-option test. When no
+# flags are found, declared_flags() decides between "could not tell" and
+# "accepts nothing" by whether the script reads its arguments at all — those
+# two must never look the same, and the first version of this file collapsed
+# them, which is a defect recorded in full at declared_flags().
 CASE_ARM = re.compile(r"^\s*\(?\s*(--?[\w-]+(?:\s*\|\s*--?[\w-]+)*)\s*\)", re.M)
 OPTION_TEST = re.compile(r"[\"']?(--[\w-]+)[\"']?\s*\)")
+
+# Does the script read its arguments at all? This separates "declares no
+# options" from "has a parser this could not follow".
+ARGUMENT_HANDLING = re.compile(r"\$\{?[1-9@*]|\bgetopts\b|\bshift\b|\$\{?#\b")
 
 # Actions the unattended guard refuses outright, read from its own behaviour
 # rather than guessed. Each is a refusal a command cannot argue its way out of.
@@ -193,7 +198,18 @@ def declared_flags(path, repo=REPO):
     for arm in CASE_ARM.findall(source):
         flags.update(part.strip() for part in arm.split("|"))
     flags.update(OPTION_TEST.findall(source))
-    return sorted(flags) or None
+    if flags:
+        return sorted(flags)
+    # NO FLAGS FOUND MEANS ONE OF TWO DIFFERENT THINGS, and collapsing them is
+    # a real defect that shipped in the first version of this function: it
+    # returned `sorted(flags) or None`, so a readable script declaring no
+    # options became indistinguishable from one whose parser could not be
+    # followed — the exact conflation the docstring above forbids, and it made
+    # unknown_flags miss a bogus flag passed to a no-option script. The tell is
+    # whether the script touches its arguments at all. One that never reads $1,
+    # $@ or getopts genuinely accepts nothing; one that does has a parser this
+    # could not follow, and unknown is the honest answer.
+    return None if ARGUMENT_HANDLING.search(source) else []
 
 
 def guard_refusals(command):

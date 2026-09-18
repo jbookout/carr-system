@@ -104,6 +104,29 @@ class HonestUnknownTests(unittest.TestCase):
             self.assertEqual(pre.unknown_flags("./ops/weird.sh --anything", repo=tmp), [],
                              "unknown must not become a confident refusal")
 
+    def test_a_script_that_truly_takes_no_options_reports_an_empty_list(self):
+        """The regression Jev caught in this module's own first version. It
+        returned `sorted(flags) or None`, collapsing a readable script that
+        declares no options into the could-not-read case, so a bogus flag
+        passed to such a script was missed entirely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(os.path.join(tmp, "ops")).mkdir()
+            Path(os.path.join(tmp, "ops", "plain.sh")).write_text(
+                "#!/bin/bash\nset -e\necho hello\n")
+            self.assertEqual(pre.declared_flags("ops/plain.sh", repo=tmp), [],
+                             "a script that never reads an argument accepts none")
+            self.assertNotEqual(
+                pre.unknown_flags("./ops/plain.sh --bogus", repo=tmp), [],
+                "a bogus flag on a no-option script must be reported")
+
+    def test_a_script_whose_parser_cannot_be_followed_still_reports_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(os.path.join(tmp, "ops")).mkdir()
+            Path(os.path.join(tmp, "ops", "weird.sh")).write_text(
+                "#!/bin/sh\nexec python3 -m thing \"$@\"\n")
+            self.assertIsNone(pre.declared_flags("ops/weird.sh", repo=tmp),
+                              "it reads $@, so its options are unknown not absent")
+
     def test_an_unparseable_module_reports_none_not_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(os.path.join(tmp, "broken.py")).write_text("def (:\n")
