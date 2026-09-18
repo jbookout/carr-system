@@ -152,8 +152,14 @@ begin
     raise exception 'WR-000110: a v29 seal or catalog function carries an ACL row: %', quiet_rows;
   end if;
 
-  if not ops.scac_mutation_catalog_v29_current() then
-    raise exception 'WR-000110: the v29 catalog is not current on a freshly built cluster';
+  -- THE SEAL, NOT THE LIVE CATALOG. This asserted ops.scac_mutation_catalog_v29_current()
+  -- until WR-000111/112/113 installed v30, which renames that predicate to
+  -- _live_at_seal and makes it false BY DESIGN -- exactly what v29 did to v28.
+  -- A proof pinned to "my generation is still the frontier" has to be rewritten
+  -- by every successor; the durable claim is that 0518's own seal is intact and
+  -- still validates its entry set, which stays true for every generation after.
+  if not ops.scac_mutation_registry_v29_seal_available() then
+    raise exception 'WR-000110: the v29 registry seal is absent or no longer validates its entry set';
   end if;
 end $wr110_successor_catalog$;
 

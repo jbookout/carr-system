@@ -1285,6 +1285,59 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # WR-000111/112/113: the three acceptance suites that need a real database.
+  # Each one SKIPS in the unit class and is REQUIRED here, so a silent skip in
+  # the lane that can actually prove them is a failure rather than a pass.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications; do
+    if [ -f "mcp-server/test/$proof.test.mjs" ]; then
+      if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
+           CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
+           run_quiet "$LOGDIR/$proof-db.log" \
+           node --test "mcp-server/test/$proof.test.mjs"; then
+        tail -30 "$LOGDIR/$proof-db.log" >&2
+        bad migration "the $proof database acceptance proof failed"
+        return
+      fi
+    fi
+  done
+
+  # WR-000111: the producer cost ledger's role-boundary and catalog proof --
+  # the compare-and-swap refusal from TWO direct authority callers, the refusal
+  # row that writes zero entries, and the revoked direct writes.
+  if [ -f mcp-server/test/producer-cost-ledger-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/producer-cost-ledger-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/producer-cost-ledger-postgres.sql; then
+      tail -30 "$LOGDIR/producer-cost-ledger-postgres.log" >&2
+      bad migration "the producer cost ledger admission and grant proof failed"
+      return
+    fi
+  fi
+
+  # WR-000112: server-derived attribution and the access list, proved on the
+  # connection each grant actually names.
+  if [ -f mcp-server/test/doc-conversation-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/doc-conversation-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/doc-conversation-postgres.sql; then
+      tail -30 "$LOGDIR/doc-conversation-postgres.log" >&2
+      bad migration "the Doc conversation attribution and access-list proof failed"
+      return
+    fi
+  fi
+
+  # WR-000113: the mint's grant from both sides, the recipient resolver on the
+  # WRITER login, the no-sponsor no-op, quiet hours and the status boundary.
+  if [ -f mcp-server/test/r03-notifications-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/r03-notifications-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/r03-notifications-postgres.sql; then
+      tail -30 "$LOGDIR/r03-notifications-postgres.log" >&2
+      bad migration "the R03 notification mint, recipient and status proof failed"
+      return
+    fi
+  fi
+
   if [ -f mcp-server/test/foundation-assurance-minimum-postgres.sql ]; then
     if ! run_quiet "$LOGDIR/foundation-assurance-minimum-postgres.log" \
          "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \

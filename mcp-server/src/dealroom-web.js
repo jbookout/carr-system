@@ -22,6 +22,7 @@ import { neon } from "@neondatabase/serverless";
 import { readWorkInventoryCensus, WORK_INVENTORY_PATH } from "./work-inventory-census.v5.js";
 import { ATLAS_GRAPH_PATH, readAtlasInventoryGraph } from "./atlas-inventory-graph.v5.js";
 import { PROGRAM_CONTROLLER_PATH, readProgramControllerCensus } from "./program-controller-census.v5.js";
+import { METERING_PATH, readMeteringProjection } from "./cost-ledger-projection.v5.js";
 import {
   BUSINESS_ASSET_PATH, CLIENTS_ROUTE, VENDORS_ROUTE,
   createWorkspaceBusinessReader, isBusinessApiPath,
@@ -859,6 +860,58 @@ async function atlasGraphResponse(request, env, session, dependencies) {
   }
 }
 
+// Default metering reader. Same client factory as the census routes above --
+// neon() over DATABASE_URL_READER, wrapped so .query() returns { rows } -- so
+// this route carries no database knowledge of its own and no write credential
+// can reach it. The WRITER path of the cost ledger is not mounted here at all.
+async function defaultMeteringReader(env, actor, correlationId, params = {}) {
+  const sql = neon(env.DATABASE_URL_READER);
+  const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+  return readMeteringProjection({
+    client, actor, correlationId: correlationId || env.CORRELATION_ID,
+    tree_ref: params.tree_ref, period: params.period,
+  });
+}
+
+/**
+ * GET /api/v1/metering -- the WR-000111 producer cost projection.
+ *
+ * Mounted exactly like the Atlas graph: same feature flag, same typed
+ * error-to-status map, same dependency-injected reader. The two query
+ * parameters are handed to the reader unparsed -- the reader owns bounding and
+ * refusal so the semantics keep ONE definition.
+ */
+async function meteringResponse(request, env, session, dependencies) {
+  if (!workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+  const url = new URL(request.url);
+  const allowed = new Set(["tree_ref", "period"]);
+  if ([...url.searchParams.keys()].some((key) => !allowed.has(key))) {
+    return json({ error: "AUTHORIZATION_REFUSED" }, 403);
+  }
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { allow: "GET, HEAD, OPTIONS", "cache-control": "no-store" } });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }), {
+      status: 405, headers: { ...JSON_HEADERS, allow: "GET, HEAD, OPTIONS" },
+    });
+  }
+  const reader = typeof dependencies.meteringReader === "function"
+    ? dependencies.meteringReader : defaultMeteringReader;
+  try {
+    const payload = await reader(env, session.actor, env.CORRELATION_ID, {
+      tree_ref: url.searchParams.get("tree_ref"),
+      period: url.searchParams.get("period"),
+    });
+    if (request.method === "HEAD") return new Response(null, { status: 200, headers: JSON_HEADERS });
+    return json(payload);
+  } catch (error) {
+    const code = ["AUTHORIZATION_REFUSED", "TENANT_SCOPE_REFUSED", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR"].includes(error?.code) ? error.code : "INTERNAL_ERROR";
+    const status = code === "AUTHORIZATION_REFUSED" ? 403 : code === "TENANT_SCOPE_REFUSED" ? 404 : code === "FRESHNESS_UNKNOWN" ? 409 : code === "DEPENDENCY_UNAVAILABLE" ? 503 : 500;
+    return json({ error: code }, status);
+  }
+}
+
 // Default program-controller reader. Same client factory as the two census
 // routes above — neon() over DATABASE_URL_READER, wrapped so .query() returns
 // { rows } — so this route carries no database knowledge of its own and no
@@ -1025,11 +1078,12 @@ async function handleRequest(request, env, ctx, dependencies) {
       // admitted by an exact path parser rather than a prefix.
       if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH &&
           url.pathname !== WORK_INVENTORY_PATH && url.pathname !== ATLAS_GRAPH_PATH &&
-          url.pathname !== PROGRAM_CONTROLLER_PATH &&
+          url.pathname !== PROGRAM_CONTROLLER_PATH && url.pathname !== METERING_PATH &&
           !isBusinessApiPath(url.pathname)) return json({ error: "not_found" }, 404);
       // Home, Clients and Vendors are one workspace surface and share its flag.
       if ((url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
            url.pathname === ATLAS_GRAPH_PATH || url.pathname === PROGRAM_CONTROLLER_PATH ||
+           url.pathname === METERING_PATH ||
            isBusinessApiPath(url.pathname) ||
            BUSINESS_VIEW_PATHS.has(url.pathname) || url.pathname === BUSINESS_ASSET_PATH ||
            APP_DOCUMENT_PATHS.has(url.pathname)) &&
@@ -1053,6 +1107,7 @@ async function handleRequest(request, env, ctx, dependencies) {
       if (!session) {
         if (url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
             url.pathname === ATLAS_GRAPH_PATH || url.pathname === PROGRAM_CONTROLLER_PATH ||
+            url.pathname === METERING_PATH ||
             isBusinessApiPath(url.pathname)) {
           return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
         }
@@ -1098,6 +1153,8 @@ async function handleRequest(request, env, ctx, dependencies) {
         response = await atlasGraphResponse(request, env, session, dependencies);
       } else if (url.pathname === PROGRAM_CONTROLLER_PATH) {
         response = await programControllerResponse(request, env, session, dependencies);
+      } else if (url.pathname === METERING_PATH) {
+        response = await meteringResponse(request, env, session, dependencies);
       } else if (isBusinessApiPath(url.pathname)) {
         response = await businessResponse(request, env, session, dependencies);
       } else if (url.pathname.startsWith("/api/v1/")) {
