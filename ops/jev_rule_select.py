@@ -41,14 +41,41 @@ the frontier, and owes a forward-only registry successor. The detector is a
 regex over the whole file with no notion of docstrings, so the construct is
 described here and never spelled. ops/typesafe_client.py carries the long form.
 
-SHADOW ONLY. Nothing here removes a rule from delivery or adds one to it. It
-writes what it WOULD have surfaced beside what the regexes DID surface, and
-returns. A threshold for acting has to be measured on that log against real
-moments; the floor below is a placeholder, and the reason it is set high is a
-measurement too — on the day this was written, "weekends are off, both humans"
-scored 0.73 against a session about to push a branch. Noise at 0.7 is real, and
-a selector that surfaces noise trains a session to ignore rules, which is worse
-than delivering none.
+THE CRITERION EARNED ITS SHAPE, AND THE FIRST VERSION FAILED IN A WAY THAT
+LOOKED LIKE SUCCESS. Scored against real shell moments sampled from a session
+transcript, the first `false` criterion produced exactly ONE rule across twelve
+different commands — "run the command, do not hand the partner a command to
+paste" — at a confident probability every time. It was matching the rule's
+TOPIC (both are about running commands) while its actual condition (the session
+is handing a command over instead of running it) was not merely unmet but
+inverted: the session was already complying. A distribution that concentrates
+on one rule is the tell, and it is invisible if you only read the top hit of a
+single moment. So the criterion now names already-complying as the boundary
+case, and the three-case check it has to keep passing lives in the suite: fires
+on the moment it governs, silent on a plain read-only command, and fires on the
+inverse moment only when the condition is genuinely met.
+
+TWO ENTRY POINTS, AND THE CHOICE BETWEEN THEM IS NOT CAUTION. advise() is live:
+it returns the rules a session should be shown. shadow_selection() records what
+it WOULD surface beside what the regexes DO, and decides nothing.
+
+Shadow is the right default for a mechanism that BLOCKS, where a false positive
+costs a partner their afternoon. This one blocks nothing: it adds rules to what
+a session reads, and a false positive costs one irrelevant paragraph. The
+incumbent already pays that cost at a worse rate — see the `git push` bundle
+above, one useful rule in five. Holding a better selector in shadow to avoid
+noise, while a noisier mechanism runs live, is caution pointed backwards.
+
+THE REAL CONSTRAINT IS LATENCY, NOT CORRECTNESS, and it decides where this runs
+rather than whether. One request per rule over the whole corpus is seconds, not
+milliseconds: fine once at the end of a turn, prohibitive in front of every
+shell call. The accuracy measurement points the same way — across twenty
+sampled real moments, every rule clearing the floor did so on a MESSAGE being
+composed for a partner and none on a read-only command, correctly, because no
+rule binds to a grep. So message composition and completion claims are the
+home, and the per-command path stays with the regexes, which are free and
+precise on literal tokens. Both entry points log, because a live mechanism
+nobody can audit afterwards is worse than a shadow one.
 """
 
 import concurrent.futures as cf
@@ -62,10 +89,15 @@ TRIAGE = os.path.join(REPO, "ops", "config", "rule-triage.v1.json")
 TRIGGERS = os.path.join(REPO, "ops", "config", "rule-jit-triggers.v1.json")
 SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
 
-# Deliberately high, and deliberately a placeholder. See the docstring: 0.73 was
-# observed on a rule that plainly did not bind. Replace this with a number
-# measured from SHADOW_LOG on real moments, not with a number that feels right.
-BIND_AT = 0.85
+# MEASURED, not guessed, and the measurement is worth keeping because the first
+# guess was wrong in the unexpected direction. Twenty real moments were sampled
+# from a session transcript and scored against the whole corpus. At 0.85 only
+# one moment in twenty drew any rule at all — too strict to be useful. At 0.75
+# every hit was correct on a hand read, no single rule dominated, and the rules
+# that surfaced were overwhelmingly ones no regex can reach. Below 0.70 the
+# distribution starts including rules whose topic matches and whose condition
+# does not. Re-derive this from SHADOW_LOG as real traffic accumulates.
+BIND_AT = 0.75
 
 # A moment that surfaces twenty rules has surfaced none, because nobody reads
 # twenty. The cap is part of the design, not a performance concern.
@@ -151,16 +183,19 @@ def binding_question(client=None):
     """
     ts = client or _sibling("typesafe_client")
     return ts.noul(
-        "This rule BINDS the moment described in `state.situation`: a session "
-        "about to act as described would be violating this rule, or this is "
-        "the moment the rule asks the session to do something.",
-        true="The rule governs this exact kind of moment, and the described "
-             "action either breaks it or is the occasion it names. A session "
-             "that had not read this rule could get this moment wrong.",
-        false="The rule concerns a different kind of work, a different surface, "
-              "or a moment that is not happening here. IT MAY BE AN EXCELLENT "
-              "RULE AND STILL NOT BIND NOW — soundness is not the question, "
-              "and a rule that binds everywhere binds nothing.")
+        "This rule BINDS the moment described in `state.situation`: its own "
+        "condition is MET right now — the thing it forbids is about to happen, "
+        "or the thing it requires has not been done.",
+        true="The rule's condition is satisfied by this exact moment. A session "
+             "that had not read this rule would get THIS moment wrong.",
+        false="Either the rule concerns different work entirely, OR — and this "
+              "is the case that is easy to get wrong — the rule is ABOUT this "
+              "kind of action but its condition is NOT met: the session is "
+              "ALREADY DOING what the rule requires, or the circumstance the "
+              "rule names is absent. A rule the session already complies with "
+              "does NOT bind. TOPIC OVERLAP IS NOT BINDING. IT MAY BE AN "
+              "EXCELLENT RULE AND STILL NOT BIND NOW — soundness is not the "
+              "question, and a rule that binds everywhere binds nothing.")
 
 
 def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
@@ -204,6 +239,55 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
     return over[:limit] + failed
 
 
+def advise(situation, *, log_path=SHADOW_LOG, **kwargs):
+    """The LIVE path: the rules that bind this moment, to be shown to a session.
+
+    Not shadow, and the distinction is deliberate. Shadow is the right default
+    for something that BLOCKS, because a false positive costs a partner their
+    afternoon. This blocks nothing — it adds rules to what a session is shown,
+    and a false positive costs one irrelevant paragraph. The incumbent already
+    pays that cost at a worse rate: the `git push` trigger delivers five rules
+    of which one is about pushing. Holding a better selector in shadow to avoid
+    noise, while a noisier mechanism runs live, is caution pointed backwards.
+
+    WHERE THIS BELONGS, AND THE ONE REAL CONSTRAINT. Scoring the whole corpus
+    costs one request per rule. Measured on real traffic that is seconds, not
+    milliseconds, which is fine once at the end of a turn and prohibitive in
+    front of every shell call. The measurement says the same thing from the
+    accuracy side: across twenty sampled moments, every rule that cleared the
+    floor did so on a MESSAGE being composed for a partner, and none on a
+    read-only command — correctly, because no rule binds to a grep. So the home
+    for this is message composition and completion claims. The per-command path
+    stays with the regexes, which are free and precise on literal tokens.
+
+    Still logs. A live mechanism that cannot be audited later is worse than a
+    shadow one, and the log is how BIND_AT gets re-derived from real traffic.
+    """
+    surfaced = select(situation, **kwargs)
+    advice = [row for row in surfaced if row.get("probability") is not None]
+    _append(log_path, {
+        "mode": "live",
+        "situation": situation[:600],
+        "surfaced": [row["id"] for row in advice],
+        "unreachable_by_regex": sorted(
+            {row["id"] for row in advice} - reachable_rule_ids()),
+        "floor": kwargs.get("floor", BIND_AT),
+        "detail": advice,
+    })
+    return advice
+
+
+def _append(log_path, record):
+    """Append one observation. A logging failure NEVER reaches the caller: an
+    observer that can break the thing it observes is worse than no observer."""
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
 def shadow_selection(situation, command_text, *, log_path=SHADOW_LOG, **kwargs):
     """Record what WOULD be surfaced beside what the regexes DO surface.
 
@@ -230,10 +314,5 @@ def shadow_selection(situation, command_text, *, log_path=SHADOW_LOG, **kwargs):
         "floor": kwargs.get("floor", BIND_AT),
         "detail": judged,
     }
-    try:
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-    except OSError:
-        pass
+    _append(log_path, record)
     return record

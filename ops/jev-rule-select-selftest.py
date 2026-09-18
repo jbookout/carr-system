@@ -149,6 +149,22 @@ class QuestionShapeTests(unittest.TestCase):
         question = sel.binding_question(client=FakeClient)
         self.assertIn("binds", question["instructions"].casefold())
 
+    def test_already_complying_is_named_as_the_boundary_case(self):
+        """The regression that motivates this. The first criterion scored ONE
+        rule across twelve different shell commands — 'run the command, do not
+        hand the partner a command to paste' — because it matched the rule's
+        topic while the session was already complying with it. Naming the
+        boundary case is what separates 'this rule is about commands' from
+        'this rule's condition is met now'."""
+        question = sel.binding_question(client=FakeClient)
+        false = question["criteria"]["false"].casefold()
+        self.assertIn("already", false)
+        self.assertIn("topic overlap is not binding", false)
+
+    def test_the_condition_not_the_subject_is_what_is_asked(self):
+        question = sel.binding_question(client=FakeClient)
+        self.assertIn("condition", question["instructions"].casefold())
+
 
 class CorpusTests(unittest.TestCase):
     def test_the_real_rule_corpus_loads_and_is_not_empty(self):
