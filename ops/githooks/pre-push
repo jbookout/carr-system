@@ -382,4 +382,41 @@ EOF
   fi
 fi
 
+# ── WHAT THIS CHANGE OWES ─────────────────────────────────────────────────
+# Advisory only, and it can never refuse a push. Hosted CI on one branch
+# refused three times on 2026-09-18 and not one refusal was about whether the
+# code worked: each was a toll this repository charges for a KIND of change --
+# a seal derived before the last edit, a branch left conflicting so the pull
+# request drew zero checks, a derived file resolved by picking a side. All
+# three are readable off the changed-file list, and all three were missed
+# because catching them depended on a session remembering nine separate
+# lessons at the moment it typed git push.
+#
+# It prints and returns zero on every path: no credential, no network, no
+# service, bad output, nothing here stops a push. A probabilistic reading is
+# allowed to advise next to the deterministic checks above and is never
+# allowed to be one of them, so a wrong answer costs a reader a few seconds
+# rather than costing a correct change its push.
+if [ -z "$CARR_SKIP_TOLL_ADVISORY" ] && [ -f "$REPO_ROOT/ops/jev_change_tolls.py" ]; then
+  REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS' 2>/dev/null || true
+import importlib.util, os, sys
+root = os.environ.get("REPO_ROOT") or os.getcwd()
+try:
+    spec = importlib.util.spec_from_file_location(
+        "jev_change_tolls", os.path.join(root, "ops", "jev_change_tolls.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rows = module.owed()
+except Exception:
+    sys.exit(0)
+if rows:
+    print("\n  WHAT THIS CHANGE LOOKS LIKE IT OWES (advisory, not blocking):",
+          file=sys.stderr)
+    for probability, name, fix in rows:
+        print(f"    {probability:.2f}  {name}", file=sys.stderr)
+        print(f"          {fix}", file=sys.stderr)
+    print("", file=sys.stderr)
+TOLLS
+fi
+
 exit 0

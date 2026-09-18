@@ -55,7 +55,12 @@ REACHES_THE_MODEL = ("typesafe_client", "jev_judge")
 # harness fires, a script a person or a job invokes, the MCP server that serves
 # the verbs. A library calling another library is not wiring — it just moves
 # the question one file along, so ops/ is deliberately absent here.
-DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals")
+DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals",
+         # git runs these itself on every commit and push, which makes
+         # them a door even though they sit under ops/ -- the one place
+         # the blanket exclusion of ops/ below would get a real caller
+         # wrong.
+         "ops/githooks")
 
 # Modules that reach the model and are KNOWINGLY not wired yet. Each needs the
 # reason and the loop, in the open. An entry here is a debt, not an excuse, and
