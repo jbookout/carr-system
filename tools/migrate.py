@@ -162,6 +162,20 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0521_r03_notifications.sql",
         "0522_producer_trio_scac_successor.sql",
     ),
+    # WR-000114 adds the three Doc conversation write doors -- create,
+    # share/revoke and rename/pin/archive -- as SECURITY DEFINER functions with
+    # their grants in 0523; 0524 is its SEALED REGISTRY SUCCESSOR, admitting the
+    # three new ingresses and resealing the source inventory. Same deferred
+    # policy-epoch boundary as every group above: ops.scac_policy_epoch_refresh()
+    # is a DEFERRABLE constraint trigger on public.schema_migrations, so
+    # committing 0523 alone asks the old v30 snapshot to bless three
+    # intentionally-new definer surfaces and must fail. The two SQL bodies and
+    # their two immutable ledger rows therefore commit in ONE runner-owned
+    # transaction, and a caller may not cut this group with --through.
+    (
+        "0523_doc_conversation_write_doors.sql",
+        "0524_doc_conversation_write_doors_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

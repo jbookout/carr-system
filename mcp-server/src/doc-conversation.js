@@ -15,6 +15,17 @@
 //     needs the acting-actor context, which only the writer path installs, so
 //     read-doc-conversation declares writerConnection: true and no write flag.
 // Fix the flag, never widen the grant.
+//
+// WR-000114 adds the three WRITE doors on the same store. All three are
+// granted to carr_writer AND carr_authority (0523), and the app has to call
+// them as the SIGNED-IN PARTNER, so every one of them declares write: true
+// with writerConnection: true and NEVER authorityOnly -- mcp.js:616-618 would
+// refuse an authority-only call before any grant is consulted, and the app
+// holds no authority binding. Nothing that names an actor appears in any of
+// the three schemas: no created_by, granted_by, grantee_actor, actor,
+// acting_actor or at. additionalProperties:false turns an attempt to name one
+// into a schema error, which is the point -- the creator, the grantor and
+// every timestamp are derived inside the definer functions.
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -110,6 +121,139 @@ export function docConversationTools({ withEnvelope, writeEvent, ToolError }) {
           return { ok: true, deduplicated: result.deduplicated === true,
             conversation_id: args.conversation_id, sequence: result.sequence,
             msg_id: result.msg_id, origin_actor: result.origin_actor };
+        }),
+    },
+
+    "create-doc-conversation": {
+      write: true,
+      // Granted to carr_writer and carr_authority, and the app calls it as the
+      // signed-in partner: a write on the writer connection, never authority-only.
+      writerConnection: true,
+      description: "Start a Doc conversation. The creator is derived from the signed-in actor; the row id is the idempotency key, so a replayed create is one row.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" },
+        title:           { type: "string" },
+        visibility:      { type: "string", enum: ["private", "shared"] },
+      }, required: ["idempotency_key", "title"] },
+      handler: async (c, actor, args) =>
+        withEnvelope(c, actor, "create-doc-conversation", args, async () => {
+          if (!UUID.test(String(args.idempotency_key || ""))) {
+            throw new ToolError({ error: "doc_conversation_idempotency_key_invalid",
+              hint: "idempotency_key is a uuid and becomes the conversation id" });
+          }
+          if (typeof args.title !== "string" || !args.title.trim() || args.title.length > 200) {
+            throw new ToolError({ error: "doc_conversation_title_invalid",
+              hint: "a title is non-empty and at most 200 characters" });
+          }
+          const created = await c.query(
+            "select ops.create_doc_conversation($1::text,$2::text,$3::uuid) as created",
+            [args.title, args.visibility ?? null, args.idempotency_key]);
+          const result = created.rows[0]?.created;
+          if (!result || result.ok !== true) {
+            throw new ToolError({ error: result?.reason_id || "doc_conversation_create_refused",
+              idempotency_key: args.idempotency_key });
+          }
+          if (result.deduplicated !== true) {
+            await writeEvent(c, actor, "create-doc-conversation", "doc_conversation",
+              result.id, {
+                field: "identity",
+                new: { title: result.title, visibility: result.visibility },
+                cause: "automation_job",
+                idempotency_key: args.idempotency_key,
+              });
+          }
+          return { ok: true, deduplicated: result.deduplicated === true,
+            conversation_id: result.id, version: result.version,
+            title: result.title, visibility: result.visibility,
+            created_by: result.created_by };
+        }),
+    },
+
+    "share-doc-conversation": {
+      write: true,
+      writerConnection: true,
+      description: "Hand another partner access to a Doc conversation, or take that access back. Creator-only; a withdrawal stamps the grant rather than deleting it.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" },
+        conversation_id: { type: "string" },
+        grantee_slug:    { type: "string" },
+        granted:         { type: "boolean" },
+      }, required: ["idempotency_key", "conversation_id", "grantee_slug", "granted"] },
+      handler: async (c, actor, args) =>
+        withEnvelope(c, actor, "share-doc-conversation", args, async () => {
+          if (!UUID.test(String(args.conversation_id || ""))) {
+            throw new ToolError({ error: "doc_conversation_id_invalid",
+              hint: "conversation_id is the uuid ops.doc_conversation assigned" });
+          }
+          if (typeof args.grantee_slug !== "string" || !args.grantee_slug.trim()) {
+            throw new ToolError({ error: "doc_conversation_grantee_slug_invalid" });
+          }
+          const shared = await c.query(
+            "select ops.share_doc_conversation($1::uuid,$2::text,$3::boolean,$4::uuid) as shared",
+            [args.conversation_id, args.grantee_slug, args.granted, args.idempotency_key]);
+          const result = shared.rows[0]?.shared;
+          if (!result || result.ok !== true) {
+            throw new ToolError({ error: result?.reason_id || "doc_conversation_share_refused",
+              conversation_id: args.conversation_id });
+          }
+          if (result.already !== true) {
+            await writeEvent(c, actor, "share-doc-conversation", "doc_conversation",
+              args.conversation_id, {
+                field: "grant",
+                new: { grantee_slug: args.grantee_slug, granted: args.granted === true },
+                cause: "automation_job",
+                idempotency_key: args.idempotency_key,
+              });
+          }
+          return { ok: true, already: result.already === true,
+            conversation_id: args.conversation_id, grantee_slug: args.grantee_slug,
+            granted: args.granted === true };
+        }),
+    },
+
+    "rename-doc-conversation": {
+      write: true,
+      writerConnection: true,
+      description: "Rename, pin, unpin, archive or unarchive a Doc conversation under a compare-and-swap on its version. Creator-only.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" },
+        conversation_id: { type: "string" },
+        base_version:    { type: "integer", minimum: 1 },
+        title:           { type: "string" },
+        pinned:          { type: "boolean" },
+        archived:        { type: "boolean" },
+      }, required: ["idempotency_key", "conversation_id", "base_version"] },
+      handler: async (c, actor, args) =>
+        withEnvelope(c, actor, "rename-doc-conversation", args, async () => {
+          if (!UUID.test(String(args.conversation_id || ""))) {
+            throw new ToolError({ error: "doc_conversation_id_invalid",
+              hint: "conversation_id is the uuid ops.doc_conversation assigned" });
+          }
+          if (args.title !== undefined &&
+              (typeof args.title !== "string" || !args.title.trim() || args.title.length > 200)) {
+            throw new ToolError({ error: "doc_conversation_title_invalid",
+              hint: "a title is non-empty and at most 200 characters" });
+          }
+          const renamed = await c.query(
+            "select ops.rename_doc_conversation($1::uuid,$2::integer,$3::text,$4::boolean,$5::boolean,$6::uuid) as renamed",
+            [args.conversation_id, args.base_version, args.title ?? null,
+              args.pinned ?? null, args.archived ?? null, args.idempotency_key]);
+          const result = renamed.rows[0]?.renamed;
+          if (!result || result.ok !== true) {
+            throw new ToolError({ error: result?.reason_id || "doc_conversation_rename_refused",
+              conversation_id: args.conversation_id,
+              current_version: result?.current_version });
+          }
+          await writeEvent(c, actor, "rename-doc-conversation", "doc_conversation",
+            args.conversation_id, {
+              field: "title",
+              new: { title: result.title, pinned: result.pinned, archived: result.archived },
+              cause: "automation_job",
+              idempotency_key: args.idempotency_key,
+            });
+          return { ok: true, conversation_id: args.conversation_id,
+            version: result.version, title: result.title,
+            pinned: result.pinned === true, archived: result.archived === true };
         }),
     },
 

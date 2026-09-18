@@ -171,6 +171,15 @@ WRITE_ACTION_EXACT = {
     "adjudicate-investigation-branch",  # owner-only branch judgment write, like review-deal:
                                          # a one-off judgment verb whose first word ("adjudicate")
                                          # is not a generic write prefix
+    "share-doc-conversation",   # WR-000114: widens or withdraws another partner's access
+                                 # to a Doc conversation. EXACT rather than a prefix for
+                                 # acknowledge-notification's reason -- "share" would cover
+                                 # exactly one verb today and would silently capture a
+                                 # future read named the same way.
+    "rename-doc-conversation",  # WR-000114: renames, pins, unpins, archives or unarchives
+                                 # a Doc conversation under a compare-and-swap. EXACT for
+                                 # the same reason: "rename" covers one verb today, and a
+                                 # future rename-shaped read must not inherit the class.
     "call-verb",             # unknown inner call is conservatively a write
     "cancel-capability-session",  # abandons the open build session on a capability
                               # project and returns that project to ready. A write in

@@ -1326,6 +1326,21 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # WR-000114: the three Doc conversation write doors, proved where only a
+  # database can prove them -- the creator rule raised INSIDE the definer under
+  # a second acting-actor context (a check written in the JavaScript handler is
+  # bypassed by exactly this call), the revoke that stamps rather than deletes,
+  # and the execute grants on the connection each verb actually arrives on.
+  if [ -f mcp-server/test/doc-conversation-write-doors-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/doc-conversation-write-doors-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/doc-conversation-write-doors-postgres.sql; then
+      tail -30 "$LOGDIR/doc-conversation-write-doors-postgres.log" >&2
+      bad migration "the Doc conversation write-door creator and grant proof failed"
+      return
+    fi
+  fi
+
   # WR-000113: the mint's grant from both sides, the recipient resolver on the
   # WRITER login, the no-sponsor no-op, quiet hours and the status boundary.
   if [ -f mcp-server/test/r03-notifications-postgres.sql ]; then
