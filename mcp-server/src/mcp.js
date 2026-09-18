@@ -13,7 +13,8 @@
 
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
-  auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
+  auditIdentity, assertNoCallerAuthorityFields,
+  pgConstraintError, describeConstraint } from "./tools.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
   personalScopeForActor, verifiedAgentSlugForClient } from "./identity.js";
@@ -731,6 +732,24 @@ export async function callTool(env, actor, name, args, profile = "full") {
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});
+    // TRANSLATE THE DATABASE'S REFUSAL HERE, WHERE THE CONNECTION IS STILL
+    // OPEN. pgConstraintError has existed and been tested since 2026-08-21 and
+    // until now had no production caller at all: every check, foreign-key,
+    // unique and not-null violation fell through to the outer handler and
+    // reached the caller as `unhandled_verb_failure` with a stack string,
+    // which is the shape that says "the server broke" about an input the
+    // server correctly refused. A tested translator nobody calls is not a
+    // capability, and this is the same failure the judgment-wiring selftest
+    // was written to catch one level up.
+    //
+    // This is also the only place the enrichment can happen: the rollback
+    // above ends the aborted transaction but `client` lives until the finally
+    // below, so the catalog lookup rides the connection that is already here.
+    // By the time the RPC handler's catch sees this, the pool is closed.
+    if (!(e instanceof ToolError)) {
+      const refusal = pgConstraintError(e);
+      if (refusal) throw await describeConstraint(client, refusal);
+    }
     throw e;
   } finally {
     client.release();

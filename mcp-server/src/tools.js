@@ -126,6 +126,70 @@ const PG_FAULT_HINT = Object.freeze({
   "42883": "the statement calls a function that does not exist — a migration is missing on this database.",
 });
 
+// A CHECK THAT SPANS MORE THAN ONE COLUMN REPORTS `column: null`, and 219 of
+// this database's constraints do. Postgres is not being unhelpful -- it cannot
+// name one column for a rule about several -- but the caller is then told that
+// a rule broke without being told which of their inputs broke it, which is the
+// difference between a refusal they can act on and a dead end. Measured
+// 2026-09-18: 219 multi-column constraints, of which 86 leave the field
+// completely unidentifiable and 212 leave the required fix unknowable.
+//
+// The catalog knows the answer. pg_constraint.conkey holds exactly the columns
+// the rule is about, and pg_get_constraintdef prints the rule itself, so one
+// lookup keyed on the constraint name the error already carries turns
+// `column: null` into the list of fields involved plus the condition they must
+// satisfy. That is a read of the system catalogs only -- no row of anyone's
+// data is touched -- and it runs on the connection the failed statement was
+// already using, after its rollback, so it costs no new connection.
+const CONSTRAINT_COLUMNS_SQL = `
+  select t.relname as table_name,
+         pg_get_constraintdef(c.oid) as definition,
+         coalesce(array_agg(a.attname order by a.attname)
+                    filter (where a.attname is not null), '{}') as columns
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    left join pg_attribute a
+      on a.attrelid = c.conrelid and a.attnum = any(c.conkey) and not a.attisdropped
+   where c.conname = $1
+   group by t.relname, c.oid
+   limit 1`;
+
+/** Add the columns and the rule text to a constraint refusal, when we can.
+ *
+ * Deliberately best-effort: the refusal is already correct and already useful
+ * without this, so a catalog lookup that fails must NOT replace a precise
+ * refusal with a database error about the lookup. Any failure returns the
+ * refusal untouched.
+ */
+export async function describeConstraint(client, refusal) {
+  const name = refusal?.payload?.constraint;
+  if (!client || typeof name !== "string" || !name) return refusal;
+  let row;
+  try {
+    const out = await client.query(CONSTRAINT_COLUMNS_SQL, [name]);
+    row = out?.rows?.[0];
+  } catch {
+    return refusal;   // see the doc comment: never trade a good refusal for this
+  }
+  if (!row) return refusal;
+  const columns = Array.isArray(row.columns) ? row.columns : [];
+  if (columns.length === 0) return refusal;
+  refusal.payload.table = refusal.payload.table || row.table_name || null;
+  refusal.payload.columns = columns;
+  refusal.payload.rule = redact(row.definition) || null;
+  // Only overwrite the hint when the original was the unhelpful case: a rule
+  // broke and no field was named. A single-column violation already told the
+  // caller which field, and that hint is better than this one.
+  if (!refusal.payload.column) {
+    refusal.payload.hint =
+      `this rule is about ${columns.length} fields together (${columns.join(", ")}), which is why ` +
+      `no single field is named: the database cannot attribute a multi-column rule to one column. ` +
+      `\`rule\` is the exact condition your values must satisfy. Check the combination, not each ` +
+      `field on its own -- each may be individually valid.`;
+  }
+  return refusal;
+}
+
 export function pgConstraintError(e) {
   const code = e && e.code;
   if (typeof code !== "string") return null;
@@ -7807,7 +7871,64 @@ export function assertNoCallerAuthorityFields(args) {
 // registry lookup, human-only, coercion, and handler/envelope gates. Keeping
 // the first gate here makes direct MCP, call-verb recursion, and composites
 // fail closed before a handler or database client can be used.
+// EVERY DECLARED CLOSED VOCABULARY IS ENFORCED HERE, AND THIS IS THE ONLY
+// PLACE THAT ENFORCES IT GENERICALLY.
+//
+// WHY IT EXISTS. There is no JSON-schema validator anywhere in this server --
+// no ajv, no jsonschema -- so an `enum` in an inputSchema was documentation
+// that nothing read. 73 of 89 enum fields were guarded BY HAND in their own
+// handler with one(); the other 16, across 15 verbs, passed whatever they were
+// given straight through to Postgres. Thirteen of the columns behind them
+// carry no check constraint either, so for those the declared vocabulary was
+// enforced at NO layer.
+//
+// THE COST, MEASURED 2026-09-18: v_code_finding.epistemic_status holds
+// 'human_stated', which is not one of the nine values record-finding declares.
+// It is a legitimate value of a DIFFERENT closed vocabulary, event.cause, and
+// nothing anywhere noticed the two being confused. Three of the nine declared
+// values have never been used at all.
+//
+// A HAND-WRITTEN GUARD PER FIELD WOULD CLOSE THE 16 AND NOT THE SEVENTEENTH.
+// The gap reappears the next time someone declares an enum and forgets the
+// one() call, which is precisely how these 16 arose. Reading the schema the
+// verb already publishes closes the class, including for verbs not yet
+// written.
+//
+// THE REFUSAL NAMES THE FIELD AND THE ALLOWED VALUES, which the database
+// cannot do: 219 check constraints span more than one column, so Postgres
+// reports `column: null` and the caller is told a rule broke without being
+// told which of their inputs broke it. This refusal happens BEFORE the
+// database and can say exactly what to send instead.
+function assertDeclaredVocabularies(name, tool, args) {
+  const properties = tool?.inputSchema?.properties;
+  if (!properties || !args || typeof args !== "object" || Array.isArray(args)) return;
+  for (const [field, spec] of Object.entries(properties)) {
+    const allowed = spec?.enum || spec?.items?.enum;
+    if (!Array.isArray(allowed) || allowed.length === 0) continue;
+    const value = args[field];
+    // Absent and null are the field not being sent. Optionality is the
+    // schema's business, and required-field checks already run elsewhere;
+    // this one rules on VALUE only.
+    if (value === undefined || value === null) continue;
+    const sent = spec?.items?.enum && Array.isArray(value) ? value : [value];
+    for (const one of sent) {
+      if (allowed.includes(one)) continue;
+      throw new ToolError({
+        error: "value_not_in_declared_vocabulary",
+        verb: name, field,
+        received: typeof one === "string" ? one : typeof one,
+        allowed,
+        hint: `\`${field}\` is a closed vocabulary on ${name}. Send one of the ` +
+              `values in \`allowed\`. This refusal comes from the verb's own ` +
+              `published schema, before any database write, so nothing was ` +
+              `recorded and nothing needs undoing.`,
+      });
+    }
+  }
+}
+
 export async function assertRegisteredToolInput(name, tool, args = {}) {
+  assertDeclaredVocabularies(name, tool, args);
   try {
     await assertRegisteredOperation(name, tool, args);
   } catch (error) {

@@ -37,6 +37,7 @@ import subprocess
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIMEOUT_SECONDS = 60.0
+VERIFY_AT = 0.60   # a check worth RUNNING is a lower bar than a remedy worth printing
 WARN_AT = 0.55
 
 # Every toll below was paid late or missed at least once, and each names the
@@ -139,15 +140,41 @@ def change(base="origin/main", repo=REPO):
     reports every line those commits added as though it were this change.
     """
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, timeout=120)
+    # COMMITTED AND UNCOMMITTED BOTH. The first version diffed only
+    # origin/main...HEAD, which is right at push time and useless while
+    # working: on 2026-09-18 a session edited mcp-server/src/tools.js, asked
+    # what the change owed, and was told about two other files -- because the
+    # edit it was asking about had not been committed yet. The toll it needed
+    # was the expensive one: 100 of the 864 inventory rows name that file as
+    # their source, so its bytes moving re-digests every one of them.
+    # NOT .strip() BEFORE .splitlines(). Porcelain's status is two COLUMNS,
+    # so an unstaged edit is " M path" with a leading space -- and stripping
+    # the whole blob eats that space on the FIRST line only, shifting its
+    # path by one character. Caught 2026-09-18 when the advisory reported an
+    # edit to "cp-server/src/tools.js", a file that does not exist: one row
+    # silently mis-parsed while every row after it was fine.
     names = subprocess.run(["git", "diff", "--name-status", f"{base}...HEAD"],
                            capture_output=True, text=True, cwd=repo,
-                           timeout=60).stdout.strip().splitlines()
+                           timeout=60).stdout.splitlines()
+    names += subprocess.run(["git", "status", "--porcelain=v1"],
+                            capture_output=True, text=True, cwd=repo,
+                            timeout=60).stdout.splitlines()
     added, edited = [], []
     for row in names:
-        parts = row.split("\t")
-        if len(parts) < 2:
+        # Two shapes reach here. `git diff --name-status` gives "M\tpath";
+        # `git status --porcelain` gives "?? path" or " M path". Untracked and
+        # added both count as ADDED, because what decides the toll is whether
+        # the file is new to the repository, not how it got there.
+        if "\t" in row:
+            parts = row.split("\t")
+            status, path = parts[0], parts[-1]
+        else:
+            status, path = row[:2].strip() or "M", row[3:].strip()
+        if not path:
             continue
-        (added if parts[0].startswith("A") else edited).append(parts[-1])
+        target = added if status.startswith(("A", "??")) else edited
+        if path not in target:
+            target.append(path)
     # Whether a file is an entrypoint is a fact the questions CANNOT see, so
     # it is gathered here for every touched file rather than inferred from a
     # path. Two mistakes in the first version of this function, both of which
@@ -176,6 +203,85 @@ def change(base="origin/main", repo=REPO):
             "added_files_with_a_shebang_or_main_guard": shebangs,
             "edited_files_that_are_script_entrypoints": edited_entrypoints,
             "this_branch_merged_another_branch": bool(merged)}
+
+
+# ── what proves a toll paid ──────────────────────────────────────────────────
+#
+# WHY THIS EXISTS, and it is a specific failure on 2026-09-18 rather than a
+# general worry. This advisory scored `inventory_reseal` at 0.94 on a push, in
+# the session's own terminal, naming the exact remedy. The session read it and
+# pushed anyway. Hosted CI failed 25 minutes later on precisely that, and the
+# whole cycle had to be spent again. The judgment was not missing, not wrong
+# and not quiet -- it simply had no consequence attached to it.
+#
+# THE SHAPE OF THE FIX, which keeps the model out of the blocking decision.
+# Rule 'judgment advises beside the deterministic layer, never decides inside
+# it' still holds: a probability must not be what refuses a push. So the model
+# does not block anything. It CHOOSES WHICH DETERMINISTIC CHECK IS WORTH
+# RUNNING, and that check's own exit code decides. A toll the model scores
+# high is a check that gets run; the check passes or fails on bytes.
+#
+# This also settles what a false positive costs. The advisory has scored
+# `gate_rebless` at 0.71 on changes that owed no rebless. Under this design
+# that costs running gate-integrity.py, which takes under a second and passes.
+# A wrong judgment buys a few seconds of checking, never a blocked afternoon,
+# which is the trade that makes running these at all safe.
+#
+# A toll with no verifier stays purely advisory. Printing a remedy nobody can
+# check mechanically is still worth doing; it just cannot hold a push.
+VERIFIERS = {
+    "inventory_reseal": (
+        ["node", "--input-type=module", "-e",
+         "import {assertCurrentSourceInventoryMatchesFixture} from "
+         "'./ops/scac-mutation-inventory.mjs'; import {TOOLS} from "
+         "'./mcp-server/src/tools.js'; "
+         "assertCurrentSourceInventoryMatchesFixture(TOOLS);"],
+        "the sealed source inventory does not match this tree"),
+    "gate_rebless": (
+        [".venv/bin/python", "hooks/gate-integrity.py"],
+        "a gate's bytes no longer match ops/config/gate-baseline.json"),
+    "judgment_without_caller": (
+        [".venv/bin/python", "ops/judgment-wiring-selftest.py"],
+        "a module that reaches the model has no caller and is not declared inert"),
+    "ci_sh_reseal": (
+        [".venv/bin/python", "ops/ci-selftest.py"],
+        "ops/ci.sh changed and something that reads it back out disagrees"),
+}
+
+
+def verify(state=None, *, floor=None, client=None, api_key=None, repo=REPO):
+    """Run the deterministic check behind every toll the model scores high.
+
+    Returns [(name, probability, reason, output)] for checks that FAILED. An
+    empty list means either nothing was flagged or everything flagged is
+    already paid.
+
+    `floor` defaults to VERIFY_AT rather than the advisory's own warning floor:
+    a check worth running is a lower bar than a remedy worth printing, so this
+    deliberately runs more checks than the advisory prints warnings.
+    """
+    floor = VERIFY_AT if floor is None else floor
+    state = change(repo=repo) if state is None else state
+    failures = []
+    for probability, name, _fix in owed(state, client=client, api_key=api_key,
+                                        floor=floor):
+        entry = VERIFIERS.get(name)
+        if not entry:
+            continue
+        argv, reason = entry
+        try:
+            done = subprocess.run(argv, cwd=repo, capture_output=True,
+                                  text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # A verifier that cannot RUN is not a verifier that failed. Saying
+            # otherwise would block a push on a missing interpreter, which is
+            # the fail-closed trap this advisory is not allowed to become.
+            failures.append((name, probability, f"{reason} (check could not run: {exc})", ""))
+            continue
+        if done.returncode != 0:
+            failures.append((name, probability, reason,
+                             ((done.stdout or "") + (done.stderr or ""))[-1200:]))
+    return failures
 
 
 def owed(state=None, *, client=None, api_key=None, floor=WARN_AT):

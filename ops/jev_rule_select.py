@@ -85,6 +85,7 @@ import os
 import re
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORPUS = os.path.join(REPO, "ops", "config", "rule-selection-corpus.v1.json")
 TRIAGE = os.path.join(REPO, "ops", "config", "rule-triage.v1.json")
 TRIGGERS = os.path.join(REPO, "ops", "config", "rule-jit-triggers.v1.json")
 SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
@@ -157,8 +158,30 @@ def load_rules(path=TRIAGE):
     rows = data if isinstance(data, list) else next(
         (value for value in data.values()
          if isinstance(value, list) and value and isinstance(value[0], dict)), [])
+    # THE RULE, NOT ITS HEADLINE. title_gist is a TITLE -- median 87
+    # characters, and all 211 end without terminal punctuation because a title
+    # has no sentence to end -- and `reason` is triage metadata about WHERE a
+    # rule is delivered, not what it says. Judging relevance from those two is
+    # judging a filing label. Measured 2026-09-18: the rule that says measure
+    # against origin rather than HEAD before naming who is blocking whom scored
+    # 0.39 on a moment its own condition covers, because the 109 characters the
+    # model saw ended on a dangling "or" and never reached the instruction.
+    #
+    # ops/config/rule-selection-corpus.v1.json carries the real statements from
+    # v_compiled_rules, 211 of them averaging 1176 characters. It is preferred
+    # when present and the triage file remains the fallback, so a missing or
+    # stale corpus degrades to the old behaviour rather than to nothing.
+    statements = {}
+    try:
+        with open(CORPUS, "r", encoding="utf-8") as handle:
+            for row in json.load(handle).get("rules", []):
+                if row.get("id") and (row.get("statement") or "").strip():
+                    statements[row["id"]] = row["statement"]
+    except (OSError, ValueError):
+        statements = {}
     return [{"id": row["id"],
              "gist": row.get("title_gist", ""),
+             "statement": statements.get(row["id"], ""),
              "context": (row.get("reason") or "")[:600]}
             for row in rows if row.get("id")]
 
@@ -303,9 +326,17 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
     question = {"binds": binding_question(client)}
 
     def score(rule):
+        # THE STATEMENT IS THE RULE. `gist` stays as the headline because a
+        # named thing is easier to judge with a name attached, but the text
+        # the question is actually answered against is the statement, and
+        # before 2026-09-18 it was never sent at all. Falls back to the
+        # headline when the corpus has no statement for this id, so a rule
+        # added since the last corpus refresh is judged on less rather than
+        # skipped.
         subject = {"situation": situation,
-                   "rule": rule["gist"],
-                   "rule_context": rule["context"]}
+                   "rule_title": rule["gist"],
+                   "rule": rule.get("statement") or rule["gist"],
+                   "rule_context": rule.get("context", "")}
         try:
             answer = judge.judge(subject, question, client=client, api_key=api_key)
             return {**rule, "probability": float(answer["answers"]["binds"]["noul"])}

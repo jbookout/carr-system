@@ -392,18 +392,50 @@ fi
 # because catching them depended on a session remembering nine separate
 # lessons at the moment it typed git push.
 #
-# It prints and returns zero on every path: no credential, no network, no
-# service, bad output, nothing here stops a push. A probabilistic reading is
-# allowed to advise next to the deterministic checks above and is never
-# allowed to be one of them, so a wrong answer costs a reader a few seconds
-# rather than costing a correct change its push.
+# IT NOW HOLDS A PUSH, AND THE MODEL STILL DOES NOT DECIDE ANYTHING.
+#
+# The first version printed and returned zero on every path. On 2026-09-18 it
+# scored `inventory_reseal` at 0.94 on a push, in the session's own terminal,
+# naming the exact remedy -- and the session pushed anyway. Hosted CI failed
+# 25 minutes later on precisely that. The judgment was not missing, not wrong
+# and not quiet. It had no consequence attached, and a warning with no
+# consequence is a warning that gets read past.
+#
+# WHAT CHANGED IS NOT THAT A PROBABILITY CAN NOW REFUSE A PUSH. It cannot,
+# and the rule that judgment advises beside the deterministic layer rather
+# than deciding inside it is intact. The model chooses WHICH DETERMINISTIC
+# CHECK IS WORTH RUNNING; that check's own exit code decides. A push is
+# refused by the seal assertion, by gate-integrity, by the wiring selftest --
+# never by a score.
+#
+# WHAT A WRONG JUDGMENT COSTS, which is the whole reason this is safe: a
+# false positive runs a check that passes. This advisory has scored
+# `gate_rebless` at 0.71 on changes owing no rebless; under this design that
+# buys a sub-second run of gate-integrity.py and nothing else. The full
+# verification pass over a clean tree measured 3.7 seconds. Against a failed
+# hosted cycle at 25 to 40 minutes, the trade is not close.
+#
+# EVERY OTHER PATH STILL RETURNS ZERO. No credential, no network, no service,
+# an exception anywhere, a verifier that cannot be launched -- all of those
+# pass the push through untouched. The only thing that stops a push here is a
+# deterministic check that ran and failed.
+#
+# CARR_SKIP_TOLL_ADVISORY still skips the whole block, deliberately: a door
+# with no handle gets taken off its hinges.
 if [ -z "$CARR_SKIP_TOLL_ADVISORY" ] && [ -f "$REPO_ROOT/ops/jev_change_tolls.py" ]; then
   # NOT 2>/dev/null. The advisory writes to stderr, so silencing stderr wired
   # it to a door and made it invisible in the same commit -- the exact failure
   # this session built ops/judgment-wiring-selftest.py to catch, committed by
   # the person who built it. The block below catches every exception itself and
   # exits 0, so there is nothing left to suppress.
-  REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS' || true
+  # NOT 2>/dev/null. The advisory writes to stderr, so silencing stderr wired
+  # it to a door and made it invisible in the same commit -- the exact failure
+  # this session built ops/judgment-wiring-selftest.py to catch, committed by
+  # the person who built it.
+  #
+  # Exit 3 is this block's own refusal, kept distinct from the deterministic
+  # classes above so a reader can tell them apart at a glance.
+  REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS'
 import importlib.util, os, sys
 root = os.environ.get("REPO_ROOT") or os.getcwd()
 try:
@@ -411,17 +443,43 @@ try:
         "jev_change_tolls", os.path.join(root, "ops", "jev_change_tolls.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    rows = module.owed()
+    state = module.change(repo=root)
+    rows = module.owed(state)
+    failures = module.verify(state, repo=root)
 except Exception:
+    # Unreachable service, missing credential, malformed answer: the push is
+    # not this check's to refuse when the check itself could not run.
     sys.exit(0)
+
 if rows:
-    print("\n  WHAT THIS CHANGE LOOKS LIKE IT OWES (advisory, not blocking):",
-          file=sys.stderr)
+    print("\n  WHAT THIS CHANGE LOOKS LIKE IT OWES:", file=sys.stderr)
     for probability, name, fix in rows:
-        print(f"    {probability:.2f}  {name}", file=sys.stderr)
+        mark = "UNPAID" if any(f[0] == name for f in failures) else "ok"
+        print(f"    {probability:.2f}  {name}  [{mark}]", file=sys.stderr)
         print(f"          {fix}", file=sys.stderr)
     print("", file=sys.stderr)
+
+if failures:
+    print("  PUSH HELD. These are not predictions -- each is a deterministic",
+          file=sys.stderr)
+    print("  check that RAN against this tree and FAILED:\n", file=sys.stderr)
+    for name, probability, reason, output in failures:
+        print(f"    {name}: {reason}", file=sys.stderr)
+        for line in (output or "").strip().splitlines()[-6:]:
+            print(f"        {line}", file=sys.stderr)
+        print("", file=sys.stderr)
+    print("  Pay the toll above and push again. Nothing here is a judgment",
+          file=sys.stderr)
+    print("  call: fix the check and it goes green. To push regardless, set",
+          file=sys.stderr)
+    print("  CARR_SKIP_TOLL_ADVISORY=1 and say in the commit why.\n",
+          file=sys.stderr)
+    sys.exit(3)
 TOLLS
+  status=$?
+  if [ "$status" -eq 3 ]; then
+    exit 1
+  fi
 fi
 
 exit 0
