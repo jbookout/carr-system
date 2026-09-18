@@ -88,11 +88,16 @@ DECLARED_INERT: dict[str, str] = {
         "narrating it -- that carry no token a regex could ever match. Across "
         "211 rules by 12 moments, 2532 judgments in 45 seconds, ZERO rules "
         "bound to nine or more moments: nothing is over-broad. "
-        "WHAT REMAINS is the wiring itself and the one open question it turns "
-        "on: the selector costs ~1.3s per call (one ranking Choice over the "
-        "roster, then parallel nouls over a shortlist of 20) and its home is "
-        "PreToolUse, which fires on every tool call. That budget, not the "
-        "quality of the judgment, is what the wiring has to answer. Loop 620.",
+        "THE LATENCY BUDGET IS ANSWERED and is not a blocker. The selector "
+        "costs ~1.3s (one ranking Choice over the roster, then parallel nouls "
+        "over a shortlist of 20, the two stages serial so the cost is two "
+        "round trips rather than twenty). Its home, hooks/rule-pack-preuse-"
+        "reselection.py, is already allocated a 20-SECOND timeout by the "
+        "harness and already shells out to the standing-context door on every "
+        "matched call. Better still, the corpus this change adds carries the "
+        "rule statements locally, so a judged selector can deliver the text "
+        "itself and DROP that round trip -- net latency flat or lower, not "
+        "additive. WHAT REMAINS is only the wiring. Loop 620.",
 }
 
 
