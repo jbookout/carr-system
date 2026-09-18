@@ -579,6 +579,13 @@ class DerivedBindingAndCanaryFloorTests(unittest.TestCase):
         ai_eval.project_scorecard_entry(
             clean, observed_on="2026-08-15", sequence=1, suite=self.suite)
 
+    def test_the_projection_cannot_be_called_without_its_suite(self):
+        # An argument that can be omitted is a check that can be skipped.
+        clean = ai_eval.evaluate_provider_run(
+            self.suite, ai_eval.load_provider_run(OBSERVED_RUN_PATH))
+        with self.assertRaises(TypeError):
+            ai_eval.project_scorecard_entry(clean, observed_on="2026-08-15", sequence=1)
+
     def test_the_suite_actually_declares_canaries_to_check_against(self):
         # Without this, every canary assertion above passes vacuously the day
         # the suite stops declaring any forbidden substring.

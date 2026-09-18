@@ -995,7 +995,7 @@ def _scorecard_projection(scorecard: Any) -> dict[str, Any]:
 
 
 def project_scorecard_entry(
-    scorecard: Any, observed_on: str, sequence: int, suite: dict[str, Any] | None = None
+    scorecard: Any, observed_on: str, sequence: int, suite: dict[str, Any]
 ) -> dict[str, Any]:
     """Create the redacted, immutable projection a baseline history can retain.
 
@@ -1007,9 +1007,11 @@ def project_scorecard_entry(
     exactly this when asked to name the change's biggest remaining weakness, and
     it was right: a guarantee enforced at one call site is not a guarantee.
 
-    `suite` stays optional only so an existing caller does not break at import;
-    every caller in this repository passes it, and a projection made without it
-    is unchecked and should be treated as such.
+    `suite` IS REQUIRED. It was briefly optional "for compatibility", which was
+    a weak reason — there are no callers outside this repository — and Jev,
+    asked again about the corrected change, put 0.95 on the optional argument
+    still leaving a way to obtain an unchecked artifact. It was right twice.
+    An argument that can be omitted is a check that can be skipped.
     """
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
         raise SuiteError("history entry sequence must be a positive integer")
@@ -1023,8 +1025,7 @@ def project_scorecard_entry(
         "summary": projected["summary"],
         "cases": projected["cases"],
     }
-    if suite is not None:
-        assert_no_canary_escaped(entry, suite, "baseline history entry")
+    assert_no_canary_escaped(entry, suite, "baseline history entry")
     return entry
 
 
