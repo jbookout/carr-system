@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { docConversationTools, docConversationProjection } from "../src/doc-conversation.js";
+import { docConversationTools, docConversationProjection, docConversationListProjection } from "../src/doc-conversation.js";
 import { TOOLS } from "../src/tools.js";
 import { PROFILES } from "../src/mcp.js";
 
@@ -706,3 +706,367 @@ test("DOC-UNARCHIVE-ONLY: an unarchive clears archived_at and leaves a PINNED co
       { setup: [{ pinned: true }, { archived: true }],
         act: { archived: false }, expect: { pinned: true, archived: false, moves: "archived_at" } });
   });
+
+// ---------------------------------------------------------------------------
+// WR-000115 — the LIST door.
+//
+// Every database case below mints its OWN actor pair, so the set a list
+// returns is exactly what that case created and an exact-set assertion is
+// meaningful. Sharing wr112-author with the cases above would make every
+// deepEqual on a whole set a hostage to test ordering.
+// ---------------------------------------------------------------------------
+
+// ONE RUN-UNIQUE TOKEN. Each case owns its whole visible set, and a second run
+// against the SAME cluster owns a different one -- so an exact-set assertion is
+// a statement about this run rather than about how many times the suite has
+// been run against this database.
+const RUN = randomUUID().slice(0, 8);
+const listSlug = (tag, role) => `wr115-${RUN}-${tag}-${role}`;
+
+/** One actor pair per case, so each case owns its whole visible set. */
+async function listActors(client, tag) {
+  const rows = [];
+  for (const role of ["author", "guest"]) {
+    const slug = listSlug(tag, role);
+    const r = await client.query(
+      `insert into public.actor(slug, kind, display_name, active) values ($1,'automation',$1,true)
+         on conflict (slug) do update set active = true returning id, slug`, [slug]);
+    rows.push(r.rows[0]);
+  }
+  return { author: rows[0], guest: rows[1] };
+}
+
+/** A verb-callable connection bound to one acting-actor context. */
+async function listSeat(pg, t, slug) {
+  const client = await connect(pg, slug);
+  t.after(() => client.end().catch(() => {}));
+  return {
+    client,
+    c: { query: (text, values = []) => client.query(text, values) },
+    verbs: docConversationTools({ ...harness(), ToolError }),
+  };
+}
+
+const listIds = listed => listed.conversations.map(row => row.id);
+const sorted = ids => [...ids].sort();
+
+test("LIST-OWN-AND-GRANTED: the list is exactly the created set plus the unrevoked-granted set, under two actor contexts",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const seat = await listSeat(pg, t, listSlug("own", "author"));
+    const { author, guest } = await listActors(seat.client, "own");
+    const guestSeat = await listSeat(pg, t, listSlug("own", "guest"));
+
+    const create = async (s, actor, title) => (await s.verbs["create-doc-conversation"].handler(
+      s.c, actor, { idempotency_key: randomUUID(), title, visibility: "private" }));
+    const a = await create(seat, { id: author.id, slug: author.slug }, "WR-000115 A");
+    const b = await create(seat, { id: author.id, slug: author.slug }, "WR-000115 B");
+    const cc = await create(guestSeat, { id: guest.id, slug: guest.slug }, "WR-000115 C");
+
+    await seat.verbs["share-doc-conversation"].handler(seat.c, { id: author.id },
+      { idempotency_key: randomUUID(), conversation_id: b.conversation_id,
+        grantee_slug: guest.slug, granted: true });
+
+    // The WHOLE set under each context, by deepEqual on a sorted array. A
+    // "contains B" assertion would pass for an implementation that returned
+    // everything the connection can read; this one fails, because the author's
+    // list would then carry C.
+    const authorList = await seat.verbs["list-doc-conversations"].handler(seat.c, {}, {});
+    assert.deepEqual(sorted(listIds(authorList)), sorted([a.conversation_id, b.conversation_id]));
+    assert.equal(authorList.visible_conversation_count, 2);
+
+    const guestList = await guestSeat.verbs["list-doc-conversations"].handler(guestSeat.c, {}, {});
+    assert.deepEqual(sorted(listIds(guestList)), sorted([b.conversation_id, cc.conversation_id]));
+    assert.equal(guestList.visible_conversation_count, 2);
+  });
+
+test("LIST-PRIVATE-INVISIBLE: a private conversation is absent from the other partner's list, appears on grant, and disappears on revoke, while the creator's list never changes",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const seat = await listSeat(pg, t, listSlug("priv", "author"));
+    const { author, guest } = await listActors(seat.client, "priv");
+    const guestSeat = await listSeat(pg, t, listSlug("priv", "guest"));
+
+    const p = await seat.verbs["create-doc-conversation"].handler(seat.c, { id: author.id },
+      { idempotency_key: randomUUID(), title: "WR-000115 private", visibility: "private" });
+    // The guest owns one of its own, so its baseline count is not zero and a
+    // count assertion cannot pass by accident.
+    await guestSeat.verbs["create-doc-conversation"].handler(guestSeat.c, { id: guest.id },
+      { idempotency_key: randomUUID(), title: "WR-000115 guest own", visibility: "private" });
+
+    const authorSees = async () => {
+      const listed = await seat.verbs["list-doc-conversations"].handler(seat.c, {}, {});
+      const row = listed.conversations.find(entry => entry.id === p.conversation_id);
+      assert.ok(row, "the creator's own list lost the conversation");
+      assert.equal(row.version, p.version, "the creator's view of the version moved");
+      return listed;
+    };
+    const guestSees = async () => {
+      const listed = await guestSeat.verbs["list-doc-conversations"].handler(guestSeat.c, {}, {});
+      return { listed, present: listIds(listed).includes(p.conversation_id) };
+    };
+
+    // 1. Before any grant.
+    await authorSees();
+    let seen = await guestSees();
+    assert.equal(seen.present, false, "a private conversation reached the other partner's list");
+    assert.equal(seen.listed.visible_conversation_count, 1);
+
+    // 2. After the grant.
+    await seat.verbs["share-doc-conversation"].handler(seat.c, { id: author.id },
+      { idempotency_key: randomUUID(), conversation_id: p.conversation_id,
+        grantee_slug: guest.slug, granted: true });
+    await authorSees();
+    seen = await guestSees();
+    assert.equal(seen.present, true, "a granted conversation did not reach the grantee's list");
+    assert.equal(seen.listed.visible_conversation_count, 2);
+
+    const stamped = await seat.client.query(
+      `select granted_by_actor, granted_at, revoked_at from ops.doc_conversation_grant
+        where conversation_id = $1 and grantee_actor = $2`, [p.conversation_id, guest.id]);
+    assert.equal(stamped.rows.length, 1);
+    const grantRow = stamped.rows[0];
+    assert.equal(grantRow.revoked_at, null);
+
+    // 3. After the revoke: absent again, and the row is STAMPED, never deleted.
+    await seat.verbs["share-doc-conversation"].handler(seat.c, { id: author.id },
+      { idempotency_key: randomUUID(), conversation_id: p.conversation_id,
+        grantee_slug: guest.slug, granted: false });
+    await authorSees();
+    seen = await guestSees();
+    assert.equal(seen.present, false, "a REVOKED grant still shows the conversation to the grantee");
+    assert.equal(seen.listed.visible_conversation_count, 1);
+
+    const after = await seat.client.query(
+      `select granted_by_actor, granted_at, revoked_at from ops.doc_conversation_grant
+        where conversation_id = $1 and grantee_actor = $2`, [p.conversation_id, guest.id]);
+    assert.equal(after.rows.length, 1, "the revoke deleted the grant row instead of stamping it");
+    assert.equal(after.rows[0].granted_by_actor, grantRow.granted_by_actor);
+    assert.deepEqual(after.rows[0].granted_at, grantRow.granted_at);
+    assert.notEqual(after.rows[0].revoked_at, null);
+
+    // 4. The creator's own list is unchanged at every one of the four moments.
+    await authorSees();
+  });
+
+test("LIST-ORDER-AND-PAGE: pinned first then most recent, every conversation exactly once across pages, an honest more, a clamped limit, archived excluded by default",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const seat = await listSeat(pg, t, listSlug("page", "author"));
+    const { author } = await listActors(seat.client, "page");
+    const actor = { id: author.id };
+
+    const seeded = [];
+    for (let index = 0; index < 7; index += 1) {
+      seeded.push(await seat.verbs["create-doc-conversation"].handler(seat.c, actor,
+        { idempotency_key: randomUUID(), title: `WR-000115 page ${index}`, visibility: "private" }));
+    }
+    const versions = new Map(seeded.map(row => [row.conversation_id, row.version]));
+    const flag = async (row, fields) => {
+      const result = await seat.verbs["rename-doc-conversation"].handler(seat.c, actor,
+        { idempotency_key: randomUUID(), conversation_id: row.conversation_id,
+          base_version: versions.get(row.conversation_id), ...fields });
+      versions.set(row.conversation_id, result.version);
+      return result;
+    };
+    await flag(seeded[0], { pinned: true });
+    await flag(seeded[1], { pinned: true });
+    await flag(seeded[6], { archived: true });
+    // TOUCH AN UNPINNED ROW LAST, so the two pinned rows are NOT also the two
+    // most recently updated. Pinning bumps updated_at, so without this the data
+    // cannot tell a pinned-first order from a plain updated_at order at all and
+    // the position assertion below would hold for either.
+    await flag(seeded[2], { title: "WR-000115 page 2 touched last" });
+    const pinned = [seeded[0].conversation_id, seeded[1].conversation_id];
+    const archived = seeded[6].conversation_id;
+    const expected = seeded.slice(0, 6).map(row => row.conversation_id);
+
+    const walk = async (between = null) => {
+      const ids = [];
+      const mores = [];
+      let cursor = null;
+      let page = 0;
+      for (;;) {
+        const args = { limit: 2 };
+        if (cursor !== null) args.cursor = cursor;
+        const listed = await seat.verbs["list-doc-conversations"].handler(seat.c, {}, args);
+        ids.push(...listIds(listed));
+        mores.push(listed.more);
+        // (d) next_cursor is null exactly when more is false.
+        assert.equal(listed.next_cursor === null, listed.more === false,
+          "next_cursor and more disagree");
+        if (!listed.more) break;
+        cursor = listed.next_cursor;
+        page += 1;
+        if (between && page === 1) await between();
+        assert.ok(page < 20, "the cursor walk did not terminate");
+      }
+      return { ids, mores };
+    };
+
+    const first = await walk();
+    // (a) no duplicates and no omissions.
+    assert.deepEqual(sorted(first.ids), sorted(expected));
+    assert.equal(new Set(first.ids).size, first.ids.length, "a conversation was returned twice");
+    // (b) both pinned ids occupy positions 0 and 1 of the CONCATENATION.
+    assert.deepEqual(sorted(first.ids.slice(0, 2)), sorted(pinned),
+      "pinned-first held only within a page");
+    // (c) more is true on every page but the last, and false on the last.
+    assert.deepEqual(first.mores, [...first.mores.slice(0, -1).map(() => true), false]);
+    assert.equal(first.mores.at(-1), false);
+    assert.ok(first.mores.slice(0, -1).every(value => value === true));
+    // The archived conversation is absent by default.
+    assert.ok(!first.ids.includes(archived), "an archived conversation appeared in the default page");
+  });
+
+test("LIST-ORDER-AND-PAGE/MID-WALK-PIN: a conversation pinned between page one and page two is still returned exactly once",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const seat = await listSeat(pg, t, listSlug("pin", "author"));
+    const { author } = await listActors(seat.client, "pin");
+    const actor = { id: author.id };
+
+    const seeded = [];
+    for (let index = 0; index < 7; index += 1) {
+      seeded.push(await seat.verbs["create-doc-conversation"].handler(seat.c, actor,
+        { idempotency_key: randomUUID(), title: `WR-000115 midwalk ${index}`, visibility: "private" }));
+    }
+    const expected = seeded.map(row => row.conversation_id);
+
+    const ids = [];
+    let cursor = null;
+    let page = 0;
+    for (;;) {
+      const args = { limit: 2 };
+      if (cursor !== null) args.cursor = cursor;
+      const listed = await seat.verbs["list-doc-conversations"].handler(seat.c, {}, args);
+      ids.push(...listIds(listed));
+      if (!listed.more) break;
+      cursor = listed.next_cursor;
+      page += 1;
+      if (page === 1) {
+        // PIN A ROW PAGE ONE ALREADY RETURNED. Pinning moves it to the front of
+        // the whole order, which is a position the reader has already passed. A
+        // cursor carrying the WHOLE sort key knows that and leaves the rest of
+        // the walk untouched; one that carries only (updated_at, id) cannot say
+        // whether the reader is still inside the pinned block, so the pages
+        // after this point stop being a partition of the visible set.
+        //
+        // Pinning a row the walk has NOT yet reached is deliberately not the
+        // case here: no keyset cursor of any width can return a row that has
+        // moved behind the reader, so such a walk would prove nothing about the
+        // cursor's shape.
+        const victim = seeded.find(row => row.conversation_id === ids[0]);
+        assert.ok(victim, "the mid-walk pin must target a row page one returned");
+        await seat.verbs["rename-doc-conversation"].handler(seat.c, actor,
+          { idempotency_key: randomUUID(), conversation_id: victim.conversation_id,
+            base_version: victim.version, pinned: true });
+      }
+      assert.ok(page < 20, "the cursor walk did not terminate");
+    }
+    assert.equal(new Set(ids).size, ids.length, "the mid-walk pin returned a conversation twice");
+    assert.deepEqual(sorted(ids), sorted(expected), "the mid-walk pin dropped a conversation");
+  });
+
+test("LIST-ORDER-AND-PAGE/LIMIT-AND-ARCHIVED: an oversized limit is clamped to 100 and the archived toggle is honoured",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const seat = await listSeat(pg, t, listSlug("clamp", "author"));
+    const { author } = await listActors(seat.client, "clamp");
+    const actor = { id: author.id };
+
+    const live = await seat.verbs["create-doc-conversation"].handler(seat.c, actor,
+      { idempotency_key: randomUUID(), title: "WR-000115 live", visibility: "private" });
+    const gone = await seat.verbs["create-doc-conversation"].handler(seat.c, actor,
+      { idempotency_key: randomUUID(), title: "WR-000115 archived", visibility: "private" });
+    await seat.verbs["rename-doc-conversation"].handler(seat.c, actor,
+      { idempotency_key: randomUUID(), conversation_id: gone.conversation_id,
+        base_version: gone.version, archived: true });
+
+    // Clamped, never refused: the function answers, with at most 100 rows.
+    const oversized = await seat.verbs["list-doc-conversations"].handler(seat.c, {}, { limit: 1000 });
+    assert.ok(oversized.conversations.length <= 100,
+      "an oversized limit was honoured instead of clamped");
+    // The schema is the other half of the clamp: a zero limit never reaches the
+    // function at all, because the transport refuses it.
+    assert.equal(TOOLS["list-doc-conversations"].inputSchema.properties.limit.minimum, 1);
+    assert.equal(TOOLS["list-doc-conversations"].inputSchema.properties.limit.maximum, 100);
+
+    const byDefault = await seat.verbs["list-doc-conversations"].handler(seat.c, {}, {});
+    assert.deepEqual(sorted(listIds(byDefault)), sorted([live.conversation_id]));
+    const withArchived = await seat.verbs["list-doc-conversations"].handler(seat.c, {},
+      { include_archived: true });
+    assert.deepEqual(sorted(listIds(withArchived)),
+      sorted([live.conversation_id, gone.conversation_id]));
+    // visible_conversation_count is the WHOLE visible set, archived included
+    // and paging ignored -- 0520:210-214 unchanged.
+    assert.equal(byDefault.visible_conversation_count, 2);
+  });
+
+test("LIST-ATTRIBUTION-SERVER-SIDE: the schema names no actor, and the set follows the acting context and no argument",
+  () => {
+    const schema = TOOLS["list-doc-conversations"].inputSchema;
+    assert.equal(schema.additionalProperties, false);
+    // An EXACT sorted key list, not a loop over forbidden names: a newly
+    // invented actor-shaped field fails here too.
+    assert.deepEqual(Object.keys(schema.properties).sort(),
+      ["cursor", "include_archived", "limit"]);
+    assert.equal(Object.hasOwn(schema, "required"), false,
+      "every field is optional: the first page of the signed-in partner's list is {}");
+    // The handler passes no actor value at all, unlike read-doc-conversation
+    // beside it, which passes a.id.
+    const handler = TOOLS["list-doc-conversations"].handler.toString();
+    assert.ok(!/\ba\.id\b/.test(handler), "the list handler passes an actor from the caller");
+    assert.ok(!/\bactor\b/.test(handler), "the list handler names an actor");
+  });
+
+test("LIST-ATTRIBUTION-SERVER-SIDE/SIGNATURE: ops.list_doc_conversations takes exactly three arguments and none of them is an actor",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const client = await connect(pg, null);
+    t.after(() => client.end().catch(() => {}));
+    const r = await client.query(
+      `select pg_get_function_identity_arguments(p.oid) as args
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'ops' and p.proname = 'list_doc_conversations'`);
+    assert.equal(r.rows.length, 1, "ops.list_doc_conversations is not installed exactly once");
+    // The shipped read keeps p_actor_id in slot two; this signature does not,
+    // and the assertion fails immediately if anyone copies that slot forward.
+    assert.equal(r.rows[0].args,
+      "p_cursor text, p_limit integer, p_include_archived boolean");
+    assert.equal(r.rows[0].args.split(",").length, 3, "exactly three arguments");
+    assert.ok(!/uuid/.test(r.rows[0].args), "an argument is a uuid, which is what an actor id is");
+    assert.ok(!/actor/i.test(r.rows[0].args), "an argument names an actor");
+  });
+
+test("LIST-APP-CALLABLE: the verb is not authorityOnly and reaches its function on the writer bundle",
+  () => {
+    assert.ok(TOOLS["list-doc-conversations"], "list-doc-conversations is not registered");
+    assert.equal(TOOLS["list-doc-conversations"].write, undefined,
+      "a list writes nothing: mcp.js opens `begin read only` only without a write flag");
+    assert.equal(TOOLS["list-doc-conversations"].writerConnection, true,
+      "ops.list_doc_conversations is granted to carr_writer, and only the writer path installs the actor context");
+    assert.equal(TOOLS["list-doc-conversations"].authorityOnly, undefined,
+      "list-doc-conversations must not be authorityOnly: the app calls it as the signed-in partner");
+    for (const profile of ["capture", "away"]) {
+      assert.ok(!PROFILES[profile].has("list-doc-conversations"),
+        `list-doc-conversations must not be in the ${profile} profile`);
+    }
+  });
+
+test("the list shaper refuses anything that is not the definer function's own shape", () => {
+  assert.throws(() => docConversationListProjection(null, ToolError), /doc_conversation_not_found/);
+  assert.throws(() => docConversationListProjection({ ok: false }, ToolError),
+    /doc_conversation_not_found/);
+  assert.throws(() => docConversationListProjection(
+    { ok: false, reason_id: "doc_conversation_cursor_invalid" }, ToolError),
+  /doc_conversation_cursor_invalid/);
+  assert.throws(() => docConversationListProjection({ ok: true }, ToolError),
+    /doc_conversation_not_found/);
+});
