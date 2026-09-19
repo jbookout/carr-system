@@ -12,6 +12,7 @@ import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
 import { notificationTools } from "./notifications.js";
 import { sessionIdentityTools } from "./session-identity.js";
+import { dispatchSpineTools } from "./dispatch-spine.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
@@ -8075,6 +8076,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "doc-conversation": "mcp-server/src/doc-conversation.js",
   "notifications": "mcp-server/src/notifications.js",
   "session-identity": "mcp-server/src/session-identity.js",
+  "dispatch-spine": "mcp-server/src/dispatch-spine.js",
   "capability-program": "mcp-server/src/capability-program.js",
   "work-shape": "mcp-server/src/work-shape.js",
   "work-request-intake": "mcp-server/src/work-request-intake.js",
@@ -9098,6 +9100,13 @@ registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notif
 // neither writes a row anywhere, so neither takes the envelope or the event
 // helper.
 registerTools(sessionIdentityTools({ ToolError }), "session-identity");
+
+// WR-000119: the dispatch spine write pair. The OPPOSITE declaration to the
+// read pair above -- both of these carry write: true as well as the writer
+// connection, because ops.record_dispatch_link and ops.acknowledge_dispatch
+// insert and 0531 makes them volatile, so a read-only transaction would fail
+// them. Both take the envelope and the event helper for that reason.
+registerTools(dispatchSpineTools({ withEnvelope, writeEvent, ToolError }), "dispatch-spine");
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");

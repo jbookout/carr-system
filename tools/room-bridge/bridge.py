@@ -207,6 +207,38 @@ def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], pro
             "attempt_id": completed["attempt_id"], "projection": projection, "published": published}
 
 
+# WR-000119 — THE BRIDGE MINTS THE LINK, AND ONLY THE BRIDGE.
+#
+# At the moment the bridge appends the dispatch turn it holds, in its hand and
+# from nowhere else, the three facts the link is made of: the msg_id of the turn
+# it just wrote, the target session id it just dispatched to, and the work
+# request that queued the task. Writing the link LATER, from a re-read of the
+# turn, would mean recovering the session id out of prose again -- which is the
+# substring match 0531 exists to retire.
+#
+# hermes-projector IS THE CREDENTIAL, not a courtesy. 0531 refuses any derived
+# identity other than hermes-pilot inside the definer, and that selector is the
+# one path by which the Worker derives hermes-pilot (see verb_io.project_room_queue).
+# ``verb_io._run_verb`` is reused rather than a second subprocess path invented:
+# verb_io.py is outside this Work Request's authorized paths, so no public
+# wrapper could be added there, and two paths to the record layer would be two
+# places for the identity derivation to drift.
+def record_dispatch_link(*, turn_msg_id: str, session_id: str,
+                          work_request_id: str | None = None,
+                          dispatch_ref: str | None = None,
+                          call_verb=verb_io._run_verb) -> dict:
+    """Mint the explicit link between a room turn and the session it went to."""
+    args = {
+        "dispatch_ref": dispatch_ref or str(uuid.uuid4()),
+        "turn_msg_id": turn_msg_id,
+        "session_id": session_id,
+    }
+    if work_request_id:
+        args["work_request_id"] = work_request_id
+    return call_verb("record-dispatch-link", args,
+                     client_profile="hermes-projector")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -811,15 +843,47 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                             session_id=pending.get("session_id"),
                         )
                         if pending.get("transport") == "claude-desktop":
+                            # ONE msg_id, minted here and used twice: once as the
+                            # turn's own id and once as what the link names. A
+                            # second uuid would make the link point at a turn
+                            # nobody could find.
+                            dispatch_turn_msg_id = str(uuid.uuid4())
+                            dispatch_ref = str(uuid.uuid4())
                             add_room_turn(
                                 body=json.dumps({"claude_desktop_session": {
                                     "session_id": pending.get("session_id"),
                                     "status": "backgrounded",
                                     "task_id": pending.get("kanban_task_id"),
                                     "desktop_visibility": "after_completion",
+                                    "dispatch_ref": dispatch_ref,
                                 }}, separators=(",", ":")),
-                                seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+                                seat="hermes", kind="receipt",
+                                msg_id=dispatch_turn_msg_id,
                             )
+                            # A link that cannot be written is a visible error on
+                            # this cycle, never a silent fall back to the body
+                            # match the link exists to replace.
+                            try:
+                                record_dispatch_link(
+                                    turn_msg_id=dispatch_turn_msg_id,
+                                    session_id=str(pending.get("session_id") or ""),
+                                    work_request_id=pending.get("work_request_id"),
+                                    dispatch_ref=dispatch_ref,
+                                )
+                                # The DESK's own acknowledgement, written by the
+                                # desk dispatcher and never by this file: the
+                                # stage is fixed at `received` there, so the
+                                # bridge cannot send `acknowledged` even by
+                                # accident. `acknowledged` belongs to the session
+                                # that acts, from inside its own turn.
+                                dispatch.acknowledge_received(
+                                    dispatch_ref, desk=name, log_offset=offset,
+                                    injected_at=str(pending.get("injected_at") or ""),
+                                )
+                            except (RuntimeError, desks.DeskError) as exc:
+                                errors.append({"desk": name,
+                                               "error": "dispatch_link_failed",
+                                               "detail": str(exc)[:500]})
                     if queue_outcome.get("outcome") != "idle":
                         delivered.append({"desk": name, **queue_outcome})
             registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)

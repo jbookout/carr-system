@@ -1290,11 +1290,14 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # the lane that can actually prove them is a failure rather than a pass.
   # WR-000117 joins the same loop for the same reason: its identity cases mint
   # TWO actors and compare two answers, which only a database can do.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity; do
+  # WR-000119 joins it too: its centre case mints a link with NO ack beside a
+  # dispatch with no link at all and asserts the two nulls are different, which
+  # is a claim about rows and not about a shaper.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
-           CARR_SESSION_IDENTITY_DB_REQUIRED=1 \
+           CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
@@ -1396,6 +1399,23 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
          -f mcp-server/test/session-identity-postgres.sql; then
       tail -30 "$LOGDIR/session-identity-postgres.log" >&2
       bad migration "the session identity projection, filter and dispatch proof failed"
+      return
+    fi
+  fi
+
+  # WR-000119: the dispatch spine proved where only a database can prove it --
+  # append-only by GRANT rather than by convention, one link per assignment and
+  # none for a turn never assigned, the hermes-pilot restriction raised inside
+  # the definer, a dangling ack refused by the reference, a second ack of one
+  # stage refused by the unique constraint, all four stages evidenced in one
+  # answer, proved distinguished from body_match, not_acknowledged distinguished
+  # from no_dispatch_spine per row, and public.partner_room_turn never written.
+  if [ -f mcp-server/test/dispatch-spine-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/dispatch-spine-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/dispatch-spine-postgres.sql; then
+      tail -30 "$LOGDIR/dispatch-spine-postgres.log" >&2
+      bad migration "the dispatch spine link, acknowledgement and per-dispatch reason proof failed"
       return
     fi
   fi
