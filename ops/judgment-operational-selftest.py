@@ -33,6 +33,7 @@ credential is read from the environment and never printed.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -374,6 +375,190 @@ class EveryPathIsOutputNotJustReturnValue(unittest.TestCase):
             body = handle.read()
         self.assertIn("additionalContext", body,
                       "the shortlist is computed and never handed to the session")
+
+
+class DealReadTests(unittest.TestCase):
+    """ops/jev_deal_read.py -- the reading the Deal Room shows.
+
+    These are the three things that were actually WRONG in the first version,
+    each caught by running the thing rather than by reading it, plus the floor
+    that is the whole reason the module is trustworthy.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load("jev_deal_read")
+
+    @staticmethod
+    def bundle(**over):
+        """A complete bundle. Complete on purpose: read_deal builds its state
+        before the guard, so a half-built fixture raises here rather than
+        being reported back as a service failure."""
+        base = {
+            "deal_id": "11111111-2222-3333-4444-555555555555",
+            "name": "Test Deal", "client": "A Client", "phase": "research",
+            "deal_type": "startup", "lane": "territory", "segment": "Dental",
+            "city": "Pensacola", "owner": "joe", "operating_state": "active",
+            "parking_reason": None, "parking_note": None,
+            "next_step": "Send the LOI.", "next_step_due": "2026-10-01",
+            "next_date": None, "status_narrative": "Terms discussed.",
+            "history": ["2026-09-01 [note] toured two buildings"],
+            "last_recorded_event": "2026-09-01",
+            "days_since_record_touched": 17, "evidence_chars": 900,
+            "has_evidence": True,
+        }
+        base.update(over)
+        return base
+
+    def test_the_score_levels_are_numbered_from_zero(self):
+        """The off-by-one that reported every deal one rung too early.
+
+        A five-rung score returns 0.0 through 4.0 and keys its probabilities
+        "0".."4" -- verified against a live legend, not assumed. The first
+        version subtracted one before indexing, which read four correctly
+        judged deals as if the model had got them wrong.
+        """
+        mod = self.mod
+        top = len(mod.MOVEMENT_LEVELS) - 1
+        bundle = self.bundle()
+
+        class Fake:
+            @staticmethod
+            def ask(state, questions, **kw):
+                return {"answers": {
+                    "movement": {"score": float(top), "confidence": 0.9},
+                    "waiting_on": {"choice": "carr", "confidence": 0.8},
+                    "silence_is_bad": {"noul": 0.1}}}
+
+        real = mod.ts.ask
+        mod.ts.ask = Fake.ask
+        try:
+            out = mod.read_deal(bundle)
+        finally:
+            mod.ts.ask = real
+        self.assertEqual(out["movement_level"], mod.MOVEMENT_LEVELS[top],
+                         "a top score must report the TOP rung")
+        self.assertEqual(out["movement_rung"], len(mod.MOVEMENT_LEVELS))
+
+    def test_a_thin_record_is_refused_rather_than_guessed(self):
+        """The floor is the honest half. Below it nothing is asked at all."""
+        mod = self.mod
+        called = []
+
+        def boom(*a, **k):
+            called.append(1)
+            raise AssertionError("asked a question about a deal with no evidence")
+
+        real = mod.ts.ask
+        mod.ts.ask = boom
+        try:
+            out = mod.read_deal(self.bundle(has_evidence=False,
+                                            evidence_chars=12))
+        finally:
+            mod.ts.ask = real
+        self.assertFalse(called, "no request may go out below the floor")
+        self.assertFalse(out["judged"])
+        self.assertIn("12", out["reason"])
+        self.assertIn(str(mod.EVIDENCE_FLOOR_CHARS), out["reason"])
+
+    def test_a_failed_reading_never_breaks_the_room(self):
+        """Every failure path lands on judged=False, never on an exception."""
+        mod = self.mod
+        real = mod.ts.ask
+
+        def explode(*a, **k):
+            raise RuntimeError("no credential on this machine")
+
+        mod.ts.ask = explode
+        try:
+            out = mod.read_deal(self.bundle())
+        finally:
+            mod.ts.ask = real
+        self.assertFalse(out["judged"])
+        self.assertIn("no credential", out["reason"])
+
+    def test_a_malformed_bundle_raises_instead_of_reporting_an_outage(self):
+        """The guard must cover the SERVICE, not this file's own faults.
+
+        The first version wrapped state_for in the same try, so a missing key
+        came back as "the judgment did not run: 'client'" and a bug in this
+        module was indistinguishable from the network being down. Mutation
+        found that the earlier test could not tell the two shapes apart: with
+        a complete bundle they behave identically.
+        """
+        mod = self.mod
+        real = mod.ts.ask
+        mod.ts.ask = lambda *a, **k: self.fail("a broken bundle reached the service")
+        try:
+            with self.assertRaises(KeyError):
+                mod.read_deal({"has_evidence": True, "evidence_chars": 900})
+        finally:
+            mod.ts.ask = real
+
+    def test_the_state_carries_the_evidence_and_not_the_bookkeeping(self):
+        """Accuracy falls as a state fills with detail unrelated to the
+        decision, so the identifiers and counters stay out of the request."""
+        mod = self.mod
+        blob = json.dumps(mod.state_for(self.bundle()))
+        self.assertIn("toured two buildings", blob)
+        self.assertIn("Terms discussed", blob)
+        self.assertNotIn("11111111", blob)
+        self.assertNotIn("evidence_chars", blob)
+        self.assertNotIn("has_evidence", blob)
+
+    def test_the_deal_room_still_builds_when_the_reading_cannot_run(self):
+        """The generator's guard, read from the generator itself."""
+        with open(os.path.join(REPO, "generators", "build-deal-room.py"),
+                  encoding="utf-8") as handle:
+            body = handle.read()
+        self.assertIn("CARR_DEAL_ROOM_NO_READ", body,
+                      "the reading needs a deliberate kill switch")
+        self.assertIn("READ, READ_SUMMARY = {}, {}", body,
+                      "a failed reading must leave the room's payload empty")
+        # "readHtml(d)" alone also matches `function readHtml(d){`, so
+        # deleting the CALL left this assertion passing. Mutation found it.
+        self.assertIn("h+=readHtml(d);", body,
+                      "the reading is computed and never rendered")
+        self.assertIn("readBanner()", body,
+                      "the counts that qualify every number are not shown")
+
+
+class DealEvidenceFloorTests(unittest.TestCase):
+    """The floor and the last-touch date, measured against the live record.
+
+    Needs the database. Skipped rather than failed where it is unreachable,
+    because this file already runs on machines that have no credential.
+    """
+
+    def setUp(self):
+        self.mod = load("jev_deal_read")
+        try:
+            self.found = self.mod.bundles()
+        except Exception as exc:  # pragma: no cover - environment, not logic
+            self.skipTest(f"the record layer is not reachable here: {exc}")
+
+    def test_no_deal_is_ever_reported_quiet_for_a_negative_number_of_days(self):
+        """A due date is in the FUTURE and is not a last touch.
+
+        Feeding critical-date and action due dates into the last-touch marker
+        produced a deal reported as quiet for minus nine hundred and
+        twenty-five days, which is the kind of number a reader stops trusting
+        the whole panel over.
+        """
+        bad = [b for b in self.found
+               if b["days_since_record_touched"] is not None
+               and b["days_since_record_touched"] < 0]
+        self.assertEqual(bad, [], "a future date set the last-touch marker")
+
+    def test_structured_fields_do_not_count_toward_the_evidence_floor(self):
+        """Every live deal has a phase and a city. If those counted, every
+        deal would clear any floor while carrying nothing to read."""
+        nothing = [b for b in self.found if not b["history"]
+                   and not b["status_narrative"] and not b["next_step"]]
+        self.assertTrue(nothing, "expected deals with no free text at all")
+        for b in nothing:
+            self.assertEqual(b["evidence_chars"], 0, b["name"])
+            self.assertFalse(b["has_evidence"], b["name"])
 
 
 if __name__ == "__main__":

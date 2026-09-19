@@ -56,6 +56,10 @@ REACHES_THE_MODEL = ("typesafe_client", "jev_judge")
 # the verbs. A library calling another library is not wiring — it just moves
 # the question one file along, so ops/ is deliberately absent here.
 DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals",
+         # `./run.sh deal-room` builds the Deal Room from here and Joe reads
+         # the result, which is what a door is. Added 2026-09-18 with
+         # ops/jev_deal_read.py, the first judgment to hang off a generator.
+         "generators",
          # git runs these itself on every commit and push, which makes
          # them a door even though they sit under ops/ -- the one place
          # the blanket exclusion of ops/ below would get a real caller
@@ -152,6 +156,14 @@ def _imports(tree, name):
         elif isinstance(node, ast.ImportFrom) and node.module:
             if node.module.split(".")[0] == name:
                 return True
+            # `from ops import typesafe_client` names the module in the ALIAS,
+            # not in node.module. Missing this made ops/jev_deal_read.py
+            # invisible to this whole check on the day it was written: the
+            # detector reported no judgment modules to inspect and the suite
+            # went green over a module it had never looked at.
+            if node.module.split(".")[0] == "ops":
+                if any(alias.name == name for alias in node.names):
+                    return True
     return False
 
 
