@@ -53093,6 +53093,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:generators/build-deal-room.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "generators/build-deal-room.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "generators/build-deal-room.py",
+          "schema_digest": "0baf4ecdc1713cdb55182b7791c6242fb1f4f9da7a9845a918d68b785eb3189c",
+          "handler_digest": "0baf4ecdc1713cdb55182b7791c6242fb1f4f9da7a9845a918d68b785eb3189c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:ops/ci.sh",
           "ingress_kind": "script_entrypoint",
           "operation": "ops/ci.sh",
@@ -53209,15 +53232,15 @@
         }
       ],
       "expected_count": 868,
-      "expected_sha256": "71f0edc3e3f118e84f5f154f77fa876e91d040c0c5273fb47bf0edcbe9ed46d6"
+      "expected_sha256": "a84dc3ebb52a9914216470d2d4dce47c96812e598406f7fc98b544724d4526c5"
     }
   ],
   "current_source_review": {
     "base_version": "v34",
     "upsert": [],
     "expected_count": 868,
-    "expected_sha256": "71f0edc3e3f118e84f5f154f77fa876e91d040c0c5273fb47bf0edcbe9ed46d6",
-    "reason": "WR-000117 admits the session-identity READ PAIR and the frontier moves 866 to 868.\nMEASURED, NOT COPIED, AND DERIVED LAST: the v34 patch was produced by running the generator's own\nfullInventory(TOOLS) against this working tree AFTER the last edit to every inventoried entrypoint on\nthis branch, and diffing it against frozenInventory(\"scac-mutation-registry.v33\"). Deriving is only\nhalf a reseal; deriving last is the other half, and a pin taken before the last edit describes a file\nthat no longer exists by the time it is committed. This paragraph was re-rendered from the row sets,\nnot typed.\n\n2 NEW ingresses: mcp-tool:read-dispatch-history, mcp-tool:read-session-identity. Both are carried by a NEW family file,\nmcp-server/src/session-identity.js, which mcp-server/src/tools.js did not previously import, map or\nregister -- so UNLIKE v31, v32 and v33 this successor edits tools.js. Both are READS, so the reviewed\nMCP inventory moves 256 to 258 with the write count unchanged at 182 and the read count\nmoving to 76.\n\n107 rows re-digest, and they fall in two groups that are measured separately because they have\ntwo different causes.\n\n100 are the rows whose registrySource IS mcp-server/src/tools.js, whose bytes moved when the new\nfamily was imported, mapped and registered there. NOT ONE of them moves its schema_digest -- the file\ngained an import, a source-map entry and a registration call, not a verb -- and that is measured\nrather than assumed: the schema-moved set over those 100 rows is EMPTY, and mcp-server/src/tools.js still\ncarries exactly 100 registered ingresses.\n\n7 are the inventoried script entrypoints this branch actually edited: external-admin:tools/migrate.py, script-entrypoint:bin/schema-snapshot.sh, script-entrypoint:ops/ci.sh, script-entrypoint:ops/foundation-assurance-candidate-rehearsal.py, script-entrypoint:ops/scac-mutation-inventory.mjs, script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py, script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py.\nEach of those carries its file digest as its schema_digest, so every one of them moves both, which is\nwhy the two groups are counted apart rather than described together.\n\n0 rows are removed."
+    "expected_sha256": "a84dc3ebb52a9914216470d2d4dce47c96812e598406f7fc98b544724d4526c5",
+    "reason": "WR-000117 admits the session-identity READ PAIR and the frontier moves 866 to 868.\nMEASURED, NOT COPIED, AND DERIVED LAST: the v34 patch was produced by running the generator's own\nfullInventory(TOOLS) against this working tree AFTER the last edit to every inventoried entrypoint on\nthis branch, and diffing it against frozenInventory(\"scac-mutation-registry.v33\"). Deriving is only\nhalf a reseal; deriving last is the other half, and a pin taken before the last edit describes a file\nthat no longer exists by the time it is committed. This paragraph was re-rendered from the row sets,\nnot typed.\n\n2 NEW ingresses: mcp-tool:read-dispatch-history, mcp-tool:read-session-identity. Both are carried by a NEW family file,\nmcp-server/src/session-identity.js, which mcp-server/src/tools.js did not previously import, map or\nregister -- so UNLIKE v31, v32 and v33 this successor edits tools.js. Both are READS, so the reviewed\nMCP inventory moves 256 to 258 with the write count unchanged at 182 and the read count\nmoving to 76.\n\n108 rows re-digest, and they fall in three groups that are measured separately because they have\nthree different causes.\n\n100 are the rows whose registrySource IS mcp-server/src/tools.js, whose bytes moved when the new\nfamily was imported, mapped and registered there. NOT ONE of them moves its schema_digest -- the file\ngained an import, a source-map entry and a registration call, not a verb -- and that is measured\nrather than assumed: the schema-moved set over those 100 rows is EMPTY, and mcp-server/src/tools.js still\ncarries exactly 100 registered ingresses.\n\n7 are the inventoried script entrypoints this branch actually edited: external-admin:tools/migrate.py, script-entrypoint:bin/schema-snapshot.sh, script-entrypoint:ops/ci.sh, script-entrypoint:ops/foundation-assurance-candidate-rehearsal.py, script-entrypoint:ops/scac-mutation-inventory.mjs, script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py, script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py.\nEach of those carries its file digest as its schema_digest, so every one of them moves both, which is\nwhy the groups are counted apart rather than described together.\n\n1 is TRUNK's, not this build's, and the partition was taken from git diff --name-only\n3c8f619d..99a93379 rather than from memory: script-entrypoint:generators/build-deal-room.py.\norigin/main 99a93379 (\"Read the deal record instead of scoring a name\", #1092) edited that generator and\nadded ops/jev_deal_read.py, which admits NO ingress -- it carries no shebang and no main guard, and the\nderived frontier count proves it by staying at 868 with 2 added rows, both of them this\nbuild's. That merge's own current_source_review overlay row is folded into THIS patch, exactly as v33\nfolded v32's, which is why the v34 overlay is left EMPTY.\n\n0 rows are removed."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",

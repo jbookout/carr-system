@@ -56,6 +56,10 @@ REACHES_THE_MODEL = ("typesafe_client", "jev_judge")
 # the verbs. A library calling another library is not wiring — it just moves
 # the question one file along, so ops/ is deliberately absent here.
 DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals",
+         # `./run.sh deal-room` builds the Deal Room from here and Joe reads
+         # the result, which is what a door is. Added 2026-09-18 with
+         # ops/jev_deal_read.py, the first judgment to hang off a generator.
+         "generators",
          # git runs these itself on every commit and push, which makes
          # them a door even though they sit under ops/ -- the one place
          # the blanket exclusion of ops/ below would get a real caller
@@ -152,6 +156,14 @@ def _imports(tree, name):
         elif isinstance(node, ast.ImportFrom) and node.module:
             if node.module.split(".")[0] == name:
                 return True
+            # `from ops import typesafe_client` names the module in the ALIAS,
+            # not in node.module. Missing this made ops/jev_deal_read.py
+            # invisible to this whole check on the day it was written: the
+            # detector reported no judgment modules to inspect and the suite
+            # went green over a module it had never looked at.
+            if node.module.split(".")[0] == "ops":
+                if any(alias.name == name for alias in node.names):
+                    return True
     return False
 
 
@@ -180,6 +192,16 @@ def wired_modules():
     looked fine on the day they were written.
     """
     ops_stems = {p.stem for p in OPS.glob("*.py")}
+    # A SELFTEST NAMING A MODULE IS NOT A CALLER, and this file is the worst
+    # offender: pre-push runs it, its own DECLARED_INERT dict spells every
+    # inert module's filename, and the traversal therefore marked each one
+    # REACHED -- so a module could read as wired purely by being on the list
+    # of modules that are not. Found 2026-09-18 tracing why jev_rule_select.py
+    # came back both wired and declared inert. Selftests are skipped as
+    # relays; they are still doors' children, they just do not vouch.
+    def _is_relay(stem):
+        return stem.endswith("-selftest") or stem.endswith("_selftest")
+
     text_of = {}
     for path in OPS.glob("*.py"):
         try:
@@ -210,6 +232,8 @@ def wired_modules():
         if stem in reached:
             continue
         reached.add(stem)
+        if _is_relay(stem):
+            continue
         frontier |= names_in(text_of.get(stem, "")) - reached
 
     judgments = {m[:-3]: m for m in judgment_modules()}
