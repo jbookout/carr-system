@@ -50679,10 +50679,34 @@
   ],
   "current_source_review": {
     "base_version": "v33",
-    "upsert": [],
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:generators/build-deal-room.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "generators/build-deal-room.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "generators/build-deal-room.py",
+        "schema_digest": "0baf4ecdc1713cdb55182b7791c6242fb1f4f9da7a9845a918d68b785eb3189c",
+        "handler_digest": "0baf4ecdc1713cdb55182b7791c6242fb1f4f9da7a9845a918d68b785eb3189c",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ],
     "expected_count": 866,
-    "expected_sha256": "11d4daef9154ac261b0c778b87d3741bcf88e32b212a1e93e7749df58af1d88f",
-    "reason": "WR-000116 admits the notification-preference PAIR and the frontier moves 864 to 866.\nMEASURED, NOT COPIED, AND DERIVED LAST: the v33 patch was produced by running the generator own\nfullInventory(TOOLS) against this working tree AFTER the merge of origin/main b64b4c5a and AFTER the\nfinal edit to every inventoried entrypoint on this branch, and diffing it against\nfrozenInventory(\"scac-mutation-registry.v32\"). Deriving is only half a reseal; deriving last is the\nother half, and a pin taken before the last edit -- or before a trunk merge -- describes a file that no\nlonger exists by the time it is committed. This paragraph was re-rendered from the row sets, not typed.\n\n2 NEW ingresses: mcp-tool:read-notification-preferences, mcp-tool:set-notification-preference. Both join mcp-server/src/notifications.js,\nwhich mcp-server/src/tools.js already imports, already maps as the \"notifications\" family and already\nregisters. One of the two is a READ and one is a WRITE, so the reviewed MCP inventory moves 254 to 256\nwith the write count 181 to 182 and the read count 73 to 74.\n\n118 rows re-digest, and they fall in three groups that are measured separately because they have\nthree different causes.\n\n2 are the notifications.js siblings whose source file bytes moved: mcp-tool:acknowledge-notification, mcp-tool:notification-feed.\nnotification-feed source_digest moves and its schema_digest does NOT -- the pure shaper gained an\noutput-only quiet_suppressed field per row and a top-level quiet_now, and its inputSchema did not move a\nbyte. Both halves of that are asserted in the registry test rather than assumed.\n\n7 are the inventoried entrypoints THIS BRANCH edited, derived by search and never copied from a\nprevious build list: external-admin:tools/migrate.py, script-entrypoint:bin/schema-snapshot.sh, script-entrypoint:ops/ci.sh, script-entrypoint:ops/foundation-assurance-candidate-rehearsal.py, script-entrypoint:ops/scac-mutation-inventory.mjs, script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py, script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py.\n\n6 are rows carried forward from the v32 current_source_review overlay, folded into this patch exactly\nas v31 folded its overlay into v32, which is why the v33 overlay is left EMPTY: script-entrypoint:hooks/blocker-decider-gate.py, script-entrypoint:hooks/delegation-gate.py, script-entrypoint:hooks/gate_paths.py, script-entrypoint:hooks/one-repo-gate.py, script-entrypoint:hooks/stale-claim-gate.py, script-entrypoint:ops/githooks/pre-push.\nThis branch did not edit any of the six. script-entrypoint:ops/githooks/pre-push is counted here rather\nthan with trunk because it was already in the folded overlay before b64b4c5a also edited it; its digest\nbelow is the merged file.\n\n103 are TRUNK's, not this build's. origin/main b64b4c5a (\"Judge the code as it is written\", #1090)\nedited mcp-server/src/tools.js, mcp-server/src/mcp.js, hooks/lint-gate.py and ops/stale-count-check.py,\nand the 103 rows sourced from those files re-digest with them (pre-push is counted above). The 100 tools.js rows move their\nsource_digest ONLY: not one of them moves a schema_digest and the file registers no new verb, which is\nwhat keeps 254 to 256 the whole MCP move. That separation is asserted in the registry test.\n\nNOT ONE row was removed. hooks/completion-evidence-gate.py is not among the re-digested:\nset-notification-preference partitions to \"set\", which is already a member of WRITE_ACTION_PREFIXES, so\nthe gate owes no edit and its row does not move. ops/migration-number-contract-selftest.py and\nops/schema-snapshot-registry-seed-selftest.py were both edited on this branch and neither appears above:\nneither carries a shebang or a main-module construct, so neither is a script entrypoint and neither moves\nthe frontier -- asserted by deriving the count rather than assuming it."
+    "expected_sha256": "fd700533502d5e1a65fda7dc2fe91b3e4efd572ccaeb7bde871d6bb89c122b9f",
+    "reason": "ops/jev_deal_read.py reads the deal record and generators/build-deal-room.py renders what it says, so the\nDeal Room generator source digest moves. That entrypoint is the ONLY row that moves: the frontier stays at\n866 and the reader itself is a library with no shebang and no main guard, so it admits no new ingress.\nMEASURED, NOT COPIED, AND DERIVED LAST: this review was produced by running the generator own\nfullInventory(TOOLS) against this working tree at d55dd77d -- after the last edit to every inventoried\nentrypoint on this branch -- and diffing it against frozenInventory(\"scac-mutation-registry.v33\"). One row\ndiffered and exactly that row is upserted here. Deriving is only half a reseal; deriving last is the other\nhalf, and a pin taken before the final edit describes a file that no longer exists by the time the seal is\nchecked.\nWHY THE LOCAL FLOOR DID NOT CATCH IT: this check needs mcp-server/node_modules, which the push floor does\nnot run, so the drift surfaced only in the hosted strict suite as the unit class. The remedy is to run the\nreseal check in a tree that has node_modules before pushing an entrypoint edit, not to widen the floor."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",
