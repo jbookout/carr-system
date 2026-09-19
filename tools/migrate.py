@@ -209,6 +209,23 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0527_notification_preferences.sql",
         "0528_notification_preferences_scac_successor.sql",
     ),
+    # WR-000117 adds the session-identity READ PAIR -- two SECURITY DEFINER
+    # functions projecting the four existing session books, with their revokes
+    # and their grants, and nothing else -- in 0529; 0530 is its SEALED REGISTRY
+    # SUCCESSOR, admitting the two new ingresses and resealing the source
+    # inventory. Same deferred policy-epoch boundary as every group above:
+    # ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint trigger on
+    # public.schema_migrations, so committing 0529 alone asks the old v33
+    # snapshot to bless two intentionally-new definer surfaces and must fail.
+    # The two SQL bodies and their two immutable ledger rows therefore commit in
+    # ONE runner-owned transaction, and a caller may not cut this group with
+    # --through. Both verbs are READS -- `read` is in neither of the
+    # completion-evidence gate's two collections -- so no gate entry is owed;
+    # the pair still owes this group.
+    (
+        "0529_session_identity_reads.sql",
+        "0530_session_identity_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

@@ -11,6 +11,7 @@ import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
 import { notificationTools } from "./notifications.js";
+import { sessionIdentityTools } from "./session-identity.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
@@ -8073,6 +8074,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "investigation": "mcp-server/src/investigation.js",
   "doc-conversation": "mcp-server/src/doc-conversation.js",
   "notifications": "mcp-server/src/notifications.js",
+  "session-identity": "mcp-server/src/session-identity.js",
   "capability-program": "mcp-server/src/capability-program.js",
   "work-shape": "mcp-server/src/work-shape.js",
   "work-request-intake": "mcp-server/src/work-request-intake.js",
@@ -9089,6 +9091,13 @@ registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "do
 // acknowledge-notification writes ops.notification_read and nothing else, which
 // is why a session may never report it as having moved a task.
 registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
+
+// WR-000117: the session-identity read pair. Both verbs are READS on the writer
+// connection -- ops.session_identity_facts and ops.session_dispatch_history
+// derive the acting actor from a context only the writer path installs -- and
+// neither writes a row anywhere, so neither takes the envelope or the event
+// helper.
+registerTools(sessionIdentityTools({ ToolError }), "session-identity");
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");

@@ -453,6 +453,33 @@ def main() -> int:
             "--through was allowed to expose WR-000116 before its SCAC seal"
         )
 
+    # WR-000117 adds the session-identity read pair in 0529 and seals the
+    # resulting SCAC v34 successor in 0530.  The same deferred policy-epoch
+    # trigger refuses the intermediate catalog, so the reviewed pair must commit
+    # as one transaction and --through may not cut it.  Both verbs are reads and
+    # `read` is in neither of the completion-evidence gate's two collections, so
+    # no gate entry is owed; the pair still owes this group.
+    session_identity = [
+        item for item in loaded if item[0].startswith(("0529_", "0530_"))
+    ]
+    assert [item[0] for item in session_identity] == [
+        "0529_session_identity_reads.sql",
+        "0530_session_identity_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(session_identity) == [session_identity]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            session_identity,
+            "0529_session_identity_reads.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000117 before its SCAC seal"
+        )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.
