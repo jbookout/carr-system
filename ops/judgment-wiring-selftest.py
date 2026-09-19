@@ -192,6 +192,16 @@ def wired_modules():
     looked fine on the day they were written.
     """
     ops_stems = {p.stem for p in OPS.glob("*.py")}
+    # A SELFTEST NAMING A MODULE IS NOT A CALLER, and this file is the worst
+    # offender: pre-push runs it, its own DECLARED_INERT dict spells every
+    # inert module's filename, and the traversal therefore marked each one
+    # REACHED -- so a module could read as wired purely by being on the list
+    # of modules that are not. Found 2026-09-18 tracing why jev_rule_select.py
+    # came back both wired and declared inert. Selftests are skipped as
+    # relays; they are still doors' children, they just do not vouch.
+    def _is_relay(stem):
+        return stem.endswith("-selftest") or stem.endswith("_selftest")
+
     text_of = {}
     for path in OPS.glob("*.py"):
         try:
@@ -222,6 +232,8 @@ def wired_modules():
         if stem in reached:
             continue
         reached.add(stem)
+        if _is_relay(stem):
+            continue
         frontier |= names_in(text_of.get(stem, "")) - reached
 
     judgments = {m[:-3]: m for m in judgment_modules()}
