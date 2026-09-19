@@ -226,6 +226,25 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0529_session_identity_reads.sql",
         "0530_session_identity_scac_successor.sql",
     ),
+    # WR-000119 adds the DISPATCH SPINE -- the two append-only side relations
+    # public.room_dispatch_link and public.room_dispatch_ack with their grants,
+    # the rewrite of ops.session_dispatch_history at the same name and arity,
+    # and the two SECURITY DEFINER write doors the three first-hand writers
+    # call -- in 0531; 0532 is its SEALED REGISTRY SUCCESSOR, admitting the two
+    # new write ingresses and resealing the source inventory. Same deferred
+    # policy-epoch boundary as every group above: ops.scac_policy_epoch_refresh()
+    # is a DEFERRABLE constraint trigger on public.schema_migrations, so
+    # committing 0531 alone asks the old v34 snapshot to bless two
+    # intentionally-new definer surfaces and two new relation grants and must
+    # fail. The two SQL bodies and their two immutable ledger rows therefore
+    # commit in ONE runner-owned transaction, and a caller may not cut this
+    # group with --through. Unlike the 0529/0530 pair above this one DOES owe a
+    # completion-evidence gate entry: acknowledge-dispatch is a durable append
+    # and `acknowledge` is deliberately not a write prefix.
+    (
+        "0531_room_dispatch_spine.sql",
+        "0532_room_dispatch_spine_scac_successor.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

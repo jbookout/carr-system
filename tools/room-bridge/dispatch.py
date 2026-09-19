@@ -51,6 +51,7 @@ import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the mo
 import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
+import verb_io  # noqa: E402 — the ONE path to the record layer; see that module
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -300,6 +301,43 @@ def dispatch(
     }
     _record(results_path, row)
     return row
+
+
+# WR-000119 — THE DESK'S OWN ACKNOWLEDGEMENT, AND ONLY ITS OWN.
+#
+# The stage is a MODULE CONSTANT and not a parameter. A desk observes exactly
+# one thing first-hand: that a turn landed in a window, at a byte offset it can
+# name. Whether the session then TOOK THE TURN UP is the session's own fact and
+# it writes that itself, from inside its own turn -- so there is deliberately no
+# way to reach `acknowledged` through this function, and a caller that wanted to
+# send it would have to write a second one.
+#
+# The evidence is the desk name and the injection offset, both measured, never a
+# guess that "it probably arrived".
+DESK_ACK_STAGE = "received"
+
+
+def acknowledge_received(dispatch_ref: str, *, desk: str, log_offset: int,
+                          injected_at: str | None = None,
+                          call_verb=verb_io._run_verb) -> dict:
+    """Append this desk's `received` acknowledgement for one dispatch.
+
+    ``verb_io._run_verb`` is reused rather than a second subprocess path being
+    invented here: two paths to the record layer would be two places for the
+    identity derivation to drift, and verb_io.py is outside this Work Request's
+    authorized paths, so no public wrapper could be added to it.
+    """
+    if not dispatch_ref:
+        raise DeskError("dispatch_ref_missing",
+                        "an acknowledgement names the dispatch it acknowledges")
+    evidence = f"desk {desk} log offset {int(log_offset)}"
+    if injected_at:
+        evidence = f"{evidence} injected at {injected_at}"
+    return call_verb("acknowledge-dispatch", {
+        "dispatch_ref": dispatch_ref,
+        "stage": DESK_ACK_STAGE,
+        "evidence": evidence,
+    })
 
 
 def dispatch_envelope(

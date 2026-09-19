@@ -268,6 +268,58 @@ test("project-room-queue: a dedup row with rejected provenance is not healthy", 
   assert.equal(db.inserted.length, 0);
 });
 
+test("project-room-queue: replaying a durable event whose task moved state still dedups", async () => {
+  const dupMsg = "dddddddd-eeee-4fff-8000-111111111111";
+  const EVENT_READY = JSON.stringify({ queue_event: {
+    v: 1, board: "carr-build", event_id: 1302, event: "task.updated", task_id: "t_abc123",
+    card: { title: "x", target: "joe", effective_model: "sonnet", status: "ready",
+      priority: "p2", cap: "production", updated_at: "2026-09-01T04:08:19Z", source_seq: 1 },
+    summary: "task ready, created.", projected_at: "2026-09-01T04:08:19Z",
+  } });
+  const EVENT_BLOCKED = JSON.stringify({ queue_event: {
+    v: 1, board: "carr-build", event_id: 1302, event: "task.updated", task_id: "t_abc123",
+    card: { title: "x", target: "joe", effective_model: "sonnet", status: "blocked",
+      priority: "p2", cap: "production", updated_at: "2026-09-19T00:00:00Z", source_seq: 1 },
+    summary: "task is blocked.", projected_at: "2026-09-19T00:00:00Z",
+  } });
+
+  // 1. append event 1302's receipt.
+  const db = new RoomFake();
+  const first = await TOOLS["project-room-queue"].handler(db, hermes, {
+    idempotency_key: "k-project-5", body: EVENT_READY, msg_id: dupMsg,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(db.inserted.length, 1);
+
+  // 2. mutate the task's durable row: receipt_for now renders a different body
+  // (status ready -> blocked) for the SAME event id, so the durable row on
+  // disk no longer equals what this cycle would recompute.
+  db.msgIdTaken = dupMsg;
+  db.rows.push({ msg_id: dupMsg, id: first.seq, room_id: "partner-line", sponsor: "joe",
+    seat: "hermes", kind: "receipt", body: EVENT_BLOCKED, at: "2026-09-01T04:08:19+00:00",
+    origin_channel: "mcp", origin_actor: "hermes-pilot" });
+
+  // 3. replay the same event id (same msg_id). Before the fix this threw
+  // queue_projection_provenance_rejected because observed.body (blocked) no
+  // longer matched the freshly recomputed body (ready).
+  const replay = await TOOLS["project-room-queue"].handler(db, hermes, {
+    idempotency_key: "k-project-6", body: EVENT_READY, msg_id: dupMsg,
+  });
+  assert.equal(replay.ok, true);
+  assert.equal(replay.deduplicated, true);
+  assert.equal(db.inserted.length, 1, "the replay must not append a second row");
+
+  // A fresh msg_id (no durable row yet) must still take the insert path —
+  // proving the dedup branch, not the guard, is what changed.
+  const freshMsg = "22222222-3333-4444-8555-666666666666";
+  const fresh = await TOOLS["project-room-queue"].handler(db, hermes, {
+    idempotency_key: "k-project-7", body: EVENT_BLOCKED, msg_id: freshMsg,
+  });
+  assert.equal(fresh.ok, true);
+  assert.equal(fresh.deduplicated, undefined);
+  assert.equal(db.inserted.length, 2);
+});
+
 // ── read-room ───────────────────────────────────────────────────────────────
 
 test("read-room: returns turns after the cursor, oldest first, with the new cursor", async () => {

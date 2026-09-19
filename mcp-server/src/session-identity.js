@@ -73,10 +73,11 @@ export function sessionDispatchProjection(facts, ToolError) {
     total_returned: facts.total_returned ?? 0,
     more: facts.more === true,
     next_cursor: facts.next_cursor ?? null,
-    // THE NAMED GAP, passed through unchanged. public.partner_room_turn carries
-    // no session id, no work-request id and no acknowledgement column, so these
-    // two stages cannot be proved from this substrate. A non-null value here
-    // would be the conflation V5-UX-C13 clause 1 forbids, not a bonus.
+    // WR-000119: NO LONGER THE NAMED GAP. 0531 gave the two missing stages a
+    // substrate, so these three are read off the newest dispatch that carries
+    // them rather than returned as constants -- and null still means null:
+    // a silent desk leaves received null with the per-dispatch reason saying
+    // which silence it is, never a value inferred from an adjacent row.
     received: facts.received ?? null,
     acknowledged: facts.acknowledged ?? null,
     stage_unavailable_reason: facts.stage_unavailable_reason ?? null,
@@ -95,6 +96,14 @@ export function sessionDispatchProjection(facts, ToolError) {
       attempt_ref: row.attempt_ref ?? null,
       superseded_by: row.superseded_by ?? null,
       work_request_ref: row.work_request_ref ?? null,
+      // PER DISPATCH, and the two nulls must never collapse. link_source says
+      // whether this dispatch was proved by a room_dispatch_link row or merely
+      // inferred from the body; stage_unavailable_reason says not_acknowledged
+      // where a link exists with no ack row and no_dispatch_spine ONLY where
+      // no link row exists at all.
+      link_source: row.link_source ?? null,
+      dispatch_ref: row.dispatch_ref ?? null,
+      stage_unavailable_reason: row.stage_unavailable_reason ?? null,
     })),
   };
 }

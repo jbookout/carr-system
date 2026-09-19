@@ -480,6 +480,35 @@ def main() -> int:
             "--through was allowed to expose WR-000117 before its SCAC seal"
         )
 
+    # WR-000119 adds the dispatch spine in 0531 -- two append-only relations
+    # with their grants, the rewritten dispatch-history function and the two
+    # write doors -- and seals the resulting SCAC v35 successor in 0532.  The
+    # same deferred policy-epoch trigger refuses the intermediate catalog, so
+    # the reviewed pair must commit as one transaction and --through may not cut
+    # it.  Unlike the 0529/0530 pair this one owes a completion-evidence gate
+    # entry, because acknowledge-dispatch is a durable append and `acknowledge`
+    # is deliberately not a write prefix.
+    dispatch_spine = [
+        item for item in loaded if item[0].startswith(("0531_", "0532_"))
+    ]
+    assert [item[0] for item in dispatch_spine] == [
+        "0531_room_dispatch_spine.sql",
+        "0532_room_dispatch_spine_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(dispatch_spine) == [dispatch_spine]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            dispatch_spine,
+            "0531_room_dispatch_spine.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000119 before its SCAC seal"
+        )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

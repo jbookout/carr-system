@@ -4,10 +4,15 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v34 is the runtime selector because WR-000117 installs the session-identity
-// READ PAIR -- TWO new security-definer ingresses and TWO new verbs in a NEW
-// family file, which is why mcp-server/src/tools.js is edited and every
-// mcp-tool row sourced from it re-digests with the selector.
+// v35 is the runtime selector because WR-000119 installs the DISPATCH SPINE --
+// TWO new security-definer WRITE ingresses and TWO new verbs in a NEW family
+// file, plus TWO new relations whose grants move relation_dml, which is why
+// mcp-server/src/tools.js is edited again and every mcp-tool row sourced from
+// it re-digests with the selector.
+//
+// Superseded note (WR-000117): v34 was the selector because it installed the
+// session-identity READ PAIR -- two new security-definer ingresses and two new
+// verbs in a new family file, with no relation and no table grant at all.
 //
 // Superseded note (WR-000116): v33 was the selector because it installed the
 // notification-preference pair in the already-registered notifications family
@@ -29,7 +34,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v34.generated.js";
+} from "./scac-mutation-registry.v35.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
