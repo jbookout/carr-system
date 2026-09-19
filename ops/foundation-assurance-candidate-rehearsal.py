@@ -179,7 +179,7 @@ def foundation_assurance_facts(snapshot_dsn: str, *, connect=psycopg.connect) ->
     """Acquire the WR95 database comparators from the receipted replacement."""
     sql = """select jsonb_build_object(
  'migration',(select max(filename collate "C") from public.schema_migrations),
- 'registry_current',ops.scac_mutation_catalog_v33_current(),
+ 'registry_current',ops.scac_mutation_catalog_v34_current(),
  'oracle_role',exists(select 1 from pg_roles where rolname='carr_foundation_assurance_oracle'
    and rolcanlogin and not rolsuper and not rolcreaterole and not rolcreatedb and not rolbypassrls),
  'oracle_functions',(select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace

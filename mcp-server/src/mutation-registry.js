@@ -4,9 +4,14 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v33 is the runtime selector because WR-000116 installs the notification
-// LIST door -- ONE new security-definer ingress and ONE new verb in the
-// already-registered doc-conversation family file.
+// v34 is the runtime selector because WR-000117 installs the session-identity
+// READ PAIR -- TWO new security-definer ingresses and TWO new verbs in a NEW
+// family file, which is why mcp-server/src/tools.js is edited and every
+// mcp-tool row sourced from it re-digests with the selector.
+//
+// Superseded note (WR-000116): v33 was the selector because it installed the
+// notification-preference pair in the already-registered notifications family
+// file.
 //
 // Superseded note (WR-000114): v31 was the selector because it installed the three Doc
 // conversation write doors -- create, share/revoke and rename/pin/archive --
@@ -24,7 +29,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v33.generated.js";
+} from "./scac-mutation-registry.v34.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

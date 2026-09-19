@@ -1288,10 +1288,13 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # WR-000111/112/113: the three acceptance suites that need a real database.
   # Each one SKIPS in the unit class and is REQUIRED here, so a silent skip in
   # the lane that can actually prove them is a failure rather than a pass.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications; do
+  # WR-000117 joins the same loop for the same reason: its identity cases mint
+  # TWO actors and compare two answers, which only a database can do.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
+           CARR_SESSION_IDENTITY_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
@@ -1377,6 +1380,22 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
          -f mcp-server/test/notification-preferences-postgres.sql; then
       tail -30 "$LOGDIR/notification-preferences-postgres.log" >&2
       bad migration "the notification preference read, write and quiet-hours proof failed"
+      return
+    fi
+  fi
+
+  # WR-000117: the permission filter asserted PER BOOK across four books with
+  # four different owner columns, the count comparison, a root distinguished
+  # from an unrecorded parent, the age rule computed from each row's own
+  # timestamp, the two proven dispatch stages with the named unavailable
+  # reason, an opaque cursor that neither skips nor repeats, and no row count
+  # moved by either read.
+  if [ -f mcp-server/test/session-identity-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/session-identity-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/session-identity-postgres.sql; then
+      tail -30 "$LOGDIR/session-identity-postgres.log" >&2
+      bad migration "the session identity projection, filter and dispatch proof failed"
       return
     fi
   fi
