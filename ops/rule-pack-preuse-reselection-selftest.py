@@ -903,9 +903,50 @@ def fake_adviser(_situation):
              "binding_model": "jev-test-binder"}]
 
 
+def fake_build_adviser(situation):
+    return {
+        "schema": "jev-build-advisory/v1",
+        "partner_request_sha256": rail.digest(situation),
+        "model": "jev-test-build",
+        "facets": {
+            "architecture_or_design": 0.81,
+            "semantic_creation": 0.84,
+            "diagnosis": 0.12,
+            "verification_selection": 0.67,
+            "evidence_matching": 0.34,
+            "next_action_priority": 0.58,
+        },
+        "guidance": {
+            "extend_existing_seam": 0.88,
+            "prefer_reversible_slice": 0.71,
+            "define_typed_contract_first": 0.84,
+            "gather_more_evidence_before_diagnosis": 0.22,
+            "prefer_behavioral_verification": 0.79,
+            "require_fresh_exact_evidence": 0.66,
+            "prioritize_blocker_removal": 0.45,
+        },
+        "required_actions": [
+            {"facet": facet, "instruction": contract.BUILD_ACTIONS[facet]}
+            for facet in contract.BUILD_ACTIONS
+            if {
+                "architecture_or_design": 0.81,
+                "semantic_creation": 0.84,
+                "diagnosis": 0.12,
+                "verification_selection": 0.67,
+                "evidence_matching": 0.34,
+                "next_action_priority": 0.58,
+            }[facet] >= contract.BUILD_ACTION_THRESHOLD
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 6},
+        "authority": "advisory_only",
+        "deterministic_exclusions": ["authority", "execution", "completion_proof"],
+    }
+
+
 semantic_runner = Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id]))
 semantic_output = rail.process(prompt_payload(), runner=semantic_runner,
-                               adviser=fake_adviser)
+                               adviser=fake_adviser,
+                               build_adviser=fake_build_adviser)
 semantic_row = json.loads(context(semantic_output))
 check("UserPromptSubmit asks Jev once about the partner message",
       semantic_row["schema"] == contract.SEMANTIC_RECEIPT_SCHEMA
@@ -920,6 +961,8 @@ check("semantic receipt uses authoritative text and keeps the Jev probability",
       semantic_row["rules"] == [{"id": semantic_id,
                                   "statement": f"binding jit rule {semantic_id}"}]
       and semantic_row["probabilities"] == {semantic_id: 0.91}
+      and semantic_row["build_receipt"]["advisory"]["model"] == "jev-test-build"
+      and semantic_row["build_receipt"]["semantic_rule_delivery"] == "delivered"
       and semantic_row["model_provenance"] == {
           semantic_id: {"ranking_model": "jev-test-ranker",
                         "binding_model": "jev-test-binder"}})
@@ -952,7 +995,7 @@ check("Claude cannot replay a valid semantic receipt onto a different prompt",
 codex_semantic = rail.process(
     prompt_payload(client="codex"),
     runner=Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id])),
-    adviser=fake_adviser)
+    adviser=fake_adviser, build_adviser=fake_build_adviser)
 check("Codex semantic receipt binds the native turn",
       json.loads(context(codex_semantic))["turn_id"] == "turn-prompt")
 codex_semantic_context = codex_context(context(codex_semantic))
@@ -973,21 +1016,39 @@ check("tampered semantic context cannot claim a loaded pack",
       mode is None and loaded == [], (mode, loaded))
 
 no_bind_runner = Runner()
-check("no Jev binding produces no context and no standing-context call",
-      rail.process(prompt_payload(prompt="hello"), runner=no_bind_runner,
-                   adviser=lambda _situation: []) is None
+no_bind_output = rail.process(
+    prompt_payload(prompt="hello"), runner=no_bind_runner,
+    adviser=lambda _situation: [], build_adviser=fake_build_adviser)
+check("no rule binding still produces the automatic build advisory",
+      json.loads(context(no_bind_output))["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and contract.validate_build_receipt(json.loads(context(no_bind_output)), repo=REPO)
+      and json.loads(context(no_bind_output))["semantic_rule_delivery"] == "not_applicable"
       and no_bind_runner.calls == [])
 
 layer0_id = next(short for short, entry in MAP["rule_load_layers"].items()
                  if entry.get("load_layer") == "layer0")
 layer0_runner = Runner()
-check("already-loaded layer0 rules are not redelivered",
-      rail.process(prompt_payload(), runner=layer0_runner,
-                   adviser=lambda _situation: [{"id": layer0_id,
-                                                "probability": 0.99,
-                                                "ranking_model": None,
-                                                "binding_model": "jev-test"}]) is None
+layer0_output = rail.process(
+    prompt_payload(), runner=layer0_runner,
+    adviser=lambda _situation: [{"id": layer0_id,
+                                 "probability": 0.99,
+                                 "ranking_model": None,
+                                 "binding_model": "jev-test"}],
+    build_adviser=fake_build_adviser)
+check("already-loaded layer0 rules are not redelivered but build advice remains",
+      json.loads(context(layer0_output))["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and json.loads(context(layer0_output))["semantic_rule_delivery"] == "not_applicable"
       and layer0_runner.calls == [])
+
+failed_semantic_output = rail.process(
+    prompt_payload(), runner=Runner(returncode=1, stderr="token=SUPER-SECRET"),
+    adviser=fake_adviser, build_adviser=fake_build_adviser)
+failed_build_receipt = json.loads(context(failed_semantic_output))
+check("semantic rule failure preserves a validated visible build receipt",
+      failed_build_receipt["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and failed_build_receipt["semantic_rule_delivery"] == "failed"
+      and contract.validate_build_receipt(failed_build_receipt, repo=REPO)
+      and "SUPER-SECRET" not in context(failed_semantic_output))
 
 check("malformed prompt events fail open before either adapter runs",
       rail.process({"hook_event_name": "UserPromptSubmit", "session_id": "x"},
@@ -1006,7 +1067,10 @@ oversize = rail.process(
     runner=Runner(),
     adviser=oversize_adviser)
 check("oversized prompts fail open visibly instead of judging truncated text",
-      context(oversize) == rail.SEMANTIC_FAILURE_CONTEXT
+      json.loads(context(oversize))["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and json.loads(context(oversize))["semantic_rule_delivery"] == "not_attempted_oversize"
+      and json.loads(context(oversize))["advisory"]["schema"]
+          == contract.BUILD_ADVISORY_UNAVAILABLE_SCHEMA
       and oversize_adviser_calls == [])
 
 forged_selector = copy.deepcopy(semantic_row)

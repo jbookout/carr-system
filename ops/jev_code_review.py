@@ -249,8 +249,12 @@ def review_one(region, client=None, api_key=None):
                         "why_it_was_flagged": region["kind"],
                         "code": region["code"]}}
     answer = tsc.ask(state, questions, timeout=TIMEOUT_SECONDS, api_key=api_key)
-    return {qid: answer_value(body)
-            for qid, body in (answer.get("answers") or {}).items()}
+    scores = {qid: answer_value(body)
+              for qid, body in (answer.get("answers") or {}).items()}
+    model = answer.get("model")
+    if isinstance(model, str) and model.strip():
+        scores["_model"] = model
+    return scores
 
 
 def answer_value(body):
