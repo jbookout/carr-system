@@ -32,6 +32,18 @@ const json = (body, status = 200) =>
 
 export const FOUNDATION_ASSURANCE_RUNTIME_BINDING_SCHEMA =
   "doctorcre-v5-foundation-assurance-runtime-binding.v1";
+const CANONICAL_OWNERSHIP_HOST_VERSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$/;
+
+// This is deployment metadata the Worker received from Cloudflare, not a
+// header, RPC parameter, or tool argument.  The ownership adapter refuses when
+// it is absent: a pool connection that cannot name its configured host cannot
+// be trusted to acquire or renew a canonical ownership lease.
+export function canonicalOwnershipExecutionHost(env) {
+  const version = typeof env?.CF_VERSION_METADATA?.id === "string"
+    ? env.CF_VERSION_METADATA.id.trim() : "";
+  return CANONICAL_OWNERSHIP_HOST_VERSION.test(version)
+    ? `cloudflare-workers:${version}` : null;
+}
 
 // The foundation oracle must prove which deployed Worker is answering before
 // the record layer exposes any material. These values are runtime/provider
@@ -69,19 +81,25 @@ export async function setWriterActorContext(client, actor, { partnerAuthorityAct
         ? partnerAuthoritySlugForActor(actor) : "");
   const receiptSessionRef = typeof actor?.correlation_id === "string" && actor.correlation_id
     ? `session:${actor.correlation_id.toLowerCase()}` : null;
+  const tenant = organizationTenantForActor(actor);
+  const executionHost = typeof actor?.execution_host_id === "string" ? actor.execution_host_id : "";
   if (receiptSessionRef === null) {
     await client.query(
       "select set_config('carr.acting_actor_slug',$1::text,true), " +
-      "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",
-      [actor.slug, verifiedHumanSlug],
+      "set_config('carr.verified_human_actor_slug',$2::text,true), " +
+      "set_config('carr.organization_tenant_id',$3::text,true), " +
+      "set_config('carr.execution_host_id',$4::text,true) /* writer-actor-context */",
+      [actor.slug, verifiedHumanSlug, tenant, executionHost],
     );
     return;
   }
   await client.query(
     "select set_config('carr.acting_actor_slug',$1::text,true), " +
     "set_config('carr.verified_human_actor_slug',$2::text,true), " +
-    "set_config('carr.receipt_session_ref',$3::text,true) /* writer-actor-context */",
-    [actor.slug, verifiedHumanSlug, receiptSessionRef],
+    "set_config('carr.receipt_session_ref',$3::text,true), " +
+    "set_config('carr.organization_tenant_id',$4::text,true), " +
+    "set_config('carr.execution_host_id',$5::text,true) /* writer-actor-context */",
+    [actor.slug, verifiedHumanSlug, receiptSessionRef, tenant, executionHost],
   );
 }
 
@@ -804,7 +822,8 @@ export async function dispatch(request, env, ctx, actor) {
     // every verb handler — means every write verb's existing withEnvelope()/
     // writeEvent() calls pick it up for free through auditIdentity(actor)
     // (tools.js), with zero change to any individual verb.
-    correlation_id: env.CORRELATION_ID || null });
+    correlation_id: env.CORRELATION_ID || null,
+    execution_host_id: canonicalOwnershipExecutionHost(env) });
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 

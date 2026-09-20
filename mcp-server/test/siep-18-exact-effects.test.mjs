@@ -68,7 +68,44 @@ test("recursive delegation returns the exact transitive union once", () => {
 });
 
 test("missing, wildcard, cycle, dynamic SQL, opaque, and unintegrated paths default deny", () => {
-  assert.deepEqual(SCAC_EXACT_EFFECT_CONTRACTS, {});
+  assert.deepEqual(Object.keys(SCAC_EXACT_EFFECT_CONTRACTS).sort(), [
+    "db-function-acl:ops.accept_ready_plan_amendment(text,integer,text,uuid):execute",
+    "db-function-acl:ops.acknowledge_ready_plan_amendment(bigint,uuid):execute",
+    "db-function-acl:ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer):execute",
+    "db-function-acl:ops.canonical_ownership_trusted_context():execute",
+    "db-function-acl:ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb):execute",
+    "db-function-acl:ops.discover_ready_plan_amendments(bigint,int):execute",
+    "db-function-acl:ops.effective_ready_plan(text):execute",
+    "db-function-acl:ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid):execute",
+    "db-function-acl:ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid):execute",
+    "db-function-acl:ops.release_canonical_ownership_lease(uuid,uuid,bigint):execute",
+    "db-function-acl:ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer):execute",
+    "mcp-tool:accept-ready-plan-amendment",
+    "mcp-tool:acknowledge-ready-plan-amendment",
+    "mcp-tool:effective-ready-plan",
+    "mcp-tool:propose-ready-plan-amendment",
+    "mcp-tool:ready-plan-amendment-discovery",
+    "worker-route:canonical-ownership",
+    "worker-route:ready-plan-amendment",
+  ]);
+  assert.deepEqual(resolveExactEffects("worker-route:canonical-ownership"), [
+    { kind: "execute", function_signature: "ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer)" },
+    { kind: "execute", function_signature: "ops.canonical_ownership_trusted_context()" },
+    { kind: "execute", function_signature: "ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb)" },
+    { kind: "execute", function_signature: "ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid)" },
+    { kind: "execute", function_signature: "ops.release_canonical_ownership_lease(uuid,uuid,bigint)" },
+    { kind: "execute", function_signature: "ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer)" },
+  ]);
+  assert.deepEqual(resolveExactEffects("worker-route:ready-plan-amendment"), [
+    { kind: "execute", function_signature: "ops.accept_ready_plan_amendment(text,integer,text,uuid)" },
+    { kind: "execute", function_signature: "ops.acknowledge_ready_plan_amendment(bigint,uuid)" },
+    { kind: "execute", function_signature: "ops.discover_ready_plan_amendments(bigint,int)" },
+    { kind: "execute", function_signature: "ops.effective_ready_plan(text)" },
+    { kind: "execute", function_signature: "ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid)" },
+  ]);
+  assert.deepEqual(resolveExactEffects("mcp-tool:propose-ready-plan-amendment"), [
+    { kind: "execute", function_signature: "ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid)" },
+  ]);
   assert.throws(() => resolveExactEffects("mcp-tool:unknown"),
     error => error instanceof ExactEffectRefusal && error.error === "effect_contract_missing");
   assert.throws(() => immutableExactEffectContracts([

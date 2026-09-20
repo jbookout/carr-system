@@ -49,6 +49,7 @@ from migration_number_contract import (
     APPROVED_INTERSTITIAL_COLLISIONS,
     FROZEN_COLLISIONS,
     MigrationNumberError,
+    PERMANENTLY_BURNED_MIGRATION_SLOTS,
     collision_report,
     validate_migration_names,
 )
@@ -293,6 +294,11 @@ def main():
                     merge(claims, {row["number"]: {"reserved"}}, "reservation")
     except OSError:
         pass  # no ledger yet — nothing reserved on this machine
+
+    merge(claims, {
+        number: {f"burned:{reason}"}
+        for number, reason in PERMANENTLY_BURNED_MIGRATION_SLOTS.items()
+    }, "permanent-burn-register")
 
     if not claims:
         print("0001", flush=True)

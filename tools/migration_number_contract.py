@@ -12,6 +12,16 @@ from collections.abc import Iterable
 
 
 SLOT_RE = re.compile(r"^(\d{4})[a-z]?_[a-z0-9_]+\.sql$")
+
+# WR120 burned 0533/0534 and WR122's withdrawn contract burned 0535/0536.
+# They are reservations without files: no allocator or explicit reservation may
+# ever hand one back, and no ledger alias may make one executable later.
+PERMANENTLY_BURNED_MIGRATION_SLOTS: dict[int, str] = {
+    533: "WR120 withdrawn 0533 slot",
+    534: "WR120 withdrawn 0534 slot",
+    535: "WR122 stale ready-plan amendment",
+    536: "WR122 stale ready-plan SCAC successor",
+}
 FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
     "0013": (
         "0013_active_book_derived.sql",
@@ -67,6 +77,15 @@ APPROVED_INTERSTITIAL_COLLISIONS: dict[str, tuple[str, ...]] = {
         "0507_export_views_one_row_per_subject.sql",
         "0507a_engineering_slice_plan_validators.sql",
     ),
+    # WR-000125 / PLAN-b9bd96dd692c-v1. Production already carries the v35
+    # registry successor at 0532. The two exact lettered members are the only
+    # approved continuation of that slot and themselves form one no-split
+    # database transaction.
+    "0532": (
+        "0532_room_dispatch_spine_scac_successor.sql",
+        "0532a_canonical_ownership_lease_activation.sql",
+        "0532b_ready_plan_amendment_scac_successor.sql",
+    ),
 }
 
 # These twelve filenames were applied to isolated Control Plane staging before
@@ -119,6 +138,12 @@ def validate_migration_names(
         if not match:
             continue
         slot = match.group(1)
+        burned_reason = PERMANENTLY_BURNED_MIGRATION_SLOTS.get(int(slot))
+        if burned_reason is not None:
+            raise MigrationNumberError(
+                f"permanently burned migration slot {slot} cannot be reused: "
+                f"{name} ({burned_reason})"
+            )
         known_names = FROZEN_COLLISIONS.get(slot)
         label = "frozen"
         if known_names is None:

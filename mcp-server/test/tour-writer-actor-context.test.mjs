@@ -17,26 +17,28 @@ test("writer transactions set server-derived actor context before Tour mutations
   });
   assert.match(human.calls[0].sql, /carr\.acting_actor_slug/);
   assert.match(human.calls[0].sql, /carr\.verified_human_actor_slug/);
-  assert.deepEqual(human.calls[0].params, ["joe", "joe"]);
+  assert.match(human.calls[0].sql, /carr\.organization_tenant_id/);
+  assert.match(human.calls[0].sql, /carr\.execution_host_id/);
+  assert.deepEqual(human.calls[0].params, ["joe", "joe", "carr-internal", ""]);
 
   const sponsored = client();
   await setWriterActorContext(sponsored, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
     sponsoring_human_slug: "joe", native_agent_verified: true,
   });
-  assert.deepEqual(sponsored.calls[0].params, ["codex", ""]);
+  assert.deepEqual(sponsored.calls[0].params, ["codex", "", "carr-internal", ""]);
 
   const delegated = client();
   await setWriterActorContext(delegated, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
     sponsoring_human_slug: "joe", native_agent_verified: true,
   }, { partnerAuthorityAct: true });
-  assert.deepEqual(delegated.calls[0].params, ["codex", "joe"]);
+  assert.deepEqual(delegated.calls[0].params, ["codex", "joe", "carr-internal", ""]);
 
   const unverified = client();
   await setWriterActorContext(unverified, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
     sponsoring_human_slug: "joe", native_agent_verified: false,
   }, { partnerAuthorityAct: true });
-  assert.deepEqual(unverified.calls[0].params, ["codex", ""]);
+  assert.deepEqual(unverified.calls[0].params, ["codex", "", "carr-internal", ""]);
 });

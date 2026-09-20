@@ -412,6 +412,25 @@ case "$DISPATCH_SPINE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the dispatch spine registry ledger state" >&2; exit 1 ;;
 esac
 
+# WR-000125. 0532a and 0532b are one atomic suffix after the already-applied
+# v35 predecessor. A snapshot may expose v36 only when the registry successor
+# itself is present; the paired domain migration is checked as a second
+# readback so a partial suffix can never masquerade as a current snapshot.
+WR125_DOMAIN_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql')" \
+  2>/dev/null)"
+case "$WR125_DOMAIN_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the WR125 ownership ledger state" >&2; exit 1 ;;
+esac
+WR125_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0532b_ready_plan_amendment_scac_successor.sql')" \
+  2>/dev/null)"
+case "$WR125_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the WR125 SCAC ledger state" >&2; exit 1 ;;
+esac
+
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v34 registry surface exists. A snapshot taken between the two would be taken
@@ -1473,7 +1492,22 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$DISPATCH_SPINE_REGISTRY_APPLIED" = t ]; then
+  if [ "$WR125_REGISTRY_APPLIED" = t ]; then
+    [ "$WR125_DOMAIN_APPLIED" = t ] || {
+      echo "schema-snapshot: WR125 v36 registry is applied without its 0532a domain suffix" >&2
+      exit 1
+    }
+    SCAC_CURRENT_NUMBER=36
+    SCAC_VERSION_COUNT=36
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v36'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" "$URL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v36'")"
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v36.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35'"
+    SCAC_FULL_SET_SEAL_COUNT=35
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v36_current()"
+  elif [ "$DISPATCH_SPINE_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=35
     SCAC_VERSION_COUNT=35
     SCAC_TOTAL_ENTRY_COUNT=54997

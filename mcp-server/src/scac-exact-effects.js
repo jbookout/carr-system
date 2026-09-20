@@ -158,11 +158,63 @@ export function immutableExactEffectContracts(contracts) {
   return Object.freeze(out);
 }
 
-// Intentionally empty at this bounded checkpoint. An operation becomes
-// admissible only when a reviewer adds a complete static contract here. The
-// registry's write flag, handler prose, SQL text, and current grants are never
-// treated as effect authority.
-export const SCAC_EXACT_EFFECT_CONTRACTS = immutableExactEffectContracts([]);
+// WR-000125 closes the exact-effect lane for the new accepted-plan amendment
+// ingress and the trusted ownership context. These are deliberately EXECUTE
+// contracts, not inferred DML: the SECURITY DEFINER functions own their
+// transaction-local checks and the Worker route is the only caller allowed to
+// reach the existing 0450 lease functions. The registry, grants, or handler
+// prose never become effect authority by themselves.
+const WR125_EXECUTE = [
+  ["db-function-acl:ops.accept_ready_plan_amendment(text,integer,text,uuid):execute",
+    "ops.accept_ready_plan_amendment(text,integer,text,uuid)"],
+  ["db-function-acl:ops.acknowledge_ready_plan_amendment(bigint,uuid):execute",
+    "ops.acknowledge_ready_plan_amendment(bigint,uuid)"],
+  ["db-function-acl:ops.canonical_ownership_trusted_context():execute",
+    "ops.canonical_ownership_trusted_context()"],
+  ["db-function-acl:ops.discover_ready_plan_amendments(bigint,int):execute",
+    "ops.discover_ready_plan_amendments(bigint,int)"],
+  ["db-function-acl:ops.effective_ready_plan(text):execute",
+    "ops.effective_ready_plan(text)"],
+  ["db-function-acl:ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid):execute",
+    "ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid)"],
+  ["db-function-acl:ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid):execute",
+    "ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid)"],
+  ["db-function-acl:ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer):execute",
+    "ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer)"],
+  ["db-function-acl:ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb):execute",
+    "ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb)"],
+  ["db-function-acl:ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer):execute",
+    "ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer)"],
+  ["db-function-acl:ops.release_canonical_ownership_lease(uuid,uuid,bigint):execute",
+    "ops.release_canonical_ownership_lease(uuid,uuid,bigint)"],
+];
+
+const wr125Contract = (ingress_key, direct_effects = [], delegates_to = []) => ({
+  schema_version: "scac-exact-effect-contract.v1",
+  ingress_key,
+  direct_effects,
+  delegates_to,
+  sql_state: "static_reviewed",
+  integration_state: "reviewed_source_test",
+});
+
+export const SCAC_EXACT_EFFECT_CONTRACTS = immutableExactEffectContracts([
+  ...WR125_EXECUTE.map(([ingress_key, function_signature]) =>
+    wr125Contract(ingress_key, [{ kind: "execute", function_signature }])),
+  wr125Contract("mcp-tool:accept-ready-plan-amendment", [], [WR125_EXECUTE[0][0]]),
+  wr125Contract("mcp-tool:acknowledge-ready-plan-amendment", [], [WR125_EXECUTE[1][0]]),
+  wr125Contract("mcp-tool:effective-ready-plan", [], [WR125_EXECUTE[4][0]]),
+  wr125Contract("mcp-tool:propose-ready-plan-amendment", [], [WR125_EXECUTE[5][0]]),
+  wr125Contract("mcp-tool:ready-plan-amendment-discovery", [], [WR125_EXECUTE[3][0]]),
+  wr125Contract("worker-route:canonical-ownership", [], [
+    WR125_EXECUTE[7][0], WR125_EXECUTE[2][0], WR125_EXECUTE[8][0],
+    WR125_EXECUTE[6][0], WR125_EXECUTE[10][0], WR125_EXECUTE[9][0],
+  ]),
+  wr125Contract("worker-route:ready-plan-amendment", [], [
+    WR125_EXECUTE[0][0], WR125_EXECUTE[1][0], WR125_EXECUTE[3][0],
+    WR125_EXECUTE[4][0], WR125_EXECUTE[5][0],
+  ]),
+]);
 
 export function resolveExactEffects(ingressKey, contracts = SCAC_EXACT_EFFECT_CONTRACTS) {
   const visiting = new Set();

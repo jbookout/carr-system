@@ -7,6 +7,7 @@
 // Claude is refused explicitly until a fresh-native-session launcher exists.
 
 import { sha256 } from "./sha256.js";
+import { organizationTenantForActor } from "./identity.js";
 import {
   NO_CEREMONIAL_MERGE_DECISION,
   NO_CEREMONIAL_MERGE_DECISION_TITLE,
@@ -15,6 +16,8 @@ import {
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID = /^[A-Za-z][A-Za-z0-9._:-]{2,127}$/;
+const OWNERSHIP_SESSION_REF = /^ownership:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EXECUTION_HOST_REF = /^cloudflare-workers:[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$/;
 const OUTCOMES = new Set(["claimed_complete", "failed", "blocked", "reopened"]);
 export const ENGINEERING_REPOSITORY_ACTIONS = Object.freeze([
   "repository:create-worktree",
@@ -86,6 +89,60 @@ function exactAuthorityFree(args, ToolError) {
     "authority", "capability", "runtime", "model", "provider", "surface", "adapter", "native_session_ref"];
   const found = forbidden.filter(key => Object.hasOwn(args || {}, key));
   if (found.length) error(ToolError, { error: "caller_authority_selector_forbidden", fields: found });
+}
+
+// The only JavaScript seam for migration0450 ownership effects.  Its input is
+// deliberately not a tool schema: callers cannot supply tenant, actor,
+// session, host, principal, or a lease token.  The Worker supplies an already
+// sealed envelope/attempt binding, the authenticated call supplies actor and
+// correlation, and Cloudflare deployment metadata supplies the host.  0532a
+// mints the ownership-session row and rechecks all of those facts before this
+// helper sets transaction-local GUCs on the same checked-out writer connection.
+export async function withTrustedCanonicalOwnershipContext(c, actor, binding, ToolError, operation) {
+  if (typeof operation !== "function") throw new TypeError("canonical ownership operation is required");
+  const fields = ["accepted_plan_id", "attempt", "envelope_id", "expires_at", "idempotency_key", "work_request_id"];
+  if (!binding || typeof binding !== "object" || Array.isArray(binding) ||
+      Object.keys(binding).sort().join(",") !== fields.join(","))
+    error(ToolError, { error: "canonical_ownership_binding_invalid" });
+  const workRequestId = uuid(binding.work_request_id, "canonical_ownership.work_request_id", ToolError);
+  const acceptedPlanId = uuid(binding.accepted_plan_id, "canonical_ownership.accepted_plan_id", ToolError);
+  const envelopeId = uuid(binding.envelope_id, "canonical_ownership.envelope_id", ToolError);
+  const idempotencyKey = uuid(binding.idempotency_key, "canonical_ownership.idempotency_key", ToolError);
+  if (!Number.isSafeInteger(binding.attempt) || binding.attempt < 1)
+    error(ToolError, { error: "canonical_ownership_attempt_invalid" });
+  const expiry = new Date(binding.expires_at);
+  if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now())
+    error(ToolError, { error: "canonical_ownership_expiry_invalid" });
+  const runtimeSessionRef = typeof actor?.correlation_id === "string" && UUID.test(actor.correlation_id)
+    ? `session:${actor.correlation_id.toLowerCase()}` : null;
+  const executionHost = actor?.execution_host_id;
+  if (!runtimeSessionRef || !EXECUTION_HOST_REF.test(executionHost || ""))
+    error(ToolError, { error: "canonical_ownership_server_context_unavailable" });
+  const minted = (await c.query(
+    `select ops.mint_canonical_ownership_runtime_session($1::uuid,$2::uuid,$3::uuid,$4::integer,$5::text,$6::text,$7::timestamptz,$8::uuid) as binding
+       /* engineering-runtime:mint-canonical-ownership-context */`,
+    [workRequestId, acceptedPlanId, envelopeId, binding.attempt, runtimeSessionRef, executionHost,
+      expiry.toISOString(), idempotencyKey],
+  )).rows[0]?.binding;
+  if (!minted?.ok || !OWNERSHIP_SESSION_REF.test(minted.ownership_session_ref || "") ||
+      minted.organization_tenant_id !== organizationTenantForActor(actor) ||
+      minted.acting_actor_slug !== actor.slug || minted.execution_host_ref !== executionHost)
+    error(ToolError, { error: minted?.error || "canonical_ownership_context_mint_refused" });
+  await c.query(
+    "select set_config('carr.organization_tenant_id',$1::text,true), " +
+    "set_config('carr.acting_actor_slug',$2::text,true), " +
+    "set_config('carr.ownership_session_id',$3::text,true), " +
+    "set_config('carr.execution_host_id',$4::text,true) /* engineering-runtime:canonical-ownership-context */",
+    [minted.organization_tenant_id, minted.acting_actor_slug, minted.ownership_session_ref, minted.execution_host_ref],
+  );
+  const context = (await c.query(
+    "select ops.canonical_ownership_trusted_context() as context /* engineering-runtime:canonical-ownership-context-readback */",
+  )).rows[0]?.context;
+  if (!context?.ok || context.ownership_session_ref !== minted.ownership_session_ref ||
+      context.organization_tenant_id !== minted.organization_tenant_id ||
+      context.acting_actor_slug !== minted.acting_actor_slug || context.execution_host_ref !== minted.execution_host_ref)
+    error(ToolError, { error: context?.error || "canonical_ownership_context_refused" });
+  return operation(context);
 }
 
 // --- V5-F03 deep-module execution contract -----------------------------------
@@ -742,6 +799,25 @@ function sourceParts(source, ToolError) {
   id(plan.plan_ref, "accepted_plan.plan_ref", ToolError);
   digest(plan.digest, "accepted_plan.digest", ToolError);
   return { work, plan };
+}
+
+// A successor may deliberately preserve an old accepted-plan row for audit and
+// amendment-predecessor reads while making its executable contract permanently
+// unavailable.  Keep that distinction at the ingress boundary: a historical
+// passport remains readable, but no admission, claim, receipt append, or merge
+// path can accidentally turn the retained row back into an executable plan.
+//
+// 0532a is the authority for the exact stale-contract decision.  This adapter
+// only consumes its server-derived projection; it never infers retirement from
+// a Work Request label, a plan name, or a bootstrap/Gate-A record.
+function requireExecutableSource(source, ToolError) {
+  if (source?.execution_authorized === false) {
+    error(ToolError, {
+      error: "engineering_execution_contract_retired",
+      reason: typeof source.execution_refusal_reason === "string"
+        ? source.execution_refusal_reason : "server-derived accepted-plan execution fence",
+    });
+  }
 }
 
 function sourcePlanRow(facts, source, ToolError) {
@@ -1470,6 +1546,7 @@ export async function resolveSourceMergeAuthority(c, args, ToolError) {
       authority.pr_number !== args.pr_number)
     error(ToolError, { error: "source_merge_authority_projection_mismatch" });
   const passport = closureProjection(projection.passport_facts, ToolError);
+  requireExecutableSource(projection.passport_facts.source, ToolError);
   if (passport.closure_state !== "complete" || passport.stale_conflict?.state !== "none")
     error(ToolError, { error: "source_merge_passport_not_closed" });
   if (passport.slices.some(slice => slice.manual_qa_required === true))
@@ -1586,6 +1663,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   if (!sourceResult.rows.length || !sourceResult.rows[0].facts?.source) error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
   let facts = sourceResult.rows[0].facts;
   let source = sourceParts(facts.source, ToolError);
+  requireExecutableSource(facts.source, ToolError);
   let plan = sourcePlan(facts, source, ToolError);
   let slice = sliceFor(plan, sliceRef, ToolError);
   // The accepted contract must describe the binding this admission issues; a
@@ -1683,6 +1761,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   if (!facts?.source || canonicalDigest(facts.source) !== locatorSourceDigest)
     error(ToolError, { error: "engineering_admission_serialization_restart" });
   source = sourceParts(facts.source, ToolError);
+  requireExecutableSource(facts.source, ToolError);
   plan = sourcePlan(facts, source, ToolError);
   slice = sliceFor(plan, sliceRef, ToolError);
   requireServerExecutionBinding(plan, slice, ToolError);
@@ -1779,6 +1858,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   if (!facts?.source || canonicalDigest(facts.source) !== locatorSourceDigest)
     error(ToolError, { error: "engineering_admission_serialization_restart" });
   source = sourceParts(facts.source, ToolError);
+  requireExecutableSource(facts.source, ToolError);
   plan = sourcePlan(facts, source, ToolError);
   slice = sliceFor(plan, sliceRef, ToolError);
   requireServerExecutionBinding(plan, slice, ToolError);
@@ -1884,6 +1964,7 @@ export async function submitEngineeringReceipt(c, claimed, receipt, actor, ToolE
   const source = facts ? sourceParts(facts.source, ToolError) : null;
   if (!source || source.work.id !== `wr:${envelopeRow.work_request_id}`)
     error(ToolError, { error: "engineering_work_request_binding_mismatch" });
+  requireExecutableSource(facts.source, ToolError);
   const plan = source ? sourcePlan(facts, source, ToolError) : null;
   const slice = plan ? sliceFor(plan, envelopeRow.slice_ref, ToolError) : { slice_ref: envelopeRow.slice_ref, plan_digest: null };
   if (plan && receipt.plan_digest !== plan.plan_digest) error(ToolError, { error: "engineering_receipt_plan_mismatch" });

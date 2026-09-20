@@ -26,6 +26,8 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 
 RUNTIME_ROLE = "carr_jobs"
+STALE_PLAN_REF = "PLAN-954b03dd464d-v1"
+STALE_PLAN_HASH = "sha256:954b03dd464dab9986bc705d01fdb197edd29b23ad10ca673da53ad0ac03c27d"
 
 
 def fail(message: str) -> int:
@@ -84,8 +86,10 @@ def assert_non_codex_admission_refused(cur):
         cur.execute("release savepoint non_codex_engineering_envelope_admission")
         raise RuntimeError("non-Codex executor was admitted into an Engineering envelope")
 
-def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, executor_slug: str = "codex", executor_kind: str = "automation"):
+def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, executor_slug: str = "codex", executor_kind: str = "automation", stale_contract: bool = False):
     token = uuid.uuid4().hex
+    accepted_plan_hash = STALE_PLAN_HASH if stale_contract else sha("c")
+    accepted_plan_ref = STALE_PLAN_REF if stale_contract else f"PLAN-{token[:12]}-v1"
     joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
     codex_id = one(cur, "select id from actor where slug=%s and active and kind=%s", (executor_slug, executor_kind))[0]
     document_id = one(
@@ -125,7 +129,7 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
                      %s,'safe:recovery:fixture','safe:observability:fixture',%s,%s,%s)
              returning id""",
         (work_request_id, uuid.uuid4(), Jsonb({}), section_id, revision_id, "b" * 64,
-         Jsonb([]), Jsonb({}), sha("c"), f"PLAN-{token[:12]}-v1"),
+         Jsonb([]), Jsonb({}), accepted_plan_hash, accepted_plan_ref),
     )[0]
     one(
         cur,
@@ -134,9 +138,32 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
               accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
              values (%s,%s,%s,1,%s,%s,1,'fixture:engineering-currentness','fixture acceptance')
              returning id""",
-        (work_request_id, plan_id, uuid.uuid4(), sha("c"), joe_id),
+        (work_request_id, plan_id, uuid.uuid4(), accepted_plan_hash, joe_id),
     )
     source = one(cur, "select ops.engineering_admission_source(%s)", (f"WR-ENGINEERING-CLAIM-{token}",))[0]
+    if stale_contract:
+        if source is not None:
+            raise RuntimeError("stale accepted plan remained visible through engineering_admission_source")
+        record_digest = one(
+            cur,
+            """select 'sha256:'||encode(public.digest(jsonb_build_object(
+                 'id',id,'ref',ref,'state',state,'version',version,'title',title,
+                 'desired_outcome',desired_outcome,'acceptance_criteria',acceptance_criteria
+               )::text,'sha256'),'hex') from ops.work_request where id=%s""",
+            (work_request_id,),
+        )[0]
+        source = {
+            "work_request": {
+                "id": f"wr:{work_request_id}",
+                "version": 1,
+                "canonical_record_digest": record_digest,
+            },
+            "accepted_plan": {
+                "digest": accepted_plan_hash,
+                "plan_ref": accepted_plan_ref,
+                "revision": 1,
+            },
+        }
     record_digest = source["work_request"]["canonical_record_digest"]
     slice_ref = "slice:claim-fixture"
     if slice_refs is not None:
@@ -191,14 +218,20 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
     }
     plan_digest = canonical_digest(plan_payload)
     plan_payload["plan_digest"] = plan_digest
-    slice_plan_id = one(
-        cur,
-        """insert into ops.engineering_slice_plan
+    if stale_contract:
+        cur.execute("set local session_replication_role=replica")
+    try:
+        slice_plan_id = one(
+            cur,
+            """insert into ops.engineering_slice_plan
              (work_request_id,accepted_plan_id,accepted_plan_hash,work_request_version,plan_digest,plan,idempotency_key)
              values (%s,%s,%s,1,%s,%s,%s) returning id""",
-        (work_request_id, plan_id, sha("c"), plan_digest,
-         Jsonb(plan_payload), uuid.uuid4()),
-    )[0]
+            (work_request_id, plan_id, accepted_plan_hash, plan_digest,
+             Jsonb(plan_payload), uuid.uuid4()),
+        )[0]
+    finally:
+        if stale_contract:
+            cur.execute("set local session_replication_role=origin")
     session_id = one(
         cur,
         """insert into ops.capability_agent_session
@@ -227,16 +260,22 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
                 "server_binding": {"authority": {"read_only": False, "capability_profile": "capability:engineering-repository-write"}, "adapter": {"surface": "codex_desktop", "adapter_id": "adapter:codex-desktop"}, "identity": {"agent_principal_id": "agent:codex", "runtime_principal": "runtime:codex"}}}
     if mutate_envelope:
         mutate_envelope(envelope)
-    envelope_id = one(
-        cur,
-        """insert into ops.engineering_execution_envelope
+    if stale_contract:
+        cur.execute("set local session_replication_role=replica")
+    try:
+        envelope_id = one(
+            cur,
+            """insert into ops.engineering_execution_envelope
              (id,job_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,agent_session_id,
               state_version,canonical_record_digest,envelope_digest,envelope,issued_at,expires_at)
              values (%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s::timestamptz,%s::timestamptz)
              returning id""",
-        (envelope_id, job_id, work_request_id, plan_id, slice_plan_id, slice_ref, session_id, record_digest, envelope_digest,
-         Jsonb(envelope), issued_at, expires_at),
-    )[0]
+            (envelope_id, job_id, work_request_id, plan_id, slice_plan_id, slice_ref,
+             session_id, record_digest, envelope_digest, Jsonb(envelope), issued_at, expires_at),
+        )[0]
+    finally:
+        if stale_contract:
+            cur.execute("set local session_replication_role=origin")
     if session_state == "cancelled":
         cur.execute("update ops.capability_agent_session set state='cancelled',cancelled_at=now(),version=version+1 where id=%s", (session_id,))
     elif session_state == "completed":
@@ -627,6 +666,7 @@ def main() -> int:
             low_runway_job, low_runway_envelope, *_ = fixture(cur, lease_offset="10 minutes")
             predecessor_job, predecessor_envelope, *_ = fixture(cur, lease_offset="-1 hour", issued_offset="-2 hours")
             successor_job, successor_envelope = successor_fixture(cur, predecessor_job, predecessor_envelope)
+            stale_job, stale_envelope, *_ = fixture(cur, stale_contract=True)
             invalid_fixtures = [
                 fixture(cur, lambda e: e.__setitem__("expires_at", "not-a-time")),
                 fixture(cur, lambda e: e.__setitem__("envelope_id", "env:wrong")),
@@ -642,7 +682,7 @@ def main() -> int:
                 fixture(cur, session_state="cancelled"),
                 fixture(cur, session_state="completed"),
             ]
-            invalid_jobs = [row[0] for row in invalid_fixtures] + [overlong_job, low_runway_job]
+            invalid_jobs = [row[0] for row in invalid_fixtures] + [overlong_job, low_runway_job, stale_job]
             for invalid_job, invalid_envelope, *_ in invalid_fixtures:
                 verdict = one(cur, "select ops.engineering_envelope_currentness(%s,%s)", (invalid_envelope, invalid_job))[0]
                 if verdict.get("eligible"):
@@ -656,6 +696,17 @@ def main() -> int:
             low_runway = one(cur, "select ops.engineering_envelope_currentness(%s,%s)", (low_runway_envelope, low_runway_job))[0]
             if low_runway.get("dispatch_runway_sufficient") is not False:
                 return fail(f"low-runway future fixture was not fenced before claim: {low_runway}")
+            stale_verdict = one(
+                cur, "select ops.engineering_envelope_currentness(%s,%s)",
+                (stale_envelope, stale_job),
+            )[0]
+            if stale_verdict != {
+                "eligible": False,
+                "dispatch_runway_sufficient": False,
+                "execution_authorized": False,
+                "reason": "accepted_plan_retired",
+            }:
+                return fail(f"stale exact plan was not permanently fenced: {stale_verdict}")
             assert_non_codex_admission_refused(cur)
             if one(cur, "select ops.engineering_envelope_currentness(%s,%s)->>'reason'", (invalid_fixtures[-1][1], invalid_fixtures[-1][0]))[0] != "agent_session_not_active":
                 return fail("completed-session fixture returned the wrong currentness reason")

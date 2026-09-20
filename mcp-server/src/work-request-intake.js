@@ -14,6 +14,8 @@ const DECLINE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", 
 const SUPERSEDE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason", "superseded_by"]);
 const PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps","heavy_build"]);
 const ACCEPT_PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","plan_hash"]);
+const AMEND_PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","predecessor_plan_hash","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps","heavy_build"]);
+const ACK_AMENDMENT_FIELDS = new Set(["idempotency_key","notice_id"]);
 const HEAVY_REVIEW_FIELDS = new Set(["idempotency_key","human_ref","plan_hash","admission_hash","verdict","reviewer_session_ref","review_summary","evidence_refs","gaps"]);
 const OUTCOME_PROPOSAL_FIELDS = new Set(["idempotency_key","human_ref","base_version","plan_hash","criterion_results","evidence_refs","blocker_code","result_summary","observed_minutes","interaction_surface","heavy_session_used","manual_context_transfers"]);
 const ACCEPT_OUTCOME_FIELDS = new Set(["idempotency_key","human_ref","base_version","feedback_hash"]);
@@ -282,6 +284,30 @@ function validatePlan(args, ToolError) {
 function validateAcceptPlan(args, ToolError) {
   if (Object.keys(args).some(k => !ACCEPT_PLAN_FIELDS.has(k))) throw new ToolError({ error: "invalid_accept_plan_fields" });
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") || !Number.isInteger(args.base_version) || args.base_version < 1 || !/^sha256:[0-9a-f]{64}$/.test(args.plan_hash || "")) throw new ToolError({ error: "invalid_accept_plan" });
+}
+
+// A ready-plan amendment is a successor proposal, never a mutation of an
+// accepted plan.  Re-use the exact bounded plan validator, then require the
+// immutable predecessor hash that makes this a same-Work-Request lineage edge.
+function validatePlanAmendment(args, ToolError) {
+  if (Object.keys(args).some(k => !AMEND_PLAN_FIELDS.has(k)))
+    throw new ToolError({ error: "invalid_ready_plan_amendment_fields" });
+  const { predecessor_plan_hash: predecessorPlanHash, ...plan } = args;
+  validatePlan(plan, ToolError);
+  if (!SHA256.test(predecessorPlanHash || ""))
+    throw new ToolError({ error: "invalid_ready_plan_amendment_predecessor" });
+  // A successor replaces an already executable contract.  It therefore always
+  // carries its own closed heavy-build evidence; the DB records that evidence
+  // against the new immutable plan before any review or acceptance can see it.
+  if (!args.heavy_build) throw new ToolError({ error: "heavy_build_admission_required",
+    missing: ["research_manifest", "master_plan", "builder_session_ref"] });
+  validateHeavyBuildContract(args.heavy_build, ToolError);
+}
+
+function validateAmendmentAcknowledgement(args, ToolError) {
+  if (Object.keys(args).some(k => !ACK_AMENDMENT_FIELDS.has(k)) ||
+      !UUID.test(args.idempotency_key || "") || !Number.isSafeInteger(args.notice_id) || args.notice_id < 1)
+    throw new ToolError({ error: "invalid_ready_plan_amendment_acknowledgement" });
 }
 
 function validateOutcomeProposal(args, ToolError) {
@@ -933,6 +959,131 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
             admission_hash: row.admission_hash, review_ref: row.review_ref, review_hash: row.review_hash,
             verdict: row.verdict, reviewer_session_ref: row.reviewer_session_ref,
             status: row.verdict === "pass" ? "ready_for_human_plan_acceptance" : "revision_required" };
+        });
+      },
+    },
+    "propose-ready-plan-amendment": {
+      write: true,
+      description: "Append one immutable same-Work-Request ready-plan successor proposal with its closed heavy-build contract. The caller binds the exact accepted predecessor hash; the database records successor build admission, serializes the lineage, preserves history, and creates no acceptance, cancellation, assignment, dispatch, or execution authority.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" }, human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$" },
+        base_version: { type: "integer", minimum: 1 }, predecessor_plan_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+        scope_summary: { type: "string", minLength: 1, maxLength: 1000 }, runbook_ref: { type: "string" },
+        dependency_refs: { type: "array", maxItems: 12, items: { type: "string" } }, recovery_ref: { type: "string" },
+        observability_ref: { type: "string" }, caps: { type: "object" }, heavy_build: HEAVY_BUILD_SCHEMA,
+      }, required: ["idempotency_key", "human_ref", "base_version", "predecessor_plan_hash", "scope_summary", "runbook_ref", "dependency_refs", "recovery_ref", "observability_ref", "caps", "heavy_build"] },
+      handler: async (c, actor, args) => {
+        validatePlanAmendment(args, ToolError);
+        return withEnvelope(c, actor, "propose-ready-plan-amendment", { ...args, _server_actor_id: actor.id }, async () => {
+          const result = await c.query(
+            `select ops.propose_ready_plan_amendment($1::text,$2::integer,$3::text,$4::text,$5::text,$6::jsonb,$7::text,$8::text,$9::jsonb,$10::jsonb,$11::uuid,$12::uuid) as amendment
+               /* work-request-intake:propose-ready-plan-amendment */`,
+            [args.human_ref, args.base_version, args.predecessor_plan_hash, text(args.scope_summary), args.runbook_ref,
+              JSON.stringify(args.dependency_refs), args.recovery_ref, args.observability_ref, JSON.stringify(args.caps),
+              JSON.stringify(args.heavy_build), actor.id, args.idempotency_key]);
+          const row = result.rows[0]?.amendment;
+          if (!row?.ok || !row.work_request || !row.plan || !row.build_admission)
+            throw new ToolError({ error: row?.error || "ready_plan_amendment_proposal_refused" });
+          await writeEvent(c, actor, "propose-ready-plan-amendment", "ops_work_request", row.work_request.id, {
+            field: "ready_plan_successor_proposed",
+            new: { predecessor_plan_hash: args.predecessor_plan_hash, plan_ref: row.plan.ref, plan_hash: row.plan.hash,
+              plan_version: row.plan.version, admission_hash: row.build_admission.admission_hash,
+              admission_ref: row.build_admission.admission_ref, replayed: row.replayed === true },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, work_request: row.work_request, plan: row.plan,
+            build_admission: row.build_admission, replayed: row.replayed === true };
+        });
+      },
+    },
+    "accept-ready-plan-amendment": {
+      write: true, humanOnly: true, authorityOnly: true,
+      description: "HUMAN-ONLY: accept one exact reviewed same-Work-Request plan successor at the database safe point. It preserves predecessor history and grants no dispatch, execution, merge, lease, or release authority.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" }, human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$" },
+        base_version: { type: "integer", minimum: 1 }, plan_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+      }, required: ["idempotency_key", "human_ref", "base_version", "plan_hash"] },
+      handler: async (c, actor, args) => {
+        validateAcceptPlan(args, ToolError);
+        return withEnvelope(c, actor, "accept-ready-plan-amendment", { ...args, _server_actor_id: actor.id }, async () => {
+          const result = await c.query(
+            `select ops.accept_ready_plan_amendment($1::text,$2::integer,$3::text,$4::uuid) as amendment
+               /* work-request-intake:accept-ready-plan-amendment */`,
+            [args.human_ref, args.base_version, args.plan_hash, args.idempotency_key]);
+          const row = result.rows[0]?.amendment;
+          if (!row?.ok || !row.work_request || !row.successor_plan)
+            throw new ToolError({ error: row?.error || "ready_plan_amendment_acceptance_refused" });
+          await writeEvent(c, actor, "accept-ready-plan-amendment", "ops_work_request", row.work_request.id, {
+            field: "ready_plan_successor_accepted",
+            new: { prior_plan: row.prior_plan || null, successor_plan: row.successor_plan,
+              notice_count: Number(row.notice_count || 0) }, idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, work_request: row.work_request, prior_plan: row.prior_plan || null,
+            successor_plan: row.successor_plan, notice_count: Number(row.notice_count || 0) };
+        });
+      },
+    },
+    "effective-ready-plan": {
+      description: "Read the one database-derived effective ready plan and immutable same-Work-Request lineage. This is a readback only; it cannot accept, acknowledge, dispatch, or execute work.",
+      inputSchema: { type: "object", additionalProperties: false, properties: { work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$" } }, required: ["work_request"] },
+      handler: async (c, _actor, args) => {
+        const work = text(args.work_request, "work_request", ToolError);
+        if (!/^WR-[0-9]{1,12}$/.test(work)) throw new ToolError({ error: "invalid_ready_plan_work_request" });
+        const row = (await c.query(
+          "select ops.effective_ready_plan($1::text) as plan /* work-request-intake:effective-ready-plan */", [work],
+        )).rows[0]?.plan;
+        if (!row?.ok || !row.work_request || !row.current_plan || !Array.isArray(row.lineage))
+          throw new ToolError({ error: row?.error || "effective_ready_plan_unavailable" });
+        return row;
+      },
+    },
+    "ready-plan-amendment-discovery": {
+      writerConnection: true,
+      description: "Read durable actor-owned ready-plan amendment notices with bounded keyset pagination. Acknowledging a notice is a separate write and never grants execution authority.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        after_notice_id: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 },
+      }, required: [] },
+      handler: async (c, _actor, args) => {
+        const after = args.after_notice_id === undefined ? 0 : args.after_notice_id;
+        const limit = args.limit === undefined ? 25 : args.limit;
+        if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+          throw new ToolError({ error: "invalid_ready_plan_amendment_discovery" });
+        const row = (await c.query(
+          "select ops.discover_ready_plan_amendments($1::bigint,$2::integer) as discovery /* work-request-intake:ready-plan-amendment-discovery */",
+          [after, limit],
+        )).rows[0]?.discovery;
+        if (!row?.ok || !Array.isArray(row.items) || typeof row.has_more !== "boolean")
+          throw new ToolError({ error: row?.error || "ready_plan_amendment_discovery_unavailable" });
+        return row;
+      },
+    },
+    "acknowledge-ready-plan-amendment": {
+      write: true,
+      description: "Record the authenticated actor's acknowledgement of one durable ready-plan amendment notice. It changes no plan, assignment, dispatch, execution, or authority.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" }, notice_id: { type: "integer", minimum: 1 },
+      }, required: ["idempotency_key", "notice_id"] },
+      handler: async (c, actor, args) => {
+        validateAmendmentAcknowledgement(args, ToolError);
+        return withEnvelope(c, actor, "acknowledge-ready-plan-amendment", { ...args, _server_actor_id: actor.id }, async () => {
+          const row = (await c.query(
+            "select ops.acknowledge_ready_plan_amendment($1::bigint,$2::uuid) as acknowledgement /* work-request-intake:acknowledge-ready-plan-amendment */",
+            [args.notice_id, args.idempotency_key],
+          )).rows[0]?.acknowledgement;
+          if (!row?.ok || !Number.isSafeInteger(Number(row.notice_id)))
+            throw new ToolError({ error: row?.error || "ready_plan_amendment_acknowledgement_refused" });
+          const subject = (await c.query(
+            "select id from ops.work_request where ref=$1::text /* work-request-intake:ready-plan-amendment-ack-subject */",
+            [row.work_request_ref],
+          )).rows[0];
+          if (!subject?.id) throw new ToolError({ error: "ready_plan_amendment_ack_subject_missing" });
+          await writeEvent(c, actor, "acknowledge-ready-plan-amendment", "ops_work_request", subject.id, {
+            field: "ready_plan_amendment_acknowledged",
+            new: { notice_id: Number(row.notice_id), plan_ref: row.plan_ref || null,
+              acknowledged_at: row.acknowledged_at || null, replayed: row.replayed === true },
+            idempotency_key: args.idempotency_key,
+          });
+          return row;
         });
       },
     },

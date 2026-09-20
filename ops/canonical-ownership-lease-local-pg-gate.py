@@ -290,6 +290,70 @@ def validated_siep18_fingerprint_guards(cur):
     return validate_siep18_guard_rows(rows)
 
 
+def assert_activated_runtime_boundary(dsn: str, cur) -> None:
+    """Prove the activated 0450 door rejects caller-forged GUCs."""
+    exact = (
+        "ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,"
+        "text,text,text,jsonb,jsonb,jsonb,integer)",
+        "ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb)",
+        "ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer)",
+        "ops.release_canonical_ownership_lease(uuid,uuid,bigint)",
+    )
+    invented = (
+        "ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,"
+        "text,text,jsonb,jsonb,interval,uuid,text)",
+        "ops.renew_canonical_ownership_lease(uuid,uuid,bigint,interval)",
+        "ops.release_canonical_ownership_lease(uuid,uuid,bigint,jsonb)",
+    )
+    for signature in exact:
+        if one(cur, "select has_function_privilege('carr_writer',%s::regprocedure,'execute')", (signature,))[0] is not True:
+            raise RuntimeError(f"activated ownership function is not granted exactly: {signature}")
+    for signature in invented:
+        if one(cur, "select to_regprocedure(%s)", (signature,))[0] is not None:
+            raise RuntimeError(f"invented ownership overload exists: {signature}")
+    # Role DDL must be visible to the second connection, but it must not commit
+    # the rollback-only fixture transaction owned by the main gate connection.
+    with psycopg.connect(dsn, autocommit=True) as admin, admin.cursor() as admin_cur:
+        admin_cur.execute("do $b$ begin if not exists(select 1 from pg_roles where rolname='app_writer') then create role app_writer login; end if; end $b$")
+        admin_cur.execute("grant carr_writer to app_writer")
+    with psycopg.connect(dsn, user="app_writer") as writer, writer.cursor() as writer_cur:
+        runtime_ref = f"session:forged:{uuid.uuid4().hex}"
+        host_ref = "cloudflare-workers:forged-local-gate"
+        for key, value in {
+            "carr.organization_tenant_id": "carr-internal",
+            "carr.acting_actor_slug": "joe",
+            "carr.receipt_session_ref": runtime_ref,
+            "carr.ownership_session_id": f"ownership:{uuid.uuid4()}",
+            "carr.execution_host_id": host_ref,
+        }.items():
+            one(writer_cur, "select set_config(%s,%s,true)", (key, value))
+        forged_mint = one(
+            writer_cur,
+            """select ops.mint_canonical_ownership_runtime_session(
+              null::uuid,null::uuid,null::uuid,1,%s,%s,
+              clock_timestamp()+interval '10 minutes',%s)""",
+            (f"session:mismatch:{uuid.uuid4().hex}", host_ref, uuid.uuid4()),
+        )[0]
+        if forged_mint != {
+            "ok": False,
+            "reason_id": "ownership_runtime_binding_invalid",
+        }:
+            raise RuntimeError(
+                f"mint accepted a runtime session not bound to the server context: {forged_mint!r}"
+            )
+        result = one(
+            writer_cur,
+            """select ops.acquire_canonical_ownership_lease(
+              null::uuid,null::integer,null::text,null::uuid,null::text,
+              null::uuid,null::text,null::text,null::text,
+              '[]'::jsonb,'[]'::jsonb,'[]'::jsonb,null::integer)""",
+        )[0]
+        refusal(result, "IDENTITY_CONTEXT_INVALID", "forged direct writer context",
+                causal_object="identity_context",
+                expected="active database-minted runtime binding",
+                actual={"reason": "ownership_runtime_context_stale", "value_redacted": True})
+
+
 def set_plan_dependencies(
     cur, plan_id, slice_ref: str,
     dependency_refs: list[str] | dict[str, bool],
@@ -513,6 +577,7 @@ def main() -> int:
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cc.hard_fence(cur, dsn)
+        assert_activated_runtime_boundary(dsn, cur)
         # A3 owns trusted context production and runtime grants. Missing
         # identity must therefore fail closed in this deliberately dark slice.
         refusal(one(cur, "select ops.canonical_ownership_context()")[0],

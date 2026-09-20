@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -167,6 +167,9 @@ export const REGISTRY_V34_VERSION = "scac-mutation-registry.v34";
 // gains ONE exact entry -- which is why that file is authorized here and was
 // not in WR-000117.
 export const REGISTRY_V35_VERSION = "scac-mutation-registry.v35";
+// v36 is the sole WR-000125 successor. Its source rows are generated from
+// 0532a/0532b and the exact current tree; v35 remains immutable history.
+export const REGISTRY_V36_VERSION = "scac-mutation-registry.v36";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -973,6 +976,36 @@ export const DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 677, digest: "sha256:d5af322988f26c1ff036844688c337d736f6e9773d9d447a6e803533115b0520" },
 });
 
+// WR-000125 has two *separate* catalog observations.  Neither is inferable
+// from v35: 0532a changes the domain before the registry cutover, and 0532b
+// then adds the v36 registry surface.  The only literals permitted before the
+// disposable-Postgres rollback probe are these obvious all-zero sentinels.
+// They make an unmeasured migration refuse rather than accidentally bless an
+// inherited v35 receipt.  The DB lane replaces both complete objects from the
+// probe's single JSON receipt before this migration can be accepted.
+const WR125_UNMEASURED_RECEIPT = Object.freeze({
+  count: 0,
+  digest: `sha256:${"0".repeat(64)}`,
+});
+const wr125UnmeasuredCatalog = projectionVersion => Object.freeze({
+  projection_version: projectionVersion,
+  secdef_execute: WR125_UNMEASURED_RECEIPT,
+  relation_dml: WR125_UNMEASURED_RECEIPT,
+  column_dml: WR125_UNMEASURED_RECEIPT,
+  role_authority: WR125_UNMEASURED_RECEIPT,
+  runtime_dml_grants: WR125_UNMEASURED_RECEIPT,
+  measurement_state: "provisional_hosted_rollback_only",
+});
+
+// Measured after applying 0532a and before the temporary v36 DDL replay.
+export const POST_0532A_PRE_V36_DB_CATALOG_BASELINE =
+  wr125UnmeasuredCatalog("scac-db-catalog-projection.v35");
+
+// Measured after the temporary 0532b/v36 DDL replay in that same rollback-only
+// transaction.  This is deliberately not an alias of the pre-v36 receipt.
+export const POST_0532B_FORWARD_V36_DB_CATALOG_BASELINE =
+  wr125UnmeasuredCatalog("scac-db-catalog-projection.v36");
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -1057,7 +1090,7 @@ select v.registry_version,
   const output = execFileSync("psql", [dsn, "-X", "-A", "-t", "-F", "\t",
     "-v", "ON_ERROR_STOP=1", "-c", sql], { encoding: "utf8" });
   const rows = output.trim().split("\n").filter(Boolean).map(line => line.split("\t"));
-  const currentVersion = Number(REGISTRY_V35_VERSION.split(".v").at(-1));
+  const currentVersion = Number(REGISTRY_V36_VERSION.split(".v").at(-1));
   const expectedVersions = Array.from({ length: currentVersion }, (_, index) =>
     `scac-mutation-registry.v${index + 1}`);
   if (rows.length !== expectedVersions.length ||
@@ -1654,6 +1687,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V33_VERSION]: "v33",
   [REGISTRY_V34_VERSION]: "v34",
   [REGISTRY_V35_VERSION]: "v35",
+  [REGISTRY_V36_VERSION]: "v36",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1709,7 +1743,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V35_VERSION) {
+  version = REGISTRY_V36_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1772,7 +1806,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V28_VERSION, REGISTRY_V29_VERSION,
     REGISTRY_V30_VERSION, REGISTRY_V31_VERSION, REGISTRY_V32_VERSION,
     REGISTRY_V33_VERSION, REGISTRY_V34_VERSION,
-    REGISTRY_V35_VERSION].includes(version))
+    REGISTRY_V35_VERSION, REGISTRY_V36_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -12078,6 +12112,377 @@ export const renderDispatchSpineForwardRegistrySql =
     frozenInventory(REGISTRY_V35_VERSION),
     DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE));
 
+// WR-000125 successor renderer. The v35 renderer already contains the
+// byte-reviewed registry successor grammar (predecessor seal, catalog
+// projection, source seed, entry-set seal, and policy-epoch cutover). Reuse
+// that grammar only after rendering against the v36 fixture, then move the
+// two frontier names and paired migration receipt forward in one deterministic
+// pass. The v35 predecessor values remain pinned; callers supply the measured
+// v36 catalog baseline from the disposable-Postgres gate.
+export function renderReadyPlanAmendmentForwardRegistrySql(rows = frozenInventory(REGISTRY_V36_VERSION),
+  dbCatalogBaseline = POST_0532B_FORWARD_V36_DB_CATALOG_BASELINE,
+  preV36CatalogBaseline = POST_0532A_PRE_V36_DB_CATALOG_BASELINE) {
+  assertFoundationAssuranceCatalogBaseline("successor v36", dbCatalogBaseline,
+    "scac-db-catalog-projection.v36");
+  assertFoundationAssuranceCatalogBaseline("predecessor v36", preV36CatalogBaseline,
+    "scac-db-catalog-projection.v35");
+
+  // Start from the byte-pinned, committed v35 migration.  The older generic
+  // renderer below is retained for its historical frontiers, but is not a
+  // valid WR125 predecessor because it starts at v34 and would silently paint
+  // the v34 seal as v35.
+  {
+  const predecessorMigrationPath = "migrations/0532_room_dispatch_spine_scac_successor.sql";
+  const predecessorRuntimePath = "mcp-server/src/scac-mutation-registry.v35.generated.js";
+  const predecessorMigration = readFileSync(resolve(REPO_ROOT, predecessorMigrationPath), "utf8");
+  const predecessorRuntime = readFileSync(resolve(REPO_ROOT, predecessorRuntimePath), "utf8");
+  if (sha256(predecessorMigration) !== "e9e3e4b2a2ad01a0d9a7517da0896cb8abb9cbf6b91dfb656c966fc755583549" ||
+      sha256(predecessorRuntime) !== "aa88bd39657743d07d07d0b4c83ea3883b91df076f8d4d2b5a5a5c438cd7c1e7")
+    throw new Error(`WR125 v35 predecessor migration/runtime pin drifted: ${sha256(predecessorMigration)} / ${sha256(predecessorRuntime)}`);
+  const v35SealDigest = "sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec";
+  const v35EntryCount = 1859;
+  const v35SourceEntryCount = 870;
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const v36EntryCount = rows.length + catalogCount;
+  const v35CurrentBaseline = DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE;
+  const readyPlanV36Digest = registryDigestFor(REGISTRY_V36_VERSION, rows, dbCatalogBaseline);
+  const v35CurrentBaselineJson = JSON.stringify(v35CurrentBaseline);
+  const v36BaselineJson = JSON.stringify(dbCatalogBaseline);
+  const catalogStart = predecessorMigration.indexOf(
+    "create or replace function ops.scac_mutation_catalog_v35_current()");
+  const catalogEnd = predecessorMigration.indexOf(
+    "\ncreate or replace function ops.scac_policy_epoch_snapshot()", catalogStart);
+  if (catalogStart < 0 || catalogEnd < 0)
+    throw new Error("WR125 v35 predecessor catalog function boundary missing");
+  const v35CatalogFunction = predecessorMigration.slice(catalogStart, catalogEnd);
+  const v35LiveFunction = v35CatalogFunction.replace(
+    "ops.scac_mutation_catalog_v35_current", "ops.scac_mutation_catalog_v35_live_at_seal");
+  let v36CatalogFunction = v35CatalogFunction
+    .replace("ops.scac_mutation_catalog_v35_current", "ops.scac_mutation_catalog_v36_current")
+    .replaceAll("scac-db-catalog-projection.v35", "scac-db-catalog-projection.v36")
+    .replaceAll(v35CurrentBaselineJson, v36BaselineJson);
+  for (const category of ["secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants"]) {
+    const oldReceipt = v35CurrentBaseline[category];
+    const newReceipt = dbCatalogBaseline[category];
+    v36CatalogFunction = v36CatalogFunction
+      .replaceAll(`observed_count<>${oldReceipt.count}`, `observed_count<>${newReceipt.count}`)
+      .replaceAll(`entry_count')::integer<>${oldReceipt.count}`, `entry_count')::integer<>${newReceipt.count}`)
+      .replaceAll(oldReceipt.digest, newReceipt.digest);
+  }
+  const v35Wrapper = `alter function ops.scac_mutation_catalog_v35_current() rename to scac_mutation_catalog_v35_live_at_seal;
+create or replace function ops.scac_mutation_registry_v35_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v35')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v35_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v35_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v35_seal_available() is 'Exact immutable v35 registry seal; separate from whether the live catalog still equals v35.';
+comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 live-catalog validator; expected to become false after the v36 authority surface is installed.';
+
+`;
+  const catalogPlaceholder = "__WR125_V35_CATALOG_FUNCTIONS__";
+  let sql = predecessorMigration.slice(0, catalogStart) + catalogPlaceholder +
+    predecessorMigration.slice(catalogEnd);
+  // Do this before the generic frontier rewrites below.  A former broad
+  // replacement silently left the v35 metadata row and seed guard with the
+  // source-row total, which makes a catalog-bearing registry self-corrupt.
+  const v35VersionMetadata = `'${v35SealDigest}',${v35EntryCount},${v35SourceEntryCount},`;
+  const v36VersionMetadata = `'sha256:${readyPlanV36Digest}',${v36EntryCount},${rows.length},`;
+  sql = replaceExactlyOnce(sql, v35CurrentBaselineJson, v36BaselineJson,
+    "WR125 v36 registry catalog projection");
+  sql = replaceExactlyOnce(sql, v35VersionMetadata, v36VersionMetadata,
+    "WR125 v36 registry version entry counts");
+  sql = replaceExactlyOnce(sql,
+    `registry_version='scac-mutation-registry.v35')<>${v35EntryCount}`,
+    `registry_version='scac-mutation-registry.v35')<>${v36EntryCount}`,
+    "WR125 v36 registry seed total");
+  const predecessorMigrationSha = sha256(predecessorMigration);
+  const successorMigrationSha = sha256(readFileSync(resolve(REPO_ROOT,
+    "migrations/0532a_canonical_ownership_lease_activation.sql"), "utf8"));
+  sql = sql
+    .replaceAll("ops.scac_mutation_registration_v35", "ops.scac_mutation_registration_v36")
+    .replaceAll("ops.scac_mutation_catalog_v35_current", "ops.scac_mutation_catalog_v36_current")
+    .replaceAll("scac-mutation-registry.v35", "scac-mutation-registry.v36")
+    .replaceAll("scac-db-catalog-projection.v35", "scac-db-catalog-projection.v36")
+    .replaceAll(v35SealDigest, `sha256:${readyPlanV36Digest}`)
+    .replaceAll(v35CurrentBaselineJson, v36BaselineJson)
+    .replaceAll(`,${v35EntryCount},${v35SourceEntryCount},`, `,${v36EntryCount},${rows.length},`)
+    .replaceAll(`<>${v35EntryCount}`, `<>${v36EntryCount}`)
+    .replaceAll("0531_room_dispatch_spine.sql", "0532a_canonical_ownership_lease_activation.sql")
+    .replaceAll("post-0531", "post-0532a")
+    .replaceAll("0531 has installed", "0532a has installed")
+    .replaceAll("$dispatch_spine_preflight$", "$ready_plan_amendment_preflight$")
+    .replaceAll("$dispatch_spine_preflight", "$ready_plan_amendment_preflight")
+    .replaceAll("Ready-plan amendment pre-v35", "Ready-plan amendment pre-v36")
+    .replaceAll("Dispatch spine", "Ready-plan amendment")
+    .replaceAll("dispatch spine", "ready-plan amendment")
+    .replaceAll(predecessorMigrationSha, successorMigrationSha)
+    .replaceAll("40301c71278f3a447a684919b5ca8112ead90fa1fe061d4b161a898c649514e0", successorMigrationSha)
+    .replaceAll("WR-000119", "WR-000125")
+    .replaceAll("before any v35 function", "before any v36 function")
+    .replaceAll("SCAC mutation registry v35 seed", "SCAC mutation registry v36 seed")
+    .replaceAll("registry-only mutation registry v35", "registry-only mutation registry v36")
+    .replaceAll("sealed SCAC mutation registry v35 is unavailable", "sealed SCAC mutation registry v36 is unavailable")
+    .replaceAll("live SCAC v35 mutation catalog drifted", "live SCAC v36 mutation catalog drifted")
+    .replaceAll("current policy epochs bind mutation registry v35", "current policy epochs bind mutation registry v36")
+    .replaceAll("scac_policy_epoch_snapshot_v34", "scac_policy_epoch_snapshot_v35")
+    .replaceAll("scac-mutation-registry.v34') then return false", "scac-mutation-registry.v34','scac-mutation-registry.v35') then return false")
+    .replaceAll("ops.scac_mutation_registry_v34_seal_available()) then", "ops.scac_mutation_registry_v34_seal_available() and ops.scac_mutation_registry_v35_seal_available()) then");
+  const sourcePreflightEnd = sql.indexOf("-- SCAC-12:");
+  if (sourcePreflightEnd < 0) throw new Error("WR125 source preflight boundary missing");
+  let sourcePreflight = sql.slice(0, sourcePreflightEnd);
+  for (const category of ["secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants"]) {
+    const oldReceipt = DISPATCH_SPINE_PRE_V35_DB_CATALOG_BASELINE[category];
+    const newReceipt = preV36CatalogBaseline[category];
+    sourcePreflight = sourcePreflight
+      .replaceAll(`observed_count<>${oldReceipt.count}`, `observed_count<>${newReceipt.count}`)
+      .replaceAll(`entry_count')::integer<>${oldReceipt.count}`, `entry_count')::integer<>${newReceipt.count}`)
+      .replaceAll(oldReceipt.digest, newReceipt.digest);
+  }
+  sql = `${sourcePreflight}${sql.slice(sourcePreflightEnd)}`
+    .replace(catalogPlaceholder, `${v35Wrapper}${v36CatalogFunction}`)
+    .replaceAll("scac_policy_epoch_snapshot_v34", "scac_policy_epoch_snapshot_v35")
+    .replaceAll("scac-mutation-registry.v34','scac-mutation-registry.v36", "scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36")
+    .replaceAll("ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_catalog_v36_current() from",
+      "ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_registry_v35_seal_available(),ops.scac_mutation_catalog_v36_current() from")
+    .replaceAll("pre-v35", "pre-v36");
+  const v35Tuple = `    ('scac-mutation-registry.v35','${v35SealDigest}',${v35EntryCount},${v35SourceEntryCount})\n`;
+  const v34Tuple = `    ('scac-mutation-registry.v34','${HISTORICAL_REGISTRY_SEALS.v34.digest}',${HISTORICAL_REGISTRY_SEALS.v34.entryCount},${HISTORICAL_REGISTRY_SEALS.v34.sourceEntryCount})\n`;
+  sql = replaceExactlyOnce(sql, v34Tuple, `${v34Tuple},${v35Tuple}`,
+    "WR125 v35 historical seal tuple");
+  const v34EpochChain = `(r.registry_version='scac-mutation-registry.v34' and r.registry_digest='${HISTORICAL_REGISTRY_SEALS.v34.digest}')`;
+  const v35EpochChain = `(r.registry_version='scac-mutation-registry.v35' and r.registry_digest='${v35SealDigest}')`;
+  const v34EpochConstraint = `(registry_version='scac-mutation-registry.v34' and registry_digest='${HISTORICAL_REGISTRY_SEALS.v34.digest}')`;
+  const v35EpochConstraint = `(registry_version='scac-mutation-registry.v35' and registry_digest='${v35SealDigest}')`;
+  sql = replaceExactlyOnce(sql, `${v34EpochChain}\n         or (r.registry_version='scac-mutation-registry.v36'`,
+    `${v34EpochChain}\n         or ${v35EpochChain}\n         or (r.registry_version='scac-mutation-registry.v36'`,
+    "WR125 v35 policy epoch chain pin");
+  sql = replaceExactlyOnce(sql, `${v34EpochConstraint} or\n  (registry_version='scac-mutation-registry.v36'`,
+    `${v34EpochConstraint} or\n  ${v35EpochConstraint} or\n  (registry_version='scac-mutation-registry.v36'`,
+    "WR125 v35 policy epoch constraint pin");
+  const rendered = `-- WR-000125 / generated target: migrations/0532b_ready_plan_amendment_scac_successor.sql\n` +
+    sql.replace(/\n+$/, "\n");
+  const required = [
+    successorMigrationSha,
+    v35Tuple.trim(),
+    v35EpochChain,
+    v35EpochConstraint,
+    "current policy epochs bind mutation registry v36",
+    `,'sha256:${readyPlanV36Digest}',${v36EntryCount},${rows.length},`,
+    `registry_version='scac-mutation-registry.v36')<>${v36EntryCount}`,
+  ];
+  const missingInvariant = required.find(fragment => !rendered.includes(fragment));
+  if (missingInvariant)
+    throw new Error(`WR125 v36 successor renderer lost pinned frontier invariant: ${missingInvariant}`);
+  return rendered;
+  }
+
+  /* istanbul ignore next -- retained v35 grammar for historical source review */
+  const predecessorRenderBaseline = {
+    ...dbCatalogBaseline,
+    projection_version: "scac-db-catalog-projection.v35",
+  };
+  const v35Digest = registryDigestFor(REGISTRY_V35_VERSION, rows, predecessorRenderBaseline);
+  const v36Digest = registryDigestFor(REGISTRY_V36_VERSION, rows, dbCatalogBaseline);
+  let sql = renderDispatchSpineRegistrySqlFrozen(rows, predecessorRenderBaseline);
+  sql = sql.replaceAll("ops.scac_mutation_registration_v35", "__SCAC_REGISTRATION_V36__")
+    .replaceAll("ops.scac_mutation_catalog_v35_current", "__SCAC_CATALOG_V36_CURRENT__")
+    .replaceAll("scac-mutation-registry.v35", "__SCAC_V36__")
+    .replaceAll("_v34", "_v35")
+    .replaceAll("scac-mutation-registry.v34", "scac-mutation-registry.v35")
+    .replaceAll("__SCAC_REGISTRATION_V36__", "ops.scac_mutation_registration_v36")
+    .replaceAll("__SCAC_CATALOG_V36_CURRENT__", "ops.scac_mutation_catalog_v36_current")
+    .replaceAll("__SCAC_V36__", "scac-mutation-registry.v36")
+    .replaceAll("scac-db-catalog-projection.v35", "scac-db-catalog-projection.v36")
+    .replaceAll("ops.scac_policy_epoch_snapshot_v34", "ops.scac_policy_epoch_snapshot_v35")
+    .replaceAll("0532_room_dispatch_spine_scac_successor.sql", "0532b_ready_plan_amendment_scac_successor.sql")
+    .replaceAll("0531_room_dispatch_spine.sql", "0532a_canonical_ownership_lease_activation.sql")
+    .replaceAll(`sha256:${v35Digest}`, `sha256:${v36Digest}`)
+    // The v35 renderer's historical case is v34. Once that case is moved to
+    // v35, it must bind the sealed v35 catalog, while the current case above
+    // binds the measured v36 catalog.
+    .replaceAll(JSON.stringify(SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE),
+      JSON.stringify(DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE))
+    // Preserve v34 in the historical allowlists and add the v34 predecessor
+    // that the v35 renderer omitted when it was built from its own frontier.
+    .replaceAll("scac-mutation-registry.v33','scac-mutation-registry.v35",
+      "scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35")
+    .replaceAll("before any v35 function", "before any v36 function")
+    .replaceAll("registry v35 seed is incomplete", "registry v36 seed is incomplete")
+    .replaceAll("live SCAC v35 mutation catalog drifted", "live SCAC v36 mutation catalog drifted")
+    .replaceAll("current policy epochs bind mutation registry v35 while historical", "current policy epochs bind mutation registry v36 while historical")
+    .replaceAll("v34 epochs remain immutable", "v34/v35 epochs remain immutable");
+
+  // Rewrite the inherited preflight's catalog literals to the measured
+  // post-0532a/pre-0532b receipt. The query shape remains the reviewed v35
+  // projection; only the receipt and ledger filename are frontier inputs.
+  const preflightEnd = sql.indexOf("-- SCAC-12:");
+  if (preflightEnd < 0) throw new Error("ready-plan amendment preflight boundary missing");
+  let preflight = sql.slice(0, preflightEnd)
+    .replaceAll("post-0531", "post-0532a")
+    .replaceAll("0531 has installed", "0532a has installed")
+    .replaceAll("dispatch-spine relations, their grants, the rewritten history function and the two write doors",
+      "canonical-ownership runtime and ready-plan amendment relations, functions, and grants");
+  for (const category of ["secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants"]) {
+    const oldReceipt = POST_0532A_PRE_V36_DB_CATALOG_BASELINE[category];
+    const newReceipt = preV36CatalogBaseline[category];
+    preflight = preflight
+      .replaceAll(`observed_count<>${oldReceipt.count}`, `observed_count<>${newReceipt.count}`)
+      .replaceAll(`entry_count')::integer<>${oldReceipt.count}`, `entry_count')::integer<>${newReceipt.count}`)
+      .replaceAll(oldReceipt.digest, newReceipt.digest);
+  }
+  preflight = preflight
+    .replaceAll("Ready-plan amendment pre-v35", "Ready-plan amendment pre-v36")
+    .replaceAll("$dispatch_spine_preflight$", "$ready_plan_amendment_preflight$")
+    .replaceAll("$dispatch_spine_preflight", "$ready_plan_amendment_preflight");
+  const successorMigrationPath = "migrations/0532a_canonical_ownership_lease_activation.sql";
+  const successorMigrationSha = sha256(readFileSync(resolve(REPO_ROOT, successorMigrationPath), "utf8"));
+  const priorMigrationSha = DISPATCH_SPINE_DOMAIN_MIGRATION_SHA256["migrations/0531_room_dispatch_spine.sql"];
+  preflight = preflight.replaceAll(priorMigrationSha, successorMigrationSha);
+  sql = `${preflight}${sql.slice(preflightEnd)}`;
+  return `-- WR-000125 / generated target: migrations/0532b_ready_plan_amendment_scac_successor.sql\n` +
+    sql.replaceAll("Dispatch spine", "Ready-plan amendment")
+      .replaceAll("dispatch spine", "ready-plan amendment");
+}
+
+export const renderReadyPlanAmendmentForwardRegistrySqlClosed =
+  closedExport(() => renderReadyPlanAmendmentForwardRegistrySql());
+
+// Temporary hosted-gate probe. It deliberately raises one compact JSON error
+// inside a single transaction after replaying schema through v35 and 0532a;
+// the caller captures the payload and the transaction rolls back. This is not
+// a green migration artifact and must be removed after the measured receipt is
+// bound into READY_PLAN_AMENDMENT_*_DB_CATALOG_BASELINE.
+function renderReadyPlanAmendmentMeasurementProbeSqlLegacy() {
+  const migrationPaths = readdirSync(resolve(REPO_ROOT, "migrations"))
+    .filter(name => /^\d{4}.*\.sql$/.test(name))
+    .filter(name => name !== "0532b_ready_plan_amendment_scac_successor.sql" &&
+      name !== "0532_room_dispatch_spine_scac_successor.sql" &&
+      (Number(name.slice(0, 4)) < 532 || name === "0532a_canonical_ownership_lease_activation.sql"))
+    .sort();
+  const includes = [resolve(REPO_ROOT, "db/schema.sql"),
+    ...migrationPaths.map(name => resolve(REPO_ROOT, "migrations", name))]
+    .map(path => `\\ir ${path}`).join("\n");
+  return `-- TEMPORARY WR125 rollback-only measurement probe; remove after seal binding.\n` +
+    `-- Run with PostgreSQL 17 psql and capture the raised JSON payload.\n` +
+    `\\set ON_ERROR_STOP on\n` + includes + `\n` +
+    `begin;\n` +
+    `do $$ declare receipt jsonb; begin\n` +
+    `  with recursive connected(oid) as (\n` +
+    `    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci'\n` +
+    `    union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid\n` +
+    `      join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end\n` +
+    `      where other.rolname<>'carr_ci' and not other.rolsuper\n` +
+    `  ), runtime_roles as (select oid from connected),\n` +
+    `  f as (select 'db-function-acl:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||coalesce(r.rolname,'public')||':execute' key,\n` +
+    `      jsonb_build_object('ingress_key','db-function-acl:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||coalesce(r.rolname,'public')||':execute','security_definer',p.prosecdef,'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',a.is_grantable) row\n` +
+    `      from pg_proc p join pg_namespace n on n.oid=p.pronamespace cross join lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a left join pg_roles r on r.oid=a.grantee\n` +
+    `      where n.nspname not in ('pg_catalog','information_schema') and p.prosecdef and a.privilege_type='EXECUTE' and a.grantee<>p.proowner and (a.grantee=0 or a.grantee in(select oid from runtime_roles))),\n` +
+    `  r as (select 'db-relation-acl:'||n.nspname||'.'||c.relname||':'||coalesce(g.rolname,'public')||':'||lower(a.privilege_type) key,\n` +
+    `      jsonb_build_object('ingress_key','db-relation-acl:'||n.nspname||'.'||c.relname||':'||coalesce(g.rolname,'public')||':'||lower(a.privilege_type),'relation',n.nspname||'.'||c.relname,'grantee',coalesce(g.rolname,'public'),'privilege',lower(a.privilege_type),'grantable',a.is_grantable) row\n` +
+    `      from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a left join pg_roles g on g.oid=a.grantee\n` +
+    `      where n.nspname not in ('pg_catalog','information_schema') and c.relkind in('r','p','v','m','f') and a.privilege_type in('INSERT','UPDATE','DELETE','TRUNCATE') and a.grantee<>c.relowner and (a.grantee=0 or a.grantee in(select oid from runtime_roles))),\n` +
+    `  c as (select 'db-column-acl:'||n.nspname||'.'||cl.relname||'.'||a.attname||':'||coalesce(g.rolname,'public')||':'||lower(x.privilege_type) key,\n` +
+    `      jsonb_build_object('ingress_key','db-column-acl:'||n.nspname||'.'||cl.relname||'.'||a.attname||':'||coalesce(g.rolname,'public')||':'||lower(x.privilege_type),'relation',n.nspname||'.'||cl.relname,'column',a.attname,'grantee',coalesce(g.rolname,'public'),'privilege',lower(x.privilege_type),'grantable',x.is_grantable) row\n` +
+    `      from pg_attribute a join pg_class cl on cl.oid=a.attrelid join pg_namespace n on n.oid=cl.relnamespace cross join lateral aclexplode(a.attacl) x left join pg_roles g on g.oid=x.grantee\n` +
+    `      where a.attnum>0 and not a.attisdropped and a.attacl is not null and n.nspname not in('pg_catalog','information_schema') and cl.relkind in('r','p','v','m','f') and x.privilege_type in('INSERT','UPDATE') and x.grantee<>cl.relowner and (x.grantee=0 or x.grantee in(select oid from runtime_roles)))\n` +
+    `  select jsonb_build_object('pre_v36',jsonb_build_object('projection_version','scac-db-catalog-projection.v35',\n` +
+    `    'secdef_execute',jsonb_build_object('count',(select count(*) from f),'digest','sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce((select jsonb_agg(row order by key collate "C") from f),'[]'::jsonb)),'UTF8'),'sha256'),'hex')),\n` +
+    `    'relation_dml',jsonb_build_object('count',(select count(*) from r),'digest','sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce((select jsonb_agg(row order by key collate "C") from r),'[]'::jsonb)),'UTF8'),'sha256'),'hex')),\n` +
+    `    'column_dml',jsonb_build_object('count',(select count(*) from c),'digest','sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce((select jsonb_agg(row order by key collate "C") from c),'[]'::jsonb)),'UTF8'),'sha256'),'hex')),\n` +
+    `    'runtime_dml_grants',ops.scac_runtime_dml_grant_snapshot())) into receipt;\n` +
+    `  raise exception using message=receipt::text;\n` +
+    `end $$;\nrollback;\n`;
+}
+
+// Convert the byte-pinned v35 catalog predicate into a receipt recorder.  The
+// query shapes stay exactly those used by the live catalog function, so the
+// rollback measurement cannot bless a different projection by accident.
+function renderReadyPlanAmendmentCatalogObserverSql(label) {
+  const predecessor = readFileSync(resolve(REPO_ROOT,
+    "migrations/0532_room_dispatch_spine_scac_successor.sql"), "utf8");
+  if (sha256(predecessor) !== "e9e3e4b2a2ad01a0d9a7517da0896cb8abb9cbf6b91dfb656c966fc755583549")
+    throw new Error("WR125 measurement observer predecessor pin drifted");
+  const start = predecessor.indexOf("create or replace function ops.scac_mutation_catalog_v35_current()");
+  const begin = predecessor.indexOf("begin\n", start);
+  const end = predecessor.indexOf("end $fn$;", begin);
+  if (start < 0 || begin < 0 || end < 0)
+    throw new Error("WR125 measurement observer catalog boundary missing");
+  let body = predecessor.slice(begin + "begin\n".length, end);
+  const categories = ["secdef_execute", "relation_dml", "column_dml"];
+  let categoryIndex = 0;
+  body = body.replace(/  if observed_count<>\d+ or observed_digest<>'sha256:[0-9a-f]{64}' then return false; end if;\n/g,
+    () => {
+      const category = categories[categoryIndex++];
+      return `  insert into pg_temp.wr125_catalog_measurement(label,category,receipt) values ('${label}','${category}',jsonb_build_object('count',observed_count,'digest',observed_digest));\n`;
+    });
+  if (categoryIndex !== categories.length)
+    throw new Error("WR125 measurement observer category guards drifted");
+  const unsafeRoleGuard = /  if exists \(select 1 from pg_auth_members[\s\S]*?then return false; end if;\n/;
+  if (!unsafeRoleGuard.test(body))
+    throw new Error("WR125 measurement observer role safety guard missing");
+  body = body.replace(unsafeRoleGuard,
+    "  if exists (select 1 from pg_auth_members m join pg_roles g on g.oid=m.roleid join pg_roles mem on mem.oid=m.member where mem.rolname~'^carr_' and (g.rolsuper or g.rolname~'^(neon_|pg_)')) then raise exception 'WR125 measurement encountered unsafe CARR role authority'; end if;\n");
+  const roleReturn = /  return observed_count=\d+ and observed_digest='sha256:[0-9a-f]{64}';\n/;
+  if (!roleReturn.test(body))
+    throw new Error("WR125 measurement observer role receipt guard missing");
+  body = body.replace(roleReturn,
+    `  insert into pg_temp.wr125_catalog_measurement(label,category,receipt) values ('${label}','role_authority',jsonb_build_object('count',observed_count,'digest',observed_digest));\n`);
+  return `do $wr125_catalog_observer$\ndeclare observed_count integer; observed_digest text; grant_snapshot jsonb;\nbegin\n` +
+    `  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();\n` +
+    `  insert into pg_temp.wr125_catalog_measurement(label,category,receipt) values ('${label}','runtime_dml_grants',jsonb_build_object('count',(grant_snapshot->>'entry_count')::integer,'digest',grant_snapshot->>'grant_digest'));\n` +
+    body + "end $wr125_catalog_observer$;\n";
+}
+
+// This is a 0532b migration body, not a bootstrap script.  The hosted runner
+// has applied frozen 0532a in its outer transaction; the final exception makes
+// that outer transaction roll back after both catalog observations are emitted.
+export function renderReadyPlanAmendmentMeasurementProbeSql() {
+  const migration0532a = readFileSync(resolve(REPO_ROOT,
+    "migrations/0532a_canonical_ownership_lease_activation.sql"), "utf8");
+  const expected0532aSha = "322df211fc73199761ec10f714dda7c9145c64d43cf86dec8294e34bbe0ba9ec";
+  if (sha256(migration0532a) !== expected0532aSha)
+    throw new Error(`WR125 measurement probe refuses non-frozen 0532a: ${sha256(migration0532a)}`);
+  const provisional = renderReadyPlanAmendmentForwardRegistrySql();
+  const bodyStart = provisional.indexOf("-- SCAC-12:");
+  if (bodyStart < 0) throw new Error("WR125 measurement probe v36 body boundary missing");
+  // Provisional zero receipts cannot satisfy final seal checks.  Strip only
+  // anonymous validation blocks; DDL, catalog functions and capability rows
+  // remain present for the forward-v36 observation.
+  const provisionalBody = provisional.slice(bodyStart)
+    .replace(/do \$\$[\s\S]*?\$\$;\n/g, "");
+  if (provisionalBody.includes("SCAC v36 database catalog category") ||
+      provisionalBody.includes("SCAC mutation registry v36 seed is incomplete"))
+    throw new Error("WR125 measurement probe left a provisional v36 validation block");
+  return `-- TEMPORARY WR125 0532b rollback-only measurement body; remove after seal binding.\n` +
+    `-- PRECONDITION: outer migration transaction has applied frozen 0532a.\n` +
+    `do $wr125_probe_precondition$ begin\n` +
+    `  if (select count(*) from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql')<>1\n` +
+    `     or not exists(select 1 from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql' and sha256='${expected0532aSha}') then\n` +
+    `    raise exception 'WR125 measurement probe requires frozen 0532a ${expected0532aSha}';\n` +
+    `  end if;\nend $wr125_probe_precondition$;\n` +
+    `create temporary table pg_temp.wr125_catalog_measurement(label text not null,category text not null,receipt jsonb not null,primary key(label,category)) on commit drop;\n` +
+    renderReadyPlanAmendmentCatalogObserverSql("pre_v36") + provisionalBody +
+    // The all-zero placeholders are never a final seal.  Make only temporary
+    // count metadata truthful so the replayed registry remains self-consistent.
+    `alter table ops.scac_mutation_registry_version disable trigger scac_mutation_registry_version_sealed;\n` +
+    `update ops.scac_mutation_registry_version v set entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version),source_entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl')) where v.registry_version='scac-mutation-registry.v36';\n` +
+    `alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;\n` +
+    renderReadyPlanAmendmentCatalogObserverSql("forward_v36") +
+    `do $wr125_measurement_result$ declare pre_v36 jsonb; forward_v36 jsonb; begin\n` +
+    `  if (select count(*) from pg_temp.wr125_catalog_measurement where label='pre_v36')<>5 or (select count(*) from pg_temp.wr125_catalog_measurement where label='forward_v36')<>5 then raise exception 'WR125 measurement observer incomplete'; end if;\n` +
+    `  select jsonb_build_object('projection_version','scac-db-catalog-projection.v35')||jsonb_object_agg(category,receipt) into pre_v36 from pg_temp.wr125_catalog_measurement where label='pre_v36';\n` +
+    `  select jsonb_build_object('projection_version','scac-db-catalog-projection.v36')||jsonb_object_agg(category,receipt) into forward_v36 from pg_temp.wr125_catalog_measurement where label='forward_v36';\n` +
+    `  raise exception using message=jsonb_build_object('pre_v36',pre_v36,'forward_v36',forward_v36)::text;\n` +
+    `end $wr125_measurement_result$;\n`;
+}
+
+export const renderReadyPlanAmendmentMeasurementProbeSqlClosed =
+  closedExport(() => renderReadyPlanAmendmentMeasurementProbeSql());
+
 
 
 export function renderGeneratedFrontier() {
@@ -13122,6 +13527,37 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       version: REGISTRY_V35_VERSION,
       dbCatalogBaseline: DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
     }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v36") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v36.generated.js");
+    const baselinePath = process.argv[4];
+    let dbCatalogBaseline = POST_0532B_FORWARD_V36_DB_CATALOG_BASELINE;
+    if (baselinePath) {
+      const measured = JSON.parse(readFileSync(resolve(baselinePath), "utf8"));
+      dbCatalogBaseline = measured.forward_v36 || measured.forward || measured;
+    }
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V36_VERSION), {
+      version: REGISTRY_V36_VERSION, dbCatalogBaseline,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-ready-plan-amendment-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0532b_ready_plan_amendment_scac_successor.sql");
+    const baselinePath = process.argv[4];
+    let forward = POST_0532B_FORWARD_V36_DB_CATALOG_BASELINE;
+    let preV36 = POST_0532A_PRE_V36_DB_CATALOG_BASELINE;
+    if (baselinePath) {
+      const measured = JSON.parse(readFileSync(resolve(baselinePath), "utf8"));
+      forward = measured.forward_v36 || measured.forward || measured;
+      preV36 = measured.pre_v36 || measured.predecessor_v36 || preV36;
+    }
+    await writeFile(target, renderReadyPlanAmendmentForwardRegistrySql(
+      frozenInventory(REGISTRY_V36_VERSION), forward, preV36));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-ready-plan-amendment-measurement-probe") {
+    const target = resolve(process.argv[3] ||
+      "/private/tmp/wr125-ready-plan-amendment-catalog-probe.sql");
+    await writeFile(target, renderReadyPlanAmendmentMeasurementProbeSql());
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-dispatch-spine-registry-migration") {
     const target = resolve(process.argv[3] ||
