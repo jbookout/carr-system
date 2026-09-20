@@ -26,20 +26,31 @@ never be the reason a write appears to fail.
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 VAULT = ("/Users/booko/Library/CloudStorage/"
          "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
 RUN_SH = "/Users/booko/carr-system/run.sh"
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.rule_delivery_preuse import (  # noqa:E402
+    POSTWRITE_RECEIPT_SCHEMA, digest, postwrite_reviewer_digest, receipt_id,
+    validate_postwrite_receipt,
+)
+from lib.rule_delivery_shadow import file_sha256  # noqa:E402
 try:                                    # telemetry only — never load-bearing
     import hook_meter
     LOG = hook_meter.guard_log_path(os.path.expanduser("~/carr-system"))
 except Exception:                       # a missing meter must not change a verdict
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 TIMEOUT = 25
+PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.M)
+PATCH_MOVE = re.compile(r"^\*\*\* Move to: (.+)$", re.M)
 
 
 def log(msg):
@@ -133,6 +144,77 @@ def surface_for(path):
     return None
 
 
+CODE_SUFFIXES = (
+    ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".sql", ".sh",
+    ".go", ".rs", ".java", ".c", ".h", ".cpp", ".rb",
+)
+REVIEW_AT = 0.85
+
+
+def _changed_code_paths(payload):
+    """Return exact paths named by one native edit or patch operation."""
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    if tool in ("Write", "Edit", "MultiEdit"):
+        path = ti.get("file_path") or ti.get("filePath") or ""
+        return [path] if path else []
+    if tool not in ("apply_patch", "functions.apply_patch"):
+        return []
+    if isinstance(ti, str):
+        patch = ti
+    elif isinstance(ti, dict):
+        patch = ti.get("command") or ti.get("patch") or ti.get("input") or ""
+    else:
+        patch = ""
+    if not isinstance(patch, str):
+        return []
+    cwd = payload.get("cwd") or os.getcwd()
+    found = PATCH_FILE.findall(patch) + PATCH_MOVE.findall(patch)
+    paths = []
+    for raw in found:
+        path = raw.strip()
+        if not os.path.isabs(path):
+            path = os.path.join(cwd, path)
+        path = os.path.normpath(path)
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _review_context(payload, body):
+    client = "codex" if isinstance(payload.get("turn_id"), str) \
+        and payload["turn_id"].strip() else "claude"
+    receipt = {
+        "schema": POSTWRITE_RECEIPT_SCHEMA,
+        "client": client,
+        "session_id": payload.get("session_id"),
+        "turn_id": payload.get("turn_id") if client == "codex" else None,
+        "tool_use_id": payload.get("tool_use_id"),
+        "tool_name": payload.get("tool_name") or payload.get("toolName"),
+        "tool_input_sha256": digest(
+            payload.get("tool_input") or payload.get("toolInput") or {}),
+        "configuration_digest": digest({
+            relative: file_sha256(REPO / relative)
+            for relative in ("ops/config/hooks.json", "ops/config/codex-hooks.json")
+        }),
+        "reviewer_digest": postwrite_reviewer_digest(REPO),
+        "status": body["status"],
+        "paths": body.get("paths", []),
+        "findings": body.get("findings", []),
+        "models": body.get("models", []),
+        "reason": body.get("reason"),
+        "instruction": body.get("instruction"),
+    }
+    receipt["receipt_id"] = receipt_id(receipt)
+    if not validate_postwrite_receipt(receipt, repo=REPO):
+        raise RuntimeError("post-write receipt failed local validation")
+    return json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": json.dumps(receipt, sort_keys=True,
+                                        separators=(",", ":")),
+    }})
+
+
 def code_review(payload):
     """Judge the lines just written, at the moment they are written.
 
@@ -158,59 +240,91 @@ def code_review(payload):
     editing while the judgment is down edits exactly as it does today.
     """
     tool = payload.get("tool_name") or payload.get("toolName") or ""
-    if tool not in ("Write", "Edit", "MultiEdit"):
-        return
     ti = payload.get("tool_input") or payload.get("toolInput") or {}
-    path = ti.get("file_path") or ti.get("filePath") or ""
-    if not path or not path.endswith((".py", ".js", ".mjs", ".sql", ".sh")):
+    paths = _changed_code_paths(payload)
+    if not paths:
         return
+    receipt = {"status": "reviewed", "paths": [], "findings": [], "models": [],
+               "reason": None, "instruction": None}
     try:
         import importlib.util
-        import subprocess
         root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
                               capture_output=True, text=True,
-                              cwd=os.path.dirname(path) or ".",
+                              cwd=os.path.dirname(paths[0]) or ".",
                               timeout=15).stdout.strip()
         if not root:
-            return
-        # The hunk that was just written, with enough around it to be judged.
-        diff = subprocess.run(["git", "diff", "-U12", "--", path],
-                              capture_output=True, text=True, cwd=root,
-                              timeout=20).stdout
-        if not diff.strip():
-            diff = subprocess.run(["git", "diff", "--cached", "-U12", "--", path],
-                                  capture_output=True, text=True, cwd=root,
-                                  timeout=20).stdout
-        added = [line[1:] for line in diff.splitlines()
-                 if line.startswith("+") and not line.startswith("+++")]
-        # Nothing added, or a diff so large it is a rewrite rather than an edit:
-        # both are outside what one scoped judgment can usefully read.
-        if not added or len(added) > 400:
-            return
+            raise RuntimeError("git_root_unavailable")
         spec = importlib.util.spec_from_file_location(
             "jev_code_review", os.path.join(root, "ops", "jev_code_review.py"))
         if spec is None or spec.loader is None:
-            return
+            raise RuntimeError("review_module_unavailable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        region = {"path": os.path.relpath(path, root), "line": 0,
-                  "kind": "just written by this session",
-                  "code": "\n".join(added)[:2600]}
-        scores = module.review_one(region)
-        hits = sorted(((name, value) for name, value in scores.items()
-                       if not name.startswith("_") and value >= 0.70),
-                      key=lambda pair: -pair[1])
-        if not hits:
-            return
-        lines = ["WHAT WAS JUST WRITTEN, read back (advisory — the edit is "
-                 "already saved, and none of this is a decision):"]
-        for name, value in hits:
-            lines.append("  %.2f  %s" % (value, name.replace("_", " ")))
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": "\n".join(lines)}}))
-    except Exception:
-        return
+        hits = []
+        for path in paths:
+            rel = os.path.relpath(path, root)
+            path_receipt = {"path": rel}
+            receipt["paths"].append(path_receipt)
+            if not path.endswith(CODE_SUFFIXES):
+                path_receipt.update(status="not_reviewed", reason="unsupported_extension")
+                continue
+            # The hunk just written, with enough around it to be judged.
+            diff = subprocess.run(["git", "diff", "-U12", "--", path],
+                                  capture_output=True, text=True, cwd=root,
+                                  timeout=20).stdout
+            if not diff.strip():
+                diff = subprocess.run(
+                    ["git", "diff", "--cached", "-U12", "--", path],
+                    capture_output=True, text=True, cwd=root, timeout=20).stdout
+            added = [line[1:] for line in diff.splitlines()
+                     if line.startswith("+") and not line.startswith("+++")]
+            if not added and tool == "Write" and isinstance(ti, dict):
+                content = ti.get("content")
+                if isinstance(content, str):
+                    added = content.splitlines()
+            if not added and os.path.isfile(path):
+                tracked = subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", path],
+                    capture_output=True, text=True, cwd=root, timeout=20)
+                if tracked.returncode != 0:
+                    with open(path, encoding="utf-8", errors="replace") as handle:
+                        added = handle.read().splitlines()
+            if not added:
+                path_receipt.update(status="not_reviewed", reason="no_git_diff")
+                continue
+            if len(added) > 400:
+                path_receipt.update(status="not_reviewed", reason="diff_over_400_added_lines")
+                continue
+            code = "\n".join(added)[:2600]
+            candidate_kinds = [kind for kind, pattern in module.SIGNATURES
+                               if pattern.search(code)]
+            if not candidate_kinds:
+                path_receipt.update(status="clear", reason="no_ambiguous_candidate")
+                continue
+            region = {"path": rel, "line": 0,
+                      "kind": "just written by this session",
+                      "code": code}
+            scores = module.review_one(region)
+            model = scores.get("_model")
+            if isinstance(model, str) and model not in receipt["models"]:
+                receipt["models"].append(model)
+            path_receipt.update(status="jev_reviewed", candidates=candidate_kinds)
+            for name, value in scores.items():
+                if not name.startswith("_") and value >= REVIEW_AT:
+                    hits.append((rel, name, value))
+        hits.sort(key=lambda item: -item[2])
+        for rel, name, value in hits:
+            receipt["findings"].append({
+                "path": rel, "question": name, "probability": value,
+                "effect": "advisory_only",
+            })
+        print(_review_context(payload, receipt))
+    except Exception as exc:
+        print(_review_context(payload, {
+            "status": "unavailable",
+            "reason": type(exc).__name__,
+            "instruction": "The edit is saved, but no Jev review may be claimed for it.",
+        }))
 
 
 def main():

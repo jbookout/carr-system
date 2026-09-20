@@ -57,7 +57,18 @@
         ]
       }
     ],
-    "PostToolUse": [],
+    "PostToolUse": [
+      {
+        "matcher": "^(Write|Edit|MultiEdit|apply_patch|functions\\.apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/lint-gate.py",
+            "timeout": 40
+          }
+        ]
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [
