@@ -248,6 +248,26 @@ class ShadowTests(unittest.TestCase):
                              "shadow mode must never stop a caller")
 
 
+class AdviceTests(unittest.TestCase):
+    def test_no_binding_is_a_successful_empty_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = sel.advise(
+                "a moment", log_path=os.path.join(tmp, "live.jsonl"),
+                rules=RULES, client=FakeClient, judge=FakeJudge(default=0.1),
+                workers=1)
+        self.assertEqual(result, [])
+
+    def test_an_unavailable_candidate_is_not_misreported_as_no_binding(self):
+        judge = FakeJudge(default=0.1, fail_on={"also binds"})
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "live.jsonl")
+            with self.assertRaises(sel.SelectionUnavailable):
+                sel.advise("a moment", log_path=log, rules=RULES,
+                           client=FakeClient, judge=judge, workers=1)
+            written = json.loads(Path(log).read_text(encoding="utf-8").strip())
+        self.assertEqual(written["unavailable"], ["bbbbbbbb"])
+
+
 class EntrypointTests(unittest.TestCase):
     def test_the_module_is_not_a_script_entrypoint(self):
         """Uses the sealed inventory's own detector, not a substring search. A

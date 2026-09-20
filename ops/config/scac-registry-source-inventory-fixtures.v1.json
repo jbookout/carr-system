@@ -55979,10 +55979,34 @@
   ],
   "current_source_review": {
     "base_version": "v35",
-    "upsert": [],
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:hooks/rule-pack-preuse-reselection.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "hooks/rule-pack-preuse-reselection.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "hooks/rule-pack-preuse-reselection.py",
+        "schema_digest": "07b40699ca040e75f53df77f0084a5390a2335ea34c5b426ddcaa2c3046c4c4e",
+        "handler_digest": "07b40699ca040e75f53df77f0084a5390a2335ea34c5b426ddcaa2c3046c4c4e",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ],
     "expected_count": 870,
-    "expected_sha256": "d07ff39588847dd978d50f3cf885aae42a3694e57ba14453852522fe325ce55f",
-    "reason": "WR-000119 admits the DISPATCH SPINE write pair and the frontier moves 868 to 870.\nMEASURED, NOT COPIED, AND DERIVED LAST: the v35 patch was produced by running the generator's own\nfullInventory(TOOLS) against this working tree AFTER the last edit to every inventoried entrypoint on\nthis branch, and diffing it against frozenInventory(\"scac-mutation-registry.v34\"). Deriving is only\nhalf a reseal; deriving last is the other half, and a pin taken before the last edit describes a file\nthat no longer exists by the time it is committed. This paragraph was re-rendered from the row sets,\nnot typed.\n\n2 NEW ingresses: mcp-tool:acknowledge-dispatch, mcp-tool:record-dispatch-link. Both are carried by a NEW family file,\nmcp-server/src/dispatch-spine.js, which mcp-server/src/tools.js did not previously import, map or\nregister -- so, as in v34, this successor edits tools.js. Both are WRITES, the opposite of the v34\npair, so the reviewed MCP inventory moves 258 to 260 with the write count moving to\n184 and the read count unchanged.\n\n116 rows re-digest, and they fall in three groups that are measured separately because they have\nthree different causes.\n\n100 are the rows whose registrySource IS mcp-server/src/tools.js, whose bytes moved when the new\nfamily was imported, mapped and registered there. NOT ONE of them moves its\nschema_digest: a source_digest that moves is a file edit, a schema_digest that moves is a contract\nchange, and only the latter would be this pair's doing.\n\n6 are the mcp-tool rows of mcp-server/src/session-identity.js, whose read shaper now carries the\nper-dispatch link_source, dispatch_ref and stage_unavailable_reason fields through. Their\nschema_digest does NOT move: read-dispatch-history's inputSchema is unchanged by this Work Request.\n\n10 are inventoried script entrypoints this branch edited: external-admin:tools/migrate.py, script-entrypoint:bin/schema-snapshot.sh, script-entrypoint:hooks/completion-evidence-gate.py, script-entrypoint:ops/ci.sh, script-entrypoint:ops/foundation-assurance-candidate-rehearsal.py, script-entrypoint:ops/scac-mutation-inventory.mjs, script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py, script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py, script-entrypoint:tools/room-bridge/bridge.py, script-entrypoint:tools/room-bridge/dispatch.py.\n\n10 rows move a schema_digest, and every one of them is an entrypoint whose digest IS its source:\nexternal-admin:tools/migrate.py, script-entrypoint:bin/schema-snapshot.sh, script-entrypoint:hooks/completion-evidence-gate.py, script-entrypoint:ops/ci.sh, script-entrypoint:ops/foundation-assurance-candidate-rehearsal.py, script-entrypoint:ops/scac-mutation-inventory.mjs, script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py, script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py, script-entrypoint:tools/room-bridge/bridge.py, script-entrypoint:tools/room-bridge/dispatch.py.\n\nZERO removals."
+    "expected_sha256": "07e4ebf4cd042c04a4ce17d8449b4fc66b3fdab9af89b2d2e541fbe9abdae4a4",
+    "reason": "Measured after the final Jev hook edit: the existing v35 script-entrypoint:hooks/rule-pack-preuse-reselection.py row was replaced with the live fullInventory(TOOLS) row. There are zero new ingresses and zero removals; the reviewed frontier remains 870 rows."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",

@@ -66,10 +66,9 @@ DOORS = ("hooks", "bin", "tools", "pipelines", "mcp-server/src", "evals",
          # wrong.
          "ops/githooks")
 
-# Modules that reach the model and are KNOWINGLY not wired yet. Each needs the
-# reason and the loop, in the open. An entry here is a debt, not an excuse, and
-# the list is meant to shrink.
-DECLARED_INERT: dict[str, str] = {
+# Historical acceptance evidence retained beside the check that used to expose
+# this module as inert. It is no longer an exception after loop 620 wiring.
+WIRED_HISTORY: dict[str, str] = {
     "jev_rule_select.py":
         "DECIDED 2026-09-18: it REPLACES the keyword table rather than backing "
         "it up, on Joe's steer that a rule Jev cannot detect should be "
@@ -124,6 +123,10 @@ DECLARED_INERT: dict[str, str] = {
         "WHAT REMAINS is only the wiring, and its design is now settled. "
         "Loop 620.",
 }
+
+# Modules that reach the model and are KNOWINGLY not wired yet. Each needs the
+# reason and loop in the open. The list is deliberately empty after loop 620.
+DECLARED_INERT: dict[str, str] = {}
 
 
 def judgment_modules():

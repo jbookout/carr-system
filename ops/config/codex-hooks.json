@@ -97,6 +97,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
             "timeout": 10
           }
