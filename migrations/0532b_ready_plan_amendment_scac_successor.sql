@@ -2,8 +2,8 @@
 -- PRECONDITION: outer migration transaction has applied frozen 0532a.
 do $wr125_probe_precondition$ begin
   if (select count(*) from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql')<>1
-     or not exists(select 1 from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql' and sha256='322df211fc73199761ec10f714dda7c9145c64d43cf86dec8294e34bbe0ba9ec') then
-    raise exception 'WR125 measurement probe requires frozen 0532a 322df211fc73199761ec10f714dda7c9145c64d43cf86dec8294e34bbe0ba9ec';
+     or not exists(select 1 from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql' and sha256='ff5040386c9e6ea3821b2b70b1c9d0f17841e6e99eb0ab4e7a9693580c267037') then
+    raise exception 'WR125 measurement probe requires frozen 0532a ff5040386c9e6ea3821b2b70b1c9d0f17841e6e99eb0ab4e7a9693580c267037';
   end if;
 end $wr125_probe_precondition$;
 create temporary table pg_temp.wr125_catalog_measurement(label text not null,category text not null,receipt jsonb not null,primary key(label,category)) on commit drop;

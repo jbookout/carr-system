@@ -696,7 +696,7 @@ begin
     v_minimum:=case when v_field='architecture' then 2 else 1 end;
     if jsonb_typeof(v_master->v_field) is distinct from 'array'
        or jsonb_array_length(v_master->v_field) not between v_minimum
-          and case when v_field='architecture' then 20 else 12 end
+          and (case when v_field='architecture' then 20 else 12 end)
        or exists(select 1 from jsonb_array_elements(v_master->v_field) item
          where jsonb_typeof(item)<>'string'
            or char_length(btrim(item#>>'{}')) not between 10 and 1000) then

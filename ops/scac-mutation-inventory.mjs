@@ -12443,7 +12443,7 @@ function renderReadyPlanAmendmentCatalogObserverSql(label) {
 export function renderReadyPlanAmendmentMeasurementProbeSql() {
   const migration0532a = readFileSync(resolve(REPO_ROOT,
     "migrations/0532a_canonical_ownership_lease_activation.sql"), "utf8");
-  const expected0532aSha = "322df211fc73199761ec10f714dda7c9145c64d43cf86dec8294e34bbe0ba9ec";
+  const expected0532aSha = "ff5040386c9e6ea3821b2b70b1c9d0f17841e6e99eb0ab4e7a9693580c267037";
   if (sha256(migration0532a) !== expected0532aSha)
     throw new Error(`WR125 measurement probe refuses non-frozen 0532a: ${sha256(migration0532a)}`);
   const provisional = renderReadyPlanAmendmentForwardRegistrySql();
