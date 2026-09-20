@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Load dynamically introduced scheduled-work rules before the tool proceeds.
 
-This is a shadow-compatible reselection rail, not an enforcement gate.  An exact
+This is a shadow-compatible reselection rail, not an enforcement gate. An exact
 top-level ``run_in_background: true`` is observed work in the scheduled domain.
 The hook calls the existing authenticated standing-context door, injects the
 source-owned rules as additional context, and leaves the original tool input
@@ -24,6 +24,15 @@ exclusive per call (the original shape, when it matches, is handled by the
 original code path alone) so the proven rail's behavior cannot be disturbed
 by the new one.
 
+MESSAGE SEMANTICS (loop 620). The same module is also wired once at
+UserPromptSubmit, the earliest seam that carries the partner's actual message.
+Jev judges which pack-layer rules bind that message; code rejects unknown and
+already-loaded layer-zero candidates; the existing authenticated
+standing-context door supplies the authoritative rule text and identity before
+one typed advisory receipt is injected. The content_regex rows no longer run
+against tool payloads. Exact verbs, command families, and paths remain code-
+owned because those are structured facts rather than semantic judgments.
+
 NOT DONE HERE, ON PURPOSE: hooks/rule-pack-drift-gate.py's Stop-side keyword
 telemetry still only recognizes the original schema's receipt as "loaded"
 evidence for scheduled-automation; it does not yet credit a generalized-rail
@@ -38,21 +47,23 @@ observation fixtures under scope pressure — see the note beside
 from __future__ import annotations
 
 import fnmatch
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeGuard
 
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_preuse import (  # noqa:E402
-    GENERALIZED_RECEIPT_SCHEMA, PACK, RECEIPT_SCHEMA, TRIGGER_TABLE_RELATIVE,
-    canonical, digest, load_trigger_table, merge_trigger_delivery, receipt_id,
-    scheduled_rule_ids as _scheduled_rule_ids, valid_local_identity,
+    CORPUS_RELATIVE, GENERALIZED_RECEIPT_SCHEMA, PACK, RECEIPT_SCHEMA,
+    SEMANTIC_RECEIPT_SCHEMA, TRIGGER_TABLE_RELATIVE, canonical, digest,
+    load_trigger_table, merge_trigger_delivery, receipt_id, semantic_delivery,
+    semantic_selector_digest, scheduled_rule_ids as _scheduled_rule_ids, valid_local_identity,
     validate_generalized_receipt,
 )
 from lib.rule_delivery_shadow import (  # noqa:E402
@@ -73,7 +84,16 @@ GENERALIZED_FAILURE_CONTEXT = (
     "One or more matched triggers were not delivered; Stop telemetry must "
     "treat their packs as not loaded."
 )
+SEMANTIC_FAILURE_CONTEXT = (
+    "JEV MESSAGE RULE DELIVERY FAILED: selector_unavailable. "
+    "The partner message was not blocked or rewritten; no semantic rule was "
+    "treated as loaded."
+)
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
+# typesafe_client's state guard is 96k characters. Leave headroom for JSON
+# structure and reject above it rather than judging only a prompt's edges while
+# issuing a receipt that appears to cover the whole message.
+MESSAGE_LIMIT_CHARS = 90_000
 
 
 def scheduled_rule_ids() -> list[str]:
@@ -120,8 +140,10 @@ def _row_matches(tool_name: str, tool_input: object, row: dict) -> bool:
         if kind == "path_pattern":
             return any(fnmatch.fnmatch(path, pattern) for path in _extract_paths(tool_input))
         if kind == "content_regex":
-            return re.search(pattern, _serialized_payload(tool_name, tool_input),
-                             re.I) is not None
+            # Replaced by Jev at UserPromptSubmit. Keeping this branch explicit
+            # makes the replacement property visible while the compiled table
+            # retains historical rows for audit and rollback.
+            return False
     except re.error:
         return False
     return False
@@ -142,7 +164,7 @@ def matched_triggers(payload: dict) -> list[dict]:
     return [row for row in rows if _row_matches(tool_name, tool_input, row)]
 
 
-def _nonempty(value: object) -> bool:
+def _nonempty(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and bool(value.strip())
 
 
@@ -243,9 +265,9 @@ def _receipt(payload: dict, response: dict, ids: list[str]) -> dict:
     return row
 
 
-def _context(text: str) -> dict:
+def _context(text: str, event: str = "PreToolUse") -> dict:
     return {"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
+        "hookEventName": event,
         "additionalContext": text,
     }}
 
@@ -351,7 +373,96 @@ def _generalized_receipt(payload: dict, response: dict, trigger_ids: list[str],
     return row
 
 
-def process(payload: dict, *, runner: Callable = subprocess.run) -> dict | None:
+def _semantic_adviser(situation: str) -> list[dict]:
+    path = REPO / "ops/jev_rule_select.py"
+    spec = importlib.util.spec_from_file_location("jev_rule_select_live", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("semantic selector unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.advise(situation)
+
+
+def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
+                      packs: list[str], ids: list[str]) -> dict:
+    identity, delivery, rules = _validate_generalized_selector(response, packs, ids)
+    client = _client(payload)
+    probabilities = {row["id"]: float(row["probability"])
+                     for row in selected if row.get("id") in ids}
+    model_provenance = {
+        row["id"]: {
+            "ranking_model": row.get("ranking_model"),
+            "binding_model": row.get("binding_model"),
+        }
+        for row in selected if row.get("id") in ids
+    }
+    if any(not _nonempty(route["binding_model"])
+           or (route["ranking_model"] is not None
+               and not _nonempty(route["ranking_model"]))
+           for route in model_provenance.values()):
+        raise RuntimeError("semantic selector omitted model provenance")
+    row = {
+        "schema": SEMANTIC_RECEIPT_SCHEMA,
+        "client": client,
+        "session_id": payload["session_id"],
+        "turn_id": payload.get("turn_id") if client == "codex" else None,
+        "prompt_sha256": digest(payload["prompt"]),
+        "packs": packs,
+        "corpus_digest": file_sha256(REPO / CORPUS_RELATIVE),
+        "selector_digest": semantic_selector_digest(REPO),
+        "map_digest": file_sha256(MAP),
+        "source_digest": source_sha256(REPO),
+        "identity": {key: identity[key] for key in (
+            "agent_principal_id", "runtime_principal", "sponsoring_human_id")},
+        "rule_ids": ids,
+        "rules": rules,
+        "probabilities": probabilities,
+        "model_provenance": model_provenance,
+        "rule_delivery": {
+            "mode": delivery["mode"],
+            "declared_packs": packs,
+            "packs_not_found": [],
+        },
+    }
+    row["receipt_id"] = receipt_id(row)
+    return row
+
+
+def _process_prompt(payload: dict, runner: Callable,
+                    adviser: Callable[[str], list[dict]] | None) -> dict | None:
+    prompt = payload.get("prompt")
+    if (not _nonempty(payload.get("session_id")) or not _nonempty(prompt)
+            or (_client(payload) == "codex" and not _nonempty(payload.get("turn_id")))):
+        return None
+    if len(prompt) > MESSAGE_LIMIT_CHARS:
+        return _context(SEMANTIC_FAILURE_CONTEXT, "UserPromptSubmit")
+    try:
+        selected = (adviser or _semantic_adviser)(prompt)
+        if not isinstance(selected, list):
+            raise RuntimeError("semantic selector returned malformed advice")
+        candidate_ids: list[str] = []
+        for row in selected:
+            candidate_id = row.get("id")
+            if isinstance(candidate_id, str):
+                candidate_ids.append(candidate_id)
+        ids, packs = semantic_delivery(REPO, candidate_ids)
+        if not ids:
+            return None
+        by_id = {row.get("id"): row for row in selected if isinstance(row, dict)}
+        selected = [by_id[short] for short in ids]
+        if any(row.get("probability") is None for row in selected):
+            raise RuntimeError("semantic selector omitted probability")
+        response = _run_generalized_selector(packs, ids, runner)
+        receipt = _semantic_receipt(payload, response, selected, packs, ids)
+        return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
+    except Exception:
+        return _context(SEMANTIC_FAILURE_CONTEXT, "UserPromptSubmit")
+
+
+def process(payload: dict, *, runner: Callable = subprocess.run,
+            adviser: Callable[[str], list[dict]] | None = None) -> dict | None:
+    if payload.get("hook_event_name") == "UserPromptSubmit":
+        return _process_prompt(payload, runner, adviser)
     if _matches(payload):
         # THE ORIGINAL RAIL, untouched: exact shape, exact pack, exact receipt.
         try:

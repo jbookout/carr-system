@@ -72,9 +72,10 @@ milliseconds: fine once at the end of a turn, prohibitive in front of every
 shell call. The accuracy measurement points the same way — across twenty
 sampled real moments, every rule clearing the floor did so on a MESSAGE being
 composed for a partner and none on a read-only command, correctly, because no
-rule binds to a grep. So message composition and completion claims are the
-home, and the per-command path stays with the regexes, which are free and
-precise on literal tokens. Both entry points log, because a live mechanism
+rule binds to a grep. So the partner-message boundary is the home, and the
+per-command path keeps only exact verb, command-family, and path triggers,
+which are free and precise structured facts. Semantic content regexes are
+replaced rather than layered. Both entry points log, because a live mechanism
 nobody can audit afterwards is worse than a shadow one.
 """
 
@@ -99,6 +100,15 @@ SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
 # distribution starts including rules whose topic matches and whose condition
 # does not. Re-derive this from SHADOW_LOG as real traffic accumulates.
 BIND_AT = 0.75
+
+
+class SelectionUnavailable(RuntimeError):
+    """One or more binding candidates could not be judged.
+
+    An empty successful answer means no rule binds. A partial or total provider
+    miss is different: the caller must fail open visibly instead of presenting
+    incomplete coverage as a complete negative judgment.
+    """
 
 # A moment that surfaces twenty rules has surfaced none, because nobody reads
 # twenty. The cap is part of the design, not a performance concern.
@@ -297,7 +307,9 @@ def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
     ranked = sorted(((rule_id, float(p)) for rule_id, p in probabilities.items()
                      if rule_id != NONE_BIND and rule_id in by_id),
                     key=lambda item: (-item[1], item[0]))
-    return [by_id[rule_id] for rule_id, _ in ranked[:limit]] or list(rules)
+    ranking_model = answer.get("model")
+    return [{**by_id[rule_id], "ranking_model": ranking_model}
+            for rule_id, _ in ranked[:limit]] or list(rules)
 
 
 def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
@@ -339,9 +351,13 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
                    "rule_context": rule.get("context", "")}
         try:
             answer = judge.judge(subject, question, client=client, api_key=api_key)
-            return {**rule, "probability": float(answer["answers"]["binds"]["noul"])}
+            return {
+                **rule,
+                "probability": float(answer["answers"]["binds"]["noul"]),
+                "binding_model": answer.get("model"),
+            }
         except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
-            return {**rule, "probability": None}
+            return {**rule, "probability": None, "binding_model": None}
 
     # CONCURRENT ON PURPOSE, AND THE REASON IS A MEASUREMENT. One request per
     # rule is the method, but the whole corpus asked serially took well over a
@@ -379,23 +395,30 @@ def advise(situation, *, log_path=SHADOW_LOG, **kwargs):
     accuracy side: across twenty sampled moments, every rule that cleared the
     floor did so on a MESSAGE being composed for a partner, and none on a
     read-only command — correctly, because no rule binds to a grep. So the home
-    for this is message composition and completion claims. The per-command path
-    stays with the regexes, which are free and precise on literal tokens.
+    for this is the partner-message boundary. The per-command path keeps only
+    exact verb, command-family, and path triggers, which are free and precise
+    structured facts; semantic content regexes are replaced rather than layered.
 
     Still logs. A live mechanism that cannot be audited later is worse than a
     shadow one, and the log is how BIND_AT gets re-derived from real traffic.
     """
     surfaced = select(situation, **kwargs)
     advice = [row for row in surfaced if row.get("probability") is not None]
+    unavailable = [row["id"] for row in surfaced
+                   if row.get("probability") is None]
     _append(log_path, {
         "mode": "live",
         "situation": situation[:600],
         "surfaced": [row["id"] for row in advice],
+        "unavailable": unavailable,
         "unreachable_by_regex": sorted(
             {row["id"] for row in advice} - reachable_rule_ids()),
         "floor": kwargs.get("floor", BIND_AT),
         "detail": advice,
     })
+    if unavailable:
+        raise SelectionUnavailable(
+            f"{len(unavailable)} rule candidates could not be judged")
     return advice
 
 

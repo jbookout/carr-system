@@ -44,6 +44,30 @@ GENERALIZED_RECEIPT_KEYS = frozenset({
 TRIGGER_TABLE_RELATIVE = "ops/config/rule-jit-triggers.v1.json"
 TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex"})
 
+# The partner-message sibling. Unlike the two PreToolUse receipts, this one is
+# selected by semantic judgment rather than by a compiled trigger row. Its
+# candidates must still resolve through the reviewed load-layer map and the
+# authenticated standing-context door before any rule text is injected.
+SEMANTIC_RECEIPT_SCHEMA = "rule-jev-message-delivery/v1"
+SEMANTIC_RECEIPT_KEYS = frozenset({
+    "schema", "receipt_id", "client", "session_id", "turn_id",
+    "prompt_sha256", "packs", "corpus_digest", "selector_digest",
+    "map_digest", "source_digest", "identity", "rule_ids", "rules",
+    "probabilities", "model_provenance", "rule_delivery",
+})
+CORPUS_RELATIVE = "ops/config/rule-selection-corpus.v1.json"
+SELECTOR_SOURCE_PATHS = (
+    "ops/jev_rule_select.py",
+    "ops/jev_judge.py",
+    "ops/typesafe_client.py",
+)
+
+
+def semantic_selector_digest(repo: Path) -> str:
+    """Bind a semantic receipt to every implementation file that judged it."""
+    return digest({relative: file_sha256(repo / relative)
+                   for relative in SELECTOR_SOURCE_PATHS})
+
 
 def load_trigger_table(repo: Path) -> list[dict]:
     """The compiled trigger table, never hand-derived a second way here.
@@ -83,6 +107,110 @@ def merge_trigger_delivery(rows: list[dict]) -> tuple[list[str], list[str], list
     packs = sorted({p for row in rows for p in row["packs"]})
     rule_ids = sorted({rid for row in rows for rid in row["rule_ids"]})
     return trigger_ids, packs, rule_ids
+
+
+def semantic_delivery(repo: Path, rule_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Return reviewed pack members and packs for Jev-selected rule ids.
+
+    Layer-zero rules are already present at boot and are intentionally omitted.
+    Unknown, malformed, or non-pack rows are omitted rather than promoted by a
+    model answer; the reviewed map remains the deterministic authority.
+    """
+    data = json.loads((repo / "ops/config/rule-enforcement-map.json").read_text(
+        encoding="utf-8"))
+    layers = data.get("rule_load_layers")
+    if not isinstance(layers, dict):
+        raise ValueError("reviewed map has no rule_load_layers object")
+    kept = []
+    packs = set()
+    for short in sorted(set(rule_ids)):
+        row = layers.get(short)
+        if (not isinstance(short, str) or len(short) != 8
+                or not isinstance(row, dict) or row.get("load_layer") != "pack"
+                or not isinstance(row.get("packs"), list) or not row["packs"]
+                or any(not _nonempty(pack) for pack in row["packs"])):
+            continue
+        kept.append(short)
+        packs.update(row["packs"])
+    return kept, sorted(packs)
+
+
+def validate_semantic_receipt(row: object, *, repo: Path) -> bool:
+    """Validate one authenticated Jev-at-message-boundary delivery receipt."""
+    if not isinstance(row, dict) or set(row) != SEMANTIC_RECEIPT_KEYS:
+        return False
+    if row.get("schema") != SEMANTIC_RECEIPT_SCHEMA:
+        return False
+    if row.get("client") not in {"claude", "codex"}:
+        return False
+    if not all(_nonempty(row.get(key)) for key in (
+            "receipt_id", "session_id", "prompt_sha256", "corpus_digest",
+            "selector_digest", "map_digest", "source_digest")):
+        return False
+    turn_id = row.get("turn_id")
+    if ((row["client"] == "codex" and not _nonempty(turn_id))
+            or (row["client"] == "claude" and turn_id is not None)):
+        return False
+    identity = row.get("identity")
+    if (not isinstance(identity, dict) or set(identity) != IDENTITY_KEYS
+            or not valid_local_identity(identity)):
+        return False
+    rule_ids = row.get("rule_ids")
+    packs = row.get("packs")
+    if (not isinstance(rule_ids, list) or not rule_ids
+            or rule_ids != sorted(set(rule_ids))
+            or not isinstance(packs, list) or not packs
+            or packs != sorted(set(packs))):
+        return False
+    try:
+        expected_ids, expected_packs = semantic_delivery(repo, rule_ids)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if rule_ids != expected_ids or packs != expected_packs:
+        return False
+    rules = row.get("rules")
+    if (not isinstance(rules, list) or len(rules) != len(rule_ids)
+            or any(not isinstance(item, dict) or set(item) != RULE_KEYS
+                   or not _nonempty(item.get("id"))
+                   or not _nonempty(item.get("statement")) for item in rules)
+            or [item["id"] for item in rules] != rule_ids):
+        return False
+    probabilities = row.get("probabilities")
+    if (not isinstance(probabilities, dict)
+            or sorted(probabilities) != rule_ids):
+        return False
+    try:
+        if any(not 0.0 <= float(value) <= 1.0
+               for value in probabilities.values()):
+            return False
+    except (TypeError, ValueError):
+        return False
+    model_provenance = row.get("model_provenance")
+    if (not isinstance(model_provenance, dict)
+            or sorted(model_provenance) != rule_ids):
+        return False
+    for route in model_provenance.values():
+        if (not isinstance(route, dict)
+                or set(route) != {"ranking_model", "binding_model"}
+                or not _nonempty(route.get("binding_model"))
+                or (route.get("ranking_model") is not None
+                    and not _nonempty(route.get("ranking_model")))):
+            return False
+    delivery = row.get("rule_delivery")
+    if (not isinstance(delivery, dict) or set(delivery) != DELIVERY_KEYS
+            or delivery.get("mode") not in {"shadow", "enforced"}
+            or sorted(delivery.get("declared_packs") or []) != packs
+            or delivery.get("packs_not_found") != []):
+        return False
+    if row["corpus_digest"] != file_sha256(repo / CORPUS_RELATIVE):
+        return False
+    if row["selector_digest"] != semantic_selector_digest(repo):
+        return False
+    if row["map_digest"] != file_sha256(repo / "ops/config/rule-enforcement-map.json"):
+        return False
+    if row["source_digest"] != source_sha256(repo):
+        return False
+    return row["receipt_id"] == receipt_id(row)
 
 
 def validate_generalized_receipt(row: object, *, repo: Path) -> bool:
@@ -263,13 +391,21 @@ def receipt_from_envelope(record: object) -> dict | None:
     attachment = record.get("attachment")
     if (record.get("type") == "attachment" and isinstance(attachment, dict)
             and attachment.get("type") == "hook_additional_context"
-            and attachment.get("hookEvent") == "PreToolUse"
             and isinstance(attachment.get("content"), list)
             and len(attachment["content"]) == 1):
         row = _json_text(attachment["content"][0])
         if (row and row.get("client") == "claude"
+                and row.get("schema") == RECEIPT_SCHEMA
+                and attachment.get("hookEvent") == "PreToolUse"
                 and attachment.get("hookName") == f"PreToolUse:{row.get('tool_name')}"
                 and attachment.get("toolUseID") == row.get("tool_use_id")
+                and record.get("sessionId") == row.get("session_id")):
+            return row
+        if (row and row.get("client") == "claude"
+                and row.get("schema") == SEMANTIC_RECEIPT_SCHEMA
+                and attachment.get("hookEvent") == "UserPromptSubmit"
+                and attachment.get("hookName") == "UserPromptSubmit"
+                and "toolUseID" not in attachment
                 and record.get("sessionId") == row.get("session_id")):
             return row
         return None
@@ -352,9 +488,55 @@ def matched_tool_call(row: dict, prior_records: list[dict]) -> bool:
             and exact_context)
 
 
+def _claude_user_text(record: object) -> str | None:
+    if not isinstance(record, dict) or record.get("type") not in {"user", "human"}:
+        return None
+    message = record.get("message")
+    if not isinstance(message, dict) or message.get("role") not in {"user", "human"}:
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    pieces = []
+    for item in content:
+        if (not isinstance(item, dict) or item.get("type") != "text"
+                or not isinstance(item.get("text"), str)):
+            return None
+        pieces.append(item["text"])
+    return "".join(pieces)
+
+
+def matched_prompt(row: dict, prior_records: list[dict]) -> bool:
+    """Bind a Claude message receipt to its immediately preceding user turn.
+
+    Codex context is already turn-bound by platform metadata in
+    receipt_from_envelope(). Claude supplies a session id instead, so its prompt
+    digest must match the latest genuine user record in that same session.
+    """
+    if row.get("client") == "codex":
+        return True
+    for record in reversed(prior_records):
+        text = _claude_user_text(record)
+        if text is None:
+            continue
+        return (record.get("sessionId") == row.get("session_id")
+                and digest(text) == row.get("prompt_sha256"))
+    return False
+
+
 def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
     row = receipt_from_envelope(record)
-    if (row is None or not validate_receipt(row, repo=repo)
+    if row is None:
+        return None
+    if row.get("schema") == SEMANTIC_RECEIPT_SCHEMA:
+        if (not validate_semantic_receipt(row, repo=repo)
+                or not matched_prompt(row, prior_records)):
+            return None
+        delivery = row["rule_delivery"]
+        return delivery["mode"], list(row["packs"]), []
+    if (not validate_receipt(row, repo=repo)
             or not matched_tool_call(row, prior_records)):
         return None
     delivery = row["rule_delivery"]
@@ -364,7 +546,9 @@ def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
 def contains_receipt_marker(value: object) -> bool:
     if isinstance(value, dict):
         return (value.get("schema") == RECEIPT_SCHEMA
+                or value.get("schema") == SEMANTIC_RECEIPT_SCHEMA
                 or any(contains_receipt_marker(item) for item in value.values()))
     if isinstance(value, list):
         return any(contains_receipt_marker(item) for item in value)
-    return isinstance(value, str) and RECEIPT_SCHEMA in value
+    return (isinstance(value, str)
+            and (RECEIPT_SCHEMA in value or SEMANTIC_RECEIPT_SCHEMA in value))
