@@ -7,12 +7,18 @@ import importlib.util
 import contextlib
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "ops"))
+from git_env import fixture_env  # noqa:E402
 
 
 def load(name: str, path: Path):
@@ -90,6 +96,40 @@ class EditCoverageTests(unittest.TestCase):
                        "tool_input": {"command": patch}}
             self.assertEqual(lint._changed_code_paths(payload), [
                 str(Path(tmp) / "src/a.py"), str(Path(tmp) / "src/b.py")])
+            wrapped = {"tool_name": "functions.exec", "cwd": tmp,
+                       "tool_input": "const p = '*** Begin Patch\\n*** Update File: src/a.py\\n*** End Patch'; await tools.apply_patch(p);"}
+            self.assertEqual(lint._changed_code_paths(wrapped), [
+                str(Path(tmp) / "src/a.py")])
+            wrapped["tool_input"] = "await tools.exec_command({cmd: 'git status'})"
+            self.assertEqual(lint._changed_code_paths(wrapped), [])
+
+    def test_wrapped_patch_reaches_postwrite_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = fixture_env()
+            (root / "ops").mkdir()
+            (root / "src").mkdir()
+            (root / "ops/jev_code_review.py").write_text("SIGNATURES = []\n")
+            target = root / "src/a.py"
+            target.write_text("answer = 1\n")
+            subprocess.run(["git", "init", "-q", tmp], check=True, env=env)
+            subprocess.run(["git", "add", "src/a.py"], cwd=tmp,
+                           check=True, env=env)
+            target.write_text("answer = 42\n")
+            payload = {
+                "tool_name": "functions.exec", "cwd": tmp,
+                "session_id": "session-review", "tool_use_id": "tool-review",
+                "tool_input": "const p = '*** Begin Patch\\n*** Update File: src/a.py\\n*** End Patch'; await tools.apply_patch(p);",
+            }
+            out = io.StringIO()
+            with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+                lint.code_review(payload)
+            receipt = json.loads(json.loads(out.getvalue())
+                                 ["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(receipt["status"], "reviewed")
+            self.assertEqual(receipt["paths"], [
+                {"path": "src/a.py", "status": "clear",
+                 "reason": "no_ambiguous_candidate"}])
 
     def test_both_clients_wire_intake_and_post_edit_review(self):
         claude = json.loads((REPO / "ops/config/hooks.json").read_text())
@@ -106,7 +146,9 @@ class EditCoverageTests(unittest.TestCase):
             self.assertEqual(len(prompt_rows), 1, label)
             self.assertEqual(len(review_rows), 1, label)
             self.assertIn("apply_patch", review_rows[0].get("matcher", ""), label)
-            self.assertNotIn("functions\\.exec", review_rows[0].get("matcher", ""), label)
+            if label == "Codex":
+                self.assertIn("functions\\.(apply_patch|exec)",
+                              review_rows[0].get("matcher", ""))
 
     def test_unsupported_file_emits_a_validated_bound_receipt(self):
         out = io.StringIO()

@@ -59,7 +59,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^(Write|Edit|MultiEdit|apply_patch|functions\\.apply_patch)$",
+        "matcher": "^(Write|Edit|MultiEdit|apply_patch|functions\\.(apply_patch|exec))$",
         "hooks": [
           {
             "type": "command",
