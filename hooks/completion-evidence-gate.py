@@ -164,10 +164,6 @@ WRITE_ACTION_EXACT = {
                                  # up". EXACT for acknowledge-notification's own reason --
                                  # "acknowledge" covers exactly two verbs today and as a prefix
                                  # would silently capture a future read named the same.
-    "acknowledge-ready-plan-amendment",  # WR-000125: appends the authenticated actor's
-                                 # durable notice acknowledgement without granting execution.
-                                 # Keep acknowledge exact so future read-shaped verbs do not
-                                 # silently inherit write classification.
     "claude-checkpoint",     # durable Claude semantic checkpoint write
     "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write
@@ -264,6 +260,9 @@ WRITE_ACTION_EXACT = {
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
     "record-foundation-assurance-minimum-outcome",
+}
+HUMAN_ONLY_WRITE_ACTION_EXACT = {
+    "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
 }
 # The three reason classes that carry a latch identity. Named constants rather
 # than repeated literals, because an identity keyed on a string that drifts is
@@ -445,7 +444,9 @@ def normalized_action(value):
 
 def is_write_action(action):
     """Classify a CARR registry action without treating similar reads as writes."""
-    return action in WRITE_ACTION_EXACT or action.partition("-")[0] in WRITE_ACTION_PREFIXES
+    return (action in WRITE_ACTION_EXACT
+            or action in HUMAN_ONLY_WRITE_ACTION_EXACT
+            or action.partition("-")[0] in WRITE_ACTION_PREFIXES)
 
 
 def nested_carr_actions(value):

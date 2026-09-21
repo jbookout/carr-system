@@ -56098,8 +56098,8 @@
         "operation": "hooks/completion-evidence-gate.py",
         "effect_class": "administrative_mutation",
         "source_locator": "hooks/completion-evidence-gate.py",
-        "schema_digest": "160bfc45b840b33bdf4c8599e68ddbf05f7629fc9a99b714027e70e9e6cf90b2",
-        "handler_digest": "160bfc45b840b33bdf4c8599e68ddbf05f7629fc9a99b714027e70e9e6cf90b2",
+        "schema_digest": "9db0ba936f48d23fe92f06af814417cd770caee846324793983a6493fe5190f5",
+        "handler_digest": "9db0ba936f48d23fe92f06af814417cd770caee846324793983a6493fe5190f5",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -56489,7 +56489,7 @@
       "mcp-server/src/engineering-runtime.js": "c8ddc956da41ae2817179c54337467b1719135dd94714635a7a967d91333f05c"
     },
     "expected_count": 876,
-    "expected_sha256": "f53161ead78732cb8aad66057a079128b85860723c74098ec7a2edb27308f150",
+    "expected_sha256": "a7dead3e33d8b596755a8b37cf779e44220bae01bb8c822deaa7850e31fccff3",
     "reason": "Measured current-tree source review for the WR126 v36 frontier: re-digest the authenticated canonical-ownership controller, runtime, credential, PostgreSQL-gate, and reviewed hook changes; the new provisioner ingress is sealed in v36 and the reviewed frontier contains 876 rows."
   },
   "historical_artifact_replay_review": {
