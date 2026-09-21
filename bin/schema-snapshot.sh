@@ -138,6 +138,8 @@ done
 # relative path, an existing symlink, or db/schema.sql itself. The existing
 # --verify-only remains the validation-only interface.
 if [ -n "$OUTPUT_CANDIDATE" ]; then
+  [ -n "$URL" ] \
+    || { echo "schema-snapshot: --output-candidate requires --from-disposable-local" >&2; exit 64; }
   [ "$CHECK" = 0 ] && [ "$VERIFY_ONLY" = 0 ] \
     || { echo "schema-snapshot: --output-candidate cannot be combined with --check or --verify-only" >&2; exit 64; }
   case "$OUTPUT_CANDIDATE" in

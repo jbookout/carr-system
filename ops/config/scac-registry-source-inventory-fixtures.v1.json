@@ -56075,8 +56075,8 @@
         "operation": "bin/schema-snapshot.sh",
         "effect_class": "administrative_mutation",
         "source_locator": "bin/schema-snapshot.sh",
-        "schema_digest": "c12b0c03694239443a99809f0f3a82c9038e1e80c2e47167527ba7e0cec649b9",
-        "handler_digest": "c12b0c03694239443a99809f0f3a82c9038e1e80c2e47167527ba7e0cec649b9",
+        "schema_digest": "5a8384ec484afdf4dd5cceea8aca27e3039dcfa547cb66237acb467b1131fc3d",
+        "handler_digest": "5a8384ec484afdf4dd5cceea8aca27e3039dcfa547cb66237acb467b1131fc3d",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -56543,7 +56543,7 @@
       "mcp-server/src/engineering-runtime.js": "c8ddc956da41ae2817179c54337467b1719135dd94714635a7a967d91333f05c"
     },
     "expected_count": 876,
-    "expected_sha256": "5e7f10c9cdfc5b9fbdcfe686125b1264aed7d55d4cff7741f12dbd1ae3028282",
+    "expected_sha256": "894f6ca8199d93eae04eaa9c630bc70f37ac686fe83d5208e49402ffe530a63b",
     "reason": "Measured current-tree source review for the WR126 v36 frontier under WR128 Gate A: re-digest the reviewed canonical-ownership PostgreSQL gate, snapshot exporter, disposable PG17 runner, and DB-acceptance workflow including its pinned artifact action. The runtime registry remains v36 with 876 rows; this source-only review does not alter a sealed migration or authorize production effects."
   },
   "historical_artifact_replay_review": {
