@@ -2713,6 +2713,9 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 
   const probe = renderReadyPlanAmendmentMeasurementProbeSqlClosed();
   assert.doesNotMatch(probe, /\\ir |\nbegin;|\nrollback;/);
+  assert.doesNotMatch(probe, /disable trigger scac_mutation_registry_version_sealed/);
+  assert.ok(probe.indexOf("update ops.scac_mutation_registry_version v set entry_count=") <
+    probe.indexOf("create trigger scac_mutation_registry_version_sealed"));
   for (const phase of ["pre_v36", "forward_v36"])
     for (const category of ["secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants"])
       assert.match(probe, new RegExp(`'${phase}','${category}'`));

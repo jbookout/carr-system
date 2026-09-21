@@ -12501,6 +12501,11 @@ export function renderReadyPlanAmendmentMeasurementProbeSql() {
   if (provisionalBody.includes("SCAC v36 database catalog category") ||
       provisionalBody.includes("SCAC mutation registry v36 seed is incomplete"))
     throw new Error("WR125 measurement probe left a provisional v36 validation block");
+  const countRepair = `update ops.scac_mutation_registry_version v set entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version),source_entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl')) where v.registry_version='scac-mutation-registry.v36';\n`;
+  const triggerRecreation =
+    "create trigger scac_mutation_registry_version_sealed before insert or update or delete on ops.scac_mutation_registry_version";
+  const measurableBody = replaceExactlyOnce(provisionalBody, triggerRecreation,
+    countRepair + triggerRecreation, "WR125 probe count repair before trigger recreation");
   return `-- TEMPORARY WR125 0532b rollback-only measurement body; remove after seal binding.\n` +
     `-- PRECONDITION: outer migration transaction has applied frozen 0532a.\n` +
     `do $wr125_probe_precondition$ begin\n` +
@@ -12509,12 +12514,7 @@ export function renderReadyPlanAmendmentMeasurementProbeSql() {
     `    raise exception 'WR125 measurement probe requires frozen 0532a ${expected0532aSha}';\n` +
     `  end if;\nend $wr125_probe_precondition$;\n` +
     `create temporary table pg_temp.wr125_catalog_measurement(label text not null,category text not null,receipt jsonb not null,primary key(label,category)) on commit drop;\n` +
-    renderReadyPlanAmendmentCatalogObserverSql("pre_v36") + provisionalBody +
-    // The all-zero placeholders are never a final seal.  Make only temporary
-    // count metadata truthful so the replayed registry remains self-consistent.
-    `alter table ops.scac_mutation_registry_version disable trigger scac_mutation_registry_version_sealed;\n` +
-    `update ops.scac_mutation_registry_version v set entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version),source_entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl')) where v.registry_version='scac-mutation-registry.v36';\n` +
-    `alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;\n` +
+    renderReadyPlanAmendmentCatalogObserverSql("pre_v36") + measurableBody +
     renderReadyPlanAmendmentCatalogObserverSql("forward_v36") +
     `do $wr125_measurement_result$ declare pre_v36 jsonb; forward_v36 jsonb; begin\n` +
     `  if (select count(*) from pg_temp.wr125_catalog_measurement where label='pre_v36')<>5 or (select count(*) from pg_temp.wr125_catalog_measurement where label='forward_v36')<>5 then raise exception 'WR125 measurement observer incomplete'; end if;\n` +
