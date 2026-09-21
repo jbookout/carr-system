@@ -5,6 +5,7 @@
 // a route adapter rather than a second mutation implementation.
 import { callTool } from "./mcp.js";
 import { ToolError } from "./tools.js";
+import { needsJoeAdvisory } from "./jev-needs-joe-advisory.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 const HUMAN_REF = /^WR-[0-9]{1,12}$/;
@@ -73,6 +74,7 @@ function errorStatus(payload) {
 export function createProgram6RoutineController(overrides = {}) {
   const dependencies = {
     callToolFn: callTool,
+    needsJoeAdvisoryFn: needsJoeAdvisory,
     // Fail closed until the Deal Room boundary explicitly injects its verifier.
     authorizeAction: async () => json({ error: "program6_browser_mutations_unavailable" }, 503),
     ...overrides,
@@ -91,8 +93,18 @@ export function createProgram6RoutineController(overrides = {}) {
       if (route.method === "GET") {
         if (route.tool === "current-work-requests") {
           try {
+            const readStarted = performance.now();
             const result = await dependencies.callToolFn(env, actor, route.tool, {}, "full");
-            return json({ ok: true, data: result });
+            // Advisory failures never turn the authenticated canonical read into a refusal.
+            let advisory;
+            try {
+              advisory = await dependencies.needsJoeAdvisoryFn(result, { apiKey: env?.TYPESAFE_API_KEY });
+            } catch {
+              advisory = { schema: "jev_c13_decision_queue_advisory/v1", status: "unavailable",
+                reason: "jev_unavailable", items: [] };
+            }
+            return json({ ok: true, data: { ...result,
+              advisory: { ...advisory, read_elapsed_ms: Math.round(performance.now() - readStarted) } } });
           } catch (error) {
             if (error instanceof ToolError) return json(error.payload, errorStatus(error.payload));
             return json({ error: "system_work_read_failed" }, 500);

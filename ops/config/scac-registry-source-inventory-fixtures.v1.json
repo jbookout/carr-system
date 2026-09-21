@@ -56102,11 +56102,34 @@
         "owner_package": "11",
         "implementation_state": "inventoried_not_atomically_mediated",
         "classification_authorizing": false
+      },
+      {
+        "ingress_key": "worker-route:program6-routine",
+        "ingress_kind": "worker_route",
+        "operation": "program6-routine",
+        "effect_class": "record_mutation",
+        "source_locator": "mcp-server/src/program6-routine-controller.js",
+        "schema_digest": "e854da688e371494b4466434290d88ea056366494068d0e8cf68ec348674b731",
+        "handler_digest": "e854da688e371494b4466434290d88ea056366494068d0e8cf68ec348674b731",
+        "write": true,
+        "human_only": false,
+        "authority_only": false,
+        "principal_mode": "existing_entrypoint_specific_authentication",
+        "mutation_kind": "scac.mutation.business_record",
+        "target_surface": "scac.surface.database",
+        "delegates_to": [],
+        "request_shape": "entrypoint_specific_current_contract",
+        "idempotency_mode": "entrypoint_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
       }
     ],
     "expected_count": 870,
-    "expected_sha256": "45a0e22f0d8d43510faed4e997e0f6b1fc9e2247f1bf07700b9be3d7394d6c09",
-    "reason": "Measured for the automatic Jev build protocol: replace the existing hooks/rule-pack-preuse-reselection.py row with its turn-bound build-receipt digest and hooks/lint-gate.py with its attributable edit/apply_patch and visible validated review-receipt digest. Shell writes remain outside this hook because repository policy forbids them and they cannot be safely attributed post hoc. There are zero new ingresses and zero removals; the reviewed frontier remains 870 rows. Loop #614 re-digests three already-known rows and admits none. ops/calendar-prebrief-service-registration-gate.py now computes the capture-challenge window with a Postgres calendar-day interval instead of a Python exact-hour timedelta, which is what the table check constraint it is compared against actually uses, so a local run whose server sits in America/Chicago no longer fails by one hour in the six weeks before a fall clock change. bin/schema-snapshot.sh pins the pg_dump client major, so db/schema.sql is reproducible rather than decided by whichever client a machine resolved first (pg_dump 18 names every NOT NULL constraint and 17 leaves it bare, a 256-line diff with no schema change behind it). .github/workflows/db-acceptance.yml installs the postgresql-client-18 package beside the 17 SERVER the disposable cluster still initdbs, because the pin is unsatisfiable on a runner carrying only 17 and exited 69 on run 35375307125; the server major is deliberately unchanged so a hosted red still means what a local red means. All three were already inventoried entry points, so no ingress is added or removed and the reviewed frontier holds at 870 rows. This change re-digests the existing hooks/lint-gate.py ingress for Codex functions.exec wrappers around literal tools.apply_patch calls. Arbitrary shell writes and dynamically generated patches remain outside this hook; no new ingress or removal is admitted."
+    "expected_sha256": "ecb0fbc10c9f444312ed822e2789eebfd19d0c2259f10a83e12bd189c0c8cd8c",
+    "reason": "Measured for the automatic Jev build protocol: replace the existing hooks/rule-pack-preuse-reselection.py row with its turn-bound build-receipt digest and hooks/lint-gate.py with its attributable edit/apply_patch and visible validated review-receipt digest. Shell writes remain outside this hook because repository policy forbids them and they cannot be safely attributed post hoc. There are zero new ingresses and zero removals; the reviewed frontier remains 870 rows. Loop #614 re-digests three already-known rows and admits none. ops/calendar-prebrief-service-registration-gate.py now computes the capture-challenge window with a Postgres calendar-day interval instead of a Python exact-hour timedelta, which is what the table check constraint it is compared against actually uses, so a local run whose server sits in America/Chicago no longer fails by one hour in the six weeks before a fall clock change. bin/schema-snapshot.sh pins the pg_dump client major, so db/schema.sql is reproducible rather than decided by whichever client a machine resolved first (pg_dump 18 names every NOT NULL constraint and 17 leaves it bare, a 256-line diff with no schema change behind it). .github/workflows/db-acceptance.yml installs the postgresql-client-18 package beside the 17 SERVER the disposable cluster still initdbs, because the pin is unsatisfiable on a runner carrying only 17 and exited 69 on run 35375307125; the server major is deliberately unchanged so a hosted red still means what a local red means. All three were already inventoried entry points, so no ingress is added or removed and the reviewed frontier holds at 870 rows. This change re-digests the existing hooks/lint-gate.py ingress for Codex functions.exec wrappers around literal tools.apply_patch calls. Arbitrary shell writes and dynamically generated patches remain outside this hook; no new ingress or removal is admitted. WR-000123 source-only review: the authenticated system-work GET now attaches a bounded Jev advisory, re-digesting only the existing worker-route:program6-routine ingress. Joe explicitly authorized this one fixture-path override after PLAN-984f7435b5a2-v3 was accepted; the four-file source cap remains recorded and no frozen v35 row, ingress count, or authority contract is widened."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",
