@@ -12257,6 +12257,16 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
   if (replayedV34Start < 0 || v35TransitionStart < 0)
     throw new Error("WR125 predecessor v34 transition boundary missing");
   sql = sql.slice(0, replayedV34Start) + sql.slice(v35TransitionStart);
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot_v33(),ops.scac_policy_epoch_snapshot_v35(),",
+    "ops.scac_policy_epoch_snapshot_v33(),ops.scac_policy_epoch_snapshot_v34(),ops.scac_policy_epoch_snapshot_v35(),",
+    "WR125 historical v34 policy snapshot revoke");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v34_seal_available(),ops.scac_mutation_catalog_v36_current() from",
+    "ops.scac_mutation_registry_v34_seal_available(),ops.scac_mutation_catalog_v35_live_at_seal(),ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_registry_v35_seal_available(),ops.scac_mutation_catalog_v36_current() from",
+    "WR125 v35 historical function revokes");
+  sql = replaceExactlyOnce(sql, "v34 epochs remain immutable.",
+    "v34/v35 epochs remain immutable.", "WR125 v35 historical epoch comment");
   const v34RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}' end;`;
   const v35RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}'\n` +
     `    when 'scac-mutation-registry.v35' then '${v35SealDigest}' end;`;
@@ -12288,6 +12298,9 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     v35Tuple.trim(),
     v35EpochChain,
     v35EpochConstraint,
+    "ops.scac_policy_epoch_snapshot_v34(),ops.scac_policy_epoch_snapshot_v35()",
+    "ops.scac_mutation_catalog_v35_live_at_seal(),ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_registry_v35_seal_available(),ops.scac_mutation_catalog_v36_current() from public",
+    "v34/v35 epochs remain immutable",
     "current policy epochs bind mutation registry v36",
     `,'sha256:${readyPlanV36Digest}',${v36EntryCount},${rows.length},`,
     `registry_version='scac-mutation-registry.v36')<>${v36EntryCount}`,

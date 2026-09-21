@@ -2700,6 +2700,10 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
     "when 'scac-mutation-registry.v35' then 'sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec' end;"));
   assert.ok(forward.includes(
     `when 'scac-mutation-registry.v35' then '${JSON.stringify(DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`));
+  assert.match(forward, /ops\.scac_policy_epoch_snapshot_v34\(\),ops\.scac_policy_epoch_snapshot_v35\(\)/);
+  assert.match(forward,
+    /ops\.scac_mutation_catalog_v35_live_at_seal\(\),ops\.scac_mutation_catalog_v35_current\(\),ops\.scac_mutation_registry_v35_seal_available\(\),ops\.scac_mutation_catalog_v36_current\(\) from public/);
+  assert.match(forward, /v34\/v35 epochs remain immutable/);
   assert.match(forward, /scac_mutation_registration_v36/);
   assert.match(forward, /scac_mutation_catalog_v36_current/);
   assert.match(forward, /current policy epochs bind mutation registry v36/);
