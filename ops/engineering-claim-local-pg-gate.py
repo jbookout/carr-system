@@ -118,9 +118,15 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
             f"Accepted immutable plan {accepted_plan_ref} for doctrine:runbook#fixture "
             f"at sha256:{'b' * 64}"
         )
-        work_request_id = one(
-            cur,
-            """insert into ops.work_request
+        # This gate tests ownership from an accepted synthetic lineage, while
+        # the sourced-capture gate separately proves the captured-to-ready
+        # transition. Bypass INSERT triggers only while placing this fixture;
+        # the table CHECK still validates its complete sourced shape.
+        cur.execute("set local session_replication_role=replica")
+        try:
+            work_request_id = one(
+                cur,
+                """insert into ops.work_request
                  (ref,state,title,requester_actor,owner_actor,organization_tenant_id,
                   origin_ref,doctrine_section_id,doctrine_revision_id,
                   capture_idempotency_key,sourced_capture_sequence,
@@ -130,10 +136,12 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
                  values (%s,'ready','Engineering claim fixture','joe','joe','carr-internal',
                          %s,%s,%s,%s,nextval('ops.work_request_ref_seq'),
                          'operational',%s,now(),'not_required',%s,%s,%s,now()) returning id""",
-            (f"WR-ENGINEERING-CLAIM-{token}", f"doctrine:engineering-claim-{token}#fixture",
-             section_id, revision_id, uuid.uuid4(), joe_id,
-             shape_ref, shape_rationale, joe_id),
-        )[0]
+                (f"WR-ENGINEERING-CLAIM-{token}", f"doctrine:engineering-claim-{token}#fixture",
+                 section_id, revision_id, uuid.uuid4(), joe_id,
+                 shape_ref, shape_rationale, joe_id),
+            )[0]
+        finally:
+            cur.execute("set local session_replication_role=origin")
     else:
         shape_ref = "fixture:engineering-currentness"
         shape_rationale = "fixture currentness acceptance"

@@ -56213,8 +56213,8 @@
         "operation": "ops/engineering-claim-local-pg-gate.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/engineering-claim-local-pg-gate.py",
-        "schema_digest": "75d5eae41612d35d3ccfebb5754b9825970ec689f70019d6e8b96d366a6ebc01",
-        "handler_digest": "75d5eae41612d35d3ccfebb5754b9825970ec689f70019d6e8b96d366a6ebc01",
+        "schema_digest": "880edc3267465556dd852fbdb46b5d9d156233b9da5f69668005bc268dd1a213",
+        "handler_digest": "880edc3267465556dd852fbdb46b5d9d156233b9da5f69668005bc268dd1a213",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -56543,7 +56543,7 @@
       "mcp-server/src/engineering-runtime.js": "c8ddc956da41ae2817179c54337467b1719135dd94714635a7a967d91333f05c"
     },
     "expected_count": 876,
-    "expected_sha256": "1f534f67d1ca06fa02fadbf38d382de2685a751cc541b312c27a2f4681caeea0",
+    "expected_sha256": "f83c103adb68376b2cee141d6b1cf83a13fe0eb42daa54d6b8f5115f800ef91f",
     "reason": "Measured current-tree source review for the WR126 v36 frontier under WR128 Gate A: re-digest the reviewed canonical-ownership PostgreSQL gate, snapshot exporter, disposable PG17 runner, and DB-acceptance workflow including its pinned artifact action. The runtime registry remains v36 with 876 rows; this source-only review does not alter a sealed migration or authorize production effects."
   },
   "historical_artifact_replay_review": {
