@@ -12174,7 +12174,12 @@ export function renderReadyPlanAmendmentForwardRegistrySql(rows = frozenInventor
     const oldReceipt = v35CurrentBaseline[category];
     const newReceipt = dbCatalogBaseline[category];
     v36CatalogFunction = v36CatalogFunction
-      .replaceAll(`observed_count<>${oldReceipt.count}`, `observed_count<>${newReceipt.count}`)
+      .replaceAll(
+        `observed_count<>${oldReceipt.count} or observed_digest<>'${oldReceipt.digest}'`,
+        `observed_count<>${newReceipt.count} or observed_digest<>'${newReceipt.digest}'`)
+      .replaceAll(
+        `return observed_count=${oldReceipt.count} and observed_digest='${oldReceipt.digest}'`,
+        `return observed_count=${newReceipt.count} and observed_digest='${newReceipt.digest}'`)
       .replaceAll(`entry_count')::integer<>${oldReceipt.count}`, `entry_count')::integer<>${newReceipt.count}`)
       .replaceAll(oldReceipt.digest, newReceipt.digest);
   }
@@ -12256,7 +12261,9 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     const oldReceipt = DISPATCH_SPINE_PRE_V35_DB_CATALOG_BASELINE[category];
     const newReceipt = preV36CatalogBaseline[category];
     sourcePreflight = sourcePreflight
-      .replaceAll(`observed_count<>${oldReceipt.count}`, `observed_count<>${newReceipt.count}`)
+      .replaceAll(
+        `observed_count<>${oldReceipt.count} or observed_digest<>'${oldReceipt.digest}'`,
+        `observed_count<>${newReceipt.count} or observed_digest<>'${newReceipt.digest}'`)
       .replaceAll(`entry_count')::integer<>${oldReceipt.count}`, `entry_count')::integer<>${newReceipt.count}`)
       .replaceAll(oldReceipt.digest, newReceipt.digest);
   }
