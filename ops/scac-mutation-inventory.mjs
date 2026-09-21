@@ -12267,6 +12267,19 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     "WR125 v35 historical function revokes");
   sql = replaceExactlyOnce(sql, "v34 epochs remain immutable.",
     "v34/v35 epochs remain immutable.", "WR125 v35 historical epoch comment");
+  const epochConstraintStart = sql.indexOf(
+    "alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_version_digest_check;");
+  const epochConstraintEnd = sql.indexOf(
+    "revoke all on function ops.scac_policy_epoch_snapshot()", epochConstraintStart);
+  if (epochConstraintStart < 0 || epochConstraintEnd < 0)
+    throw new Error("WR125 policy-epoch constraint boundary missing");
+  const epochConstraintBlock = sql.slice(epochConstraintStart, epochConstraintEnd);
+  sql = sql.slice(0, epochConstraintStart) + sql.slice(epochConstraintEnd);
+  const v36VersionInsert = sql.indexOf(
+    "insert into ops.scac_mutation_registry_version(registry_version");
+  if (v36VersionInsert < 0)
+    throw new Error("WR125 v36 registry-version insert boundary missing");
+  sql = sql.slice(0, v36VersionInsert) + epochConstraintBlock + sql.slice(v36VersionInsert);
   const v34RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}' end;`;
   const v35RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}'\n` +
     `    when 'scac-mutation-registry.v35' then '${v35SealDigest}' end;`;

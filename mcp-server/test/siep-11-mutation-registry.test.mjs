@@ -2704,6 +2704,9 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
   assert.match(forward,
     /ops\.scac_mutation_catalog_v35_live_at_seal\(\),ops\.scac_mutation_catalog_v35_current\(\),ops\.scac_mutation_registry_v35_seal_available\(\),ops\.scac_mutation_catalog_v36_current\(\) from public/);
   assert.match(forward, /v34\/v35 epochs remain immutable/);
+  assert.ok(forward.indexOf(
+    "alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_version_digest_check;") <
+    forward.indexOf("insert into ops.scac_mutation_registry_version(registry_version"));
   assert.match(forward, /scac_mutation_registration_v36/);
   assert.match(forward, /scac_mutation_catalog_v36_current/);
   assert.match(forward, /current policy epochs bind mutation registry v36/);
