@@ -159,6 +159,11 @@ WRITE_ACTION_EXACT = {
                                  # EXACT rather than a prefix for adjudicate's reason --
                                  # "acknowledge" would cover exactly one verb today and
                                  # would silently capture a future read named the same.
+    "acknowledge-dispatch",  # WR-000119: appends a public.room_dispatch_ack row, a durable
+                                 # per-dispatch receipt a session could report as "I took that
+                                 # up". EXACT for acknowledge-notification's own reason --
+                                 # "acknowledge" covers exactly two verbs today and as a prefix
+                                 # would silently capture a future read named the same.
     "claude-checkpoint",     # durable Claude semantic checkpoint write
     "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write

@@ -26,11 +26,48 @@ model's uncertainty into a partner's blocked afternoon.
 THREE THINGS LEARNED THE EXPENSIVE WAY ON 2026-09-18, all of them shaping the
 interface below:
 
-  1. ONE REQUEST PER SUBJECT, NOT ONE REQUEST CARRYING EVERY SUBJECT. A batched
-     request whose state holds ten candidates lets every judgment see its
-     competitors and does not reproduce the vendor's own measured results. Ask
-     independent questions about ONE subject together; ask about a second
-     subject in a second request. judge() takes one subject for that reason.
+  1. PICK THE SHAPE FROM THE JOB, AND THERE ARE TWO SHAPES. This entry said
+     "one request per subject, never one request carrying every subject" as
+     though it were a law. That is the RERANKING rule, it is real, and it is
+     narrow: the vendor's reranking walkthrough scores query-and-candidate
+     pairs one request at a time, no request seeing another — over a SHORTLIST
+     OF THIRTY that a keyword search produced first. Reading it as universal
+     was wrong and it cost this repository four modules built the expensive way.
+
+     SELECTING FROM A ROSTER IS THE OTHER SHAPE, and the vendor's own examples
+     are exactly that: 182 agent skills ranked in ONE Choice question, 218
+     document line identifiers scored in ONE request. A Choice carries up to
+     255 options, its probabilities sum to one across them, and an explicit
+     "none of these fits" option is how it declines. Then, if anything, a close
+     look at the top two or three.
+
+     MEASURED HERE ON 2026-09-18, same held-out data, same corpus, the two
+     shapes against each other on picking a defect class from 320:
+
+         one Noul per class ....... 320 requests  12.5s  38% top-1  81% top-8
+         one Choice, then a look ...  9 requests   1.4s  69% top-1  88% top-8
+
+     And on finding the commit that answers a claim, over 214 commits: 214
+     requests and 4.2 seconds became ONE request and 0.6 seconds, with the same
+     four answers out of four, and with "nothing here answers this" arriving as
+     a calibrated option rather than as a hand-set floor.
+
+     THE TEST, so this does not get misread again: are the candidates competing
+     for one slot, or is each independently true or false? Competing for a slot
+     is a Choice over all of them. Independently true or false — several may
+     apply, or none — is a Noul each, and then it belongs on a shortlist rather
+     than on the whole roster. Truncate option text in the ranking pass and
+     keep the full text for the close look; 255 full-length options returns
+     HTTP 400 max_tokens_exceeded, which is how that stops being optional.
+
+  1b. ASK EVERY INDEPENDENT QUESTION ABOUT ONE SUBJECT IN ONE REQUEST. This is
+     the vendor's headline efficiency principle and the opposite of what the
+     old entry above implied. Their measurement: thirteen questions about one
+     document batched into a single call came out 12.2 times cheaper and 10
+     times faster, and each question is scored on its own against the state, so
+     an answer does not depend on what else rides along. A broad question that
+     hides several judgments is the thing to avoid — decompose it into narrow
+     ones and combine them in code, in ONE call, not in several.
 
   2. LOW CONFIDENCE IS THE ANSWER, NOT A FAILURE TO ANSWER. On the day this was
      written, Jev's wrong calls arrived under 0.5 confidence and its right ones

@@ -180,7 +180,7 @@
       ]
     },
     {
-      "matcher": "Write|Edit|MultiEdit",
+      "matcher": "Write|Edit|MultiEdit|apply_patch|functions\\.apply_patch",
       "hooks": [
         {
           "type": "command",
@@ -297,6 +297,15 @@
     }
   ],
   "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+          "timeout": 20
+        }
+      ]
+    },
     {
       "hooks": [
         {

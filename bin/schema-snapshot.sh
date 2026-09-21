@@ -422,6 +422,42 @@ case "$DOC_CONVERSATION_LIST_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Doc conversation list registry ledger state" >&2; exit 1 ;;
 esac
 
+# WR-000116. 0528 is the registry successor half of the atomic (0527,0528)
+# group, so probing the SUCCESSOR and not the domain migration is what says the
+# v33 registry surface exists. A snapshot taken between the two would be taken
+# inside a transaction that has not committed, which cannot happen.
+NOTIFICATION_PREFERENCES_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0528_notification_preferences_scac_successor.sql')" \
+  2>/dev/null)"
+case "$NOTIFICATION_PREFERENCES_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the notification preference registry ledger state" >&2; exit 1 ;;
+esac
+
+# WR-000119. 0532 is the registry successor half of the atomic (0531,0532)
+# group, so probing the SUCCESSOR and not the domain migration is what says the
+# v35 registry surface exists. A snapshot taken between the two would be taken
+# inside a transaction that has not committed, which cannot happen.
+DISPATCH_SPINE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0532_room_dispatch_spine_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DISPATCH_SPINE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the dispatch spine registry ledger state" >&2; exit 1 ;;
+esac
+
+# WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
+# group, so probing the SUCCESSOR and not the domain migration is what says the
+# v34 registry surface exists. A snapshot taken between the two would be taken
+# inside a transaction that has not committed, which cannot happen.
+SESSION_IDENTITY_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0530_session_identity_scac_successor.sql')" \
+  2>/dev/null)"
+case "$SESSION_IDENTITY_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the session identity registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1471,7 +1507,49 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$DOC_CONVERSATION_LIST_REGISTRY_APPLIED" = t ]; then
+  if [ "$DISPATCH_SPINE_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=35
+    SCAC_VERSION_COUNT=35
+    SCAC_TOTAL_ENTRY_COUNT=54997
+    SCAC_CURRENT_ENTRY_COUNT=1859
+    SCAC_CURRENT_SOURCE_COUNT=870
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v35.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34'"
+    # Same one-behind rule as every branch below: the v34 full entry set became
+    # readable only once 0532 sealed it, so this branch is where that seal is
+    # first required. All 34 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=34
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v35_current()"
+  elif [ "$SESSION_IDENTITY_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=34
+    SCAC_VERSION_COUNT=34
+    SCAC_TOTAL_ENTRY_COUNT=53138
+    SCAC_CURRENT_ENTRY_COUNT=1845
+    SCAC_CURRENT_SOURCE_COUNT=868
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v34.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33'"
+    # Same one-behind rule as every branch below: the v33 full entry set became
+    # readable only once 0530 sealed it, so this branch is where that seal is
+    # first required. All 33 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=33
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v34_current()"
+  elif [ "$NOTIFICATION_PREFERENCES_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=33
+    SCAC_VERSION_COUNT=33
+    SCAC_TOTAL_ENTRY_COUNT=51293
+    SCAC_CURRENT_ENTRY_COUNT=1835
+    SCAC_CURRENT_SOURCE_COUNT=866
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v33.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32'"
+    # Same one-behind rule as every branch below: the v32 full entry set became
+    # readable only once 0528 sealed it, so this branch is where that seal is
+    # first required. All 32 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=32
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v33_current()"
+  elif [ "$DOC_CONVERSATION_LIST_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=32
     SCAC_VERSION_COUNT=32
     SCAC_TOTAL_ENTRY_COUNT=49458

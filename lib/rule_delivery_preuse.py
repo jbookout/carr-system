@@ -44,6 +44,210 @@ GENERALIZED_RECEIPT_KEYS = frozenset({
 TRIGGER_TABLE_RELATIVE = "ops/config/rule-jit-triggers.v1.json"
 TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex"})
 
+# The partner-message sibling. Unlike the two PreToolUse receipts, this one is
+# selected by semantic judgment rather than by a compiled trigger row. Its
+# candidates must still resolve through the reviewed load-layer map and the
+# authenticated standing-context door before any rule text is injected.
+SEMANTIC_RECEIPT_SCHEMA = "rule-jev-message-delivery/v2"
+SEMANTIC_RECEIPT_KEYS = frozenset({
+    "schema", "receipt_id", "client", "session_id", "turn_id",
+    "prompt_sha256", "packs", "corpus_digest", "selector_digest",
+    "map_digest", "source_digest", "identity", "rule_ids", "rules",
+    "probabilities", "model_provenance", "rule_delivery", "build_receipt",
+})
+BUILD_ADVISORY_SCHEMA = "jev-build-advisory/v1"
+BUILD_ADVISORY_UNAVAILABLE_SCHEMA = "jev-build-advisory-unavailable/v1"
+BUILD_RECEIPT_SCHEMA = "jev-build-turn-receipt/v1"
+BUILD_ADVISORY_FACETS = frozenset({
+    "architecture_or_design", "semantic_creation", "diagnosis",
+    "verification_selection", "evidence_matching", "next_action_priority",
+})
+BUILD_ADVISORY_KEYS = frozenset({
+    "schema", "partner_request_sha256", "model", "facets", "usage",
+    "authority", "deterministic_exclusions", "required_actions", "guidance",
+})
+BUILD_GUIDANCE_KEYS = frozenset({
+    "extend_existing_seam", "prefer_reversible_slice",
+    "define_typed_contract_first", "gather_more_evidence_before_diagnosis",
+    "prefer_behavioral_verification", "require_fresh_exact_evidence",
+    "prioritize_blocker_removal",
+})
+BUILD_ADVISORY_UNAVAILABLE_KEYS = frozenset({
+    "schema", "status", "effect", "instruction",
+})
+BUILD_RECEIPT_KEYS = frozenset({
+    "schema", "receipt_id", "client", "session_id", "turn_id",
+    "prompt_sha256", "adviser_digest", "configuration_digest",
+    "source_digest", "semantic_rule_delivery", "advisory",
+})
+POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v1"
+POSTWRITE_RECEIPT_KEYS = frozenset({
+    "schema", "receipt_id", "client", "session_id", "turn_id", "tool_use_id",
+    "tool_name", "tool_input_sha256", "configuration_digest",
+    "reviewer_digest", "status", "paths", "findings", "models", "reason",
+    "instruction",
+})
+BUILD_ACTION_THRESHOLD = 0.50
+BUILD_ACTIONS = {
+    "architecture_or_design": (
+        "Before choosing an architecture, interface, seam, or data shape, "
+        "formulate the bounded alternatives and use Jev to judge their semantic fit."
+    ),
+    "semantic_creation": (
+        "Use Jev on the meaning and likely behavior of material code or prose; "
+        "for code, also consume the automatic post-write Jev review receipt."
+    ),
+    "diagnosis": (
+        "Before settling on a cause or defect class, ask Jev bounded competing "
+        "diagnostic questions and verify the favored explanation deterministically."
+    ),
+    "verification_selection": (
+        "Use Jev to judge which candidate checks or evidence are relevant and "
+        "proportionate, then let code run and verify the selected checks."
+    ),
+    "evidence_matching": (
+        "Use Jev to judge whether the candidate evidence semantically supports "
+        "the claim; code must still verify identity, freshness, and exact bindings."
+    ),
+    "next_action_priority": (
+        "Use Jev to rank the bounded reasonable next actions by fit, impact, and "
+        "blockage before code applies authority and execution constraints."
+    ),
+}
+CORPUS_RELATIVE = "ops/config/rule-selection-corpus.v1.json"
+SELECTOR_SOURCE_PATHS = (
+    "ops/jev_rule_select.py",
+    "ops/jev_build_advisory.py",
+    "ops/jev_judge.py",
+    "ops/typesafe_client.py",
+)
+
+
+def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
+    """Validate the advisory or its fixed visible abstention."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA:
+        return (set(row) == BUILD_ADVISORY_UNAVAILABLE_KEYS
+                and row.get("status") == "unavailable"
+                and row.get("effect") == "visible_advisory_abstention"
+                and _nonempty(row.get("instruction")))
+    if set(row) != BUILD_ADVISORY_KEYS or row.get("schema") != BUILD_ADVISORY_SCHEMA:
+        return False
+    if (row.get("partner_request_sha256") != prompt_sha256
+            or not _nonempty(row.get("model"))
+            or row.get("authority") != "advisory_only"
+            or not isinstance(row.get("usage"), dict)):
+        return False
+    facets = row.get("facets")
+    if not isinstance(facets, dict) or set(facets) != BUILD_ADVISORY_FACETS:
+        return False
+    try:
+        if any(not 0.0 <= float(value) <= 1.0 for value in facets.values()):
+            return False
+    except (TypeError, ValueError):
+        return False
+    guidance = row.get("guidance")
+    if not isinstance(guidance, dict) or set(guidance) != BUILD_GUIDANCE_KEYS:
+        return False
+    try:
+        if any(not 0.0 <= float(value) <= 1.0 for value in guidance.values()):
+            return False
+    except (TypeError, ValueError):
+        return False
+    exclusions = row.get("deterministic_exclusions")
+    actions = row.get("required_actions")
+    expected_actions = [
+        {"facet": facet, "instruction": BUILD_ACTIONS[facet]}
+        for facet in BUILD_ACTIONS if float(facets[facet]) >= BUILD_ACTION_THRESHOLD
+    ]
+    return (isinstance(exclusions, list) and bool(exclusions)
+            and all(_nonempty(value) for value in exclusions)
+            and actions == expected_actions)
+
+
+def validate_build_receipt(row: object, *, repo: Path) -> bool:
+    """Validate the turn-bound build receipt even when no semantic rule binds."""
+    if not isinstance(row, dict) or set(row) != BUILD_RECEIPT_KEYS:
+        return False
+    if row.get("schema") != BUILD_RECEIPT_SCHEMA:
+        return False
+    if row.get("client") not in {"claude", "codex"}:
+        return False
+    if not all(_nonempty(row.get(key)) for key in (
+            "receipt_id", "session_id", "prompt_sha256", "adviser_digest",
+            "configuration_digest", "source_digest")):
+        return False
+    turn_id = row.get("turn_id")
+    if ((row["client"] == "codex" and not _nonempty(turn_id))
+            or (row["client"] == "claude" and turn_id is not None)):
+        return False
+    if row.get("semantic_rule_delivery") not in {
+            "delivered", "not_applicable", "failed", "not_attempted_oversize"}:
+        return False
+    expected_config = digest({
+        relative: file_sha256(repo / relative)
+        for relative in ("ops/config/hooks.json", "ops/config/codex-hooks.json")
+    })
+    if (row["adviser_digest"] != semantic_selector_digest(repo)
+            or row["configuration_digest"] != expected_config
+            or row["source_digest"] != source_sha256(repo)):
+        return False
+    if not validate_build_advisory(
+            row.get("advisory"), prompt_sha256=row["prompt_sha256"]):
+        return False
+    return row["receipt_id"] == receipt_id(row)
+
+
+def postwrite_reviewer_digest(repo: Path) -> str:
+    return digest({
+        relative: file_sha256(repo / relative)
+        for relative in (
+            "hooks/lint-gate.py", "ops/jev_code_review.py", "ops/typesafe_client.py",
+        )
+    })
+
+
+def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
+    if not isinstance(row, dict) or set(row) != POSTWRITE_RECEIPT_KEYS:
+        return False
+    if (row.get("schema") != POSTWRITE_RECEIPT_SCHEMA
+            or row.get("client") not in {"claude", "codex"}
+            or row.get("status") not in {"reviewed", "unavailable"}):
+        return False
+    if not all(_nonempty(row.get(key)) for key in (
+            "receipt_id", "session_id", "tool_use_id", "tool_name",
+            "tool_input_sha256", "configuration_digest", "reviewer_digest")):
+        return False
+    turn_id = row.get("turn_id")
+    if ((row["client"] == "codex" and not _nonempty(turn_id))
+            or (row["client"] == "claude" and turn_id is not None)):
+        return False
+    expected_config = digest({
+        relative: file_sha256(repo / relative)
+        for relative in ("ops/config/hooks.json", "ops/config/codex-hooks.json")
+    })
+    if (row["configuration_digest"] != expected_config
+            or row["reviewer_digest"] != postwrite_reviewer_digest(repo)):
+        return False
+    if not isinstance(row.get("paths"), list) or not isinstance(row.get("findings"), list):
+        return False
+    if (not isinstance(row.get("models"), list)
+            or any(not _nonempty(model) for model in row["models"])):
+        return False
+    if row["status"] == "reviewed":
+        if row.get("reason") is not None or row.get("instruction") is not None:
+            return False
+    elif not _nonempty(row.get("reason")) or not _nonempty(row.get("instruction")):
+        return False
+    return row["receipt_id"] == receipt_id(row)
+
+
+def semantic_selector_digest(repo: Path) -> str:
+    """Bind a semantic receipt to every implementation file that judged it."""
+    return digest({relative: file_sha256(repo / relative)
+                   for relative in SELECTOR_SOURCE_PATHS})
+
 
 def load_trigger_table(repo: Path) -> list[dict]:
     """The compiled trigger table, never hand-derived a second way here.
@@ -83,6 +287,117 @@ def merge_trigger_delivery(rows: list[dict]) -> tuple[list[str], list[str], list
     packs = sorted({p for row in rows for p in row["packs"]})
     rule_ids = sorted({rid for row in rows for rid in row["rule_ids"]})
     return trigger_ids, packs, rule_ids
+
+
+def semantic_delivery(repo: Path, rule_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Return reviewed pack members and packs for Jev-selected rule ids.
+
+    Layer-zero rules are already present at boot and are intentionally omitted.
+    Unknown, malformed, or non-pack rows are omitted rather than promoted by a
+    model answer; the reviewed map remains the deterministic authority.
+    """
+    data = json.loads((repo / "ops/config/rule-enforcement-map.json").read_text(
+        encoding="utf-8"))
+    layers = data.get("rule_load_layers")
+    if not isinstance(layers, dict):
+        raise ValueError("reviewed map has no rule_load_layers object")
+    kept = []
+    packs = set()
+    for short in sorted(set(rule_ids)):
+        row = layers.get(short)
+        if (not isinstance(short, str) or len(short) != 8
+                or not isinstance(row, dict) or row.get("load_layer") != "pack"
+                or not isinstance(row.get("packs"), list) or not row["packs"]
+                or any(not _nonempty(pack) for pack in row["packs"])):
+            continue
+        kept.append(short)
+        packs.update(row["packs"])
+    return kept, sorted(packs)
+
+
+def validate_semantic_receipt(row: object, *, repo: Path) -> bool:
+    """Validate one authenticated Jev-at-message-boundary delivery receipt."""
+    if not isinstance(row, dict) or set(row) != SEMANTIC_RECEIPT_KEYS:
+        return False
+    if row.get("schema") != SEMANTIC_RECEIPT_SCHEMA:
+        return False
+    if row.get("client") not in {"claude", "codex"}:
+        return False
+    if not all(_nonempty(row.get(key)) for key in (
+            "receipt_id", "session_id", "prompt_sha256", "corpus_digest",
+            "selector_digest", "map_digest", "source_digest")):
+        return False
+    turn_id = row.get("turn_id")
+    if ((row["client"] == "codex" and not _nonempty(turn_id))
+            or (row["client"] == "claude" and turn_id is not None)):
+        return False
+    identity = row.get("identity")
+    if (not isinstance(identity, dict) or set(identity) != IDENTITY_KEYS
+            or not valid_local_identity(identity)):
+        return False
+    rule_ids = row.get("rule_ids")
+    packs = row.get("packs")
+    if (not isinstance(rule_ids, list) or not rule_ids
+            or rule_ids != sorted(set(rule_ids))
+            or not isinstance(packs, list) or not packs
+            or packs != sorted(set(packs))):
+        return False
+    try:
+        expected_ids, expected_packs = semantic_delivery(repo, rule_ids)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if rule_ids != expected_ids or packs != expected_packs:
+        return False
+    rules = row.get("rules")
+    if (not isinstance(rules, list) or len(rules) != len(rule_ids)
+            or any(not isinstance(item, dict) or set(item) != RULE_KEYS
+                   or not _nonempty(item.get("id"))
+                   or not _nonempty(item.get("statement")) for item in rules)
+            or [item["id"] for item in rules] != rule_ids):
+        return False
+    probabilities = row.get("probabilities")
+    if (not isinstance(probabilities, dict)
+            or sorted(probabilities) != rule_ids):
+        return False
+    try:
+        if any(not 0.0 <= float(value) <= 1.0
+               for value in probabilities.values()):
+            return False
+    except (TypeError, ValueError):
+        return False
+    model_provenance = row.get("model_provenance")
+    if (not isinstance(model_provenance, dict)
+            or sorted(model_provenance) != rule_ids):
+        return False
+    for route in model_provenance.values():
+        if (not isinstance(route, dict)
+                or set(route) != {"ranking_model", "binding_model"}
+                or not _nonempty(route.get("binding_model"))
+                or (route.get("ranking_model") is not None
+                    and not _nonempty(route.get("ranking_model")))):
+            return False
+    delivery = row.get("rule_delivery")
+    if (not isinstance(delivery, dict) or set(delivery) != DELIVERY_KEYS
+            or delivery.get("mode") not in {"shadow", "enforced"}
+            or sorted(delivery.get("declared_packs") or []) != packs
+            or delivery.get("packs_not_found") != []):
+        return False
+    if row["corpus_digest"] != file_sha256(repo / CORPUS_RELATIVE):
+        return False
+    if row["selector_digest"] != semantic_selector_digest(repo):
+        return False
+    if row["map_digest"] != file_sha256(repo / "ops/config/rule-enforcement-map.json"):
+        return False
+    if row["source_digest"] != source_sha256(repo):
+        return False
+    if (not validate_build_receipt(row.get("build_receipt"), repo=repo)
+            or row["build_receipt"]["prompt_sha256"] != row["prompt_sha256"]
+            or row["build_receipt"]["client"] != row["client"]
+            or row["build_receipt"]["session_id"] != row["session_id"]
+            or row["build_receipt"]["turn_id"] != row["turn_id"]
+            or row["build_receipt"]["semantic_rule_delivery"] != "delivered"):
+        return False
+    return row["receipt_id"] == receipt_id(row)
 
 
 def validate_generalized_receipt(row: object, *, repo: Path) -> bool:
@@ -263,12 +578,34 @@ def receipt_from_envelope(record: object) -> dict | None:
     attachment = record.get("attachment")
     if (record.get("type") == "attachment" and isinstance(attachment, dict)
             and attachment.get("type") == "hook_additional_context"
-            and attachment.get("hookEvent") == "PreToolUse"
             and isinstance(attachment.get("content"), list)
             and len(attachment["content"]) == 1):
         row = _json_text(attachment["content"][0])
         if (row and row.get("client") == "claude"
+                and row.get("schema") == RECEIPT_SCHEMA
+                and attachment.get("hookEvent") == "PreToolUse"
                 and attachment.get("hookName") == f"PreToolUse:{row.get('tool_name')}"
+                and attachment.get("toolUseID") == row.get("tool_use_id")
+                and record.get("sessionId") == row.get("session_id")):
+            return row
+        if (row and row.get("client") == "claude"
+                and row.get("schema") == SEMANTIC_RECEIPT_SCHEMA
+                and attachment.get("hookEvent") == "UserPromptSubmit"
+                and attachment.get("hookName") == "UserPromptSubmit"
+                and "toolUseID" not in attachment
+                and record.get("sessionId") == row.get("session_id")):
+            return row
+        if (row and row.get("client") == "claude"
+                and row.get("schema") == BUILD_RECEIPT_SCHEMA
+                and attachment.get("hookEvent") == "UserPromptSubmit"
+                and attachment.get("hookName") == "UserPromptSubmit"
+                and "toolUseID" not in attachment
+                and record.get("sessionId") == row.get("session_id")):
+            return row
+        if (row and row.get("client") == "claude"
+                and row.get("schema") == POSTWRITE_RECEIPT_SCHEMA
+                and attachment.get("hookEvent") == "PostToolUse"
+                and attachment.get("hookName") == f"PostToolUse:{row.get('tool_name')}"
                 and attachment.get("toolUseID") == row.get("tool_use_id")
                 and record.get("sessionId") == row.get("session_id")):
             return row
@@ -352,9 +689,55 @@ def matched_tool_call(row: dict, prior_records: list[dict]) -> bool:
             and exact_context)
 
 
+def _claude_user_text(record: object) -> str | None:
+    if not isinstance(record, dict) or record.get("type") not in {"user", "human"}:
+        return None
+    message = record.get("message")
+    if not isinstance(message, dict) or message.get("role") not in {"user", "human"}:
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    pieces = []
+    for item in content:
+        if (not isinstance(item, dict) or item.get("type") != "text"
+                or not isinstance(item.get("text"), str)):
+            return None
+        pieces.append(item["text"])
+    return "".join(pieces)
+
+
+def matched_prompt(row: dict, prior_records: list[dict]) -> bool:
+    """Bind a Claude message receipt to its immediately preceding user turn.
+
+    Codex context is already turn-bound by platform metadata in
+    receipt_from_envelope(). Claude supplies a session id instead, so its prompt
+    digest must match the latest genuine user record in that same session.
+    """
+    if row.get("client") == "codex":
+        return True
+    for record in reversed(prior_records):
+        text = _claude_user_text(record)
+        if text is None:
+            continue
+        return (record.get("sessionId") == row.get("session_id")
+                and digest(text) == row.get("prompt_sha256"))
+    return False
+
+
 def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
     row = receipt_from_envelope(record)
-    if (row is None or not validate_receipt(row, repo=repo)
+    if row is None:
+        return None
+    if row.get("schema") == SEMANTIC_RECEIPT_SCHEMA:
+        if (not validate_semantic_receipt(row, repo=repo)
+                or not matched_prompt(row, prior_records)):
+            return None
+        delivery = row["rule_delivery"]
+        return delivery["mode"], list(row["packs"]), []
+    if (not validate_receipt(row, repo=repo)
             or not matched_tool_call(row, prior_records)):
         return None
     delivery = row["rule_delivery"]
@@ -364,7 +747,12 @@ def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
 def contains_receipt_marker(value: object) -> bool:
     if isinstance(value, dict):
         return (value.get("schema") == RECEIPT_SCHEMA
+                or value.get("schema") == SEMANTIC_RECEIPT_SCHEMA
+                or value.get("schema") == BUILD_RECEIPT_SCHEMA
+                or value.get("schema") == POSTWRITE_RECEIPT_SCHEMA
                 or any(contains_receipt_marker(item) for item in value.values()))
     if isinstance(value, list):
         return any(contains_receipt_marker(item) for item in value)
-    return isinstance(value, str) and RECEIPT_SCHEMA in value
+    return (isinstance(value, str)
+            and (RECEIPT_SCHEMA in value or SEMANTIC_RECEIPT_SCHEMA in value
+                 or BUILD_RECEIPT_SCHEMA in value or POSTWRITE_RECEIPT_SCHEMA in value))

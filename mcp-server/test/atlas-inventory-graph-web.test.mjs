@@ -25,7 +25,7 @@ const makeEnvironment = () => ({
   WORKSPACE_COMMAND_CENTER_READ_ENABLED: "true",
 });
 const PAYLOAD = {
-  version: { bundle_digest: "a".repeat(64), registry_version: "scac-mutation-registry.v32" },
+  version: { bundle_digest: "a".repeat(64), registry_version: "scac-mutation-registry.v35" },
   observed_at: "2026-09-16T12:00:00.000Z", viewer: "joe", tenant: "carr-internal",
   layer: ["declared", "installed", "observed"], q: null, include_retired: false, limit: 500,
   nodes: [{ id: "verb:add-loop", class: "verb", key: "add-loop", title: "Open a new loop",

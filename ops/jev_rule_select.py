@@ -72,9 +72,10 @@ milliseconds: fine once at the end of a turn, prohibitive in front of every
 shell call. The accuracy measurement points the same way — across twenty
 sampled real moments, every rule clearing the floor did so on a MESSAGE being
 composed for a partner and none on a read-only command, correctly, because no
-rule binds to a grep. So message composition and completion claims are the
-home, and the per-command path stays with the regexes, which are free and
-precise on literal tokens. Both entry points log, because a live mechanism
+rule binds to a grep. So the partner-message boundary is the home, and the
+per-command path keeps only exact verb, command-family, and path triggers,
+which are free and precise structured facts. Semantic content regexes are
+replaced rather than layered. Both entry points log, because a live mechanism
 nobody can audit afterwards is worse than a shadow one.
 """
 
@@ -85,6 +86,7 @@ import os
 import re
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CORPUS = os.path.join(REPO, "ops", "config", "rule-selection-corpus.v1.json")
 TRIAGE = os.path.join(REPO, "ops", "config", "rule-triage.v1.json")
 TRIGGERS = os.path.join(REPO, "ops", "config", "rule-jit-triggers.v1.json")
 SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
@@ -99,6 +101,15 @@ SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
 # does not. Re-derive this from SHADOW_LOG as real traffic accumulates.
 BIND_AT = 0.75
 
+
+class SelectionUnavailable(RuntimeError):
+    """One or more binding candidates could not be judged.
+
+    An empty successful answer means no rule binds. A partial or total provider
+    miss is different: the caller must fail open visibly instead of presenting
+    incomplete coverage as a complete negative judgment.
+    """
+
 # A moment that surfaces twenty rules has surfaced none, because nobody reads
 # twenty. The cap is part of the design, not a performance concern.
 MAX_SURFACED = 5
@@ -107,6 +118,34 @@ MAX_SURFACED = 5
 # independent by construction, so the only cost of asking them at once is the
 # vendor's rate limit, which the client already backs off from.
 WORKERS = 16
+
+# THE CHEAP RANKING PASS. A Choice carrying every rule, which narrows 211 to
+# this many before any rule is judged on its own. The vendor's own shape for
+# picking from a roster: a cheap ranking over everything, then a close look at
+# a few. Their skill selector ranks 182 candidates this way and then examines
+# three; measured on defect classes here, one Choice over the roster beat one
+# Noul per candidate on accuracy AND cost, 69% top-1 against 38%.
+#
+# WHY THE CLOSE LOOK SURVIVES HERE AND NOT THERE. Defect classes compete for
+# one slot, so the Choice IS the answer. Rules do not: several can bind to one
+# moment and usually none do, which is independently true or false per rule and
+# therefore a Noul each. So the Choice narrows and the Nouls decide — and the
+# Nouls now run over a shortlist, which is the only place the reranking rule
+# ever applied.
+SHORTLIST = 20
+
+# A Choice carries at most 255 options; one slot is kept for the escape.
+MAX_OPTIONS = 254
+
+# Rank on short text, judge on full text. 254 full-length rubrics returns
+# HTTP 400 max_tokens_exceeded.
+RUBRIC_CHARS = 150
+
+# Without an explicit way to decline, a Choice must return a rule for every
+# moment — and MOST MOMENTS BIND NO RULE AT ALL. This option is what lets the
+# ranking say so, and it is the same failure the binding question already
+# guards against: a rule that matches the topic while its condition is unmet.
+NONE_BIND = "no rule here binds to this moment"
 
 
 def _sibling(name):
@@ -129,8 +168,30 @@ def load_rules(path=TRIAGE):
     rows = data if isinstance(data, list) else next(
         (value for value in data.values()
          if isinstance(value, list) and value and isinstance(value[0], dict)), [])
+    # THE RULE, NOT ITS HEADLINE. title_gist is a TITLE -- median 87
+    # characters, and all 211 end without terminal punctuation because a title
+    # has no sentence to end -- and `reason` is triage metadata about WHERE a
+    # rule is delivered, not what it says. Judging relevance from those two is
+    # judging a filing label. Measured 2026-09-18: the rule that says measure
+    # against origin rather than HEAD before naming who is blocking whom scored
+    # 0.39 on a moment its own condition covers, because the 109 characters the
+    # model saw ended on a dangling "or" and never reached the instruction.
+    #
+    # ops/config/rule-selection-corpus.v1.json carries the real statements from
+    # v_compiled_rules, 211 of them averaging 1176 characters. It is preferred
+    # when present and the triage file remains the fallback, so a missing or
+    # stale corpus degrades to the old behaviour rather than to nothing.
+    statements = {}
+    try:
+        with open(CORPUS, "r", encoding="utf-8") as handle:
+            for row in json.load(handle).get("rules", []):
+                if row.get("id") and (row.get("statement") or "").strip():
+                    statements[row["id"]] = row["statement"]
+    except (OSError, ValueError):
+        statements = {}
     return [{"id": row["id"],
              "gist": row.get("title_gist", ""),
+             "statement": statements.get(row["id"], ""),
              "context": (row.get("reason") or "")[:600]}
             for row in rows if row.get("id")]
 
@@ -198,9 +259,72 @@ def binding_question(client=None):
               "question, and a rule that binds everywhere binds nothing.")
 
 
+def rank_question(rules, client=None):
+    """The cheap pass: one Choice carrying every rule, ranked in one request.
+
+    This does NOT decide what binds — it decides what is worth asking about.
+    The none-binds option is why it can be trusted to narrow rather than to
+    invent: most moments bind no rule, and an option that says so keeps the
+    ranking honest about a roster full of rules that have nothing to do with
+    the moment in hand.
+    """
+    tsc = client or _sibling("typesafe_client")
+    options = {rule["id"]: (rule.get("gist") or "")[:RUBRIC_CHARS]
+               for rule in rules[:MAX_OPTIONS]}
+    options[NONE_BIND] = (
+        "None of the rules listed binds to this moment. Choose this when the "
+        "others are merely ABOUT this kind of work rather than triggered by it "
+        "— including a rule the session is ALREADY COMPLYING WITH, which does "
+        "not bind. Most moments bind no rule at all, so this is the common "
+        "answer and not a failure to find one.")
+    return tsc.choice(
+        "The moment a session is in is described in `state.situation`. Which of "
+        "these standing rules is most likely to BIND to it — to change what the "
+        "session should do right now? Topic overlap is not binding.", options)
+
+
+def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
+           judge=None):
+    """The rules worth judging one at a time, from one cheap ranking request.
+
+    Returns the shortlist, or the whole roster when the ranking is unavailable
+    — falling back to judging everything is slower and more expensive but not
+    wrong, and it is what this module did before the ranking pass existed.
+    """
+    if len(rules) <= limit:
+        return list(rules)
+    judge = judge or _sibling("jev_judge")
+    try:
+        answer = judge.judge({"situation": situation},
+                             {"rank": rank_question(rules, client)},
+                             client=client, api_key=api_key)
+        probabilities = answer["answers"]["rank"].get("probabilities") or {}
+    except Exception:
+        return list(rules)
+    if not probabilities:
+        return list(rules)
+    by_id = {rule["id"]: rule for rule in rules}
+    ranked = sorted(((rule_id, float(p)) for rule_id, p in probabilities.items()
+                     if rule_id != NONE_BIND and rule_id in by_id),
+                    key=lambda item: (-item[1], item[0]))
+    ranking_model = answer.get("model")
+    return [{**by_id[rule_id], "ranking_model": ranking_model}
+            for rule_id, _ in ranked[:limit]] or list(rules)
+
+
 def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
-           client=None, api_key=None, judge=None, workers=WORKERS):
-    """Rank rules by whether they bind to `situation`. One request per rule.
+           client=None, api_key=None, judge=None, workers=WORKERS,
+           shortlist=SHORTLIST):
+    """Rank rules by whether they bind to `situation`.
+
+    TWO STAGES. One Choice over the whole roster narrows it to a shortlist,
+    then one Noul per shortlisted rule decides independently whether it binds —
+    because several rules can bind to one moment and usually none do, which a
+    single Choice cannot express. That is the only shape the one-request-per-
+    candidate rule ever governed: a shortlist a cheap pass produced first.
+
+    The first version judged all 211 rules one at a time. That cost ten times
+    the requests for the same answer.
 
     Returns [{"id", "gist", "probability"}] over the floor, longest odds last,
     capped at `limit`. A rule whose request fails is reported with probability
@@ -209,17 +333,31 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
     """
     rules = load_rules() if rules is None else rules
     judge = judge or _sibling("jev_judge")
+    rules = narrow(situation, rules, limit=shortlist, client=client,
+                   api_key=api_key, judge=judge)
     question = {"binds": binding_question(client)}
 
     def score(rule):
+        # THE STATEMENT IS THE RULE. `gist` stays as the headline because a
+        # named thing is easier to judge with a name attached, but the text
+        # the question is actually answered against is the statement, and
+        # before 2026-09-18 it was never sent at all. Falls back to the
+        # headline when the corpus has no statement for this id, so a rule
+        # added since the last corpus refresh is judged on less rather than
+        # skipped.
         subject = {"situation": situation,
-                   "rule": rule["gist"],
-                   "rule_context": rule["context"]}
+                   "rule_title": rule["gist"],
+                   "rule": rule.get("statement") or rule["gist"],
+                   "rule_context": rule.get("context", "")}
         try:
             answer = judge.judge(subject, question, client=client, api_key=api_key)
-            return {**rule, "probability": float(answer["answers"]["binds"]["noul"])}
+            return {
+                **rule,
+                "probability": float(answer["answers"]["binds"]["noul"]),
+                "binding_model": answer.get("model"),
+            }
         except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
-            return {**rule, "probability": None}
+            return {**rule, "probability": None, "binding_model": None}
 
     # CONCURRENT ON PURPOSE, AND THE REASON IS A MEASUREMENT. One request per
     # rule is the method, but the whole corpus asked serially took well over a
@@ -257,23 +395,30 @@ def advise(situation, *, log_path=SHADOW_LOG, **kwargs):
     accuracy side: across twenty sampled moments, every rule that cleared the
     floor did so on a MESSAGE being composed for a partner, and none on a
     read-only command — correctly, because no rule binds to a grep. So the home
-    for this is message composition and completion claims. The per-command path
-    stays with the regexes, which are free and precise on literal tokens.
+    for this is the partner-message boundary. The per-command path keeps only
+    exact verb, command-family, and path triggers, which are free and precise
+    structured facts; semantic content regexes are replaced rather than layered.
 
     Still logs. A live mechanism that cannot be audited later is worse than a
     shadow one, and the log is how BIND_AT gets re-derived from real traffic.
     """
     surfaced = select(situation, **kwargs)
     advice = [row for row in surfaced if row.get("probability") is not None]
+    unavailable = [row["id"] for row in surfaced
+                   if row.get("probability") is None]
     _append(log_path, {
         "mode": "live",
         "situation": situation[:600],
         "surfaced": [row["id"] for row in advice],
+        "unavailable": unavailable,
         "unreachable_by_regex": sorted(
             {row["id"] for row in advice} - reachable_rule_ids()),
         "floor": kwargs.get("floor", BIND_AT),
         "detail": advice,
     })
+    if unavailable:
+        raise SelectionUnavailable(
+            f"{len(unavailable)} rule candidates could not be judged")
     return advice
 
 

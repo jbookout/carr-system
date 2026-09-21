@@ -21,27 +21,27 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0526 installs v32 as the live frontier and demotes v31 to sealed history.
-# Both are pinned: an unreviewed frontier, or a v31 row the successor rewrote
+# 0532 installs v35 as the live frontier and demotes v34 to sealed history.
+# Both are pinned: an unreviewed frontier, or a v34 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
 # The per-version function names below are DERIVED from these two ordinals
 # rather than spelled out again. Every prior advance of this gate had to hand-
 # edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
 # check that silently keeps interrogating the superseded frontier.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v32"
-LIVE_REGISTRY_ORDINAL = 32
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v31"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v35"
+LIVE_REGISTRY_ORDINAL = 35
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v34"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:7e6aa5faf0c73eb0eee748bec22cb99f5f01a8cbc1c265d40464f2a83d98c927"
+    "sha256:7fd4d40a717b19d619da78a1939053656fa8abf1a4cfce2286d4e3d6cdfabf40"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (1818, 863)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (1845, 868)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0524_doc_conversation_write_doors_scac_successor.sql"
+    "migrations/0530_session_identity_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0526_doc_conversation_list_scac_successor.sql"
+    "migrations/0532_room_dispatch_spine_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
@@ -59,12 +59,23 @@ PREDECESSOR_LIVE_AT_SEAL_NAME = (
 # MOVED BY 0503'S OWN CAPABILITY ADMISSION, not by drift. The successor grants
 # insert on ops.release to carr_authority -- open loop #594's
 # db-relation-acl:ops.release:carr_authority:insert -- and that grant is visible
-# to ops.scac_runtime_dml_grant_snapshot(), so the live projection this gate
-# pins is 308, one more than the 307 a database carrying only 0502 holds.
+# to ops.scac_runtime_dml_grant_snapshot(), so the projection this gate pinned
+# through v34 was 308, one more than the 307 a database carrying only 0502
+# holds.
+#
+# MOVED AGAIN BY 0531'S OWN RELATION ADMISSION, and again not by drift. 0531
+# creates public.room_dispatch_link and public.room_dispatch_ack and grants
+# insert on each to carr_writer AND carr_authority -- FOUR rows, the same four
+# that move relation_dml from 296 to 300 -- and the runtime grant snapshot sees
+# relation grants, so it moves with them: 308 -> 312. The WR-000117 brief
+# handed this receipt forward as "must not move"; that prediction was written
+# for a Work Request that created no relation, and the MEASUREMENT IS ADOPTED.
+# A grant projection that did NOT move here would mean it had stopped seeing
+# relation grants at all.
 # Measured on a disposable loopback PostgreSQL 17, never predicted.
-EXPECTED_GRANT_COUNT = 308
+EXPECTED_GRANT_COUNT = 312
 EXPECTED_GRANT_DIGEST = (
-    "sha256:810aa3a9ad94e182e5d1b3f985e51ccbaab8e48e40ad070ba7c45199a226a813"
+    "sha256:f3a7344a4e690971141c39b207c2fd3410b12946f53130c67ee9679b5c7bf5e0"
 )
 
 # WR-000048 mutation test fixtures. NARROWED_ROLE_AUTHORITY_SCOPE is the

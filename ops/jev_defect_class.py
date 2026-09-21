@@ -13,47 +13,50 @@ and the numbers above are what that instruction achieves on its own. It asks a
 session to compare a new defect against three hundred existing names, which is
 work no session does, so every session invents a name and the ledger fragments.
 
-WHAT THIS MODULE DOES. It scores the proposed defect against every existing
-class, ONE REQUEST PER CLASS, and hands back the few worth looking at. It does
-not file anything and it does not pick.
+WHAT THIS MODULE DOES. It puts every existing class in front of ONE judgment as
+the options of a single Choice question, and hands back the few worth reading.
+It does not file anything and it does not pick.
 
-WHAT IT IS WORTH, measured on 2026-09-18. Sixteen defects were held out, one
-from each class that already has more than one member, so the true answer is
-known. Each was scored against all 320 classes — 320 requests, about 12.5
-seconds, roughly a cent:
+THE FIRST VERSION ASKED ONE QUESTION PER CLASS, and that was a misreading of the
+vendor's own guidance that cost 320 requests where one does better. "One request
+per candidate, no request sees another" is the RERANKING rule, and it governs a
+shortlist of thirty that a keyword search produced first. Choosing one item from
+a roster is the other shape entirely: the vendor ranks 182 agent skills and
+scores 218 document line identifiers in a single Choice. Measured here on the
+same sixteen held-out defects, same corpus, same ground truth:
 
-    true class ranked 1st ............  6 of 16   38%
-    true class inside the top 3 .....   8 of 16   50%
-    true class inside the top 5 .....  11 of 16   69%
-    true class inside the top 8 .....  13 of 16   81%
-    true class inside the top 10 ....  13 of 16   81%
+    one Noul per class ......... 320 requests  12.5s   38% top-1   81% top-8
+    one Choice over the roster .   1 request    0.8s   69% top-1   88% top-8
 
-WHY A SHORTLIST AND NEVER A PICK is that table, not caution. Thirty-eight
-percent is a bad autopilot and eighty-one percent is an excellent reading list,
-and the same numbers say both things. The top candidates cluster inside about
-five hundredths of each other, so the ordering among them is nearly arbitrary:
-the same held-out defect, scored twice with an identical question against an
-identical corpus, came back 1st and then 4th. That is not the model being
-unstable — reproducibility on a pinned version is tight — it is a genuinely
-flat landscape, because a defect often does plausibly resemble several classes.
-So the human or the larger model chooses, and this narrows what they read from
-three hundred candidates to eight. Note also that top-10 buys nothing over
-top-8, which is where SHORTLIST comes from rather than a round number.
+Better on every axis. A second pass that re-scored the top eight with a Noul
+each — the close look the vendor's skill-selection cookbook takes — was measured
+too and made it WORSE, 56% top-1 against the Choice's own 69%, so it is not
+here. The ranking pass is the answer.
 
-THE INSTRUMENT MATTERED MORE THAN THE MODEL, and the shape below was measured
-rather than assumed. Three ways of describing a class to the judgment, same
-defect, same 320 candidates:
+WHY IT STILL RETURNS A SHORTLIST AND NEVER A PICK. 69% is much better than 38%
+and it is still not something to file a record on unattended. The remaining
+value is in reading eight names instead of three hundred, and that is what this
+returns. The none-of-these probability comes back beside them, so a reader can
+see when the judgment thinks this defect is genuinely new.
 
-    class name alone .................... true class ranked  99th
-    class name + ONE earlier defect ..... true class ranked   1st
-    class name + THREE earlier defects .. true class ranked  11th
+THREE THINGS THAT ARE NOT OPTIONAL, each measured rather than assumed:
 
-The bare name is too thin to judge against; three examples are worse than one
-because the illustrations' own specifics pull the category toward them and the
-name stops doing the work. One example anchors the name without burying it.
-Rewording the question alone — telling it that the NAME is the category and any
-example is an illustration, and that a new occurrence normally involves
-different files and tools — moved the same state from 8th to 1st.
+  · THE FREE LEXICAL TRIM. A Choice carries at most 255 options and there are
+    320 classes. Splitting into two Choices is a measurement error, not a
+    workaround: probabilities sum to one WITHIN a request, so numbers from two
+    of them cannot be compared, and pooling them scored 75% top-8 against 88%
+    for a single clean request. A token-overlap trim to 254 costs nothing, runs
+    offline, and kept the true class in all sixteen held-out cases.
+
+  · TRUNCATED RUBRICS IN THE RANKING PASS. 254 options carrying a full anchor
+    defect each returns HTTP 400 max_tokens_exceeded. The cure is the vendor's
+    own: rank on short index text, keep the full text for a closer look.
+
+  · ONE ANCHOR, NOT THREE, AND NEVER THE BARE NAME. Measured separately on the
+    same data, changing only how a class was described: the name alone ranked
+    the true class 99th, the name with one earlier defect ranked it 1st, and the
+    name with three illustrations ranked it 11th. Extra examples pull the
+    category toward their own specifics and bury the name that defines it.
 
 IT IS A LIBRARY AND MUST STAY ONE. No shebang and no main guard: either turns a
 .py file into a registered script entrypoint in the sealed source inventory,
@@ -65,32 +68,37 @@ described here and never spelled. ops/typesafe_client.py carries the long form.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# How many candidates a caller is shown. Taken from the recall table above:
-# eight captures 81% of true classes and ten captures no more, so this is where
-# the curve flattens rather than a round number. Small on purpose — a shortlist
-# a session will not read is the same as no shortlist.
+# How many candidates a reader is shown. Eight captured 88% of true classes and
+# the curve is flat past it. Small on purpose — a shortlist nobody reads is the
+# same as no shortlist.
 SHORTLIST = 8
 
-# Below this, a class is not worth a reader's attention. It is NOT a threshold
-# for acting: nothing in this module acts. It only trims a tail. Chosen from the
-# same run: fourteen of the sixteen true classes scored 0.65 or higher, and the
-# two that fell below it (0.52 and 0.27) are the same two that ranked outside
-# the top twenty — so the floor discards nothing the limit was going to keep.
-CONSIDER_AT = 0.60
+# A Choice carries at most 255 options. One slot is kept for none-of-these.
+MAX_OPTIONS = 254
 
-# Serial scoring of three hundred classes takes minutes and would not be used.
-WORKERS = 16
+# Rank on short text. 254 full-length rubrics returns HTTP 400.
+RUBRIC_CHARS = 110
+
+# The escape hatch. Without it a Choice must return a class for every defect,
+# and a genuinely new kind of mistake is exactly what deserves a new name.
+NONE_OF_THESE = "none of these classes fits — this is a new kind of mistake"
+
+# Long enough for a request carrying 255 options.
+TIMEOUT_SECONDS = 40.0
+
+# Words worth counting for the offline trim. Four characters and up, which
+# drops the articles and prepositions that every defect shares.
+WORD = re.compile(r"[a-z]{4,}")
 
 # The SQL that gets the corpus. One row per class: the name, how often it has
-# been used, and ONE earlier defect as its anchor — one, for the reason the
-# module docstring measures. The earliest is taken because it is the occurrence
-# that named the class.
+# been used, and ONE earlier defect as its anchor — one, for the reason above.
+# The earliest is taken because it is the occurrence that named the class.
 CORPUS_SQL = """
 select json_build_object(
          'name', c.defect_class,
@@ -166,95 +174,119 @@ def load_classes(runner=None, repo=REPO):
     return classes
 
 
-def belongs_question(client=None):
-    """The one question, in the wording that was measured rather than assumed.
+def _words(text):
+    return set(WORD.findall((text or "").lower()))
 
-    The false criterion is the whole contract. Two defects can happen in the
-    same part of the system, involve the same tool and arise during the same
-    kind of work while being different mistakes — and a criterion that does not
-    say so scores on topic instead of on mechanism, which is the degeneracy
-    that made an earlier selector return the same rule for every moment.
+
+def narrow(proposed, classes, limit=MAX_OPTIONS):
+    """Trim the roster under the Choice cap, offline and for free.
+
+    Jaccard overlap on words of four letters or more, between the proposed
+    defect and each class's name plus its anchor. This is NOT the ranking — it
+    is the cheap search stage the vendor's own reranking walkthrough puts in
+    front of any judgment, and it exists here only to get under the option cap
+    without splitting into two requests whose numbers cannot be compared.
+
+    Measured: trimming 320 to 254 kept the true class in all sixteen held-out
+    cases, so it costs nothing that the judgment was going to find.
+    """
+    if len(classes) <= limit:
+        return list(classes)
+    query = _words(proposed.get("claimed")) | _words(proposed.get("actual"))
+    scored = []
+    for existing in classes:
+        text = (_words((existing.get("name") or "").replace("-", " "))
+                | _words(existing.get("claimed")) | _words(existing.get("actual")))
+        overlap = len(query & text) / (len(query | text) or 1)
+        scored.append((overlap, existing.get("name") or "", existing))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [existing for _, _, existing in scored[:limit]]
+
+
+def rubric(existing):
+    """One option's description: the class name plus a cut of its anchor.
+
+    Short, because this is the ranking pass. The corrective half of the anchor
+    is the half that carries the mechanism of the error, so that is the half
+    kept when there is only room for one.
+    """
+    return "%s — e.g. %s" % (
+        (existing.get("name") or "").replace("-", " ").replace("_", " "),
+        (existing.get("actual") or "")[:RUBRIC_CHARS])
+
+
+def belongs_question(classes, client=None):
+    """The one Choice, carrying every class as an option.
+
+    Option names are the class names, which is what a caller needs back. The
+    none-of-these rubric names the boundary case that is easy to get wrong:
+    two defects can happen in the same part of the system, involve the same
+    tool, or arise during the same kind of work and still be different
+    mistakes. Without that, the ranking scores subject matter instead of
+    mechanism, which is the degeneracy an earlier selector shipped with.
     """
     tsc = client or _sibling("typesafe_client")
-    return tsc.noul(
-        "The state holds a defect a session is about to record, and one CLASS "
-        "of defect that already exists in the ledger. The class name is the "
-        "category; any earlier defect shown under it is an illustration of "
-        "that category, not its definition. Does the proposed defect belong "
-        "in this class?",
-        true="The proposed defect is another occurrence of the category the "
-             "class NAME describes. Filing it under this class would be "
-             "correct and the class's count should go up by one. A new "
-             "occurrence will normally involve different files, tools and "
-             "subject matter from the earlier one — that is expected and does "
-             "not make it a different class.",
-        false="It is a different mistake from the one the class name "
-              "describes. THIS IS THE CASE THAT IS EASY TO GET WRONG: two "
-              "defects can happen in the same part of the system, involve the "
-              "same tool, or arise during the same kind of work and still be "
-              "different mistakes. SHARED SUBJECT MATTER IS NOT THE SAME "
-              "CLASS — the test is the mechanism of the error named by the "
-              "class, not where it happened. Also false when the proposed "
-              "defect is markedly narrower or broader than the class name, so "
-              "filing it here would blur the name's meaning.")
+    options = {(existing.get("name") or ""): rubric(existing) for existing in classes}
+    options[NONE_OF_THESE] = (
+        "None of the classes listed is the same kind of mistake as the proposed "
+        "defect. Choose this when the others only share SUBJECT MATTER — the "
+        "same tool, the same file, the same kind of work — rather than the same "
+        "mechanism of error, and when the proposed defect is markedly narrower "
+        "or broader than any of them. A genuinely new kind of mistake deserves "
+        "a new class, so this is a real answer and not a failure to find one.")
+    return tsc.choice(
+        "A session is about to record the defect in `state.proposed_defect`. "
+        "Which existing defect class is it another occurrence of? An option's "
+        "name is the category; the example quoted with it only illustrates that "
+        "category, and a new occurrence normally involves different files, "
+        "tools and subject matter from the example.", options)
 
 
-def _score(proposed, existing, question, judge, api_key, client):
-    state = {
-        "proposed_defect": {"claimed": proposed.get("claimed"),
-                            "actual": proposed.get("actual")},
-        "existing_class": {
-            "name": (existing.get("name") or "").replace("-", " ").replace("_", " "),
-            "earlier_defect_claimed": existing.get("claimed"),
-            "earlier_defect_actual": existing.get("actual"),
-        },
-    }
-    try:
-        answer = judge.judge(state, {"belongs": question}, timeout=25.0,
-                             client=client, api_key=api_key)
-        return existing.get("name"), answer["answers"]["belongs"]["noul"]
-    except Exception:
-        return existing.get("name"), None
-
-
-def shortlist(proposed, classes=None, *, floor=CONSIDER_AT, limit=SHORTLIST,
-              client=None, api_key=None, judge=None, workers=WORKERS):
+def shortlist(proposed, classes=None, *, limit=SHORTLIST, client=None,
+              api_key=None, judge=None):
     """The few existing classes worth reading before naming a new one.
 
-    ONE REQUEST PER CLASS, never one request carrying every class. A state
-    holding many candidates lets each judgment see its competitors, and that
-    does not reproduce the published method or its results.
+    Returns (candidates, declined) where candidates is
+    [(class_name, probability, occurrences)] best first, and declined is the
+    probability the judgment put on this being a new kind of mistake.
 
-    Returns [(class_name, probability, occurrences)], highest first. Returns []
-    when the corpus is empty or every request failed — a caller then names a
-    class the way it always did, which is the behaviour this replaces rather
-    than something worse.
+    Returns ([], None) when the corpus is empty or the request failed — a
+    caller then names a class the way it always did, which is the behaviour
+    this replaces rather than something worse.
     """
     classes = load_classes() if classes is None else classes
     if not classes:
-        return []
+        return [], None
     judge = judge or _sibling("jev_judge")
-    question = belongs_question(client)
-    occurrences = {c.get("name"): c.get("occurrences") for c in classes}
-    with ThreadPoolExecutor(max(1, workers)) as executor:
-        scored = list(executor.map(
-            lambda existing: _score(proposed, existing, question, judge, api_key, client),
-            classes))
-    ranked = [(name, probability) for name, probability in scored
-              if probability is not None and probability >= floor]
-    ranked.sort(key=lambda item: (-item[1], item[0]))
-    return [(name, probability, occurrences.get(name))
-            for name, probability in ranked[:limit]]
+    trimmed = narrow(proposed, classes)
+    occurrences = {c.get("name"): c.get("occurrences") for c in trimmed}
+    try:
+        answer = judge.judge(
+            {"proposed_defect": {"claimed": proposed.get("claimed"),
+                                 "actual": proposed.get("actual")}},
+            {"pick": belongs_question(trimmed, client)},
+            timeout=TIMEOUT_SECONDS, client=client, api_key=api_key)
+        probabilities = answer["answers"]["pick"].get("probabilities") or {}
+    except Exception:
+        return [], None
+    if not probabilities:
+        return [], None
+    declined = float(probabilities.get(NONE_OF_THESE, 0.0))
+    ranked = sorted(((name, float(p)) for name, p in probabilities.items()
+                     if name != NONE_OF_THESE and name in occurrences),
+                    key=lambda item: (-item[1], item[0]))
+    return ([(name, probability, occurrences.get(name))
+             for name, probability in ranked[:limit]], declined)
 
 
 def advise(proposed, **kwargs):
     """The shortlist as a sentence a recorder can act on, or None.
 
-    Deliberately says that nothing here is a decision. The ranking's top is
-    flat enough that presenting it as an answer would be a misreading of the
-    measurement it comes from.
+    Deliberately says that nothing here is a decision. At 69% top-1 the ranking
+    is a good reading list and a bad autopilot, and presenting it as an answer
+    would misread the measurement it comes from.
     """
-    candidates = shortlist(proposed, **kwargs)
+    candidates, declined = shortlist(proposed, **kwargs)
     if not candidates:
         return None
     lines = ["EXISTING DEFECT CLASSES that may already cover this. Reuse one if "
@@ -263,4 +295,7 @@ def advise(proposed, **kwargs):
     for name, probability, count in candidates:
         seen = "seen once" if count == 1 else "seen %s times" % count
         lines.append("  %.2f  %s (%s)" % (probability, name, seen))
+    if declined is not None:
+        lines.append("  %.2f  that none of them fits and this is a new kind of "
+                     "mistake" % declined)
     return "\n".join(lines)

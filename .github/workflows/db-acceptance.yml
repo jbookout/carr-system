@@ -134,6 +134,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-17
           /usr/lib/postgresql/17/bin/initdb --version
+          # THE SERVER IS 17; THE DUMP CLIENT IS 18, AND THEY ARE NOT THE SAME
+          # DECISION. The disposable cluster this lane initdbs stays on 17,
+          # because matching the local lane is what makes a hosted red mean the
+          # same thing as a local red. But bin/schema-snapshot.sh pins the
+          # pg_dump MAJOR (see its PG_DUMP_MAJOR) so db/schema.sql is
+          # reproducible rather than decided by whichever client a machine
+          # happened to resolve first: pg_dump 18 emits every NOT NULL as a
+          # named table constraint and 17 emits a bare one, a 256-line diff with
+          # no schema change behind it. main's committed snapshot is an 18 dump,
+          # so a runner carrying only 17 fails the pin and exits 69 — which is
+          # exactly what happened on run 35375307125. Installing the 18 CLIENT
+          # satisfies the pin without moving the server. The script probes this
+          # absolute path by major, so no PATH change is needed. Same PGDG repo
+          # already configured above; backup-nightly.yml does the same thing.
+          sudo apt-get install -y -qq postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
           # THE SOCKET DIRECTORY IS THE ONE REAL PLATFORM DIFFERENCE.
           # ops/local-pg-ci.py starts the server with only -h/-p and leaves
           # unix_socket_directories at the build default. Homebrew compiles that

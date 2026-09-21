@@ -424,6 +424,91 @@ def main() -> int:
             "--through was allowed to expose WR-000115 before its SCAC seal"
         )
 
+    # WR-000116 adds the notification-preference pair in 0527 and seals the
+    # resulting SCAC v33 successor in 0528.  The same deferred policy-epoch
+    # trigger refuses the intermediate catalog, so the reviewed pair must commit
+    # as one transaction and --through may not cut it.  The write verb's name
+    # already classifies as a write through the completion-evidence gate's own
+    # `set` prefix, so no gate entry is owed; the pair still owes this group.
+    notification_preferences = [
+        item for item in loaded if item[0].startswith(("0527_", "0528_"))
+    ]
+    assert [item[0] for item in notification_preferences] == [
+        "0527_notification_preferences.sql",
+        "0528_notification_preferences_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(notification_preferences) == [
+        notification_preferences
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            notification_preferences,
+            "0527_notification_preferences.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000116 before its SCAC seal"
+        )
+
+    # WR-000117 adds the session-identity read pair in 0529 and seals the
+    # resulting SCAC v34 successor in 0530.  The same deferred policy-epoch
+    # trigger refuses the intermediate catalog, so the reviewed pair must commit
+    # as one transaction and --through may not cut it.  Both verbs are reads and
+    # `read` is in neither of the completion-evidence gate's two collections, so
+    # no gate entry is owed; the pair still owes this group.
+    session_identity = [
+        item for item in loaded if item[0].startswith(("0529_", "0530_"))
+    ]
+    assert [item[0] for item in session_identity] == [
+        "0529_session_identity_reads.sql",
+        "0530_session_identity_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(session_identity) == [session_identity]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            session_identity,
+            "0529_session_identity_reads.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000117 before its SCAC seal"
+        )
+
+    # WR-000119 adds the dispatch spine in 0531 -- two append-only relations
+    # with their grants, the rewritten dispatch-history function and the two
+    # write doors -- and seals the resulting SCAC v35 successor in 0532.  The
+    # same deferred policy-epoch trigger refuses the intermediate catalog, so
+    # the reviewed pair must commit as one transaction and --through may not cut
+    # it.  Unlike the 0529/0530 pair this one owes a completion-evidence gate
+    # entry, because acknowledge-dispatch is a durable append and `acknowledge`
+    # is deliberately not a write prefix.
+    dispatch_spine = [
+        item for item in loaded if item[0].startswith(("0531_", "0532_"))
+    ]
+    assert [item[0] for item in dispatch_spine] == [
+        "0531_room_dispatch_spine.sql",
+        "0532_room_dispatch_spine_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(dispatch_spine) == [dispatch_spine]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            dispatch_spine,
+            "0531_room_dispatch_spine.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "--through was allowed to expose WR-000119 before its SCAC seal"
+        )
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

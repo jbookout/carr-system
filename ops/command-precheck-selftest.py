@@ -75,14 +75,14 @@ class NeverDeniesTests(unittest.TestCase):
 
     def test_a_certain_failure_still_returns_a_note_not_a_refusal(self):
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"}},
-                        check=lambda command, repo=None: (0.99, {"undeclared_options": ["--nope"]}),
+                        check=lambda command, repo=None: (0.99, {"undeclared_options": ["--nope"]}, {"undeclared_option": 0.99}),
                         _log=lambda record: None)
         self.assertEqual(code, 0, "a warning is not a denial")
         self.assertIn("NOT been blocked", out)
 
     def test_the_warning_names_the_reason(self):
         _, out = run({"tool_name": "Bash", "tool_input": {"command": "x"}},
-                     check=lambda command, repo=None: (0.95, {"guard_refusals": ["the guard refuses this"]}),
+                     check=lambda command, repo=None: (0.95, {"guard_refusals": ["the guard refuses this"]}, {"guard_refusal": 0.95}),
                      _log=lambda record: None)
         self.assertIn("the guard refuses this", out,
                       "a warning without its reason is noise a session learns to skip")
@@ -109,7 +109,7 @@ class FailsOpenTests(unittest.TestCase):
         def boom(record):
             raise OSError("disk full")
         code, _ = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                      check=lambda command, repo=None: (0.99, {"x": ["y"]}), _log=boom)
+                      check=lambda command, repo=None: (0.99, {"guard_refusals": ["y"]}, {"guard_refusal": 0.99}), _log=boom)
         self.assertEqual(code, 0)
 
 
@@ -143,7 +143,7 @@ class SpendsNothingUnnecessarilyTests(unittest.TestCase):
             importlib.util.spec_from_file_location("p", REPO / "ops" / "jev_precheck.py"))
         self.assertEqual(hook.check.__module__, "command_precheck")
         with mock.patch.object(hook, "_sibling", side_effect=lambda n: asked.append(n) or _Facts()):
-            probability, facts = hook.check("git push origin HEAD")
+            probability, facts, reasons = hook.check("git push origin HEAD")
         self.assertIsNone(probability)
         self.assertEqual(asked, ["jev_precheck"],
                          "the judging modules must not even be loaded")
@@ -201,7 +201,7 @@ class RepoRootTests(unittest.TestCase):
         seen = []
         run({"tool_name": "Bash", "tool_input": {"command": "./ops/ci.sh --nope"},
              "cwd": "/somewhere/else"},
-            check=lambda command, repo=None: seen.append(repo) or (None, {}))
+            check=lambda command, repo=None: seen.append(repo) or (None, {}, {}))
         self.assertEqual(seen, [hook.REPO],
                          "a cwd outside any checkout must still be passed explicitly")
 
@@ -223,7 +223,7 @@ class ThresholdTests(unittest.TestCase):
     def test_below_the_floor_is_silent_but_still_logged(self):
         logged = []
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                        check=lambda command, repo=None: (hook.WARN_AT - 0.01, {"a": ["b"]}),
+                        check=lambda command, repo=None: (hook.WARN_AT - 0.01, {"guard_refusals": ["b"]}, {"guard_refusal": hook.WARN_AT - 0.01}),
                         _log=logged.append)
         self.assertEqual(out, "", "below the floor nothing is said")
         self.assertEqual(len(logged), 1, "but it is recorded, so the floor can be re-derived")
@@ -231,7 +231,7 @@ class ThresholdTests(unittest.TestCase):
 
     def test_the_floor_is_inclusive(self):
         _, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                     check=lambda command, repo=None: (hook.WARN_AT, {"a": ["b"]}),
+                     check=lambda command, repo=None: (hook.WARN_AT, {"guard_refusals": ["b"]}, {"guard_refusal": hook.WARN_AT}),
                      _log=lambda record: None)
         self.assertIn("PRE-CHECK", out)
 

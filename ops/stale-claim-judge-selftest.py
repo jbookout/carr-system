@@ -3,11 +3,14 @@
 No credential, no network, no spend. Every model call arrives through an
 injected fake.
 
-The cases that earn their place are the ones that decide whether this is safe
-in front of a Stop door on the gate that guards this system's most frequent
-failure class: it must never announce when nothing answers the claim, it must
-be distinguishable from an outage, and an outage must leave the gate behaving
-exactly as it did before this module existed.
+THIS SUITE USED TO ASSERT THE BUG. Its first version had a class called
+OneRequestPerCommitTests that checked the module sent one request per commit
+and that no request saw another candidate. That was the reranking rule applied
+to a roster it does not govern, and the tests locked it in — a suite can make a
+mistake permanent as easily as it can catch one. The shape is now a single
+Choice over the whole window, measured at one request and 0.6 seconds against
+214 requests and 4.2 seconds for the same four answers, and the cases below
+guard the new shape and the reasons for it.
 """
 
 from __future__ import annotations
@@ -36,86 +39,139 @@ CLAIM = "The pre-check that warns before a shell command runs has not shipped."
 
 
 class _FakeJudge:
-    """Reproduces the REAL response shape, with answers nested under "answers".
+    """Reproduces the REAL response shape: answers nested under "answers", and
+    a Choice answer carrying a probabilities mapping over its options.
 
-    A fake that flattens that nesting hides the exact defect mutation testing
-    caught in a sibling module, so it is worse than no fake at all.
+    A fake that flattens either nesting hides a defect rather than catching it,
+    which is how an earlier module shipped reading one level too shallow.
     """
 
-    def __init__(self, scores, fail=()):
-        self.scores = scores
-        self.fail = set(fail)
-        self.seen = []
+    def __init__(self, probabilities, fail=False):
+        self.probabilities = probabilities
+        self.fail = fail
+        self.calls = []
 
     def judge(self, state, questions, **kwargs):
-        self.seen.append(state)
-        subject = state["commit_subject"]
-        if subject in self.fail or self.fail == {"*"}:
+        self.calls.append((state, questions))
+        if self.fail:
             raise RuntimeError("service did not answer")
-        return {"answers": {"addresses": {"noul": self.scores.get(subject, 0.0)}}}
+        return {"answers": {"pick": {"type": "choice",
+                                     "probabilities": dict(self.probabilities)}}}
 
 
 class _FakeClient:
     @staticmethod
-    def noul(instructions, true=None, false=None):
-        return {"type": "noul", "instructions": instructions,
-                "criteria": {"true": true, "false": false}}
+    def choice(instructions, options):
+        if not isinstance(options, dict) or len(options) < 2:
+            raise ValueError("a choice needs at least two options")
+        return {"type": "choice", "instructions": instructions, "criteria": dict(options)}
 
 
-def scores(**kwargs):
-    return {"Warn before a shell command runs, in every session": kwargs.get("warn", 0.0),
-            "Admit the Doc conversation list door": kwargs.get("doc", 0.0),
-            "Bind F03's SQL leg to the shared corpus": kwargs.get("f03", 0.0)}
+class OneRequestTests(unittest.TestCase):
+    """The candidates compete for one slot, so they belong in one Choice.
+
+    One request per candidate is the RERANKING rule and it governs a shortlist
+    a keyword search produced first, not a whole roster.
+    """
+
+    def test_the_whole_window_goes_out_in_a_single_request(self):
+        fake = _FakeJudge({"c39ed3bf": 0.9, judge.NONE_OF_THESE: 0.05})
+        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
+        self.assertEqual(len(fake.calls), 1,
+                         "214 requests became one; do not go back")
+
+    def test_every_commit_becomes_an_option(self):
+        fake = _FakeJudge({"c39ed3bf": 0.9, judge.NONE_OF_THESE: 0.05})
+        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
+        options = fake.calls[0][1]["pick"]["criteria"]
+        for commit, _ in COMMITS:
+            self.assertIn(commit, options)
+
+    def test_the_claim_is_the_state_not_an_option(self):
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.9})
+        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
+        self.assertEqual(fake.calls[0][0]["claim"], CLAIM)
+
+    def test_option_rubrics_are_truncated_for_the_ranking_pass(self):
+        """255 full-length options returns HTTP 400 max_tokens_exceeded, which
+        is how truncation stopped being optional."""
+        long_subject = "x" * 900
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.9})
+        judge.refuting_commits(CLAIM, [("deadbeef", long_subject)],
+                               client=_FakeClient(), judge=fake)
+        rubric = fake.calls[0][1]["pick"]["criteria"]["deadbeef"]
+        self.assertLessEqual(len(rubric), 150)
+
+    def test_a_window_over_the_cap_is_trimmed_not_split(self):
+        """Probabilities sum to one WITHIN a request, so numbers from two
+        Choices cannot be compared and pooling them is a measurement error."""
+        many = [(f"{i:08x}", f"subject {i}") for i in range(400)]
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.9})
+        judge.refuting_commits(CLAIM, many, client=_FakeClient(), judge=fake)
+        self.assertEqual(len(fake.calls), 1, "never split into two Choices")
+        options = fake.calls[0][1]["pick"]["criteria"]
+        self.assertLessEqual(len(options), judge.MAX_OPTIONS + 1)
+
+    def test_the_trim_keeps_the_most_recent(self):
+        many = [(f"{i:08x}", f"subject {i}") for i in range(400)]
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.9})
+        judge.refuting_commits(CLAIM, many, client=_FakeClient(), judge=fake)
+        options = fake.calls[0][1]["pick"]["criteria"]
+        self.assertIn(f"{0:08x}", options, "recent_commits returns newest first")
+        self.assertNotIn(f"{399:08x}", options)
 
 
 class SilenceIsLoadBearingTests(unittest.TestCase):
-    """Reporting real breakage is core work and must never need an argument.
+    """Reporting real breakage is core work and must never need an argument."""
 
-    A search that finds something for every query would be worse than the stem
-    matcher it replaces, not better.
-    """
+    def test_the_none_option_is_always_offered(self):
+        """Choice probabilities sum to one, so without an explicit way to
+        decline the model must hand back a commit for every claim."""
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.9})
+        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
+        self.assertIn(judge.NONE_OF_THESE, fake.calls[0][1]["pick"]["criteria"])
 
-    def test_nothing_above_the_floor_returns_an_empty_list(self):
-        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                     judge=_FakeJudge(scores(warn=0.66, doc=0.25, f03=0.1)))
-        self.assertEqual(got, [], "0.66 was the best score against a window "
-                                  "holding no answer at all, and must stay silent")
+    def test_the_none_rubric_says_declining_is_the_common_case(self):
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.9})
+        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
+        rubric = fake.calls[0][1]["pick"]["criteria"][judge.NONE_OF_THESE]
+        self.assertIn("COMMON CASE", rubric.upper())
+        self.assertIn("share words", rubric)
 
-    def test_an_empty_list_is_not_the_same_object_as_unavailable(self):
-        """The gate falls back to the stem matcher on None and stays silent on
-        []. Collapsing them turns an outage into a finding or the reverse."""
-        quiet = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                       judge=_FakeJudge(scores()))
-        self.assertEqual(quiet, [])
-        self.assertIsNotNone(quiet)
+    def test_the_none_option_winning_ends_it(self):
+        """Measured: the two claims nothing answered put none at 0.96 and 0.77."""
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.77, "c39ed3bf": 0.15})
+        self.assertEqual(
+            judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake), [])
+
+    def test_the_none_option_wins_ties(self):
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.5, "c39ed3bf": 0.5})
+        self.assertEqual(
+            judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake), [])
+
+    def test_nothing_above_the_floor_is_silence(self):
+        fake = _FakeJudge({judge.NONE_OF_THESE: 0.2, "c39ed3bf": 0.3, "a7b7bf46": 0.25})
+        self.assertEqual(
+            judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake,
+                                   floor=0.5), [])
 
     def test_no_commits_at_all_is_silence_not_an_outage(self):
         self.assertEqual(judge.refuting_commits(CLAIM, [], client=_FakeClient()), [])
-
-    def test_the_false_criterion_says_answering_no_to_everything_is_correct(self):
-        """Without this the question reads as "pick the best commit", and it
-        will always pick one."""
-        question = judge.addresses_question(_FakeClient())
-        self.assertIn("Answering no to every commit is the correct outcome",
-                      question["criteria"]["false"])
-
-    def test_the_false_criterion_forbids_scoring_on_shared_words(self):
-        false = question_false()
-        self.assertIn("same file", false)
-        self.assertIn("still concern different things", false)
-
-
-def question_false():
-    return judge.addresses_question(_FakeClient())["criteria"]["false"]
 
 
 class UnavailableMeansFallBackTests(unittest.TestCase):
     """Today's behaviour is the floor. Every failure path ends there."""
 
-    def test_every_request_failing_is_an_outage_not_a_finding(self):
-        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                     judge=_FakeJudge(scores(), fail={"*"}))
-        self.assertIsNone(got, "an outage must not read as 'nothing refutes this'")
+    def test_a_failed_request_is_an_outage_not_a_finding(self):
+        fake = _FakeJudge({}, fail=True)
+        self.assertIsNone(
+            judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake),
+            "an outage must not read as 'nothing refutes this'")
+
+    def test_an_answer_with_no_probabilities_is_an_outage(self):
+        fake = _FakeJudge({})
+        self.assertIsNone(
+            judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake))
 
     def test_a_judge_that_cannot_be_loaded_returns_none(self):
         def boom(name):
@@ -123,66 +179,46 @@ class UnavailableMeansFallBackTests(unittest.TestCase):
         with mock.patch.object(judge, "_sibling", side_effect=boom):
             self.assertIsNone(judge.refuting_commits(CLAIM, COMMITS))
 
-    def test_some_requests_failing_still_yields_a_finding(self):
-        got = judge.refuting_commits(
-            CLAIM, COMMITS, client=_FakeClient(),
-            judge=_FakeJudge(scores(warn=0.9), fail={"Bind F03's SQL leg to the shared corpus"}))
-        self.assertEqual([h for h, _, _ in got], ["c39ed3bf"])
-
-    def test_the_kill_switch_hands_the_gate_straight_back_to_the_matcher(self):
-        called = []
+    def test_the_kill_switch_hands_the_gate_back_to_the_matcher(self):
         with mock.patch.dict(os.environ, {judge.DISABLE: "0"}):
-            got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                         judge=_FakeJudge(scores(warn=0.99)))
-        self.assertIsNone(got)
-        self.assertEqual(called, [])
+            self.assertIsNone(
+                judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
+                                       judge=_FakeJudge({"c39ed3bf": 0.99})))
+
+    def test_an_option_the_window_does_not_hold_is_ignored(self):
+        """A returned key that is not a known commit cannot be printed as one."""
+        fake = _FakeJudge({"not-a-commit": 0.99, judge.NONE_OF_THESE: 0.01})
+        self.assertEqual(
+            judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake), [])
 
 
 class RankingTests(unittest.TestCase):
     def test_best_first(self):
-        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                     judge=_FakeJudge(scores(warn=0.8, doc=0.95)))
+        fake = _FakeJudge({"c39ed3bf": 0.8, "a7b7bf46": 0.95, judge.NONE_OF_THESE: 0.01})
+        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
         self.assertEqual([h for h, _, _ in got], ["a7b7bf46", "c39ed3bf"])
-
-    def test_the_floor_is_inclusive(self):
-        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                     judge=_FakeJudge(scores(warn=judge.CONFIRM_AT)))
-        self.assertEqual(len(got), 1)
 
     def test_the_cap_holds(self):
         many = [(f"{i:08x}", f"subject {i}") for i in range(20)]
-        got = judge.refuting_commits(
-            CLAIM, many, client=_FakeClient(),
-            judge=_FakeJudge({f"subject {i}": 0.9 for i in range(20)}))
+        probabilities = {f"{i:08x}": 0.9 for i in range(20)}
+        probabilities[judge.NONE_OF_THESE] = 0.01
+        got = judge.refuting_commits(CLAIM, many, client=_FakeClient(),
+                                     judge=_FakeJudge(probabilities))
         self.assertEqual(len(got), judge.MAX_HITS)
 
-    def test_the_reason_carries_the_probability_for_a_reader(self):
-        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                     judge=_FakeJudge(scores(warn=0.83)))
+    def test_the_reason_carries_both_numbers(self):
+        """A reader needs the margin, not just the score: 0.55 against 0.40 and
+        0.55 against 0.02 are different invitations."""
+        fake = _FakeJudge({"c39ed3bf": 0.83, judge.NONE_OF_THESE: 0.04})
+        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
         self.assertIn("0.83", got[0][2])
+        self.assertIn("0.04", got[0][2])
 
     def test_the_hit_shape_matches_what_the_gate_prints(self):
-        """The gate unpacks three values and prints the third under the hash."""
-        got = judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(),
-                                     judge=_FakeJudge(scores(warn=0.9)))
-        for hit in got:
+        fake = _FakeJudge({"c39ed3bf": 0.9, judge.NONE_OF_THESE: 0.01})
+        for hit in judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake):
             self.assertEqual(len(hit), 3)
-
-
-class OneRequestPerCommitTests(unittest.TestCase):
-    def test_each_commit_gets_its_own_request(self):
-        fake = _FakeJudge(scores())
-        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
-        self.assertEqual(len(fake.seen), len(COMMITS))
-
-    def test_no_request_sees_another_commit(self):
-        """A state holding every commit lets each judgment see its competitors
-        and does not reproduce the published method."""
-        fake = _FakeJudge(scores())
-        judge.refuting_commits(CLAIM, COMMITS, client=_FakeClient(), judge=fake)
-        for state in fake.seen:
-            self.assertIsInstance(state["commit_subject"], str)
-            self.assertEqual(state["claim"], CLAIM)
+            self.assertEqual(hit[1], dict(COMMITS)[hit[0]], "subject must survive")
 
 
 class GateWiringTests(unittest.TestCase):
@@ -195,8 +231,6 @@ class GateWiringTests(unittest.TestCase):
                       "None must fall back to the matcher, not to silence")
 
     def test_the_matcher_still_labels_its_own_reason(self):
-        """Both paths hand the announcement the same shape, and a reader must
-        be able to tell which one spoke."""
         source = GATE_PATH.read_text(encoding="utf-8")
         self.assertIn('"matched on: "', source)
 

@@ -11,6 +11,7 @@ import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -425,6 +426,16 @@ check("Claude wiring is exact and unique, widened for the generalized rail (S9)"
       len(claude_rows) == 1 and claude_rows[0]["matcher"] == CLAUDE_MATCHER)
 check("Codex wiring is exact and unique, widened for the generalized rail (S9)",
       len(codex_rows) == 1 and codex_rows[0]["matcher"] == CODEX_MATCHER)
+claude_prompt_rows = [group for group in claude["UserPromptSubmit"]
+                      if any(command in hook.get("command", "")
+                             for hook in group.get("hooks", []))]
+codex_prompt_rows = [group for group in codex["UserPromptSubmit"]
+                     if any(command in hook.get("command", "")
+                            for hook in group.get("hooks", []))]
+check("Claude wires the same rule-delivery module once at the partner-message seam",
+      len(claude_prompt_rows) == 1)
+check("Codex wires the same rule-delivery module once at the partner-message seam",
+      len(codex_prompt_rows) == 1)
 check("new rail participates in the epoch source digest",
       "hooks/rule-pack-preuse-reselection.py" in rail.WINDOW_SOURCE_PATHS)
 check("the compiled trigger table participates in the epoch source digest too",
@@ -822,35 +833,37 @@ check("a Write outside hooks/ does not match the path_pattern trigger",
       path_row["trigger_id"] not in
       [r["trigger_id"] for r in rail.matched_triggers(non_hooks_write)])
 
-# content_regex fallback match: an ordinary Bash comment naming two governance words.
+# Semantic keyword matching is replaced, not layered. Tool payload prose no
+# longer fires content_regex rows; Jev sees the partner message at
+# UserPromptSubmit instead. Structural verb, command-family and path rows stay
+# deterministic because those are facts, not judgments.
 gov_call = gen_payload(tool="Bash",
                       tool_input={"command": "echo checking the retrieval doctrine index"})
-check("matched_triggers finds the governance-rules pack fallback trigger by content",
-      governance_fallback_row["trigger_id"] in
+check("content_regex no longer fires on tool payload prose",
+      governance_fallback_row["trigger_id"] not in
       [r["trigger_id"] for r in rail.matched_triggers(gov_call)])
 gov_call_upper = gen_payload(tool="Bash",
                             tool_input={"command": "echo checking the retrieval DOCTRINE Index"})
-check("content_regex matching is case-insensitive",
-      governance_fallback_row["trigger_id"] in
+check("content_regex replacement is independent of keyword case",
+      governance_fallback_row["trigger_id"] not in
       [r["trigger_id"] for r in rail.matched_triggers(gov_call_upper)])
 
-# bash_family plus its own pack's content fallback can co-fire on one call —
-# the documented multi-trigger over-delivery shape, still capped per row.
+# The exact bash family remains deterministic without a semantic keyword row
+# layering a second answer onto it.
 gitpush_call = gen_payload(tool="Bash", tool_input={"command": "git push origin main"})
 gitpush_matches = rail.matched_triggers(gitpush_call)
 gitpush_ids = {r["trigger_id"] for r in gitpush_matches}
 check("a git push Bash command matches its seeded bash_family trigger",
       gitpush_row["trigger_id"] in gitpush_ids)
 merged_trigger_ids, merged_packs, merged_rule_ids = contract.merge_trigger_delivery(gitpush_matches)
-check("multi-trigger merge unions packs/rule_ids across every matched row",
+check("structural merge derives packs/rule_ids from the remaining matched rows",
       merged_rule_ids == sorted({rid for r in gitpush_matches for rid in r["rule_ids"]})
       and merged_packs == sorted({p for r in gitpush_matches for p in r["packs"]}))
-check("this git push command matches more than one trigger row (bash_family plus its "
-      "pack's own content fallback), the multi-match shape this section is testing",
-      len(gitpush_matches) > 1, gitpush_ids)
+check("git push has one structural answer rather than a layered keyword answer",
+      gitpush_ids == {gitpush_row["trigger_id"]}, gitpush_ids)
 non_bash_gitpush = gen_payload(tool="SomeOtherTool", tool_input={"command": "git push origin main"})
 check("bash_family is gated to Bash/functions.exec — the same command on another "
-      "tool name does not fire the bash_family trigger (its pack content fallback still can)",
+      "tool name does not fire the bash_family trigger",
       gitpush_row["trigger_id"] not in
       [r["trigger_id"] for r in rail.matched_triggers(non_bash_gitpush)])
 check("every individual matched row still respects the per-trigger cap",
@@ -861,6 +874,210 @@ gitpush_row_receipt = json.loads(context(gitpush_output))
 check("git push call's receipt reflects the full multi-trigger union",
       gitpush_row_receipt["rule_ids"] == merged_rule_ids
       and gitpush_row_receipt["trigger_ids"] == merged_trigger_ids)
+
+# Partner-message semantic selection. The fake adviser is the test adapter at
+# the same seam the production Jev adapter occupies; the standing-context
+# runner remains the existing authenticated rule-text adapter.
+def prompt_payload(*, client="claude", prompt="we need to improve this source"):
+    row = {
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": str(REPO),
+        "session_id": "session-prompt",
+        "prompt": prompt,
+    }
+    if client == "codex":
+        row["turn_id"] = "turn-prompt"
+    else:
+        row["transcript_path"] = "/tmp/claude/session-prompt.jsonl"
+    return row
+
+
+semantic_id = governance_fallback_row["rule_ids"][0]
+semantic_packs = MAP["rule_load_layers"][semantic_id]["packs"]
+
+
+def fake_adviser(_situation):
+    return [{"id": semantic_id, "gist": "governance rule",
+             "statement": "local candidate text", "probability": 0.91,
+             "ranking_model": "jev-test-ranker",
+             "binding_model": "jev-test-binder"}]
+
+
+def fake_build_adviser(situation):
+    return {
+        "schema": "jev-build-advisory/v1",
+        "partner_request_sha256": rail.digest(situation),
+        "model": "jev-test-build",
+        "facets": {
+            "architecture_or_design": 0.81,
+            "semantic_creation": 0.84,
+            "diagnosis": 0.12,
+            "verification_selection": 0.67,
+            "evidence_matching": 0.34,
+            "next_action_priority": 0.58,
+        },
+        "guidance": {
+            "extend_existing_seam": 0.88,
+            "prefer_reversible_slice": 0.71,
+            "define_typed_contract_first": 0.84,
+            "gather_more_evidence_before_diagnosis": 0.22,
+            "prefer_behavioral_verification": 0.79,
+            "require_fresh_exact_evidence": 0.66,
+            "prioritize_blocker_removal": 0.45,
+        },
+        "required_actions": [
+            {"facet": facet, "instruction": contract.BUILD_ACTIONS[facet]}
+            for facet in contract.BUILD_ACTIONS
+            if {
+                "architecture_or_design": 0.81,
+                "semantic_creation": 0.84,
+                "diagnosis": 0.12,
+                "verification_selection": 0.67,
+                "evidence_matching": 0.34,
+                "next_action_priority": 0.58,
+            }[facet] >= contract.BUILD_ACTION_THRESHOLD
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 6},
+        "authority": "advisory_only",
+        "deterministic_exclusions": ["authority", "execution", "completion_proof"],
+    }
+
+
+semantic_runner = Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id]))
+semantic_output = rail.process(prompt_payload(), runner=semantic_runner,
+                               adviser=fake_adviser,
+                               build_adviser=fake_build_adviser)
+semantic_row = json.loads(context(semantic_output))
+check("UserPromptSubmit asks Jev once about the partner message",
+      semantic_row["schema"] == contract.SEMANTIC_RECEIPT_SCHEMA
+      and semantic_row["prompt_sha256"] == rail.digest("we need to improve this source")
+      and semantic_row["selector_digest"] == contract.semantic_selector_digest(REPO))
+check("semantic candidates are authenticated through standing-context",
+      semantic_runner.calls[0][0][0] == [
+          str(REPO / "run.sh"), "call", "standing-context",
+          json.dumps({"packs": semantic_packs, "rule_ids": [semantic_id]},
+                     sort_keys=True, separators=(",", ":"))])
+check("semantic receipt uses authoritative text and keeps the Jev probability",
+      semantic_row["rules"] == [{"id": semantic_id,
+                                  "statement": f"binding jit rule {semantic_id}"}]
+      and semantic_row["probabilities"] == {semantic_id: 0.91}
+      and semantic_row["build_receipt"]["advisory"]["model"] == "jev-test-build"
+      and semantic_row["build_receipt"]["semantic_rule_delivery"] == "delivered"
+      and semantic_row["model_provenance"] == {
+          semantic_id: {"ranking_model": "jev-test-ranker",
+                        "binding_model": "jev-test-binder"}})
+check("semantic receipt validates through the shared rule-delivery interface",
+      contract.validate_semantic_receipt(semantic_row, repo=REPO))
+
+semantic_claude_attachment = {
+    "type": "attachment", "sessionId": "session-prompt",
+    "attachment": {
+        "type": "hook_additional_context", "hookEvent": "UserPromptSubmit",
+        "hookName": "UserPromptSubmit", "content": [context(semantic_output)],
+    },
+}
+semantic_claude_prompt = {
+    "type": "user", "sessionId": "session-prompt",
+    "message": {"role": "user", "content": "we need to improve this source"},
+}
+mode, loaded, _ = drift.delivery_state([
+    semantic_claude_prompt, semantic_claude_attachment])
+check("Claude Stop telemetry credits only the validated semantic hook envelope",
+      mode == "shadow" and loaded == semantic_packs, (mode, loaded))
+
+replayed_prompt = copy.deepcopy(semantic_claude_prompt)
+cast(dict[str, object], replayed_prompt["message"])["content"] = (
+    "a different later request")
+mode, loaded, _ = drift.delivery_state([replayed_prompt, semantic_claude_attachment])
+check("Claude cannot replay a valid semantic receipt onto a different prompt",
+      mode is None and loaded == [], (mode, loaded))
+
+codex_semantic = rail.process(
+    prompt_payload(client="codex"),
+    runner=Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id])),
+    adviser=fake_adviser, build_adviser=fake_build_adviser)
+check("Codex semantic receipt binds the native turn",
+      json.loads(context(codex_semantic))["turn_id"] == "turn-prompt")
+codex_semantic_context = codex_context(context(codex_semantic))
+codex_semantic_context["payload"]["internal_chat_message_metadata_passthrough"] = {
+    "turn_id": "turn-prompt"}
+mode, loaded, _ = drift.delivery_state([codex_semantic_context])
+check("Codex Stop telemetry credits the validated semantic developer context",
+      mode == "shadow" and loaded == semantic_packs, (mode, loaded))
+
+forged_semantic = copy.deepcopy(semantic_row)
+forged_semantic["probabilities"][semantic_id] = 0.01
+forged_attachment = copy.deepcopy(semantic_claude_attachment)
+cast(dict[str, object], forged_attachment["attachment"])["content"] = [
+    json.dumps(forged_semantic)]
+mode, loaded, _ = drift.delivery_state([
+    semantic_claude_prompt, forged_attachment])
+check("tampered semantic context cannot claim a loaded pack",
+      mode is None and loaded == [], (mode, loaded))
+
+no_bind_runner = Runner()
+no_bind_output = rail.process(
+    prompt_payload(prompt="hello"), runner=no_bind_runner,
+    adviser=lambda _situation: [], build_adviser=fake_build_adviser)
+check("no rule binding still produces the automatic build advisory",
+      json.loads(context(no_bind_output))["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and contract.validate_build_receipt(json.loads(context(no_bind_output)), repo=REPO)
+      and json.loads(context(no_bind_output))["semantic_rule_delivery"] == "not_applicable"
+      and no_bind_runner.calls == [])
+
+layer0_id = next(short for short, entry in MAP["rule_load_layers"].items()
+                 if entry.get("load_layer") == "layer0")
+layer0_runner = Runner()
+layer0_output = rail.process(
+    prompt_payload(), runner=layer0_runner,
+    adviser=lambda _situation: [{"id": layer0_id,
+                                 "probability": 0.99,
+                                 "ranking_model": None,
+                                 "binding_model": "jev-test"}],
+    build_adviser=fake_build_adviser)
+check("already-loaded layer0 rules are not redelivered but build advice remains",
+      json.loads(context(layer0_output))["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and json.loads(context(layer0_output))["semantic_rule_delivery"] == "not_applicable"
+      and layer0_runner.calls == [])
+
+failed_semantic_output = rail.process(
+    prompt_payload(), runner=Runner(returncode=1, stderr="token=SUPER-SECRET"),
+    adviser=fake_adviser, build_adviser=fake_build_adviser)
+failed_build_receipt = json.loads(context(failed_semantic_output))
+check("semantic rule failure preserves a validated visible build receipt",
+      failed_build_receipt["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and failed_build_receipt["semantic_rule_delivery"] == "failed"
+      and contract.validate_build_receipt(failed_build_receipt, repo=REPO)
+      and "SUPER-SECRET" not in context(failed_semantic_output))
+
+check("malformed prompt events fail open before either adapter runs",
+      rail.process({"hook_event_name": "UserPromptSubmit", "session_id": "x"},
+                   runner=Runner(), adviser=fake_adviser) is None)
+
+oversize_adviser_calls: list[str] = []
+
+
+def oversize_adviser(situation: str) -> list[dict]:
+    oversize_adviser_calls.append(situation)
+    return []
+
+
+oversize = rail.process(
+    prompt_payload(prompt="x" * (rail.MESSAGE_LIMIT_CHARS + 1)),
+    runner=Runner(),
+    adviser=oversize_adviser)
+check("oversized prompts fail open visibly instead of judging truncated text",
+      json.loads(context(oversize))["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and json.loads(context(oversize))["semantic_rule_delivery"] == "not_attempted_oversize"
+      and json.loads(context(oversize))["advisory"]["schema"]
+          == contract.BUILD_ADVISORY_UNAVAILABLE_SCHEMA
+      and oversize_adviser_calls == [])
+
+forged_selector = copy.deepcopy(semantic_row)
+forged_selector["selector_digest"] = "0" * 64
+forged_selector["receipt_id"] = contract.receipt_id(forged_selector)
+check("a receipt from different selector bytes is rejected even when resealed",
+      not contract.validate_semantic_receipt(forged_selector, repo=REPO))
 
 # Original rail still wins outright on its own exact shape, even though a
 # background Bash git-push command would ALSO structurally match the new
