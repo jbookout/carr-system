@@ -2890,7 +2890,9 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // WR95 adds two reviewed administrative entrypoints: the live evidence
   // sealer and the bounded candidate rehearsal. Both are tracked before the
   // v27 frontier is frozen, so the pinned count advances by exactly two.
-  assert.equal(rows.length, 549);
+  // WR126 adds one reviewed administrative entrypoint: the credential-safe
+  // canonical-ownership issuer provisioner.
+  assert.equal(rows.length, 550);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2905,7 +2907,8 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // bin/deploy-worker.sh IMPORTS rather than a file it executes.
   // WR95's evidence sealer and candidate rehearsal are both intentional
   // command-line entrypoints, so discovery advances by the same exact two.
-  assert.equal(scripts.length, 540);
+  // WR126 adds the canonical-ownership issuer provisioner.
+  assert.equal(scripts.length, 541);
   // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
   // ingress this branch's registry successor does not seal, and the whole point
   // of the predicate is that intent does not enter it.
