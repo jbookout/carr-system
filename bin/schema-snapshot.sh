@@ -89,11 +89,45 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$REPO/db/schema.sql"
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
 
+# PIN THE CLIENT MAJOR, because pg_dump's OUTPUT is version-dependent and this
+# file is a tracked artifact a human reviews as a diff. pg_dump 18 emits every
+# NOT NULL as a named table constraint; pg_dump 17 emits the same columns with a
+# bare NOT NULL. Both dumps are correct and they describe the same database, but
+# they differ by 256 lines, so whichever client a given machine happened to
+# resolve first decided the diff. That is what happened on 2026-09-17: main's
+# snapshot came from a machine whose libpq is 18 and the v28 branch's from one
+# resolving Homebrew's postgresql@17, and 256 constraint lines churned with no
+# schema change behind them (loop #614). Searching harder is not the fix — the
+# SAME major has to win everywhere, or the artifact is not reproducible.
+#
+# Raising this is a deliberate change: bump PG_DUMP_MAJOR, regenerate, and land
+# the resulting whole-file diff on its own, so the churn is reviewed once rather
+# than arriving inside somebody else's branch.
+PG_DUMP_MAJOR=18
+
+pg_dump_major() {
+  # "pg_dump (PostgreSQL) 18.4" / "pg_dump (PostgreSQL) 17.11 (Homebrew)" -> 18 / 17
+  "$1" --version 2>/dev/null | sed -n 's/^pg_dump (PostgreSQL) \([0-9][0-9]*\).*/\1/p'
+}
+
 PG_DUMP=""
-for c in /opt/homebrew/opt/libpq/bin/pg_dump /usr/local/opt/libpq/bin/pg_dump pg_dump; do
-  if command -v "$c" >/dev/null 2>&1; then PG_DUMP="$c"; break; fi
+PG_DUMP_SEEN=""
+for c in /opt/homebrew/opt/postgresql@$PG_DUMP_MAJOR/bin/pg_dump \
+         /usr/local/opt/postgresql@$PG_DUMP_MAJOR/bin/pg_dump \
+         /opt/homebrew/opt/libpq/bin/pg_dump /usr/local/opt/libpq/bin/pg_dump \
+         /usr/lib/postgresql/$PG_DUMP_MAJOR/bin/pg_dump pg_dump; do
+  command -v "$c" >/dev/null 2>&1 || continue
+  m="$(pg_dump_major "$c")"
+  [ -n "$m" ] || continue
+  PG_DUMP_SEEN="$PG_DUMP_SEEN $c($m)"
+  if [ "$m" = "$PG_DUMP_MAJOR" ]; then PG_DUMP="$c"; break; fi
 done
-[ -n "$PG_DUMP" ] || { echo "schema-snapshot: no pg_dump found" >&2; exit 69; }
+if [ -z "$PG_DUMP" ]; then
+  echo "schema-snapshot: no pg_dump $PG_DUMP_MAJOR found — the snapshot is pinned to that major" >&2
+  echo "schema-snapshot: clients on PATH:${PG_DUMP_SEEN:- none}" >&2
+  echo "schema-snapshot: install one (brew install postgresql@$PG_DUMP_MAJOR) rather than dumping with another major" >&2
+  exit 69
+fi
 
 PSQL=""
 for c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do
