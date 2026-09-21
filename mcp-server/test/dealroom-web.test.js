@@ -117,6 +117,34 @@ test("Deal Room host is explicit per environment and request matching fails clos
   assert.equal(missing.status, 404);
 });
 
+test("Jev deal read requires a partner session and same-origin one-deal request", async () => {
+  const environment = env();
+  environment.TYPESAFE_API_KEY = "synthetic";
+  let readCount = 0;
+  const handler = createDealroomHandler({
+    ...identityOverrides("joe.bookout.carr.us@gmail.com"),
+    jevDealRecordReader: async (deal) => { readCount++; return { deal_id: deal }; },
+    jevDealRead: async () => ({ schema: "carr.jev-deal-reading.v1", judged: false,
+      reason: "insufficient_recorded_evidence" }),
+  });
+  const deal = "00000000-0000-4000-8000-000000000001";
+  const url = `https://${PRODUCTION_HOST}/api/v1/jev-deal-reading`;
+  const anonymous = await handler.fetch(new Request(url, { method: "POST", body: JSON.stringify({ deal }) }), environment, {});
+  assert.equal(anonymous.status, 401);
+  const callback = await login(handler, environment, "joe.bookout.carr.us@gmail.com");
+  const cookie = namedCookie(callback, "__Host-dealroom_session");
+  const post = (origin, body) => handler.fetch(new Request(url, { method: "POST",
+    headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body),
+  }), environment, {});
+  assert.equal((await post("https://elsewhere.example", { deal })).status, 403);
+  assert.equal((await post(`https://${PRODUCTION_HOST}`, { deal: "not-an-id" })).status, 400);
+  assert.equal(readCount, 0);
+  const response = await post(`https://${PRODUCTION_HOST}`, { deal });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).reason, "insufficient_recorded_evidence");
+  assert.equal(readCount, 1);
+});
+
 test("independent DoctorCRE host owns its OAuth origin and cannot replay sessions across allowed hosts", async () => {
   const environment = {
     ...env(STAGING_HOST),
