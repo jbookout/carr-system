@@ -2040,6 +2040,13 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
          ||E'\n'||'live_catalog_fn (not an arm)= '||($SCAC_CURRENT_CATALOG_FUNCTION)::text
        from ops.scac_mutation_registry_version v" >&2 2>/dev/null ||
       echo "schema-snapshot: the per-arm breakdown could not be read" >&2
+    "$PSQL" "$URL" -Atqc \
+      "select 'sealed entry-set mismatch '||expected.registry_version||': expected '||expected.entry_set_digest||', observed '||coalesce(sealed.entry_set_digest,'<missing>')
+         from (values $SCAC_FULL_SET_SQL) expected(registry_version,entry_set_digest)
+         left join ops.scac_mutation_registry_version sealed using(registry_version)
+        where sealed.entry_set_digest is distinct from expected.entry_set_digest
+        order by expected.registry_version" >&2 2>/dev/null ||
+      echo "schema-snapshot: sealed entry-set mismatch details could not be read" >&2
     exit 1
   }
 
