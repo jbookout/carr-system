@@ -575,6 +575,12 @@ def main() -> int:
         )
     assertions = 0
 
+    with psycopg.connect(dsn) as probe, probe.cursor() as cur:
+        cc.hard_fence(cur, dsn)
+        activated = one(cur, "select to_regprocedure('ops.canonical_ownership_lifecycle(jsonb)') is not null")[0]
+    if activated:
+        return authenticated_main(dsn)
+
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cc.hard_fence(cur, dsn)
         assert_activated_runtime_boundary(dsn, cur)
@@ -2698,6 +2704,390 @@ def main() -> int:
         raise RuntimeError("submitted wrong token escaped into a response")
     print(f"canonical ownership lease local PG gate — {assertions} assertion groups passed")
     return 0
+
+
+def authenticated_main(dsn: str) -> int:
+    """Production SQL and real NOINHERIT login connections, never a ci bypass."""
+    assertions = 0
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cc.hard_fence(cur, dsn)
+        cur.execute((ROOT / "mcp-server/test/authenticated-canonical-ownership-postgres.sql").read_text())
+        admin.rollback()  # GUCs and role switches in the SQL proof are isolated.
+        row = fixture(cur, slice_refs=[f"slice:authenticated:{uuid.uuid4().hex}"],
+                      source_merge_paths=["mcp-server/src/authenticated-fixture.js"])
+        admin.commit()
+        claimed = cc.claim_one(admin, row[0], "ownership-authenticated-gate", [row[0]])
+        seed = one(cur, """select e.work_request_id,e.accepted_plan_id,e.id,
+          'session:'||e.agent_session_id::text,w.organization_tenant_id,
+          least(j.leased_until,s.lease_expires_at,e.expires_at)-interval '5 seconds'
+          from ops.engineering_execution_envelope e join ops.work_request w on w.id=e.work_request_id
+          join ops.job j on j.id=e.job_id join ops.capability_agent_session s on s.id=e.agent_session_id
+          where e.id=%s""", (row[1],))
+    host = "cloudflare-workers:authenticated-pg-fixture"
+    mint_key = uuid.uuid4()
+    runtime = None
+
+    def setup(cur, *, actor="codex", session=None, execution_host=host, token=None, ownership=None):
+        cur.execute("set local role carr_ownership_issuer")
+        for key, value in {
+            "carr.organization_tenant_id": seed[4],
+            "carr.acting_actor_slug": actor,
+            "carr.receipt_session_ref": session or seed[3],
+            "carr.execution_host_id": execution_host,
+            "carr.engineering_job_lease_token": str(token or claimed[1]),
+            "carr.ownership_session_id": ownership or runtime or "",
+        }.items():
+            one(cur, "select set_config(%s,%s,true)", (key, value))
+
+    def mint(cur, key=mint_key, runtime_ref=None, execution_host=host):
+        return one(cur, """select ops.mint_canonical_ownership_runtime_session(
+          %s,%s,%s,%s,%s,%s,%s,%s)""",
+          (*seed[:3], claimed[2], runtime_ref or seed[3], execution_host, seed[5], key))[0]
+
+    def lifecycle(cur, request):
+        return one(cur, "select ops.canonical_ownership_lifecycle(%s)", (Jsonb(request),))[0]
+
+    def require(value, label):
+        if value.get("ok") is not True:
+            raise RuntimeError(f"authenticated ownership {label} refused: {value.get('reason_id') or value.get('refusal', {}).get('code')}")
+
+    def deny(value, label):
+        if value.get("ok") is not False:
+            raise RuntimeError(f"authenticated ownership {label} unexpectedly succeeded")
+
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        for changes, label in [({"actor": "joe"}, "wrong executor"),
+                               ({"token": uuid.uuid4()}, "wrong capability"),
+                               ({"session": "session:wrong-durable-session"}, "wrong session"),
+                               ({"execution_host": "cloudflare-workers:wrong-host"}, "wrong host")]:
+            setup(cur, **changes)
+            deny(mint(cur, uuid.uuid4()), label)
+            issuer.rollback()
+            assertions += 1
+        setup(cur)
+        controller_sql = "select ops.authenticated_canonical_ownership_controller_binding(%s,%s,%s,%s)"
+        controller = one(cur, controller_sql, (row[0], claimed[1], "ownership-authenticated-gate", "acquire"))[0]
+        if not controller or controller["envelope_id"] != str(row[1]) or not controller.get("runtime_expires_at"):
+            raise RuntimeError("issuer controller projection lost exact bounded authority")
+        for capability, worker, operation in [(uuid.uuid4(), "ownership-authenticated-gate", "acquire"),
+                (claimed[1], "wrong-worker", "acquire"), (claimed[1], "ownership-authenticated-gate", "dispatch")]:
+            if one(cur, controller_sql, (row[0], capability, worker, operation))[0] is not None:
+                raise RuntimeError("controller projection admitted wrong capability, worker, or operation")
+        assertions += 4
+        bound = mint(cur)
+        require(bound, "mint")
+        runtime = bound["ownership_session_ref"]
+        require(mint(cur), "mint replay")
+        issuer.commit()
+        assertions += 2
+
+        # A reused pooled connection carries neither local role nor authority.
+        if one(cur, "select current_user,current_setting('carr.ownership_session_id',true)") != (
+                "carr_ownership_issuer_g1", ""):
+            raise RuntimeError("pooled connection retained transaction-local authority")
+        issuer.rollback()
+        setup(cur, ownership=runtime)
+        require(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "context")
+        issuer.commit()
+        assertions += 2
+
+    acquire_request = {
+        "operation": "acquire", "idempotency_key": str(uuid.uuid4()),
+        "ttl_seconds": 60,
+    }
+
+    def concurrent_acquire():
+        with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as conn, conn.cursor() as cur:
+            setup(cur)
+            value = lifecycle(cur, acquire_request)
+            require(value, "concurrent acquire")
+            return value
+
+    raced = race(concurrent_acquire, concurrent_acquire, "authenticated same-key acquire")
+    lease = raced["writer"]
+    if lease["lease_id"] != raced["lease"]["lease_id"] or lease["lease_token"] != raced["lease"]["lease_token"]:
+        raise RuntimeError("concurrent idempotency issued different leases")
+    assertions += 1
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        setup(cur)
+        readback = one(cur, "select ops.read_canonical_ownership_operation(%s)",
+                       (uuid.UUID(acquire_request["idempotency_key"]),))[0]
+        if readback["lease_id"] != lease["lease_id"] or readback["lease_token"] != lease["lease_token"]:
+            raise RuntimeError("ambiguous acquire readback lost exact identity")
+        conflict = dict(acquire_request, ttl_seconds=61)
+        if lifecycle(cur, conflict).get("reason_id") != "ownership_operation_idempotency_conflict":
+            raise RuntimeError("changed replay did not conflict")
+        check = {"operation": "check", "idempotency_key": str(uuid.uuid4()),
+                 "lease_id": lease["lease_id"], "lease_token": lease["lease_token"],
+                 "fencing_generation": lease["fencing_generation"]}
+        projected = one(cur, "select ops.canonical_ownership_claim_projection(%s)", (lease["lease_id"],))[0]
+        if projected.get("path_claims") != [{"path": "mcp-server/src/authenticated-fixture.js", "mode": "file", "operation": "write"}]:
+            raise RuntimeError("claims were not derived from the exact accepted scope")
+        deny(lifecycle(cur, dict(acquire_request, idempotency_key=str(uuid.uuid4()), path_claims=[])), "caller-selected scope")
+        require(lifecycle(cur, check), "check")
+        deny(lifecycle(cur, dict(check, idempotency_key=str(uuid.uuid4()), lease_token=str(uuid.uuid4()))), "wrong lease token")
+        renew = {"operation": "renew", "idempotency_key": str(uuid.uuid4()),
+                "lease_id": lease["lease_id"], "lease_token": lease["lease_token"],
+                "fencing_generation": lease["fencing_generation"], "ttl_seconds": 90}
+        require(lifecycle(cur, renew), "renew")
+        for request in [check, renew]:
+            replay = one(cur, "select ops.read_canonical_ownership_operation(%s)",
+                         (uuid.UUID(request["idempotency_key"]),))[0]
+            if replay.get("lease_token") != lease["lease_token"] or replay.get("lease_id") != lease["lease_id"]:
+                raise RuntimeError("protected check/renew readback dropped lease capability")
+        deny(one(cur, "select ops.read_canonical_ownership_operation(%s)", (uuid.uuid4(),))[0], "foreign operation readback")
+        issuer.commit()
+        assertions += 10
+        for changes in [{"actor": "joe"}, {"token": uuid.uuid4()},
+                        {"session": "session:wrong-durable-session"},
+                        {"execution_host": "cloudflare-workers:wrong-host"},
+                        {"ownership": f"ownership:{uuid.uuid4()}"}]:
+            setup(cur, **changes)
+            deny(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "forged context")
+            deny(one(cur, "select ops.read_canonical_ownership_operation(%s)",
+                     (uuid.UUID(acquire_request["idempotency_key"]),))[0], "forged capability readback")
+            issuer.rollback()
+            assertions += 1
+
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        original_deadline = one(cur, "select leased_until from ops.job where id=%s", (row[0],))[0]
+        cur.execute("update ops.job set leased_until=clock_timestamp()+interval '60 seconds' where id=%s", (row[0],))
+    try:
+        with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+            setup(cur)
+            if one(cur, controller_sql, (row[0], claimed[1], "ownership-authenticated-gate", "acquire"))[0] is not None:
+                raise RuntimeError("acquire admitted insufficient dispatch runway")
+            for operation in ["check", "renew", "release"]:
+                if one(cur, controller_sql, (row[0], claimed[1], "ownership-authenticated-gate", operation))[0] is None:
+                    raise RuntimeError("ongoing lifecycle incorrectly requires pre-dispatch runway")
+            assertions += 4
+    finally:
+        with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+            cur.execute("update ops.job set leased_until=%s where id=%s", (original_deadline, row[0]))
+
+    # Existing bindings survive rotation only for bounded drain operations.
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cur.execute("update ops.canonical_ownership_issuer_generation set state='draining' where principal='carr_ownership_issuer_g1'")
+        cur.execute("update ops.canonical_ownership_issuer_generation set state='active' where principal='carr_ownership_issuer_g2'")
+    try:
+        with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+            setup(cur)
+            require(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "draining context")
+            require(mint(cur), "draining binding replay")
+            deny(mint(cur, uuid.uuid4()), "draining mint")
+            require(lifecycle(cur, dict(check, idempotency_key=str(uuid.uuid4()))), "draining check")
+            deny(lifecycle(cur, dict(acquire_request, idempotency_key=str(uuid.uuid4()))), "new draining acquire")
+            release = {"operation": "release", "idempotency_key": str(uuid.uuid4()),
+                       "lease_id": lease["lease_id"], "lease_token": lease["lease_token"],
+                       "fencing_generation": lease["fencing_generation"]}
+            require(lifecycle(cur, release), "release")
+            require(lifecycle(cur, release), "release replay")
+            assertions += 7
+    finally:
+        with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+            cur.execute("update ops.canonical_ownership_issuer_generation set state='draining' where principal='carr_ownership_issuer_g2'")
+            cur.execute("update ops.canonical_ownership_issuer_generation set state='active' where principal='carr_ownership_issuer_g1'")
+
+    # Expired leases are replaced with a new generation, never resurrected.
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        setup(cur)
+        current = lifecycle(cur, dict(acquire_request, idempotency_key=str(uuid.uuid4())))
+        require(current, "reacquire after release")
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cur.execute("update ops.canonical_ownership_lease set acquired_at=clock_timestamp()-interval '2 minutes',expires_at=clock_timestamp()-interval '1 minute' where id=%s", (current["lease_id"],))
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        setup(cur)
+        current_check = dict(check, idempotency_key=str(uuid.uuid4()), lease_id=current["lease_id"],
+                             lease_token=current["lease_token"], fencing_generation=current["fencing_generation"])
+        deny(lifecycle(cur, current_check), "expired lease")
+        replacement = lifecycle(cur, dict(acquire_request, idempotency_key=str(uuid.uuid4())))
+        require(replacement, "expired lease replacement")
+        deny(lifecycle(cur, dict(current_check, idempotency_key=str(uuid.uuid4()))), "replaced lease")
+        assertions += 3
+
+    # The actual scoped failure door must clean up before making the job terminal.
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cc.set_jobs(cur)
+        one(cur, "select ops.engineering_fail_claim(%s,%s,'fixture','authenticated terminal cleanup')", (row[0], claimed[1]))
+        cc.reset_role(cur)
+        state = one(cur, "select state from ops.canonical_ownership_lease where id=%s", (replacement["lease_id"],))[0]
+        if state != "released":
+            raise RuntimeError("terminal job left an active ownership lease")
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        setup(cur)
+        deny(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "terminal runtime binding")
+        assertions += 2
+    assertions += authenticated_merge_proof(dsn)
+    print(f"authenticated canonical ownership local PG gate — {assertions} assertion groups passed; no test-role production bypass")
+    return 0
+
+
+def authenticated_merge_proof(dsn: str) -> int:
+    """Exercise post-terminal merge authority; history is fixture data, not a bypass."""
+    head = uuid.uuid4().hex + uuid.uuid4().hex[:8]
+    pr = 126
+    host = "cloudflare-workers:merge-pg-fixture"
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        row = fixture(cur, slice_refs=[f"slice:merge:{uuid.uuid4().hex}"],
+                      source_merge_paths=["mcp-server/src/merge-fixture.js"])
+        admin.commit()
+        claimed = cc.claim_one(admin, row[0], "ownership-merge-gate", [row[0]])
+        seed = one(cur, """select e.work_request_id,e.accepted_plan_id,w.ref,w.organization_tenant_id,
+          'session:'||e.agent_session_id::text,
+          least(e.expires_at,s.lease_expires_at,j.leased_until)-interval '5 seconds'
+          from ops.engineering_execution_envelope e join ops.work_request w on w.id=e.work_request_id
+          join ops.job j on j.id=e.job_id join ops.capability_agent_session s on s.id=e.agent_session_id
+          where e.id=%s""", (row[1],))
+        decision_id = uuid.uuid4()
+        event_id, decision_expiry = one(cur, """insert into public.event(
+          occurred_at,actor_id,verb,subject_type,subject_id,new_value,cause,human_quote,
+          sponsoring_human_slug,authorization_class,organization_tenant_id)
+          select clock_timestamp(),id,'log-decision','decision',%s,%s,'human_stated',%s,
+                 'joe','human',%s from public.actor where slug='joe' and active
+          returning id,occurred_at+interval '119 minutes'""",
+          (decision_id, Jsonb({"title": f"Gate A2 source-merge authority: {seed[2]}", "quote_absent": False}),
+           f"I approve Gate A2 for {seed[2]} PR #{pr} at {head} for 120 minutes", seed[3]))
+        invalid_decisions = []
+        expected_title = f"Gate A2 source-merge authority: {seed[2]}"
+        expected_quote = f"I approve Gate A2 for {seed[2]} PR #{pr} at {head} for 120 minutes"
+        for title, quote, absent, authorization, offset, label in [
+            ("Routine authorized green PRs merge without asking Joe for ceremonial approval", expected_quote, False, "human", "0 seconds", "global policy decision"),
+            (expected_title, expected_quote + ".", False, "human", "0 seconds", "inexact human quote"),
+            (expected_title, expected_quote, True, "human", "0 seconds", "absent quote"),
+            (expected_title, expected_quote, False, "automation", "0 seconds", "nonhuman authorization"),
+            (expected_title, expected_quote, False, "human", "-121 minutes", "expired decision"),
+        ]:
+            bad_id = uuid.uuid4()
+            one(cur, """insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,
+              new_value,cause,human_quote,sponsoring_human_slug,authorization_class,organization_tenant_id)
+              select clock_timestamp()+%s::interval,id,'log-decision','decision',%s,%s,'human_stated',%s,
+                'joe',%s,%s from public.actor where slug='joe' and active returning id""",
+              (offset, bad_id, Jsonb({"title": title, "quote_absent": absent}), quote, authorization, seed[3]))
+            invalid_decisions.append((bad_id, label))
+
+    def configure(cur, binding=None):
+        cur.execute("set local role carr_ownership_issuer")
+        values = {"carr.organization_tenant_id": seed[3], "carr.acting_actor_slug": "codex",
+                  "carr.execution_host_id": host,
+                  "carr.receipt_session_ref": binding["runtime_session_ref"] if binding else seed[4],
+                  "carr.ownership_session_id": binding["ownership_session_ref"] if binding else "",
+                  "carr.engineering_job_lease_token": binding["merge_capability_token"] if binding else str(claimed[1])}
+        for key, value in values.items():
+            one(cur, "select set_config(%s,%s,true)", (key, value))
+
+    def require(value, label):
+        if not value or value.get("ok") is not True:
+            raise RuntimeError(f"merge fixture {label} refused: {(value or {}).get('reason_id') or (value or {}).get('error')}")
+
+    def reject(value, label):
+        if not value or value.get("ok") is not False:
+            raise RuntimeError(f"merge fixture {label} unexpectedly authorized")
+
+    merge_key = uuid.uuid4()
+    mint_sql = "select ops.mint_canonical_ownership_merge_session(%s,%s,%s,%s,%s,%s,%s)"
+    mint_args = (row[1], decision_id, head, pr, host, decision_expiry, merge_key)
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        configure(cur)
+        reject(one(cur, mint_sql, mint_args)[0], "missing claimed_complete")
+        build = one(cur, """select ops.mint_canonical_ownership_runtime_session(
+          %s,%s,%s,%s,%s,%s,%s,%s)""",
+          (seed[0], seed[1], row[1], claimed[2], seed[4], host, seed[5], uuid.uuid4()))[0]
+        require(build, "build mint")
+        one(cur, "select set_config('carr.ownership_session_id',%s,true)", (build["ownership_session_ref"],))
+        build_lease = one(cur, "select ops.canonical_ownership_lifecycle(%s)",
+            (Jsonb({"operation": "acquire", "idempotency_key": str(uuid.uuid4()), "ttl_seconds": 60}),))[0]
+        require(build_lease, "build acquire")
+
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cc.set_jobs(cur)
+        payload = cc.receipt_payload(cur, row, claimed, "claimed_complete")
+        payload["source_evidence"]["source_sha"] = head
+        receipt_id = one(cur, """select id from ops.engineering_finalize_slice_receipt(%s,%s,%s,%s,%s)""",
+            (row[1], claimed[1], Jsonb(payload), cc.canonical_digest(payload), row[3]))[0]
+        cc.reset_role(cur)
+        if one(cur, "select state from ops.canonical_ownership_lease where id=%s", (build_lease["lease_id"],))[0] != "released":
+            raise RuntimeError("successful terminal receipt did not release build lease")
+        insert_review(cur, row, receipt_id)
+        reviewer_id = one(cur, "select id from ops.engineering_reviewer_fact where receipt_id=%s", (receipt_id,))[0]
+        # Seed immutable historical assurance rows through ordinary INSERT with
+        # all production constraints/triggers enabled. This fixture tests the
+        # projection of history, not the separately gated assurance authoring API.
+        manifests = []
+        for stage in ["post_commit", "review"]:
+            manifests.append(one(cur, """insert into ops.assurance_execution_manifest(
+              organization_tenant_id,work_request_id,accepted_plan_id,slice_plan_id,slice_ref,
+              lease_id,fencing_generation,repository_stage,repository_commit_sha,repository_tree_sha,
+              compiler_id,compiler_version,input_digest,manifest_hash,applicable_rule_snapshot_digest,
+              coordination_snapshot_digest,snapshot_valid_until,applicable_rules,coordination_snapshot,
+              compiler_input,ownership_contract_digest,manifest,idempotency_key)
+              select l.organization_tenant_id,l.work_request_id,l.accepted_plan_id,l.slice_plan_id,l.slice_ref,
+                l.id,l.fencing_generation,%s,%s,%s,'carr-assurance-slice-compiler','fixture',%s,%s,%s,%s,
+                clock_timestamp()+interval '1 hour','{}','{}','{}',l.contract_digest,'{}',%s
+              from ops.canonical_ownership_lease l where l.id=%s returning id""",
+              (stage, head, "1" * 40, sha("a"), "sha256:" + uuid.uuid4().hex * 2,
+               sha("b"), sha("c"), uuid.uuid4(), build_lease["lease_id"]))[0])
+        evidence_id = one(cur, """insert into ops.assurance_evidence_extension(
+          receipt_id,manifest_id,evidence_digest,evidence,idempotency_key) values(%s,%s,%s,'{}',%s) returning id""",
+          (receipt_id, manifests[0], "sha256:" + uuid.uuid4().hex * 2, uuid.uuid4()))[0]
+        one(cur, """insert into ops.assurance_review_extension(
+          reviewer_fact_id,review_manifest_id,evidence_id,review_digest,review,idempotency_key)
+          values(%s,%s,%s,%s,'{}',%s) returning id""",
+          (reviewer_id, manifests[1], evidence_id, "sha256:" + uuid.uuid4().hex * 2, uuid.uuid4()))
+        historical = one(cur, "select jsonb_agg(to_jsonb(m) order by id) from ops.assurance_execution_manifest m where id=any(%s)", (manifests,))[0]
+
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        configure(cur)
+        one(cur, "select set_config('carr.ownership_session_id',%s,true)", (build["ownership_session_ref"],))
+        reject(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "terminal build reuse")
+        for changed, label in [({1: uuid.uuid4()}, "wrong decision"), ({2: "f" * 40}, "wrong head"),
+                              ({3: pr + 1}, "wrong PR"),
+                              ({5: datetime(2000, 1, 1).isoformat() + "Z"}, "expired expiry"),
+                              ({5: datetime(2099, 1, 1).isoformat() + "Z"}, "expiry beyond decision")]:
+            args = list(mint_args)
+            args[-1] = uuid.uuid4()
+            for index, value in changed.items():
+                args[index] = value
+            reject(one(cur, mint_sql, tuple(args))[0], label)
+        for bad_id, label in invalid_decisions:
+            args = list(mint_args)
+            args[1], args[-1] = bad_id, uuid.uuid4()
+            reject(one(cur, mint_sql, tuple(args))[0], label)
+        merge = one(cur, mint_sql, mint_args)[0]
+        require(merge, "exact Gate A2 mint")
+        replay = one(cur, mint_sql, mint_args)[0]
+        if replay != merge or merge["phase"] != "merge" or merge["ownership_session_ref"] == build["ownership_session_ref"]:
+            raise RuntimeError("merge did not mint a distinct idempotent phase binding")
+        if merge["merge_capability_token"] in {str(claimed[1]), build_lease["lease_token"]}:
+            raise RuntimeError("merge reused build authority")
+        configure(cur, merge)
+        merge_lease = one(cur, "select ops.canonical_ownership_lifecycle(%s)",
+            (Jsonb({"operation": "acquire", "idempotency_key": str(uuid.uuid4()), "ttl_seconds": 60}),))[0]
+        require(merge_lease, "merge acquire")
+        if merge_lease["lease_id"] == build_lease["lease_id"]:
+            raise RuntimeError("merge reused terminal build lease")
+
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cur.execute("set local role carr_reader")
+        projection = one(cur, "select ops.source_merge_authority_projection(%s,null,%s,%s)", (decision_id, head, pr))[0]
+        require(projection, "projection consumes merge phase")
+        claims = projection["authority"]["authorized_path_claims"]
+        if not claims or {claim["lease_ref"] for claim in claims} != {f"canonical-ownership-lease:{merge_lease['lease_id']}"}:
+            raise RuntimeError("source-merge projection consumed historical build lease")
+        for bad_head, bad_pr in [("f" * 40, pr), (head, pr + 1)]:
+            reject(one(cur, "select ops.source_merge_authority_projection(%s,null,%s,%s)", (decision_id, bad_head, bad_pr))[0], "wrong projection source")
+        cur.execute("reset role")
+        if one(cur, "select jsonb_agg(to_jsonb(m) order by id) from ops.assurance_execution_manifest m where id=any(%s)", (manifests,))[0] != historical:
+            raise RuntimeError("merge projection rewrote historical build manifests")
+    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
+        configure(cur, merge)
+        require(one(cur, "select ops.canonical_ownership_lifecycle(%s)", (Jsonb({
+            "operation": "release", "idempotency_key": str(uuid.uuid4()),
+            "lease_id": merge_lease["lease_id"], "lease_token": merge_lease["lease_token"],
+            "fencing_generation": merge_lease["fencing_generation"]}),))[0], "merge release")
+    with psycopg.connect(dsn) as admin, admin.cursor() as cur:
+        cur.execute("set local role carr_reader")
+        reject(one(cur, "select ops.source_merge_authority_projection(%s,null,%s,%s)", (decision_id, head, pr))[0], "released merge projection")
+    return 23
 
 
 if __name__ == "__main__":

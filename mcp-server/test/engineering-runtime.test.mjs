@@ -263,13 +263,25 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
     return { rows: [] };
   } };
   const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: fakeClaim.envelope_digest, attempt_id: "attempt:1", slice_ref: "slice:one", plan_digest: typed.plan_digest, attribution: {}, planned_resource_refs: [], actual_resource_refs: [], planned_component_refs: [], actual_component_refs: [], checks: [{ check_ref: "check:one" }], artifact_refs: [], evidence_refs: [], deviations: [], source_evidence: {}, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false }, executor_claim: { claimed_by: "codex" }, independent_verification_required: true, outcome: "claimed_complete" };
-  const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "hermes-desktop", dispatchEnvelope: async (_desk, _envelope, task, options) => { calls.push({ task, options }); return receipt; }, ToolError: Error });
+  const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "hermes-desktop",
+    withCanonicalOwnership: async (claim, execute) => {
+      assert.equal(claim.job_id, fakeClaim.job_id);
+      calls.push("ownership-acquire");
+      const value = await execute();
+      calls.push("ownership-release");
+      return value;
+    },
+    dispatchEnvelope: async (_desk, _envelope, task, options) => { calls.push({ task, options }); return receipt; }, ToolError: Error });
   assert.equal(result.completed, 1);
   assert.ok(calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.reap_expired_jobs")) <
     calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.engineering_claim_slice")));
   assert.ok(calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.engineering_retire_permanently_ineligible_jobs")) <
     calls.findIndex(sql => typeof sql === "string" && sql.includes("ops.engineering_claim_slice")));
   assert.deepEqual(calls.find(row => row.options)?.options, { fresh: true });
+  assert.ok(calls.indexOf("ownership-acquire") < calls.findIndex(row => row.options));
+  assert.ok(calls.indexOf("ownership-release") > calls.findIndex(row => row.options));
+  assert.ok(calls.indexOf("ownership-release") <
+    calls.findIndex(sql => typeof sql === "string" && sql.includes("engineering_finalize_slice_receipt")));
   assert.equal(calls.find(row => row.options)?.task.engineering_plan.plan_digest, typed.plan_digest);
   assert.equal(calls.find(row => row.options)?.task.work_request, typed.work_request.id);
   assert.equal(calls.find(row => row.options)?.task.work_request_ref, "WR-301",
@@ -2057,32 +2069,38 @@ test("a v2 plan still admits and projects through the existing runtime seams", (
 
 test("canonical ownership context is minted from sealed runtime bindings and read back on one connection", async () => {
   const calls = [];
-  const ownedActor = { ...actor, correlation_id: "77777777-7777-4777-8777-777777777777", execution_host_id: "cloudflare-workers:build-125" };
+  const ownedActor = { ...actor, execution_host_id: "cloudflare-workers:build-126" };
   const db = { query: async (sql, params = []) => {
     calls.push({ sql, params });
+    if (sql.includes("issuer-capability")) return { rows: [] };
     if (sql.includes("mint_canonical_ownership_runtime_session")) return { rows: [{ binding: {
       ok: true, ownership_session_ref: "ownership:88888888-8888-4888-8888-888888888888",
-      organization_tenant_id: "carr-internal", acting_actor_slug: "codex", execution_host_ref: "cloudflare-workers:build-125",
+      organization_tenant_id: "carr-internal", acting_actor_slug: "codex", execution_host_ref: "cloudflare-workers:build-126",
     } }] };
     if (sql.includes("canonical_ownership_trusted_context")) return { rows: [{ context: {
       ok: true, ownership_session_ref: "ownership:88888888-8888-4888-8888-888888888888",
-      organization_tenant_id: "carr-internal", acting_actor_slug: "codex", execution_host_ref: "cloudflare-workers:build-125",
+      organization_tenant_id: "carr-internal", acting_actor_slug: "codex", execution_host_ref: "cloudflare-workers:build-126",
     } }] };
     if (sql.includes("set_config")) return { rows: [] };
     throw new Error(`unexpected query: ${sql}`);
   } };
   const result = await withTrustedCanonicalOwnershipContext(db, ownedActor, {
     work_request_id: "11111111-1111-4111-8111-111111111111", accepted_plan_id: "22222222-2222-4222-8222-222222222222",
+    agent_session_id: "55555555-5555-4555-8555-555555555555",
     envelope_id: "33333333-3333-4333-8333-333333333333", attempt: 1, expires_at: "2099-01-01T00:00:00Z",
-    idempotency_key: "44444444-4444-4444-8444-444444444444",
+    idempotency_key: "44444444-4444-4444-8444-444444444444", job_lease_token: "66666666-6666-4666-8666-666666666666",
   }, EngineeringToolError, context => ({ session: context.ownership_session_ref }));
   assert.equal(result.session, "ownership:88888888-8888-4888-8888-888888888888");
   assert.equal(calls.filter(call => call.sql.includes("mint_canonical_ownership_runtime_session")).length, 1);
   assert.equal(calls.filter(call => call.sql.includes("canonical_ownership_trusted_context")).length, 1);
-  assert.match(calls.find(call => call.sql.includes("set_config")).sql, /ownership_session_id/);
+  assert.match(calls.find(call => call.sql.includes("ownership_session_id")).sql, /ownership_session_id/);
+  assert.deepEqual(calls.find(call => call.sql.includes("canonical-ownership-server-binding")).params,
+    ["carr-internal", "codex", "session:55555555-5555-4555-8555-555555555555",
+      "cloudflare-workers:build-126", "66666666-6666-4666-8666-666666666666"]);
   await assert.rejects(() => withTrustedCanonicalOwnershipContext(db, { ...ownedActor, execution_host_id: "forged-host" }, {
     work_request_id: "11111111-1111-4111-8111-111111111111", accepted_plan_id: "22222222-2222-4222-8222-222222222222",
+    agent_session_id: "55555555-5555-4555-8555-555555555555",
     envelope_id: "33333333-3333-4333-8333-333333333333", attempt: 1, expires_at: "2099-01-01T00:00:00Z",
-    idempotency_key: "55555555-5555-4555-8555-555555555555",
+    idempotency_key: "77777777-7777-4777-8777-777777777777", job_lease_token: "66666666-6666-4666-8666-666666666666",
   }, EngineeringToolError, () => {}), error => error.error === "canonical_ownership_server_context_unavailable");
 });

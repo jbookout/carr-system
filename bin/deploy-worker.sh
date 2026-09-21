@@ -256,6 +256,17 @@ done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
+# WR126 only ships the inert contract.  A local environment must not turn the
+# issuer planner into a live provisioning or activation path, and the checked
+# Wrangler manifest must carry the same explicit disabled default.  The actual
+# login/secret slots are deliberately not read by this deploy wrapper.
+OWNERSHIP_RUNTIME_MODE="${CARR_CANONICAL_OWNERSHIP_RUNTIME_MODE:-disabled}"
+[ "$OWNERSHIP_RUNTIME_MODE" = "disabled" ] \
+  || fail "canonical ownership issuer runtime is disabled in this source slice."
+grep -Eq '^CANONICAL_OWNERSHIP_RUNTIME_MODE[[:space:]]*=[[:space:]]*"disabled"[[:space:]]*$' \
+  "$WORKER_DIR/wrangler.toml" \
+  || fail "wrangler.toml must keep canonical ownership issuer runtime disabled."
+
 # One builder owns the exact source/environment/assurance preimage for every
 # release-manifest reconstruction.  A caller may supply either the complete
 # assurance group or none; the admission rules below require the complete group

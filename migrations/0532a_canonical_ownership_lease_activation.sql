@@ -1,4 +1,4 @@
--- WR-000125 / PLAN-b9bd96dd692c-v1
+-- WR-000126 / PLAN-660624b07e83-v1
 -- Activate the byte-identical 0450 ownership kernel through the existing
 -- authenticated Worker principal, add immutable same-request accepted-plan
 -- successors, and permanently fence the abandoned WR122 contract.
@@ -22,7 +22,7 @@ insert into ops.engineering_stale_contract_fence(
 values (1,'WR-000122','PLAN-954b03dd464d-v1',
   'sha256:954b03dd464dab9986bc705d01fdb197edd29b23ad10ca673da53ad0ac03c27d',
   array['0535_ready_plan_amendment.sql','0536_ready_plan_amendment_scac_successor.sql'],false,
-  'Superseded by the sole accepted WR-000125 recovery authority; historical rows remain exact but are permanently non-executable.');
+  'Superseded through WR-000125 and its accepted WR-000126 replacement authority; historical rows remain exact but are permanently non-executable.');
 
 insert into ops.engineering_stale_contract_fence(
   generation,work_request_ref,plan_ref,plan_hash,migration_filenames,successor_allowed,reason)
@@ -157,7 +157,7 @@ end $$;
 -- is not found exactly once.
 do $source_merge_successor$
 declare v_definition text; v_marker text:='where x.work_request_id=w.id;';
-        v_name_marker text:='FUNCTION ops.source_merge_authority_projection(';
+        v_name_marker text:='FUNCTION ops.source_merge_authority_projection('; v_old text; v_new text;
 begin
   select pg_get_functiondef('ops.source_merge_authority_projection(uuid,text,text,integer)'::regprocedure)
     into v_definition;
@@ -169,6 +169,41 @@ begin
     'FUNCTION ops.source_merge_authority_projection_v1(');
   v_definition:=replace(v_definition,v_marker,
     'where x.work_request_id=w.id and x.result_version=w.version;');
+  for v_old,v_new in select * from (values
+    ($old$decision.title is distinct from 'Routine authorized green PRs merge without asking Joe for ceremonial approval'$old$,
+     $new$decision.title is distinct from 'Gate A2 source-merge authority: '||work_ref$new$),
+    ($old$and e.subject_id=p_decision_id$old$,
+     $new$and e.subject_id=p_decision_id
+     and e.authorization_class='human' and e.new_value->'quote_absent'='false'::jsonb
+     and e.human_quote='I approve Gate A2 for '||work_ref||' PR #'||p_pr_number::text||' at '||p_head_sha||' for 120 minutes'
+     and e.occurred_at<=statement_timestamp() and e.occurred_at+interval '120 minutes'>statement_timestamp()$new$),
+    ($old$and lease.state='active' and lease.expires_at>evaluated_at
+     and lease.id=review_manifest.lease_id$old$,
+     $new$and lease.state in ('active','released')
+     and lease.id=review_manifest.lease_id$new$),
+    ($old$and exists (select 1 from ops.assurance_execution_manifest bound_manifest
+                      join ops.assurance_evidence_extension bound_evidence
+                        on bound_evidence.manifest_id=bound_manifest.id
+                     where bound_manifest.lease_id=lease.id
+                       and bound_manifest.repository_commit_sha=p_head_sha
+                       and bound_evidence.receipt_id in (
+                         select bound_receipt.id from ops.engineering_slice_receipt bound_receipt
+                          where bound_receipt.work_request_id=w.id
+                            and bound_receipt.outcome='claimed_complete'))$old$,
+     $new$and exists (select 1 from ops.canonical_ownership_runtime_session merge_session
+                      join ops.canonical_ownership_merge_binding merge_binding
+                        on merge_binding.runtime_binding_id=merge_session.id
+                     where merge_session.ownership_session_ref=lease.holder_session_ref
+                       and merge_session.phase='merge'
+                       and merge_binding.decision_id=p_decision_id
+                       and merge_binding.head_sha=p_head_sha and merge_binding.pr_number=p_pr_number
+                       and ops.canonical_ownership_merge_binding_valid(merge_session.id))$new$)
+  ) changes(old_text,new_text) loop
+    if (length(v_definition)-length(replace(v_definition,v_old,'')))/length(v_old)<>1 then
+      raise exception 'source-merge phase seam drifted';
+    end if;
+    v_definition:=replace(v_definition,v_old,v_new);
+  end loop;
   execute v_definition;
 end $source_merge_successor$;
 
@@ -198,6 +233,43 @@ end $$;
 -- Trusted transaction-local 0450 adapter binding.
 -- -------------------------------------------------------------------------
 
+-- Credentials are provisioned separately. Membership permits SET ROLE for
+-- EXECUTE only; session_user remains the authenticated generation throughout.
+do $issuer_roles$
+declare r text;
+begin
+  if not exists(select 1 from pg_roles where rolname='carr_ownership_issuer') then
+    create role carr_ownership_issuer nologin noinherit nobypassrls;
+  end if;
+  foreach r in array array['carr_ownership_issuer_g1','carr_ownership_issuer_g2'] loop
+    if not exists(select 1 from pg_roles where rolname=r) then
+      execute format('create role %I login noinherit nobypassrls',r);
+    end if;
+    if exists(select 1 from pg_roles where rolname=r and
+      (not rolcanlogin or rolinherit or rolbypassrls or rolsuper or rolcreaterole or rolcreatedb)) then
+      raise exception 'ownership issuer login has unsafe attributes: %',r;
+    end if;
+    execute format('grant carr_ownership_issuer to %I',r);
+  end loop;
+  if exists(select 1 from pg_roles where rolname='carr_ownership_issuer' and
+    (rolcanlogin or rolbypassrls or rolsuper or rolcreaterole or rolcreatedb)) then
+    raise exception 'ownership issuer capability role has unsafe attributes';
+  end if;
+end $issuer_roles$;
+
+create table ops.canonical_ownership_issuer_generation (
+  principal name primary key check (principal in ('carr_ownership_issuer_g1','carr_ownership_issuer_g2')),
+  generation integer not null unique check (generation>0),
+  state text not null check (state in ('active','draining')),
+  changed_at timestamptz not null default clock_timestamp()
+);
+create unique index canonical_ownership_one_active_issuer
+  on ops.canonical_ownership_issuer_generation(state) where state='active';
+insert into ops.canonical_ownership_issuer_generation(principal,generation,state)
+values ('carr_ownership_issuer_g1',1,'active'),('carr_ownership_issuer_g2',2,'draining');
+revoke all on ops.canonical_ownership_issuer_generation from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_ownership_issuer;
+grant usage on schema ops to carr_ownership_issuer;
+
 create table ops.canonical_ownership_runtime_session (
   id uuid primary key default gen_random_uuid(),
   idempotency_key uuid not null unique,
@@ -211,6 +283,9 @@ create table ops.canonical_ownership_runtime_session (
   runtime_session_ref text not null check (runtime_session_ref ~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'),
   ownership_session_ref text not null unique check (ownership_session_ref ~ '^ownership:[0-9a-f-]{36}$'),
   execution_host_ref text not null check (execution_host_ref ~ '^cloudflare-workers:[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$'),
+  issuer_principal name not null references ops.canonical_ownership_issuer_generation(principal),
+  capability_token_hash text not null check (capability_token_hash ~ '^[0-9a-f]{64}$'),
+  phase text not null default 'build' check (phase in ('build','merge')),
   state text not null default 'active' check (state in ('active','expired','replaced')),
   issued_at timestamptz not null default clock_timestamp(),
   expires_at timestamptz not null,
@@ -224,12 +299,66 @@ create table ops.canonical_ownership_runtime_session (
 create index canonical_ownership_runtime_session_active_idx
   on ops.canonical_ownership_runtime_session(organization_tenant_id,ownership_session_ref,expires_at)
   where state='active';
+create unique index canonical_ownership_runtime_one_build_attempt
+  on ops.canonical_ownership_runtime_session(subject_envelope_id,attempt)
+  where state='active' and phase='build';
+
+create table ops.canonical_ownership_merge_binding (
+  runtime_binding_id uuid primary key references ops.canonical_ownership_runtime_session(id),
+  decision_id uuid not null,
+  decision_event_id uuid not null references public.event(id),
+  receipt_id uuid not null references ops.engineering_slice_receipt(id),
+  scope_id uuid not null references ops.source_merge_plan_scope(id),
+  head_sha text not null check (head_sha ~ '^[0-9a-f]{40}$'),
+  pr_number integer not null check (pr_number>0),
+  capability_token uuid not null unique,
+  decision_expires_at timestamptz not null,
+  unique(decision_id,head_sha,pr_number)
+);
+revoke all on ops.canonical_ownership_merge_binding from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_ownership_issuer;
+
+create or replace function ops.canonical_ownership_merge_binding_valid(p_binding_id uuid)
+returns boolean language sql stable security definer set search_path=pg_catalog,ops,public
+as $$
+  select exists(select 1 from ops.canonical_ownership_runtime_session rs
+    join ops.canonical_ownership_merge_binding m on m.runtime_binding_id=rs.id
+    join ops.work_request w on w.id=rs.work_request_id and w.organization_tenant_id=rs.organization_tenant_id
+    join ops.sourced_work_request_plan_acceptance_receipt ar
+      on ar.work_request_id=w.id and ar.result_version=w.version and ar.plan_id=rs.accepted_plan_id
+    join ops.sourced_work_request_plan p on p.id=ar.plan_id and p.plan_hash=ar.plan_hash
+    join ops.source_merge_plan_scope scope on scope.id=m.scope_id and scope.accepted_plan_id=p.id
+      and scope.work_request_id=w.id and scope.acceptance_receipt_id=ar.id
+    join ops.engineering_execution_envelope env on env.id=rs.subject_envelope_id
+      and env.accepted_plan_id=p.id and env.work_request_id=w.id and env.state_version=w.version
+    join ops.engineering_slice_receipt receipt on receipt.id=m.receipt_id and receipt.envelope_id=env.id
+      and receipt.outcome='claimed_complete' and receipt.receipt#>>'{source_evidence,source_sha}'=m.head_sha
+    join public.event ev on ev.id=m.decision_event_id and ev.subject_id=m.decision_id
+    join public.actor a on a.id=rs.actor_id and a.slug=rs.actor_slug and a.active
+   where rs.id=p_binding_id and rs.phase='merge' and rs.state='active'
+     and rs.expires_at>statement_timestamp() and m.decision_expires_at>=rs.expires_at
+     and w.state='ready' and w.blocker_code is null
+     and not ops.engineering_contract_stale(p.plan_ref,p.plan_hash,null)
+     and not exists(select 1 from ops.engineering_execution_envelope successor where successor.supersedes_envelope_id=env.id)
+     and ev.verb='log-decision' and ev.subject_type='decision'
+     and ev.organization_tenant_id=rs.organization_tenant_id
+     and ev.sponsoring_human_slug='joe' and ev.authorization_class='human'
+     and ev.new_value->>'title'='Gate A2 source-merge authority: '||w.ref
+     and ev.new_value->'quote_absent'='false'::jsonb
+     and ev.human_quote='I approve Gate A2 for '||w.ref||' PR #'||m.pr_number::text||' at '||m.head_sha||' for 120 minutes'
+     and ev.occurred_at<=statement_timestamp()
+     and m.decision_expires_at=ev.occurred_at+interval '120 minutes');
+$$;
 
 create or replace function ops.canonical_ownership_runtime_principal_valid()
-returns boolean language sql stable security definer set search_path=pg_catalog
+returns boolean language sql stable security definer set search_path=pg_catalog,ops
 as $$
-  select session_user in ('app_writer','carr_writer')
-     and pg_has_role(session_user,'carr_writer','member')
+  select exists(select 1 from ops.canonical_ownership_issuer_generation g
+       join pg_roles r on r.rolname=g.principal
+      where g.principal=session_user and g.state in ('active','draining')
+        and r.rolcanlogin and not r.rolinherit and not r.rolbypassrls and not r.rolsuper
+        and not r.rolcreaterole and not r.rolcreatedb)
+     and pg_has_role(session_user,'carr_ownership_issuer','member')
+     and not pg_has_role(session_user,'carr_writer','member')
      and not pg_has_role(session_user,'carr_jobs','member')
      and not pg_has_role(session_user,'carr_authority','member');
 $$;
@@ -245,6 +374,7 @@ declare v_tenant text:=nullif(btrim(current_setting('carr.organization_tenant_id
         v_actor_slug text:=nullif(btrim(current_setting('carr.acting_actor_slug',true)),'');
         v_runtime_context text:=nullif(btrim(current_setting('carr.receipt_session_ref',true)),'');
         v_host_context text:=nullif(btrim(current_setting('carr.execution_host_id',true)),'');
+        v_capability text:=nullif(current_setting('carr.engineering_job_lease_token',true),'');
         v_actor public.actor%rowtype; v_work ops.work_request%rowtype;
         v_plan ops.sourced_work_request_plan%rowtype;
         v_env ops.engineering_execution_envelope%rowtype;
@@ -255,7 +385,7 @@ begin
     return jsonb_build_object('ok',false,'reason_id','ownership_runtime_principal_untrusted');
   end if;
   if v_tenant is null or v_actor_slug is null or v_runtime_context is null
-     or v_host_context is null then
+     or v_host_context is null or v_capability is null then
     return jsonb_build_object('ok',false,'reason_id','ownership_runtime_identity_missing');
   end if;
   if p_idempotency_key is null or p_attempt is null or p_attempt<1
@@ -278,9 +408,18 @@ begin
         p_runtime_session_ref,p_execution_host_ref,p_expires_at) then
       return jsonb_build_object('ok',false,'reason_id','ownership_runtime_idempotency_conflict');
     end if;
-    if v_row.organization_tenant_id is distinct from v_tenant
+    if v_row.phase<>'build' or v_row.organization_tenant_id is distinct from v_tenant
        or v_row.actor_slug is distinct from v_actor_slug
+       or v_row.issuer_principal is distinct from session_user
+       or v_row.capability_token_hash is distinct from encode(public.digest(v_capability,'sha256'),'hex')
        or v_row.state<>'active' or v_row.expires_at<=clock_timestamp()
+       or not exists(select 1 from ops.engineering_execution_envelope e
+         join ops.job j on j.id=e.job_id
+         join ops.capability_agent_session s on s.id=e.agent_session_id
+         where e.id=v_row.subject_envelope_id and j.attempt=v_row.attempt and j.state='running'
+           and j.lease_token::text=v_capability and j.leased_until>clock_timestamp()
+           and s.executor_actor_id=v_row.actor_id and s.state in ('claimed','in_progress')
+           and s.lease_expires_at>clock_timestamp())
        or not exists(
          select 1 from ops.work_request w
          join ops.sourced_work_request_plan_acceptance_receipt ar
@@ -299,6 +438,10 @@ begin
       'acting_actor_slug',v_row.actor_slug,'execution_host_ref',v_row.execution_host_ref,
       'expires_at',v_row.expires_at);
   end if;
+  if not exists(select 1 from ops.canonical_ownership_issuer_generation
+      where principal=session_user and state='active') then
+    return jsonb_build_object('ok',false,'reason_id','ownership_issuer_draining');
+  end if;
   select * into v_actor from public.actor where slug=v_actor_slug and active for share;
   select * into v_work from ops.work_request where id=p_work_request_id for update;
   select * into v_plan from ops.sourced_work_request_plan where id=p_accepted_plan_id for share;
@@ -314,6 +457,8 @@ begin
      or v_env.state_version<>v_work.version or v_env.expires_at<=clock_timestamp()
      or p_expires_at>v_env.expires_at
      or v_agent_session.work_request_id<>v_work.id
+     or v_actor.id is distinct from v_agent_session.executor_actor_id
+     or p_runtime_session_ref is distinct from 'session:'||v_agent_session.id::text
      or v_agent_session.state not in ('claimed','in_progress')
      or v_agent_session.lease_expires_at is null
      or v_agent_session.lease_expires_at<=clock_timestamp()
@@ -324,26 +469,79 @@ begin
         where ar.work_request_id=v_work.id and ar.plan_id=v_plan.id
           and ar.plan_hash=v_plan.plan_hash and ar.result_version=v_work.version)
      or v_job.attempt<>p_attempt or v_job.state<>'running'
+     or v_job.lease_token::text is distinct from v_capability
      or v_job.leased_until is null or v_job.leased_until<=clock_timestamp()
      or p_expires_at>v_job.leased_until
      or coalesce((ops.engineering_envelope_currentness(v_env.id,v_job.id)->>'eligible')::boolean,false)
         is not true then
     return jsonb_build_object('ok',false,'reason_id','ownership_runtime_binding_stale');
   end if;
+  update ops.canonical_ownership_runtime_session set state='expired'
+    where subject_envelope_id=v_env.id and attempt=p_attempt and phase='build'
+      and state='active' and expires_at<=clock_timestamp();
+  if exists(select 1 from ops.canonical_ownership_runtime_session
+      where subject_envelope_id=v_env.id and attempt=p_attempt and phase='build' and state='active') then
+    return jsonb_build_object('ok',false,'reason_id','ownership_runtime_binding_already_exists');
+  end if;
   v_id:=gen_random_uuid();
   insert into ops.canonical_ownership_runtime_session(
     id,idempotency_key,organization_tenant_id,actor_id,actor_slug,work_request_id,
     accepted_plan_id,subject_envelope_id,attempt,runtime_session_ref,
-    ownership_session_ref,execution_host_ref,expires_at)
+    ownership_session_ref,execution_host_ref,expires_at,issuer_principal,capability_token_hash)
   values(v_id,p_idempotency_key,v_tenant,v_actor.id,v_actor.slug,v_work.id,v_plan.id,
     v_env.id,p_attempt,p_runtime_session_ref,'ownership:'||v_id::text,
-    p_execution_host_ref,p_expires_at)
+    p_execution_host_ref,p_expires_at,session_user,encode(public.digest(v_capability,'sha256'),'hex'))
   returning * into v_row;
   return jsonb_build_object('ok',true,'replayed',false,'binding_id',v_row.id,
     'ownership_session_ref',v_row.ownership_session_ref,
     'organization_tenant_id',v_row.organization_tenant_id,
     'acting_actor_slug',v_row.actor_slug,'execution_host_ref',v_row.execution_host_ref,
     'expires_at',v_row.expires_at);
+end $$;
+
+create or replace function ops.authenticated_canonical_ownership_controller_binding(
+  p_job_id uuid,p_lease_token uuid,p_worker text,p_operation text
+) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
+as $$
+declare e ops.engineering_execution_envelope%rowtype; j ops.job%rowtype;
+  bound jsonb; candidates integer; s ops.capability_agent_session%rowtype;
+  sp ops.engineering_slice_plan%rowtype; a public.actor%rowtype;
+begin
+  if not ops.canonical_ownership_runtime_principal_valid()
+     or p_job_id is null or p_lease_token is null or nullif(btrim(p_worker),'') is null
+     or p_operation is null or p_operation not in ('acquire','check','renew','release') then return null; end if;
+  select count(*) into candidates from ops.engineering_execution_envelope env
+    where env.job_id=p_job_id and not exists(select 1 from ops.engineering_execution_envelope successor
+      where successor.supersedes_envelope_id=env.id);
+  if candidates<>1 then return null; end if;
+  select * into e from ops.engineering_execution_envelope env where env.job_id=p_job_id
+    and not exists(select 1 from ops.engineering_execution_envelope successor where successor.supersedes_envelope_id=env.id);
+  if p_operation='acquire' then
+    bound:=ops.engineering_controller_binding(e.id,p_job_id,p_lease_token);
+    if bound is null then return null; end if;
+  else
+    perform ops.canonical_ownership_lock_lineage(null,e.slice_plan_id,array[e.slice_ref]);
+    select * into s from ops.capability_agent_session where id=e.agent_session_id for share;
+    select * into a from public.actor where id=s.executor_actor_id and active and kind='automation' and slug='codex' for share;
+    select * into sp from ops.engineering_slice_plan where id=e.slice_plan_id for share;
+    if s.id is null or a.id is null or sp.id is null or s.state not in ('claimed','in_progress')
+       or s.lease_expires_at is null or s.lease_expires_at<=clock_timestamp() or e.expires_at<=clock_timestamp()
+       or not coalesce((ops.engineering_envelope_currentness(e.id,p_job_id)->>'eligible')::boolean,false) then return null; end if;
+    bound:=jsonb_build_object('envelope_id',e.id,'envelope_digest',e.envelope_digest,
+      'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,
+      'executor_actor',jsonb_build_object('id',a.id,'slug',a.slug),'agent_session_id',s.id,
+      'agent_session_lease_expires_at',s.lease_expires_at);
+  end if;
+  select * into j from ops.job where id=p_job_id for share;
+  if not found or j.definition_key<>'engineering-slice' or j.state<>'running'
+     or j.lease_token is distinct from p_lease_token or j.lease_owner is distinct from p_worker
+     or j.leased_until<=clock_timestamp() then return null; end if;
+  return jsonb_build_object('envelope_id',e.id,'work_request_id',e.work_request_id,
+    'accepted_plan_id',e.accepted_plan_id,'slice_plan_id',e.slice_plan_id,
+    'state_version',e.state_version,'canonical_record_digest',e.canonical_record_digest,
+    'expires_at',e.expires_at,
+    'runtime_expires_at',least(e.expires_at,j.leased_until,(bound->>'agent_session_lease_expires_at')::timestamptz),
+    'attempt',j.attempt,'agent_session_id',e.agent_session_id,'binding',bound);
 end $$;
 
 create or replace function ops.canonical_ownership_trusted_context()
@@ -354,13 +552,14 @@ declare v_tenant text:=nullif(btrim(current_setting('carr.organization_tenant_id
         v_runtime text:=nullif(btrim(current_setting('carr.receipt_session_ref',true)),'');
         v_session text:=nullif(btrim(current_setting('carr.ownership_session_id',true)),'');
         v_host text:=nullif(btrim(current_setting('carr.execution_host_id',true)),'');
+        v_capability text:=nullif(current_setting('carr.engineering_job_lease_token',true),'');
         v_row ops.canonical_ownership_runtime_session%rowtype; v_job_id uuid;
 begin
   if not ops.canonical_ownership_runtime_principal_valid() then
     return jsonb_build_object('ok',false,'reason_id','ownership_runtime_principal_untrusted');
   end if;
   if v_tenant is null or v_actor is null or v_runtime is null
-     or v_session is null or v_host is null then
+     or v_session is null or v_host is null or v_capability is null then
     return jsonb_build_object('ok',false,'reason_id','ownership_runtime_context_missing');
   end if;
   select * into v_row from ops.canonical_ownership_runtime_session
@@ -370,6 +569,18 @@ begin
   if not found or v_row.state<>'active' or v_row.expires_at<=clock_timestamp()
      or v_row.actor_slug<>v_actor or v_row.runtime_session_ref<>v_runtime
      or v_row.execution_host_ref<>v_host
+     or v_row.issuer_principal is distinct from session_user
+     or v_row.capability_token_hash is distinct from encode(public.digest(v_capability,'sha256'),'hex')
+     or (v_row.phase='build' and not exists(select 1 from ops.engineering_execution_envelope e
+       join ops.capability_agent_session s on s.id=e.agent_session_id
+       join ops.job j on j.id=e.job_id
+       join public.actor a on a.id=s.executor_actor_id and a.active
+       where e.id=v_row.subject_envelope_id and s.executor_actor_id=v_row.actor_id
+         and v_row.runtime_session_ref='session:'||s.id::text
+         and s.state in ('claimed','in_progress') and s.lease_expires_at>clock_timestamp()
+         and j.state='running' and j.attempt=v_row.attempt
+         and j.lease_token::text=v_capability and j.leased_until>clock_timestamp()))
+     or (v_row.phase='merge' and not ops.canonical_ownership_merge_binding_valid(v_row.id))
      or not exists(
        select 1 from ops.work_request w
        join ops.sourced_work_request_plan_acceptance_receipt ar
@@ -378,8 +589,8 @@ begin
         where w.id=v_row.work_request_id and w.state='ready'
           and ar.plan_id=v_row.accepted_plan_id and ar.plan_hash=p.plan_hash
           and not ops.engineering_contract_stale(p.plan_ref,p.plan_hash,null))
-     or coalesce((ops.engineering_envelope_currentness(
-          v_row.subject_envelope_id,v_job_id)->>'eligible')::boolean,false) is not true then
+     or (v_row.phase='build' and coalesce((ops.engineering_envelope_currentness(
+          v_row.subject_envelope_id,v_job_id)->>'eligible')::boolean,false) is not true) then
     return jsonb_build_object('ok',false,'reason_id','ownership_runtime_context_stale');
   end if;
   return jsonb_build_object('ok',true,'organization_tenant_id',v_tenant,
@@ -387,7 +598,92 @@ begin
     'execution_host_ref',v_host,'binding_id',v_row.id,
     'work_request_id',v_row.work_request_id,'accepted_plan_id',v_row.accepted_plan_id,
     'subject_envelope_id',v_row.subject_envelope_id,'attempt',v_row.attempt,
-    'runtime_session_ref',v_row.runtime_session_ref,'expires_at',v_row.expires_at);
+    'runtime_session_ref',v_row.runtime_session_ref,'phase',v_row.phase,'expires_at',v_row.expires_at);
+end $$;
+
+create or replace function ops.mint_canonical_ownership_merge_session(
+  p_subject_envelope_id uuid,p_decision_id uuid,p_head_sha text,p_pr_number integer,
+  p_execution_host_ref text,p_expires_at timestamptz,p_idempotency_key uuid
+) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
+as $$
+declare tenant text:=nullif(current_setting('carr.organization_tenant_id',true),'');
+  actor_slug text:=nullif(current_setting('carr.acting_actor_slug',true),'');
+  host text:=nullif(current_setting('carr.execution_host_id',true),'');
+  e ops.engineering_execution_envelope%rowtype; w ops.work_request%rowtype;
+  ar ops.sourced_work_request_plan_acceptance_receipt%rowtype;
+  scope ops.source_merge_plan_scope%rowtype; receipt ops.engineering_slice_receipt%rowtype;
+  ev public.event%rowtype; a public.actor%rowtype;
+  rs ops.canonical_ownership_runtime_session%rowtype; m ops.canonical_ownership_merge_binding%rowtype;
+  v_id uuid; capability uuid;
+begin
+  if not ops.canonical_ownership_runtime_principal_valid() then
+    return jsonb_build_object('ok',false,'reason_id','ownership_merge_issuer_untrusted');
+  end if;
+  if tenant is null or actor_slug is null or host is null or p_execution_host_ref is distinct from host
+     or host !~ '^cloudflare-workers:[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$'
+     or p_idempotency_key is null or coalesce(p_head_sha,'') !~ '^[0-9a-f]{40}$'
+     or p_pr_number is null or p_pr_number<1 or p_expires_at is null or p_expires_at<=clock_timestamp() then
+    return jsonb_build_object('ok',false,'reason_id','ownership_merge_input_invalid');
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('canonical-ownership-runtime:'||p_idempotency_key::text,0));
+  select * into rs from ops.canonical_ownership_runtime_session where idempotency_key=p_idempotency_key;
+  if found then
+    select * into m from ops.canonical_ownership_merge_binding where runtime_binding_id=rs.id;
+    if rs.phase<>'merge' or rs.issuer_principal is distinct from session_user
+       or (rs.organization_tenant_id,rs.actor_slug,rs.subject_envelope_id,rs.execution_host_ref,rs.expires_at,
+           m.decision_id,m.head_sha,m.pr_number) is distinct from
+          (tenant,actor_slug,p_subject_envelope_id,host,p_expires_at,p_decision_id,p_head_sha,p_pr_number) then
+      return jsonb_build_object('ok',false,'reason_id','ownership_merge_idempotency_conflict');
+    end if;
+    if not ops.canonical_ownership_merge_binding_valid(rs.id) then
+      return jsonb_build_object('ok',false,'reason_id','ownership_merge_binding_stale');
+    end if;
+  else
+    if not exists(select 1 from ops.canonical_ownership_issuer_generation where principal=session_user and state='active') then
+      return jsonb_build_object('ok',false,'reason_id','ownership_issuer_draining');
+    end if;
+    select * into e from ops.engineering_execution_envelope where id=p_subject_envelope_id for share;
+    select * into w from ops.work_request where id=e.work_request_id and organization_tenant_id=tenant for update;
+    select * into ar from ops.sourced_work_request_plan_acceptance_receipt
+     where work_request_id=w.id and result_version=w.version and plan_id=e.accepted_plan_id;
+    select * into scope from ops.source_merge_plan_scope where work_request_id=w.id
+      and accepted_plan_id=e.accepted_plan_id and acceptance_receipt_id=ar.id;
+    select * into receipt from ops.engineering_slice_receipt where envelope_id=e.id
+      and outcome='claimed_complete' and receipt#>>'{source_evidence,source_sha}'=p_head_sha;
+    select * into ev from public.event where subject_type='decision' and verb='log-decision'
+      and subject_id=p_decision_id order by recorded_at desc,id desc limit 1;
+    select * into a from public.actor where slug=actor_slug and active;
+    if e.id is null or w.id is null or ar.id is null or scope.id is null or receipt.id is null or a.id is null
+       or ev.id is null or ev.organization_tenant_id is distinct from tenant
+       or ev.sponsoring_human_slug is distinct from 'joe'
+       or ev.authorization_class is distinct from 'human'
+       or ev.new_value->>'title' is distinct from 'Gate A2 source-merge authority: '||w.ref
+       or ev.new_value->'quote_absent' is distinct from 'false'::jsonb
+       or ev.human_quote is distinct from 'I approve Gate A2 for '||w.ref||' PR #'||p_pr_number::text||' at '||p_head_sha||' for 120 minutes'
+       or ev.occurred_at>clock_timestamp() or p_expires_at>ev.occurred_at+interval '120 minutes'
+       or w.state<>'ready' or w.blocker_code is not null or e.state_version<>w.version
+       or ops.engineering_contract_stale(null,ar.plan_hash,null)
+       or exists(select 1 from ops.engineering_execution_envelope successor where successor.supersedes_envelope_id=e.id) then
+      return jsonb_build_object('ok',false,'reason_id','ownership_merge_authority_invalid');
+    end if;
+    v_id:=gen_random_uuid(); capability:=gen_random_uuid();
+    insert into ops.canonical_ownership_runtime_session(id,idempotency_key,organization_tenant_id,actor_id,actor_slug,
+      work_request_id,accepted_plan_id,subject_envelope_id,attempt,runtime_session_ref,ownership_session_ref,
+      execution_host_ref,issuer_principal,capability_token_hash,phase,expires_at)
+    values(v_id,p_idempotency_key,tenant,a.id,a.slug,w.id,e.accepted_plan_id,e.id,split_part(receipt.attempt_id,':',2)::integer,
+      'session:merge:'||v_id::text,'ownership:'||v_id::text,host,session_user,
+      encode(public.digest(capability::text,'sha256'),'hex'),'merge',p_expires_at) returning * into rs;
+    insert into ops.canonical_ownership_merge_binding(runtime_binding_id,decision_id,decision_event_id,
+      receipt_id,scope_id,head_sha,pr_number,capability_token,decision_expires_at)
+    values(v_id,p_decision_id,ev.id,receipt.id,scope.id,p_head_sha,p_pr_number,capability,ev.occurred_at+interval '120 minutes')
+    returning * into m;
+  end if;
+  return jsonb_build_object('ok',true,'binding_id',rs.id,'phase','merge',
+    'ownership_session_ref',rs.ownership_session_ref,'runtime_session_ref',rs.runtime_session_ref,
+    'organization_tenant_id',rs.organization_tenant_id,'acting_actor_slug',rs.actor_slug,
+    'execution_host_ref',rs.execution_host_ref,'expires_at',rs.expires_at,
+    'merge_capability_token',m.capability_token,'decision_id',m.decision_id,
+    'head_sha',m.head_sha,'pr_number',m.pr_number);
 end $$;
 
 do $clone_ownership_context$
@@ -407,13 +703,6 @@ set search_path=pg_catalog,ops,public
 as $$
 declare v_context jsonb:=ops.canonical_ownership_trusted_context();
 begin
-  -- The disposable local-PG harness owns no login-role simulation and runs the
-  -- exhaustive byte-identical 0450 kernel proof as its ephemeral superuser.
-  -- That role does not exist in deployed environments; production principals
-  -- always take the database-minted branch below.
-  if session_user='carr_ci' and current_user='carr_ci' then
-    return ops.canonical_ownership_context_v1();
-  end if;
   if not coalesce((v_context->>'ok')::boolean,false) then
     return ops.canonical_ownership_refusal('IDENTITY_CONTEXT_INVALID','identity_context',
       '"active database-minted runtime binding"'::jsonb,
@@ -431,6 +720,203 @@ end $$;
 -- -------------------------------------------------------------------------
 -- Same-Work-Request ready-plan successor lifecycle.
 -- -------------------------------------------------------------------------
+
+-- A request receipt binds every operation to its durable runtime identity.
+-- Tokens never enter logs or audit events; the protected response allows the
+-- same issuer to resolve an ambiguous commit without acquiring a second lease.
+create table ops.canonical_ownership_operation (
+  idempotency_key uuid primary key,
+  runtime_binding_id uuid not null references ops.canonical_ownership_runtime_session(id),
+  request_digest text not null,
+  operation text not null check (operation in ('acquire','check','renew','release')),
+  response jsonb not null,
+  created_at timestamptz not null default clock_timestamp()
+);
+revoke all on ops.canonical_ownership_operation from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_ownership_issuer;
+
+create or replace function ops.canonical_ownership_lifecycle(p_request jsonb)
+returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
+as $$
+declare ctx jsonb:=ops.canonical_ownership_trusted_context();
+  rs ops.canonical_ownership_runtime_session%rowtype;
+  e ops.engineering_execution_envelope%rowtype;
+  sp ops.engineering_slice_plan%rowtype;
+  prior ops.canonical_ownership_operation%rowtype;
+  op text:=p_request->>'operation'; key uuid; digest text; result jsonb; keys text[];
+  ttl integer; lease ops.canonical_ownership_lease%rowtype;
+  scope ops.source_merge_plan_scope%rowtype; paths jsonb; resources jsonb; deps jsonb; slice jsonb;
+begin
+  if not coalesce((ctx->>'ok')::boolean,false) then return ctx; end if;
+  keys:=case op
+    when 'acquire' then array['operation','idempotency_key','ttl_seconds']
+    when 'check' then array['operation','idempotency_key','lease_id','lease_token','fencing_generation']
+    when 'renew' then array['operation','idempotency_key','lease_id','lease_token','fencing_generation','ttl_seconds']
+    when 'release' then array['operation','idempotency_key','lease_id','lease_token','fencing_generation'] end;
+  if keys is null or not coalesce(ops.engineering_receipt_exact_object(p_request,keys),false)
+     or coalesce(p_request->>'idempotency_key','') !~ '^[0-9a-f-]{36}$' then
+    return jsonb_build_object('ok',false,'reason_id','ownership_operation_invalid');
+  end if;
+  key:=(p_request->>'idempotency_key')::uuid;
+  digest:=encode(public.digest(p_request::text,'sha256'),'hex');
+  perform pg_advisory_xact_lock(hashtextextended('ownership-operation:'||key::text,0));
+  select * into prior from ops.canonical_ownership_operation where idempotency_key=key;
+  if found then
+    if prior.runtime_binding_id is distinct from (ctx->>'binding_id')::uuid
+       or prior.request_digest is distinct from digest then
+      return jsonb_build_object('ok',false,'reason_id','ownership_operation_idempotency_conflict');
+    end if;
+    return prior.response||jsonb_build_object('replayed',true);
+  end if;
+  select * into rs from ops.canonical_ownership_runtime_session where id=(ctx->>'binding_id')::uuid;
+  select * into e from ops.engineering_execution_envelope where id=rs.subject_envelope_id;
+  select * into sp from ops.engineering_slice_plan where id=e.slice_plan_id;
+  if op in ('acquire','renew') then
+    ttl:=(p_request->>'ttl_seconds')::integer;
+    if ttl is null or ttl<30 or ttl>1800 or clock_timestamp()+make_interval(secs=>ttl)>rs.expires_at then
+      return jsonb_build_object('ok',false,'reason_id','ownership_operation_ttl_exceeds_binding');
+    end if;
+  end if;
+  if op='acquire' then
+    if not exists(select 1 from ops.canonical_ownership_issuer_generation
+        where principal=session_user and state='active') then
+      return jsonb_build_object('ok',false,'reason_id','ownership_issuer_draining');
+    end if;
+    select s.* into scope from ops.source_merge_plan_scope s
+      join ops.sourced_work_request_plan_acceptance_receipt ar on ar.id=s.acceptance_receipt_id
+      where s.accepted_plan_id=rs.accepted_plan_id and s.work_request_id=rs.work_request_id
+        and s.organization_tenant_id=rs.organization_tenant_id and ar.result_version=e.state_version;
+    if not found then return jsonb_build_object('ok',false,'reason_id','ownership_accepted_scope_missing'); end if;
+    select jsonb_agg(jsonb_build_object('path',p,'mode','file','operation','write') order by p collate "C")
+      into paths from jsonb_array_elements_text(scope.authorized_paths) p;
+    select item into slice from jsonb_array_elements(sp.plan->'slices') item where item->>'slice_ref'=e.slice_ref;
+    if slice is null or jsonb_typeof(slice->'declared_resource_refs') is distinct from 'array'
+       or jsonb_typeof(slice->'declared_component_refs') is distinct from 'array' then
+      return jsonb_build_object('ok',false,'reason_id','ownership_registered_claims_invalid');
+    end if;
+    select coalesce(jsonb_agg(jsonb_build_object('resource',ref) order by ref collate "C"),'[]'::jsonb)
+      into resources from (select distinct value ref from jsonb_array_elements_text(
+        (slice->'declared_resource_refs')||(slice->'declared_component_refs'))) r;
+    deps:=ops.canonical_ownership_plan_dependencies(e.slice_plan_id,e.slice_ref);
+    if not coalesce((deps->>'ok')::boolean,false) then return deps; end if;
+    result:=ops.acquire_canonical_ownership_lease(e.work_request_id,e.state_version,
+      e.canonical_record_digest,e.accepted_plan_id,sp.accepted_plan_hash,e.slice_plan_id,
+      sp.plan_digest,e.slice_ref,scope.scope_digest,paths,resources,deps->'dependencies',ttl);
+  else
+    select * into lease from ops.canonical_ownership_lease where id=(p_request->>'lease_id')::uuid;
+    if not found or lease.subject_envelope_id is distinct from rs.subject_envelope_id
+       or lease.holder_session_ref is distinct from rs.ownership_session_ref then
+      return jsonb_build_object('ok',false,'reason_id','ownership_operation_subject_mismatch');
+    end if;
+    case op
+      when 'check' then
+        select coalesce(jsonb_agg(jsonb_build_object('path',claim_value,'mode',claim_mode,'operation',operation)
+          order by claim_value collate "C") filter(where claim_kind='path'),'[]'::jsonb),
+          coalesce(jsonb_agg(jsonb_build_object('resource',claim_value) order by claim_value collate "C")
+          filter(where claim_kind='resource'),'[]'::jsonb) into paths,resources
+          from ops.canonical_ownership_claim where lease_id=lease.id;
+        result:=ops.check_canonical_ownership_lease(lease.id,
+        (p_request->>'lease_token')::uuid,(p_request->>'fencing_generation')::bigint,
+        paths,resources);
+      when 'renew' then result:=ops.renew_canonical_ownership_lease(lease.id,
+        (p_request->>'lease_token')::uuid,(p_request->>'fencing_generation')::bigint,ttl);
+      when 'release' then result:=ops.release_canonical_ownership_lease(lease.id,
+        (p_request->>'lease_token')::uuid,(p_request->>'fencing_generation')::bigint);
+    end case;
+  end if;
+  insert into ops.canonical_ownership_operation(idempotency_key,runtime_binding_id,request_digest,operation,response)
+  values(key,rs.id,digest,op,result);
+  return result||jsonb_build_object('replayed',false);
+exception when invalid_text_representation or numeric_value_out_of_range then
+  return jsonb_build_object('ok',false,'reason_id','ownership_operation_invalid');
+end $$;
+
+create or replace function ops.canonical_ownership_claim_projection(p_lease_id uuid)
+returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
+as $$
+declare ctx jsonb:=ops.canonical_ownership_trusted_context(); result jsonb;
+begin
+  if not coalesce((ctx->>'ok')::boolean,false) then return ctx; end if;
+  if not exists(select 1 from ops.canonical_ownership_lease where id=p_lease_id
+     and holder_session_ref=ctx->>'ownership_session_ref'
+     and subject_envelope_id=(ctx->>'subject_envelope_id')::uuid) then
+    return jsonb_build_object('ok',false,'reason_id','ownership_operation_subject_mismatch');
+  end if;
+  select jsonb_build_object('ok',true,'lease_id',p_lease_id,
+    'path_claims',coalesce(jsonb_agg(jsonb_build_object('path',claim_value,'mode',claim_mode,'operation',operation)
+      order by claim_value collate "C") filter(where claim_kind='path'),'[]'::jsonb),
+    'resource_claims',coalesce(jsonb_agg(jsonb_build_object('resource',claim_value) order by claim_value collate "C")
+      filter(where claim_kind='resource'),'[]'::jsonb)) into result
+    from ops.canonical_ownership_claim where lease_id=p_lease_id;
+  return result;
+end $$;
+
+create or replace function ops.read_canonical_ownership_operation(p_idempotency_key uuid)
+returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
+as $$
+declare ctx jsonb:=ops.canonical_ownership_trusted_context(); result jsonb;
+  l ops.canonical_ownership_lease%rowtype;
+begin
+  if not coalesce((ctx->>'ok')::boolean,false) then return ctx; end if;
+  select response into result from ops.canonical_ownership_operation
+   where idempotency_key=p_idempotency_key and runtime_binding_id=(ctx->>'binding_id')::uuid;
+  if coalesce((result->>'ok')::boolean,false) and result ? 'lease_id' then
+    select * into l from ops.canonical_ownership_lease where id=(result->>'lease_id')::uuid
+      and holder_session_ref=ctx->>'ownership_session_ref'
+      and subject_envelope_id=(ctx->>'subject_envelope_id')::uuid;
+    if not found then return jsonb_build_object('ok',false,'reason_id','ownership_operation_subject_mismatch'); end if;
+    result:=result||jsonb_build_object('lease_id',l.id,'lease_token',l.lease_token,'fencing_generation',l.fencing_generation);
+  end if;
+  return coalesce(result||jsonb_build_object('replayed',true),
+    jsonb_build_object('ok',false,'reason_id','ownership_operation_not_found'));
+end $$;
+
+-- Terminal queue transitions own cleanup, so callers cannot retire the durable
+-- job/session first and strand an ownership lease. The try-lock refuses a
+-- competing acquisition rather than introducing job/ownership lock inversion.
+create or replace function ops.canonical_ownership_release_before_terminal()
+returns trigger language plpgsql security definer set search_path=pg_catalog,ops,public
+as $$
+declare rs ops.canonical_ownership_runtime_session%rowtype;
+  l ops.canonical_ownership_lease%rowtype; stamp timestamptz; event_kind text;
+begin
+  if old.state<>'running' or new.state='running' then return new; end if;
+  for rs in select r.* from ops.canonical_ownership_runtime_session r
+    join ops.engineering_execution_envelope e on e.id=r.subject_envelope_id
+    where e.job_id=old.id and r.attempt=old.attempt and r.state='active' and r.phase='build' order by r.id loop
+    if rs.capability_token_hash is distinct from encode(public.digest(old.lease_token::text,'sha256'),'hex') then
+      raise exception 'ownership terminal capability binding mismatch';
+    end if;
+    if not pg_try_advisory_xact_lock(hashtextextended('canonical-ownership:'||rs.organization_tenant_id,0)) then
+      raise exception using errcode='40001',message='ownership terminal cleanup contended; retry exact transition';
+    end if;
+    for l in select * from ops.canonical_ownership_lease where holder_session_ref=rs.ownership_session_ref
+      and subject_envelope_id=rs.subject_envelope_id and state='active' order by id for update loop
+      stamp:=clock_timestamp();
+      event_kind:=case when l.expires_at<=stamp then 'expired' else 'released' end;
+      update ops.canonical_ownership_lease set state=event_kind,
+        released_at=case when event_kind='released' then stamp else null end,updated_at=stamp where id=l.id;
+      insert into ops.canonical_ownership_lease_event(organization_tenant_id,lease_id,event_kind,
+        fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at,created_at)
+      values(l.organization_tenant_id,l.id,event_kind,l.fencing_generation,l.holder_actor_id,
+        l.holder_session_ref,l.holder_host_ref,'{"reason":"release_before_terminal"}',stamp,stamp);
+    end loop;
+    update ops.canonical_ownership_runtime_session set state='expired' where id=rs.id;
+  end loop;
+  return new;
+end $$;
+create trigger canonical_ownership_release_before_terminal before update of state on ops.job
+for each row execute function ops.canonical_ownership_release_before_terminal();
+revoke all on function ops.canonical_ownership_lifecycle(jsonb),
+  ops.read_canonical_ownership_operation(uuid),ops.canonical_ownership_release_before_terminal(),
+  ops.canonical_ownership_claim_projection(uuid),ops.canonical_ownership_merge_binding_valid(uuid),
+  ops.authenticated_canonical_ownership_controller_binding(uuid,uuid,text,text),
+  ops.mint_canonical_ownership_merge_session(uuid,uuid,text,integer,text,timestamptz,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+grant execute on function ops.canonical_ownership_lifecycle(jsonb),
+  ops.read_canonical_ownership_operation(uuid),ops.canonical_ownership_claim_projection(uuid),
+  ops.authenticated_canonical_ownership_controller_binding(uuid,uuid,text,text),
+  ops.mint_canonical_ownership_merge_session(uuid,uuid,text,integer,text,timestamptz,uuid)
+  to carr_ownership_issuer;
 
 -- Preserve the initial triaged-plan admission/review implementation byte for
 -- behavior under private predecessor names.  The public names below dispatch
@@ -494,14 +980,17 @@ as $$
       'scope_summary',p.scope_summary,'dependency_refs',p.dependency_refs,
       'recovery_ref',p.recovery_ref,'observability_ref',p.observability_ref,
       'caps',p.caps,'accepted_at',ar.accepted_at,
-      'accepted_by_actor_id',ar.accepted_by_actor_id))
+      'accepted_by_actor_id',ar.accepted_by_actor_id),
+    'execution_authorized',not ops.engineering_contract_stale(p.plan_ref,p.plan_hash,null),
+    'execution_refusal_reason',case when ops.engineering_contract_stale(p.plan_ref,p.plan_hash,null)
+      then (select f.reason from ops.engineering_stale_contract_fence f where f.plan_ref=p.plan_ref)
+      else null end)
     from ops.work_request w
     join ops.sourced_work_request_plan_acceptance_receipt ar
       on ar.work_request_id=w.id and ar.result_version=w.version
     join ops.sourced_work_request_plan p
       on p.id=ar.plan_id and p.work_request_id=w.id and p.plan_hash=ar.plan_hash
-   where w.ref=p_work_request and w.state='ready'
-     and not ops.engineering_contract_stale(p.plan_ref,p.plan_hash,null);
+   where w.ref=p_work_request and w.state='ready';
 $$;
 
 create table ops.ready_plan_amendment (
@@ -1420,11 +1909,15 @@ grant execute on function ops.source_merge_authority_projection(uuid,text,text,i
   to carr_reader;
 grant execute on function
   ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid),
-  ops.canonical_ownership_trusted_context(),
+  ops.canonical_ownership_trusted_context()
+  to carr_ownership_issuer;
+revoke all on function
   ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer),
   ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb),
   ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer),
-  ops.release_canonical_ownership_lease(uuid,uuid,bigint),
+  ops.release_canonical_ownership_lease(uuid,uuid,bigint)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_ownership_issuer;
+grant execute on function
   ops.record_sourced_heavy_build_admission(uuid,text,integer,jsonb,jsonb,uuid,uuid),
   ops.sourced_heavy_build_review_target(text,text,text),
   ops.review_sourced_heavy_build_plan(text,text,text,uuid,text,text,text,jsonb,jsonb,uuid),

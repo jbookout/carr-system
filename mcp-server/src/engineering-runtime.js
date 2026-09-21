@@ -94,30 +94,44 @@ function exactAuthorityFree(args, ToolError) {
 // The only JavaScript seam for migration0450 ownership effects.  Its input is
 // deliberately not a tool schema: callers cannot supply tenant, actor,
 // session, host, principal, or a lease token.  The Worker supplies an already
-// sealed envelope/attempt binding, the authenticated call supplies actor and
-// correlation, and Cloudflare deployment metadata supplies the host.  0532a
-// mints the ownership-session row and rechecks all of those facts before this
-// helper sets transaction-local GUCs on the same checked-out writer connection.
+// sealed envelope/attempt/job binding, the authenticated controller binding
+// supplies the durable capability-agent session and live job lease, and
+// Cloudflare deployment metadata supplies the host.  The checked-out
+// connection is from the issuer-only pool: ordinary writer/jobs connections
+// cannot SET ROLE to the capability role or execute either closed function.
 export async function withTrustedCanonicalOwnershipContext(c, actor, binding, ToolError, operation) {
   if (typeof operation !== "function") throw new TypeError("canonical ownership operation is required");
-  const fields = ["accepted_plan_id", "attempt", "envelope_id", "expires_at", "idempotency_key", "work_request_id"];
+  const fields = ["accepted_plan_id", "agent_session_id", "attempt", "envelope_id", "expires_at",
+    "idempotency_key", "job_lease_token", "work_request_id"];
   if (!binding || typeof binding !== "object" || Array.isArray(binding) ||
       Object.keys(binding).sort().join(",") !== fields.join(","))
     error(ToolError, { error: "canonical_ownership_binding_invalid" });
   const workRequestId = uuid(binding.work_request_id, "canonical_ownership.work_request_id", ToolError);
   const acceptedPlanId = uuid(binding.accepted_plan_id, "canonical_ownership.accepted_plan_id", ToolError);
+  const agentSessionId = uuid(binding.agent_session_id, "canonical_ownership.agent_session_id", ToolError);
   const envelopeId = uuid(binding.envelope_id, "canonical_ownership.envelope_id", ToolError);
   const idempotencyKey = uuid(binding.idempotency_key, "canonical_ownership.idempotency_key", ToolError);
+  const jobLeaseToken = uuid(binding.job_lease_token, "canonical_ownership.job_lease_token", ToolError);
   if (!Number.isSafeInteger(binding.attempt) || binding.attempt < 1)
     error(ToolError, { error: "canonical_ownership_attempt_invalid" });
   const expiry = new Date(binding.expires_at);
   if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now())
     error(ToolError, { error: "canonical_ownership_expiry_invalid" });
-  const runtimeSessionRef = typeof actor?.correlation_id === "string" && UUID.test(actor.correlation_id)
-    ? `session:${actor.correlation_id.toLowerCase()}` : null;
+  const runtimeSessionRef = `session:${agentSessionId}`;
   const executionHost = actor?.execution_host_id;
-  if (!runtimeSessionRef || !EXECUTION_HOST_REF.test(executionHost || ""))
+  const organizationTenantId = organizationTenantForActor(actor);
+  if (!actor?.slug || !organizationTenantId || !EXECUTION_HOST_REF.test(executionHost || ""))
     error(ToolError, { error: "canonical_ownership_server_context_unavailable" });
+  await c.query("set local role carr_ownership_issuer /* engineering-runtime:issuer-capability */");
+  await c.query(
+    "select set_config('carr.organization_tenant_id',$1::text,true), " +
+    "set_config('carr.acting_actor_slug',$2::text,true), " +
+    "set_config('carr.receipt_session_ref',$3::text,true), " +
+    "set_config('carr.execution_host_id',$4::text,true), " +
+    "set_config('carr.engineering_job_lease_token',$5::text,true) " +
+    "/* engineering-runtime:canonical-ownership-server-binding */",
+    [organizationTenantId, actor.slug, runtimeSessionRef, executionHost, jobLeaseToken],
+  );
   const minted = (await c.query(
     `select ops.mint_canonical_ownership_runtime_session($1::uuid,$2::uuid,$3::uuid,$4::integer,$5::text,$6::text,$7::timestamptz,$8::uuid) as binding
        /* engineering-runtime:mint-canonical-ownership-context */`,
@@ -125,7 +139,7 @@ export async function withTrustedCanonicalOwnershipContext(c, actor, binding, To
       expiry.toISOString(), idempotencyKey],
   )).rows[0]?.binding;
   if (!minted?.ok || !OWNERSHIP_SESSION_REF.test(minted.ownership_session_ref || "") ||
-      minted.organization_tenant_id !== organizationTenantForActor(actor) ||
+      minted.organization_tenant_id !== organizationTenantId ||
       minted.acting_actor_slug !== actor.slug || minted.execution_host_ref !== executionHost)
     error(ToolError, { error: minted?.error || "canonical_ownership_context_mint_refused" });
   await c.query(
@@ -142,7 +156,7 @@ export async function withTrustedCanonicalOwnershipContext(c, actor, binding, To
       context.organization_tenant_id !== minted.organization_tenant_id ||
       context.acting_actor_slug !== minted.acting_actor_slug || context.execution_host_ref !== minted.execution_host_ref)
     error(ToolError, { error: context?.error || "canonical_ownership_context_refused" });
-  return operation(context);
+  return await operation(context);
 }
 
 // --- V5-F03 deep-module execution contract -----------------------------------
@@ -2028,8 +2042,11 @@ async function controllerReadback(c, claim, ToolError) {
 // lease-bound receipt function.  The controller supplies the already audited
 // room-bridge dispatcher; no Claude fallback or inherited transcript path is
 // permitted here.
-export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, limit = 1, ToolError }) {
+export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope,
+  withCanonicalOwnership = null, limit = 1, ToolError }) {
   if (typeof dispatchEnvelope !== "function") throw new Error("engineering worker requires the Codex room-bridge dispatcher");
+  if (withCanonicalOwnership !== null && typeof withCanonicalOwnership !== "function")
+    throw new Error("engineering worker canonical ownership wrapper must be a function");
   // Maintenance runs as separate autocommit statements.  It must not acquire
   // queue locks inside the scoped claim transaction, whose lock order begins
   // with the exact capability session and actor authority.
@@ -2056,7 +2073,14 @@ export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, 
         job_ref: `job:${claim.job_id}`,
         attempt_id: `attempt:${claim.attempt}`, claim_lease_expires_at: jobLeaseExpiresAt,
         engineering_plan: plan, engineering_slice: slice };
-      const receipt = await runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
+      const execute = () => runCodexSlice({ dispatchEnvelope, desk, envelope: claim.envelope, task });
+      // The local controller may hold a Worker-only bearer, but the model child
+      // never does.  This wrapper acquires/checks/releases canonical ownership
+      // around the existing fully validated dispatch path and must finish its
+      // release before submitEngineeringReceipt performs the terminal update.
+      const receipt = withCanonicalOwnership
+        ? await withCanonicalOwnership(claim, execute)
+        : await execute();
       if (!receipt || typeof receipt !== "object") throw new Error("Codex worker returned no typed receipt");
       persisted = await submitEngineeringReceipt(c, claim, receipt, actor, ToolError);
     } catch (cause) {

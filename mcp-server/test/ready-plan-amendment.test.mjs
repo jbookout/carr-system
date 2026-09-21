@@ -131,6 +131,8 @@ test("the existing heavy review seam binds the successor admission and refuses i
 });
 
 test("effective-plan and actor-owned discovery are bounded readbacks", async () => {
+  assert.equal(tools()["effective-ready-plan"].writerConnection, true,
+    "tenant-scoped effective-plan reads require the actor-context transaction path");
   const db = { query: async (sql, params = []) => {
     if (sql.includes("effective_ready_plan")) return { rows: [{ plan: {
       ok: true, work_request: { ref: "WR-000125" }, current_plan: { ref: "PLAN-successor" }, lineage: [{ ref: "PLAN-old" }, { ref: "PLAN-successor" }],

@@ -1024,6 +1024,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
       },
     },
     "effective-ready-plan": {
+      writerConnection: true,
       description: "Read the one database-derived effective ready plan and immutable same-Work-Request lineage. This is a readback only; it cannot accept, acknowledge, dispatch, or execute work.",
       inputSchema: { type: "object", additionalProperties: false, properties: { work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$" } }, required: ["work_request"] },
       handler: async (c, _actor, args) => {

@@ -54,7 +54,10 @@ def main() -> int:
                 raise RuntimeError("source-merge wrapper omitted the stale-plan fence/delegation")
             if ("ops.assurance_evidence_extension" not in row[13]
                     or "ops.canonical_ownership_claim" not in row[13]
-                    or "x.result_version=w.version" not in row[13]):
+                    or "x.result_version=w.version" not in row[13]
+                    or "ops.canonical_ownership_merge_binding_valid" not in row[13]
+                    or "Gate A2 source-merge authority: " not in row[13]
+                    or "lease.state in ('active','released')" not in row[13]):
                 raise RuntimeError("source-merge projection omitted protected evidence projection")
             if row[14] is not False:
                 raise RuntimeError("private source-merge predecessor remained executable by reader")

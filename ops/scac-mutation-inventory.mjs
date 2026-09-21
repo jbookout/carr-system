@@ -1760,6 +1760,14 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
         throw new Error(`current source-inventory review has unknown ingress ${row?.ingress_key}`);
       reviewedByKey.set(row.ingress_key, row);
     }
+    for (const [sourceLocator, sourceDigest] of Object.entries(review.source_digest_replacements || {})) {
+      if (!/^[0-9a-f]{64}$/.test(sourceDigest))
+        throw new Error(`current source digest replacement is malformed: ${sourceLocator}`);
+      for (const [ingressKey, row] of reviewedByKey) {
+        if (row.source_locator === sourceLocator)
+          reviewedByKey.set(ingressKey, { ...row, source_digest: sourceDigest });
+      }
+    }
     const reviewed = [...reviewedByKey.values()]
       .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
     const reviewedDigest = sourceInventoryFixtureDigest(reviewed);
@@ -12199,6 +12207,16 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     `registry_version='scac-mutation-registry.v35')<>${v35EntryCount}`,
     `registry_version='scac-mutation-registry.v35')<>${v36EntryCount}`,
     "WR125 v36 registry seed total");
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("WR125 v35 predecessor migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
   const predecessorMigrationSha = sha256(predecessorMigration);
   const successorMigrationSha = sha256(readFileSync(resolve(REPO_ROOT,
     "migrations/0532a_canonical_ownership_lease_activation.sql"), "utf8"));
@@ -12317,6 +12335,7 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     "current policy epochs bind mutation registry v36",
     `,'sha256:${readyPlanV36Digest}',${v36EntryCount},${rows.length},`,
     `registry_version='scac-mutation-registry.v36')<>${v36EntryCount}`,
+    `${sqlLiteral(seed)}::jsonb`,
   ];
   const missingInvariant = required.find(fragment => !rendered.includes(fragment));
   if (missingInvariant)
@@ -12487,7 +12506,7 @@ function renderReadyPlanAmendmentCatalogObserverSql(label) {
 export function renderReadyPlanAmendmentMeasurementProbeSql() {
   const migration0532a = readFileSync(resolve(REPO_ROOT,
     "migrations/0532a_canonical_ownership_lease_activation.sql"), "utf8");
-  const expected0532aSha = "ff5040386c9e6ea3821b2b70b1c9d0f17841e6e99eb0ab4e7a9693580c267037";
+  const expected0532aSha = "4fa9c91163906b39ecf67143d6bebd67bb3b7029136e45b35e4a02f361dd1fc0";
   if (sha256(migration0532a) !== expected0532aSha)
     throw new Error(`WR125 measurement probe refuses non-frozen 0532a: ${sha256(migration0532a)}`);
   const provisional = renderReadyPlanAmendmentForwardRegistrySql();

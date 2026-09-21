@@ -164,6 +164,10 @@ WRITE_ACTION_EXACT = {
                                  # up". EXACT for acknowledge-notification's own reason --
                                  # "acknowledge" covers exactly two verbs today and as a prefix
                                  # would silently capture a future read named the same.
+    "acknowledge-ready-plan-amendment",  # WR-000125: appends the authenticated actor's
+                                 # durable notice acknowledgement without granting execution.
+                                 # Keep acknowledge exact so future read-shaped verbs do not
+                                 # silently inherit write classification.
     "claude-checkpoint",     # durable Claude semantic checkpoint write
     "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write

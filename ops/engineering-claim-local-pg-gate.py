@@ -86,7 +86,7 @@ def assert_non_codex_admission_refused(cur):
         cur.execute("release savepoint non_codex_engineering_envelope_admission")
         raise RuntimeError("non-Codex executor was admitted into an Engineering envelope")
 
-def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, executor_slug: str = "codex", executor_kind: str = "automation", stale_contract: bool = False):
+def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, executor_slug: str = "codex", executor_kind: str = "automation", stale_contract: bool = False, source_merge_paths=None):
     token = uuid.uuid4().hex
     accepted_plan_hash = STALE_PLAN_HASH if stale_contract else sha("c")
     accepted_plan_ref = STALE_PLAN_REF if stale_contract else f"PLAN-{token[:12]}-v1"
@@ -129,7 +129,9 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
                      %s,'safe:recovery:fixture','safe:observability:fixture',%s,%s,%s)
              returning id""",
         (work_request_id, uuid.uuid4(), Jsonb({}), section_id, revision_id, "b" * 64,
-         Jsonb([]), Jsonb({}), accepted_plan_hash, accepted_plan_ref),
+         Jsonb([]), Jsonb({"source_merge": {"schema_version": "source-merge-scope.v1",
+           "repository": "jbookout/carr-system", "base_branch": "main",
+           "authorized_paths": source_merge_paths}} if source_merge_paths else {}), accepted_plan_hash, accepted_plan_ref),
     )[0]
     one(
         cur,
@@ -142,8 +144,11 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
     )
     source = one(cur, "select ops.engineering_admission_source(%s)", (f"WR-ENGINEERING-CLAIM-{token}",))[0]
     if stale_contract:
-        if source is not None:
-            raise RuntimeError("stale accepted plan remained visible through engineering_admission_source")
+        if (source is None or source.get("execution_authorized") is not False
+                or not source.get("execution_refusal_reason")
+                or source["accepted_plan"]["plan_ref"] != accepted_plan_ref
+                or source["accepted_plan"]["digest"] != accepted_plan_hash):
+            raise RuntimeError("stale accepted plan history lost exact readable bindings or its execution fence")
         record_digest = one(
             cur,
             """select 'sha256:'||encode(public.digest(jsonb_build_object(

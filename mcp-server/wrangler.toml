@@ -157,6 +157,24 @@
 #                         narrow machine actor, never as a full human actor.)
 #   GOOGLE_CLIENT_ID    — Google Cloud OAuth 2.0 web client (upstream sign-in)
 #   GOOGLE_CLIENT_SECRET— ditto. Joe sets both himself; Claude never holds them.
+#   DATABASE_URL_OWNERSHIP_ISSUER_G1 / DATABASE_URL_OWNERSHIP_ISSUER_G2
+#                         — generation-specific login URLs for the canonical
+#                         ownership issuer capability.  The two slots are
+#                         published independently and carry only one of the
+#                         two login roles at a time: active or draining.
+#                         They are intentionally absent from every local
+#                         dispatcher environment.  WR126's provisioner is a
+#                         dry-run planner only; it never reads or publishes
+#                         these values.  The Worker lifecycle seam remains
+#                         disabled until a separately accepted production
+#                         change provisions and verifies the slots.
+#   ENGINEERING_CONTROLLER_TOKENS
+#                         — one isolated Worker bearer map for the registered
+#                         Codex controller: {"codex":"<token>"}.  It opens
+#                         only the four canonical-ownership MCP operations;
+#                         it is not LOCAL_TOKENS, AGENT_TOKENS, or either
+#                         generation-specific issuer slot.  No local model
+#                         process receives this bearer.
 name = "carr-mcp"
 account_id = "12ccca77eb49142a6be8eb84c0d6a3a0"
 main = "src/index.js"
@@ -219,6 +237,12 @@ WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
 # proof on the compatibility release, so this release requires surface-bound
 # credentials. Absent or unknown values fail closed in index.js.
 CONTINUITY_SURFACE_ENFORCEMENT = "required"
+# Canonical ownership issuer lifecycle is deliberately inert in this source
+# slice.  Keep the default explicit in both environments so a deploy cannot
+# turn a credential plan into a production effect by omission.
+CANONICAL_OWNERSHIP_RUNTIME_MODE = "disabled"
+CANONICAL_OWNERSHIP_ISSUER_ACTIVE_GENERATION = "none"
+CANONICAL_OWNERSHIP_CANARY_JOB_ID = "none"
 
 # Cloudflare supplies the immutable version ID, optional tag, and creation
 # timestamp at runtime. /release reads this binding as provider identity; it is
@@ -310,6 +334,9 @@ DOCTORCRE_APP_HOST = "doctorcre-app-staging.joe-bookout-carr-us.workers.dev"
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
 WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
 CONTINUITY_SURFACE_ENFORCEMENT = "required"
+CANONICAL_OWNERSHIP_RUNTIME_MODE = "disabled"
+CANONICAL_OWNERSHIP_ISSUER_ACTIVE_GENERATION = "none"
+CANONICAL_OWNERSHIP_CANARY_JOB_ID = "none"
 
 # Environment configuration is explicit: staging's separate Worker needs the
 # same runtime version-identity binding and must not depend on inheritance.
