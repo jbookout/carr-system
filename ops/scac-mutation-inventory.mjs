@@ -12249,6 +12249,16 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     .replaceAll("ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_catalog_v36_current() from",
       "ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_registry_v35_seal_available(),ops.scac_mutation_catalog_v36_current() from")
     .replaceAll("pre-v35", "pre-v36");
+  const v34RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}' end;`;
+  const v35RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}'\n` +
+    `    when 'scac-mutation-registry.v35' then '${v35SealDigest}' end;`;
+  sql = replaceExactlyOnce(sql, v34RegistryCase, v35RegistryCase,
+    "WR125 v35 historical registry-digest case");
+  const v34CatalogCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then ${sqlLiteral(JSON.stringify(SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE))}::jsonb end;`;
+  const v35CatalogCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then ${sqlLiteral(JSON.stringify(SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE))}::jsonb\n` +
+    `    when 'scac-mutation-registry.v35' then ${sqlLiteral(v35CurrentBaselineJson)}::jsonb end;`;
+  sql = replaceExactlyOnce(sql, v34CatalogCase, v35CatalogCase,
+    "WR125 v35 historical catalog case");
   const v35Tuple = `    ('scac-mutation-registry.v35','${v35SealDigest}',${v35EntryCount},${v35SourceEntryCount})\n`;
   const v34Tuple = `    ('scac-mutation-registry.v34','${HISTORICAL_REGISTRY_SEALS.v34.digest}',${HISTORICAL_REGISTRY_SEALS.v34.entryCount},${HISTORICAL_REGISTRY_SEALS.v34.sourceEntryCount})\n`;
   sql = replaceExactlyOnce(sql, v34Tuple, `${v34Tuple},${v35Tuple}`,
