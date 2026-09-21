@@ -648,8 +648,8 @@ begin
      where work_request_id=w.id and result_version=w.version and plan_id=e.accepted_plan_id;
     select * into scope from ops.source_merge_plan_scope where work_request_id=w.id
       and accepted_plan_id=e.accepted_plan_id and acceptance_receipt_id=ar.id;
-    select * into receipt from ops.engineering_slice_receipt slice_receipt where slice_receipt.envelope_id=e.id
-      and slice_receipt.outcome='claimed_complete' and slice_receipt.receipt#>>'{source_evidence,source_sha}'=p_head_sha;
+    select * into receipt from ops.engineering_slice_receipt where envelope_id=e.id
+      and outcome='claimed_complete' and receipt#>>'{source_evidence,source_sha}'=p_head_sha;
     select * into ev from public.event where subject_type='decision' and verb='log-decision'
       and subject_id=p_decision_id order by recorded_at desc,id desc limit 1;
     select * into a from public.actor where slug=actor_slug and active;
