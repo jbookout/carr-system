@@ -86,7 +86,7 @@ def assert_non_codex_admission_refused(cur):
         cur.execute("release savepoint non_codex_engineering_envelope_admission")
         raise RuntimeError("non-Codex executor was admitted into an Engineering envelope")
 
-def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, executor_slug: str = "codex", executor_kind: str = "automation", stale_contract: bool = False, source_merge_paths=None):
+def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_offset: str = "29 minutes", issued_offset: str = "0", slice_refs=None, slice_dependencies=None, planned_check_refs=None, executor_slug: str = "codex", executor_kind: str = "automation", stale_contract: bool = False, source_merge_paths=None):
     token = uuid.uuid4().hex
     accepted_plan_hash = STALE_PLAN_HASH if stale_contract else sha("c")
     accepted_plan_ref = STALE_PLAN_REF if stale_contract else f"PLAN-{token[:12]}-v1"
@@ -216,7 +216,7 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
     active_refs = (slice_ref,) if slice_refs is None else tuple(slice_refs)
     slice_entries = []
     for ordinal, ref in enumerate(active_refs, start=1):
-        check_ref = f"check:fixture-{ordinal}"
+        check_ref = (planned_check_refs or {}).get(ref, f"check:fixture-{ordinal}")
         slice_entries.append({
             "baseline_evidence_refs": [{
                 "content_digest": sha("e"),
