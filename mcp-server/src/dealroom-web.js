@@ -28,6 +28,8 @@ import {
   createWorkspaceBusinessReader, isBusinessApiPath,
 } from "./workspace-business-read.js";
 import { isTourInternalRequest } from "./tour-internal-web.js";
+import { executeRegisteredTool } from "./tools.js";
+import { readDealWithJev } from "./jev-deal-reading.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current"; // mirrors wrangler.toml [assets]
 
@@ -45,6 +47,7 @@ const ACTION_CHALLENGE_TTL = 5 * 60;
 const SYSTEM_WORK_MAX_BODY = 16 * 1024;
 const SYSTEM_WORK_PREFIX = "/api/system-work";
 const COMMAND_CENTER_API_PREFIX = "/api/v1/";
+const JEV_DEAL_READING_PATH = "/api/v1/jev-deal-reading";
 // The Model Room observatory (Joe's ruling 0892c539). One read door onto the
 // partner-room wire and one write door back into it, both behind the same
 // cookie session the rest of this host uses.  The room's own body cap is
@@ -805,6 +808,34 @@ async function workInventoryResponse(request, env, session, dependencies) {
   }
 }
 
+// A partner asks for one advisory at a time. This route reuses the authenticated
+// Deal Room record verb, then sends only bounded deal evidence to TypeSafe.
+async function jevDealReadingResponse(request, env, session, dependencies) {
+  if (request.method !== "POST") return json({ error: "METHOD_NOT_ALLOWED" }, 405);
+  if (!sameOrigin(request, env)) return json({ error: "forbidden", reason: "origin_mismatch" }, 403);
+  let args;
+  try {
+    const body = await request.text();
+    if (body.length > 1024) throw new Error("too_large");
+    args = JSON.parse(body);
+  } catch { return json({ error: "INVALID_REQUEST" }, 400); }
+  if (!args || Object.keys(args).length !== 1 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.deal || ""))
+    return json({ error: "INVALID_REQUEST" }, 400);
+  try {
+    const reader = dependencies.jevDealRecordReader || (async (deal) => {
+      const sql = neon(env.DATABASE_URL_READER);
+      const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+      return executeRegisteredTool(client, session.actor, "get-deal-room", { deal });
+    });
+    const record = await reader(args.deal);
+    const read = dependencies.jevDealRead || readDealWithJev;
+    return json(await read(record, { apiKey: env.TYPESAFE_API_KEY }));
+  } catch {
+    return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
+  }
+}
+
 // Default Atlas reader. Same client factory as the census route above — neon()
 // over DATABASE_URL_READER, wrapped so .query() returns { rows } — so this route
 // carries no database knowledge of its own and no write credential can reach it.
@@ -1077,6 +1108,7 @@ async function handleRequest(request, env, ctx, dependencies) {
       // The business read is the ONLY addition to that surface, and it is
       // admitted by an exact path parser rather than a prefix.
       if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH &&
+          url.pathname !== JEV_DEAL_READING_PATH &&
           url.pathname !== WORK_INVENTORY_PATH && url.pathname !== ATLAS_GRAPH_PATH &&
           url.pathname !== PROGRAM_CONTROLLER_PATH && url.pathname !== METERING_PATH &&
           !isBusinessApiPath(url.pathname)) return json({ error: "not_found" }, 404);
@@ -1105,7 +1137,7 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
-        if (url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
+        if (url.pathname === JEV_DEAL_READING_PATH || url.pathname === COMMAND_CENTER_PATH || url.pathname === WORK_INVENTORY_PATH ||
             url.pathname === ATLAS_GRAPH_PATH || url.pathname === PROGRAM_CONTROLLER_PATH ||
             url.pathname === METERING_PATH ||
             isBusinessApiPath(url.pathname)) {
@@ -1145,7 +1177,9 @@ async function handleRequest(request, env, ctx, dependencies) {
         response = await dependencies.mcpHandler(request, env, ctx, session.actor);
       }
       else if (url.pathname === "/pipeline/changes") response = await dependencies.pipelineHandler(request, env, ctx, session.actor);
-      else if (url.pathname === COMMAND_CENTER_PATH) {
+      else if (url.pathname === JEV_DEAL_READING_PATH) {
+        response = await jevDealReadingResponse(request, env, session, dependencies);
+      } else if (url.pathname === COMMAND_CENTER_PATH) {
         response = await commandCenterResponse(request, env, session, dependencies);
       } else if (url.pathname === WORK_INVENTORY_PATH) {
         response = await workInventoryResponse(request, env, session, dependencies);
