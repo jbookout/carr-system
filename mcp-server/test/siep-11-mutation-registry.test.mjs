@@ -2693,6 +2693,8 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
   assert.match(forward, /ff5040386c9e6ea3821b2b70b1c9d0f17841e6e99eb0ab4e7a9693580c267037/);
   assert.match(forward, /\('scac-mutation-registry\.v35','sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec',1859,870\)/);
   assert.match(forward, /rename to scac_mutation_catalog_v35_live_at_seal/);
+  assert.doesNotMatch(forward,
+    /alter function ops\.scac_mutation_catalog_v34_current\(\) rename to scac_mutation_catalog_v34_live_at_seal/);
   assert.match(forward, /scac_mutation_registry_v35_seal_available/);
   assert.ok(forward.includes(
     "when 'scac-mutation-registry.v35' then 'sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec' end;"));

@@ -12249,6 +12249,14 @@ comment on function ops.scac_mutation_catalog_v35_current() is 'Historical v35 l
     .replaceAll("ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_catalog_v36_current() from",
       "ops.scac_mutation_catalog_v35_current(),ops.scac_mutation_registry_v35_seal_available(),ops.scac_mutation_catalog_v36_current() from")
     .replaceAll("pre-v35", "pre-v36");
+  const replayedV34Start = sql.indexOf(
+    "\nalter function ops.scac_mutation_catalog_v34_current() rename to scac_mutation_catalog_v34_live_at_seal;");
+  const v35TransitionStart = sql.indexOf(
+    "\nalter function ops.scac_mutation_catalog_v35_current() rename to scac_mutation_catalog_v35_live_at_seal;",
+    replayedV34Start);
+  if (replayedV34Start < 0 || v35TransitionStart < 0)
+    throw new Error("WR125 predecessor v34 transition boundary missing");
+  sql = sql.slice(0, replayedV34Start) + sql.slice(v35TransitionStart);
   const v34RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}' end;`;
   const v35RegistryCase = `    when '${HISTORICAL_REGISTRY_SEALS.v34.version}' then '${HISTORICAL_REGISTRY_SEALS.v34.digest}'\n` +
     `    when 'scac-mutation-registry.v35' then '${v35SealDigest}' end;`;

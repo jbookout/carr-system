@@ -315,18 +315,6 @@ begin
   end loop;
 end $history$;
 
-alter function ops.scac_mutation_catalog_v34_current() rename to scac_mutation_catalog_v34_live_at_seal;
-create or replace function ops.scac_mutation_registry_v34_seal_available()
-returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
-  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v34')
-$fn$;
-create or replace function ops.scac_mutation_catalog_v34_current()
-returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
-  select ops.scac_mutation_catalog_v34_live_at_seal()
-$fn$;
-comment on function ops.scac_mutation_registry_v34_seal_available() is 'Exact immutable v34 registry seal; separate from whether the live catalog still equals v34.';
-comment on function ops.scac_mutation_catalog_v34_current() is 'Historical v34 live-catalog validator; expected to become false after the v35 authority surface is installed.';
-
 alter function ops.scac_mutation_catalog_v35_current() rename to scac_mutation_catalog_v35_live_at_seal;
 create or replace function ops.scac_mutation_registry_v35_seal_available()
 returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
