@@ -110,15 +110,42 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
              values (%s,1,%s,%s,'Engineering claim fixture',%s,'fixture') returning id""",
         (section_id, joe_id, Jsonb({"text": "Engineering claim fixture"}), "a" * 64),
     )[0]
-    work_request_id = one(
-        cur,
-        """insert into ops.work_request
-             (ref,state,title,requester_actor,owner_actor,shape_disposition,
-              shape_fixed_surface_ref,shape_rationale,shape_decided_by_actor_id,shape_decided_at)
-             values (%s,'ready','Engineering claim fixture','joe','joe','not_required',
-                     'fixture:engineering-currentness','fixture currentness acceptance',%s,now()) returning id""",
-        (f"WR-ENGINEERING-CLAIM-{token}", joe_id),
-    )[0]
+    # Source-merge acceptance captures a tenant-bound scope. Give that fixture
+    # a complete synthetic sourced shape; ordinary legacy fixtures stay as-is.
+    if source_merge_paths:
+        shape_ref = f"sourced-plan:{accepted_plan_ref}#{accepted_plan_hash}"
+        shape_rationale = (
+            f"Accepted immutable plan {accepted_plan_ref} for doctrine:runbook#fixture "
+            f"at sha256:{'b' * 64}"
+        )
+        work_request_id = one(
+            cur,
+            """insert into ops.work_request
+                 (ref,state,title,requester_actor,owner_actor,organization_tenant_id,
+                  origin_ref,doctrine_section_id,doctrine_revision_id,
+                  capture_idempotency_key,sourced_capture_sequence,
+                  triage_classification,triaged_by_actor_id,triaged_at,
+                  shape_disposition,shape_fixed_surface_ref,shape_rationale,
+                  shape_decided_by_actor_id,shape_decided_at)
+                 values (%s,'ready','Engineering claim fixture','joe','joe','carr-internal',
+                         %s,%s,%s,%s,nextval('ops.work_request_ref_seq'),
+                         'operational',%s,now(),'not_required',%s,%s,%s,now()) returning id""",
+            (f"WR-ENGINEERING-CLAIM-{token}", f"doctrine:engineering-claim-{token}#fixture",
+             section_id, revision_id, uuid.uuid4(), joe_id,
+             shape_ref, shape_rationale, joe_id),
+        )[0]
+    else:
+        shape_ref = "fixture:engineering-currentness"
+        shape_rationale = "fixture currentness acceptance"
+        work_request_id = one(
+            cur,
+            """insert into ops.work_request
+                 (ref,state,title,requester_actor,owner_actor,shape_disposition,
+                  shape_fixed_surface_ref,shape_rationale,shape_decided_by_actor_id,shape_decided_at)
+                 values (%s,'ready','Engineering claim fixture','joe','joe','not_required',
+                         'fixture:engineering-currentness','fixture currentness acceptance',%s,now()) returning id""",
+            (f"WR-ENGINEERING-CLAIM-{token}", joe_id),
+        )[0]
     plan_id = one(
         cur,
         """insert into ops.sourced_work_request_plan
@@ -138,9 +165,10 @@ def fixture(cur, mutate_envelope=None, *, session_state: str = "claimed", lease_
         """insert into ops.sourced_work_request_plan_acceptance_receipt
              (work_request_id,plan_id,idempotency_key,base_version,plan_hash,
               accepted_by_actor_id,result_version,shape_fixed_surface_ref,shape_rationale)
-             values (%s,%s,%s,1,%s,%s,1,'fixture:engineering-currentness','fixture acceptance')
+             values (%s,%s,%s,1,%s,%s,1,%s,%s)
              returning id""",
-        (work_request_id, plan_id, uuid.uuid4(), accepted_plan_hash, joe_id),
+        (work_request_id, plan_id, uuid.uuid4(), accepted_plan_hash, joe_id,
+         shape_ref, shape_rationale),
     )
     source = one(cur, "select ops.engineering_admission_source(%s)", (f"WR-ENGINEERING-CLAIM-{token}",))[0]
     if stale_contract:
