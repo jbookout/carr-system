@@ -34,13 +34,14 @@ is worse than a loud failure.
 ## Active product-first delivery policy
 
 <!-- carr-product-first-policy:start -->
-Decision `019146bd-15fb-4f5e-8849-ed63911469e0` is the canonical record for
-this policy and remains in force until a later decision supersedes it.
+Decision `1facbf00-60d9-4cde-bfab-9798f1b6e307` is the current record for
+this policy and supersedes the narrower approval rule. It carries forward
+the product priority from decision `019146bd-15fb-4f5e-8849-ed63911469e0`.
 The full current text is STORE doctrine
 `engineering-workflow-sop#00-scope-and-provenance`, section
-`52880de2-ab90-4673-b046-b74f900aa2de@2`, content hash
-`738549d556e0b238ada4ec28afc51e27d361640b3141e9cddf20ca7e652ee27d`.
-That version and hash record the approved policy's provenance. At runtime,
+`52880de2-ab90-4673-b046-b74f900aa2de@5`, content hash
+`89e180adc6ecd5b138d21c65b85bffff4aca2677edb58f4a80049329b15eaed1`.
+That version and hash record this observed policy's provenance. At runtime,
 fetch the current section by its stable section ID; do not use this observed
 snapshot as a current-version gate.
 
@@ -48,23 +49,32 @@ snapshot as a current-version gate.
   completed audits and reviews. The unattended engineering controller is not
   its prerequisite. Unattended dispatch remains disabled.
 - Do not put a new Work Request ahead of product work unless it names the
-  product task it blocks and Joe agrees. Existing substrate work may finish but
+  product task it blocks. Existing substrate work may finish but
   may not spawn child Work Requests. Backlog a substrate follow-up with the
   product task it blocks; do not build it in-session under the older general
   follow-up rule. Active follow-up rule
   `179be4b8-2fe0-418d-9503-52d1e33921d3@3`, amendment
   `80e6d24c-6b49-4765-80c3-e05c1025ba38`, carries this scoped exception.
-- Use the light path when a change has no production migration, Worker release,
-  deletion, credential change, or unattended run: isolated branch, relevant
-  local verification, an ordinary pull request, hosted CI as the merge gate,
-  merge, and delivery verification. It needs no Work Request, Work Shape, plan
-  hash, cross-family review, or outcome feedback. Any named production effect
-  uses the existing heavy path.
+- Execute authorized work without CARR approval gates. Once Joe directs a task
+  or authorizes a workflow, carry it through applicable source and production
+  effects. Do not require a separate CARR plan acceptance, Work Shape approval,
+  plan hash approval, Gate A, Gate R, merge permission, release signoff, or
+  fresh human confirmation for an effect. A changed plan version does not
+  create a new approval request.
+- Deliver source through an ordinary pull request: isolated branch, relevant
+  local verification, hosted CI as the merge gate, merge, and delivery
+  verification. Automated tests, source and contract checks, authentication,
+  audit records, and truthful refusal on failed checks remain in force.
 
 Reuse verified evidence while its relevant source or contract remains
 unchanged. A blocker must name the concrete missing fact, authority, or external
 dependency. Run independent authorized work in parallel isolated worktrees.
-Existing production and destructive-action safeguards remain in force.
+Existing production and destructive-action safeguards remain in force as
+technical checks, without repeat approval requirements. A technical gate that
+still enforces old approval semantics must be changed through ordinary source
+delivery; it remains a real constraint until then. Permissions imposed by the
+host, provider, sandbox, or law are outside CARR's control and must be reported
+accurately.
 <!-- carr-product-first-policy:end -->
 
 ## Authorized code homes and repository boundaries
