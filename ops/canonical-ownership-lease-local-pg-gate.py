@@ -15,6 +15,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from threading import Barrier, Event, Lock, Thread
+from typing import cast
 import uuid
 
 import psycopg
@@ -2756,10 +2757,13 @@ def authenticated_main(dsn: str) -> int:
             raise RuntimeError(f"authenticated ownership {label} unexpectedly succeeded")
 
     with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
-        for changes, label in [({"actor": "joe"}, "wrong executor"),
-                               ({"token": uuid.uuid4()}, "wrong capability"),
-                               ({"session": "session:wrong-durable-session"}, "wrong session"),
-                               ({"execution_host": "cloudflare-workers:wrong-host"}, "wrong host")]:
+        rejected_contexts: list[tuple[dict[str, object], str]] = [
+            ({"actor": "joe"}, "wrong executor"),
+            ({"token": uuid.uuid4()}, "wrong capability"),
+            ({"session": "session:wrong-durable-session"}, "wrong session"),
+            ({"execution_host": "cloudflare-workers:wrong-host"}, "wrong host"),
+        ]
+        for changes, label in rejected_contexts:
             setup(cur, **changes)
             deny(mint(cur, uuid.uuid4()), label)
             issuer.rollback()
@@ -2810,8 +2814,9 @@ def authenticated_main(dsn: str) -> int:
     assertions += 1
     with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer, issuer.cursor() as cur:
         setup(cur)
+        acquire_operation_id = uuid.UUID(cast(str, acquire_request["idempotency_key"]))
         readback = one(cur, "select ops.read_canonical_ownership_operation(%s)",
-                       (uuid.UUID(acquire_request["idempotency_key"]),))[0]
+                       (acquire_operation_id,))[0]
         if readback["lease_id"] != lease["lease_id"] or readback["lease_token"] != lease["lease_token"]:
             raise RuntimeError("ambiguous acquire readback lost exact identity")
         conflict = dict(acquire_request, ttl_seconds=61)
@@ -2832,20 +2837,23 @@ def authenticated_main(dsn: str) -> int:
         require(lifecycle(cur, renew), "renew")
         for request in [check, renew]:
             replay = one(cur, "select ops.read_canonical_ownership_operation(%s)",
-                         (uuid.UUID(request["idempotency_key"]),))[0]
+                         (uuid.UUID(cast(str, request["idempotency_key"])),))[0]
             if replay.get("lease_token") != lease["lease_token"] or replay.get("lease_id") != lease["lease_id"]:
                 raise RuntimeError("protected check/renew readback dropped lease capability")
         deny(one(cur, "select ops.read_canonical_ownership_operation(%s)", (uuid.uuid4(),))[0], "foreign operation readback")
         issuer.commit()
         assertions += 10
-        for changes in [{"actor": "joe"}, {"token": uuid.uuid4()},
-                        {"session": "session:wrong-durable-session"},
-                        {"execution_host": "cloudflare-workers:wrong-host"},
-                        {"ownership": f"ownership:{uuid.uuid4()}"}]:
+        rejected_replays: list[dict[str, object]] = [
+            {"actor": "joe"}, {"token": uuid.uuid4()},
+            {"session": "session:wrong-durable-session"},
+            {"execution_host": "cloudflare-workers:wrong-host"},
+            {"ownership": f"ownership:{uuid.uuid4()}"},
+        ]
+        for changes in rejected_replays:
             setup(cur, **changes)
             deny(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "forged context")
             deny(one(cur, "select ops.read_canonical_ownership_operation(%s)",
-                     (uuid.UUID(acquire_request["idempotency_key"]),))[0], "forged capability readback")
+                     (acquire_operation_id,))[0], "forged capability readback")
             issuer.rollback()
             assertions += 1
 
@@ -3039,10 +3047,14 @@ def authenticated_merge_proof(dsn: str) -> int:
         configure(cur)
         one(cur, "select set_config('carr.ownership_session_id',%s,true)", (build["ownership_session_ref"],))
         reject(one(cur, "select ops.canonical_ownership_trusted_context()")[0], "terminal build reuse")
-        for changed, label in [({1: uuid.uuid4()}, "wrong decision"), ({2: "f" * 40}, "wrong head"),
-                              ({3: pr + 1}, "wrong PR"),
-                              ({5: datetime(2000, 1, 1).isoformat() + "Z"}, "expired expiry"),
-                              ({5: datetime(2099, 1, 1).isoformat() + "Z"}, "expiry beyond decision")]:
+        changed_cases: list[tuple[dict[int, object], str]] = [
+            ({1: uuid.uuid4()}, "wrong decision"),
+            ({2: "f" * 40}, "wrong head"),
+            ({3: pr + 1}, "wrong PR"),
+            ({5: datetime(2000, 1, 1).isoformat() + "Z"}, "expired expiry"),
+            ({5: datetime(2099, 1, 1).isoformat() + "Z"}, "expiry beyond decision"),
+        ]
+        for changed, label in changed_cases:
             args = list(mint_args)
             args[-1] = uuid.uuid4()
             for index, value in changed.items():

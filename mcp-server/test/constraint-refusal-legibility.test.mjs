@@ -87,7 +87,16 @@ test("the server actually calls the translator -- the whole point", async () => 
   assert.match(server, /await describeConstraint\(client, refusal\)/,
     "the enrichment must run on the still-open client inside callTool -- by " +
     "the time the RPC handler's catch runs, the pool is closed");
-  const catchBody = server.slice(server.indexOf('await client.query("rollback")'));
+  // mcp.js has another rollback in the closed engineering-controller route.
+  // Anchor on callTool before selecting the transaction rollback, or this
+  // wiring assertion can inspect an unrelated catch block and pass/fail on
+  // the wrong control flow.
+  const callToolStart = server.indexOf("export async function callTool");
+  assert.ok(callToolStart >= 0, "mcp.js must export callTool");
+  const callToolBody = server.slice(callToolStart);
+  const rollbackAt = callToolBody.indexOf('await client.query("rollback")');
+  assert.ok(rollbackAt >= 0, "callTool must roll back its open transaction");
+  const catchBody = callToolBody.slice(rollbackAt);
   assert.ok(catchBody.indexOf("pgConstraintError") < catchBody.indexOf("throw e;"),
     "the translation must come before the bare rethrow, or it never runs");
 });

@@ -43,7 +43,7 @@ from schema_snapshot_grants import (
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
+DEFAULT_SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 
 # The app roles the migrations grant to. neondb_owner may appear as a membership
@@ -76,6 +76,7 @@ ROLE_GRANT_MIGRATIONS = {
     "carr_renewal_source_attestors": "0249_renewal_signed_source_ingress.sql",
     "carr_gate_zero_producer": "0502_gate_zero_read_only_outcome.sql",
     "carr_foundation_assurance_oracle": "0511_foundation_assurance_minimum_outcome.sql",
+    "carr_ownership_issuer": "0532a_canonical_ownership_lease_activation.sql",
 }
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence",
@@ -83,8 +84,10 @@ APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver",
              "carr_program5_forward_fix_verifiers",
              "carr_renewal_source_attestors",
-             "carr_gate_zero_producer", "carr_foundation_assurance_oracle"]
-MEMBERSHIP_ONLY = ["neondb_owner"]
+             "carr_gate_zero_producer", "carr_foundation_assurance_oracle",
+             "carr_ownership_issuer"]
+MEMBERSHIP_ONLY = ["neondb_owner", "carr_ownership_issuer_g1",
+                   "carr_ownership_issuer_g2"]
 
 failures: list[str] = []
 checked = 0
@@ -100,11 +103,27 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
-def main():
-    if not os.path.exists(SNAPSHOT):
-        print(f"FAIL: {SNAPSHOT} not present")
+def parse_snapshot(argv):
+    if not argv:
+        return DEFAULT_SNAPSHOT
+    if len(argv) == 2 and argv[0] == "--snapshot":
+        snapshot = argv[1]
+        if not os.path.isabs(snapshot):
+            raise ValueError("--snapshot must be an absolute path")
+        return snapshot
+    raise ValueError("usage: test-schema-snapshot-grants.py [--snapshot /absolute/candidate.sql]")
+
+
+def main(argv):
+    try:
+        snapshot = parse_snapshot(argv)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    if not os.path.exists(snapshot):
+        print(f"FAIL: {snapshot} not present")
         return 1
-    sql = open(SNAPSHOT).read()
+    sql = open(snapshot).read()
     lines = sql.split("\n")
 
     check("the snapshot carries a CARR GRANTS section",
@@ -198,6 +217,15 @@ def main():
           any(ln == "grant carr_reader to carr_exporter;"
               for _, ln in grant_lines))
 
+    ownership_activation_applied = (
+        "0532a_canonical_ownership_lease_activation.sql\t" in sql
+    )
+    for principal in ("carr_ownership_issuer_g1", "carr_ownership_issuer_g2"):
+        expected = f"grant carr_ownership_issuer to {principal};"
+        check(f"ownership issuer membership for {principal} is ledger-appropriate",
+              (expected in canonical_section) if ownership_activation_applied
+              else (expected not in canonical_section))
+
     generator = open(GENERATOR).read()
     check("function ACL renderer uses a qualification-neutral search path",
           re.search(r"cat > \"\$GRANTS_SQL\" <<'GRANTSQL'\n.*?set search_path = '';",
@@ -228,6 +256,10 @@ def main():
 
     check("all five ACL renderers retain the foundation-assurance oracle",
           generator.count("('carr_foundation_assurance_oracle')") == 5)
+    check("all five ACL renderers retain the ownership issuer bundle",
+          generator.count("('carr_ownership_issuer')") == 5)
+    check("ownership issuer generations are membership-only renderer targets",
+          "('carr_ownership_issuer_g1'), ('carr_ownership_issuer_g2')" in generator)
 
     # THE WIDENING GUARD. Every grantee in the file must be an app role —
     # or neondb_owner, on membership lines only. Anything else means some
@@ -262,4 +294,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

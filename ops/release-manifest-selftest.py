@@ -310,7 +310,10 @@ def main() -> int:
           legacy_out.returncode == 0 and legacy_verify.returncode == 0)
 
     historical_sha = None
-    for candidate in git("log", "-80", "--format=%H").split():
+    # The P2 artifact was added 80 commits ago on this branch; keep a bounded
+    # historical window, but wide enough that the first pre-P2 commit remains
+    # discoverable as the branch advances.
+    for candidate in git("log", "-160", "--format=%H").split():
         present = subprocess.run(
             ("git", "-C", str(REPO), "cat-file", "-e",
              f"{candidate}:ops/config/doctorcre-artifact.v1.json"),

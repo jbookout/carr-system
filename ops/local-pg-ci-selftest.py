@@ -120,6 +120,91 @@ with patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_REPOSITORY": "someone/fo
     else:
         check("a fork is refused", False)
 
+# Export is a manual hosted-only mode; unlike the ordinary local DB lane it
+# must not be invokable from a developer shell or write into the repository.
+with patch.dict(os.environ, {}, clear=True):
+    try:
+        mod.export_snapshot_candidate(
+            repo=REPO, port=55432, artifact_dir=Path("/tmp/carr-export-selftest")
+        )
+    except mod.LocalPGRefusal as exc:
+        check("candidate export refuses non-hosted execution", "manual hosted" in str(exc))
+    else:
+        check("candidate export refuses non-hosted execution", False)
+
+for event_name in ("pull_request", "schedule"):
+    with patch.dict(os.environ, {**DECLARED_HOSTED,
+                              "GITHUB_EVENT_NAME": event_name,
+                              "GITHUB_WORKFLOW": "DB acceptance"}, clear=True):
+        try:
+            mod.export_snapshot_candidate(
+                repo=REPO, port=55432,
+                artifact_dir=Path("/tmp/carr-export-selftest")
+            )
+        except mod.LocalPGRefusal:
+            check(f"candidate export refuses {event_name}", True)
+        else:
+            check(f"candidate export refuses {event_name}", False)
+
+export_events: list[tuple[str, ...]] = []
+
+
+class TimeoutExportRunner:
+    def run(self, command, *, env=None, cwd=None, capture=False):
+        del env, cwd, capture
+        event = tuple(str(part) for part in command)
+        export_events.append(event)
+        if event[:3] == ("git", "rev-parse", "HEAD"):
+            return mod.CommandResult(0, "a" * 40 + "\n", "")
+        if event[:3] == ("git", "rev-parse", "HEAD^{tree}"):
+            return mod.CommandResult(0, "b" * 40 + "\n", "")
+        if event[:3] == ("/fake/initdb", "--version"):
+            return mod.CommandResult(0, "initdb (PostgreSQL) 17.6\n", "")
+        if event[0] == "/fake/pg_ctl" and event[-1] == "start":
+            return mod.CommandResult(1, "", "start timed out after spawn")
+        return mod.CommandResult(0, "", "")
+
+
+with (
+    patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                            "GITHUB_WORKFLOW": "DB acceptance"}, clear=True),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod, "find_postgres_binaries", return_value=mod.PostgresBinaries(
+        initdb=Path("/fake/initdb"), pg_ctl=Path("/fake/pg_ctl"),
+        createdb=Path("/fake/createdb"), psql=Path("/fake/psql"),
+    )),
+    patch.object(mod.tempfile, "mkdtemp", return_value="/tmp/carr-export-timeout-selftest"),
+    patch.object(mod.shutil, "rmtree") as export_remove,
+):
+    try:
+        mod.export_snapshot_candidate(
+            repo=REPO, port=55432,
+            artifact_dir=Path("/tmp/carr-export-timeout-artifact"),
+            runner=TimeoutExportRunner(),
+        )
+    except mod.LocalPGRefusal as exc:
+        check("candidate export surfaces pg_ctl start timeout", "start timed out" in str(exc))
+    else:
+        check("candidate export surfaces pg_ctl start timeout", False)
+    check("timed-out postmaster receives a stop attempt",
+          any(event[0] == "/fake/pg_ctl" and event[-1] == "stop"
+              for event in export_events))
+    check("confirmed timeout teardown removes disposable root", export_remove.call_count == 1)
+
+with (
+    patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                            "GITHUB_WORKFLOW": "DB acceptance"}, clear=True),
+    patch.object(mod, "port_is_available", return_value=True),
+):
+    try:
+        mod.export_snapshot_candidate(
+            repo=REPO, port=55432, artifact_dir=REPO / ".wr128-never-created-artifact"
+        )
+    except mod.LocalPGRefusal as exc:
+        check("candidate export refuses repository artifact target", "outside the repository" in str(exc))
+    else:
+        check("candidate export refuses repository artifact target", False)
+
 # The remaining cases use a fully mocked local runner. Clear the ambient hosted
 # marker after testing the refusal so CI and a developer shell exercise the
 # exact same hermetic fixtures below.
