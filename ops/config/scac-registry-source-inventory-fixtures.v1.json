@@ -56520,8 +56520,8 @@
         "operation": "ops/local-pg-ci.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/local-pg-ci.py",
-        "schema_digest": "91e4dc8647cd86afcb1c0def01e1d2b639afbb45e366125c1c5bf1fb232e1436",
-        "handler_digest": "91e4dc8647cd86afcb1c0def01e1d2b639afbb45e366125c1c5bf1fb232e1436",
+        "schema_digest": "ac3e30174b7eefb4d4bc9628083f6a2cb2a4d07a1240ef2a63d4a77cee31c362",
+        "handler_digest": "ac3e30174b7eefb4d4bc9628083f6a2cb2a4d07a1240ef2a63d4a77cee31c362",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -56543,7 +56543,7 @@
       "mcp-server/src/engineering-runtime.js": "c8ddc956da41ae2817179c54337467b1719135dd94714635a7a967d91333f05c"
     },
     "expected_count": 876,
-    "expected_sha256": "621c93ec84a7907108633fe467b3d422fa11a228302c7324578f660c01602b3e",
+    "expected_sha256": "28529157de1103d98f68b87e7faf043ab2c5f379b41cdda8acb3d5e41fa2a429",
     "reason": "Measured current-tree source review for the WR126 v36 frontier under WR128 Gate A: re-digest the reviewed canonical-ownership PostgreSQL gate, snapshot exporter, disposable PG17 runner, and DB-acceptance workflow including its pinned artifact action. The runtime registry remains v36 with 876 rows; this source-only review does not alter a sealed migration or authorize production effects."
   },
   "historical_artifact_replay_review": {

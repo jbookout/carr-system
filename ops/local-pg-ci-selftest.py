@@ -173,7 +173,7 @@ with (
         initdb=Path("/fake/initdb"), pg_ctl=Path("/fake/pg_ctl"),
         createdb=Path("/fake/createdb"), psql=Path("/fake/psql"),
     )),
-    patch.object(mod.tempfile, "mkdtemp", return_value="/tmp/carr-export-timeout-selftest"),
+    patch.object(mod.tempfile, "mkdtemp", return_value="/tmp/carr-export-timeout-selftest") as export_mkdtemp,
     patch.object(mod.shutil, "rmtree") as export_remove,
 ):
     try:
@@ -190,6 +190,10 @@ with (
           any(event[0] == "/fake/pg_ctl" and event[-1] == "stop"
               for event in export_events))
     check("confirmed timeout teardown removes disposable root", export_remove.call_count == 1)
+    # The restore CI class requires the same dedicated disposable directory
+    # contract as the ordinary local PG lane.
+    check("candidate restore uses the dedicated disposable directory prefix",
+          export_mkdtemp.call_args.kwargs.get("prefix") == "carr-local-pg-ci.")
 
 with (
     patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_EVENT_NAME": "workflow_dispatch",

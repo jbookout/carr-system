@@ -133,7 +133,7 @@ def export_snapshot_candidate(
         raise LocalPGRefusal("snapshot export requires PostgreSQL 17 binaries")
     baseline_sha256 = _sha256(repo / "db/schema.sql")
 
-    root = Path(tempfile.mkdtemp(prefix="carr-schema-export."))
+    root = Path(tempfile.mkdtemp(prefix="carr-local-pg-ci."))
     clusters = [(root / "source-data", port), (root / "restore-data", port + 1)]
     start_attempts: list[Path] = []
     candidate = root / "candidate.sql"
