@@ -54,13 +54,15 @@ if agents.count(mod.POLICY_START) != 1 or agents.count(mod.POLICY_END) != 1:
 policy = mod.delivery_policy_brief(repo)
 normalized_policy = " ".join(policy.split())
 for required in (
+        "1facbf00-60d9-4cde-bfab-9798f1b6e307",
         "019146bd-15fb-4f5e-8849-ed63911469e0",
-        "52880de2-ab90-4673-b046-b74f900aa2de@2",
+        "52880de2-ab90-4673-b046-b74f900aa2de@5",
         "179be4b8-2fe0-418d-9503-52d1e33921d3@3",
         "80e6d24c-6b49-4765-80c3-e05c1025ba38",
         "fetch the current section by its stable section ID",
         "an ordinary pull request",
         "Unattended dispatch remains disabled",
+        "without CARR approval gates",
 ):
     if required not in normalized_policy:
         failures.append(f"product-first boot policy is missing: {required}")
