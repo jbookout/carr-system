@@ -12513,9 +12513,9 @@ function renderReadyPlanAmendmentCatalogObserverSql(label) {
 export function renderReadyPlanAmendmentMeasurementProbeSql() {
   const migration0532a = readFileSync(resolve(REPO_ROOT,
     "migrations/0532a_canonical_ownership_lease_activation.sql"), "utf8");
-  const expected0532aSha = "4fa9c91163906b39ecf67143d6bebd67bb3b7029136e45b35e4a02f361dd1fc0";
+  const expected0532aSha = "b2ede942c3263d5d7a1e6e8f9e05258dfc631b90a81596b15ac34767c96ac180";
   if (sha256(migration0532a) !== expected0532aSha)
-    throw new Error(`WR125 measurement probe refuses non-frozen 0532a: ${sha256(migration0532a)}`);
+    throw new Error(`WR126 measurement probe refuses non-frozen 0532a: ${sha256(migration0532a)}`);
   const provisional = renderReadyPlanAmendmentForwardRegistrySql();
   const bodyStart = provisional.indexOf("-- SCAC-12:");
   if (bodyStart < 0) throw new Error("WR125 measurement probe v36 body boundary missing");

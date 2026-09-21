@@ -9,7 +9,7 @@ declare observed_count integer; observed_digest text; grant_snapshot jsonb;
 begin
   if (select count(*) from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql')<>1
      or not exists(select 1 from public.schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql'
-       and sha256='4fa9c91163906b39ecf67143d6bebd67bb3b7029136e45b35e4a02f361dd1fc0') then
+       and sha256='b2ede942c3263d5d7a1e6e8f9e05258dfc631b90a81596b15ac34767c96ac180') then
     raise exception 'Ready-plan amendment pre-v36 migration ledger receipt drifted';
   end if;
   grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();

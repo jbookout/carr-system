@@ -56282,8 +56282,8 @@
         "operation": "ops/scac-mutation-inventory.mjs",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/scac-mutation-inventory.mjs",
-        "schema_digest": "9a91d201fc22008c8f3565337aeabf1ddb6003dd267ed933cce2797ba2b150d8",
-        "handler_digest": "9a91d201fc22008c8f3565337aeabf1ddb6003dd267ed933cce2797ba2b150d8",
+        "schema_digest": "b5ed14791acc4057d1ef7a45277d4877c42b30913aaae14bad5b4fdaa7269f6d",
+        "handler_digest": "b5ed14791acc4057d1ef7a45277d4877c42b30913aaae14bad5b4fdaa7269f6d",
         "write": true,
         "human_only": false,
         "authority_only": true,
@@ -56489,7 +56489,7 @@
       "mcp-server/src/engineering-runtime.js": "c8ddc956da41ae2817179c54337467b1719135dd94714635a7a967d91333f05c"
     },
     "expected_count": 876,
-    "expected_sha256": "a7dead3e33d8b596755a8b37cf779e44220bae01bb8c822deaa7850e31fccff3",
+    "expected_sha256": "a28154293072e024ff9ab9f2edba367d98b6c57b766dfcf5037bc65430f04cf0",
     "reason": "Measured current-tree source review for the WR126 v36 frontier: re-digest the authenticated canonical-ownership controller, runtime, credential, PostgreSQL-gate, and reviewed hook changes; the new provisioner ingress is sealed in v36 and the reviewed frontier contains 876 rows."
   },
   "historical_artifact_replay_review": {

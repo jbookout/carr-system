@@ -870,20 +870,23 @@ begin
     jsonb_build_object('ok',false,'reason_id','ownership_operation_not_found'));
 end $$;
 
--- Terminal queue transitions own cleanup, so callers cannot retire the durable
--- job/session first and strand an ownership lease. The try-lock refuses a
+-- The two scoped Engineering terminal doors call this helper before changing
+-- ops.job.  Keeping cleanup inside those existing doors preserves the control-
+-- plane invariant that ops.job has no user trigger while still making lease
+-- cleanup and the terminal transition one transaction.  The try-lock refuses a
 -- competing acquisition rather than introducing job/ownership lock inversion.
-create or replace function ops.canonical_ownership_release_before_terminal()
-returns trigger language plpgsql security definer set search_path=pg_catalog,ops,public
+create or replace function ops.canonical_ownership_release_for_job(
+  p_job_id uuid,p_attempt integer,p_lease_token uuid
+)
+returns void language plpgsql set search_path=pg_catalog,ops,public
 as $$
 declare rs ops.canonical_ownership_runtime_session%rowtype;
   l ops.canonical_ownership_lease%rowtype; stamp timestamptz; event_kind text;
 begin
-  if old.state<>'running' or new.state='running' then return new; end if;
   for rs in select r.* from ops.canonical_ownership_runtime_session r
     join ops.engineering_execution_envelope e on e.id=r.subject_envelope_id
-    where e.job_id=old.id and r.attempt=old.attempt and r.state='active' and r.phase='build' order by r.id loop
-    if rs.capability_token_hash is distinct from encode(public.digest(old.lease_token::text,'sha256'),'hex') then
+    where e.job_id=p_job_id and r.attempt=p_attempt and r.state='active' and r.phase='build' order by r.id loop
+    if rs.capability_token_hash is distinct from encode(public.digest(p_lease_token::text,'sha256'),'hex') then
       raise exception 'ownership terminal capability binding mismatch';
     end if;
     if not pg_try_advisory_xact_lock(hashtextextended('canonical-ownership:'||rs.organization_tenant_id,0)) then
@@ -902,12 +905,35 @@ begin
     end loop;
     update ops.canonical_ownership_runtime_session set state='expired' where id=rs.id;
   end loop;
-  return new;
 end $$;
-create trigger canonical_ownership_release_before_terminal before update of state on ops.job
-for each row execute function ops.canonical_ownership_release_before_terminal();
+
+-- Patch the already reviewed scoped terminal functions without cloning their
+-- large typed-receipt contracts. Exact markers refuse if a predecessor changes.
+do $terminal_cleanup_doors$
+declare v_definition text; v_marker text; v_replacement text;
+begin
+  select pg_get_functiondef('ops.engineering_finalize_slice_receipt(uuid,uuid,jsonb,text,uuid)'::regprocedure)
+    into v_definition;
+  v_marker:='  if row.outcome=''claimed_complete'' then';
+  if length(v_definition)-length(replace(v_definition,v_marker,''))<>length(v_marker) then
+    raise exception 'engineering finalize cleanup marker drifted';
+  end if;
+  v_replacement:='  perform ops.canonical_ownership_release_for_job(j.id,j.attempt,p_lease_token);'||chr(10)||v_marker;
+  execute replace(v_definition,v_marker,v_replacement);
+
+  select pg_get_functiondef('ops.engineering_fail_claim(uuid,uuid,text,text)'::regprocedure)
+    into v_definition;
+  v_marker:='  update ops.job_attempt set state=''failed'',ended_at=v_now,';
+  if length(v_definition)-length(replace(v_definition,v_marker,''))<>length(v_marker) then
+    raise exception 'engineering failure cleanup marker drifted';
+  end if;
+  v_replacement:='  perform ops.canonical_ownership_release_for_job(j.id,j.attempt,p_lease_token);'||chr(10)||v_marker;
+  execute replace(v_definition,v_marker,v_replacement);
+end $terminal_cleanup_doors$;
+revoke all on function ops.canonical_ownership_release_for_job(uuid,integer,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority,carr_ownership_issuer;
 revoke all on function ops.canonical_ownership_lifecycle(jsonb),
-  ops.read_canonical_ownership_operation(uuid),ops.canonical_ownership_release_before_terminal(),
+  ops.read_canonical_ownership_operation(uuid),
   ops.canonical_ownership_claim_projection(uuid),ops.canonical_ownership_merge_binding_valid(uuid),
   ops.authenticated_canonical_ownership_controller_binding(uuid,uuid,text,text),
   ops.mint_canonical_ownership_merge_session(uuid,uuid,text,integer,text,timestamptz,uuid)
