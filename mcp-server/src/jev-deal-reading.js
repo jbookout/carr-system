@@ -24,27 +24,98 @@ function clip(value, max = 1200) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
+function items(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function usefulText(value) {
+  const words = clip(value).toLowerCase().match(/[a-z0-9]{3,}/g) || [];
+  return new Set(words).size >= 5;
+}
+
+function activeCriticalDates(record, now) {
+  const current = now.valueOf();
+  const distance = date => {
+    const parsed = Date.parse(date?.due_on || "");
+    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : Math.abs(parsed - current);
+  };
+  return items(record.critical_dates)
+    .filter(d => !["completed", "cancelled", "canceled", "satisfied"].includes(d.status))
+    .sort((a, b) => distance(a) - distance(b))
+    .slice(0, 4);
+}
+
+// Keep current operational facts ahead of older narrative. A single long note
+// cannot fill the input or establish enough evidence for all three judgments.
+function evidenceLines(record, now) {
+  const sources = [
+    ["next_action", items(record.next_actions).filter(a => a.status === "open" || !a.status)
+      .slice(0, 4).map(a => clip(a.description, 500))],
+    ["negotiation", items(record.negotiation_rounds).slice(0, 3).map(n => clip(n.note, 500))],
+    ["critical_date", activeCriticalDates(record, now).map(d => clip(d.note, 500))],
+    ["activity", items(record.activities).slice(0, 6)
+      .map(a => [clip(a.summary, 250), clip(a.detail, 350)].filter(Boolean).join(" "))],
+    ["note", items(record.thread).slice(0, 8).map(n => clip(n.text, 500))],
+  ];
+  const lines = [];
+  const kinds = new Set();
+  for (const [kind, values] of sources) {
+    for (const value of values) {
+      if (!value || lines.join("\n").length + value.length > 6000) continue;
+      lines.push(`${kind}: ${value}`);
+      if (usefulText(value)) kinds.add(kind);
+    }
+  }
+  return { lines, kinds };
+}
+
 export function dealReadingState(record, now = new Date()) {
-  const lines = [
-    ...record.thread.map(n => clip(n.text)),
-    ...record.activities.map(a => [clip(a.summary), clip(a.detail)].filter(Boolean).join(" ")),
-    ...record.next_actions.map(a => clip(a.description)),
-    ...record.negotiation_rounds.map(n => clip(n.note)),
-    ...record.critical_dates.map(d => clip(d.note)),
-  ].filter(Boolean).slice(0, 40);
+  const { lines, kinds } = evidenceLines(record, now);
   const nextStep = clip(record.next_step);
+  if (usefulText(nextStep)) kinds.add("next_step");
   const evidenceChars = nextStep.length + lines.reduce((sum, line) => sum + line.length, 0);
   const lastTouch = record.last_touch ? new Date(record.last_touch) : null;
   const daysQuiet = lastTouch && !Number.isNaN(lastTouch.valueOf())
     ? Math.max(0, Math.floor((now.valueOf() - lastTouch.valueOf()) / 86400000)) : null;
+  const hasTransactionAnchor = items(record.premises).length > 0 ||
+    items(record.negotiation_rounds).length > 0 ||
+    /\b(offer|counter|proposal|lease|purchase|property|space|tour|site|landlord|seller|tenant|buyer|renewal|loi)\b/i
+      .test([nextStep, ...lines].join(" "));
+  const hasNextMove = usefulText(nextStep) || kinds.has("next_action") ||
+    /\b(waiting|reply|respond|decide|approve|send|schedule|owe|needs? to|must)\b/i
+      .test([nextStep, ...lines].join(" "));
+  const negotiations = items(record.negotiation_rounds);
+  const premises = items(record.premises);
+  const criticalDates = activeCriticalDates(record, now);
+  const sentDocuments = items(record.documents).filter(d => d.sent_status === "sent").length;
+  const narrativeSufficient = evidenceChars >= JEV_DEAL_EVIDENCE_FLOOR &&
+    kinds.size >= 2 && hasTransactionAnchor && hasNextMove;
+  const structuredSufficient = evidenceChars >= 80 && usefulText(nextStep) &&
+    (negotiations.length > 0 || sentDocuments > 0 || (premises.length > 0 && criticalDates.length > 0));
+  const sufficient = narrativeSufficient || structuredSufficient;
   return {
     evidenceChars,
+    sufficient,
     state: {
       deal: {
         recorded_phase: record.phase || null,
         transaction_type: record.type || null,
         next_step_on_file: nextStep || null,
         history: lines,
+        premises_recorded: premises.length,
+        negotiation_rounds_recorded: negotiations.length,
+        latest_negotiation: negotiations.length ? {
+          round_no: Number.isInteger(negotiations[0].round_no) ? negotiations[0].round_no : null,
+          side: clip(negotiations[0].side, 40) || null,
+          proposed_on: clip(negotiations[0].proposed_on, 24) || null,
+          expires_on: clip(negotiations[0].expires_on, 24) || null,
+        } : null,
+        active_dates: criticalDates.map(d => ({
+          kind: clip(d.kind, 40) || null,
+          due_on: clip(d.due_on, 24) || null,
+          status: clip(d.status, 40) || null,
+        })),
+        sent_documents_recorded: sentDocuments,
         days_since_last_recorded_touch: daysQuiet,
       },
     },
@@ -64,10 +135,10 @@ function probability(value) {
 }
 
 export async function readDealWithJev(record, { apiKey, fetchImpl = fetch, now = new Date() } = {}) {
-  const { evidenceChars, state } = dealReadingState(record, now);
+  const { evidenceChars, sufficient, state } = dealReadingState(record, now);
   const base = { schema: "carr.jev-deal-reading.v1", advisory_only: true,
     evidence_chars: evidenceChars, evidence_floor: JEV_DEAL_EVIDENCE_FLOOR };
-  if (evidenceChars < JEV_DEAL_EVIDENCE_FLOOR)
+  if (!sufficient)
     return { ...base, judged: false, reason: "insufficient_recorded_evidence" };
   if (!apiKey) return { ...base, judged: false, reason: "jev_unavailable" };
   try {
