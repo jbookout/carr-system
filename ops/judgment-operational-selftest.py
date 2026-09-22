@@ -152,15 +152,14 @@ class StaleClaimJudgeTests(unittest.TestCase):
         self.commits = recent_commits()
 
     def test_it_still_finds_the_commit_that_answers_a_claim(self):
-        # The claim is chosen to be answered by a commit SUBJECT, because
-        # subjects are all this judgment is given. A squash merge retitles
-        # everything under one subject, so a claim answered only by a commit
-        # BODY is a bad probe rather than a failure -- that mistake cost a
-        # false alarm on 2026-09-18.
+        # Keep the known positive subject as a stable live-service probe.
+        # It eventually falls outside the recent-commit window, even though
+        # the judgment still answers correctly.
         hits = self.module.refuting_commits(
-            "no session warns before a shell command runs", self.commits)
+            "no session warns before a shell command runs",
+            [("c39ed3bf", "Warn before a shell command runs, in every session (#1086)")])
         self.assertIsNotNone(hits, "the judgment was unavailable")
-        self.assertTrue(hits, "a commit subject in the last 40 answers this "
+        self.assertTrue(hits, "the known commit subject answers this "
                               "claim outright; finding none means the judgment "
                               "has gone silent")
 

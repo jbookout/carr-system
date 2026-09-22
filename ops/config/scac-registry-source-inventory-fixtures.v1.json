@@ -56905,8 +56905,8 @@
           "operation": "ops/assurance-evidence-acceptance-local-pg-gate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/assurance-evidence-acceptance-local-pg-gate.py",
-          "schema_digest": "abc36a6b227a42ec1827aad50bed4393b5531d176c4ae5103bbf24bb955957ea",
-          "handler_digest": "abc36a6b227a42ec1827aad50bed4393b5531d176c4ae5103bbf24bb955957ea",
+          "schema_digest": "ff2d66daef5203f39eb9c2b1983f94bd8ae70dd82a640b4745e77ae5048be62f",
+          "handler_digest": "ff2d66daef5203f39eb9c2b1983f94bd8ae70dd82a640b4745e77ae5048be62f",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -57294,7 +57294,7 @@
       "remove": [],
       "source_digest_replacements": {},
       "expected_count": 876,
-      "expected_sha256": "ae531de2d0af272881bd46d821838bbc5316998ba79708b7ac18885f206c186d"
+      "expected_sha256": "7ba45eca8646022e1789e681044300459513acc5397b1af0a598c0fc880d9ca7"
     }
   ],
   "current_source_review": {
@@ -57302,7 +57302,7 @@
     "upsert": [],
     "source_digest_replacements": {},
     "expected_count": 876,
-    "expected_sha256": "ae531de2d0af272881bd46d821838bbc5316998ba79708b7ac18885f206c186d",
+    "expected_sha256": "7ba45eca8646022e1789e681044300459513acc5397b1af0a598c0fc880d9ca7",
     "reason": "Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
   },
   "historical_artifact_replay_review": {

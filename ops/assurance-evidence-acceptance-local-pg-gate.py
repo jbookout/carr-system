@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 from threading import Barrier, Lock, Thread
 import time
+from typing import TypedDict
 import uuid
 
 import psycopg
@@ -30,7 +31,16 @@ SECRET_TOKENS: set[str] = set()
 RAW_RESULTS: list[object] = []
 RAW_ERRORS: list[str] = []
 RAW_LOCK = Lock()
-A3A_ISSUER: dict[str, object] = {}
+class IssuerConfig(TypedDict, total=False):
+    dsn: str
+    tenant: str
+    runtime_session: str
+    host: str
+    job_token: uuid.UUID
+    ownership_session_ref: str
+
+
+A3A_ISSUER: IssuerConfig = {}
 EXPECTED_A3A_TABLES = [
     "ops.assurance_evidence_extension",
     "ops.assurance_execution_manifest",
