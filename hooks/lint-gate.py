@@ -266,8 +266,10 @@ def code_review(payload):
                               timeout=15).stdout.strip()
         if not root:
             raise RuntimeError("git_root_unavailable")
+        # This hook is installed from CARR for every code home. The edited
+        # repository supplies the diff; CARR supplies the Jev reviewer.
         spec = importlib.util.spec_from_file_location(
-            "jev_code_review", os.path.join(root, "ops", "jev_code_review.py"))
+            "jev_code_review", REPO / "ops" / "jev_code_review.py")
         if spec is None or spec.loader is None:
             raise RuntimeError("review_module_unavailable")
         module = importlib.util.module_from_spec(spec)

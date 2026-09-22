@@ -57564,6 +57564,29 @@
         "classification_authorizing": false
       },
       {
+        "ingress_key": "script-entrypoint:hooks/lint-gate.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "hooks/lint-gate.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "hooks/lint-gate.py",
+        "schema_digest": "9e0c227b78fb86d890680b42b2a22ee13b009c53c4ad8736b64591f9ebf46563",
+        "handler_digest": "9e0c227b78fb86d890680b42b2a22ee13b009c53c4ad8736b64591f9ebf46563",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
         "ingress_key": "script-entrypoint:mcp-server/smoke-reads.sh",
         "ingress_kind": "script_entrypoint",
         "operation": "mcp-server/smoke-reads.sh",
@@ -57589,8 +57612,8 @@
     ],
     "source_digest_replacements": {},
     "expected_count": 876,
-    "expected_sha256": "7e61699390845e63549675bcbd09dc6764def32b2551fae9d1b5c5e99f0789f8",
-    "reason": "WR123 smoke and probe rotation changes re-digest reviewed source. Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
+    "expected_sha256": "a38340169b9f1443da29b5d158543bd14421475375efeed7eb401efea00997ac",
+    "reason": "DoctorCRE V5 post-write Jev review: re-digest the existing CARR lint-gate entrypoint after loading the CARR-owned reviewer for edits in either authorized code home; no new ingress or authority. WR123 smoke and probe rotation changes re-digest reviewed source. Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",
