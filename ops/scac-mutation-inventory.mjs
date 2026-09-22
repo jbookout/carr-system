@@ -172,6 +172,8 @@ export const REGISTRY_V35_VERSION = "scac-mutation-registry.v35";
 export const REGISTRY_V36_VERSION = "scac-mutation-registry.v36";
 // v37 is the WR-000130 successor for 0538 assurance binding. v36 remains frozen.
 export const REGISTRY_V37_VERSION = "scac-mutation-registry.v37";
+// v38 seals the attended release-readiness successor. v37 remains immutable.
+export const REGISTRY_V38_VERSION = "scac-mutation-registry.v38";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1018,6 +1020,21 @@ export const POST_0539_FORWARD_V37_DB_CATALOG_BASELINE = Object.freeze({
   runtime_dml_grants: { count: 312, digest: "sha256:f3a7344a4e690971141c39b207c2fd3410b12946f53130c67ee9679b5c7bf5e0" },
 });
 
+// Measured on the disposable PG17 database after applying 0540. The readiness
+// relation is read-only to runtime roles; four new SECURITY DEFINER grants are
+// the only catalog movement.
+// Measured after 0541 has installed its v38 functions. The predecessor's
+// post-0540 catalog is only an observation input; the sealed v38 row binds
+// the catalog after its own forward DDL.
+export const POST_0541_FORWARD_V38_DB_CATALOG_BASELINE = Object.freeze({
+  projection_version: "scac-db-catalog-projection.v38",
+  secdef_execute: { count: 717, digest: "sha256:29ed2cf19d5eed6693b0c36f58a082a232657f157dee9997fb5b124f82993c1a" },
+  relation_dml: { count: 300, digest: "sha256:65041336641fb57e01830d5d670c304817d2e6da8ba94ab49ca94c51f8112e12" },
+  column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
+  role_authority: { count: 13, digest: "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0" },
+  runtime_dml_grants: { count: 312, digest: "sha256:f3a7344a4e690971141c39b207c2fd3410b12946f53130c67ee9679b5c7bf5e0" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -1701,6 +1718,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V35_VERSION]: "v35",
   [REGISTRY_V36_VERSION]: "v36",
   [REGISTRY_V37_VERSION]: "v37",
+  [REGISTRY_V38_VERSION]: "v38",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1756,11 +1774,11 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V37_VERSION) {
+  version = REGISTRY_V38_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
-  if (review) {
+  if (review && version === REGISTRY_V37_VERSION) {
     const expectedBase = version.split(".").at(-1);
     if (review.base_version !== expectedBase || !Array.isArray(review.upsert) ||
         !Number.isInteger(review.expected_count) ||
@@ -1827,7 +1845,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V28_VERSION, REGISTRY_V29_VERSION,
     REGISTRY_V30_VERSION, REGISTRY_V31_VERSION, REGISTRY_V32_VERSION,
     REGISTRY_V33_VERSION, REGISTRY_V34_VERSION,
-    REGISTRY_V35_VERSION, REGISTRY_V36_VERSION, REGISTRY_V37_VERSION].includes(version))
+    REGISTRY_V35_VERSION, REGISTRY_V36_VERSION, REGISTRY_V37_VERSION,
+    REGISTRY_V38_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -12566,6 +12585,170 @@ export function renderReadyPlanAmendmentMeasurementProbeSql() {
 export const renderReadyPlanAmendmentMeasurementProbeSqlClosed =
   closedExport(() => renderReadyPlanAmendmentMeasurementProbeSql());
 
+// v38 is a forward seal, generated from the sealed v37 implementation rather
+// than retyping its registry machinery. The only variable inputs are the
+// immutable predecessor, the reviewed 0540 source, the frozen v38 source rows,
+// and the measured post-0540 database catalog.
+export function renderReleaseReadinessForwardRegistrySql(rows,
+  dbCatalogBaseline = POST_0541_FORWARD_V38_DB_CATALOG_BASELINE) {
+  const predecessorPath = "migrations/0539_canonical_ownership_assurance_scac_successor.sql";
+  const predecessor = readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorSha = "e8130fa50b1139414b2c2e906922028465de6589c8ebf2d4a1f0dd36acac56c0";
+  if (sha256(predecessor) !== predecessorSha)
+    throw new Error("v38 generator predecessor migration pin drifted");
+  const readinessPath = "migrations/0540_release_readiness_without_repeat_approval.sql";
+  const readinessSha = sha256(readFileSync(resolve(REPO_ROOT, readinessPath), "utf8"));
+  const v37Seal = registrySeal(REGISTRY_V37_VERSION,
+    frozenInventory(REGISTRY_V37_VERSION), POST_0539_FORWARD_V37_DB_CATALOG_BASELINE);
+  const v38Seal = registrySeal(REGISTRY_V38_VERSION, rows, dbCatalogBaseline);
+  const sealedV36RegistryCase = predecessor.match(/    when 'scac-mutation-registry\.v36' then 'sha256:[0-9a-f]{64}'\n/);
+  const sealedV36CatalogCase = predecessor.match(/    when 'scac-mutation-registry\.v36' then '[^']*'::jsonb\n/);
+  if (!sealedV36RegistryCase || !sealedV36CatalogCase)
+    throw new Error("v38 generator cannot preserve sealed v36 registry and catalog cases");
+  // This is fixture data rather than a generator literal: the inventory
+  // deliberately includes this generator's own source hash, so embedding the
+  // observed full-set seal in this module would create a SHA fixed-point loop.
+  const v38EntrySetDigest = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"))[
+    REGISTRY_V38_VERSION
+  ];
+  if (!/^sha256:[0-9a-f]{64}$/.test(v38EntrySetDigest || ""))
+    throw new Error("v38 full entry-set digest fixture is malformed");
+  let sql = predecessor
+    // Protect the predecessor's v36 facts while v37 becomes the live v38
+    // successor below. They are restored only after the v37 substitutions.
+    .replaceAll("scac-db-catalog-projection.v36", "__V37_CATALOG_VERSION__")
+    .replaceAll("sha256:581b7078ab7f56aae9aa5dd83f4ec6266efa15f9af85297fd730acbf8605186d",
+      "__V37_SECDEF_DIGEST__")
+    .replaceAll("observed_count<>703", "observed_count<>__V37_SECDEF_COUNT__")
+    .replaceAll("v.entry_count<>1891", "v.entry_count<>__V37_ENTRY_COUNT__")
+    .replaceAll("scac-mutation-registry.v37", "scac-mutation-registry.v38")
+    .replaceAll("scac-mutation-registry.v36", "scac-mutation-registry.v37")
+    .replaceAll("_v37", "_v38")
+    .replaceAll("_v36", "_v37")
+    .replaceAll("WR-000130", "WR-000132")
+    .replaceAll("WR130", "WR132")
+    .replaceAll("0539", "0541")
+    .replaceAll("0538_canonical_ownership_assurance_binding.sql",
+      "0540_release_readiness_without_repeat_approval.sql")
+    .replaceAll("30e272d131bd91c77c3f8288429cf9624831a19b9d47f145516ec693f9c2af30",
+      readinessSha)
+    .replaceAll("sha256:9000689a73268dfb1b1da81cef645e750523d7b3082eafcd2632e4ca54da76e9",
+      v38Seal.digest)
+    .replaceAll("sha256:1ff892e8604c26f02a46ef7ab5d6c91bc0a2ce54af091966021faaca956470da",
+      "__V38_ENTRY_SET__")
+    .replaceAll("sha256:ec86f1666faafbfd3aa51e5b55a95f1566de34f041b81d32d94ca859311ee54b",
+      v37Seal.digest)
+    .replaceAll("sha256:18ffbe6c48728aa753926c7e5ff360e1c03561bb9c89842041a5dabe18edc6da",
+      "sha256:1ff892e8604c26f02a46ef7ab5d6c91bc0a2ce54af091966021faaca956470da")
+    .replaceAll("scac-db-catalog-projection.v37", "scac-db-catalog-projection.v38")
+    .replaceAll("sha256:018fbe53956a85142b5364af42a8640bc6fbe983fe6ddbfa7d1f23f4608f170a",
+      dbCatalogBaseline.secdef_execute.digest)
+    .replaceAll("observed_count<>709", `observed_count<>${dbCatalogBaseline.secdef_execute.count}`)
+    .replaceAll("__V37_CATALOG_VERSION__", "scac-db-catalog-projection.v37")
+    .replaceAll("__V37_SECDEF_DIGEST__", POST_0539_FORWARD_V37_DB_CATALOG_BASELINE.secdef_execute.digest)
+    .replaceAll("__V37_SECDEF_COUNT__", String(POST_0539_FORWARD_V37_DB_CATALOG_BASELINE.secdef_execute.count))
+    .replaceAll("__V37_ENTRY_COUNT__", String(v37Seal.entryCount))
+    // The original v36/v37 constraint becomes v37/v38 after the ordinal
+    // advance above. Retain v36 as sealed history instead of dropping it.
+    .replaceAll("'scac-mutation-registry.v35','scac-mutation-registry.v37'",
+      "'scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37'")
+    .replace("values ('scac-mutation-registry.v38','carr-system-integrity-elimination-v1','11',",
+      `values ('scac-mutation-registry.v38','carr-system-integrity-elimination-v1','11',`)
+    .replace(`,'${v38Seal.digest}',1897,876,`,
+      `,'${v38Seal.digest}',${v38Seal.entryCount},${v38Seal.sourceEntryCount},`)
+    .replaceAll("__V38_ENTRY_SET__", v38EntrySetDigest);
+  // The v37 preflight must remain an exact assertion of the already-sealed
+  // v37 row. The new v38 row records the independently measured post-0540
+  // catalog projection; textual JSON order is irrelevant to jsonb equality.
+  sql = sql.replace(
+    /or v\.catalog_projection is distinct from '[^']+'::jsonb then\n    raise exception 'WR132 v37 predecessor registry metadata drifted';/,
+    `or v.catalog_projection is distinct from '${JSON.stringify(POST_0539_FORWARD_V37_DB_CATALOG_BASELINE)}'::jsonb then\n    raise exception 'WR132 v37 predecessor registry metadata drifted';`,
+  ).replace(
+    /(values \('scac-mutation-registry\.v38',[\s\S]*?,\d+,\d+,)'[^']*'::jsonb/,
+    `$1'${JSON.stringify(dbCatalogBaseline)}'::jsonb`,
+  ).replace(
+    /(registry_version='scac-mutation-registry\.v38'\)<>)1897/g,
+    `$1${v38Seal.entryCount}`,
+  ).replace(
+    /(registry_version='scac-mutation-registry\.v38' and ingress_kind not in \('db_function_acl','db_relation_acl','db_column_acl'\)\)<>)876/g,
+    `$1${v38Seal.sourceEntryCount}`,
+  ).replace(
+    /(when 'scac-mutation-registry\.v38' then )'[^']*'::jsonb end;/,
+    `$1'${JSON.stringify(dbCatalogBaseline)}'::jsonb end;`,
+  ).replace(
+    /(when 'scac-mutation-registry\.v37' then )'[^']*'::jsonb\n    when 'scac-mutation-registry\.v38'/,
+    `$1'${JSON.stringify(POST_0539_FORWARD_V37_DB_CATALOG_BASELINE)}'::jsonb\n    when 'scac-mutation-registry.v38'`,
+  );
+  const sealFunctionStart = sql.indexOf("create or replace function ops.scac_mutation_registry_seal_valid");
+  const sealFunctionEnd = sql.indexOf("end $fn$;", sealFunctionStart);
+  if (sealFunctionStart < 0 || sealFunctionEnd < 0)
+    throw new Error("v38 generator seal function missing");
+  const sealFunction = sql.slice(sealFunctionStart, sealFunctionEnd);
+  const registryStart = sealFunction.indexOf("  expected_registry:=case p_registry_version\n");
+  const catalogStart = sealFunction.indexOf("  expected_catalog:=case p_registry_version\n");
+  if (registryStart < 0 || catalogStart < registryStart)
+    throw new Error("v38 generator seal CASE boundaries missing");
+  const registryCase = sealFunction.slice(registryStart, catalogStart);
+  const catalogCase = sealFunction.slice(catalogStart);
+  const v37Case = "    when 'scac-mutation-registry.v37' then";
+  if (registryCase.includes("when 'scac-mutation-registry.v36' then") ||
+      catalogCase.includes("when 'scac-mutation-registry.v36' then"))
+    throw new Error("v38 generator unexpectedly retained a v36 CASE branch");
+  const registryV37Offset = registryCase.indexOf(v37Case);
+  const catalogV37Offset = catalogCase.indexOf(v37Case);
+  if (registryV37Offset < 0 || catalogV37Offset < 0)
+    throw new Error("v38 generator seal v37 CASE branches missing");
+  const registryInsertion = sealFunctionStart + registryStart + registryV37Offset;
+  const catalogInsertion = sealFunctionStart + catalogStart + catalogV37Offset;
+  sql = `${sql.slice(0, catalogInsertion)}${sealedV36CatalogCase[0]}${sql.slice(catalogInsertion)}`;
+  sql = `${sql.slice(0, registryInsertion)}${sealedV36RegistryCase[0]}${sql.slice(registryInsertion)}`;
+  const sealedFunction = sql.slice(sealFunctionStart, sql.indexOf("end $fn$;", sealFunctionStart));
+  const sealedRegistryCase = sealedFunction.slice(
+    sealedFunction.indexOf("  expected_registry:=case p_registry_version\n"),
+    sealedFunction.indexOf("  expected_catalog:=case p_registry_version\n"));
+  const sealedCatalogCase = sealedFunction.slice(
+    sealedFunction.indexOf("  expected_catalog:=case p_registry_version\n"));
+  if (!sealedRegistryCase.includes(sealedV36RegistryCase[0]) ||
+      sealedRegistryCase.includes(sealedV36CatalogCase[0]) ||
+      !sealedCatalogCase.includes(sealedV36CatalogCase[0]) ||
+      sealedCatalogCase.includes(sealedV36RegistryCase[0]))
+    throw new Error("v38 generator v36 CASE type preservation failed");
+  const v36Digest = sealedV36RegistryCase[0].match(/sha256:[0-9a-f]{64}/)[0];
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v35_seal_available() and ops.scac_mutation_registry_v37_seal_available()) then",
+    "ops.scac_mutation_registry_v35_seal_available() and ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available()) then",
+    "v38 historical v36 policy snapshot seal check");
+  const v37EpochChainCase =
+    "         or (r.registry_version='scac-mutation-registry.v37' and r.registry_digest='sha256:9000689a73268dfb1b1da81cef645e750523d7b3082eafcd2632e4ca54da76e9')";
+  sql = replaceExactlyOnce(sql, v37EpochChainCase,
+    `         or (r.registry_version='scac-mutation-registry.v36' and r.registry_digest='${v36Digest}')\n${v37EpochChainCase}`,
+    "v38 historical v36 policy epoch chain case");
+  sql = replaceExactlyOnce(sql,
+    "if not ops.scac_mutation_registry_v37_seal_available()\n     or not ops.scac_mutation_registry_v38_seal_available()",
+    "if not ops.scac_mutation_registry_v36_seal_available()\n     or not ops.scac_mutation_registry_v37_seal_available()\n     or not ops.scac_mutation_registry_v38_seal_available()",
+    "v38 final historical v36 seal assertion");
+  const policySnapshot = sql.slice(
+    sql.indexOf("create or replace function ops.scac_policy_epoch_snapshot()"),
+    sql.indexOf("end $fn$;", sql.indexOf("create or replace function ops.scac_policy_epoch_snapshot()")));
+  const policyChain = sql.slice(
+    sql.indexOf("create or replace function ops.scac_policy_epoch_chain_state()"),
+    sql.indexOf("end $fn$;", sql.indexOf("create or replace function ops.scac_policy_epoch_chain_state()")));
+  const finalAssertion = sql.slice(sql.indexOf("do $wr130_v38_final$"));
+  if (!policySnapshot.includes("ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available()") ||
+      !policyChain.includes(`r.registry_version='scac-mutation-registry.v36' and r.registry_digest='${v36Digest}'`) ||
+      !finalAssertion.includes("if not ops.scac_mutation_registry_v36_seal_available()"))
+    throw new Error("v38 generator v36 historical policy-chain preservation failed");
+  const sourceStart = sql.indexOf("$wr130_source$[");
+  const sourceEnd = sql.indexOf("]$wr130_source$", sourceStart);
+  if (sourceStart < 0 || sourceEnd < 0)
+    throw new Error("v38 generator source-seed boundary missing");
+  sql = `${sql.slice(0, sourceStart)}$wr132_source$${JSON.stringify(rows.map(row => ({
+    ...row, entry_digest: `sha256:${sha256(row)}`,
+  })))}$wr132_source$${sql.slice(sourceEnd + "]$wr130_source$".length)}`;
+  sql = sql.replaceAll("$wr130_source$", "$wr132_source$");
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + sql;
+}
+
 
 
 export function renderGeneratedFrontier() {
@@ -13008,9 +13191,19 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v34.generated.js"],
       });
 
+  const v38Rows = frozenInventory(REGISTRY_V38_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v38.generated.js"] =
+    renderRuntimeProjection(v38Rows, {
+      version: REGISTRY_V38_VERSION,
+      dbCatalogBaseline: POST_0541_FORWARD_V38_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0541_release_readiness_scac_successor.sql"] =
+    renderReleaseReadinessForwardRegistrySql(v38Rows,
+      POST_0541_FORWARD_V38_DB_CATALOG_BASELINE);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 43 || runtimeCount !== 34 || Object.keys(artifacts).length !== 77)
+  if (migrationCount !== 44 || runtimeCount !== 35 || Object.keys(artifacts).length !== 79)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -13635,6 +13828,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       version: REGISTRY_V37_VERSION, dbCatalogBaseline,
     }));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-release-readiness-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0541_release_readiness_scac_successor.sql");
+    await writeFile(target, renderReleaseReadinessForwardRegistrySql(
+      frozenInventory(REGISTRY_V38_VERSION), POST_0541_FORWARD_V38_DB_CATALOG_BASELINE));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v38") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v38.generated.js");
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V38_VERSION), {
+      version: REGISTRY_V38_VERSION,
+      dbCatalogBaseline: POST_0541_FORWARD_V38_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-ready-plan-amendment-registry-migration") {
     const target = resolve(process.argv[3] ||
       "migrations/0532b_ready_plan_amendment_scac_successor.sql");
@@ -13661,7 +13866,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V37_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V38_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

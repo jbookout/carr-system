@@ -4,9 +4,8 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v37 is the runtime selector after WR-000130 assurance binding. Its sealed
-// database catalog includes the two issuer grants from 0538 and four v37
-// metadata lookup grants. v36 remains historical.
+// v38 is the runtime selector after release readiness. Its sealed catalog
+// includes the readiness migration and preserves v37 as historical.
 //
 // Superseded note (WR-000119): v35 was the runtime selector because it installed the DISPATCH SPINE --
 // TWO new security-definer WRITE ingresses and TWO new verbs in a NEW family
@@ -38,7 +37,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v37.generated.js";
+} from "./scac-mutation-registry.v38.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

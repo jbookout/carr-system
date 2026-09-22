@@ -305,17 +305,10 @@ def main() -> int:
             idempotency_key=None,
         ))
 
-    # ONE CONNECTION, AND IT IS THE AUTHORITY'S. The reason this case once
-    # demanded the writer is gone: migration 0503 granted carr_authority the
-    # insert on ops.release and 0505 grants it exactly the two reads the filing
-    # path makes (ops.service.key and the columns the insert RETURNS), so the
-    # candidate can now be filed on the credential whose session_user 0504
-    # records. Filing it on the writer is what the third release review
-    # refused, because maker_authority_verified then comes out FALSE on a row
-    # a human authority actually made. Still exactly ONE connection: a second
-    # one would mean the row and its maker came from different credentials.
-    check("12. an exact candidate is filed on the authority connection and no other",
-          candidate_rc == 0 and opened == ["authority"],
+    # The service files its own candidate. PostgreSQL derives the maker from
+    # session_user; an autonomous upload must not acquire Joe attribution.
+    check("12. an exact candidate is filed on the scoped service connection",
+          candidate_rc == 0 and opened == ["routine"],
           f"rc={candidate_rc} connections={opened}")
     filed = [statement for conn in connection_objects
              for statement in conn.cursor_object.statements]

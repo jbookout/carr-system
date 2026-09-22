@@ -111,9 +111,11 @@ def main() -> int:
 
     # 2. Provider promotion is strict, while routine source rehearsal preserves
     # main's credential boundary: only the explicit not-approved result blocks.
-    check("2. provider promotion refuses every non-zero approval result",
+    check("2. provider promotion refuses an unresolved provider identity",
           re.search(r'\[ "\$REQUIRE_RC" -eq 0 \]\s*\\\s*\n\s*\|\| fail '
-                    r'"no live approval binds Production', source) is not None,
+                    r'"no unique recorded candidate binds Production', source) is not None
+          and 'release ready' in source
+          and 'RECONFIRMED_BINDING=' in source,
           "provider-version promotion can proceed without exact release truth")
     check("2b. source rehearsal treats exit 3 as the approval refusal",
           re.search(r'REQUIRE_RC["}]*\s*-eq\s*3', source) is not None
