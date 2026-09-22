@@ -435,7 +435,15 @@ if [ -z "$CARR_SKIP_TOLL_ADVISORY" ] && [ -f "$REPO_ROOT/ops/jev_change_tolls.py
   #
   # Exit 3 is this block's own refusal, kept distinct from the deterministic
   # classes above so a reader can tell them apart at a glance.
-  REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS'
+  # The verifier can launch Git-backed selftests. The CI block above strips
+  # Git's hook variables, and this second child needs the same isolation:
+  # otherwise a fixture's git init can change the shared checkout's .git/config.
+  env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES \
+      -u GIT_WORK_TREE_OVERRIDE -u GIT_CONFIG -u GIT_CONFIG_GLOBAL \
+      -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT \
+      REPO_ROOT="$REPO_ROOT" "$REPO_ROOT/.venv/bin/python" - <<'TOLLS'
 import importlib.util, os, sys
 root = os.environ.get("REPO_ROOT") or os.getcwd()
 try:

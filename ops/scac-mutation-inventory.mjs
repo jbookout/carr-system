@@ -179,6 +179,7 @@ export const REGISTRY_V40_VERSION = "scac-mutation-registry.v40";
 export const REGISTRY_V41_VERSION = "scac-mutation-registry.v41";
 // v42 seals the B09 strict-atomic migration repair. v41 stays immutable.
 export const REGISTRY_V42_VERSION = "scac-mutation-registry.v42";
+export const REGISTRY_V43_VERSION = "scac-mutation-registry.v43";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1076,6 +1077,13 @@ export const POST_0548_FORWARD_V42_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v42",
   secdef_execute: { count: 770, digest: "sha256:bd2be17ae3414408af52d2ff4e986d44d867e4beaf5d695039388ab88ee77170" },
 });
+// The v43 successor registers the reviewed Jev process source without
+// changing domain tables. Its four sealed functions advance EXECUTE census.
+export const POST_0549_FORWARD_V43_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0548_FORWARD_V42_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v43",
+  secdef_execute: { count: 774, digest: "sha256:d75223efb8bb0808e44f41c155ac264677860690f01c88df0ee636e98033f2a3" },
+});
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -1765,6 +1773,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V40_VERSION]: "v40",
   [REGISTRY_V41_VERSION]: "v41",
   [REGISTRY_V42_VERSION]: "v42",
+  [REGISTRY_V43_VERSION]: "v43",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1820,7 +1829,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V42_VERSION) {
+  version = REGISTRY_V43_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1893,7 +1902,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V33_VERSION, REGISTRY_V34_VERSION,
     REGISTRY_V35_VERSION, REGISTRY_V36_VERSION, REGISTRY_V37_VERSION,
     REGISTRY_V38_VERSION, REGISTRY_V39_VERSION, REGISTRY_V40_VERSION,
-    REGISTRY_V41_VERSION, REGISTRY_V42_VERSION].includes(version))
+    REGISTRY_V41_VERSION, REGISTRY_V42_VERSION, REGISTRY_V43_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -13185,6 +13194,87 @@ export function renderB09AtomicRepairRegistrySql(rows,
 
 
 
+// Seal the two changed Jev process entrypoints without revising any earlier
+// registry. The predecessor SQL is pinned before it is used as a template.
+export function renderJevProcessRegistrySql(rows,
+  dbCatalogBaseline = POST_0549_FORWARD_V43_DB_CATALOG_BASELINE,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0548_b09_atomic_migration_repair_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "eff9ae4b1dd4de2fa8dcd1ec0e9c5740e1c73b770217a8b2a313c2056f704ad0";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v43 predecessor migration pin drifted");
+  const oldSeal = registrySeal(REGISTRY_V42_VERSION,
+    frozenInventory(REGISTRY_V42_VERSION), POST_0548_FORWARD_V42_DB_CATALOG_BASELINE);
+  const newSeal = registrySeal(REGISTRY_V43_VERSION, rows, dbCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V42_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V43_VERSION];
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value ?? "")))
+    throw new Error("v43 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(POST_0548_FORWARD_V42_DB_CATALOG_BASELINE);
+  const newCatalog = JSON.stringify(dbCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v43 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$b09_v42", "$jev_v43")
+    .replaceAll("scac-mutation-registry.v42", "scac-mutation-registry.v43")
+    .replaceAll("scac-db-catalog-projection.v42", "scac-db-catalog-projection.v43")
+    .replaceAll("_v42", "_v43")
+    .replaceAll("v41_current", "v42_current")
+    .replaceAll("v41_live_at_seal", "v42_live_at_seal")
+    .replaceAll("snapshot_v41", "snapshot_v42")
+    .replaceAll("B09 atomic migration repair", "Jev process")
+    .replaceAll("Jev process v42 seed or entry-set seal drifted", "Jev process v43 seed or entry-set seal drifted")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v42", "v43"), newCatalog)
+    .replaceAll("observed_count<>770", `observed_count<>${dbCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(POST_0548_FORWARD_V42_DB_CATALOG_BASELINE.secdef_execute.digest,
+      dbCatalogBaseline.secdef_execute.digest)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`);
+  const versionListMarker = "'scac-mutation-registry.v40','scac-mutation-registry.v41','scac-mutation-registry.v43'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v43 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v40','scac-mutation-registry.v41','scac-mutation-registry.v42','scac-mutation-registry.v43'");
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v43' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v42' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v43' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v43' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v42' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v43' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v43' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v42' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v43' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v41_seal_available()) then",
+      "ops.scac_mutation_registry_v41_seal_available() and ops.scac_mutation_registry_v42_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v43' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v42' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v43' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v43_seal_available()",
+      "     or not ops.scac_mutation_registry_v42_seal_available()\n     or not ops.scac_mutation_registry_v43_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v43 ${label}`);
+  const seedStart = sql.indexOf("$jev_v43_source$[");
+  const seedEnd = sql.indexOf("]$jev_v43_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v43 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$jev_v43_source$${seed}$jev_v43_source$${sql.slice(seedEnd + "]$jev_v43_source$".length)}`;
+  const preflight = `do $jev_v43_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'Jev process v43 requires exact applied 0548'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V42_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'Jev process v42 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v42('${oldSeal.digest}','script-entrypoint:hooks/lint-gate.py');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'Jev process v42 predecessor entry drifted'; end if;\n` +
+    `end $jev_v43_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
+
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
   // in v21 artifacts, and every input to the guard is a fixed module constant.
@@ -13674,10 +13764,20 @@ export function renderGeneratedFrontier() {
     renderB09AtomicRepairRegistrySql(v42Rows,
       POST_0548_FORWARD_V42_DB_CATALOG_BASELINE,
       artifacts["migrations/0547_read_doc_outcome_cards_scac_successor.sql"]);
+  const v43Rows = frozenInventory(REGISTRY_V43_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v43.generated.js"] =
+    renderRuntimeProjection(v43Rows, {
+      version: REGISTRY_V43_VERSION,
+      dbCatalogBaseline: POST_0549_FORWARD_V43_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0549_jev_process_scac_successor.sql"] =
+    renderJevProcessRegistrySql(v43Rows,
+      POST_0549_FORWARD_V43_DB_CATALOG_BASELINE,
+      artifacts["migrations/0548_b09_atomic_migration_repair_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 48 || runtimeCount !== 39 || Object.keys(artifacts).length !== 87)
+  if (migrationCount !== 49 || runtimeCount !== 40 || Object.keys(artifacts).length !== 89)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -14359,6 +14459,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       dbCatalogBaseline: POST_0548_FORWARD_V42_DB_CATALOG_BASELINE,
     }));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-jev-process-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0549_jev_process_scac_successor.sql");
+    await writeFile(target, renderJevProcessRegistrySql(frozenInventory(REGISTRY_V43_VERSION)));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v43") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v43.generated.js");
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V43_VERSION), {
+      version: REGISTRY_V43_VERSION,
+      dbCatalogBaseline: POST_0549_FORWARD_V43_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-ready-plan-amendment-registry-migration") {
     const target = resolve(process.argv[3] ||
       "migrations/0532b_ready_plan_amendment_scac_successor.sql");
@@ -14385,7 +14496,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V41_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V43_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

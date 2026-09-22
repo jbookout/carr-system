@@ -125,7 +125,9 @@ class EditCoverageTests(unittest.TestCase):
                 lint.code_review(payload)
             receipt = json.loads(json.loads(out.getvalue())
                                  ["hookSpecificOutput"]["additionalContext"])
-            self.assertEqual(receipt["status"], "reviewed")
+            self.assertEqual(receipt["status"], "skipped")
+            self.assertEqual(receipt["models"], [])
+            self.assertEqual(receipt["reason"], "no_jev_candidate")
             self.assertEqual(receipt["paths"], [
                 {"path": "src/a.py", "status": "clear",
                  "reason": "no_ambiguous_candidate"}])
@@ -160,6 +162,8 @@ class EditCoverageTests(unittest.TestCase):
             lint.code_review(payload)
         unsupported = json.loads(
             json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(unsupported["status"], "skipped")
+        self.assertEqual(unsupported["reason"], "no_supported_code_paths")
         self.assertEqual(unsupported["paths"][0]["reason"], "unsupported_extension")
         contract = load("rule_delivery_postwrite_test",
                         REPO / "lib/rule_delivery_preuse.py")
@@ -167,6 +171,46 @@ class EditCoverageTests(unittest.TestCase):
         forged = dict(unsupported)
         forged["tool_input_sha256"] = "0" * 64
         self.assertFalse(contract.validate_postwrite_receipt(forged, repo=REPO))
+        false_review = dict(unsupported, status="reviewed", reason=None)
+        false_review["receipt_id"] = contract.receipt_id(false_review)
+        self.assertFalse(contract.validate_postwrite_receipt(false_review, repo=REPO))
+        actual_review = dict(false_review, models=["jev-1.13.0"],
+                             paths=[{"path": "src/a.py", "status": "jev_reviewed",
+                                     "candidates": ["boundary"]}])
+        actual_review["receipt_id"] = contract.receipt_id(actual_review)
+        self.assertTrue(contract.validate_postwrite_receipt(actual_review, repo=REPO))
+
+    def test_markdown_outside_git_is_a_skip_not_a_jev_outage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "pr-body.md"
+            target.write_text("Review notes\n")
+            payload = {"tool_name": "apply_patch", "cwd": tmp,
+                       "session_id": "session-review", "tool_use_id": "tool-review",
+                       "tool_input": {"command":
+                           f"*** Begin Patch\n*** Add File: {target}\n+Review notes\n*** End Patch"}}
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                lint.code_review(payload)
+            receipt = json.loads(json.loads(out.getvalue())
+                                 ["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(receipt["status"], "skipped")
+            self.assertEqual(receipt["reason"], "no_supported_code_paths")
+            self.assertEqual(receipt["models"], [])
+
+    def test_supported_code_outside_git_remains_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "source.py"
+            target.write_text("value = 1\n")
+            payload = {"tool_name": "Write", "cwd": tmp,
+                       "session_id": "session-review", "tool_use_id": "tool-review",
+                       "tool_input": {"file_path": str(target)}}
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                lint.code_review(payload)
+            receipt = json.loads(json.loads(out.getvalue())
+                                 ["hookSpecificOutput"]["additionalContext"])
+            self.assertEqual(receipt["status"], "unavailable")
+            self.assertEqual(receipt["reason"], "RuntimeError")
 
 
 if __name__ == "__main__":

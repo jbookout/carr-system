@@ -952,6 +952,21 @@ check_pushfloor() {
     fi
   fi
 
+  # A registry successor changes the active version returned by the inventory
+  # graph. The 2026-09-22 v41 successor reached hosted unit before this exact
+  # assertion ran locally, costing a full strict-CI cycle. These two focused
+  # tests take under a second together and keep the local floor bounded.
+  if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Eq \
+      '^(migrations/[0-9]+_.*scac.*\.sql|mcp-server/src/scac-mutation-registry\.v[0-9]+\.generated\.js|ops/config/scac-registry-.*\.json)$'; then
+    ran="$ran scac-atlas"
+    run_quiet "$LOGDIR/pushfloor-scac-atlas.log" node --test \
+      mcp-server/test/atlas-inventory-graph-read.test.mjs \
+      mcp-server/test/atlas-inventory-graph-web.test.mjs \
+      || { tail -18 "$LOGDIR/pushfloor-scac-atlas.log" >&2
+           floor_fail scac-atlas \
+             "active registry changed; update the Atlas version contract or repair its reader before push"; }
+  fi
+
   # ── predictor: the gate-impact closure ───────────────────────────────────
   local gate_surface=""
   if [ -n "$changed" ]; then

@@ -80,7 +80,7 @@ BUILD_RECEIPT_KEYS = frozenset({
     "prompt_sha256", "adviser_digest", "configuration_digest",
     "source_digest", "semantic_rule_delivery", "advisory",
 })
-POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v1"
+POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 POSTWRITE_RECEIPT_KEYS = frozenset({
     "schema", "receipt_id", "client", "session_id", "turn_id", "tool_use_id",
     "tool_name", "tool_input_sha256", "configuration_digest",
@@ -213,7 +213,7 @@ def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
         return False
     if (row.get("schema") != POSTWRITE_RECEIPT_SCHEMA
             or row.get("client") not in {"claude", "codex"}
-            or row.get("status") not in {"reviewed", "unavailable"}):
+            or row.get("status") not in {"reviewed", "skipped", "unavailable"}):
         return False
     if not all(_nonempty(row.get(key)) for key in (
             "receipt_id", "session_id", "tool_use_id", "tool_name",
@@ -230,13 +230,30 @@ def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
     if (row["configuration_digest"] != expected_config
             or row["reviewer_digest"] != postwrite_reviewer_digest(repo)):
         return False
-    if not isinstance(row.get("paths"), list) or not isinstance(row.get("findings"), list):
+    if (not isinstance(row.get("paths"), list) or
+            any(not isinstance(path, dict) for path in row["paths"]) or
+            not isinstance(row.get("findings"), list)):
         return False
     if (not isinstance(row.get("models"), list)
             or any(not _nonempty(model) for model in row["models"])):
         return False
     if row["status"] == "reviewed":
-        if row.get("reason") is not None or row.get("instruction") is not None:
+        if (not row["models"] or row.get("reason") is not None
+                or row.get("instruction") is not None
+                or not any(isinstance(path, dict) and path.get("status") == "jev_reviewed"
+                           for path in row["paths"])):
+            return False
+    elif row["status"] == "skipped":
+        if (row["models"] or row["findings"] or row.get("reason") not in
+                {"no_jev_candidate", "no_supported_code_paths"}
+                or row.get("instruction") is not None
+                or any(isinstance(path, dict) and path.get("status") == "jev_reviewed"
+                       for path in row["paths"])):
+            return False
+        if (row["reason"] == "no_supported_code_paths" and
+                any(path.get("status") != "not_reviewed" or
+                    path.get("reason") != "unsupported_extension"
+                    for path in row["paths"])):
             return False
     elif not _nonempty(row.get("reason")) or not _nonempty(row.get("instruction")):
         return False
