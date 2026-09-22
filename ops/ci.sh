@@ -1199,6 +1199,14 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   done
 
+  if ! run_quiet "$LOGDIR/model-role-store-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/model-role-store-postgres.sql; then
+    tail -30 "$LOGDIR/model-role-store-postgres.log" >&2
+    bad migration "Model Room role-store PostgreSQL acceptance failed"
+    return
+  fi
+
   # Continuity bindings and append-only records need actual PostgreSQL proof.
   if ! run_quiet "$LOGDIR/codex-continuity-postgres.log" \
        "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \

@@ -348,7 +348,7 @@ begin
     raise exception 'the ECMAScript whitespace set holds % code points, not 25',
       length(ops.model_role_ecmascript_whitespace());
   end if;
-  v_exercised := v_exercised || 'ecmascript-trim-rule-matches-defineRole-both-directions';
+  v_exercised := array_append(v_exercised, 'ecmascript-trim-rule-matches-defineRole-both-directions');
 
   -- === the digest, computed from bytes assembled in this file ===============
   v_digest := ops.model_role_digest_of_preimage(v_preimage);
@@ -363,7 +363,7 @@ begin
   if v_digest !~ '^sha256:[0-9a-f]{64}$' then
     raise exception 'the role digest is not a sha256 reference: %', v_digest;
   end if;
-  v_exercised := v_exercised || 'digest-shape-and-no-domain-tag';
+  v_exercised := array_append(v_exercised, 'digest-shape-and-no-domain-tag');
 
   -- === revision 1 ===========================================================
   v_id := ops.model_role_record_revision(
@@ -384,7 +384,7 @@ begin
     raise exception 'a freshly recorded revision is structurally invalid: %',
       ops.model_role_structure_error(v_id);
   end if;
-  v_exercised := v_exercised || 'stored-rows-rebuild-equals-hashed-preimage';
+  v_exercised := array_append(v_exercised, 'stored-rows-rebuild-equals-hashed-preimage');
 
   -- THE ROLE CONTRACT VERSION IS REPORTED, not assumed. It is what lets a future
   -- reader refuse a revision it cannot revalidate BY NAME rather than by failing
@@ -394,7 +394,7 @@ begin
        <> ops.model_role_schema_version() then
     raise exception 'a revision readback does not report the role contract version it was stored under';
   end if;
-  v_exercised := v_exercised || 'revision-entry-reports-stored-role-schema-version';
+  v_exercised := array_append(v_exercised, 'revision-entry-reports-stored-role-schema-version');
 
   -- REFERENCE SETS ARE EMITTED SORTED, whatever ordinals their rows carry. The
   -- rows above deliberately number task_classes and capability_refs in reverse,
@@ -409,7 +409,7 @@ begin
        <> to_jsonb('read a diff against the contract it claims to satisfy'::text) then
     raise exception 'text lists are not emitted in their stored ordinal order';
   end if;
-  v_exercised := v_exercised || 'ref-sets-sorted-and-text-lists-ordinal';
+  v_exercised := array_append(v_exercised, 'ref-sets-sorted-and-text-lists-ordinal');
 
   -- === revision 2: the same role, one list reordered ========================
   v_digest2 := ops.model_role_digest_of_preimage(
@@ -433,7 +433,7 @@ begin
   if v_count <> 2 then
     raise exception 'the role history holds % revisions, not 2', v_count;
   end if;
-  v_exercised := v_exercised || 'versioned-revisions-and-preserved-history';
+  v_exercised := array_append(v_exercised, 'versioned-revisions-and-preserved-history');
 
   -- === refusals on the record path ==========================================
 
@@ -452,7 +452,7 @@ begin
       raise exception 'wrong refusal for a version hole: %', sqlerrm;
     end if;
   end;
-  v_exercised := v_exercised || 'refuses-version-hole';
+  v_exercised := array_append(v_exercised, 'refuses-version-hole');
 
   -- CONTENT THAT REPEATS AN EXISTING REVISION. A revision recording no change is
   -- not history; rolling back is done with the current pointer.
@@ -466,7 +466,7 @@ begin
       raise exception 'wrong refusal for duplicate content: %', sqlerrm;
     end if;
   end;
-  v_exercised := v_exercised || 'refuses-duplicate-content';
+  v_exercised := array_append(v_exercised, 'refuses-duplicate-content');
 
   -- AN ORDINAL GAP. The structure check fires before the digest check, so the
   -- caller learns the shape is wrong rather than only that a hash disagreed.
@@ -483,7 +483,7 @@ begin
       raise exception 'wrong refusal for a gapped list: %', sqlerrm;
     end if;
   end;
-  v_exercised := v_exercised || 'refuses-ordinal-gap';
+  v_exercised := array_append(v_exercised, 'refuses-ordinal-gap');
 
   -- A DIGEST THE STORED ROWS DO NOT PRODUCE. The caller's hash is compared, and
   -- a refused write leaves nothing behind.
@@ -504,7 +504,7 @@ begin
   if v_count <> 2 then
     raise exception 'a refused write left % revisions behind instead of 2', v_count;
   end if;
-  v_exercised := v_exercised || 'refuses-body-digest-drift-and-leaves-nothing';
+  v_exercised := array_append(v_exercised, 'refuses-body-digest-drift-and-leaves-nothing');
 
   -- A ROLE DECLARING RETAINED SYSTEM AUTHORITY. No occupant could ever hold it.
   begin
@@ -519,7 +519,7 @@ begin
       raise exception 'wrong refusal for a system-authority role class: %', sqlerrm;
     end if;
   end;
-  v_exercised := v_exercised || 'refuses-system-authority-role-class';
+  v_exercised := array_append(v_exercised, 'refuses-system-authority-role-class');
 
   -- AN UNSETTLED ROLE KEY.
   begin
@@ -530,7 +530,7 @@ begin
   exception when others then
     if sqlerrm like v_marker || '%' then raise; end if;
   end;
-  v_exercised := v_exercised || 'refuses-unsettled-role-key';
+  v_exercised := array_append(v_exercised, 'refuses-unsettled-role-key');
 
   -- === idempotency ==========================================================
   declare v_key constant uuid := gen_random_uuid();
@@ -567,7 +567,7 @@ begin
       end if;
     end;
   end;
-  v_exercised := v_exercised || 'idempotent-replay-and-mismatch-refusal';
+  v_exercised := array_append(v_exercised, 'idempotent-replay-and-mismatch-refusal');
 
   -- === whitespace-only text is refused on the writer path ===================
   --
@@ -622,7 +622,7 @@ begin
   if v_count <> 3 then
     raise exception 'a refused whitespace write left % revisions behind instead of 3', v_count;
   end if;
-  v_exercised := v_exercised || 'refuses-whitespace-only-title-mission-and-skill';
+  v_exercised := array_append(v_exercised, 'refuses-whitespace-only-title-mission-and-skill');
 
   -- A DIRECT INSERT OF WHITESPACE-ONLY CONTENT, which is the path the writer
   -- functions do not cover. On a session that holds INSERT (the schema owner)
@@ -640,10 +640,10 @@ begin
       raise exception 'wrong refusal (SQLSTATE %) for a directly inserted whitespace-only skill: %',
         v_state, sqlerrm;
     end if;
-    v_exercised := v_exercised || format(
+    v_exercised := array_append(v_exercised, format(
       'refuses-direct-whitespace-only-content-insert (SQLSTATE %s: %s)', v_state,
       case v_state when '23514' then 'the check constraint'
-                   when '42501' then 'the grant posture' else 'unexpected' end);
+                   when '42501' then 'the grant posture' else 'unexpected' end));
   end;
 
   -- === legitimate embedded whitespace is stored VERBATIM ====================
@@ -686,7 +686,7 @@ begin
     raise exception 'legitimate embedded whitespace was called structurally invalid: %',
       ops.model_role_structure_error(v_ws_id);
   end if;
-  v_exercised := v_exercised || 'stores-legitimate-embedded-whitespace-verbatim';
+  v_exercised := array_append(v_exercised, 'stores-legitimate-embedded-whitespace-verbatim');
 
   -- === append-only, truncate, and direct writes =============================
   --
@@ -722,7 +722,7 @@ begin
       raise exception 'wrong refusal for a content delete: %', sqlerrm;
     end if;
   end;
-  v_exercised := v_exercised || 'append-only-on-revisions-and-content';
+  v_exercised := array_append(v_exercised, 'append-only-on-revisions-and-content');
 
   -- TRUNCATE IS A STATEMENT EVENT, so the row-level append-only trigger cannot
   -- see it. Without a statement-level BEFORE TRUNCATE trigger, "a superseded
@@ -750,7 +750,7 @@ begin
       raise exception 'wrong refusal for a truncate: %', sqlerrm;
     end if;
   end;
-  v_exercised := v_exercised || 'refuses-truncate-on-all-four-relations';
+  v_exercised := array_append(v_exercised, 'refuses-truncate-on-all-four-relations');
 
   -- A DIRECT INSERT NAMING ANOTHER WRITER.
   --
@@ -785,16 +785,16 @@ begin
       raise exception 'wrong refusal (SQLSTATE %) for a direct misattributed insert: %',
         v_state, sqlerrm;
     end if;
-    v_exercised := v_exercised || format(
+    v_exercised := array_append(v_exercised, format(
       'refuses-direct-misattributed-insert (SQLSTATE %s: %s)', v_state,
       case
         when v_state = '23502' then 'the NOT NULL column, because this database holds one active actor -- the writer guard was NOT reached'
         when sqlerrm like '%authenticated writer context%' then 'ops.model_role_revision_guard itself'
         else 'the grant posture -- the writer guard was NOT reached'
-      end);
+      end));
     if v_state = '23502' or sqlerrm not like '%authenticated writer context%' then
-      v_not_exercised := v_not_exercised ||
-        'ops.model_role_revision_guard''s misattribution refusal itself: this session was refused earlier, by the grant posture or by a NOT NULL column. Re-run as the schema owner on a database with two or more active actors to reach the guard.';
+      v_not_exercised := array_append(v_not_exercised,
+        'ops.model_role_revision_guard''s misattribution refusal itself: this session was refused earlier, by the grant posture or by a NOT NULL column. Re-run as the schema owner on a database with two or more active actors to reach the guard.');
     end if;
   end;
 
@@ -811,13 +811,13 @@ begin
     if v_locks < 1 then
       raise exception 'ops.model_role_lock did not take an advisory lock';
     end if;
-    v_exercised := v_exercised || 'per-role-advisory-lock-is-actually-taken';
+    v_exercised := array_append(v_exercised, 'per-role-advisory-lock-is-actually-taken');
   else
-    v_not_exercised := v_not_exercised || format(
+    v_not_exercised := array_append(v_not_exercised, format(
       'the runtime observation that ops.model_role_lock takes an advisory lock: %s does not hold EXECUTE on it, which is the intended posture. Only the source assertion that both writers call it ran.',
-      current_user);
+      current_user));
   end if;
-  select pg_get_functiondef(oid) into v_def from pg_proc p
+  select pg_get_functiondef(p.oid) into v_def from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'ops' and p.proname = 'model_role_record_revision' limit 1;
   if v_def not like '%model_role_lock%' then
@@ -829,7 +829,7 @@ begin
   -- correct ordering. Asserted from the installed source instead, because a
   -- schema where somebody dropped the clause would pass every row-level
   -- assertion in this file.
-  select pg_get_functiondef(oid) into v_def from pg_proc p
+  select pg_get_functiondef(p.oid) into v_def from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'ops' and p.proname = 'model_role_structure_error' limit 1;
   if v_def not like '%model_role_is_nonempty_text%' then
@@ -840,10 +840,10 @@ begin
      or v_def not like '%reference rows name an unknown field%' then
     raise exception 'ops.model_role_structure_error sweeps text rows for an unknown field but not reference rows';
   end if;
-  v_not_exercised := v_not_exercised ||
-    'the structure-check half of the non-empty gate as a runtime refusal: the CHECK constraints refuse a whitespace-only value at insert, so no revision carrying one can be brought into existence for ops.model_role_structure_error to reject. Its clause is asserted from the installed source instead.';
+  v_not_exercised := array_append(v_not_exercised,
+    'the structure-check half of the non-empty gate as a runtime refusal: the CHECK constraints refuse a whitespace-only value at insert, so no revision carrying one can be brought into existence for ops.model_role_structure_error to reject. Its clause is asserted from the installed source instead.');
 
-  select pg_get_functiondef(oid) into v_def from pg_proc p
+  select pg_get_functiondef(p.oid) into v_def from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'ops' and p.proname = 'model_role_set_current_revision' limit 1;
   if v_def not like '%model_role_lock%' then
@@ -865,14 +865,14 @@ begin
     raise exception 'the current-pointer writer takes an identity, an approval or an authority as a parameter';
   end if;
   -- The guard re-derives both facts too, so a writer bug cannot skip either.
-  select pg_get_functiondef(oid) into v_def from pg_proc p
+  select pg_get_functiondef(p.oid) into v_def from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'ops' and p.proname = 'model_role_pointer_guard' limit 1;
   if v_def not like '%authority_actor_slug()%'
      or v_def not like '%portfolio_writer_actor_id()%' then
     raise exception 'the current-pointer guard does not independently re-derive both the authority login scope and the acting principal';
   end if;
-  v_exercised := v_exercised || 'both-writers-lock-and-the-pointer-principal-is-derived-twice-in-source';
+  v_exercised := array_append(v_exercised, 'both-writers-lock-and-the-pointer-principal-is-derived-twice-in-source');
 
   -- The content guard exists and is attached to both content relations, and the
   -- revision carries the transaction that created it. Its BEHAVIOUR needs two
@@ -890,8 +890,8 @@ begin
                     and column_name = 'created_xid') then
     raise exception 'the revision carries no creating transaction, so its content cannot be frozen';
   end if;
-  v_not_exercised := v_not_exercised ||
-    'content-freeze-behaviour (needs two committed transactions; only its presence and attachment were checked)';
+  v_not_exercised := array_append(v_not_exercised,
+    'content-freeze-behaviour (needs two committed transactions); only its presence and attachment were checked)');
 
   -- === the current pointer ==================================================
   v_readback := ops.model_role_readback(v_role);
@@ -905,7 +905,7 @@ begin
      or (v_readback ->> 'capability_token_issued') <> 'false' then
     raise exception 'a role readback claims more than re-derivation from committed rows: %', v_readback;
   end if;
-  v_exercised := v_exercised || 'no-default-current-role-and-scoped-readback';
+  v_exercised := array_append(v_exercised, 'no-default-current-role-and-scoped-readback');
 
   v_session := session_user;
   v_partner_ok := false;
@@ -942,13 +942,13 @@ begin
         raise exception 'wrong refusal (SQLSTATE %) for an unauthorized current-pointer change: %',
           v_state, sqlerrm;
       end if;
-      v_exercised := v_exercised || format(
+      v_exercised := array_append(v_exercised, format(
         'refuses-current-pointer-without-system-authority (SQLSTATE %s: %s)', v_state,
         case
           when sqlerrm like '%permission denied%' then 'the grant posture -- EXECUTE is revoked, so the writer was never entered'
           when sqlerrm like '%not an admitted human authority principal%' then 'ops.authority_actor_slug() -- this session_user maps to no partner'
           else 'the writer''s retained-system-authority comparison'
-        end);
+        end));
     end;
     select count(*) into v_count from ops.model_role_current_pointer;
     if v_count <> 0 then
@@ -957,16 +957,16 @@ begin
     if ops.model_role_current_revision(v_role) is not null then
       raise exception 'a refused current-pointer change still selected a revision';
     end if;
-    v_not_exercised := v_not_exercised || format(
+    v_not_exercised := array_append(v_not_exercised, format(
       'the POSITIVE current-pointer path, the acting-principal refusal, and every compare-and-swap refusal (stale expectation, creation collision, already-current, unknown revision, wrong digest). This session is %s, which ops.authority_actor_slug() does not admit as the retained system-authority partner. Re-run this file on that partner''s authority connection to exercise them.',
-      v_session);
+      v_session));
   else
     v_partner := ops.model_role_system_authority_partner();
     -- THE POSITIVE PATH, available only on the retained partner's connection.
     if not exists (select 1 from public.actor
                     where slug = v_partner and active and kind = 'human') then
-      v_not_exercised := v_not_exercised ||
-        'the positive current-pointer path: the authority session is the retained partner, but no active human actor exists for that slug, so the writer refuses. No actor is created here.';
+      v_not_exercised := array_append(v_not_exercised,
+        'the positive current-pointer path: the authority session is the retained partner, but no active human actor exists for that slug, so the writer refuses. No actor is created here.');
     else
       -- ============================================================
       -- FIRST, THE REFUSAL THAT MATTERS MOST, and it runs on the PARTNER'S OWN
@@ -997,8 +997,8 @@ begin
       if v_count <> 0 then
         raise exception 'a refused acting-principal change still wrote % pointer rows', v_count;
       end if;
-      v_exercised := v_exercised ||
-        'refuses-current-pointer-when-acting-actor-is-not-the-partner-human-on-the-shared-authority-login';
+      v_exercised := array_append(v_exercised,
+        'refuses-current-pointer-when-acting-actor-is-not-the-partner-human-on-the-shared-authority-login');
 
       -- ============================================================
       -- NOW THE POSITIVE PATH -- AND READ THIS BEFORE READING IT AS A PROOF OF
@@ -1051,8 +1051,8 @@ begin
       if (v_cur -> 'preimage' -> 'authority' ->> 'authority_class') <> 'developer' then
         raise exception 'the role''s own declared authority class is not where a reader looks for it';
       end if;
-      v_exercised := v_exercised ||
-        'creates-current-pointer-under-retained-system-authority-recording-login-scope-and-acting-principal-separately';
+      v_exercised := array_append(v_exercised,
+        'creates-current-pointer-under-retained-system-authority-recording-login-scope-and-acting-principal-separately');
 
       -- A SECOND CREATION COLLIDES rather than overwriting.
       begin
@@ -1064,7 +1064,7 @@ begin
           raise exception 'wrong refusal for a creation collision: %', sqlerrm;
         end if;
       end;
-      v_exercised := v_exercised || 'refuses-creation-collision';
+      v_exercised := array_append(v_exercised, 'refuses-creation-collision');
 
       -- A STALE EXPECTATION LOSES.
       begin
@@ -1076,7 +1076,7 @@ begin
           raise exception 'wrong refusal for a stale compare-and-swap: %', sqlerrm;
         end if;
       end;
-      v_exercised := v_exercised || 'refuses-stale-compare-and-swap';
+      v_exercised := array_append(v_exercised, 'refuses-stale-compare-and-swap');
 
       -- A DIGEST THE NAMED REVISION DOES NOT HAVE.
       begin
@@ -1100,7 +1100,7 @@ begin
           raise exception 'wrong refusal for an unknown revision: %', sqlerrm;
         end if;
       end;
-      v_exercised := v_exercised || 'refuses-missing-revision-and-stale-pointer-digest';
+      v_exercised := array_append(v_exercised, 'refuses-missing-revision-and-stale-pointer-digest');
 
       -- A LEGITIMATE SWAP, and the history of what was current is preserved.
       perform ops.model_role_set_current_revision(v_role, gen_random_uuid(), 2, v_digest2, false, 1);
@@ -1143,7 +1143,7 @@ begin
           end if;
         end;
       end;
-      v_exercised := v_exercised || 'swaps-current-pointer-preserves-ledger-and-replays-idempotently';
+      v_exercised := array_append(v_exercised, 'swaps-current-pointer-preserves-ledger-and-replays-idempotently');
 
       -- RE-POINTING AT WHAT IS ALREADY CURRENT IS A NO-OP AND IS REFUSED, so a
       -- stale caller cannot read one as a success.
@@ -1156,7 +1156,7 @@ begin
           raise exception 'wrong refusal for an already-current re-point: %', sqlerrm;
         end if;
       end;
-      v_exercised := v_exercised || 'refuses-already-current-re-point';
+      v_exercised := array_append(v_exercised, 'refuses-already-current-re-point');
 
       -- The writer context is restored, so nothing after this block runs under
       -- an actor context this file manufactured.
@@ -1164,9 +1164,9 @@ begin
       perform set_config('carr.verified_human_actor_slug', '', true);
     end if;
     if v_session <> 'carr_authority_' || ops.model_role_system_authority_partner() then
-      v_not_exercised := v_not_exercised || format(
+      v_not_exercised := array_append(v_not_exercised, format(
         'the refusal path for a NON-system-authority authority principal: this session (%s) is the retained partner, so the other partner''s refusal was not observed here.',
-        v_session);
+        v_session));
     end if;
   end if;
 
@@ -1197,10 +1197,10 @@ begin
        or has_function_privilege('carr_reader', 'ops.model_role_lock(text)', 'execute') then
       raise exception 'the per-role write lock is reachable without writing';
     end if;
-    v_exercised := v_exercised || 'least-privilege-on-tables-writers-and-lock';
+    v_exercised := array_append(v_exercised, 'least-privilege-on-tables-writers-and-lock');
   else
-    v_not_exercised := v_not_exercised ||
-      'the least-privilege assertions: carr_writer and carr_authority do not both exist here. This file creates no role.';
+    v_not_exercised := array_append(v_not_exercised,
+      'the least-privilege assertions: carr_writer and carr_authority do not both exist here. This file creates no role.');
   end if;
 
   -- === the installed shape the writers and guards depend on =================
@@ -1308,7 +1308,7 @@ begin
   if v_probe is not null then
     raise exception 'these constraints gate text with the space-only btrim(): %', v_probe;
   end if;
-  v_exercised := v_exercised || 'installed-shape-carries-every-constraint-and-not-null-the-writers-depend-on';
+  v_exercised := array_append(v_exercised, 'installed-shape-carries-every-constraint-and-not-null-the-writers-depend-on');
 
   -- === what this rail does not carry ========================================
   if to_regclass('ops.model_role_occupant') is not null
@@ -1337,7 +1337,7 @@ begin
   if v_count <> 0 then
     raise exception 'a role relation carries a grant column beyond the recorded authority kind';
   end if;
-  v_exercised := v_exercised || 'no-occupant-qualification-approval-or-numeric-floor-column';
+  v_exercised := array_append(v_exercised, 'no-occupant-qualification-approval-or-numeric-floor-column');
 
   -- === the honest report ====================================================
   raise notice 'EXERCISED (%): %', cardinality(v_exercised), array_to_string(v_exercised, '; ');

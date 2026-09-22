@@ -12,8 +12,8 @@
 // module SENDS, what it REFUSES, and what it refuses to send — and it is not,
 // and is not treated as, a claim about durable behaviour. The
 // transaction-scoped proofs against a real PostgreSQL live in
-// model-role-store-postgres.sql, and ops/model-role-store.candidate.sql has not
-// been applied to any database by this change.
+// model-role-store-postgres.sql. Migration 0542 promotes the reviewed candidate;
+// these unit tests alone do not prove that a live database has applied it.
 //
 // THE LAST FOUR CASES READ ops/model-role-store.candidate.sql AS TEXT and assert
 // what it does and does not contain — chiefly that it holds no migration program:
@@ -1328,8 +1328,9 @@ test("the projection names the gaps it does not fill and claims nothing it canno
   assert.equal(p.numeric_policy_default_declared, false);
   assert.equal(p.signed_capability_token_issued, false);
   assert.equal(p.provenance_survives_serialization, false);
-  assert.equal(p.candidate_sql_applied_as_migration, false);
-  assert.equal(p.tools_registered, false);
+  assert.equal(p.candidate_sql_applied_as_migration, true);
+  assert.equal(p.candidate_install.numbered_migration, "migrations/0542_model_role_store.sql");
+  assert.equal(p.tools_registered, true);
   assert.equal(p.current_pointer_authority_class, "system_authority");
   assert.equal(p.current_pointer_delegable, false);
   assert.deepEqual(p.role_keys, [...V5_ROLE_KEYS]);
@@ -1342,10 +1343,9 @@ test("the projection names the gaps it does not fill and claims nothing it canno
   assert.ok(kernelGaps.includes("model dispatch"));
   assert.ok(kernelGaps.includes("live backend health source"));
   assert.equal(p.effects.database_writes, 0);
-  // The unapplied candidate is named as unapplied on the projection itself, so
-  // no reader has to infer it from a file header.
+  // Source promotion does not imply the current database has applied it.
   assert.ok(p.integration_still_open.some(line =>
-    line.includes("has not been executed against any database")));
+    line.includes("checked at runtime")));
 });
 
 test("the principal binding names both record-layer derivations and the seam that remains", () => {
@@ -1376,7 +1376,7 @@ test("the read-compatibility scope refuses every form of quiet repair", () => {
   assert.equal(scope.returns_partial_history_on_corruption, false);
 });
 
-test("this rail registers nothing and activates nothing", () => {
+test("this rail exposes role descriptions without activating a route", () => {
   assert.deepEqual(Object.keys(tools).sort(),
     ["read-model-role", "record-model-role-revision", "set-current-model-role-revision"]);
   for (const name of Object.keys(tools)) {
@@ -1508,7 +1508,7 @@ test("every column and constraint the writers depend on is in the CREATE TABLE s
 test("the module's install scope says what the candidate file actually does", () => {
   const scope = modelRoleStorePrerequisites().candidate_install;
   assert.equal(scope, MODEL_ROLE_CANDIDATE_INSTALL_SCOPE);
-  assert.equal(scope.applied_as_migration, false);
+  assert.equal(scope.applied_as_migration, true);
   assert.equal(scope.installs_fresh_only, true);
   assert.equal(scope.refuses_preexisting_installation_before_any_ddl, true);
   assert.equal(scope.migrates_or_repairs_a_preexisting_installation, false);
@@ -1524,5 +1524,5 @@ test("the module's install scope says what the candidate file actually does", ()
   assert.equal(CANDIDATE_CODE.includes("alter table"), false);
   assert.ok(CANDIDATE_CODE.includes("$fresh_install_only$"));
   assert.ok(scope.asserts_its_own_installed_shape.includes("2b"));
-  assert.ok(scope.forward_migration_is.includes("ordinal"));
+  assert.ok(scope.forward_migration_is.includes("0542_model_role_store.sql"));
 });

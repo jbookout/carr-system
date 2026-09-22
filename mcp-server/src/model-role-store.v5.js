@@ -118,10 +118,9 @@
 // projection and are re-exported below from it rather than restated, so there
 // is one list and it stays one list.
 //
-// NOT REGISTERED. `modelRoleStoreTools` is exported and is deliberately added
-// to no tool index by this slice: registering a verb — and especially an
-// `authorityOnly` one — is a separate, reviewed act. Applying
-// ops/model-role-store.candidate.sql as a numbered migration is another.
+// `modelRoleStoreTools` is registered in tools.js. The fresh-only store is
+// installed by migration 0542 together with a paired SCAC registry successor;
+// the role verbs do not qualify a route or dispatch a model.
 //
 // NO `humanOnly` LABEL IS DECLARED, AND ITS ABSENCE IS THE ACCURATE STATEMENT.
 // Joe's 2026-08-26 ruling (decision dc57f62d) retired the `humanOnly` refusal:
@@ -301,11 +300,10 @@ export const MODEL_ROLE_READ_COMPATIBILITY_SCOPE = Object.freeze({
 });
 
 /**
- * HOW `ops/model-role-store.candidate.sql` MAY BE APPLIED, and what applying it
- * would and would not establish about the schema it leaves behind.
+ * HOW THE NUMBERED MIGRATION INSTALLS THE REVIEWED CANDIDATE, and what it
+ * establishes about the schema it leaves behind.
  *
- * WRITTEN OUT BECAUSE "THE CANDIDATE IS UNAPPLIED" IS NOT THE WHOLE STATEMENT.
- * That file installs FRESH: its section 0 refuses, BEFORE ANY DDL, on a database
+ * The numbered migration installs FRESH: its section 0 refuses, BEFORE ANY DDL, on a database
  * that already carries any `ops.model_role_*` relation or function, and its
  * section 2 uses plain `CREATE TABLE`, so an existing relation is refused a second
  * time by an independent mechanism. It contains no `ALTER TABLE`, no `ADD COLUMN`,
@@ -320,12 +318,13 @@ export const MODEL_ROLE_READ_COMPATIBILITY_SCOPE = Object.freeze({
  * expectation, which is a guess about a deparser rather than a verification. So
  * the claim is the narrow one: those objects were created by that file on a
  * database that lacked them, or nothing was created. Bringing an earlier
- * installation forward is a numbered migration with its own ordinal, ledger entry
- * and review, and applying this candidate is not that and does not stand in for it.
+ * installation forward requires a separate reviewed migration. Migration 0542
+ * refuses one rather than silently adopting its rows.
  */
 export const MODEL_ROLE_CANDIDATE_INSTALL_SCOPE = Object.freeze({
   candidate_sql: "ops/model-role-store.candidate.sql",
-  applied_as_migration: false,
+  numbered_migration: "migrations/0542_model_role_store.sql",
+  applied_as_migration: true,
   installs_fresh_only: true,
   refuses_preexisting_installation_before_any_ddl: true,
   migrates_or_repairs_a_preexisting_installation: false,
@@ -335,7 +334,7 @@ export const MODEL_ROLE_CANDIDATE_INSTALL_SCOPE = Object.freeze({
   refusal_is_on_presence_not_on_verified_incompatibility: true,
   verifies_that_a_preexisting_relation_is_compatible: false,
   asserts_its_own_installed_shape: "section 2b re-reads the catalog after the relations are created and refuses unless every column, type, nullability and NAMED constraint the writers, guards and readers depend on is present -- acting_actor_id NOT NULL and the three ECMAScript non-empty gates included. It issues no DDL and repairs nothing; a mismatch is raised and named.",
-  forward_migration_is: "a numbered migration with an ordinal, a schema_migrations entry and its own review. This candidate is not one, and neither this module nor that file decides what happens to rows written under an earlier shape.",
+  forward_migration_is: "migrations/0542_model_role_store.sql promotes the fresh-only candidate through the numbered migration runner. Neither file adopts or rewrites rows from a preexisting installation.",
 });
 
 /**
@@ -986,16 +985,15 @@ export function modelRoleStorePrerequisites() {
     routing_kernel_provenance_scope: V5_PROVENANCE_SCOPE,
     // Integration that is NOT done by this slice, named at the point a reader
     // would otherwise assume it.
-    candidate_sql_applied_as_migration: false,
+    candidate_sql_applied_as_migration: true,
     // HOW it may be applied, beside the fact that it has not been. The candidate
     // installs fresh and refuses an existing installation before any DDL; it
     // holds no migration program and this projection does not imply one.
     candidate_install: MODEL_ROLE_CANDIDATE_INSTALL_SCOPE,
-    tools_registered: false,
+    tools_registered: true,
     routing_kernel_unimplemented_dependencies: [...routing.unimplemented_dependencies],
     integration_still_open: [
-      "Applying ops/model-role-store.candidate.sql as a numbered migration. It is candidate source, carries no ordinal, is not in public.schema_migrations, and has not been executed against any database. Nothing in this module has been exercised against a real record layer. It also installs FRESH ONLY -- it refuses, before any DDL, a database that already carries these relations or functions -- so what to do about an earlier installation is a separate migration question it deliberately does not answer; see candidate_install.",
-      "Registering these verbs. modelRoleStoreTools is exported and is added to no tool index here; the current-pointer verb is authorityOnly, and registering one of those is a separate reviewed act.",
+      "The current database's installed migration and role-store readback must be checked at runtime before a role is used. Source presence does not prove production installation.",
       "Proving that the session holding a partner authority login is that human. The record layer now derives the acting principal separately from the login scope and refuses a sponsored agent on the shared login, but the acting-actor context is an ordinary transaction-local setting a direct holder of that login can set for itself, and nothing pairs the in-process actor object with the database session; see principal_binding.unbound_seam.",
       "Cross-language canonicalization equality. ops.model_role_preimage carries no NUMBER at all, so the JavaScript number-rendering half of the divergence cannot arise; the STRING half is asserted structurally and, where the two implementations could disagree, the write REFUSES on the digest comparison rather than storing a role whose stored digest either side would compute differently.",
     ],

@@ -264,6 +264,10 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0540_release_readiness_without_repeat_approval.sql",
         "0541_release_readiness_scac_successor.sql",
     ),
+    (
+        "0542_model_role_store.sql",
+        "0543_model_role_store_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -278,6 +282,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0540_release_readiness_without_repeat_approval.sql",
         "0541_release_readiness_scac_successor.sql",
+    ),
+    (
+        "0542_model_role_store.sql",
+        "0543_model_role_store_scac_successor.sql",
     ),
 )
 
