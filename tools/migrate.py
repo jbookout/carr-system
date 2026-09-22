@@ -253,12 +253,23 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0532a_canonical_ownership_lease_activation.sql",
         "0532b_ready_plan_amendment_scac_successor.sql",
     ),
+    # WR-000130 changes the live ownership assurance surface in 0538; 0539
+    # seals that exact catalog as v37. Neither intermediate catalog nor a
+    # partial ledger may become visible to another session.
+    (
+        "0538_canonical_ownership_assurance_binding.sql",
+        "0539_canonical_ownership_assurance_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0532a_canonical_ownership_lease_activation.sql",
         "0532b_ready_plan_amendment_scac_successor.sql",
+    ),
+    (
+        "0538_canonical_ownership_assurance_binding.sql",
+        "0539_canonical_ownership_assurance_scac_successor.sql",
     ),
 )
 
