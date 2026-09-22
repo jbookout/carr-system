@@ -1458,20 +1458,16 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
-  # THE AUTHORITY-FILED RELEASE CANDIDATE, added 2026-09-13 (same refusal,
-  # finding 1). Standing amendment 9(c) has the deploy wrapper file the
-  # release-candidate record under the AUTHORITY identity; migration 0504 marks a
-  # row filed on any other login unauthenticated and the Gate Zero seam store
-  # ignores it. Whether carr_authority actually holds the reads that filing path
-  # performs -- ops.service by key, and the ops.release columns its insert returns
-  # -- is a property of real grants, and it runs the REAL tools/ops-record.py over
-  # a REAL manifest so a missing one fails here instead of in production.
+  # The real release recorder files service candidates with carr_jobs provenance.
+  # This proof also checks that the historical Gate Zero reader accepts only a
+  # separately authenticated human-authority row. Both paths use real grants
+  # and a real manifest on a disposable database.
   if [ -f mcp-server/test/gate-zero-candidate-authority-filing.test.mjs ]; then
     if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
          run_quiet "$LOGDIR/gate-zero-candidate-filing.log" \
          node --test mcp-server/test/gate-zero-candidate-authority-filing.test.mjs; then
       tail -30 "$LOGDIR/gate-zero-candidate-filing.log" >&2
-      bad migration "the authority-filed release-candidate provenance proof failed"
+      bad migration "the service-candidate and historical Gate Zero provenance proof failed"
       return
     fi
   fi

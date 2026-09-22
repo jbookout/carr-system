@@ -128,6 +128,9 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
             tool = Path(args[0]).name if args else ""
             rest = args[1:]
             if tool == "ops-record.py":
+                if rest[:2] == ["release", "locate"]:
+                    print("release-test " + "a" * 40)
+                    raise SystemExit(0)
                 if rest[:2] == ["release", "require"]:
                     print("release-test " + "a" * 40)
                     raise SystemExit(0)

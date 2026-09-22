@@ -1375,22 +1375,17 @@ test("PROVENANCE: the store admits only the row the database itself named a make
     assert.match(candidateQuery, /and r\.environment = 'production'/,
       "the candidate store can confuse staging history with its Production subject");
 
-    // THE RECORDER FILES THE ROW ON THE AUTHORITY CREDENTIAL, and asserts
-    // nothing about who made it. The seventh round put the insert behind a
-    // SECURITY DEFINER door on the authority connection; a door needs an EXECUTE
-    // grant, so it stopped the wrapper filing at all. ONE STATEMENT NOW, on the
-    // authority connection, naming no maker column — which is what standing
-    // amendment 9(c) requires and what this store's predicate needs, because a
-    // row filed on the ledger writer is marked unauthenticated by 0504 and read
-    // by nobody. The capability that makes it possible is 0503's admitted insert
-    // plus migration 0505's two column-scoped reads.
+    // Current release candidates are filed by carr_jobs and carry truthful
+    // service provenance. They cannot supply Gate Zero's historical human
+    // subject maker. The ruled reader still accepts exact older authority-filed
+    // rows and refuses service rows; the recorder never accepts a caller maker.
     assert.equal(recorder.includes("ops.record_release_candidate("), false,
       "the recorder still files the candidate through the withdrawn authority door");
     assert.match(recorder, /CANDIDATE_INSERT = "{3}\n\s*insert into ops\.release/,
       "the recorder no longer files the candidate with one named insert");
     assert.match(recorder,
-      /connection_kind = \("authority"\s*\n\s*if args\.action in \("candidate", "approve", "staging-approve"\)\s*\n\s*else "write"\)/,
-      "the candidate branch no longer files on the authority connection, so its row is unauthenticated");
+      /connection_kind = \("authority"\s*\n\s*if args\.action in \("approve", "staging-approve"\)\s*\n\s*else "routine" if args\.action in \("candidate", "ready", "reopen"\)\s*\n\s*else "write"\)/,
+      "service candidates must file under carr_jobs while historical approvals retain Joe authority");
     assert.match(recorder,
       /the release candidate's maker is not a caller field/,
       "the recorder no longer refuses a caller-asserted maker");

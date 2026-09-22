@@ -2263,16 +2263,10 @@ def cmd_deployment(args) -> int:
 # five ops.release columns the INSERT below returns — column-scoped and nothing
 # wider.
 #
-# SO THE ROW IS FILED ON THE AUTHORITY CREDENTIAL NOW, and the database still
-# records which login that was. Standing amendment 9(c) requires it: the Gate
-# Zero seam store reads a subject maker only out of a row whose GENERATED
-# `maker_authority_verified` column is true, which is true exactly when the
-# filing login was carr_authority_joe or carr_authority_dell. A candidate filed
-# on the ledger writer is still an honest UNAUTHENTICATED record and 0504 still
-# marks it as one — that path is unchanged — but it is not what the deploy
-# wrapper writes any more, because a record no reader may believe is not
-# provenance. The wrapper's log prints what the database recorded rather than
-# what anybody meant.
+# Current service-owned releases file on carr_jobs. The 0504 trigger records
+# carr_jobs as maker_session_user and maker_actor. Its generated
+# maker_authority_verified field is correctly false: filing a release candidate
+# is an authenticated service fact, never a claim that Joe authored it.
 CANDIDATE_INSERT = """
     insert into ops.release
         (correlation_id, release_key, service_id, environment,
@@ -2398,12 +2392,17 @@ def cmd_release(args) -> int:
     here means the human is told which field changed rather than watching an
     approval silently evaporate.
     """
-    if args.action in ("candidate", "require"):
+    if args.action in ("candidate", "require", "locate"):
         if not _validate_provider_identity(args, f"release {args.action}"):
             return 2
     if args.action == "require":
         if args.environment != "production" and not args.sha:
             print("ops-record: release require needs --sha", file=sys.stderr)
+            return 2
+    elif args.action == "locate":
+        if args.environment != "production" or args.sha:
+            print("ops-record: release locate requires exact production provider identity",
+                  file=sys.stderr)
             return 2
     elif not args.key:
         print(f"ops-record: release {args.action} needs --key", file=sys.stderr)
@@ -2419,7 +2418,7 @@ def cmd_release(args) -> int:
               "derives its approver from. Drop --maker and --maker-verification.",
               file=sys.stderr)
         return 2
-    if args.action in ("approve", "staging-approve") and args.actor:
+    if args.action in ("approve", "staging-approve", "ready", "reopen") and args.actor:
         print("ops-record: approval identity is not a caller field; Joe is derived "
               "from CARR_DB_AUTHORITY_JOE_URL", file=sys.stderr)
         return 2
@@ -2427,11 +2426,10 @@ def cmd_release(args) -> int:
         print("ops-record: release staging-approve requires --environment staging", file=sys.stderr)
         return 2
     approval_key = None
-    if args.action in ("approve", "staging-approve"):
+    if args.action in ("approve", "staging-approve", "ready"):
         if not args.plan_hash or not args.idempotency_key:
             print(f"ops-record: release {args.action} requires --plan-hash and "
-                  "--idempotency-key; Joe identity comes from the authority "
-                  "credential, never --actor", file=sys.stderr)
+                  "--idempotency-key", file=sys.stderr)
             return 2
         try:
             approval_key = str(uuid.UUID(args.idempotency_key))
@@ -2453,35 +2451,14 @@ def cmd_release(args) -> int:
             return 2
 
     try:
-        # ONE CONNECTION, AND FOR A CANDIDATE IT IS NOW THE AUTHORITY'S
-        # (2026-09-13, the third release candidate's refusal, finding 1).
-        #
-        # WHAT THE EIGHTH ROUND MEASURED AND WHY IT NO LONGER HOLDS. That round
-        # put the candidate on the ledger writer because carr_authority held no
-        # INSERT on ops.release -- migration 0161 built the bundle without one --
-        # and granting it was a new DB mutation capability SIEP-11 admits only
-        # through a SCAC mutation-registry successor. Migration 0503 IS that
-        # successor and it landed the grant, with the two column-scoped selects
-        # the invoker-rights trigger reads; migration 0505 adds the two reads
-        # THIS command path needs (ops.service, and the ops.release columns the
-        # INSERT returns). So the reason for the writer connection is gone.
-        #
-        # AND STANDING AMENDMENT 9(c) REQUIRES IT TO BE GONE. The producer takes
-        # its subject maker from this row, and the Gate Zero seam store reads
-        # only rows whose `maker_authority_verified` is true -- a generated
-        # column that is true exactly when the filing login was a human
-        # authority. Filed on the writer, the row is honestly UNAUTHENTICATED
-        # and the store ignores it, which is the state the release-3 reviewer
-        # refused. Filed here, the database itself names the maker.
-        #
-        # THE MAKER IS STILL NOT A CALLER FIELD. Nothing below asserts it: 0504's
-        # trigger writes maker_session_user from session_user and derives
-        # maker_actor and maker_verification_ref from that login, so moving the
-        # connection changes WHICH credential files the row and nothing about who
-        # gets to name its maker.
+        # Candidate and readiness use the exact carr_jobs login. The 0504
+        # trigger derives the candidate maker from session_user; the readiness
+        # function independently checks the same service login. Historical
+        # approval actions retain their original human authority path.
         connection_kind = ("authority"
-                           if args.action in ("candidate", "approve", "staging-approve")
-                           else "write")
+                           if args.action in ("approve", "staging-approve")
+                           else "routine" if args.action in ("candidate", "ready", "reopen")
+            else "write")
         with connect(connection_kind) as conn, conn.cursor() as cur:
             if args.action == "candidate":
                 corr = correlation_of(getattr(args, "correlation", None))
@@ -2528,6 +2505,22 @@ def cmd_release(args) -> int:
                       file=sys.stderr)
                 return 0
 
+            if args.action == "locate":
+                cur.execute(
+                    """select release_key,git_sha from ops.release
+                        where environment='production' and provider=%s
+                          and provider_version_id=%s
+                          and state in ('candidate','ready','approved','deploying','verifying')
+                        order by created_at desc limit 2""",
+                    (args.provider, args.provider_version_id))
+                rows=cur.fetchall()
+                if len(rows)!=1:
+                    print("ops-record: provider version has no unique recorded Production candidate",
+                          file=sys.stderr)
+                    return 3
+                print(f"{rows[0][0]} {rows[0][1]}")
+                return 0
+
             if args.action == "require":
                 # THE QUESTION A DEPLOY ASKS, one query: may this SHA ship?
                 #
@@ -2564,9 +2557,22 @@ def cmd_release(args) -> int:
                               and provider = %s
                               and provider_version_id = %s
                               and (%s::text is null or git_sha = %s)
-                              and state in ('approved','deploying','verifying')
-                              and approval_expires_at > now()
-                            order by approved_at desc
+                              and (
+                                (state in ('ready','deploying','verifying')
+                                 and readiness_receipt_id is not null
+                                 and ops.release_technical_readiness_current(id)
+                                 and exists (
+                                   select 1 from ops.release_readiness_receipt q
+                                    where q.id=ops.release.readiness_receipt_id
+                                      and q.release_id=ops.release.id
+                                      and q.git_sha=ops.release.git_sha
+                                      and q.provider=ops.release.provider
+                                      and q.provider_version_id=ops.release.provider_version_id
+                                      and q.plan_hash=ops.release.plan_hash))
+                                or (state in ('approved','deploying','verifying')
+                                    and approval_receipt_id is not null
+                                    and approval_expires_at > now()))
+                            order by coalesce(ready_at,approved_at) desc
                             limit 1""",
                         (args.environment, args.provider, args.provider_version_id,
                          args.sha, args.sha))
@@ -2593,15 +2599,15 @@ def cmd_release(args) -> int:
                     release_identity = (args.sha[:12] if args.sha else
                                         f"{args.provider}:{args.provider_version_id}")
                     if args.environment == "production":
-                        print(f"NO LIVE APPROVAL for {release_identity} in production.\n"
-                              "  Record a candidate from the manifest bound to this "
-                              "exact provider version, then have Joe approve that "
-                              "bound plan hash:\n"
+                        print(f"NO EXACT RELEASE READINESS for {release_identity} in production.\n"
+                              "  Record a service-filed candidate from the manifest "
+                              "bound to this exact provider version, then qualify "
+                              "the bound plan after technical evidence passes:\n"
                               "    tools/ops-record.py release candidate --key <key> "
                               "--environment production "
                               f"--provider {args.provider} --provider-version-id "
                               f"{args.provider_version_id} --manifest out/bound.json\n"
-                              "    tools/ops-record.py release approve --key <key> "
+                              "    tools/ops-record.py release ready --key <key> "
                               "--plan-hash <bound-hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     else:
@@ -2637,9 +2643,9 @@ def cmd_release(args) -> int:
                     return 3
                 key, state, expires, stored_plan, release_sha = row
                 if args.plan_hash and args.plan_hash != stored_plan:
-                    print(f"THE PLAN MOVED SINCE APPROVAL. Release {key} was approved "
-                          f"against {stored_plan}; this tree builds {args.plan_hash}. "
-                          f"Re-approve before shipping.", file=sys.stderr)
+                    print(f"THE RELEASE PLAN MOVED. Release {key} binds "
+                          f"{stored_plan}; this tree builds {args.plan_hash}.",
+                          file=sys.stderr)
                     return 3
                 if args.environment == "production":
                     # The promotion wrapper must get provenance from the approved
@@ -2759,7 +2765,7 @@ def cmd_release(args) -> int:
                               verifier_actor = coalesce(%s, verifier_actor),
                               verifier_evidence_ref = coalesce(%s, verifier_evidence_ref)
                         where release_key = %s
-                          and state in ('approved','deploying','verifying')
+                          and state in ('ready','approved','deploying','verifying')
                     returning state""",
                     (args.verifier, args.verifier_evidence, args.key))
                 row = cur.fetchone()
@@ -2779,6 +2785,25 @@ def cmd_release(args) -> int:
                      args.verifier, args.verifier_evidence),
                 )
                 print(json.dumps(cur.fetchone()[0],sort_keys=True,default=str))
+                return 0
+
+            if args.action == "ready":
+                cur.execute(
+                    "select ops.qualify_program5_release(%s,%s,%s::uuid)",
+                    (args.key, args.plan_hash, approval_key),
+                )
+                print(json.dumps(cur.fetchone()[0], sort_keys=True, default=str))
+                return 0
+
+            if args.action == "reopen":
+                if not args.plan_hash:
+                    print("ops-record: release reopen requires --plan-hash", file=sys.stderr)
+                    return 2
+                cur.execute(
+                    "select ops.reopen_program5_release_rehearsal(%s,%s)",
+                    (args.key, args.plan_hash),
+                )
+                print(json.dumps(cur.fetchone()[0], sort_keys=True, default=str))
                 return 0
 
             # read one back — the manifest, in one query, as the gate asserts
@@ -2998,8 +3023,8 @@ def main() -> int:
                     choices=["local", "rehearsal", "staging", "production"],
                     default="production")
 
-    rel = sub.add_parser("release", help="record, approve or read one release (P0-1)")
-    rel.add_argument("action", choices=["candidate", "approve", "staging-approve", "require", "complete",
+    rel = sub.add_parser("release", help="record, qualify, or read one release (P0-1)")
+    rel.add_argument("action", choices=["candidate", "ready", "reopen", "locate", "approve", "staging-approve", "require", "complete",
                                         "abandon", "show"])
     rel.add_argument("--sha", help="require only: the SHA about to ship")
     rel.add_argument("--provider", help="Production provider, e.g. cloudflare-workers")

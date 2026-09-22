@@ -290,22 +290,14 @@ def main() -> int:
           (refused_target.stdout + refused_target.stderr),
           f"rc={refused_target.returncode}")
 
-    # A CANDIDATE NOW FILES ON THE AUTHORITY CONNECTION, and the reason the old
-    # assertion gave for the writer is gone: migration 0503 granted
-    # carr_authority the insert on ops.release, 0505 granted it exactly the two
-    # reads the filing path makes, and the third release review REFUSED the
-    # writer-filed row because 0504's provenance columns then mark it
-    # unauthenticated. What survives from the old pair is the ORDER — the
-    # manifest is verified before any connection opens — and it is still the
-    # point worth checking, so it is checked against the new line.
+    # A service uploads the candidate and receives its own database-derived
+    # maker identity. Manifest verification still precedes the connection.
     candidate_verify_at = record.find("release-manifest.py")
     candidate_connect_at = record.find('connection_kind = ("authority"', candidate_verify_at)
     check("5e. candidate verification runs before the connection opens",
           candidate_verify_at != -1 and candidate_connect_at > candidate_verify_at)
-    check("5e-i. and the candidate branch opens the AUTHORITY connection",
-          re.search(r'connection_kind = \("authority"\s*\n\s*if args\.action in '
-                    r'\("candidate", "approve", "staging-approve"\)\s*\n\s*else "write"\)',
-                    record) is not None)
+    check("5e-i. candidate and readiness use the scoped service connection",
+          'else "routine" if args.action in ("candidate", "ready", "reopen")' in record)
 
     check("5f. Cloudflare UUIDs normalize to lowercase at both boundaries",
           "args.provider_version_id = version_id.lower()" in record
@@ -329,11 +321,11 @@ def main() -> int:
     bind_at = deploy.find('release-manifest.py" bind-provider', rebuild_at)
     recheck_at = deploy.find("RECONFIRMED_BINDING=", bind_at)
     promote_at = deploy.find('"$WRANGLER" versions deploy', recheck_at)
-    check("7. promotion resolves SHA, recomputes evidence, then rechecks approval",
+    check("7. promotion resolves SHA, recomputes evidence, then rechecks readiness",
           -1 not in (resolve_at, rebuild_at, bind_at, recheck_at, promote_at)
           and resolve_at < rebuild_at < bind_at < recheck_at < promote_at,
           f"positions={resolve_at,rebuild_at,bind_at,recheck_at,promote_at}")
-    check("7b. final approval check binds SHA, provider UUID, and plan hash",
+    check("7b. final readiness check binds SHA, provider UUID, and plan hash",
           '--sha "$HEAD_SHA" --environment production' in deploy
           and '--provider-version-id "$PROVIDER_VERSION_ID"' in deploy
           and '--plan-hash "$RELEASE_PLAN_HASH"' in deploy)

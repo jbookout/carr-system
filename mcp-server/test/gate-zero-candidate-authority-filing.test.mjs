@@ -1,42 +1,7 @@
-// THE RELEASE-CANDIDATE RECORD IS FILED UNDER THE AUTHORITY IDENTITY, AND THE
-// GATE ZERO STORE READS IT (2026-09-13, the third release candidate's refusal,
-// finding 1).
-//
-// WHAT THE OUTSIDE REVIEW REFUSED. Standing-rule amendment 9(c) says the
-// release-candidate record is filed by the deploy wrapper under the AUTHORITY
-// identity, because the Gate Zero producer takes its SUBJECT MAKER out of that
-// row. Migration 0504 records the filing login from `session_user` and derives
-// the generated `maker_authority_verified` column from it; the seam store reads
-// only rows where that column is true. The refused candidate filed on the
-// ordinary ledger writer, so 0504 marked every row unauthenticated and the store
-// read none of them — the subject-maker seat was unreachable in production while
-// every test stayed green.
-//
-// WHY IT FILED THERE, AND WHAT CLOSED IT. Until migration 0503, carr_authority
-// held no INSERT on ops.release at all (0161 built the bundle without one), and
-// admitting the grant was a new DB mutation capability SIEP-11 accepts only
-// through a mutation-registry successor — open loop #594. 0503 IS that successor
-// and it carries the grant. What remained missing was the two READS the filing
-// command performs: `select id from ops.service where key = $1`, and the five
-// ops.release columns its INSERT returns. Migration 0505 grants exactly those,
-// column-scoped, and tools/ops-record.py's `release candidate` now runs on the
-// authority connection.
-//
-// WHAT THIS FILE ESTABLISHES, end to end and against a real database:
-//
-//   1. The REAL command files the row over a connection that authenticated as
-//      carr_authority_joe, holding only carr_authority and explicitly not the
-//      forbidden carr_writer bundle. Not a re-implementation of its SQL: the
-//      actual
-//      tools/ops-record.py, over a manifest the actual tools/release-manifest.py
-//      built, so a grant this path needs and does not hold is a failure here.
-//   2. The row's 0504 provenance columns mark it AUTHENTICATED — the filing
-//      login recorded, the maker derived from it, the generated column true.
-//   3. The Gate Zero seam store's own reader BINDS it, by git_sha, through
-//      fetchCandidateBuildRecordRows and its real predicate.
-//   4. AND THE FALSIFIER: the same command on the ordinary writer connection
-//      produces a row the same reader does NOT bind. Without this, case 3 would
-//      pass against a reader that admitted anything.
+// The real release command files on carr_jobs and the 0504 trigger records
+// carr_jobs as maker. It must never imply that Joe authored the candidate.
+// A synthetic historical authority row remains visible to the Gate Zero
+// reader; a service or writer row must not acquire that human maker claim.
 //
 // THE PRODUCTION CREDENTIAL IS NEVER REACHABLE FROM HERE. tools/ops-record.py
 // reads ~/.config/carr/db.env by `setdefault`, so an unset variable is silently
@@ -71,8 +36,8 @@ const LOOPBACK = /@(localhost|127\.0\.0\.1)[:/]|^postgres(ql)?:\/\/(localhost|\/
 const PROVIDER = "cloudflare-workers";
 const AUTHORITY_LOGIN = "carr_authority_joe";
 const PROVIDER_VERSION_AUTHORITY = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+const PROVIDER_VERSION_SERVICE = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee";
 const PROVIDER_VERSION_WRITER = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
-const PROVIDER_VERSION_STAGING = "cccccccc-3333-4333-8333-cccccccccccc";
 const PROVIDER_VERSION_DUPLICATE = "dddddddd-4444-4444-8444-dddddddddddd";
 
 /**
@@ -101,7 +66,7 @@ function asUser(dsn, user) {
   return url.toString();
 }
 
-test("a candidate filed on the authority connection is authenticated, and the Gate Zero store reads it",
+test("service candidate provenance is honest and historical Gate Zero authority reads remain exact",
   async t => {
     if (!DSN) {
       assert.equal(REQUIRED, false,
@@ -145,12 +110,17 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
         end if;
       end $$;`);
     await client.query(`grant carr_authority to ${AUTHORITY_LOGIN}`);
+    await client.query("alter role carr_jobs login");
     const authorityPassword = decodeURIComponent(new URL(DSN).password);
     if (authorityPassword) {
       const passwordStatement = (await client.query(
         "select format('alter role %I login password %L', $1::text, $2::text) as sql",
         [AUTHORITY_LOGIN, authorityPassword])).rows[0].sql;
       await client.query(passwordStatement);
+      const jobsPasswordStatement = (await client.query(
+        "select format('alter role %I login password %L', $1::text, $2::text) as sql",
+        ["carr_jobs", authorityPassword])).rows[0].sql;
+      await client.query(jobsPasswordStatement);
     }
 
     // THE EXACT ROLE AND GRANTS 0503 AND 0505 CARRY, asked of the database
@@ -212,7 +182,7 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
     const work = mkdtempSync(join(tmpdir(), "carr-candidate-filing-"));
     t.after(() => { for (const d of [blindHome, work]) rmSync(d, { recursive: true, force: true }); });
 
-    const authorityDsn = asUser(DSN, AUTHORITY_LOGIN);
+    const jobsDsn = asUser(DSN, "carr_jobs");
     const blinded = Object.fromEntries(credentialNames().map(name =>
       [name, "postgresql://nobody@127.0.0.1:1/absent"]));
     const opsRecord = (env, ...args) => spawnSync(
@@ -268,18 +238,32 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
         "--security-evidence", "ops/ci.sh#candidate-filing-proof");
     };
 
-    // ── (1) THE REAL COMMAND, ON THE AUTHORITY CONNECTION ───────────────────
-    // Only CARR_DB_AUTHORITY_JOE_URL points anywhere real. DATABASE_URL stays
-    // blinded to a dead port, so a command that reached for the writer
-    // connection instead would fail rather than quietly file an unauthenticated
-    // row — which is the exact defect this proof exists for.
-    const filed = fileCandidate("gate-zero-authority-filing", PROVIDER_VERSION_AUTHORITY, "production",
-      { CARR_DB_AUTHORITY_JOE_URL: authorityDsn });
+    // ── (1) THE REAL COMMAND FILES ITS SERVICE IDENTITY ────────────────────
+    const filed = fileCandidate("gate-zero-service-filing", PROVIDER_VERSION_SERVICE, "production",
+      { CARR_DB_JOBS_URL: jobsDsn });
     assert.equal(filed.status, 0,
-      `the candidate did not file on the authority connection: ${(filed.stderr || "").slice(-600)}`);
-    // The tool prints what the DATABASE recorded, which is the line a deploy log
-    // carries; asserting it keeps the wrapper's own report honest.
-    assert.match(filed.stderr, /maker joe filed by carr_authority_joe \(authority-verified\)/);
+      `the candidate did not file on the service connection: ${(filed.stderr || "").slice(-600)}`);
+    assert.match(filed.stderr, /maker carr_jobs filed by carr_jobs \(not authority-verified\)/);
+    const serviceRow = (await client.query(
+      `select maker_session_user,maker_actor,maker_authority_verified
+         from ops.release where release_key='gate-zero-service-filing'`)).rows[0];
+    assert.deepEqual(serviceRow, {
+      maker_session_user: "carr_jobs", maker_actor: "carr_jobs",
+      maker_authority_verified: false
+    });
+
+    // Historical human-filed candidate records remain readable by Gate Zero.
+    // This row is a disposable fixture made under the synthetic authority login,
+    // separate from the service-filed production candidate above.
+    await client.query(`set session authorization ${AUTHORITY_LOGIN}`);
+    await client.query(`insert into ops.release
+      (release_key,service_id,environment,state,git_sha,provider,
+       provider_version_id,source_kind,source_ref)
+      select 'gate-zero-authority-filing',id,'production',$1,$2,$3,$4,
+             'wrapper','historical-gate-zero-fixture'
+        from ops.service where key='carr-mcp'`,
+      ["candidate", head, PROVIDER, PROVIDER_VERSION_AUTHORITY]);
+    await client.query("reset session authorization");
 
     // ── (2) THE 0504 PROVENANCE COLUMNS ─────────────────────────────────────
     const row = (await client.query(
@@ -316,10 +300,13 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
 
     // The same authority and SHA may also have a staging record. It must coexist
     // in the ledger but remain invisible to the Production-only Gate Zero reader.
-    const staged = fileCandidate("gate-zero-authority-staging", PROVIDER_VERSION_STAGING, "staging",
-      { CARR_DB_AUTHORITY_JOE_URL: authorityDsn });
-    assert.equal(staged.status, 0,
-      `staging history could not share the Production SHA: ${(staged.stderr || "").slice(-600)}`);
+    await client.query(`set session authorization ${AUTHORITY_LOGIN}`);
+    await client.query(`insert into ops.release
+      (release_key,service_id,environment,state,git_sha,source_kind,source_ref)
+      select 'gate-zero-authority-staging',id,'staging','candidate',$1,
+             'wrapper','historical-gate-zero-fixture'
+        from ops.service where key='carr-mcp'`, [head]);
+    await client.query("reset session authorization");
     const environments = (await client.query(
       `select environment from ops.release
         where git_sha = $1 and maker_authority_verified order by environment`, [head]))
@@ -334,12 +321,16 @@ test("a candidate filed on the authority connection is authenticated, and the Ga
 
     // The widened ledger is not widened inside Production: a second authenticated
     // Production row for the same SHA must still fail at the database boundary.
-    const duplicate = fileCandidate("gate-zero-authority-duplicate", PROVIDER_VERSION_DUPLICATE,
-      "production", { CARR_DB_AUTHORITY_JOE_URL: authorityDsn });
-    assert.notEqual(duplicate.status, 0,
-      "a second authority-filed Production candidate for one SHA was accepted");
-    assert.match(`${duplicate.stdout}\n${duplicate.stderr}`,
+    await client.query(`set session authorization ${AUTHORITY_LOGIN}`);
+    await assert.rejects(client.query(`insert into ops.release
+      (release_key,service_id,environment,state,git_sha,provider,
+       provider_version_id,source_kind,source_ref)
+      select 'gate-zero-authority-duplicate',id,'production','candidate',$1,$2,$3,
+             'wrapper','historical-gate-zero-fixture'
+        from ops.service where key='carr-mcp'`,
+      [head, PROVIDER, PROVIDER_VERSION_DUPLICATE]),
       /release_authority_candidate_sha_uniq|duplicate key value/);
+    await client.query("reset session authorization");
 
     // ── (4) THE FALSIFIER: THE WRITER-FILED ROW IS NOT READ ─────────────────
     // The same command, same manifest shape, on the ordinary ledger writer —

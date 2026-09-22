@@ -78,34 +78,35 @@ def psql(dsn, *args):
                           capture_output=True, text=True, timeout=1800)
 
 
-# The authority DSN every ops-record call in this test is pinned to, provisioned
-# on whatever throwaway cluster this run was handed. It is set by
-# provision_authority_principal() below and is deliberately a module global: a
-# call that inherited the DEVELOPER's real CARR_DB_AUTHORITY_JOE_URL from
-# ~/.config/carr/db.env would reach PRODUCTION. tools/ops-record.py loads db.env
-# with setdefault, so an explicitly set value wins; this is the same class of
-# accident that wrote 46 fabricated run rows into production in 2026-08 (see
-# credential_names() there). `release candidate` OPENS THIS CONNECTION AGAIN as
-# of 2026-09-13: migration 0503 admitted `insert on ops.release` to carr_authority
-# and 0505 granted the two column-scoped reads the filing path performs, so the
-# candidate is filed under the authority identity standing-rule amendment 9(c)
-# requires and 0504 marks the row authenticated. The pin would matter either way —
-# what it protects against is an ops-record call reaching the wrong database, not
-# one command's own DSN choice — but it is now load-bearing rather than defensive.
+# Every ops-record credential is pinned to this disposable cluster. The tool
+# loads a developer's db.env with setdefault, so an unset jobs credential could
+# otherwise send a candidate fixture to Production. Current candidates use the
+# jobs login; historical approval exercises still use Joe's authority login.
 AUTHORITY_DSN: str | None = None
+JOBS_DSN: str | None = None
+
+
+def credential_names() -> tuple[str, ...]:
+    spec = importlib.util.spec_from_file_location("ops_record", REPO / "tools" / "ops-record.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load ops-record credential inventory")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.credential_names()
 
 
 def record(dsn, *args):
+    isolated = {name: dsn for name in credential_names()}
+    isolated["CARR_DB_AUTHORITY_JOE_URL"] = AUTHORITY_DSN or dsn
+    isolated["CARR_DB_JOBS_URL"] = JOBS_DSN or dsn
     return subprocess.run(
         [sys.executable, str(REPO / "tools" / "ops-record.py"), *args],
         capture_output=True, text=True, timeout=300,
-        env={**os.environ, "DATABASE_URL": dsn,
-             "CARR_DB_AUTHORITY_JOE_URL": AUTHORITY_DSN or "postgresql://carr_authority_joe@127.0.0.1:1/absent"})
+        env={**os.environ, **isolated})
 
 
 def provision_authority_principal(dsn: str) -> None:
-    """Give this cluster a real human-authority login role, and point
-    AUTHORITY_DSN at it.
+    """Give this cluster the human authority and service login roles.
 
     `ops.authority_actor_slug()` maps `session_user` to a partner slug and admits
     only carr_authority_joe and carr_authority_dell, and EXECUTE on it is granted
@@ -114,16 +115,11 @@ def provision_authority_principal(dsn: str) -> None:
     password is the base DSN's own, so nothing about the throwaway cluster's
     credentials is written down here.
 
-    THE INSERT ON ops.release IS STILL NOT GRANTED HERE, and that has not changed
-    even though `release candidate` now runs on this connection: the role reaches
-    the table through its carr_authority MEMBERSHIP, and the grant on the bundle
-    is migration 0503's own — applied to Production on 2026-09-13 — with the two
-    column-scoped reads the filing path needs coming from 0505. A test that
-    granted either to itself would report a green candidate path this database's
-    Production twin does not have; both arrive here the same way they arrive
-    there, by applying the numbered files.
+    Current candidate inserts use carr_jobs; this authority login remains for
+    historical approval fixture commands. Its grants still come from numbered
+    migrations rather than being fabricated by this test.
     """
-    global AUTHORITY_DSN
+    global AUTHORITY_DSN, JOBS_DSN
     params = psycopg.conninfo.conninfo_to_dict(dsn)
     password = params.get("password")
     with psycopg.connect(dsn, autocommit=True) as connection:
@@ -140,7 +136,11 @@ def provision_authority_principal(dsn: str) -> None:
                        .format(sql.Literal(password)))
             cursor.execute("grant carr_authority to carr_authority_joe")
             cursor.execute("grant usage on schema ops to carr_authority_joe")
+            cursor.execute(
+                sql.SQL("alter role carr_jobs login password {}")
+                   .format(sql.Literal(password)))
     AUTHORITY_DSN = psycopg.conninfo.make_conninfo(dsn, user="carr_authority_joe")
+    JOBS_DSN = psycopg.conninfo.make_conninfo(dsn, user="carr_jobs")
 
 
 @contextmanager
@@ -188,8 +188,7 @@ def _cases(dsn: str) -> None:
     # Candidate intake verifies every environment before opening the database,
     # so every abandonment fixture uses a real staging manifest rather than a
     # synthetic shape that the release door must refuse. Each fixture uses a
-    # distinct repository revision because 0504 deliberately permits exactly
-    # one authority-filed candidate per git_sha.
+    # distinct repository revision so their immutable source evidence differs.
     staging_manifests: dict[str, Path] = {}
     staging_error = ""
     fixture_keys = ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor")

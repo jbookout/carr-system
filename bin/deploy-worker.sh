@@ -38,14 +38,14 @@
 #   bin/deploy-worker.sh              # preflight, deploy, postflight
 #   bin/deploy-worker.sh --check      # preflight only, ship nothing
 #   bin/deploy-worker.sh --release-sha <full-40-char-sha>
-#       # an approved immutable release when main moves after approval
+#       # an immutable release when main moves after readiness was recorded
 #   bin/deploy-worker.sh --upload-version
 #       # upload a Production candidate without changing traffic
 #       # optional --probe-tokens-file <private JSON> rotates only PROBE_TOKENS
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
-#       # promote that exact approved version to 100% of Production traffic
-#   # Production modes and a standalone staging release require the approval
-#   # preimage inputs:
+#       # promote that exact ready version to 100% of Production traffic
+#   # Production modes and a standalone staging release require the assurance
+#   # plan inputs:
 #       --performance-budget-ref <immutable-ref> --performance-budget-ms <ms>
 #       --recovery-strategy <rollback|forward_fix>
 #       --rollback-plan-ref <immutable-runbook-ref>
@@ -476,7 +476,7 @@ if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBAC
 fi
 if [ "$TARGET_ENV" = "production" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] \
-    || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required; they are approval inputs, not deploy defaults."
+    || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required readiness inputs."
 fi
 if [ "$TARGET_ENV" = "staging" ] && [ "$RECOVERY_STEP" = "standalone" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] \
@@ -503,14 +503,14 @@ if [ -n "$PINNED_RELEASE" ]; then
   [ "${#PINNED_RELEASE}" -eq 40 ] \
     || fail "--release-sha must be the full immutable 40-character commit SHA."
   PINNED_SHA="$(git -C "$SOURCE_ROOT" rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
-    || fail "approved release SHA does not resolve to a commit."
+    || fail "pinned release SHA does not resolve to a commit."
   [ "$PINNED_RELEASE" = "$PINNED_SHA" ] \
     || fail "--release-sha must be the exact canonical full SHA, not an abbreviation or tag."
   [ "$HEAD_SHA" = "$PINNED_SHA" ] \
-    || fail "checkout HEAD does not equal the approved release SHA."
+    || fail "checkout HEAD does not equal the pinned release SHA."
   git -C "$SOURCE_ROOT" merge-base --is-ancestor "$PINNED_SHA" origin/main \
-    || fail "approved release SHA is not an ancestor of fetched origin/main."
-  echo "  OK  pinned approved release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
+    || fail "pinned release SHA is not an ancestor of fetched origin/main."
+  echo "  OK  pinned release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
 elif [ "$TARGET_ENV" != "production" ]; then
   # STAGING IS FOR CODE THAT IS NOT ON MAIN YET — that is the entire point of
   # having it. Requiring origin/main here would mean the only way to rehearse a
@@ -782,45 +782,55 @@ if [ "$VERSION_MODE" = "promote" ]; then
   echo ""
   echo "== preflight: immutable release truth =="
   set +e
-  RELEASE_BINDING="$("$PY" "$REPO/tools/ops-record.py" release require \
+  RELEASE_BINDING="$("$PY" "$REPO/tools/ops-record.py" release locate \
     --environment production --provider "$PROVIDER" \
     --provider-version-id "$PROVIDER_VERSION_ID")"
   REQUIRE_RC=$?
   set -e
   [ "$REQUIRE_RC" -eq 0 ] \
-    || fail "no live approval binds Production to $PROVIDER:$PROVIDER_VERSION_ID."
+    || fail "no unique recorded candidate binds Production to $PROVIDER:$PROVIDER_VERSION_ID."
   # Production provider lookup returns exactly `<release-key> <git-sha>` so
-  # promotion provenance comes from the approved immutable object, not HEAD.
+  # promotion provenance comes from the recorded immutable object, not HEAD.
   set -- $RELEASE_BINDING
   [ "$#" -eq 2 ] \
     || fail "release truth returned no exact release/SHA binding for $PROVIDER_VERSION_ID."
   RELEASE_KEY="$1"
   HEAD_SHA="$2"
   printf '%s\n' "$HEAD_SHA" | grep -Eq '^[0-9A-Fa-f]{40}$' \
-    || fail "approved release $RELEASE_KEY has no canonical git SHA."
-  echo "  approved release: $RELEASE_KEY"
+    || fail "recorded release $RELEASE_KEY has no canonical git SHA."
+  echo "  recorded release: $RELEASE_KEY"
   echo "  provider version: $PROVIDER_VERSION_ID"
   echo "  recorded git SHA: $HEAD_SHA"
 
-  # The first exact UUID lookup reveals the SHA the approver signed. Recompute
+  # The first exact UUID lookup reveals the SHA the candidate binds. Recompute
   # the evidence from that git object without uploading or building a Worker,
-  # bind the same canonical provider UUID, then ask release truth a second time
-  # with every immutable dimension and the freshly computed plan hash.
+  # bind the same canonical provider UUID, then record technical readiness
+  # using that exact immutable plan if it has not already been recorded.
   PROMOTION_SOURCE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-source-manifest.XXXXXX")"
   PROMOTION_BOUND_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-bound-manifest.XXXXXX")"
   if ! build_release_manifest "$HEAD_SHA" production > "$PROMOTION_SOURCE_MANIFEST"; then
-    fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
+    fail "release evidence cannot be rebuilt from git SHA $HEAD_SHA."
   fi
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
       --manifest "$PROMOTION_SOURCE_MANIFEST" --provider "$PROVIDER" \
       --provider-version-id "$PROVIDER_VERSION_ID" > "$PROMOTION_BOUND_MANIFEST"; then
-    fail "approved provider identity cannot be rebound to recomputed evidence."
+    fail "provider identity cannot be rebound to recomputed evidence."
   fi
   RELEASE_MANIFEST="$PROMOTION_BOUND_MANIFEST"
   RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
     --manifest "$RELEASE_MANIFEST")"
   [ -n "$RELEASE_PLAN_HASH" ] \
     || fail "recomputed provider-bound evidence produced no plan hash."
+  if ! "$PY" "$REPO/tools/ops-record.py" release require \
+      --sha "$HEAD_SHA" --environment production --provider "$PROVIDER" \
+      --provider-version-id "$PROVIDER_VERSION_ID" \
+      --plan-hash "$RELEASE_PLAN_HASH" >/dev/null 2>&1; then
+    RELEASE_READY_IDEMPOTENCY="$("$PY" -c 'import sys,uuid; print(uuid.uuid5(uuid.UUID("b8912ba6-4df7-44f3-9d7c-151edcc4372d"),sys.argv[1]+"\0"+sys.argv[2]))' "$RELEASE_KEY" "$RELEASE_PLAN_HASH")"
+    "$PY" "$REPO/tools/ops-record.py" release ready \
+      --key "$RELEASE_KEY" --plan-hash "$RELEASE_PLAN_HASH" \
+      --idempotency-key "$RELEASE_READY_IDEMPOTENCY" >/dev/null \
+      || fail "technical release readiness needs a fresh typed staging recovery rehearsal; traffic was not changed."
+  fi
   set +e
   RECONFIRMED_BINDING="$("$PY" "$REPO/tools/ops-record.py" release require \
     --sha "$HEAD_SHA" --environment production --provider "$PROVIDER" \
@@ -828,10 +838,15 @@ if [ "$VERSION_MODE" = "promote" ]; then
     --plan-hash "$RELEASE_PLAN_HASH")"
   REQUIRE_RC=$?
   set -e
-  [ "$REQUIRE_RC" -eq 0 ] \
-    || fail "approval no longer matches the recomputed SHA/provider/version plan."
+  if [ "$REQUIRE_RC" -ne 0 ]; then
+    if "$PY" "$REPO/tools/ops-record.py" release reopen \
+        --key "$RELEASE_KEY" --plan-hash "$RELEASE_PLAN_HASH" >/dev/null 2>&1; then
+      fail "readiness became stale. The release is reopened for the typed staging recovery rehearsal; rerun promotion after fresh recovery evidence. Traffic was not changed."
+    fi
+    fail "readiness does not match the recomputed SHA/provider/version plan."
+  fi
   [ "$RECONFIRMED_BINDING" = "$RELEASE_BINDING" ] \
-    || fail "release binding changed between UUID resolution and final approval check."
+    || fail "release binding changed between UUID resolution and final readiness check."
   echo "  recomputed plan: $RELEASE_PLAN_HASH"
 elif [ "$RECOVERY_STEP" != "standalone" ]; then
   echo ""
@@ -858,7 +873,7 @@ elif [ -f "$REPO/tools/release-manifest.py" ]; then
   if [ "$VERSION_MODE" = "upload" ]; then
     [ -n "$RELEASE_PLAN_HASH" ] \
       || fail "the release manifest did not produce a plan hash; version upload refused."
-    echo "  upload may proceed; approval happens only after Cloudflare returns the immutable version id"
+    echo "  upload may proceed; technical readiness binds the immutable version after its evidence is recorded"
   else
     set +e
     RELEASE_KEY="$("$PY" "$REPO/tools/ops-record.py" release require \
@@ -867,11 +882,10 @@ elif [ -f "$REPO/tools/release-manifest.py" ]; then
     REQUIRE_RC=$?
     set -e
     if [ "$REQUIRE_RC" -eq 3 ]; then
-      fail "no live approval for $HEAD_SHA in $TARGET_ENV. The reason and the exact
-commands are printed above. This is P0-1: a production deploy names an approved
-release or it does not happen."
+      fail "no exact release readiness for $HEAD_SHA in $TARGET_ENV. The reason and the exact
+commands are printed above."
     fi
-    [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
+    [ -n "$RELEASE_KEY" ] && echo "  ready release: $RELEASE_KEY"
   fi
 fi
 
@@ -1101,7 +1115,7 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
   RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
     --manifest "$RELEASE_MANIFEST")"
   [ -n "$RELEASE_PLAN_HASH" ] \
-    || fail "the provider-bound release manifest has no approval plan hash; traffic was not changed."
+    || fail "the provider-bound release manifest has no plan hash; traffic was not changed."
   echo ""
   echo "uploaded only — Production traffic was not changed"
   echo "  provider: $PROVIDER"
@@ -1123,29 +1137,13 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
   # records the login role the connection authenticated as and derives the maker
   # from it, so this wrapper cannot name a maker even by mistake. What it supplies
   # is the exact target: the key, the environment, the provider and its immutable
-  # version id, and the provider-bound manifest whose plan hash Joe will approve.
+  # version id, and the provider-bound manifest technical readiness will bind.
   #
-  # AND WHAT THAT MAKER IS TODAY, said here because a deploy log should not imply
-  # more than it has. The row is filed on the AUTHORITY connection —
-  # CARR_DB_AUTHORITY_JOE_URL, the same credential `release approve` already runs
-  # on — so migration 0504's trigger records carr_authority_joe as the filing
-  # login and derives `maker_actor = joe` from it, and the generated
-  # `maker_authority_verified` column comes out TRUE. That is what standing-rule
-  # amendment 9(c) means by the authority identity, and it is why the Gate Zero
-  # seam store can read a subject maker back out of this row at all: the store
-  # reads only authority-verified rows and ignores every other one.
-  #
-  # WHAT CHANGED, AND WHAT CLOSED IT. Until 2026-09-13 this insert ran on the
-  # ledger writer, because the authority bundle held no INSERT on ops.release and
-  # granting it was a new DB mutation capability — open loop #594. Migration 0503
-  # is the SCAC registry successor that admitted it, and migration 0505 grants the
-  # two column-scoped reads the filing path needs (ops.service by key, and the
-  # five ops.release columns the insert returns). So the earlier honest
-  # UNAUTHENTICATED record is no longer what this wrapper writes.
-  #
-  # THIS STEP THEREFORE NEEDS THE AUTHORITY CREDENTIAL IN THE ENVIRONMENT. Absent
-  # it, ops-record.py refuses by name before it opens any connection and this
-  # wrapper fails the upload rather than filing a record no reader may believe.
+  # The exact carr_jobs service login files it. Migration 0504 records that
+  # login, derives maker_actor=carr_jobs, and correctly reports
+  # maker_authority_verified=false. This row claims no Joe authorship or approval.
+  # The typed readiness receipt later binds independent technical evidence.
+  # Without the scoped service credential, ops-record.py refuses before insert.
   # The line printed below still reports what the database recorded rather than
   # what anyone intended.
   echo "== release candidate record =="
@@ -1171,7 +1169,7 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
       --staging-replacement-receipt-id "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT" \
       --staging-replacement-source-sha "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE" \
       --idempotency-key "$WR95_EVIDENCE_IDEMPOTENCY" > "$WR95_SEAL_OUTPUT"; then
-      fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; traffic was not changed and approval remains impossible."
+      fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; traffic was not changed and readiness remains impossible."
     fi
     RELEASE_TEST_EVIDENCE="$($PY -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x["evidence_ref"])' "$WR95_SEAL_OUTPUT")" \
       || fail "the WR95 evidence store returned no sealed evidence reference."
@@ -1187,16 +1185,16 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
       ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
       ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
       >/dev/null \
-      || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no approval can name $PROVIDER_VERSION_ID until the record exists."
+      || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no readiness can name $PROVIDER_VERSION_ID until the record exists."
   fi
   echo "  filed release candidate $RELEASE_KEY for $HEAD_SHA"
   echo "  test evidence: $RELEASE_TEST_EVIDENCE"
   echo "  maker: recorded by the database from the filing login, not asserted"
   echo ""
-  echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"
+  echo "Before promotion, use the typed staging wrapper to record the exact recovery strategy:"
   echo "  rollback: bin/deploy-worker.sh --env staging --recovery-step current_before|prior|current_after ..."
   echo "  forward_fix: bin/deploy-worker.sh --env staging --recovery-step forward_fix --release-key <key> ..."
-  echo "The wrapper, not a generic ops-record run, writes approval-eligible rehearsal evidence."
+  echo "The wrapper writes the typed rehearsal evidence required for readiness."
   exit 0
 fi
 
