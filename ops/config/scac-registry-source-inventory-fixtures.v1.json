@@ -60104,8 +60104,8 @@
           "operation": "bin/schema-snapshot.sh",
           "effect_class": "administrative_mutation",
           "source_locator": "bin/schema-snapshot.sh",
-          "schema_digest": "a5c458c32d4c6914899801ca0a4c5732e6f2cf1cad388612cd929133b302b73a",
-          "handler_digest": "a5c458c32d4c6914899801ca0a4c5732e6f2cf1cad388612cd929133b302b73a",
+          "schema_digest": "1e205b87e59d3077398760aeea052d19948a6718638401cf2e3f0a6211e256c7",
+          "handler_digest": "1e205b87e59d3077398760aeea052d19948a6718638401cf2e3f0a6211e256c7",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -60238,7 +60238,7 @@
         }
       ],
       "expected_count": 881,
-      "expected_sha256": "5e10a2d0892b593b44224e056778de805e2244fa26ce8c8827f8ef440adcfdda",
+      "expected_sha256": "4663003e9cf12862945e97a7d4bec1fa03bcde940303a9a9e55beafb4606976e",
       "reason": "WR130 plan-hash correction and private libpq snapshot connection advance the sealed source frontier. One new script ingress is the snapshot connection helper; the readiness gate, snapshot script, SCAC generator, and two local PostgreSQL acceptance gates re-digest. No new runtime grant or authority is admitted."
     }
   ],
