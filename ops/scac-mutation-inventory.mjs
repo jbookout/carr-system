@@ -12851,6 +12851,10 @@ export function renderModelRoleForwardRegistrySql(rows,
   if (seedStart < 0 || seedEnd < 0) throw new Error("v39 source seed boundary missing");
   const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
   sql = `${sql.slice(0, seedStart)}$model_role_source$${seed}$model_role_source$${sql.slice(seedEnd + "]$wr132_source$".length)}`;
+  sql = replaceExactlyOnce(sql,
+    "raise exception 'Model Room v37 seed or entry-set seal drifted';",
+    `raise exception 'Model Room v39 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, '${v39EntrySet}';`,
+    "v39 entry-set diagnostic");
   const preflight = `do $model_role_v39_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb; grants jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${roleSourcePath.split("/").at(-1)}' and sha256='${roleSourceSha}') then\n` +
     `    raise exception 'Model Room v39 requires exact applied 0542 role store'; end if;\n` +
