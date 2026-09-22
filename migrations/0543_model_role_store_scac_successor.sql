@@ -183,8 +183,8 @@ begin
   if (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v39')<>1948
     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v39' and ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))<>880
     or bad_hash or v.registry_digest is distinct from 'sha256:d83df3e8ad587f1bc2bcd7e367c0b05cac480017ab7982779c73a069f1bbb356'
-    or v.entry_set_digest is distinct from 'sha256:10c7a47eb079da3baaf184c6bac61b69e5276c6cd885c1945df8757ae0a6bb7d' then
-    raise exception 'Model Room v39 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:10c7a47eb079da3baaf184c6bac61b69e5276c6cd885c1945df8757ae0a6bb7d';
+    or v.entry_set_digest is distinct from 'sha256:21e39d21306ca723ec27e3ee5a0fbca69dedebdd083e802de1c479fb63d3a1e2' then
+    raise exception 'Model Room v39 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:21e39d21306ca723ec27e3ee5a0fbca69dedebdd083e802de1c479fb63d3a1e2';
   end if;
 end $wr130_v39_seed$;
 
