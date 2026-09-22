@@ -617,6 +617,38 @@ def main() -> int:
     else:
         raise AssertionError("applied 0538 without 0539 was accepted")
 
+    # B09's reader and its v41 successor share the same deferred epoch
+    # boundary.  The pair must batch on a fresh production ledger, reject a
+    # through-boundary at 0546, and refuse an inherited one-file ledger.
+    outcome_card_suffix = [
+        item for item in loaded if item[0].startswith(("0546_", "0547_"))
+    ]
+    assert [item[0] for item in outcome_card_suffix] == [
+        "0546_read_doc_outcome_cards_successor.sql",
+        "0547_read_doc_outcome_cards_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(outcome_card_suffix) == [
+        outcome_card_suffix
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded, outcome_card_suffix,
+            "0546_read_doc_outcome_cards_successor.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError("--through 0546 was allowed to expose an unsealed catalog")
+    try:
+        migration_runner.validate_applied_ledger(
+            outcome_card_suffix,
+            {outcome_card_suffix[0][0]: outcome_card_suffix[0][2]},
+        )
+    except migration_runner.AppliedMigrationLedgerError as exc:
+        assert "partial strict atomic migration group is forbidden" in str(exc), str(exc)
+    else:
+        raise AssertionError("applied 0546 without 0547 was accepted")
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

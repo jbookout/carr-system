@@ -268,6 +268,13 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0542_model_role_store.sql",
         "0543_model_role_store_scac_successor.sql",
     ),
+    # 0546 exposes the outcome-card reader and its grants.  0547 registers
+    # the v41 successor that seals that new catalog, so the deferred epoch
+    # trigger may only observe them together.
+    (
+        "0546_read_doc_outcome_cards_successor.sql",
+        "0547_read_doc_outcome_cards_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -286,6 +293,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0542_model_role_store.sql",
         "0543_model_role_store_scac_successor.sql",
+    ),
+    (
+        "0546_read_doc_outcome_cards_successor.sql",
+        "0547_read_doc_outcome_cards_scac_successor.sql",
     ),
 )
 
