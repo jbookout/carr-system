@@ -8078,6 +8078,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "notifications": "mcp-server/src/notifications.js",
   "session-identity": "mcp-server/src/session-identity.js",
   "dispatch-spine": "mcp-server/src/dispatch-spine.js",
+  "doc-outcome-cards": "mcp-server/src/tools.js",
   "capability-program": "mcp-server/src/capability-program.js",
   "work-shape": "mcp-server/src/work-shape.js",
   "work-request-intake": "mcp-server/src/work-request-intake.js",
@@ -9109,6 +9110,27 @@ registerTools(sessionIdentityTools({ ToolError }), "session-identity");
 // insert and 0531 makes them volatile, so a read-only transaction would fail
 // them. Both take the envelope and the event helper for that reason.
 registerTools(dispatchSpineTools({ withEnvelope, writeEvent, ToolError }), "dispatch-spine");
+
+export function docOutcomeCardsProjection(facts, ErrorType = ToolError) {
+  const states = new Set(["queued", "active", "waiting", "failed", "unknown", "verified"]);
+  if (!facts || facts.ok !== true || facts.schema_version !== "doc-outcome-cards.v2" || !Array.isArray(facts.cards))
+    throw new ErrorType({ error: facts?.reason_id || "doc_outcome_cards_unavailable" });
+  for (const card of facts.cards) {
+    if (!card || !states.has(card.routing_state) || card.session_entry?.auto_launch !== false || !Object.hasOwn(card, "native_task_id"))
+      throw new ErrorType({ error: "doc_outcome_cards_invalid_projection" });
+  }
+  return { ok: true, schema_version: facts.schema_version, as_of: facts.as_of, correlation_version: facts.correlation_version,
+    more: facts.more === true, next_cursor: facts.next_cursor ?? null, cards: facts.cards };
+}
+
+registerTools({
+  "read-doc-outcome-cards": {
+    writerConnection: true,
+    description: "Read actor- and tenant-scoped, page-atomic DoctorCRE outcome cards. The producer derives joins and availability; it never launches a native task.",
+    inputSchema: { type: "object", additionalProperties: false, properties: { cursor: { type: "string", minLength: 1, maxLength: 1000 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, required: [] },
+    handler: async (c, _actor, args) => docOutcomeCardsProjection((await c.query("select ops.read_doc_outcome_cards_successor($1::text,$2::integer) as facts", [args.cursor ?? null, args.limit ?? null])).rows[0]?.facts, ToolError),
+  },
+}, "doc-outcome-cards");
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");
