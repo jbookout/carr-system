@@ -176,6 +176,7 @@ export const REGISTRY_V37_VERSION = "scac-mutation-registry.v37";
 export const REGISTRY_V38_VERSION = "scac-mutation-registry.v38";
 export const REGISTRY_V39_VERSION = "scac-mutation-registry.v39";
 export const REGISTRY_V40_VERSION = "scac-mutation-registry.v40";
+export const REGISTRY_V41_VERSION = "scac-mutation-registry.v41";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1059,6 +1060,12 @@ export const POST_0545_FORWARD_V40_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v40",
   secdef_execute: { count: 760, digest: "sha256:ad2faf154a18ee943e8b87ef8776d1aba424e39eb382040a08789256c0e00c5f" },
 });
+// Measured after 0546 and 0547 in an isolated PostgreSQL 17 database.
+export const POST_0547_FORWARD_V41_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0545_FORWARD_V40_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v41",
+  secdef_execute: { count: 766, digest: "sha256:bd207b783129baa0ae6883c59cc439667a1ad1816e17d931f93dd7850c83011b" },
+});
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -1746,6 +1753,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V38_VERSION]: "v38",
   [REGISTRY_V39_VERSION]: "v39",
   [REGISTRY_V40_VERSION]: "v40",
+  [REGISTRY_V41_VERSION]: "v41",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1801,7 +1809,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V40_VERSION) {
+  version = REGISTRY_V41_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1873,7 +1881,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V30_VERSION, REGISTRY_V31_VERSION, REGISTRY_V32_VERSION,
     REGISTRY_V33_VERSION, REGISTRY_V34_VERSION,
     REGISTRY_V35_VERSION, REGISTRY_V36_VERSION, REGISTRY_V37_VERSION,
-    REGISTRY_V38_VERSION, REGISTRY_V39_VERSION, REGISTRY_V40_VERSION].includes(version))
+    REGISTRY_V38_VERSION, REGISTRY_V39_VERSION, REGISTRY_V40_VERSION,
+    REGISTRY_V41_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -12976,6 +12985,100 @@ export function renderReleaseReadinessHotfixRegistrySql(rows,
 }
 
 
+// WR-000133 / B09 read-only outcome-card SCAC successor.
+export function renderOutcomeCardRegistrySql(rows,
+  dbCatalogBaseline = POST_0547_FORWARD_V41_DB_CATALOG_BASELINE,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0545_release_readiness_hotfix_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  if (sha256(predecessor) !== "4ca1867c900987247b47e6b112c8f1cc304386c8981707cbdf2626bdebd04a31")
+    throw new Error("v41 predecessor migration pin drifted");
+  const domainPath = "migrations/0546_read_doc_outcome_cards_successor.sql";
+  const domainSha = sha256(readFileSync(resolve(REPO_ROOT, domainPath), "utf8"));
+  if (domainSha !== "a5379ae1ba923f8e9edb8c4bcfff57fe021c4bc6ad9bf208a0a35f1834fba528")
+    throw new Error("v41 domain migration pin drifted");
+  const v40Seal = registrySeal(REGISTRY_V40_VERSION,
+    frozenInventory(REGISTRY_V40_VERSION), POST_0545_FORWARD_V40_DB_CATALOG_BASELINE);
+  const v41Seal = registrySeal(REGISTRY_V41_VERSION, rows, dbCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V40_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V41_VERSION] ?? `sha256:${"0".repeat(64)}`;
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value)))
+    throw new Error("v41 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(POST_0545_FORWARD_V40_DB_CATALOG_BASELINE);
+  const newCatalog = JSON.stringify(dbCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v41 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("scac-mutation-registry.v40", "scac-mutation-registry.v41")
+    .replaceAll("scac-db-catalog-projection.v40", "scac-db-catalog-projection.v41")
+    .replaceAll("_v40", "_v41")
+    .replaceAll("v39_current", "v40_current")
+    .replaceAll("v39_live_at_seal", "v40_live_at_seal")
+    .replaceAll("snapshot_v39", "snapshot_v40")
+    .replaceAll("WR130 hotfix", "B09 outcome cards")
+    .replaceAll("$wr130_v41", "$b09_v41")
+    .replaceAll(v40Seal.digest, v41Seal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v40", "v41"), newCatalog)
+    .replaceAll("observed_count<>760", `observed_count<>${dbCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(POST_0545_FORWARD_V40_DB_CATALOG_BASELINE.secdef_execute.digest,
+      dbCatalogBaseline.secdef_execute.digest)
+    .replaceAll("<>1953", `<>${v41Seal.entryCount}`)
+    .replaceAll("<>881", `<>${v41Seal.sourceEntryCount}`)
+    .replaceAll(",1953,881,", `,${v41Seal.entryCount},${v41Seal.sourceEntryCount},`);
+  const versionListMarker = "'scac-mutation-registry.v39','scac-mutation-registry.v41'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v41 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v39','scac-mutation-registry.v40','scac-mutation-registry.v41'");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v41' and registry_digest='${v41Seal.digest}'));`,
+    `  (registry_version='scac-mutation-registry.v40' and registry_digest='${v40Seal.digest}') or\n  (registry_version='scac-mutation-registry.v41' and registry_digest='${v41Seal.digest}'));`,
+    "v41 epoch version history");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v41' then '${v41Seal.digest}' end;`,
+    `    when 'scac-mutation-registry.v40' then '${v40Seal.digest}'\n    when 'scac-mutation-registry.v41' then '${v41Seal.digest}' end;`,
+    "v41 sealed registry history");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v41' then '${newCatalog}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v40' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v41' then '${newCatalog}'::jsonb end;`,
+    "v41 sealed catalog history");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available() and ops.scac_mutation_registry_v38_seal_available() and ops.scac_mutation_registry_v39_seal_available()) then",
+    "ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available() and ops.scac_mutation_registry_v38_seal_available() and ops.scac_mutation_registry_v39_seal_available() and ops.scac_mutation_registry_v40_seal_available()) then",
+    "v41 policy snapshot history");
+  sql = replaceExactlyOnce(sql,
+    `         or (r.registry_version='scac-mutation-registry.v41' and r.registry_digest='${v41Seal.digest}'))`,
+    `         or (r.registry_version='scac-mutation-registry.v40' and r.registry_digest='${v40Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v41' and r.registry_digest='${v41Seal.digest}'))`,
+    "v41 policy epoch chain history");
+  sql = replaceExactlyOnce(sql,
+    "     or not ops.scac_mutation_registry_v41_seal_available()",
+    "     or not ops.scac_mutation_registry_v40_seal_available()\n     or not ops.scac_mutation_registry_v41_seal_available()",
+    "v41 final historical seal");
+  const seedStart = sql.indexOf("$wr130_hotfix_source$[");
+  const seedEnd = sql.indexOf("]$wr130_hotfix_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v41 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$b09_source$${seed}$b09_source$${sql.slice(seedEnd + "]$wr130_hotfix_source$".length)}`;
+  sql = sql.replaceAll("$wr130_hotfix_source$", "$b09_source$");
+  sql = sql.replaceAll("B09 outcome cards v40 seed or entry-set seal drifted", "B09 outcome cards v41 seed or entry-set seal drifted");
+  const preflight = `do $b09_v41_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${domainPath.split("/").at(-1)}' and sha256='${domainSha}') then\n` +
+    `    raise exception 'B09 outcome cards v41 requires exact applied 0546'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V40_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${v40Seal.digest}' or v.entry_count<>${v40Seal.entryCount}\n` +
+    `    or v.source_entry_count<>${v40Seal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'B09 outcome cards v40 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v40('${v40Seal.digest}','mcp-tool:standing-context');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'B09 outcome cards v40 predecessor entry drifted'; end if;\n` +
+    `end $b09_v41_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
+
+
 
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
@@ -13446,10 +13549,20 @@ export function renderGeneratedFrontier() {
     renderReleaseReadinessHotfixRegistrySql(v40Rows,
       POST_0545_FORWARD_V40_DB_CATALOG_BASELINE,
       artifacts["migrations/0543_model_role_store_scac_successor.sql"]);
+  const v41Rows = frozenInventory(REGISTRY_V41_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v41.generated.js"] =
+    renderRuntimeProjection(v41Rows, {
+      version: REGISTRY_V41_VERSION,
+      dbCatalogBaseline: POST_0547_FORWARD_V41_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0547_read_doc_outcome_cards_scac_successor.sql"] =
+    renderOutcomeCardRegistrySql(v41Rows,
+      POST_0547_FORWARD_V41_DB_CATALOG_BASELINE,
+      artifacts["migrations/0545_release_readiness_hotfix_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 46 || runtimeCount !== 37 || Object.keys(artifacts).length !== 83)
+  if (migrationCount !== 47 || runtimeCount !== 38 || Object.keys(artifacts).length !== 85)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -14108,6 +14221,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       dbCatalogBaseline: POST_0545_FORWARD_V40_DB_CATALOG_BASELINE,
     }));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-outcome-card-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0547_read_doc_outcome_cards_scac_successor.sql");
+    await writeFile(target, renderOutcomeCardRegistrySql(frozenInventory(REGISTRY_V41_VERSION)));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v41") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v41.generated.js");
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V41_VERSION), {
+      version: REGISTRY_V41_VERSION,
+      dbCatalogBaseline: POST_0547_FORWARD_V41_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-ready-plan-amendment-registry-migration") {
     const target = resolve(process.argv[3] ||
       "migrations/0532b_ready_plan_amendment_scac_successor.sql");
@@ -14134,7 +14258,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V40_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V41_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
