@@ -59976,6 +59976,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:bin/schema-snapshot.sh",
+          "ingress_kind": "script_entrypoint",
+          "operation": "bin/schema-snapshot.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/schema-snapshot.sh",
+          "schema_digest": "5ca55b97369e73689d5066e1b7da3100b9c6ffd30983c1bfbc48c62e304b1868",
+          "handler_digest": "5ca55b97369e73689d5066e1b7da3100b9c6ffd30983c1bfbc48c62e304b1868",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:ops/ci.sh",
           "ingress_kind": "script_entrypoint",
           "operation": "ops/ci.sh",
@@ -60069,7 +60092,7 @@
         }
       ],
       "expected_count": 880,
-      "expected_sha256": "1919b5e9695cbbb5f04734b74b47a41ea3a174eab35cb5424208a7c07f9b788c"
+      "expected_sha256": "5ca71bab4a995428cec35ad00695b4b608aabf89785a92873efd1c6613a63ccc"
     }
   ],
   "current_source_review": {
