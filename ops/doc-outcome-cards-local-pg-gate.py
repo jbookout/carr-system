@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only PostgreSQL acceptance for the B09 outcome-card projection."""
 
 from __future__ import annotations
