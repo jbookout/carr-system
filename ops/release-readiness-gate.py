@@ -23,7 +23,7 @@ SPEC.loader.exec_module(typed)
 # The production manifest's provider-bound plan hash uses the CARR release
 # contract, which differs from Engineering Work Request sha256 plan hashes.
 # Seed this disposable release fixture with the value the wrapper really emits.
-typed.PLAN_HASH = "plan:" + "c" * 32
+setattr(typed, "PLAN_HASH", "plan:" + "c" * 32)
 
 
 def expect_refusal(cur, statement: str, params: tuple = ()) -> None:
