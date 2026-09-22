@@ -12714,6 +12714,11 @@ export function renderReleaseReadinessForwardRegistrySql(rows,
       sealedCatalogCase.includes(sealedV36RegistryCase[0]))
     throw new Error("v38 generator v36 CASE type preservation failed");
   const v36Digest = sealedV36RegistryCase[0].match(/sha256:[0-9a-f]{64}/)[0];
+  const v37PolicyConstraintCase =
+    "  (registry_version='scac-mutation-registry.v37' and registry_digest='sha256:9000689a73268dfb1b1da81cef645e750523d7b3082eafcd2632e4ca54da76e9') or";
+  sql = replaceExactlyOnce(sql, v37PolicyConstraintCase,
+    `  (registry_version='scac-mutation-registry.v36' and registry_digest='${v36Digest}') or\n${v37PolicyConstraintCase}`,
+    "v38 historical v36 policy epoch constraint case");
   sql = replaceExactlyOnce(sql,
     "ops.scac_mutation_registry_v35_seal_available() and ops.scac_mutation_registry_v37_seal_available()) then",
     "ops.scac_mutation_registry_v35_seal_available() and ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available()) then",
@@ -12734,7 +12739,11 @@ export function renderReleaseReadinessForwardRegistrySql(rows,
     sql.indexOf("create or replace function ops.scac_policy_epoch_chain_state()"),
     sql.indexOf("end $fn$;", sql.indexOf("create or replace function ops.scac_policy_epoch_chain_state()")));
   const finalAssertion = sql.slice(sql.indexOf("do $wr130_v38_final$"));
-  if (!policySnapshot.includes("ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available()") ||
+  const policyConstraint = sql.slice(
+    sql.indexOf("alter table ops.scac_policy_epoch add constraint scac_policy_epoch_registry_version_digest_check"),
+    sql.indexOf(";", sql.indexOf("alter table ops.scac_policy_epoch add constraint scac_policy_epoch_registry_version_digest_check")));
+  if (!policyConstraint.includes(`registry_version='scac-mutation-registry.v36' and registry_digest='${v36Digest}'`) ||
+      !policySnapshot.includes("ops.scac_mutation_registry_v36_seal_available() and ops.scac_mutation_registry_v37_seal_available()") ||
       !policyChain.includes(`r.registry_version='scac-mutation-registry.v36' and r.registry_digest='${v36Digest}'`) ||
       !finalAssertion.includes("if not ops.scac_mutation_registry_v36_seal_available()"))
     throw new Error("v38 generator v36 historical policy-chain preservation failed");
