@@ -19,6 +19,8 @@ import errno
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -106,6 +108,69 @@ PROVIDER_WAIT_POLL_SECONDS = float(os.environ.get("CARR_PROVIDER_POLL_SECONDS", 
 # before it can answer the first read at all, so one chunk proves what a full
 # read proves at a fraction of the cost on a 9320-row workbook.
 PROVIDER_PROBE_BYTES = 1 << 16
+
+# WAITING FOR A PROVIDER THAT IS NOT RUNNING, measured 2026-09-22. The 09-22
+# nightly is the first that reached the end of the budget above instead of being
+# killed by the step timeout, and what it proved is that the wait itself was
+# never the binding constraint: 60 poll lines over the full 1200s, no file ever
+# warming, then EDEADLK on all six targets. The cause was not a slow provider.
+# `ps -Ao lstart` that afternoon put OneDrive.app's start at 08:55:58 local,
+# three seconds after the session's "Display is turned on" event and nearly
+# SEVEN HOURS after the exports step ran at 02:05:29 local. OneDrive is a GUI
+# login item, so nothing had it running in the 02:05 window; every read of a
+# dehydrated placeholder answers EDEADLK forever when no provider exists to
+# service it. The same six files read in ~2s each once the client was up.
+#
+# So the wait now asks the cheap question FIRST — is anything there to wait for
+# — and says the answer out loud. When the provider is absent it makes ONE
+# attempt to start it (`open -gj -a OneDrive`, background and hidden: a no-op
+# when it is already running) and keeps waiting, so a night that would have lost
+# six targets can recover on its own. When the launch does not take, the budget
+# is not burned in silence: the message names an absent provider rather than
+# reporting six files as merely "still cold", which is what five nights of logs
+# said while the real answer was that OneDrive was not running.
+#
+# The check is a process probe, not an API call, because there is no supported
+# way to ask a File Provider extension whether it is up, and because a probe
+# that needs the provider in order to test the provider cannot report its
+# absence. Both names are matched: the appex services the reads, the app is
+# what `open` starts.
+PROVIDER_PROCESS_PATTERNS = ("OneDrive File Provider", "MacOS/OneDrive")
+PROVIDER_LAUNCH_COMMAND = ("open", "-gj", "-a", "OneDrive")
+PROVIDER_LAUNCH_TIMEOUT_SECONDS = 30.0
+
+
+def provider_running(run=subprocess.run):
+    """True when a OneDrive process that could service a cloud read is up.
+
+    Unknowable rather than false when pgrep is missing: a machine without it
+    must not have the wait report an absent provider it never actually tested,
+    so the caller treats None as "no finding" and behaves exactly as before.
+    """
+    if shutil.which("pgrep") is None:
+        return None
+    for pattern in PROVIDER_PROCESS_PATTERNS:
+        try:
+            done = run(["pgrep", "-f", pattern], capture_output=True, text=True)
+        except OSError:
+            return None
+        if done.returncode == 0 and done.stdout.strip():
+            return True
+    return False
+
+
+def start_provider(run=subprocess.run):
+    """Ask the session to start OneDrive. Returns True when the command ran.
+
+    Never raises: a failed launch is one more thing the wait reports, not a new
+    way for the export step to die before it exports anything.
+    """
+    try:
+        done = run(list(PROVIDER_LAUNCH_COMMAND), capture_output=True, text=True,
+                   timeout=PROVIDER_LAUNCH_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def connect():
@@ -264,7 +329,8 @@ def _generation_destinations(gen_dir: Path, final_path: Path, stamp: str):
         yield gen_dir / f"{stamp}-{sequence:02d}-{final_path.name}"
 
 
-def wait_for_provider(paths, budget_seconds=None, poll_seconds=None, sleep=time.sleep):
+def wait_for_provider(paths, budget_seconds=None, poll_seconds=None, sleep=time.sleep,
+                      running=provider_running, launch=start_provider):
     """Block until the cloud file provider can actually serve `paths`.
 
     WHY A WAIT AND NOT A LONGER RETRY, measured 2026-09-17. The nightly chain
@@ -306,6 +372,7 @@ def wait_for_provider(paths, budget_seconds=None, poll_seconds=None, sleep=time.
         return []
 
     deadline = time.monotonic() + budget
+    launched = False
     while True:
         cold = []
         for path in probes:
@@ -319,10 +386,33 @@ def wait_for_provider(paths, budget_seconds=None, poll_seconds=None, sleep=time.
         if any(error.errno not in GENERATION_COPY_RETRY_ERRNOS for _p, error in cold):
             return cold
         remaining = deadline - time.monotonic()
+
+        # The liveness question is asked on every poll, but acted on once: a
+        # second `open` buys nothing while the first is still starting, and a
+        # relaunch loop against a provider that refuses to come up is how a
+        # bounded wait turns into a bounded stream of launches.
+        alive = running()
+        if alive is False:
+            if not launched:
+                launched = True
+                started = launch()
+                print("[provider] no OneDrive process is running — this is why the "
+                      "files are unreadable, and waiting alone cannot fix it. "
+                      f"Launch attempt {'issued' if started else 'FAILED'} "
+                      f"({' '.join(PROVIDER_LAUNCH_COMMAND)}).",
+                      file=sys.stderr, flush=True)
+            elif remaining <= 0:
+                print("[provider] still no OneDrive process after the launch "
+                      "attempt; the budget was spent on an absent provider, not "
+                      "a slow one. OneDrive is a GUI login item — it does not "
+                      "start for a scheduled run on its own.",
+                      file=sys.stderr, flush=True)
+
         if remaining <= 0:
             return cold
         names = ", ".join(sorted(path.name for path, _e in cold))
-        print(f"[provider] {len(cold)} file(s) still cold ({names}); "
+        state = {True: "provider up", False: "provider DOWN", None: "provider state unknown"}[alive]
+        print(f"[provider] {len(cold)} file(s) still cold ({names}); {state}; "
               f"{remaining:.0f}s left before the exports start anyway",
               file=sys.stderr, flush=True)
         sleep(min(poll, remaining))

@@ -3,7 +3,7 @@
 Draft by default; CARR_EXPORT_LIVE=1 activates vault paths (cutover only).
 """
 import argparse, os, sys
-from .common import EXPORT_HOME, LIVE, run_export, wait_for_provider
+from .common import EXPORT_HOME, LIVE, provider_running, run_export, wait_for_provider
 from .targets import TARGETS
 
 def select(only):
@@ -81,10 +81,18 @@ def main():
         cold = wait_for_provider(EXPORT_HOME / rel for rel, _fn in targets.values())
         if cold:
             names = ", ".join(sorted(path.name for path, _e in cold))
+            alive = provider_running()
+            cause = {
+                True: "the provider is up and still not serving these files: the "
+                      "tree is cloud-only, so pin the OneDrive CARR folder or free disk",
+                False: "NO OneDrive PROCESS IS RUNNING — waiting could never have "
+                       "helped. OneDrive is a GUI login item and does not start for "
+                       "a 02:05 scheduled run; the launch attempt did not take",
+                None: "the provider's state could not be tested on this machine",
+            }[alive]
             print(f"[provider] giving up the wait; {len(cold)} file(s) still "
-                  f"unreadable ({names}). Each target will now try and report "
-                  f"for itself. If this is EDEADLK, the tree is cloud-only: pin "
-                  f"the OneDrive CARR folder or free disk.", file=sys.stderr)
+                  f"unreadable ({names}). {cause}. Each target will now try and "
+                  f"report for itself.", file=sys.stderr)
 
     # NOT `all(...)`: it short-circuits, so ONE failing target silently cancels every
     # target after it in dict order. That is exactly what bit on 2026-08-02 — an
