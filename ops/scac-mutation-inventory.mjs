@@ -170,6 +170,8 @@ export const REGISTRY_V35_VERSION = "scac-mutation-registry.v35";
 // v36 is the sole WR-000125 successor. Its source rows are generated from
 // 0532a/0532b and the exact current tree; v35 remains immutable history.
 export const REGISTRY_V36_VERSION = "scac-mutation-registry.v36";
+// v37 is the WR-000130 successor for 0538 assurance binding. v36 remains frozen.
+export const REGISTRY_V37_VERSION = "scac-mutation-registry.v37";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1006,6 +1008,16 @@ export const POST_0532A_PRE_V36_DB_CATALOG_BASELINE =
 export const POST_0532B_FORWARD_V36_DB_CATALOG_BASELINE =
   wr125UnmeasuredCatalog("scac-db-catalog-projection.v36");
 
+// Measured in disposable PG17 after 0538 and the four v37 lookup grants.
+export const POST_0539_FORWARD_V37_DB_CATALOG_BASELINE = Object.freeze({
+  projection_version: "scac-db-catalog-projection.v37",
+  secdef_execute: { count: 709, digest: "sha256:018fbe53956a85142b5364af42a8640bc6fbe983fe6ddbfa7d1f23f4608f170a" },
+  relation_dml: { count: 300, digest: "sha256:65041336641fb57e01830d5d670c304817d2e6da8ba94ab49ca94c51f8112e12" },
+  column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
+  role_authority: { count: 13, digest: "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0" },
+  runtime_dml_grants: { count: 312, digest: "sha256:f3a7344a4e690971141c39b207c2fd3410b12946f53130c67ee9679b5c7bf5e0" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -1090,7 +1102,7 @@ select v.registry_version,
   const output = execFileSync("psql", [dsn, "-X", "-A", "-t", "-F", "\t",
     "-v", "ON_ERROR_STOP=1", "-c", sql], { encoding: "utf8" });
   const rows = output.trim().split("\n").filter(Boolean).map(line => line.split("\t"));
-  const currentVersion = Number(REGISTRY_V36_VERSION.split(".v").at(-1));
+  const currentVersion = Number(REGISTRY_V37_VERSION.split(".v").at(-1));
   const expectedVersions = Array.from({ length: currentVersion }, (_, index) =>
     `scac-mutation-registry.v${index + 1}`);
   if (rows.length !== expectedVersions.length ||
@@ -1688,6 +1700,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V34_VERSION]: "v34",
   [REGISTRY_V35_VERSION]: "v35",
   [REGISTRY_V36_VERSION]: "v36",
+  [REGISTRY_V37_VERSION]: "v37",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -1743,7 +1756,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V36_VERSION) {
+  version = REGISTRY_V37_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1814,7 +1827,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V28_VERSION, REGISTRY_V29_VERSION,
     REGISTRY_V30_VERSION, REGISTRY_V31_VERSION, REGISTRY_V32_VERSION,
     REGISTRY_V33_VERSION, REGISTRY_V34_VERSION,
-    REGISTRY_V35_VERSION, REGISTRY_V36_VERSION].includes(version))
+    REGISTRY_V35_VERSION, REGISTRY_V36_VERSION, REGISTRY_V37_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -13610,6 +13623,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       version: REGISTRY_V36_VERSION, dbCatalogBaseline,
     }));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v37") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v37.generated.js");
+    const baselinePath = process.argv[4];
+    let dbCatalogBaseline = POST_0539_FORWARD_V37_DB_CATALOG_BASELINE;
+    if (baselinePath) {
+      const measured = JSON.parse(readFileSync(resolve(baselinePath), "utf8"));
+      dbCatalogBaseline = measured.forward_v37 || measured.forward || measured;
+    }
+    await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V37_VERSION), {
+      version: REGISTRY_V37_VERSION, dbCatalogBaseline,
+    }));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-ready-plan-amendment-registry-migration") {
     const target = resolve(process.argv[3] ||
       "migrations/0532b_ready_plan_amendment_scac_successor.sql");
@@ -13636,7 +13661,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V35_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V37_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

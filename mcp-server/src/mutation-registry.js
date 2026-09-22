@@ -4,7 +4,11 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v35 is the runtime selector because WR-000119 installs the DISPATCH SPINE --
+// v37 is the runtime selector after WR-000130 assurance binding. Its sealed
+// database catalog includes the two issuer grants from 0538 and four v37
+// metadata lookup grants. v36 remains historical.
+//
+// Superseded note (WR-000119): v35 was the runtime selector because it installed the DISPATCH SPINE --
 // TWO new security-definer WRITE ingresses and TWO new verbs in a NEW family
 // file, plus TWO new relations whose grants move relation_dml, which is why
 // mcp-server/src/tools.js is edited again and every mcp-tool row sourced from
@@ -34,7 +38,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v36.generated.js";
+} from "./scac-mutation-registry.v37.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

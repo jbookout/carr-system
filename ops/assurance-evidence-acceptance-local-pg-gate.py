@@ -751,6 +751,10 @@ def main() -> int:
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             schema_before = schema_fingerprint(cur)
+            review_rows_before = one(cur,
+                "select count(*) from ops.assurance_review_extension")[0]
+            owner_rows_before = one(cur,
+                "select count(*) from ops.assurance_owner_acceptance_fact")[0]
         # This is a nondisclosure canary, not authority.  It is registered as
         # a released foreign-tenant lease after the activated lease exists:
         # token suppression scans the canonical lease registry, so a bare UUID
@@ -2090,8 +2094,10 @@ def main() -> int:
                       and all(token not in error for error in RAW_ERRORS)
                       for token in SECRET_TOKENS))
             check("owner acceptance cannot satisfy review structurally", one(cur,
-                "select count(*) from ops.assurance_review_extension")[0] == 1 and one(cur,
-                "select count(*) from ops.assurance_owner_acceptance_fact")[0] == 5)
+                "select count(*) from ops.assurance_review_extension")[0]
+                == review_rows_before + 1 and one(cur,
+                "select count(*) from ops.assurance_owner_acceptance_fact")[0]
+                == owner_rows_before + 5)
             check("owner-only manifest has no assurance-review extension", one(cur, """
               select not exists(select 1 from ops.assurance_review_extension
                 where review_manifest_id=%s)""", (owner_only_manifest_id,))[0])

@@ -71,6 +71,52 @@ SKIP = "LOCAL-ONLY: needs the live credential and the live service"
 
 
 @unittest.skipUnless(has_credential(), SKIP)
+class MessageBoundaryJevTests(unittest.TestCase):
+    """The installed prompt hook must deliver both Jev judgments, not just call them."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(REPO, "hooks", "rule-pack-preuse-reselection.py")
+        spec = importlib.util.spec_from_file_location("jev_message_hook_live", path)
+        cls.hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.hook)
+
+    def receipt(self, prompt, turn):
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": REPO,
+            "session_id": "jev-operational-selftest",
+            "turn_id": turn,
+            "prompt": prompt,
+        }
+        output = self.hook.process(payload)
+        self.assertIsNotNone(output, "the prompt hook returned no context")
+        return json.loads(output["hookSpecificOutput"]["additionalContext"])
+
+    def test_binding_pack_rule_is_delivered_with_a_live_build_receipt(self):
+        row = self.receipt(
+            "My working tree is dirty. I am about to tell Joe another session "
+            "is blocking my change. I only compared against HEAD and have not "
+            "fetched origin/main. Can I say that?", "jev-positive")
+        self.assertEqual(row["schema"], "rule-jev-message-delivery/v2")
+        self.assertIn("173119a8", row["rule_ids"])
+        self.assertIn("engineering-git", row["packs"])
+        self.assertTrue(row["model_provenance"]["173119a8"]["binding_model"])
+        self.assertEqual(row["build_receipt"]["advisory"]["schema"],
+                         "jev-build-advisory/v1")
+        self.assertTrue(row["build_receipt"]["advisory"]["model"])
+
+    def test_plain_read_receives_no_rule_and_no_invented_build_action(self):
+        row = self.receipt(
+            "I need to inspect the current hook configuration read-only.",
+            "jev-negative")
+        self.assertEqual(row["schema"], "jev-build-turn-receipt/v1")
+        self.assertEqual(row["semantic_rule_delivery"], "not_applicable")
+        self.assertEqual(row["advisory"]["schema"], "jev-build-advisory/v1")
+        self.assertEqual(row["advisory"]["required_actions"], [])
+
+
+@unittest.skipUnless(has_credential(), SKIP)
 class ShellPreCheckTests(unittest.TestCase):
     """Fires on every Bash call, from the delegation gate."""
 

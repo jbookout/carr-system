@@ -67,6 +67,7 @@ import {
   REGISTRY_V34_VERSION,
   REGISTRY_V35_VERSION,
   REGISTRY_V36_VERSION,
+  REGISTRY_V37_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -301,6 +302,8 @@ const v35Migration = fs.readFileSync(
     import.meta.url), "utf8");
 const generatedV36 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v36.generated.js", import.meta.url), "utf8");
+const generatedV37 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v37.generated.js", import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
@@ -909,7 +912,7 @@ test("v20 seals the Codex continuity archive frontier and preserves the v19 pred
   }
 });
 
-test("the ACTIVE runtime registry is v36, and a stale v19 import fails admission", async () => {
+test("the ACTIVE runtime registry is v37, and a stale v19 import fails admission", async () => {
   // mutation-registry.js is the module every TOOLS admission actually runs
   // through, so this binds the LIVE import rather than the mere existence of a
   // generated v20 file. Re-pinning the generated artifact without re-pointing
@@ -923,12 +926,12 @@ test("the ACTIVE runtime registry is v36, and a stale v19 import fails admission
   // mcp-server/src/engineering-runtime.js, v30 took it because
   // WR-000111/112/113 registered four new verbs across two new source modules,
   // v31-v35 successively registered the Doc conversation, notification,
-  // session-identity and dispatch-spine surfaces; v36 takes it now because
-  // WR-000125 registers the ready-plan amendment lifecycle tools.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V36_VERSION);
-  const v36SelectorDigest = generatedV36.match(
+  // session-identity and dispatch-spine surfaces; v36 registered the
+  // ready-plan amendment lifecycle tools; v37 seals WR130 assurance binding.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V37_VERSION);
+  const v37SelectorDigest = generatedV37.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v36SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v37SelectorDigest);
   assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v19.digest);
   assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v21.digest);
 
@@ -1192,7 +1195,7 @@ test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predece
   }
 });
 
-test("the v21 frontier re-digested only source, and v36 is what the runtime now imports", async () => {
+test("the v21 frontier re-digested only source, and v37 is what the runtime now imports", async () => {
   // THE SELECTOR FOLLOWS THE MCP CONTRACT, NOT THE FRONTIER, and that rule has
   // now been exercised in both directions four times over. v21 moved no MCP
   // contract, which is what made leaving the import on v20 safe for the R06
@@ -1200,7 +1203,7 @@ test("the v21 frontier re-digested only source, and v36 is what the runtime now 
   // v22 through all three. v26 DOES register a verb, so the selector moves with
   // it — an unregistered operation is refused at the door, so the runtime has
   // to read the registry that knows record-gate-zero-read-only-outcome.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V36_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V37_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1208,10 +1211,12 @@ test("the v21 frontier re-digested only source, and v36 is what the runtime now 
   assert.equal(v21GeneratedVersion, REGISTRY_V21_VERSION);
   // The v21 projection is genuinely a new seal, not a re-emitted v20.
   assert.notEqual(`sha256:${v21GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v20.digest);
-  // The live digest is v36's: the runtime import moved again with the
-  // WR-000125 assurance successor, and it is NOT v22's, v28's, v29's, v30's,
+  // The live digest is v37's: the runtime import moved again with the
+  // WR-000130 assurance successor, and it is NOT v22's, v28's, v29's, v30's,
   // v31's, v32's, v33's, v34's or v35's any more.
   const v36GeneratedDigest = generatedV36.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
+  const v37GeneratedDigest = generatedV37.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v34GeneratedDigest = generatedV34.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
@@ -1229,7 +1234,8 @@ test("the v21 frontier re-digested only source, and v36 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v30GeneratedDigest = generatedV30.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v36GeneratedDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v37GeneratedDigest);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v36GeneratedDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v34GeneratedDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v33GeneratedDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v32GeneratedDigest);
@@ -2449,7 +2455,7 @@ test("the v23 frontier re-digested only source, so it did not move the runtime i
   // verb either, so the import stayed on v22 through v23, v24 and v25, and only
   // moved again at v26 when the Gate Zero outcome verb arrived. What this test
   // records is that v23 was NOT the reason it moved.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V36_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V37_VERSION);
   assert.notEqual(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V23_VERSION);
   const v23GeneratedVersion = generatedV23.match(
     /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];

@@ -21,27 +21,27 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0532b installs v36 as the live frontier and demotes v35 to sealed history.
-# Both are pinned: an unreviewed frontier, or a v35 row the successor rewrote
+# 0539 installs v37 as the live frontier and demotes v36 to sealed history.
+# Both are pinned: an unreviewed frontier, or a v36 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
 # The per-version function names below are DERIVED from these two ordinals
 # rather than spelled out again. Every prior advance of this gate had to hand-
 # edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
 # check that silently keeps interrogating the superseded frontier.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v36"
-LIVE_REGISTRY_ORDINAL = 36
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v35"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v37"
+LIVE_REGISTRY_ORDINAL = 37
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v36"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec"
+    "sha256:ec86f1666faafbfd3aa51e5b55a95f1566de34f041b81d32d94ca859311ee54b"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (1859, 870)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (1891, 876)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0532_room_dispatch_spine_scac_successor.sql"
+    "migrations/0532b_ready_plan_amendment_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0532b_ready_plan_amendment_scac_successor.sql"
+    "migrations/0539_canonical_ownership_assurance_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
@@ -73,8 +73,8 @@ PREDECESSOR_LIVE_AT_SEAL_NAME = (
 # A grant projection that did NOT move here would mean it had stopped seeing
 # relation grants at all.
 # Measured on a disposable loopback PostgreSQL 17, never predicted.
-# v36 owns the post-0532b grant projection. Read its measured value from the
-# sealed catalog row below; the v35 predecessor remains pinned separately.
+# v37 owns the post-0539 grant projection. Read its measured value from the
+# sealed catalog row below; the v36 predecessor remains pinned separately.
 
 # WR-000048 mutation test fixtures. NARROWED_ROLE_AUTHORITY_SCOPE is the
 # portable census scope this repair cascade installs (verbatim from the

@@ -152,22 +152,34 @@ REVIEW_AT = 0.85
 
 
 def _changed_code_paths(payload):
-    """Return exact paths named by one native edit or patch operation."""
+    """Return exact paths named by one native edit or patch operation.
+
+    Codex can call apply_patch inside functions.exec. In that case the outer
+    tool is the hook event, so inspect its script for patch file headers too.
+    Only explicit patch targets qualify; arbitrary shell commands do not.
+    """
     tool = payload.get("tool_name") or payload.get("toolName") or ""
     ti = payload.get("tool_input") or payload.get("toolInput") or {}
     if tool in ("Write", "Edit", "MultiEdit"):
         path = ti.get("file_path") or ti.get("filePath") or ""
         return [path] if path else []
-    if tool not in ("apply_patch", "functions.apply_patch"):
+    if tool not in ("apply_patch", "functions.apply_patch", "functions.exec"):
         return []
     if isinstance(ti, str):
         patch = ti
     elif isinstance(ti, dict):
-        patch = ti.get("command") or ti.get("patch") or ti.get("input") or ""
+        patch = (ti.get("code") if tool == "functions.exec" else None) or \
+            ti.get("command") or ti.get("patch") or ti.get("input") or ""
     else:
         patch = ""
     if not isinstance(patch, str):
         return []
+    if tool == "functions.exec":
+        if "tools.apply_patch" not in patch:
+            return []
+        # A JS string often contains escaped line breaks instead of literal
+        # newlines. Normalize only for locating patch headers, never execute it.
+        patch = patch.replace("\\n", "\n")
     cwd = payload.get("cwd") or os.getcwd()
     found = PATCH_FILE.findall(patch) + PATCH_MOVE.findall(patch)
     paths = []
@@ -262,7 +274,7 @@ def code_review(payload):
         spec.loader.exec_module(module)
         hits = []
         for path in paths:
-            rel = os.path.relpath(path, root)
+            rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
             path_receipt = {"path": rel}
             receipt["paths"].append(path_receipt)
             if not path.endswith(CODE_SUFFIXES):
