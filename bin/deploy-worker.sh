@@ -41,6 +41,7 @@
 #       # an approved immutable release when main moves after approval
 #   bin/deploy-worker.sh --upload-version
 #       # upload a Production candidate without changing traffic
+#       # optional --probe-tokens-file <private JSON> rotates only PROBE_TOKENS
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
 #       # promote that exact approved version to 100% of Production traffic
 #   # Production modes and a standalone staging release require the approval
@@ -122,6 +123,7 @@ RELEASE_TEST_EVIDENCE=""
 RELEASE_SECURITY_EVIDENCE=""
 RELEASE_VERIFIER=""
 RELEASE_VERIFIER_EVIDENCE=""
+PROBE_TOKENS_FILE=""
 FOUNDATION_ASSURANCE_STAGING_PROVIDER=""
 FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION=""
 FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT=""
@@ -208,6 +210,9 @@ while [ "$#" -gt 0 ]; do
     --verifier-evidence)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --verifier-evidence needs a reference" >&2; exit 64; }
       RELEASE_VERIFIER_EVIDENCE="$2"; shift ;;
+    --probe-tokens-file)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --probe-tokens-file needs a private JSON path" >&2; exit 64; }
+      PROBE_TOKENS_FILE="$2"; shift ;;
     --foundation-assurance-staging-provider)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-provider needs an immutable UUID" >&2; exit 64; }
       FOUNDATION_ASSURANCE_STAGING_PROVIDER="$2"; shift ;;
@@ -253,6 +258,23 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ -n "$PROBE_TOKENS_FILE" ]; then
+  [ "$VERSION_MODE" = "upload" ] || { echo "deploy-worker: probe token rotation requires --upload-version" >&2; exit 64; }
+  "$PY" - "$PROBE_TOKENS_FILE" <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+meta = os.stat(path)
+if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+    raise SystemExit("deploy-worker: probe token file must be an owner-only regular file")
+value = json.load(open(path))
+if set(value) != {"PROBE_TOKENS"}:
+    raise SystemExit("deploy-worker: probe token file may bind only PROBE_TOKENS")
+tokens = json.loads(value["PROBE_TOKENS"])
+if set(tokens) != {"smoke-probe"} or not isinstance(tokens["smoke-probe"], str) or len(tokens["smoke-probe"]) != 64 or any(c not in "0123456789abcdef" for c in tokens["smoke-probe"]):
+    raise SystemExit("deploy-worker: invalid smoke-probe token shape")
+PY
+fi
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
 
@@ -1032,7 +1054,12 @@ if (live.get("git_sha") or {}).get("value")!=sha or (live.get("worker_version") 
     echo "  verified exact staging provider $FOUNDATION_ASSURANCE_STAGING_PROVIDER"
   fi
   set +e
-  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" \
+  if [ -n "$PROBE_TOKENS_FILE" ]; then
+    set -- --secrets-file "$PROBE_TOKENS_FILE"
+  else
+    set --
+  fi
+  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload "$@" --var "GIT_SHA:$HEAD_SHA" \
     --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
     --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
   VERSION_UPLOAD_RC=$?
