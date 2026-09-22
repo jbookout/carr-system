@@ -54,6 +54,7 @@ with tempfile.TemporaryDirectory() as directory:
 source = SNAPSHOT.read_text(encoding="utf-8")
 assert "unset URL" in source
 assert "PGSERVICE=schema_snapshot" in source
+assert "$URL" not in source.split("unset URL", 1)[1]
 assert '"$PG_DUMP" --schema-only --no-owner --no-acl "$URL"' not in source
 assert '"$PSQL" "$URL"' not in source
 
