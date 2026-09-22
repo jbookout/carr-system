@@ -57301,6 +57301,29 @@
     "base_version": "v37",
     "upsert": [
       {
+        "ingress_key": "external-admin:bin/deploy-worker.sh",
+        "ingress_kind": "external_admin",
+        "operation": "bin/deploy-worker.sh",
+        "effect_class": "administrative_mutation",
+        "source_locator": "bin/deploy-worker.sh",
+        "schema_digest": "8a9e670cea02ef4658f002573369de69128f2f018b0c2486c0ad48b81f25c4a6",
+        "handler_digest": "8a9e670cea02ef4658f002573369de69128f2f018b0c2486c0ad48b81f25c4a6",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
         "ingress_key": "script-entrypoint:mcp-server/smoke-reads.sh",
         "ingress_kind": "script_entrypoint",
         "operation": "mcp-server/smoke-reads.sh",
@@ -57326,7 +57349,7 @@
     ],
     "source_digest_replacements": {},
     "expected_count": 876,
-    "expected_sha256": "ace6ac3aac0203da6b3fc1a375a10498cbc7c5bd5fef9d3497338afcc4af0d8b",
+    "expected_sha256": "7e61699390845e63549675bcbd09dc6764def32b2551fae9d1b5c5e99f0789f8",
     "reason": "WR123 smoke and probe rotation changes re-digest reviewed source. Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
   },
   "historical_artifact_replay_review": {
