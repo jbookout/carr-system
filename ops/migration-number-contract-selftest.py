@@ -586,6 +586,37 @@ def main() -> int:
     else:
         raise AssertionError("applied 0532a without 0532b was accepted")
 
+    # WR-000130's assurance repair and its v37 catalog seal must commit as
+    # one group, including on production where both are still pending.
+    assurance_suffix = [
+        item for item in loaded if item[0].startswith(("0538_", "0539_"))
+    ]
+    assert [item[0] for item in assurance_suffix] == [
+        "0538_canonical_ownership_assurance_binding.sql",
+        "0539_canonical_ownership_assurance_scac_successor.sql",
+    ]
+    assert migration_runner.migration_batches(assurance_suffix) == [
+        assurance_suffix
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded, assurance_suffix,
+            "0538_canonical_ownership_assurance_binding.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError("--through 0538 was allowed to expose an unsealed catalog")
+    try:
+        migration_runner.validate_applied_ledger(
+            assurance_suffix,
+            {assurance_suffix[0][0]: assurance_suffix[0][2]},
+        )
+    except migration_runner.AppliedMigrationLedgerError as exc:
+        assert "partial strict atomic migration group is forbidden" in str(exc), str(exc)
+    else:
+        raise AssertionError("applied 0538 without 0539 was accepted")
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

@@ -56160,8 +56160,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "2f0ded5ad2b453fa34db9e7e9b526447d9c2fcf5bc23071be95bb3ad9c73943b",
-          "handler_digest": "2f0ded5ad2b453fa34db9e7e9b526447d9c2fcf5bc23071be95bb3ad9c73943b",
+          "schema_digest": "ad3edfd2ba58b094f909d14d275926df41412832d4f08e7c31a9b289686100cd",
+          "handler_digest": "ad3edfd2ba58b094f909d14d275926df41412832d4f08e7c31a9b289686100cd",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -57294,7 +57294,7 @@
       "remove": [],
       "source_digest_replacements": {},
       "expected_count": 876,
-      "expected_sha256": "7ba45eca8646022e1789e681044300459513acc5397b1af0a598c0fc880d9ca7"
+      "expected_sha256": "08313334a46eb0c465e0efd83265573cb81866889fb74119e7214075858169b4"
     }
   ],
   "current_source_review": {
@@ -57302,7 +57302,7 @@
     "upsert": [],
     "source_digest_replacements": {},
     "expected_count": 876,
-    "expected_sha256": "7ba45eca8646022e1789e681044300459513acc5397b1af0a598c0fc880d9ca7",
+    "expected_sha256": "08313334a46eb0c465e0efd83265573cb81866889fb74119e7214075858169b4",
     "reason": "Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
   },
   "historical_artifact_replay_review": {
