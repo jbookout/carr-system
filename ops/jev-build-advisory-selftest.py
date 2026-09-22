@@ -107,9 +107,8 @@ class EditCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = fixture_env()
-            (root / "ops").mkdir()
             (root / "src").mkdir()
-            (root / "ops/jev_code_review.py").write_text("SIGNATURES = []\n")
+            self.assertFalse((root / "ops/jev_code_review.py").exists())
             target = root / "src/a.py"
             target.write_text("answer = 1\n")
             subprocess.run(["git", "init", "-q", tmp], check=True, env=env)
