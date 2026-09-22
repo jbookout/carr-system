@@ -1129,7 +1129,7 @@ for t in $VOCAB_TABLES; do
 done
 
 # shellcheck disable=SC2086
-if ! "$PG_DUMP" --data-only --no-owner --no-acl  >> "$TMP"; then
+if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS >> "$TMP"; then
   echo "schema-snapshot: could not dump the reference vocabulary — nothing written" >&2
   exit 1
 fi
