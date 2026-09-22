@@ -57369,6 +57369,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:hooks/lint-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "hooks/lint-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "hooks/lint-gate.py",
+          "schema_digest": "9e0c227b78fb86d890680b42b2a22ee13b009c53c4ad8736b64591f9ebf46563",
+          "handler_digest": "9e0c227b78fb86d890680b42b2a22ee13b009c53c4ad8736b64591f9ebf46563",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:mcp-server/smoke-reads.sh",
           "ingress_kind": "script_entrypoint",
           "operation": "mcp-server/smoke-reads.sh",
@@ -57533,7 +57556,7 @@
       "remove": [],
       "source_digest_replacements": {},
       "expected_count": 877,
-      "expected_sha256": "740c57ad920abd9660d42265d040015947bb3252dcbd3ac80d871ffa99df9a93",
+      "expected_sha256": "ba3e832ba6a3e903c6d7084c68c64d2bb49db07ba32718759e4b8cc123892d4d",
       "expected_entry_set_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     }
   ],
