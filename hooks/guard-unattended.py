@@ -1162,13 +1162,14 @@ def main():
                 log(f"ALLOW(open-read) {host} :: {url[:200]}")
             sys.exit(0)
 
-        # Codex routes its local shell through functions.exec. Normalise the
-        # name so this remains one command policy across both runtimes.
-        if tool == "functions.exec":
+        # Codex may expose the outer functions.exec wrapper or its nested
+        # exec_command. Apply the same shell policy to the literal command.
+        if tool in {"functions.exec", "exec_command"}:
             # The native Bash guard pre-dates Codex and is intentionally global.
             # This new Codex alias is CARR-only so it cannot change Life AI or
             # another repository's workflow merely because they share Codex.
-            cwd = payload.get("cwd") or ""
+            cwd = ((ti.get("workdir") or payload.get("cwd") or "")
+                   if isinstance(ti, dict) else (payload.get("cwd") or ""))
             try:
                 real_cwd = os.path.realpath(os.path.expanduser(cwd))
             except Exception:
@@ -1178,7 +1179,9 @@ def main():
                 # A task rooted elsewhere can still target CARR by absolute
                 # path.  Scope by the target too, otherwise a non-CARR cwd is
                 # an accidental bypass for the very files this guard protects.
-                raw = ti if isinstance(ti, str) else ""
+                raw = (ti if isinstance(ti, str) else
+                       ((ti.get("cmd") or ti.get("code") or "")
+                        if isinstance(ti, dict) else ""))
                 if REPO not in raw and not raw_targets_carr(raw):
                     sys.exit(0)
             tool = "Bash"
@@ -1187,7 +1190,7 @@ def main():
         # Codex's local-function tool passes freeform JavaScript as a string;
         # its embedded exec_command({cmd: ...}) must receive the same command
         # inspection as a native Bash call. A dict remains the Claude shape.
-        cmd = ti.get("command", "") if isinstance(ti, dict) else ti
+        cmd = (ti.get("command") or ti.get("cmd") or "") if isinstance(ti, dict) else ti
         if not isinstance(cmd, str):
             cmd = ""
         if not cmd:

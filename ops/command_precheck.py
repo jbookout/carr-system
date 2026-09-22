@@ -287,9 +287,13 @@ def _commands(payload):
 
 def _command_cwd(payload):
     cwd = payload.get("cwd") or payload.get("workingDirectory") or ""
-    if (payload.get("tool_name") or payload.get("toolName")) != "functions.exec":
-        return cwd
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
     tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+    if tool == "exec_command" and isinstance(tool_input, dict):
+        workdir = tool_input.get("workdir")
+        return workdir if isinstance(workdir, str) else cwd
+    if tool != "functions.exec":
+        return cwd
     source = tool_input if isinstance(tool_input, str) else tool_input.get("code", "")
     if not isinstance(source, str):
         return None

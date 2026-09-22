@@ -56,6 +56,18 @@ def codex_exec(cmd, cwd=REPO):
         "turn_id": "fixture",
     }
 
+
+def direct_exec(cmd, workdir=REPO, cwd=REPO):
+    """Actual nested Codex shell event delivered to the hook runtime."""
+    return {
+        "hook_event_name": "PreToolUse", "cwd": cwd,
+        "model": "gpt-5.6-terra", "permission_mode": "default",
+        "session_id": "guard-selftest", "tool_name": "exec_command",
+        "tool_input": {"cmd": cmd, "workdir": workdir},
+        "tool_use_id": "fixture", "transcript_path": None,
+        "turn_id": "fixture",
+    }
+
 CASES: list[tuple] = []
 
 
@@ -194,6 +206,12 @@ case("Codex non-CARR cwd cannot target CARR", codex_exec(
 case("Codex non-CARR cwd cannot target tilde CARR", codex_exec(
     "const r = await tools.exec_command({cmd: 'rm -rf ~/carr-system/lib'});",
     "/private/tmp"), DENY)
+case("direct Codex exec_command applies the CARR guard", direct_exec(
+    "rm -rf /Users/booko/carr-system/lib"), DENY)
+case("direct Codex exec_command uses tool workdir for scope", direct_exec(
+    "rm -rf /private/tmp/not-carr", workdir="/private/tmp"), ALLOW)
+case("direct non-CARR workdir cannot target CARR", direct_exec(
+    "rm -rf /Users/booko/carr-system/lib", workdir="/private/tmp"), DENY)
 
 # ── DESCRIBING A DESTRUCTIVE COMMAND IS NOT RUNNING ONE ──────────────────────
 #

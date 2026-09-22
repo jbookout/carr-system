@@ -205,6 +205,17 @@ class RepoRootTests(unittest.TestCase):
         self.assertEqual(seen, [hook.REPO],
                          "a cwd outside any checkout must still be passed explicitly")
 
+    def test_direct_exec_command_uses_its_workdir(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(os.path.join(tmp, ".git")).mkdir()
+            run({"tool_name": "exec_command",
+                 "tool_input": {"cmd": "./ops/ci.sh --nope", "workdir": tmp},
+                 "cwd": "/wrong"},
+                check=lambda command, repo=None: seen.append((command, repo)) or
+                (None, {}, {}))
+            self.assertEqual(seen, [("./ops/ci.sh --nope", hook.repo_root(tmp))])
+
     def test_check_passes_its_repo_through(self):
         seen = {}
 

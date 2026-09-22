@@ -3313,8 +3313,16 @@ def static_contract_cases():
     current_codex = json.loads((REPO / "ops/config/codex-hooks.json").read_text())
     old_hooks = old_codex.get("hooks", {})
     current_hooks = current_codex.get("hooks", {})
+    normalized_pretool = json.loads(json.dumps(current_hooks.get("PreToolUse")))
+    allowed_exec_matchers = {
+        "^(Bash|exec_command|functions\\.exec)$": "^(Bash|functions\\.exec)$",
+        "^(Bash|exec_command|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$":
+            "^(Bash|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
+    }
+    for group in normalized_pretool:
+        group["matcher"] = allowed_exec_matchers.get(group.get("matcher"), group.get("matcher"))
     check("Codex historical PreToolUse/Stop groups preserved",
-          current_hooks.get("PreToolUse") == old_hooks.get("PreToolUse")
+          normalized_pretool == old_hooks.get("PreToolUse")
           and current_hooks.get("Stop") == old_hooks.get("Stop"),
           {"historical": old_hooks, "current": {k: current_hooks.get(k) for k in ("PreToolUse", "Stop")}})
     check("Codex continuity lifecycle groups registered",

@@ -176,7 +176,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23", "scac-mutation-registry.v24", "scac-mutation-registry.v25", "scac-mutation-registry.v26", "scac-mutation-registry.v27", "scac-mutation-registry.v28", "scac-mutation-registry.v29", "scac-mutation-registry.v30", "scac-mutation-registry.v31", "scac-mutation-registry.v32", "scac-mutation-registry.v33", "scac-mutation-registry.v34", "scac-mutation-registry.v35", "scac-mutation-registry.v36", "scac-mutation-registry.v37", "scac-mutation-registry.v38", "scac-mutation-registry.v39", "scac-mutation-registry.v40", "scac-mutation-registry.v41", "scac-mutation-registry.v42", "scac-mutation-registry.v43"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23", "scac-mutation-registry.v24", "scac-mutation-registry.v25", "scac-mutation-registry.v26", "scac-mutation-registry.v27", "scac-mutation-registry.v28", "scac-mutation-registry.v29", "scac-mutation-registry.v30", "scac-mutation-registry.v31", "scac-mutation-registry.v32", "scac-mutation-registry.v33", "scac-mutation-registry.v34", "scac-mutation-registry.v35", "scac-mutation-registry.v36", "scac-mutation-registry.v37", "scac-mutation-registry.v38", "scac-mutation-registry.v39", "scac-mutation-registry.v40", "scac-mutation-registry.v41", "scac-mutation-registry.v42", "scac-mutation-registry.v43", "scac-mutation-registry.v44"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             # A successor may only ADD a seal. Whatever version is live, the one
             # immediately below it must still be present AND still validate its
@@ -400,7 +400,7 @@ def main() -> int:
             cur.execute("release savepoint registry_same_cardinality_probe")
     except Exception as exc:  # noqa: BLE001 - concise CI surface
         return fail(str(exc))
-    print("siep11-mutation-registry-local-pg-gate passed: 1264 exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
+    print("siep11-mutation-registry-local-pg-gate passed: exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
     return 0
 
 
