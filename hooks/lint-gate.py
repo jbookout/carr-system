@@ -258,6 +258,14 @@ def code_review(payload):
         return
     receipt = {"status": "reviewed", "paths": [], "findings": [], "models": [],
                "reason": None, "instruction": None}
+    if not any(path.endswith(CODE_SUFFIXES) for path in paths):
+        receipt["status"] = "skipped"
+        receipt["reason"] = "no_supported_code_paths"
+        receipt["paths"] = [
+            {"path": os.path.basename(path), "status": "not_reviewed",
+             "reason": "unsupported_extension"} for path in paths]
+        print(_review_context(payload, receipt))
+        return
     try:
         import importlib.util
         root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
@@ -320,7 +328,9 @@ def code_review(payload):
                       "code": code}
             scores = module.review_one(region)
             model = scores.get("_model")
-            if isinstance(model, str) and model not in receipt["models"]:
+            if not isinstance(model, str) or not model.strip():
+                raise RuntimeError("missing_model_readback")
+            if model not in receipt["models"]:
                 receipt["models"].append(model)
             path_receipt.update(status="jev_reviewed", candidates=candidate_kinds)
             for name, value in scores.items():
@@ -332,6 +342,9 @@ def code_review(payload):
                 "path": rel, "question": name, "probability": value,
                 "effect": "advisory_only",
             })
+        if not receipt["models"]:
+            receipt["status"] = "skipped"
+            receipt["reason"] = "no_jev_candidate"
         print(_review_context(payload, receipt))
     except Exception as exc:
         print(_review_context(payload, {
