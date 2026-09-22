@@ -28,11 +28,7 @@ def decoded(value: str) -> str:
     return result
 
 
-def service_quote(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-
-def service_lines(raw: str) -> list[str]:
+def connection_values(raw: str) -> dict[str, str]:
     if not raw or any(character in raw for character in "\x00\r\n"):
         raise ValueError("missing or unsafe connection URL")
     parsed = urlsplit(raw)
@@ -60,21 +56,45 @@ def service_lines(raw: str) -> list[str]:
             raise ValueError("unsafe connection parameter")
         values[key] = decoded(value)
         seen.add(key)
-    return ["[schema_snapshot]", *(f"{key}={service_quote(value)}" for key, value in values.items())]
+    return values
+
+
+def service_lines(raw: str) -> list[str]:
+    values = connection_values(raw)
+    # libpq service files do not strip single quotes around numeric values. Keep
+    # this file to syntax-safe connection selectors; the password belongs in the
+    # separately parsed .pgpass file below.
+    return ["[schema_snapshot]", *(f"{key}={value}" for key, value in values.items() if key != "password")]
+
+
+def passfile_line(raw: str) -> str:
+    values = connection_values(raw)
+    password = values.get("password", "")
+    def escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace(":", "\\:")
+    fields = (values["host"], values["port"], values["dbname"], values.get("user", "*"))
+    return ":".join(escape(value) for value in fields) + ":" + escape(password)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--write-service", type=Path, required=True)
+    parser.add_argument("--write-passfile", type=Path, required=True)
     args = parser.parse_args()
     try:
-        lines = service_lines(sys.stdin.read())
+        raw = sys.stdin.read()
+        lines = service_lines(raw)
+        passline = passfile_line(raw)
         # mktemp has already created this path; refuse an accidental redirect.
-        if args.write_service.is_symlink() or not args.write_service.is_file():
+        if (args.write_service.is_symlink() or not args.write_service.is_file()
+                or args.write_passfile.is_symlink() or not args.write_passfile.is_file()):
             raise ValueError("unsafe service path")
         os.chmod(args.write_service, 0o600)
+        os.chmod(args.write_passfile, 0o600)
         args.write_service.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        args.write_passfile.write_text(passline + "\n", encoding="utf-8")
         os.chmod(args.write_service, 0o600)
+        os.chmod(args.write_passfile, 0o600)
     except (OSError, ValueError):
         return 1
     return 0

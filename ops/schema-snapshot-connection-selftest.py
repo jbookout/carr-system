@@ -24,9 +24,10 @@ DSN = "postgresql://snapshot_user:fixture-password@db.example.test:5432/carr?ssl
 
 lines = connection.service_lines(DSN)
 assert lines[0] == "[schema_snapshot]"
-assert "host='db.example.test'" in lines
-assert "sslmode='require'" in lines
-assert "channel_binding='require'" in lines
+assert "host=db.example.test" in lines
+assert "port=5432" in lines
+assert "sslmode=require" in lines
+assert "channel_binding=require" in lines
 assert all("fixture-password" not in line for line in lines if line.startswith(("host=", "port=", "dbname=", "user=")))
 
 for malformed in ("", "https://db.example.test/carr", "postgresql://db.example.test/a/b", "postgresql://u:p@db.example.test/carr?host=elsewhere", "postgresql://u:p@db.example.test/carr?service=other"):
@@ -39,9 +40,11 @@ for malformed in ("", "https://db.example.test/carr", "postgresql://db.example.t
 
 with tempfile.TemporaryDirectory() as directory:
     service_file = Path(directory) / "service.conf"
+    pass_file = Path(directory) / "passfile"
     service_file.touch()
+    pass_file.touch()
     result = subprocess.run(
-        [sys.executable, str(HELPER), "--write-service", str(service_file)],
+        [sys.executable, str(HELPER), "--write-service", str(service_file), "--write-passfile", str(pass_file)],
         input=DSN,
         text=True,
         capture_output=True,
@@ -49,8 +52,9 @@ with tempfile.TemporaryDirectory() as directory:
         env={**os.environ},
     )
     assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
-    assert stat.S_IMODE(service_file.stat().st_mode) == 0o600
-    assert "fixture-password" in service_file.read_text(encoding="utf-8")
+    assert stat.S_IMODE(service_file.stat().st_mode) == stat.S_IMODE(pass_file.stat().st_mode) == 0o600
+    assert "fixture-password" not in service_file.read_text(encoding="utf-8")
+    assert "fixture-password" in pass_file.read_text(encoding="utf-8")
 
     # The first psql read happens before the later snapshot temp files and their
     # broader cleanup trap.  Force that read to fail and prove the service file
@@ -74,7 +78,7 @@ with tempfile.TemporaryDirectory() as directory:
     fake_bin = fixture / "fake-bin"
     fake_bin.mkdir()
     psql_marker = fixture / "psql-called"
-    for name, body in {"pg_dump": "#!/bin/sh\necho 'pg_dump (PostgreSQL) 18.4'\n", "psql": "#!/bin/sh\ntouch \"$CARR_TEST_PSQL_MARKER\"\nexit 71\n", "mktemp": "#!/bin/sh\npath=\"$CARR_TEST_TMP/service\"\n: > \"$path\"\nprintf '%s\\n' \"$path\"\n"}.items():
+    for name, body in {"pg_dump": "#!/bin/sh\necho 'pg_dump (PostgreSQL) 18.4'\n", "psql": "#!/bin/sh\ntouch \"$CARR_TEST_PSQL_MARKER\"\nexit 71\n", "mktemp": "#!/bin/sh\ncount_file=\"$CARR_TEST_TMP_COUNT\"\ncount=$(cat \"$count_file\" 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\npath=\"$CARR_TEST_TMP/private-$count\"\n: > \"$path\"\nprintf '%s\\n' \"$path\"\n"}.items():
         path = fake_bin / name
         path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
@@ -85,7 +89,7 @@ with tempfile.TemporaryDirectory() as directory:
         text=True,
         capture_output=True,
         check=False,
-        env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin", "CARR_TEST_TMP": str(private_tmp), "CARR_TEST_PSQL": str(fake_bin / "psql"), "CARR_TEST_PSQL_MARKER": str(psql_marker)},
+        env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin", "CARR_TEST_TMP": str(private_tmp), "CARR_TEST_TMP_COUNT": str(fixture / "mktemp-count"), "CARR_TEST_PSQL": str(fake_bin / "psql"), "CARR_TEST_PSQL_MARKER": str(psql_marker)},
     )
     assert early_failure.returncode != 0 and psql_marker.exists()
     assert list(private_tmp.iterdir()) == []
