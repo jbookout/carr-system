@@ -555,7 +555,7 @@ case "$MODEL_ROLE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Model Room SCAC ledger state" >&2; exit 1 ;;
 esac
 
-WR130_HOTFIX_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+WR130_HOTFIX_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0545_release_readiness_hotfix_scac_successor.sql')" \
   2>/dev/null)"
 case "$WR130_HOTFIX_REGISTRY_APPLIED" in
@@ -1670,9 +1670,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     }
     SCAC_CURRENT_NUMBER=40
     SCAC_VERSION_COUNT=40
-    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
-    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v40'")"
-    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" "$URL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v40'")"
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v40'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v40'")"
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v40.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37','scac-mutation-registry.v38','scac-mutation-registry.v39','scac-mutation-registry.v40'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37','scac-mutation-registry.v38','scac-mutation-registry.v39'"
