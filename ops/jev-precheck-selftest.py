@@ -9,6 +9,7 @@ about everything.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -50,6 +51,16 @@ class CodexCommandReachabilityTests(unittest.TestCase):
         self.assertEqual(command_precheck._commands(
             {"tool_name": "exec_command", "tool_input": {"cmd": "python3 ops/missing.py"}}),
             ["python3 ops/missing.py"])
+
+    def test_credential_command_never_reaches_jev_or_the_log(self):
+        raw = 'curl -H "Authorization: Bearer private-token" https://example.test'
+        payload = {"tool_name": "functions.exec", "cwd": str(OPS.parent),
+                   "tool_input": f'await tools.exec_command({{cmd:{json.dumps(raw)}}});'}
+        with mock.patch.object(command_precheck, "check") as judge, \
+             mock.patch.object(command_precheck, "_log") as log:
+            self.assertIsNone(command_precheck.advisory(payload))
+        judge.assert_not_called()
+        log.assert_not_called()
 
     def test_codex_nested_workdir_controls_path_facts(self):
         payload = {"tool_name": "functions.exec", "cwd": "/wrong/tree", "tool_input":

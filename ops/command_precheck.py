@@ -95,6 +95,15 @@ def is_pure_read(command):
     return bool(statements) and all(READS.match(s) for s in statements)
 
 
+# The precheck sends a command to TypeSafe. A command carrying a credential
+# stays local even when its file facts would otherwise make it eligible.
+SENSITIVE_COMMAND = re.compile(
+    r"(?i)(?:\b(?:api[_-]?key|access[_-]?token|password|passwd|secret|"
+    r"authorization|bearer|pgpassword|database_url)\b\s*(?:=|:|\s+)"
+    r"|postgres(?:ql)?://|\b[a-z]+://[^/\s]+@)"
+)
+
+
 def _sibling(name):
     """Load an ops/ library by path. ops/ is not a package by design."""
     import importlib.util
@@ -315,7 +324,7 @@ def advisory(payload):
         repo = repo_root(command_cwd)
         warnings = []
         for command in _commands(payload):
-            if not command.strip() or is_pure_read(command):
+            if not command.strip() or is_pure_read(command) or SENSITIVE_COMMAND.search(command):
                 continue
             probability, facts, reasons = check(command, repo)
             if probability is None:
