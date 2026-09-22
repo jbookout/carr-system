@@ -69,14 +69,14 @@ with tempfile.TemporaryDirectory() as directory:
     copied_snapshot.write_text(snapshot_text.replace(psql_lookup, 'PSQL="$CARR_TEST_PSQL"\nfor c in; do'), encoding="utf-8")
     copied_snapshot.chmod(0o755)
     shutil.copyfile(HELPER, fixture / "ops" / "schema-snapshot-connection.py")
-    (fixture / ".venv" / "bin").mkdir(parents=True)
-    (fixture / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    # Hosted CI has no repository venv; exercise the python3 fallback here.
     neon = fixture / "mcp-server" / "node_modules" / ".bin" / "neonctl"
     neon.parent.mkdir(parents=True)
     neon.write_text("#!/bin/sh\nprintf '%s\\n' 'postgresql://owner:fixture-password@db.example.test/carr?sslmode=require'\n", encoding="utf-8")  # ci-secret-scan: allow — synthetic local fixture
     neon.chmod(0o755)
     fake_bin = fixture / "fake-bin"
     fake_bin.mkdir()
+    (fake_bin / "python3").symlink_to(sys.executable)
     psql_marker = fixture / "psql-called"
     for name, body in {"pg_dump": "#!/bin/sh\necho 'pg_dump (PostgreSQL) 18.4'\n", "psql": "#!/bin/sh\ntouch \"$CARR_TEST_PSQL_MARKER\"\nexit 71\n", "mktemp": "#!/bin/sh\ncount_file=\"$CARR_TEST_TMP_COUNT\"\ncount=$(cat \"$count_file\" 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\npath=\"$CARR_TEST_TMP/private-$count\"\n: > \"$path\"\nprintf '%s\\n' \"$path\"\n"}.items():
         path = fake_bin / name

@@ -208,7 +208,9 @@ fi
 SERVICE_FILE="$(mktemp)"
 PASSFILE="$(mktemp)"
 trap 'rm -f "$SERVICE_FILE" "$PASSFILE"' 0
-if ! printf '%s' "$URL" | "$REPO/.venv/bin/python" "$REPO/ops/schema-snapshot-connection.py" --write-service "$SERVICE_FILE" --write-passfile "$PASSFILE"; then
+SNAPSHOT_PY="$REPO/.venv/bin/python"
+[ -x "$SNAPSHOT_PY" ] || SNAPSHOT_PY=python3
+if ! printf '%s' "$URL" | "$SNAPSHOT_PY" "$REPO/ops/schema-snapshot-connection.py" --write-service "$SERVICE_FILE" --write-passfile "$PASSFILE"; then
   rm -f "$SERVICE_FILE" "$PASSFILE"
   echo "schema-snapshot: could not prepare the private database connection" >&2
   exit 1
