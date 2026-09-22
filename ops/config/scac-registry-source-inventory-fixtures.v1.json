@@ -57443,8 +57443,8 @@
           "operation": "ops/release-readiness-gate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/release-readiness-gate.py",
-          "schema_digest": "a844bc0295920dc547a96376fc3c00b889b559c4dfe16cf3a3cad08a10b34828",
-          "handler_digest": "a844bc0295920dc547a96376fc3c00b889b559c4dfe16cf3a3cad08a10b34828",
+          "schema_digest": "34438e8c15dd737adbfdac248aa37c00ba53940e1f3db14a9dd720462ed38685",
+          "handler_digest": "34438e8c15dd737adbfdac248aa37c00ba53940e1f3db14a9dd720462ed38685",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -57556,7 +57556,7 @@
       "remove": [],
       "source_digest_replacements": {},
       "expected_count": 877,
-      "expected_sha256": "ba3e832ba6a3e903c6d7084c68c64d2bb49db07ba32718759e4b8cc123892d4d",
+      "expected_sha256": "2249a8645df1993a8d4737f6a688d7528c415f3513c6a1b6be2f4c8cbf4addd2",
       "expected_entry_set_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     }
   ],

@@ -2,6 +2,7 @@
 """Disposable-DB acceptance for service-owned production release readiness."""
 
 # ci: db-gate
+# doctrine: engineering-workflow-sop
 
 from __future__ import annotations
 
@@ -32,6 +33,12 @@ def expect_refusal(cur, statement: str, params: tuple = ()) -> None:
     raise AssertionError(f"unexpected success: {statement[:90]}")
 
 
+def one(cur):
+    row = cur.fetchone()
+    assert row is not None
+    return row
+
+
 def main() -> int:
     dsn = os.environ.get("CARR_CI_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not dsn:
@@ -53,7 +60,7 @@ def main() -> int:
                 returning maker_actor,maker_session_user,maker_authority_verified""",
                 (f"service-candidate-{uuid.uuid4()}", fixture["service_id"],
                  "c" * 40))
-            assert cur.fetchone() == ("carr_jobs", "carr_jobs", False)
+            assert one(cur) == ("carr_jobs", "carr_jobs", False)
             typed.owner(cur)
 
             # The new trigger also fires for the historical Joe authority
@@ -68,7 +75,7 @@ def main() -> int:
                 returning maker_actor,maker_session_user,maker_authority_verified""",
                 (f"historical-candidate-{uuid.uuid4()}", fixture["service_id"],
                  "d" * 40))
-            assert cur.fetchone() == ("joe", "carr_authority_joe", True)
+            assert one(cur) == ("joe", "carr_authority_joe", True)
             typed.owner(cur)
 
             # A legacy row without an authenticated filing login must not pass
@@ -106,10 +113,10 @@ def main() -> int:
             key = uuid.uuid4()
             cur.execute("select ops.qualify_program5_release(%s,%s,%s)",
                         (fixture["current_key"], typed.PLAN_HASH, key))
-            first = cur.fetchone()[0]
+            first = one(cur)[0]
             cur.execute("select ops.qualify_program5_release(%s,%s,%s)",
                         (fixture["current_key"], typed.PLAN_HASH, key))
-            replay = cur.fetchone()[0]
+            replay = one(cur)[0]
             assert first["replayed"] is False and replay["replayed"] is True
             expect_refusal(cur, "select ops.qualify_program5_release(%s,%s,%s)",
                            (fixture["current_key"], "sha256:" + "d" * 64, key))
@@ -120,7 +127,7 @@ def main() -> int:
                        from ops.release r join ops.release_readiness_receipt q
                          on q.id=r.readiness_receipt_id where r.id=%s""",
                         (fixture["current_id"],))
-            state, maker, approver, approved_at, approval_id, login, version, sha, plan = cur.fetchone()
+            state, maker, approver, approved_at, approval_id, login, version, sha, plan = one(cur)
             assert (state, maker, approver, approved_at, approval_id, login,
                     version, sha, plan) == (
                     "ready", "carr_jobs", None, None, None, "carr_jobs",
@@ -145,7 +152,7 @@ def main() -> int:
                 typed.CURRENT_PROVIDER_VERSION, fixture["current_id"]))
             cur.execute("select ops.release_technical_readiness_current(%s)",
                         (fixture["current_id"],))
-            assert cur.fetchone()[0] is True
+            assert one(cur)[0] is True
             cur.execute("set local session_replication_role=replica")
             cur.execute("""update ops.staging_recovery_rehearsal_bundle
                 set completed_at=now()-interval '25 hours'
@@ -153,7 +160,7 @@ def main() -> int:
             cur.execute("set local session_replication_role=origin")
             cur.execute("select ops.release_technical_readiness_current(%s)",
                         (fixture["current_id"],))
-            assert cur.fetchone()[0] is False
+            assert one(cur)[0] is False
             expect_refusal(cur, """insert into ops.deployment
                (correlation_id,service_id,environment,state,git_sha,provider,
                 provider_version_id,release_id,started_at,source_kind,source_ref)
@@ -170,7 +177,7 @@ def main() -> int:
                            (fixture["current_key"], "sha256:" + "d" * 64))
             cur.execute("select ops.reopen_program5_release_rehearsal(%s,%s)",
                         (fixture["current_key"], typed.PLAN_HASH))
-            assert cur.fetchone()[0]["replayed"] is False
+            assert one(cur)[0]["replayed"] is False
             expect_refusal(cur, "select ops.qualify_program5_release(%s,%s,%s)",
                            (fixture["current_key"], typed.PLAN_HASH, key))
             typed.owner(cur)
@@ -178,13 +185,13 @@ def main() -> int:
             typed.authority(cur, "carr_jobs")
             cur.execute("select ops.qualify_program5_release(%s,%s,%s)",
                         (fixture["current_key"], typed.PLAN_HASH, key))
-            refreshed = cur.fetchone()[0]
+            refreshed = one(cur)[0]
             assert refreshed["replayed"] is True and refreshed["refreshed"] is True
             assert refreshed["readiness_receipt_id"] == first["readiness_receipt_id"]
             typed.owner(cur)
             cur.execute("select ops.release_technical_readiness_current(%s)",
                         (fixture["current_id"],))
-            assert cur.fetchone()[0] is True
+            assert one(cur)[0] is True
         connection.rollback()
     print("release-readiness-gate: service readiness, replay, identity and audit pass")
     return 0
