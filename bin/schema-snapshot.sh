@@ -599,6 +599,17 @@ if [ "$JEV_PROCESS_REGISTRY_APPLIED" = t ] && [ "$B09_ATOMIC_REPAIR_REGISTRY_APP
   echo "schema-snapshot: Jev v43 is applied without v42 predecessor" >&2
   exit 1
 fi
+DEAL_CONFLICT_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0550_deal_conflict_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DEAL_CONFLICT_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the Deal Room v44 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$DEAL_CONFLICT_REGISTRY_APPLIED" = t ] && [ "$JEV_PROCESS_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Deal Room v44 is applied without v43 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -1745,6 +1756,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
           SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v42'"
           SCAC_FULL_SET_SEAL_COUNT=42
           SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v43_current()"
+          if [ "$DEAL_CONFLICT_REGISTRY_APPLIED" = t ]; then
+            SCAC_CURRENT_NUMBER=44
+            SCAC_VERSION_COUNT=44
+            SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v44'")"
+            SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v44'")"
+            SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v44.generated.js"
+            SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v44'"
+            SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v43'"
+            SCAC_FULL_SET_SEAL_COUNT=43
+            SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v44_current()"
+          fi
         fi
       fi
     fi

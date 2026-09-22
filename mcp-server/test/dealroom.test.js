@@ -422,6 +422,26 @@ test("same-field conflict retains both actors and values; resolve uses normal at
   assert.ok(db.events.every(e => e.actor_id));
 });
 
+test("a conflict cannot overwrite a third edit to the same field", async () => {
+  const db = new FakeClient();
+  const first = await call("patch-deal-field", db, actors.joe,
+    { idempotency_key: "third-a", deal: "Deal Alpha", field: "owner", value: "joe", base_event_id: null });
+  const crossed = await call("patch-deal-field", db, actors.dell,
+    { idempotency_key: "third-b", deal: "Deal Alpha", field: "owner", value: "dell", base_event_id: null });
+  assert.equal(crossed.ok, false);
+  const third = await call("patch-deal-field", db, actors.joe,
+    { idempotency_key: "third-c", deal: "Deal Alpha", field: "owner", value: "dell", base_event_id: first.event_id });
+  assert.equal(third.ok, true);
+  await assert.rejects(
+    call("resolve-conflict", db, actors.dell,
+      { idempotency_key: "third-resolve", conflict_id: crossed.conflict.id, winner: "a" }),
+    (error) => error.payload?.error === "newer_change_exists" || error.error === "newer_change_exists",
+  );
+  assert.equal(db.deals.get(ids.deal).owner, "dell");
+  assert.equal(db.conflicts[0].status, "open");
+  assert.equal(db.events.length, 2);
+});
+
 test("a retry under the same key replays; a fresh key over the same intent conflicts with itself", async () => {
   // The property the board's write path depends on, pinned here so a later
   // server change cannot quietly remove it.
