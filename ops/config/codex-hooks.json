@@ -12,7 +12,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|functions\\.exec)$",
+        "matcher": "^(Bash|exec_command|functions\\.exec)$",
         "hooks": [
           {
             "type": "command",
@@ -47,7 +47,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
+        "matcher": "^(Bash|exec_command|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
         "hooks": [
           {
             "type": "command",
