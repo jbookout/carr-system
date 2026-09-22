@@ -1486,12 +1486,12 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   const v33GeneratedDigest = generatedV33.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   assert.notEqual(`sha256:${v33GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v32.digest);
-  // The generated frontier grew by exactly ONE numbered file and ONE runtime:
-  // 0527 is handwritten and does not move that count.
+  // The complete generated frontier now includes the v40 successor pair;
+  // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 45);
+    .filter(path => path.startsWith("migrations/")).length, 46);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 36);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 37);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2913,7 +2913,9 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // canonical-ownership issuer provisioner.
   // WR130 adds the tracked release-readiness DB acceptance gate as one
   // reviewed administrative entrypoint; it also has a CLI shebang.
-  assert.equal(rows.length, 551);
+  // v40 adds the tracked private snapshot connection helper as one reviewed
+  // script ingress; it carries no runtime authorization.
+  assert.equal(rows.length, 552);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2929,13 +2931,15 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // WR95's evidence sealer and candidate rehearsal are both intentional
   // command-line entrypoints, so discovery advances by the same exact two.
   // WR126 adds the canonical-ownership issuer provisioner.
-  assert.equal(scripts.length, 542);
+  // v40 adds the private snapshot connection helper.
+  assert.equal(scripts.length, 543);
   // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
   // ingress this branch's registry successor does not seal, and the whole point
   // of the predicate is that intent does not enter it.
   assert.equal(scripts.some(path => path === "mcp-server/bin/seal-candidate-manifest.mjs"), false);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/release-readiness-gate.py"), true);
+  assert.equal(scripts.some(path => path === "ops/schema-snapshot-connection.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
   assert.equal(scripts.some(path => path === "mcp-server/local-verb.mjs"), true);
