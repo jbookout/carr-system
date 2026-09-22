@@ -72,6 +72,7 @@ import {
   REGISTRY_V39_VERSION,
   REGISTRY_V40_VERSION,
   REGISTRY_V41_VERSION,
+  REGISTRY_V42_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -1493,12 +1494,12 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   const v33GeneratedDigest = generatedV33.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   assert.notEqual(`sha256:${v33GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v32.digest);
-  // The complete generated frontier now includes the v41 successor pair;
+  // The complete generated frontier now includes the v42 successor;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 47);
+    .filter(path => path.startsWith("migrations/")).length, 48);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 38);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 39);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2751,14 +2752,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V41_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V42_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 47);
+  assert.equal(migrations.length, 48);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 38);
-  assert.equal(paths.length, 85);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 39);
+  assert.equal(paths.length, 87);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
