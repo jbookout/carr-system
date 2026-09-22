@@ -81,6 +81,7 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "accept-outcome-feedback",
     "accept-portfolio-revision",
     "accept-ready-plan",
+    "accept-ready-plan-amendment",
     "adjudicate-incident",
     "assign-execution-route",
     "attest-attempt-evaluation",

@@ -66,6 +66,8 @@ import {
   REGISTRY_V33_VERSION,
   REGISTRY_V34_VERSION,
   REGISTRY_V35_VERSION,
+  REGISTRY_V36_VERSION,
+  REGISTRY_V37_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -77,6 +79,8 @@ import {
   renderSessionIdentityForwardRegistrySql,
   assertDispatchSpineV35TrustRoot,
   renderDispatchSpineForwardRegistrySql,
+  renderReadyPlanAmendmentForwardRegistrySqlClosed,
+  renderReadyPlanAmendmentMeasurementProbeSqlClosed,
   assertFoundationAssuranceV27TrustRoot,
   gateZeroOutcomeAdmissionProvenance,
   v5ScheduledJobAdmissionProvenance,
@@ -296,6 +300,10 @@ const generatedV35 = fs.readFileSync(
 const v35Migration = fs.readFileSync(
   new URL("../../migrations/0532_room_dispatch_spine_scac_successor.sql",
     import.meta.url), "utf8");
+const generatedV36 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v36.generated.js", import.meta.url), "utf8");
+const generatedV37 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v37.generated.js", import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
@@ -322,12 +330,11 @@ test("successor generation refuses absent or ambiguous predecessor markers", () 
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory(TOOLS);
-  // 260 after WR-000119: the dispatch spine is the two new verbs, and BOTH are
-  // WRITES -- the opposite of WR-000117's pair -- so the write count moves
-  // 182 -> 184 and the read count stays at 76.
-  assert.equal(rows.length, 260);
-  assert.equal(rows.filter(row => row.write).length, 184);
-  assert.equal(rows.filter(row => !row.write).length, 76);
+  // 265 after WR-000125: the amendment lifecycle adds five reviewed MCP
+  // ingresses (three writes and two reads) to the v35 dispatch-spine surface.
+  assert.equal(rows.length, 265);
+  assert.equal(rows.filter(row => row.write).length, 187);
+  assert.equal(rows.filter(row => !row.write).length, 78);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -905,7 +912,7 @@ test("v20 seals the Codex continuity archive frontier and preserves the v19 pred
   }
 });
 
-test("the ACTIVE runtime registry is v32, and a stale v19 import fails admission", async () => {
+test("the ACTIVE runtime registry is v37, and a stale v19 import fails admission", async () => {
   // mutation-registry.js is the module every TOOLS admission actually runs
   // through, so this binds the LIVE import rather than the mere existence of a
   // generated v20 file. Re-pinning the generated artifact without re-pointing
@@ -918,13 +925,13 @@ test("the ACTIVE runtime registry is v32, and a stale v19 import fails admission
   // patch-deal-field's schema_digest, v29 took it because WR-000110 edited
   // mcp-server/src/engineering-runtime.js, v30 took it because
   // WR-000111/112/113 registered four new verbs across two new source modules,
-  // v31 took it because WR-000114 registered the three Doc conversation write
-  // doors inside an ALREADY-registered family file, and v32 takes it now
-  // because WR-000115 registers list-doc-conversations in that same file.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V35_VERSION);
-  const v35SelectorDigest = generatedV35.match(
+  // v31-v35 successively registered the Doc conversation, notification,
+  // session-identity and dispatch-spine surfaces; v36 registered the
+  // ready-plan amendment lifecycle tools; v37 seals WR130 assurance binding.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V37_VERSION);
+  const v37SelectorDigest = generatedV37.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v35SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v37SelectorDigest);
   assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v19.digest);
   assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v21.digest);
 
@@ -1188,7 +1195,7 @@ test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predece
   }
 });
 
-test("the v21 frontier re-digested only source, and v35 is what the runtime now imports", async () => {
+test("the v21 frontier re-digested only source, and v37 is what the runtime now imports", async () => {
   // THE SELECTOR FOLLOWS THE MCP CONTRACT, NOT THE FRONTIER, and that rule has
   // now been exercised in both directions four times over. v21 moved no MCP
   // contract, which is what made leaving the import on v20 safe for the R06
@@ -1196,7 +1203,7 @@ test("the v21 frontier re-digested only source, and v35 is what the runtime now 
   // v22 through all three. v26 DOES register a verb, so the selector moves with
   // it — an unregistered operation is refused at the door, so the runtime has
   // to read the registry that knows record-gate-zero-read-only-outcome.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V35_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V37_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1204,10 +1211,12 @@ test("the v21 frontier re-digested only source, and v35 is what the runtime now 
   assert.equal(v21GeneratedVersion, REGISTRY_V21_VERSION);
   // The v21 projection is genuinely a new seal, not a re-emitted v20.
   assert.notEqual(`sha256:${v21GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v20.digest);
-  // The live digest is v35's: the runtime import moved again with the
-  // WR-000119 dispatch spine, and it is NOT v22's, v28's, v29's, v30's, v31's,
-  // v32's, v33's or v34's any more.
-  const v35GeneratedDigest = generatedV35.match(
+  // The live digest is v37's: the runtime import moved again with the
+  // WR-000130 assurance successor, and it is NOT v22's, v28's, v29's, v30's,
+  // v31's, v32's, v33's, v34's or v35's any more.
+  const v36GeneratedDigest = generatedV36.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
+  const v37GeneratedDigest = generatedV37.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v34GeneratedDigest = generatedV34.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
@@ -1225,7 +1234,8 @@ test("the v21 frontier re-digested only source, and v35 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v30GeneratedDigest = generatedV30.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v35GeneratedDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v37GeneratedDigest);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v36GeneratedDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v34GeneratedDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v33GeneratedDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, v32GeneratedDigest);
@@ -1310,12 +1320,12 @@ test("the v21 frontier re-digested only source, and v35 is what the runtime now 
   // what assertRegisteredOperation reads, and WR-000109 moved
   // patch-deal-field's schema_digest into v28. A loop still comparing against
   // v27 would assert the superseded contract and fail at the door.
-  const v35Rows = frozenInventory(REGISTRY_V35_VERSION);
+  const v36Rows = frozenInventory(REGISTRY_V36_VERSION);
   for (const name of Object.keys(TOOLS)) {
     const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
     assert.equal(admitted.schema_digest,
-      v35Rows.find(row => row.ingress_key === `mcp-tool:${name}`).schema_digest, name);
+      v36Rows.find(row => row.ingress_key === `mcp-tool:${name}`).schema_digest, name);
   }
 });
 
@@ -2369,6 +2379,8 @@ test("the v25-v30 public surfaces admit no caller input under any shape", () => 
     ["assertSessionIdentityV34TrustRoot", assertSessionIdentityV34TrustRoot],
     ["renderDispatchSpineForwardRegistrySql", renderDispatchSpineForwardRegistrySql],
     ["assertDispatchSpineV35TrustRoot", assertDispatchSpineV35TrustRoot],
+    ["renderReadyPlanAmendmentForwardRegistrySqlClosed", renderReadyPlanAmendmentForwardRegistrySqlClosed],
+    ["renderReadyPlanAmendmentMeasurementProbeSqlClosed", renderReadyPlanAmendmentMeasurementProbeSqlClosed],
   ];
 
   // A FOURTH CLOSED EXPORT CANNOT ARRIVE UNSWEPT. Two comments counted this
@@ -2443,7 +2455,7 @@ test("the v23 frontier re-digested only source, so it did not move the runtime i
   // verb either, so the import stayed on v22 through v23, v24 and v25, and only
   // moved again at v26 when the Gate Zero outcome verb arrived. What this test
   // records is that v23 was NOT the reason it moved.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V35_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V37_VERSION);
   assert.notEqual(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V23_VERSION);
   const v23GeneratedVersion = generatedV23.match(
     /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
@@ -2682,6 +2694,42 @@ test("the frontier refuses an unbound v20 trust root before any predecessor work
   }
 });
 
+test("the v36 successor preserves the exact v35 seal and measures both catalog phases", () => {
+  const forward = renderReadyPlanAmendmentForwardRegistrySqlClosed();
+  const domainMigration = fs.readFileSync(new URL(
+    "../../migrations/0532a_canonical_ownership_lease_activation.sql", import.meta.url), "utf8");
+  assert.match(forward, new RegExp(sha256(domainMigration)));
+  assert.match(forward, /\('scac-mutation-registry\.v35','sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec',1859,870\)/);
+  assert.match(forward, /rename to scac_mutation_catalog_v35_live_at_seal/);
+  assert.doesNotMatch(forward,
+    /alter function ops\.scac_mutation_catalog_v34_current\(\) rename to scac_mutation_catalog_v34_live_at_seal/);
+  assert.match(forward, /scac_mutation_registry_v35_seal_available/);
+  assert.ok(forward.includes(
+    "when 'scac-mutation-registry.v35' then 'sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec' end;"));
+  assert.ok(forward.includes(
+    `when 'scac-mutation-registry.v35' then '${JSON.stringify(DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`));
+  assert.match(forward, /ops\.scac_policy_epoch_snapshot_v34\(\),ops\.scac_policy_epoch_snapshot_v35\(\)/);
+  assert.match(forward,
+    /ops\.scac_mutation_catalog_v35_live_at_seal\(\),ops\.scac_mutation_catalog_v35_current\(\),ops\.scac_mutation_registry_v35_seal_available\(\),ops\.scac_mutation_catalog_v36_current\(\) from public/);
+  assert.match(forward, /v34\/v35 epochs remain immutable/);
+  assert.ok(forward.indexOf(
+    "alter table ops.scac_policy_epoch drop constraint scac_policy_epoch_registry_version_digest_check;") <
+    forward.indexOf("insert into ops.scac_mutation_registry_version(registry_version"));
+  assert.match(forward, /scac_mutation_registration_v36/);
+  assert.match(forward, /scac_mutation_catalog_v36_current/);
+  assert.match(forward, /current policy epochs bind mutation registry v36/);
+
+  const probe = renderReadyPlanAmendmentMeasurementProbeSqlClosed();
+  assert.doesNotMatch(probe, /\\ir |\nbegin;|\nrollback;/);
+  assert.doesNotMatch(probe, /disable trigger scac_mutation_registry_version_sealed/);
+  assert.ok(probe.indexOf("update ops.scac_mutation_registry_version v set entry_count=") <
+    probe.indexOf("create trigger scac_mutation_registry_version_sealed"));
+  for (const phase of ["pre_v36", "forward_v36"])
+    for (const category of ["secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants"])
+      assert.match(probe, new RegExp(`'${phase}','${category}'`));
+  assert.match(probe, /jsonb_build_object\('pre_v36',pre_v36,'forward_v36',forward_v36\)/);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
@@ -2848,7 +2896,9 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // WR95 adds two reviewed administrative entrypoints: the live evidence
   // sealer and the bounded candidate rehearsal. Both are tracked before the
   // v27 frontier is frozen, so the pinned count advances by exactly two.
-  assert.equal(rows.length, 549);
+  // WR126 adds one reviewed administrative entrypoint: the credential-safe
+  // canonical-ownership issuer provisioner.
+  assert.equal(rows.length, 550);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2863,7 +2913,8 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // bin/deploy-worker.sh IMPORTS rather than a file it executes.
   // WR95's evidence sealer and candidate rehearsal are both intentional
   // command-line entrypoints, so discovery advances by the same exact two.
-  assert.equal(scripts.length, 540);
+  // WR126 adds the canonical-ownership issuer provisioner.
+  assert.equal(scripts.length, 541);
   // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
   // ingress this branch's registry successor does not seal, and the whole point
   // of the predicate is that intent does not enter it.

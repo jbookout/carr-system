@@ -25,13 +25,160 @@ import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
+import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
+  opaqueControllerResult, operationIdempotencyKey, ENGINEERING_CONTROLLER_EXECUTOR,
+  ENGINEERING_CONTROLLER_WORKER } from "./authenticated-canonical-ownership.js";
+import { withTrustedCanonicalOwnershipContext } from "./engineering-runtime.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 
+// This route deliberately does not use dispatch()/allowedIn().  Every regular
+// MCP profile inherits read verbs; an ownership controller must inherit none.
+async function controllerBinding(client, actor, name, input) {
+  const operation = name.replace(/^canonical-ownership-/, "");
+  const found = await client.query(
+    `select ops.authenticated_canonical_ownership_controller_binding(
+       $1::uuid,$2::uuid,$3::text,$4::text) as row
+       /* engineering-controller:closed-binding-readback */`,
+    [input.job_id, input.lease_token, ENGINEERING_CONTROLLER_WORKER, operation],
+  );
+  const row = found.rows[0]?.row;
+  if (!row || typeof row !== "object")
+    throw new ToolError({ error: "engineering_controller_binding_unavailable" });
+  const binding = row.binding;
+  if (!binding || binding.executor_actor?.slug !== ENGINEERING_CONTROLLER_EXECUTOR ||
+      binding.envelope_id !== row.envelope_id || !binding.slice_plan ||
+      binding.slice_plan.work_request?.id !== `wr:${row.work_request_id}` ||
+      binding.slice_plan.accepted_plan_revision?.id !== `plan:${row.accepted_plan_id}` ||
+      binding.slice_plan.plan_digest !== binding.plan_digest || actor.slug !== ENGINEERING_CONTROLLER_EXECUTOR)
+    throw new ToolError({ error: "engineering_controller_binding_mismatch" });
+  // The lifecycle definer derives the exact accepted source scope itself.  The
+  // Worker is intentionally not a second source-path projection.
+  return { row, binding };
+}
+
+async function controllerOperation(client, actor, name, input, issuerGeneration) {
+  const resolved = await controllerBinding(client, actor, name, input);
+  const { row, binding } = resolved;
+  const contextBinding = {
+    work_request_id: row.work_request_id, accepted_plan_id: row.accepted_plan_id,
+    envelope_id: row.envelope_id, agent_session_id: row.agent_session_id,
+    attempt: row.attempt, expires_at: row.runtime_expires_at, idempotency_key: input.lease_token,
+    // The request token becomes authority only after the binding query above
+    // proves it equals ops.job.lease_token on this live engineering worker.
+    job_lease_token: input.lease_token,
+  };
+  const result = await withTrustedCanonicalOwnershipContext(client, actor, contextBinding, ToolError, async context => {
+    const stableOperationSubject = name === "canonical-ownership-acquire"
+      ? `${context.binding_id}:${row.attempt}:${input.job_id}`
+      : `${context.binding_id}:${input.prior_operation_key}:${name}`;
+    const operationKey = operationIdempotencyKey(name, stableOperationSubject);
+    let prior = null;
+    if (input.prior_operation_key) {
+      prior = (await client.query(
+        "select ops.read_canonical_ownership_operation($1::uuid) as result /* engineering-controller:ambiguity-readback */",
+        [input.prior_operation_key],
+      )).rows[0]?.result;
+      if (!prior?.ok || prior.lease_id !== input.lease_id ||
+          typeof prior.lease_token !== "string" || !Number.isSafeInteger(Number(prior.fencing_generation)))
+        throw new ToolError({ error: "engineering_controller_prior_operation_unavailable" });
+    }
+    const remainingSeconds = Math.floor((Date.parse(context.expires_at) - Date.now()) / 1000);
+    if (!Number.isSafeInteger(remainingSeconds) || remainingSeconds < 30)
+      throw new ToolError({ error: "engineering_controller_runtime_runway_insufficient" });
+    const lifecycle = name === "canonical-ownership-acquire"
+      ? {
+        operation: "acquire", idempotency_key: operationKey, ttl_seconds: Math.min(900, remainingSeconds),
+      }
+      : name === "canonical-ownership-check"
+        ? { operation: "check", idempotency_key: operationKey, lease_id: input.lease_id,
+          lease_token: prior.lease_token, fencing_generation: Number(prior.fencing_generation) }
+        : name === "canonical-ownership-renew"
+          ? { operation: "renew", idempotency_key: operationKey, lease_id: input.lease_id,
+            lease_token: prior.lease_token, fencing_generation: Number(prior.fencing_generation),
+            ttl_seconds: Math.min(900, remainingSeconds) }
+          : { operation: "release", idempotency_key: operationKey, lease_id: input.lease_id,
+            lease_token: prior.lease_token, fencing_generation: Number(prior.fencing_generation) };
+    const applied = (await client.query(
+      "select ops.canonical_ownership_lifecycle($1::jsonb) as result /* engineering-controller:lifecycle */",
+      [JSON.stringify(lifecycle)],
+    )).rows[0]?.result;
+    // The bounded readback is the ambiguity path: a response loss cannot cause
+    // a second lease operation with freshly chosen authority.
+    const readback = (await client.query(
+      "select ops.read_canonical_ownership_operation($1::uuid) as result /* engineering-controller:operation-readback */",
+      [operationKey],
+    )).rows[0]?.result;
+    const settled = readback?.ok ? readback : applied;
+    return { result: settled, operationKey };
+  });
+  return opaqueControllerResult(name, result.result, result.operationKey, issuerGeneration);
+}
+
+export function ownershipIssuerConnection(env, input) {
+  const mode = env?.CANONICAL_OWNERSHIP_RUNTIME_MODE;
+  if (!new Set(["canary_only", "attended_active"]).has(mode)) return null;
+  if (mode === "canary_only" && env?.CANONICAL_OWNERSHIP_CANARY_JOB_ID !== input.job_id) return null;
+  const generation = input.issuer_generation || Number(env?.CANONICAL_OWNERSHIP_ISSUER_ACTIVE_GENERATION);
+  if (![1, 2].includes(generation)) return null;
+  const connectionString = generation === 1
+    ? env.DATABASE_URL_OWNERSHIP_ISSUER_G1 : env.DATABASE_URL_OWNERSHIP_ISSUER_G2;
+  return connectionString ? { connectionString, generation } : null;
+}
+
+/** The controller's closed MCP surface, called only by index.js's token door. */
+export async function dispatchEngineeringController(request, env, ctx, actor) {
+  if (!isEngineeringControllerActor(actor)) return json({ error: "engineering_controller_auth_refused" }, 401);
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  let rpc;
+  try { rpc = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
+  const reply = result => json({ jsonrpc: "2.0", id: rpc.id, result });
+  if (rpc.method === "initialize") return reply({ protocolVersion: PROTOCOL, capabilities: { tools: {} },
+    serverInfo: { name: "carr-engineering-ownership-controller", version: "1" } });
+  if (rpc.method === "tools/list") return reply({ tools: controllerToolList() });
+  if (rpc.method !== "tools/call") return json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32601, message: "method not found" } });
+  try {
+    const name = rpc.params?.name;
+    const input = controllerOperationInput(name, rpc.params?.arguments);
+    const issuer = ownershipIssuerConnection(env, input);
+    if (!issuer) throw new ToolError({ error: "engineering_controller_issuer_unavailable" });
+    const pool = new Pool({ connectionString: issuer.connectionString });
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local role carr_ownership_issuer /* engineering-controller:issuer-capability */");
+      const result = await controllerOperation(client, actor, name, input, issuer.generation);
+      await client.query("commit");
+      return reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
+    } catch (error) {
+      await client.query("rollback").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+      ctx?.waitUntil?.(pool.end());
+    }
+  } catch (error) {
+    const payload = error instanceof ToolError ? error.payload : (error.payload || { error: "engineering_controller_operation_failed" });
+    return reply({ isError: true, content: [{ type: "text", text: JSON.stringify(payload) }] });
+  }
+}
+
 export const FOUNDATION_ASSURANCE_RUNTIME_BINDING_SCHEMA =
   "doctorcre-v5-foundation-assurance-runtime-binding.v1";
+const CANONICAL_OWNERSHIP_HOST_VERSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$/;
+
+// This is deployment metadata the Worker received from Cloudflare, not a
+// header, RPC parameter, or tool argument.  The ownership adapter refuses when
+// it is absent: a pool connection that cannot name its configured host cannot
+// be trusted to acquire or renew a canonical ownership lease.
+export function canonicalOwnershipExecutionHost(env) {
+  const version = typeof env?.CF_VERSION_METADATA?.id === "string"
+    ? env.CF_VERSION_METADATA.id.trim() : "";
+  return CANONICAL_OWNERSHIP_HOST_VERSION.test(version)
+    ? `cloudflare-workers:${version}` : null;
+}
 
 // The foundation oracle must prove which deployed Worker is answering before
 // the record layer exposes any material. These values are runtime/provider
@@ -69,19 +216,25 @@ export async function setWriterActorContext(client, actor, { partnerAuthorityAct
         ? partnerAuthoritySlugForActor(actor) : "");
   const receiptSessionRef = typeof actor?.correlation_id === "string" && actor.correlation_id
     ? `session:${actor.correlation_id.toLowerCase()}` : null;
+  const tenant = organizationTenantForActor(actor);
+  const executionHost = typeof actor?.execution_host_id === "string" ? actor.execution_host_id : "";
   if (receiptSessionRef === null) {
     await client.query(
       "select set_config('carr.acting_actor_slug',$1::text,true), " +
-      "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",
-      [actor.slug, verifiedHumanSlug],
+      "set_config('carr.verified_human_actor_slug',$2::text,true), " +
+      "set_config('carr.organization_tenant_id',$3::text,true), " +
+      "set_config('carr.execution_host_id',$4::text,true) /* writer-actor-context */",
+      [actor.slug, verifiedHumanSlug, tenant, executionHost],
     );
     return;
   }
   await client.query(
     "select set_config('carr.acting_actor_slug',$1::text,true), " +
     "set_config('carr.verified_human_actor_slug',$2::text,true), " +
-    "set_config('carr.receipt_session_ref',$3::text,true) /* writer-actor-context */",
-    [actor.slug, verifiedHumanSlug, receiptSessionRef],
+    "set_config('carr.receipt_session_ref',$3::text,true), " +
+    "set_config('carr.organization_tenant_id',$4::text,true), " +
+    "set_config('carr.execution_host_id',$5::text,true) /* writer-actor-context */",
+    [actor.slug, verifiedHumanSlug, receiptSessionRef, tenant, executionHost],
   );
 }
 
@@ -804,7 +957,8 @@ export async function dispatch(request, env, ctx, actor) {
     // every verb handler — means every write verb's existing withEnvelope()/
     // writeEvent() calls pick it up for free through auditIdentity(actor)
     // (tools.js), with zero change to any individual verb.
-    correlation_id: env.CORRELATION_ID || null });
+    correlation_id: env.CORRELATION_ID || null,
+    execution_host_id: canonicalOwnershipExecutionHost(env) });
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 

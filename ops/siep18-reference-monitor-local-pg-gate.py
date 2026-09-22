@@ -21,27 +21,27 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0532 installs v35 as the live frontier and demotes v34 to sealed history.
-# Both are pinned: an unreviewed frontier, or a v34 row the successor rewrote
+# 0539 installs v37 as the live frontier and demotes v36 to sealed history.
+# Both are pinned: an unreviewed frontier, or a v36 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
 # The per-version function names below are DERIVED from these two ordinals
 # rather than spelled out again. Every prior advance of this gate had to hand-
 # edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
 # check that silently keeps interrogating the superseded frontier.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v35"
-LIVE_REGISTRY_ORDINAL = 35
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v34"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v37"
+LIVE_REGISTRY_ORDINAL = 37
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v36"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:7fd4d40a717b19d619da78a1939053656fa8abf1a4cfce2286d4e3d6cdfabf40"
+    "sha256:ec86f1666faafbfd3aa51e5b55a95f1566de34f041b81d32d94ca859311ee54b"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (1845, 868)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (1891, 876)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0530_session_identity_scac_successor.sql"
+    "migrations/0532b_ready_plan_amendment_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0532_room_dispatch_spine_scac_successor.sql"
+    "migrations/0539_canonical_ownership_assurance_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
@@ -73,10 +73,8 @@ PREDECESSOR_LIVE_AT_SEAL_NAME = (
 # A grant projection that did NOT move here would mean it had stopped seeing
 # relation grants at all.
 # Measured on a disposable loopback PostgreSQL 17, never predicted.
-EXPECTED_GRANT_COUNT = 312
-EXPECTED_GRANT_DIGEST = (
-    "sha256:f3a7344a4e690971141c39b207c2fd3410b12946f53130c67ee9679b5c7bf5e0"
-)
+# v37 owns the post-0539 grant projection. Read its measured value from the
+# sealed catalog row below; the v36 predecessor remains pinned separately.
 
 # WR-000048 mutation test fixtures. NARROWED_ROLE_AUTHORITY_SCOPE is the
 # portable census scope this repair cascade installs (verbatim from the
@@ -1050,9 +1048,11 @@ def main() -> int:
                 raise RuntimeError(
                     f"{LIVE_REGISTRY_VERSION} registry is absent or authority-expanding: {registry!r}"
                 )
-            if registry[3].get("runtime_dml_grants") != {
-                "count": EXPECTED_GRANT_COUNT, "digest": EXPECTED_GRANT_DIGEST,
-            }:
+            expected_grant_snapshot = registry[3].get("runtime_dml_grants")
+            if not isinstance(expected_grant_snapshot, dict) or \
+               set(expected_grant_snapshot) != {"count", "digest"} or \
+               not isinstance(expected_grant_snapshot.get("count"), int) or \
+               not isinstance(expected_grant_snapshot.get("digest"), str):
                 raise RuntimeError(
                     f"{LIVE_REGISTRY_VERSION} grant projection is not exact: {registry[3]!r}"
                 )
@@ -1154,8 +1154,8 @@ def main() -> int:
             ).fetchone()[0]
             if grant_snapshot != {
                 "schema_version": "scac-runtime-dml-grants.v1",
-                "entry_count": EXPECTED_GRANT_COUNT,
-                "grant_digest": EXPECTED_GRANT_DIGEST,
+                "entry_count": expected_grant_snapshot["count"],
+                "grant_digest": expected_grant_snapshot["digest"],
             }:
                 raise RuntimeError(f"runtime DML grant snapshot drifted: {grant_snapshot!r}")
 

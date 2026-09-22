@@ -261,6 +261,9 @@ WRITE_ACTION_EXACT = {
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
     "record-foundation-assurance-minimum-outcome",
 }
+HUMAN_ONLY_WRITE_ACTION_EXACT = {
+    "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
+}
 # The three reason classes that carry a latch identity. Named constants rather
 # than repeated literals, because an identity keyed on a string that drifts is
 # an identity that silently stops matching — the latch would then look present
@@ -441,7 +444,9 @@ def normalized_action(value):
 
 def is_write_action(action):
     """Classify a CARR registry action without treating similar reads as writes."""
-    return action in WRITE_ACTION_EXACT or action.partition("-")[0] in WRITE_ACTION_PREFIXES
+    return (action in WRITE_ACTION_EXACT
+            or action in HUMAN_ONLY_WRITE_ACTION_EXACT
+            or action.partition("-")[0] in WRITE_ACTION_PREFIXES)
 
 
 def nested_carr_actions(value):

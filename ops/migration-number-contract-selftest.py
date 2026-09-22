@@ -20,6 +20,7 @@ from migration_number_contract import (  # noqa: E402
     FROZEN_COLLISIONS,
     LEGACY_APPLIED_ALIASES,
     MigrationNumberError,
+    PERMANENTLY_BURNED_MIGRATION_SLOTS,
     collision_report,
     validate_migration_names,
 )
@@ -46,6 +47,17 @@ APPROVED_0507 = (
     "0507_export_views_one_row_per_subject.sql",
     "0507a_engineering_slice_plan_validators.sql",
 )
+APPROVED_0532 = (
+    "0532_room_dispatch_spine_scac_successor.sql",
+    "0532a_canonical_ownership_lease_activation.sql",
+    "0532b_ready_plan_amendment_scac_successor.sql",
+)
+EXPECTED_BURNED_SLOTS = {
+    533: "WR120 withdrawn 0533 slot",
+    534: "WR120 withdrawn 0534 slot",
+    535: "WR122 stale ready-plan amendment",
+    536: "WR122 stale ready-plan SCAC successor",
+}
 EXPECTED_LEGACY_ALIASES = {
     "0134_control_plane_admission.sql": "0148_control_plane_admission.sql",
     "0135_control_plane_jobs.sql": "0149_control_plane_jobs.sql",
@@ -106,7 +118,10 @@ def allocator_refuses_interstitial(
 
 def main() -> int:
     actual = tuple(path.name for path in (REPO / "migrations").glob("*.sql"))
-    expected_next = max(next_migration.numbers_from_names(actual)) + 1
+    expected_next = max(
+        max(next_migration.numbers_from_names(actual)),
+        max(PERMANENTLY_BURNED_MIGRATION_SLOTS),
+    ) + 1
     validate_migration_names(actual, require_frozen=True)
 
     report = collision_report(actual)
@@ -114,10 +129,13 @@ def main() -> int:
     assert report["0169"] == FROZEN_0169
     assert report["0494"] == APPROVED_0494
     assert report["0507"] == APPROVED_0507
+    assert report["0532"] == APPROVED_0532
     assert APPROVED_INTERSTITIAL_COLLISIONS == {
         "0494": APPROVED_0494,
         "0507": APPROVED_0507,
+        "0532": APPROVED_0532,
     }
+    assert PERMANENTLY_BURNED_MIGRATION_SLOTS == EXPECTED_BURNED_SLOTS
     assert LEGACY_APPLIED_ALIASES == EXPECTED_LEGACY_ALIASES
 
     refuses(("0171_alpha.sql", "0171_beta.sql"), "unregistered collision 0171")
@@ -189,6 +207,35 @@ def main() -> int:
         "approved interstitial collision 0507 changed",
         APPROVED_0507,
     )
+    refuses(APPROVED_0532[:1], "approved interstitial collision 0532 changed")
+    refuses(APPROVED_0532[:2], "approved interstitial collision 0532 changed")
+    refuses((APPROVED_0532[1], APPROVED_0532[2]),
+            "approved interstitial collision 0532 changed")
+    refuses((APPROVED_0532[2],), "approved interstitial collision 0532 changed")
+    validate_migration_names(
+        APPROVED_0532[:1], allow_approved_interstitial_base=True
+    )
+    refuses(
+        APPROVED_0532[:2],
+        "approved interstitial collision 0532 changed",
+        allow_approved_interstitial_base=True,
+    )
+    refuses(
+        APPROVED_0532 + ("0532c_unapproved.sql",),
+        "approved interstitial collision 0532 changed",
+    )
+    for missing in APPROVED_0532:
+        allocator_refuses_interstitial(
+            actual,
+            tuple(name for name in actual if name != missing),
+            "approved interstitial collision 0532 changed",
+            APPROVED_0532,
+        )
+    for number in EXPECTED_BURNED_SLOTS:
+        refuses(
+            (f"{number:04d}_reuse.sql",),
+            f"permanently burned migration slot {number:04d} cannot be reused",
+        )
     missing_frozen = tuple(name for name in actual if name != "0074_deal_city_lane.sql")
     try:
         validate_migration_names(missing_frozen, require_frozen=True)
@@ -508,6 +555,36 @@ def main() -> int:
         raise AssertionError(
             "--through was allowed to expose WR-000119 before its SCAC seal"
         )
+
+    # Production already carries the numeric 0532 v35 seal. WR-000125's two
+    # lettered suffixes are one strict atomic group: no through-boundary or
+    # pre-existing partial ledger may expose 0532a without the v36 successor.
+    ready_plan_suffix = [
+        item for item in loaded if item[0].startswith(("0532a_", "0532b_"))
+    ]
+    assert [item[0] for item in ready_plan_suffix] == list(APPROVED_0532[1:])
+    assert migration_runner.migration_batches(ready_plan_suffix) == [
+        ready_plan_suffix
+    ]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            ready_plan_suffix,
+            "0532a_canonical_ownership_lease_activation.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError("--through 0532a was allowed to expose an unsealed catalog")
+    try:
+        migration_runner.validate_applied_ledger(
+            ready_plan_suffix,
+            {ready_plan_suffix[0][0]: ready_plan_suffix[0][2]},
+        )
+    except migration_runner.AppliedMigrationLedgerError as exc:
+        assert "partial strict atomic migration group is forbidden" in str(exc), str(exc)
+    else:
+        raise AssertionError("applied 0532a without 0532b was accepted")
 
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history

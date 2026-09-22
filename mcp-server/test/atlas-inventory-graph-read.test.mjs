@@ -371,7 +371,7 @@ test("the bundle digest tracks the declared bundle and not the clock", async () 
   assert.notEqual(a.observed_at, b.observed_at);
   assert.match(a.version.bundle_digest, /^[0-9a-f]{64}$/);
   assert.equal(a.version.bundle_digest, await bundleDigest(DECLARED_LAYER));
-  assert.equal(a.version.registry_version, "scac-mutation-registry.v35");
+  assert.equal(a.version.registry_version, "scac-mutation-registry.v37");
 
   // Changing the TOOLS key set MUST move the digest. The tools list is injectable
   // for exactly this: a digest that could not change would prove nothing.

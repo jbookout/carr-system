@@ -103,6 +103,26 @@ def main() -> int:
     )
     active_roles = set(re.findall(r"'([a-z_][a-z0-9_]*)'",
                                   preamble_match.group("roles") if preamble_match else ""))
+    conditional = re.search(
+        r"cat >> \"\$TMP\" <<'CANONICAL_OWNERSHIP_ROLES'\n"
+        r"(?P<body>.*?)\nCANONICAL_OWNERSHIP_ROLES",
+        script,
+        re.DOTALL,
+    )
+    conditional_gate = (
+        'if [ "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" = t ]; then\n'
+        'cat >> "$TMP" <<\'CANONICAL_OWNERSHIP_ROLES\''
+    ) in script and "filename='0532a_canonical_ownership_lease_activation.sql'" in script
+    if conditional and conditional_gate:
+        body = conditional.group("body")
+        active_roles.update(role.lower() for role in CREATE_ROLE.findall(body))
+        dynamic_roles = re.search(
+            r"foreach r in array array\[(?P<roles>.*?)\] loop", body, re.DOTALL
+        )
+        if dynamic_roles:
+            active_roles.update(re.findall(
+                r"'([a-z_][a-z0-9_]*)'", dynamic_roles.group("roles")
+            ))
     if "'create role %I login password %L', 'carr_jobs'" in script:
         active_roles.add("carr_jobs")
     results: list[bool] = []

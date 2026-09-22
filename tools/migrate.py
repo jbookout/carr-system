@@ -245,7 +245,27 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0531_room_dispatch_spine.sql",
         "0532_room_dispatch_spine_scac_successor.sql",
     ),
+    # WR-000125 activates the previously-dark 0450 kernel and the same-request
+    # accepted-plan successor lifecycle in 0532a; 0532b is the sole v36 SCAC
+    # owner. Production already has 0532, so the pending suffix pair is its own
+    # atomic group and must never be resumed from 0532b alone.
+    (
+        "0532a_canonical_ownership_lease_activation.sql",
+        "0532b_ready_plan_amendment_scac_successor.sql",
+    ),
 )
+
+STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
+    (
+        "0532a_canonical_ownership_lease_activation.sql",
+        "0532b_ready_plan_amendment_scac_successor.sql",
+    ),
+)
+
+FORBIDDEN_MIGRATION_FILENAMES = frozenset({
+    "0535_ready_plan_amendment.sql",
+    "0536_ready_plan_amendment_scac_successor.sql",
+})
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # NNNN_name.sql, plus an OPTIONAL single lowercase letter after the number:
@@ -457,6 +477,8 @@ def load_migrations() -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for p in sorted(MIGRATIONS_DIR.iterdir()):
         if p.suffix == ".sql":
+            if p.name in FORBIDDEN_MIGRATION_FILENAMES:
+                fail(f"stale WR122 migration filename is permanently refused: {p.name}")
             if not NAME_RE.match(p.name):
                 fail(f"bad migration filename (want NNNN_name.sql): {p.name}")
             sql = p.read_text()
@@ -598,6 +620,13 @@ def validate_applied_ledger(
         for name in applied
         if name in LEGACY_APPLIED_ALIASES
     )
+    for group in STRICT_ATOMIC_MIGRATION_GROUPS:
+        present = tuple(name for name in group if name in effective_applied)
+        if present and present != group:
+            raise AppliedMigrationLedgerError(
+                "partial strict atomic migration group is forbidden: expected "
+                + ", ".join(group) + "; found " + ", ".join(present)
+            )
     first_hole: str | None = None
     later_applied: list[str] = []
     for name, _sql, _digest in migrations:

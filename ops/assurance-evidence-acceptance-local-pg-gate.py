@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 from threading import Barrier, Lock, Thread
 import time
+from typing import TypedDict
 import uuid
 
 import psycopg
@@ -30,6 +31,16 @@ SECRET_TOKENS: set[str] = set()
 RAW_RESULTS: list[object] = []
 RAW_ERRORS: list[str] = []
 RAW_LOCK = Lock()
+class IssuerConfig(TypedDict, total=False):
+    dsn: str
+    tenant: str
+    runtime_session: str
+    host: str
+    job_token: uuid.UUID
+    ownership_session_ref: str
+
+
+A3A_ISSUER: IssuerConfig = {}
 EXPECTED_A3A_TABLES = [
     "ops.assurance_evidence_extension",
     "ops.assurance_execution_manifest",
@@ -42,6 +53,9 @@ EXPECTED_A3A_FUNCTIONS = sorted([
     "ops.assurance_exact_object(jsonb,text[])",
     "ops.assurance_identifier_valid(text)",
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)",
+    "ops.assurance_append_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)",
+    "ops.assurance_terminal_evidence_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)",
+    "ops.assurance_terminal_receipt_lineage_current(uuid,uuid,timestamp with time zone)",
     "ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)",
     "ops.assurance_normalized_set(jsonb)",
     "ops.assurance_pinned_pointer(text)",
@@ -65,6 +79,12 @@ EXPECTED_A3A_FUNCTION_POSTURE = {
     "ops.assurance_exact_object(jsonb,text[])": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_identifier_valid(text)": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)":
+        (True, "v", "search_path=pg_catalog, ops, public"),
+    "ops.assurance_append_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)":
+        (True, "v", "search_path=pg_catalog, ops, public"),
+    "ops.assurance_terminal_evidence_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)":
+        (True, "v", "search_path=pg_catalog, ops, public"),
+    "ops.assurance_terminal_receipt_lineage_current(uuid,uuid,timestamp with time zone)":
         (True, "v", "search_path=pg_catalog, ops, public"),
     "ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)":
         (True, "v", "search_path=pg_catalog, ops, public"),
@@ -486,15 +506,12 @@ def ownership_contract_digest(cur, plan: dict, rules: dict, session: str, host: 
     if evidence_requirements is not None:
         contract["evidence_requirements"] = copy.deepcopy(evidence_requirements)
     planned_check = selected["planned_checks"][0]
+    contract["required_tests"][0]["check_ref"] = planned_check["check_ref"]
+    contract["required_tests"][0]["causal_failure"]["object"] = planned_check["check_ref"]
     contract["required_tests"][0]["planned_check_digest"] = digest(planned_check)
     contract["required_tests"][0]["causal_failure"]["expected"] = planned_check["failure_condition"]
-    compiler = load_module(f"a3a_prelease_{uuid.uuid4().hex}",
-                           ROOT / "tools/room-bridge/assurance_slice_compiler.py")
-    preimage = {
-        key: copy.deepcopy(item) for key, item in contract.items()
-        if key not in {"contract_digest", "ownership_contract_digest", "lease_binding"}
-    }
-    return compiler.compile_ownership_contract_digest(preimage)
+    normalize_contract(contract)
+    return contract["ownership_contract_digest"]
 
 
 def compile_input(cur, lease: dict, plan: dict, rules: dict, coord: dict,
@@ -542,6 +559,8 @@ def compile_input(cur, lease: dict, plan: dict, rules: dict, coord: dict,
     if evidence_requirements is not None:
         contract["evidence_requirements"] = copy.deepcopy(evidence_requirements)
     planned_check = selected["planned_checks"][0]
+    contract["required_tests"][0]["check_ref"] = planned_check["check_ref"]
+    contract["required_tests"][0]["causal_failure"]["object"] = planned_check["check_ref"]
     contract["required_tests"][0]["planned_check_digest"] = digest(planned_check)
     contract["required_tests"][0]["causal_failure"]["expected"] = planned_check["failure_condition"]
     normalize_contract(contract)
@@ -559,15 +578,63 @@ def compile_input(cur, lease: dict, plan: dict, rules: dict, coord: dict,
     return value, compile_canonical(value)
 
 
+def issuer_context(cur, tenant: str, runtime_session: str, host: str,
+                   job_token: uuid.UUID, ownership_session_ref: str) -> None:
+    """Bind a NOINHERIT issuer connection to one live A2 runtime."""
+    cur.execute("set local role carr_ownership_issuer")
+    for key, value in {
+        "carr.organization_tenant_id": tenant,
+        "carr.acting_actor_slug": "codex",
+        "carr.receipt_session_ref": runtime_session,
+        "carr.execution_host_id": host,
+        "carr.engineering_job_lease_token": str(job_token),
+        "carr.ownership_session_id": ownership_session_ref,
+    }.items():
+        one(cur, "select set_config(%s,%s,true)", (key, value))
+
+
+def issuer_manifest_context(cur) -> None:
+    issuer_context(cur, A3A_ISSUER["tenant"], A3A_ISSUER["runtime_session"],
+                   A3A_ISSUER["host"], A3A_ISSUER["job_token"],
+                   A3A_ISSUER["ownership_session_ref"])
+
+
 def record_manifest(cur, lease: dict, stage: str, compiler_input: dict,
                     manifest: dict, rules: dict, coord: dict, key: uuid.UUID):
-    return call(cur, "ops.record_assurance_execution_manifest", (
-        lease["lease_id"], lease["lease_token"], lease["fencing_generation"], stage,
-        Jsonb(compiler_input), Jsonb(manifest), Jsonb(rules), Jsonb(coord), key,
-    ))
+    # Keep the generic fixture cursor as a data builder.  Only a NOINHERIT
+    # issuer login with the current runtime may call the guarded A3a door.
+    # Publish fixture rows before the issuer opens its separate transaction;
+    # otherwise its lease/plan read can wait on this connection's own writes.
+    cur.connection.commit()
+    with psycopg.connect(A3A_ISSUER["dsn"], user="carr_ownership_issuer_g1") as issuer:
+        with issuer.cursor() as issuer_cur:
+            issuer_manifest_context(issuer_cur)
+            return call(issuer_cur, "ops.record_assurance_execution_manifest", (
+                lease["lease_id"], lease["lease_token"], lease["fencing_generation"], stage,
+                Jsonb(compiler_input), Jsonb(manifest), Jsonb(rules), Jsonb(coord), key,
+            ))
 
 
-def race_calls(dsn: str, setups: list, signature: str, args: tuple) -> list[dict]:
+def issuer_lifecycle(request: dict) -> dict:
+    with psycopg.connect(A3A_ISSUER["dsn"], user="carr_ownership_issuer_g1") as issuer:
+        with issuer.cursor() as issuer_cur:
+            issuer_manifest_context(issuer_cur)
+            # A2 lifecycle may legitimately return the lease token.  The raw
+            # nondisclosure ledger below covers A3a results, not A2 issuance.
+            return one(issuer_cur, "select ops.canonical_ownership_lifecycle(%s)",
+                       (Jsonb(request),))[0]
+
+
+def issuer_call(signature: str, args: tuple) -> dict:
+    """Run a read through the same real issuer runtime as manifest admission."""
+    with psycopg.connect(A3A_ISSUER["dsn"], user="carr_ownership_issuer_g1") as issuer:
+        with issuer.cursor() as issuer_cur:
+            issuer_manifest_context(issuer_cur)
+            return call(issuer_cur, signature, args)
+
+
+def race_calls(dsn: str, setups: list, signature: str, args: tuple,
+               *, user: str | None = None) -> list[dict]:
     barrier = Barrier(len(setups))
     results: list[dict] = []
     errors: list[BaseException] = []
@@ -575,7 +642,7 @@ def race_calls(dsn: str, setups: list, signature: str, args: tuple) -> list[dict
 
     def run(setup) -> None:
         try:
-            with psycopg.connect(dsn) as peer:
+            with psycopg.connect(dsn, user=user) as peer:
                 with peer.cursor() as cur:
                     setup(cur)
                     barrier.wait(timeout=15)
@@ -599,7 +666,7 @@ def race_calls(dsn: str, setups: list, signature: str, args: tuple) -> list[dict
 
 
 def race_arg_calls(dsn: str, setups: list, signature: str,
-                   args_list: list[tuple]) -> list[dict]:
+                   args_list: list[tuple], *, user: str | None = None) -> list[dict]:
     barrier = Barrier(len(setups))
     results: list[dict] = []
     errors: list[BaseException] = []
@@ -607,7 +674,7 @@ def race_arg_calls(dsn: str, setups: list, signature: str,
 
     def run(setup, args: tuple) -> None:
         try:
-            with psycopg.connect(dsn) as peer:
+            with psycopg.connect(dsn, user=user) as peer:
                 with peer.cursor() as cur:
                     setup(cur)
                     barrier.wait(timeout=15)
@@ -687,61 +754,35 @@ def main() -> int:
     if not dsn.startswith(("postgres://", "postgresql://")):
         print("assurance A3a gate: CARR_LOCAL_PG_DSN must name disposable PostgreSQL", file=sys.stderr)
         return 2
-    tenant = f"tenant:a3a:{uuid.uuid4().hex}"
-    host = "host:a3a-disposable-pg"
+    tenant = "carr-internal"
+    host = "cloudflare-workers:a3a-disposable-pg"
     dependency_ref, subject_ref = "slice:a3a-dependency", "slice:a3a-subject"
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             schema_before = schema_fingerprint(cur)
-        foreign_tenant = f"tenant:a3a-foreign:{uuid.uuid4().hex}"
-        foreign_dependency, foreign_subject, _, _ = a2.seed_lineage(
-            conn, foreign_tenant, f"a3a-foreign-{uuid.uuid4().hex}")
-        with conn.cursor() as cur:
-            foreign_session = f"session:a3a-foreign:{uuid.uuid4().hex}"
-            foreign_host = "host:a3a-foreign-disposable-pg"
-            a2.context(cur, foreign_tenant, "codex", foreign_session, foreign_host)
-            foreign_bound = a2.binding(cur, foreign_subject[1])
-            foreign_lease = a2.acquire(
-                cur,
-                foreign_bound,
-                paths=[{
-                    "path": f"ops/a3a-foreign-{uuid.uuid4().hex}.sql",
-                    "mode": "file",
-                    "operation": "write",
-                }],
-                dependencies=[{
-                    "slice_ref": foreign_dependency[5],
-                    "required_state": "independently_verified",
-                }],
-            )
-            check("foreign minted lease token fixture exists",
-                  foreign_lease.get("ok") is True)
-            if foreign_lease.get("ok") is not True:
-                raise RuntimeError(
-                    f"foreign A2 fixture lease failed: {safe(foreign_lease)}")
-            foreign_token = foreign_lease["lease_token"]
-            SECRET_TOKENS.update(token_spellings(foreign_token))
+            review_rows_before = one(cur,
+                "select count(*) from ops.assurance_review_extension")[0]
+            owner_rows_before = one(cur,
+                "select count(*) from ops.assurance_owner_acceptance_fact")[0]
+        # This is a nondisclosure canary, not authority.  It is registered as
+        # a released foreign-tenant lease after the activated lease exists:
+        # token suppression scans the canonical lease registry, so a bare UUID
+        # would not exercise the condition.
+        foreign_token = uuid.uuid4()
+        foreign_token_lease_id = uuid.uuid4()
+        SECRET_TOKENS.update(token_spellings(foreign_token))
         conn.commit()
         with conn.cursor() as cur:
             a2.context(cur, tenant)
             dependency = a2.fixture(cur, slice_refs=[dependency_ref, subject_ref],
-                slice_dependencies={subject_ref: [dependency_ref]})
-            plan = one(cur, """select plan from ops.engineering_slice_plan where id=(
-              select slice_plan_id from ops.engineering_execution_envelope where id=%s)""",
-              (dependency[1],))[0]
-            checks = copy.deepcopy(compiler_fixture()["engineering_slice_plan"]["slices"][1]["planned_checks"])
-            checks[0]["evidence_requirement"] = "metadata_only_sufficient"
-            next(row for row in plan["slices"] if row["slice_ref"] == subject_ref)["planned_checks"] = checks
-            plan["plan_digest"] = digest({k: v for k, v in plan.items() if k != "plan_digest"})
-            cur.execute("alter table ops.engineering_slice_plan disable trigger user")
-            cur.execute("""update ops.engineering_slice_plan set plan=%s,plan_digest=%s where id=(
-              select slice_plan_id from ops.engineering_execution_envelope where id=%s)""",
-              (Jsonb(plan), plan["plan_digest"], dependency[1]))
-            cur.execute("alter table ops.engineering_slice_plan enable trigger user")
-            cur.execute("update ops.job set payload=jsonb_set(payload,'{plan_digest}',to_jsonb(%s::text),true) where id=%s",
-              (plan["plan_digest"], dependency[0]))
-            dependency = (*dependency[:4], plan["plan_digest"], *dependency[5:])
+                slice_dependencies={subject_ref: [dependency_ref]},
+                planned_check_refs={subject_ref: "check:compiler"},
+                source_merge_paths=[
+                    "ops/a3a-fixture.sql",
+                    "ops/a3a-rename-destination.sql",
+                    "ops/a3a-rename-source.sql",
+                ])
         conn.commit()
         with conn.cursor() as cur:
             cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
@@ -762,26 +803,16 @@ def main() -> int:
             session = one(cur, "select envelope#>>'{agent_session,id}' from ops.engineering_execution_envelope where id=%s", (fixture[1],))[0]
             set_context(cur, tenant, "codex", session, host)
             bound = a2.binding(cur, fixture[1])
+            plan = one(cur, "select plan from ops.engineering_slice_plan where id=%s", (bound[5],))[0]
             rules = make_rules("a")
             path_claims = [
                 {"path": "ops/a3a-fixture.sql", "mode": "file", "operation": "write"},
-                {"path": "ops/a3a-rename-source.sql", "mode": "file",
-                 "operation": "rename_source"},
-                {"path": "ops/a3a-rename-destination.sql", "mode": "file",
-                 "operation": "rename_destination"},
+                {"path": "ops/a3a-rename-source.sql", "mode": "file", "operation": "write"},
+                {"path": "ops/a3a-rename-destination.sql", "mode": "file", "operation": "write"},
             ]
             dependencies = [{"slice_ref": dependency_ref,
                              "required_state": "independently_verified"}]
             contract_evidence_requirements = multi_evidence_requirements()
-            contract_digest = ownership_contract_digest(
-                cur, plan, rules, session, host, subject_ref, path_claims, dependencies,
-                evidence_requirements=contract_evidence_requirements)
-            lease = a2.acquire(cur, bound, paths=path_claims,
-                dependencies=dependencies, contract=contract_digest)
-            if lease.get("ok") is not True:
-                raise RuntimeError(f"A2 fixture lease failed: {safe(lease)}")
-            lease["slice_ref"] = subject_ref
-            SECRET_TOKENS.update(token_spellings(lease["lease_token"]))
         conn.commit()
 
         with conn.cursor() as cur:
@@ -791,37 +822,123 @@ def main() -> int:
         conn.commit()
         claim = cc.claim_one(conn, fixture[0], "a3a-controller", [fixture[0]])
         with conn.cursor() as cur:
-            cc.set_jobs(cur)
-            receipt_id = cc.receipt(cur, fixture, claim, "claimed_complete")
-            cc.reset_role(cur)
+            expires_at = one(cur, """select least(j.leased_until,
+              s.lease_expires_at,e.expires_at)-interval '5 seconds'
+              from ops.engineering_execution_envelope e
+              join ops.job j on j.id=e.job_id
+              join ops.capability_agent_session s on s.id=e.agent_session_id
+              where e.id=%s""", (fixture[1],))[0]
+            runtime_probe = one(cur, """select jsonb_build_object(
+              'currentness',ops.engineering_envelope_currentness(e.id,e.job_id),
+              'job_state',j.state,'job_attempt',j.attempt,
+              'session_state',s.state,'session_lease_live',s.lease_expires_at>clock_timestamp(),
+              'work_state',w.state,'work_version_matches',e.state_version=w.version,
+              'plan_matches',e.accepted_plan_id=p.id)
+              from ops.engineering_execution_envelope e
+              join ops.job j on j.id=e.job_id
+              join ops.capability_agent_session s on s.id=e.agent_session_id
+              join ops.work_request w on w.id=e.work_request_id
+              join ops.sourced_work_request_plan p on p.id=e.accepted_plan_id
+              where e.id=%s""", (fixture[1],))[0]
+            if runtime_probe["currentness"].get("eligible") is not True:
+                raise RuntimeError(f"A3a fixture runtime subject is ineligible: {safe(runtime_probe)}")
         conn.commit()
+        # Claim first, then let a real issuer login mint and consume the exact
+        # running-job capability.  The lifecycle derives the accepted scope
+        # digest itself; the compiler digest stays an assurance preimage.
+        with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as issuer:
+            with issuer.cursor() as issuer_cur:
+                issuer_context(issuer_cur, tenant, session, host, claim[1], "")
+                runtime = call(issuer_cur, "ops.mint_canonical_ownership_runtime_session", (
+                    bound[0], bound[3], fixture[1], claim[2], session, host,
+                    expires_at, uuid.uuid4()))
+                if runtime.get("ok") is not True:
+                    raise RuntimeError(f"A3a issuer runtime mint failed: {safe(runtime)}")
+                issuer_context(issuer_cur, tenant, session, host, claim[1],
+                               runtime["ownership_session_ref"])
+                lease = one(issuer_cur, "select ops.canonical_ownership_lifecycle(%s)", (Jsonb({
+                    "operation": "acquire", "idempotency_key": str(uuid.uuid4()),
+                    "ttl_seconds": 900,
+                }),))[0]
+        if lease.get("ok") is not True:
+            raise RuntimeError(f"A3a issuer lifecycle acquire failed: {safe(lease)}")
+        A3A_ISSUER.update({
+            "dsn": dsn, "tenant": tenant, "runtime_session": session, "host": host,
+            "job_token": claim[1], "ownership_session_ref": runtime["ownership_session_ref"],
+        })
+        # Assurance binds to the issuer-minted ownership session. The original
+        # engineering session remains bound separately in A3A_ISSUER.
+        session = runtime["ownership_session_ref"]
         with conn.cursor() as cur:
-            a2.insert_review(cur, fixture, receipt_id)
-        conn.commit()
-
+            scope_digest = one(cur, """select scope.scope_digest
+              from ops.source_merge_plan_scope scope
+              join ops.sourced_work_request_plan_acceptance_receipt acceptance
+                on acceptance.id=scope.acceptance_receipt_id
+              join ops.engineering_execution_envelope envelope on envelope.id=%s
+              where scope.organization_tenant_id=%s and scope.work_request_id=%s
+                and scope.accepted_plan_id=%s
+                and acceptance.result_version=envelope.state_version""",
+              (fixture[1], tenant, bound[0], bound[3]))[0]
+            stored_scope_digest = one(cur,
+                "select contract_digest from ops.canonical_ownership_lease where id=%s",
+                (lease["lease_id"],))[0]
+            if stored_scope_digest != scope_digest:
+                raise RuntimeError("A3a lifecycle did not bind the current accepted scope digest")
+            lease["slice_ref"] = subject_ref
+            SECRET_TOKENS.update(token_spellings(lease["lease_token"]))
+            cur.execute("""insert into ops.canonical_ownership_lease(
+              id,organization_tenant_id,holder_actor_id,holder_actor_slug,
+              holder_session_ref,holder_host_ref,lease_token,fencing_generation,
+              work_request_id,work_request_version,work_request_digest,
+              accepted_plan_id,accepted_plan_digest,slice_plan_id,slice_plan_digest,
+              slice_ref,subject_envelope_id,contract_digest,state,acquired_at,
+              expires_at,released_at,created_at,updated_at)
+              select %s,%s,holder_actor_id,holder_actor_slug,holder_session_ref,
+                holder_host_ref,%s,nextval('ops.canonical_ownership_fencing_generation'),
+                work_request_id,work_request_version,work_request_digest,
+                accepted_plan_id,accepted_plan_digest,slice_plan_id,slice_plan_digest,
+                slice_ref,subject_envelope_id,contract_digest,'released',
+                clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour',
+                clock_timestamp()-interval '1 hour',clock_timestamp(),clock_timestamp()
+              from ops.canonical_ownership_lease where id=%s""", (
+                foreign_token_lease_id, tenant + ":foreign-token-canary", foreign_token,
+                lease["lease_id"],
+            ))
+            check("foreign token canary is registered in the lease catalog", one(cur,
+                "select exists(select 1 from ops.canonical_ownership_lease where id=%s "
+                "and lease_token=%s and state='released')",
+                (foreign_token_lease_id, foreign_token))[0])
         with conn.cursor() as cur:
             set_context(cur, tenant, "codex", session, host)
-            plan = one(cur, "select plan from ops.engineering_slice_plan where id=%s", (bound[5],))[0]
             coord = make_coord(cur, lease, session, host)
             compiler_input, post_manifest = compile_input(
                 cur, lease, plan, rules, coord, session, host,
                 evidence_requirements=contract_evidence_requirements)
+            compiler = load_module(f"a3a_digest_{uuid.uuid4().hex}",
+                                   ROOT / "tools/room-bridge/assurance_slice_compiler.py")
+            compiler_digest = compiler.compile_ownership_contract_digest({
+                key: copy.deepcopy(item)
+                for key, item in compiler_input["assurance_slice"].items()
+                if key not in {"contract_digest", "ownership_contract_digest", "lease_binding"}
+            })
             stored_contract_digest = one(cur,
                 "select contract_digest from ops.canonical_ownership_lease where id=%s",
                 (lease["lease_id"],))[0]
-            if compiler_input["assurance_slice"]["ownership_contract_digest"] != stored_contract_digest:
+            if compiler_input["assurance_slice"]["ownership_contract_digest"] != compiler_digest:
                 raise RuntimeError(
-                    "ownership digest fixture drift: "
-                    f"prelease={stored_contract_digest} "
+                    "compiler ownership digest fixture drift: "
+                    f"preimage={compiler_digest} "
                     f"compiled={compiler_input['assurance_slice']['ownership_contract_digest']}"
                 )
+            if compiler_digest == stored_contract_digest:
+                raise RuntimeError("A3a fixture collapsed compiler and accepted-scope digests")
             sql_contract_digest = one(cur, """select ops.assurance_digest(
               %s::jsonb-array['contract_digest','ownership_contract_digest','lease_binding'])""",
               (Jsonb(compiler_input["assurance_slice"]),))[0]
-            if sql_contract_digest != stored_contract_digest:
+            if sql_contract_digest != compiler_digest:
                 raise RuntimeError(
                     "ownership digest SQL recomputation drift: "
-                    f"stored={stored_contract_digest} sql={sql_contract_digest}"
+                    f"compiled={compiler_digest} sql={sql_contract_digest}"
                 )
             post_key = uuid.uuid4()
             post = record_manifest(cur, lease, "post_commit", compiler_input,
@@ -840,42 +957,48 @@ def main() -> int:
 
             def run_manifest_behind_a2_renew() -> None:
                 try:
-                    with psycopg.connect(dsn) as peer, peer.cursor() as race_cur:
-                        set_context(race_cur, tenant, "codex", session, host)
+                    with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as peer, peer.cursor() as race_cur:
+                        issuer_manifest_context(race_cur)
                         with RAW_LOCK:
                             blocked_pids.append(one(race_cur, "select pg_backend_pid()")[0])
-                        blocked_results.append(record_manifest(
-                            race_cur, lease, "push", blocked_input, blocked_manifest,
-                            rules, blocked_coord, blocked_key))
+                        blocked_results.append(call(
+                            race_cur, "ops.record_assurance_execution_manifest", (
+                                lease["lease_id"], lease["lease_token"], lease["fencing_generation"],
+                                "push", Jsonb(blocked_input), Jsonb(blocked_manifest),
+                                Jsonb(rules), Jsonb(blocked_coord), blocked_key)))
                 except BaseException as exc:
                     assert_secret_absent(str(exc), "A2-renew/A3a-manifest race exception")
                     blocked_errors.append(exc)
 
             conn.commit()
-            with psycopg.connect(dsn) as blocker, blocker.cursor() as blocker_cur:
-                set_context(blocker_cur, tenant, "codex", session, host)
+            with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as blocker, blocker.cursor() as blocker_cur:
+                issuer_manifest_context(blocker_cur)
                 one(blocker_cur, "select pg_advisory_xact_lock(hashtextextended(%s,0))",
                     (f"canonical-ownership:{tenant}",))
                 blocked_thread = Thread(target=run_manifest_behind_a2_renew, daemon=True)
                 blocked_thread.start()
                 deadline = time.monotonic() + 5
                 waiting_on_a2 = False
+                blocker_pid = one(blocker_cur, "select pg_backend_pid()")[0]
                 while time.monotonic() < deadline:
                     with RAW_LOCK:
                         peer_pid = blocked_pids[0] if blocked_pids else None
                     if peer_pid is not None:
-                        waiting_on_a2 = bool(one(blocker_cur, """select coalesce((select
-                          wait_event_type='Lock' and wait_event='advisory'
-                          from pg_stat_activity where pid=%s),false)""", (peer_pid,))[0])
+                        waiting_on_a2 = bool(one(blocker_cur,
+                            "select %s=any(pg_blocking_pids(%s))",
+                            (blocker_pid, peer_pid))[0])
                         if waiting_on_a2:
                             break
                     time.sleep(0.05)
                 time.sleep(2.1)
-                renewal_during_block = call(blocker_cur,
-                    "ops.renew_canonical_ownership_lease", (
-                        lease["lease_id"], lease["lease_token"],
-                        lease["fencing_generation"], 900,
-                    ))
+                renewal_during_block = one(blocker_cur,
+                    "select ops.canonical_ownership_lifecycle(%s)", (Jsonb({
+                        "operation": "renew", "idempotency_key": str(uuid.uuid4()),
+                        "lease_id": str(lease["lease_id"]),
+                        "lease_token": str(lease["lease_token"]),
+                        "fencing_generation": lease["fencing_generation"],
+                        "ttl_seconds": 900,
+                    }),))[0]
                 blocker.commit()
             blocked_thread.join(timeout=15)
             check("A3a waits behind canonical A2 authority before lease-table SHARE",
@@ -1036,19 +1159,21 @@ def main() -> int:
                 "ASSURANCE_INPUT_INVALID", "assurance.token_nondisclosure")
             foreign_input = copy.deepcopy(compiler_input)
             foreign_input["assurance_slice"]["outcome"] = str(foreign_token)
-            refusal("foreign minted token refuses in manifest", record_manifest(
-                cur, lease, "post_commit", foreign_input, post_manifest,
+            normalize_contract(foreign_input["assurance_slice"])
+            foreign_manifest = compile_canonical(foreign_input)
+            refusal("foreign registered token refuses in manifest", record_manifest(
+                cur, lease, "post_commit", foreign_input, foreign_manifest,
                 rules, coord, uuid.uuid4()),
                 "ASSURANCE_INPUT_INVALID", "assurance.token_nondisclosure")
             unsupported_input = copy.deepcopy(compiler_input)
             unsupported_input["assurance_slice"]["reviewer_policy"]["minimum_independent_reviewers"] = 2
             normalize_contract(unsupported_input["assurance_slice"])
             unsupported = compile_canonical(unsupported_input)
-            refusal("contract mutation refuses against the pinned A2 ownership digest",
+            refusal("unsupported reviewer policy reaches the manifest policy refusal",
                 record_manifest(cur, lease, "post_commit", unsupported_input, unsupported,
                                 rules, coord, uuid.uuid4()),
-                "ASSURANCE_DIGEST_MISMATCH",
-                "compiler_input.assurance_slice.ownership_contract_digest")
+                "REVIEWER_POLICY_UNSUPPORTED",
+                "manifest.slice.reviewer_policy")
             bad_hash = copy.deepcopy(post_manifest); bad_hash["manifest_hash"] = "sha256:" + "0" * 64
             refusal("manifest output forgery is causal", record_manifest(
                 cur, lease, "post_commit", compiler_input, bad_hash, rules, coord, uuid.uuid4()),
@@ -1060,21 +1185,21 @@ def main() -> int:
                     "FENCING_GENERATION_STALE", "lease.fencing_generation")
             check("lease token is never returned", str(lease["lease_token"]) not in safe(post) and str(lease["lease_token"]) not in safe(stale))
 
-            current = call(cur, "ops.assurance_manifest_currentness", (
+            current = issuer_call("ops.assurance_manifest_currentness", (
                 post_id, "post_commit", "a" * 40, "b" * 40,
                 rules["snapshot_digest"], coord["snapshot_digest"], lease["lease_token"],
             ))
             check("exact post-commit currentness is non-authorizing", current.get("ok") is True and current.get("authorizes_action") is False)
-            refusal("stage mismatch refuses", call(cur, "ops.assurance_manifest_currentness", (
+            refusal("stage mismatch refuses", issuer_call("ops.assurance_manifest_currentness", (
                 post_id, "push", "a" * 40, "b" * 40, rules["snapshot_digest"], coord["snapshot_digest"], lease["lease_token"],
             )), "ASSURANCE_STAGE_MISMATCH", "manifest.repository_stage")
-            refusal("resulting commit makes old manifest stale", call(cur, "ops.assurance_manifest_currentness", (
+            refusal("resulting commit makes old manifest stale", issuer_call("ops.assurance_manifest_currentness", (
                 post_id, "post_commit", "c" * 40, "b" * 40, rules["snapshot_digest"], coord["snapshot_digest"], lease["lease_token"],
             )), "ASSURANCE_BINDING_STALE", "manifest.repository")
-            refusal("rule snapshot drift refuses", call(cur, "ops.assurance_manifest_currentness", (
+            refusal("rule snapshot drift refuses", issuer_call("ops.assurance_manifest_currentness", (
                 post_id, "post_commit", "a" * 40, "b" * 40, "sha256:" + "f" * 64, coord["snapshot_digest"], lease["lease_token"],
             )), "ASSURANCE_RULE_SNAPSHOT_STALE", "manifest.applicable_rule_snapshot_digest")
-            refusal("coordination snapshot drift refuses", call(cur, "ops.assurance_manifest_currentness", (
+            refusal("coordination snapshot drift refuses", issuer_call("ops.assurance_manifest_currentness", (
                 post_id, "post_commit", "a" * 40, "b" * 40, rules["snapshot_digest"], "sha256:" + "f" * 64, lease["lease_token"],
             )), "ASSURANCE_COORDINATION_SNAPSHOT_STALE", "manifest.coordination_snapshot_digest")
             currentness_args = [
@@ -1090,7 +1215,7 @@ def main() -> int:
                     token_args[field_index] = spelling
                     refusal(
                         f"currentness {field_name} token spelling {ordinal + 1} refuses",
-                        call(cur, "ops.assurance_manifest_currentness", (
+                        issuer_call("ops.assurance_manifest_currentness", (
                             post_id, *token_args, lease["lease_token"],
                         )), "ASSURANCE_INPUT_INVALID", "assurance.token_nondisclosure")
 
@@ -1099,6 +1224,7 @@ def main() -> int:
             # token rather than reading a race-prone snapshot.
             conn.commit()
             minted_token = uuid.uuid4()
+            manual_release_id = uuid.uuid4()
             SECRET_TOKENS.update(token_spellings(minted_token))
             mint_results: list[dict] = []
             mint_errors: list[BaseException] = []
@@ -1118,15 +1244,14 @@ def main() -> int:
                     clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour',
                     clock_timestamp()-interval '1 hour',clock_timestamp(),clock_timestamp()
                   from ops.canonical_ownership_lease where id=%s""", (
-                    uuid.uuid4(), tenant + ":foreign-token-mint", minted_token,
+                    manual_release_id, tenant + ":foreign-token-mint", minted_token,
                     lease["lease_id"],
                 ))
 
                 def currentness_during_mint() -> None:
                     try:
-                        with psycopg.connect(dsn) as race_conn, race_conn.cursor() as race_cur:
-                            setup_codex = lambda c: set_context(c, tenant, "codex", session, host)
-                            setup_codex(race_cur)
+                        with psycopg.connect(dsn, user="carr_ownership_issuer_g1") as race_conn, race_conn.cursor() as race_cur:
+                            issuer_manifest_context(race_cur)
                             mint_results.append(call(
                                 race_cur, "ops.assurance_manifest_currentness", (
                                     post_id, str(minted_token), "a" * 40, "b" * 40,
@@ -1189,11 +1314,15 @@ def main() -> int:
                 expired_manifest, rules, expired_coord, uuid.uuid4())
             expired_id = manifest_id(expired_row)
             wait_out_snapshot(cur, expired_coord)
-            renewed = call(cur, "ops.renew_canonical_ownership_lease", (
-                lease["lease_id"], lease["lease_token"], lease["fencing_generation"], 900,
-            ))
+            renewed = issuer_lifecycle({
+                "operation": "renew", "idempotency_key": str(uuid.uuid4()),
+                "lease_id": str(lease["lease_id"]),
+                "lease_token": str(lease["lease_token"]),
+                "fencing_generation": lease["fencing_generation"],
+                "ttl_seconds": 900,
+            })
             check("A2 lease renews after manifest snapshot", renewed.get("ok") is True)
-            refusal("expired snapshot refuses despite renewed A2 lease", call(cur, "ops.assurance_manifest_currentness", (
+            refusal("expired snapshot refuses despite renewed A2 lease", issuer_call("ops.assurance_manifest_currentness", (
                 expired_id, "write", "1" * 40, "b" * 40, rules["snapshot_digest"], expired_coord["snapshot_digest"], lease["lease_token"],
             )), "ASSURANCE_SNAPSHOT_EXPIRED", "manifest.snapshot_valid_until")
             non_post_manifest_ids = {"write": expired_id}
@@ -1207,6 +1336,81 @@ def main() -> int:
                     cur, lease, non_post_stage, stage_input, stage_manifest,
                     rules, stage_coord, uuid.uuid4())
                 non_post_manifest_ids[non_post_stage] = manifest_id(stage_row)
+
+            # Every positive manifest must be admitted while the issuer runtime
+            # and A2 lease are live.  0532a releases both before the terminal
+            # receipt, so review-stage manifests are immutable pre-terminal facts.
+            one(cur, "select pg_sleep(1.1)")
+            review_coord = make_coord(cur, lease, session, host, seconds=240)
+            review_input, review_manifest = compile_input(
+                cur, lease, plan, rules, review_coord, session, host, commit="a" * 40,
+                evidence_requirements=contract_evidence_requirements)
+            review_row = record_manifest(cur, lease, "review", review_input,
+                review_manifest, rules, review_coord, uuid.uuid4())
+            review_manifest_id = manifest_id(review_row)
+            one(cur, "select pg_sleep(1.1)")
+            owner_only_coord = make_coord(cur, lease, session, host, seconds=220)
+            owner_only_input, owner_only_manifest = compile_input(
+                cur, lease, plan, rules, owner_only_coord, session, host,
+                evidence_requirements=contract_evidence_requirements)
+            owner_only_row = record_manifest(cur, lease, "review", owner_only_input,
+                owner_only_manifest, rules, owner_only_coord, uuid.uuid4())
+            owner_only_manifest_id = manifest_id(owner_only_row)
+
+            cur.execute("""insert into ops.canonical_ownership_claim(
+              lease_id,organization_tenant_id,claim_kind,claim_value,claim_mode,operation)
+              values(%s,%s,'resource','resource:a3a-unexpected','resource','claim')""",
+                (lease["lease_id"], tenant))
+            refusal("activated unregistered resource claim makes compiler scope stale", call(
+                cur, "ops.assurance_validate_compiler_input", (
+                    lease["lease_id"], Jsonb(compiler_input), Jsonb(post_manifest),
+                )), "ASSURANCE_BINDING_STALE", "compiler_input.assurance_slice.scope")
+
+            # The append records start only after the exact 0532a transition.
+            # Their evidence timestamp is captured before release and must not
+            # extend the old live authority window.
+            terminal_evidence_time = one(
+                cur, "select date_trunc('second',clock_timestamp())")[0]
+            cc.set_jobs(cur)
+            receipt_id = cc.receipt(cur, fixture, claim, "claimed_complete")
+            cc.reset_role(cur)
+            a2.insert_review(cur, fixture, receipt_id)
+            released_at = one(cur, "select released_at from ops.canonical_ownership_lease where id=%s",
+                              (lease["lease_id"],))[0]
+            check("0532a releases the A2 lease before terminal assurance append",
+                  released_at is not None and terminal_evidence_time <= released_at)
+            conn.commit()
+            refusal("post-terminal manifest creation is refused", record_manifest(
+                cur, lease, "post_commit", compiler_input, post_manifest, rules, coord,
+                uuid.uuid4()), "IDENTITY_CONTEXT_INVALID", "identity_context")
+            forged_terminal = one(cur, "select ops.assurance_terminal_evidence_lineage_current(%s,%s,clock_timestamp(),%s,%s)",
+                (lease["lease_id"], dependency_receipt_id, lease["lease_token"],
+                 lease["fencing_generation"]))[0]
+            refusal("forged terminal receipt cannot authorize assurance append", forged_terminal,
+                    "ASSURANCE_BINDING_STALE", "lease.terminal_lineage")
+            manual_terminal = one(cur, "select ops.assurance_terminal_receipt_lineage_current(%s,%s,clock_timestamp())",
+                (manual_release_id, receipt_id))[0]
+            refusal("manual release cannot masquerade as the 0532a transition", manual_terminal,
+                    "ASSURANCE_BINDING_STALE", "lease.terminal_lineage")
+            expired_terminal_id = uuid.uuid4()
+            cur.execute("""insert into ops.canonical_ownership_lease(
+              id,organization_tenant_id,holder_actor_id,holder_actor_slug,holder_session_ref,
+              holder_host_ref,lease_token,fencing_generation,work_request_id,work_request_version,
+              work_request_digest,accepted_plan_id,accepted_plan_digest,slice_plan_id,slice_plan_digest,
+              slice_ref,subject_envelope_id,contract_digest,state,acquired_at,expires_at,released_at,
+              created_at,updated_at)
+              select %s,organization_tenant_id,holder_actor_id,holder_actor_slug,holder_session_ref,
+                holder_host_ref,%s,nextval('ops.canonical_ownership_fencing_generation'),work_request_id,
+                work_request_version,work_request_digest,accepted_plan_id,accepted_plan_digest,slice_plan_id,
+                slice_plan_digest,slice_ref,subject_envelope_id,contract_digest,'expired',
+                clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour',null,
+                clock_timestamp(),clock_timestamp() from ops.canonical_ownership_lease where id=%s""",
+                (expired_terminal_id, uuid.uuid4(), lease["lease_id"]))
+            expired_terminal = one(cur, "select ops.assurance_append_lineage_current(%s,%s,clock_timestamp(),%s,%s)",
+                (expired_terminal_id, receipt_id, lease["lease_token"],
+                 lease["fencing_generation"]))[0]
+            refusal("expired lease cannot authorize terminal assurance append", expired_terminal,
+                    "ASSURANCE_BINDING_STALE", "lease.currentness")
 
             # Evidence has one canonical home for each observed field. Requirement
             # coverage points at those homes through pinned JSON pointers.
@@ -1239,9 +1443,6 @@ def main() -> int:
                     },
                     "artifact_refs": [artifact_ref],
                 })
-            reviewer_fact_time = one(cur, """select date_trunc('second',created_at)
-              from ops.engineering_reviewer_fact where receipt_id=%s""",
-              (receipt_id,))[0]
             evidence = {
                 "schema_version": "assurance-evidence.v1",
                 "manifest_hash": post_manifest["manifest_hash"],
@@ -1253,8 +1454,8 @@ def main() -> int:
                 "toolchain": {"runtime": "python3", "runtime_version": "3.12",
                               "database": "postgresql", "database_version": "17"},
                 "output": {"exit_code": 0, "stdout_digest": "sha256:" + "3" * 64, "stderr_digest": "sha256:" + "4" * 64},
-                "timestamps": {"started_at": iso(reviewer_fact_time),
-                               "finished_at": iso(reviewer_fact_time)},
+                "timestamps": {"started_at": iso(terminal_evidence_time),
+                               "finished_at": iso(terminal_evidence_time)},
                 "artifacts": evidence_artifacts,
                 "requirements": evidence_requirements,
                 "fencing_generation": lease["fencing_generation"],
@@ -1280,7 +1481,8 @@ def main() -> int:
                   and all(row.get("ok") is True for row in fresh_evidence_race)
                   and len({row.get("evidence_id") for row in fresh_evidence_race}) == 1
                   and sum(row.get("replayed") is False for row in fresh_evidence_race) == 1
-                  and sum(row.get("replayed") is True for row in fresh_evidence_race) == 1)
+                  and sum(row.get("replayed") is True for row in fresh_evidence_race) == 1,
+                  safe(fresh_evidence_race))
             ev = next(row for row in fresh_evidence_race if row.get("replayed") is False)
             check("one post-commit evidence extension persists", ev.get("ok") is True)
             ev_id = uuid.UUID(str(ev["evidence_id"]))
@@ -1386,7 +1588,7 @@ def main() -> int:
                 )), "ASSURANCE_BINDING_STALE", "evidence.lineage")
             reversed_timestamps = copy.deepcopy(evidence)
             reversed_timestamps["timestamps"]["finished_at"] = iso(
-                reviewer_fact_time - timedelta(seconds=1))
+                terminal_evidence_time - timedelta(seconds=1))
             refusal("reversed evidence timestamps refuse", call(
                 cur, "ops.record_assurance_evidence_extension", (
                     receipt_id, post_id, lease["lease_token"], Jsonb(reversed_timestamps),
@@ -1394,7 +1596,7 @@ def main() -> int:
                 )), "ASSURANCE_INPUT_INVALID", "evidence.timestamps")
             future_timestamps = copy.deepcopy(evidence)
             future_timestamps["timestamps"]["started_at"] = iso(
-                reviewer_fact_time + timedelta(days=1))
+                terminal_evidence_time + timedelta(days=1))
             future_timestamps["timestamps"]["finished_at"] = (
                 future_timestamps["timestamps"]["started_at"])
             refusal("future evidence timestamps refuse", call(
@@ -1406,7 +1608,7 @@ def main() -> int:
                 cur, "ops.record_assurance_evidence_extension", (
                     dependency_receipt_id, post_id, lease["lease_token"], Jsonb(evidence),
                     evidence_digest, uuid.uuid4(),
-                )), "ASSURANCE_BINDING_STALE", "evidence.lineage")
+                )), "ASSURANCE_BINDING_STALE", "lease.terminal_lineage")
             for ordinal, spelling in enumerate(sorted(token_spellings(lease["lease_token"]))):
                 token_evidence = copy.deepcopy(evidence)
                 token_evidence["toolchain"]["runtime_version"] = spelling
@@ -1501,14 +1703,6 @@ def main() -> int:
                         digest(typed_evidence), uuid.uuid4(),
                     )), "ASSURANCE_INPUT_INVALID", "evidence")
 
-            one(cur, "select pg_sleep(1.1)")
-            review_coord = make_coord(cur, lease, session, host, seconds=240)
-            review_input, review_manifest = compile_input(
-                cur, lease, plan, rules, review_coord, session, host, commit="a" * 40,
-                evidence_requirements=contract_evidence_requirements)
-            review_row = record_manifest(cur, lease, "review", review_input,
-                review_manifest, rules, review_coord, uuid.uuid4())
-            review_manifest_id = manifest_id(review_row)
             refusal("non-post-commit review evidence refuses", call(
                 cur, "ops.record_assurance_evidence_extension", (
                     receipt_id, review_manifest_id, lease["lease_token"], Jsonb(evidence),
@@ -1683,14 +1877,6 @@ def main() -> int:
         # carr_authority_joe as session_user; no production role is created.
         with conn.cursor() as cur:
             set_context(cur, tenant, "codex", session, host)
-            one(cur, "select pg_sleep(1.1)")
-            owner_only_coord = make_coord(cur, lease, session, host, seconds=220)
-            owner_only_input, owner_only_manifest = compile_input(
-                cur, lease, plan, rules, owner_only_coord, session, host,
-                evidence_requirements=contract_evidence_requirements)
-            owner_only_row = record_manifest(cur, lease, "review", owner_only_input,
-                owner_only_manifest, rules, owner_only_coord, uuid.uuid4())
-            owner_only_manifest_id = manifest_id(owner_only_row)
             owner_role = one(cur, "select current_user")[0]
             cur.execute("savepoint non_owner_authority")
             try:
@@ -1848,48 +2034,6 @@ def main() -> int:
         conn.commit()
 
         setup_codex = lambda cur: set_context(cur, tenant, "codex", session, host)
-        with conn.cursor() as cur:
-            setup_codex(cur)
-            race_coord = make_coord(cur, lease, session, host, seconds=180)
-            race_input, race_manifest = compile_input(
-                cur, lease, plan, rules, race_coord, session, host,
-                evidence_requirements=contract_evidence_requirements)
-            race_key = uuid.uuid4()
-        conn.commit()
-        manifest_race = race_calls(dsn, [setup_codex, setup_codex],
-            "ops.record_assurance_execution_manifest", (
-                lease["lease_id"], lease["lease_token"], lease["fencing_generation"],
-                "push", Jsonb(race_input), Jsonb(race_manifest),
-                Jsonb(rules), Jsonb(race_coord), race_key))
-        check("manifest two-connection exact replay is serialized",
-              len(manifest_race) == 2
-              and all(row.get("ok") is True for row in manifest_race)
-              and len({row.get("manifest_id") for row in manifest_race}) == 1
-              and sum(row.get("replayed") is False for row in manifest_race) == 1
-              and sum(row.get("replayed") is True for row in manifest_race) == 1)
-        with conn.cursor() as cur:
-            setup_codex(cur)
-            one(cur, "select pg_sleep(1.1)")
-            conflict_coord = make_coord(cur, lease, session, host, seconds=180)
-            conflict_input, conflict_manifest = compile_input(
-                cur, lease, plan, rules, conflict_coord, session, host,
-                evidence_requirements=contract_evidence_requirements)
-            conflict_key = uuid.uuid4()
-        conn.commit()
-        manifest_conflict = race_arg_calls(dsn, [setup_codex, setup_codex],
-            "ops.record_assurance_execution_manifest", [
-                (lease["lease_id"], lease["lease_token"], lease["fencing_generation"],
-                 "push", Jsonb(conflict_input), Jsonb(conflict_manifest),
-                 Jsonb(rules), Jsonb(conflict_coord), conflict_key),
-                (lease["lease_id"], lease["lease_token"], lease["fencing_generation"],
-                 "review", Jsonb(conflict_input), Jsonb(conflict_manifest),
-                 Jsonb(rules), Jsonb(conflict_coord), conflict_key),
-            ])
-        check("manifest conflicting fresh insert race is atomic",
-              len(manifest_conflict) == 2
-              and sum(row.get("ok") is True for row in manifest_conflict) == 1
-              and sum(row.get("refusal", {}).get("code") == "IDEMPOTENCY_CONFLICT"
-                      for row in manifest_conflict) == 1)
         evidence_race = race_calls(dsn, [setup_codex, setup_codex],
             "ops.record_assurance_evidence_extension", (
                 receipt_id, post_id, lease["lease_token"], Jsonb(evidence),
@@ -1935,58 +2079,17 @@ def main() -> int:
                       for row in owner_conflict) == 1)
 
         with conn.cursor() as cur:
-            setup_codex(cur)
-            released = call(cur, "ops.release_canonical_ownership_lease", (
-                lease["lease_id"], lease["lease_token"], lease["fencing_generation"],
-            ))
-            check("A2 lease releases after all positive persistence", released.get("ok") is True)
-        conn.commit()
-        with conn.cursor() as cur:
-            setup_review(cur)
-            refusal("backdated review cannot authorize after lease release", call(
-                cur, "ops.record_assurance_review_extension", (
-                    reviewer_fact_id, review_manifest_id, ev_id, Jsonb(review),
-                    review_digest, uuid.uuid4(),
-                )), "ASSURANCE_BINDING_STALE", "lease.currentness")
-        conn.commit()
-        with conn.cursor() as cur:
-            setup_owner(cur)
-            refusal("backdated owner fact cannot authorize after lease release", call(
-                cur, "ops.record_assurance_owner_acceptance", (
-                    review_manifest_id, ev_id, "accept", Jsonb(acceptance),
-                    digest(acceptance), uuid.uuid4(),
-                )), "ASSURANCE_BINDING_STALE", "lease.currentness")
-            cur.execute("reset role")
-            cur.execute("reset session authorization")
-        conn.commit()
-
-        with conn.cursor() as cur:
-            setup_codex(cur)
-            policy_contract_digest = ownership_contract_digest(
-                cur, plan, rules, session, host, subject_ref, path_claims,
-                dependencies, minimum_independent_reviewers=2)
-            policy_lease = a2.acquire(
-                cur, bound, paths=path_claims, dependencies=dependencies,
-                contract=policy_contract_digest)
-            if policy_lease.get("ok") is not True:
-                raise RuntimeError(
-                    f"reviewer-policy lease fixture failed: {safe(policy_lease)}")
-            policy_lease["slice_ref"] = subject_ref
-            SECRET_TOKENS.update(token_spellings(policy_lease["lease_token"]))
-            policy_coord = make_coord(cur, policy_lease, session, host)
-            policy_input, policy_manifest = compile_input(
-                cur, policy_lease, plan, rules, policy_coord, session, host,
-                minimum_independent_reviewers=2)
-            refusal("minimum two reviewers reaches the causal policy refusal", record_manifest(
-                cur, policy_lease, "post_commit", policy_input, policy_manifest,
-                rules, policy_coord, uuid.uuid4()),
-                "REVIEWER_POLICY_UNSUPPORTED",
-                "manifest.slice.reviewer_policy")
-            policy_release = call(cur, "ops.release_canonical_ownership_lease", (
-                policy_lease["lease_id"], policy_lease["lease_token"],
-                policy_lease["fencing_generation"],
-            ))
-            check("reviewer-policy fixture lease releases", policy_release.get("ok") is True)
+            cur.execute("""update ops.job_attempt set lease_token=%s
+              where id=(select job_attempt_id from ops.engineering_slice_receipt where id=%s)""",
+                (uuid.uuid4(), receipt_id))
+            attempt_hash_mismatch = one(cur, """select
+              ops.assurance_terminal_evidence_lineage_current(
+                %s,%s,clock_timestamp(),%s,%s)""", (
+                lease["lease_id"], receipt_id, lease["lease_token"],
+                lease["fencing_generation"],))[0]
+            refusal("terminal append refuses a mismatched job-attempt capability hash",
+                    attempt_hash_mismatch, "ASSURANCE_BINDING_STALE",
+                    "lease.terminal_lineage")
         conn.commit()
 
         with conn.cursor() as cur:
@@ -2001,8 +2104,10 @@ def main() -> int:
                       and all(token not in error for error in RAW_ERRORS)
                       for token in SECRET_TOKENS))
             check("owner acceptance cannot satisfy review structurally", one(cur,
-                "select count(*) from ops.assurance_review_extension")[0] == 1 and one(cur,
-                "select count(*) from ops.assurance_owner_acceptance_fact")[0] == 5)
+                "select count(*) from ops.assurance_review_extension")[0]
+                == review_rows_before + 1 and one(cur,
+                "select count(*) from ops.assurance_owner_acceptance_fact")[0]
+                == owner_rows_before + 5)
             check("owner-only manifest has no assurance-review extension", one(cur, """
               select not exists(select 1 from ops.assurance_review_extension
                 where review_manifest_id=%s)""", (owner_only_manifest_id,))[0])
@@ -2060,8 +2165,26 @@ def main() -> int:
                   or p.proname=any(array['record_assurance_execution_manifest',
                     'record_assurance_evidence_extension','record_assurance_review_extension',
                     'record_assurance_owner_acceptance','refuse_assurance_persistence_rewrite']))
-                  and acl.grantee<>p.proowner)""")[0]
-            check("all A3a tables and functions have owner-only ACLs", no_external_acl)
+                  and acl.grantee<>p.proowner
+                  and not (p.oid=any(array[
+                    'ops.record_assurance_execution_manifest(uuid,uuid,bigint,text,jsonb,jsonb,jsonb,jsonb,uuid)'::regprocedure,
+                    'ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)'::regprocedure])
+                    and acl.grantee='carr_ownership_issuer'::regrole))""")[0]
+            check("A3a tables and non-approved functions have owner-only ACLs", no_external_acl)
+            issuer_functions = one(cur, """select coalesce(array_agg(p.oid::regprocedure::text
+              order by p.oid::regprocedure::text),'{}'::text[]) from pg_proc p cross join lateral
+              aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+              join pg_roles role on role.oid=acl.grantee
+              where p.oid=any(array[
+                'ops.record_assurance_execution_manifest(uuid,uuid,bigint,text,jsonb,jsonb,jsonb,jsonb,uuid)'::regprocedure,
+                'ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)'::regprocedure])
+                and acl.privilege_type='EXECUTE'
+                and acl.grantee='carr_ownership_issuer'::regrole""")[0]
+            check("A3a issuer can call only manifest admission and currentness",
+                  issuer_functions == [
+                      "ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)",
+                      "ops.record_assurance_execution_manifest(uuid,uuid,bigint,text,jsonb,jsonb,jsonb,jsonb,uuid)",
+                  ])
             posture_rows = cur.execute("""select
               p.oid::regprocedure::text,p.prosecdef,p.provolatile,
               coalesce(p.proconfig[1],'')
@@ -2075,7 +2198,7 @@ def main() -> int:
                 signature: (security_definer, volatility, config)
                 for signature, security_definer, volatility, config in posture_rows
             }
-            check("exact A3a posture is pinned for all 21 functions",
+            check("exact A3a posture is pinned for all 24 functions",
                   actual_function_posture == EXPECTED_A3A_FUNCTION_POSTURE,
                   f"actual={safe(actual_function_posture)}")
             check("A3a schema fingerprint is invariant across all tests",

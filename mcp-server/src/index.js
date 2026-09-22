@@ -78,7 +78,8 @@
 
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
-import { mcpApiHandler, dispatch } from "./mcp.js";
+import { mcpApiHandler, dispatch, dispatchEngineeringController, canonicalOwnershipExecutionHost } from "./mcp.js";
+import { engineeringControllerActorForToken } from "./authenticated-canonical-ownership.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
 import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
          serveReviewRequest,
@@ -479,6 +480,15 @@ function agentActorFor(request, env) {
   return agentActorForToken(request.headers.get("authorization"), env.AGENT_TOKENS);
 }
 
+// A separate secret map and a separate dispatcher are intentional: this actor
+// cannot reach the ordinary MCP profile, where every non-full profile retains
+// read verbs.  Only the exact four ownership operations below are listable or
+// callable, and their plan/executor authority is re-read in mcp.js.
+function engineeringControllerActorFor(request, env) {
+  return engineeringControllerActorForToken(request.headers.get("authorization"),
+    env.ENGINEERING_CONTROLLER_TOKENS, agentActorForToken);
+}
+
 // ---------- local token (Phase 1, 2026-08-13, decision 97e76a2f) ----------
 //
 // THE DEFECT THIS CLOSES. `run.sh call <verb>` (tools/call-verb.py ->
@@ -662,6 +672,14 @@ async function routeRequest(request, env, ctx) {
     return captureHandler(env).fetch(request, env, ctx);
   }
   if (url.pathname === "/mcp") {
+    const controllerActor = engineeringControllerActorFor(request, env);
+    if (controllerActor) {
+      // This is deploy metadata, never an MCP parameter.  The controller skips
+      // ordinary dispatch(), so attach the same server-derived host binding it
+      // would otherwise receive there before the ownership context is minted.
+      Object.assign(controllerActor, { execution_host_id: canonicalOwnershipExecutionHost(env) });
+      return dispatchEngineeringController(request, env, ctx, controllerActor);
+    }
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
     // THE REVIEW COUNCIL'S DOOR. The bearer is matched inside identity.js and

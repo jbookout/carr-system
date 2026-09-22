@@ -9,7 +9,7 @@
     "chat-lint-gate.py": "58719c566edf8dec52c31de409a0a29e31514fb12c0858fc27057a0311dd2b44",
     "close-before-open-gate.py": "3c5db91e5a73ff7769b9fa69ba428d93e68c651ba0b4c9251238488e61eaf940",
     "cmd_text.py": "27103bb25b3f40024fa370a44418d0ca643e220c6b3fda62b29aadd15634dee2",
-    "completion-evidence-gate.py": "5e53eeaf9ffbd13188b9ee592663040c08cedb9a57e6eed723a0686b62d2f5ac",
+    "completion-evidence-gate.py": "9db0ba936f48d23fe92f06af814417cd770caee846324793983a6493fe5190f5",
     "conduct-stop-gate.py": "773f242567b877d1fac77658c244a7b8b6f39557106eda6cec2ee97f06e49603",
     "conduct_patterns.py": "c101be9bd78fec4449f28a792a79b505c49c5dc676e7065eafdcfd3d4e45efcb",
     "context-handoff-gate.py": "4567490b2ffbf66288d2a998231abb608808d3175e9fccaa182b77df09b94ff7",

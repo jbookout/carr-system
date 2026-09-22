@@ -90,10 +90,31 @@ def main():
           re.search(r"elsif not jobs_can_login", head, re.I) is not None)
 
     generated = re.search(r"cat > \"\$TMP\" <<'ROLES'\n(.*?)\nROLES", generator, re.S)
+    conditional = re.search(
+        r"cat >> \"\$TMP\" <<'CANONICAL_OWNERSHIP_ROLES'\n"
+        r"(?P<body>.*?)\nCANONICAL_OWNERSHIP_ROLES",
+        generator,
+        re.S,
+    )
+    conditional_gate = (
+        'if [ "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" = t ]; then\n'
+        'cat >> "$TMP" <<\'CANONICAL_OWNERSHIP_ROLES\''
+    ) in generator and "filename='0532a_canonical_ownership_lease_activation.sql'" in generator
+    issuer_in_snapshot_ledger = re.search(
+        r"^0532a_canonical_ownership_lease_activation\.sql\t[0-9a-f]{64}\t",
+        sql,
+        re.M,
+    ) is not None
+    expected_preamble = generated.group(1).strip() if generated else None
+    if expected_preamble is not None and issuer_in_snapshot_ledger:
+        expected_preamble = (
+            expected_preamble + "\n\n\n" + conditional.group("body").strip()
+            if conditional and conditional_gate else None
+        )
     preamble_end = sql.find("--\n-- PostgreSQL database dump")
     check("the snapshot generator carries the exact checked-in role preamble",
-          generated is not None and preamble_end > 0
-          and generated.group(1).strip() == sql[:preamble_end].strip())
+          expected_preamble is not None and preamble_end > 0
+          and expected_preamble == sql[:preamble_end].strip())
 
     normalizer = re.search(r"EOF_NORMALIZER='\n(.*?)\n'", generator, re.S)
     if normalizer is None:
