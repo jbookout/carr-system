@@ -70,6 +70,7 @@ import {
   REGISTRY_V37_VERSION,
   REGISTRY_V38_VERSION,
   REGISTRY_V39_VERSION,
+  REGISTRY_V40_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -2743,14 +2744,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V39_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V40_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 45);
+  assert.equal(migrations.length, 46);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 36);
-  assert.equal(paths.length, 81);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 37);
+  assert.equal(paths.length, 83);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
