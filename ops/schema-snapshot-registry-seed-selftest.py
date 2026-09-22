@@ -76,6 +76,9 @@ RUNTIME_V38 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v38.generat
 RUNTIME_V39 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v39.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V40 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v40.generated.js").read_text(
+    encoding="utf-8"
+)
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -107,7 +110,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 40)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 41)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -194,6 +197,12 @@ assert "SCAC_VERSION_COUNT=38" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=37" in GENERATOR
 assert "ops.scac_mutation_catalog_v38_current()" in GENERATOR
 assert "0541_release_readiness_scac_successor.sql" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=40" in GENERATOR
+assert "SCAC_VERSION_COUNT=40" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=39" in GENERATOR
+assert "ops.scac_mutation_catalog_v40_current()" in GENERATOR
+assert "0545_release_readiness_hotfix_scac_successor.sql" in GENERATOR
+assert "0543_model_role_store_scac_successor.sql" in GENERATOR
 # The Model Room pair advances the live registry and keeps the release seal.
 assert "MODEL_ROLE_REGISTRY_APPLIED" in GENERATOR
 assert "MODEL_ROLE_STORE_APPLIED" in GENERATOR
@@ -367,23 +376,23 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "38", "39"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "39", "40"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 38
-assert loaded_sql.count("sha256:") == 38
-assert FULL_SET_SEALS["scac-mutation-registry.v38"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 39
+assert loaded_sql.count("sha256:") == 39
+assert FULL_SET_SEALS["scac-mutation-registry.v39"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
-# NEGATIVE HALF. The positive above shows the loader renders all 37 sealed rows; it
+# NEGATIVE HALF. The positive above shows the loader renders all 39 sealed rows; it
 # says nothing about whether a tampered seal file would be caught. These three
 # feed the loader deliberately broken input and require a nonzero exit, so a
 # seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
-def loader_rejects(seals: dict, count: str, current: str = "38") -> bool:
+def loader_rejects(seals: dict, count: str, current: str = "40") -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(seals, handle)
         path = handle.name
@@ -408,7 +417,7 @@ def runtime_seal(source: str, name: str) -> str:
     return match.group(1)
 
 
-runtime_seals = {name: runtime_seal(RUNTIME_V39, name) for name in (
+runtime_seals = {name: runtime_seal(RUNTIME_V40, name) for name in (
     "SCAC_MUTATION_REGISTRY_DIGEST",
     "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
     "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",
@@ -421,7 +430,7 @@ validation_env = {
     "SCAC_EXPECTED_CURRENT_DIGEST": runtime_seals["SCAC_MUTATION_REGISTRY_DIGEST"],
     "SCAC_EXPECTED_CURRENT_SOURCE_SET": runtime_seals["SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST"],
     "SCAC_EXPECTED_CURRENT_CATALOG": runtime_seals["SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST"],
-    "SCAC_CURRENT_NUMBER": "39",
+    "SCAC_CURRENT_NUMBER": "40",
 }
 subprocess.run(["sh", "-c", validation], check=True, env=validation_env)
 

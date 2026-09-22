@@ -202,11 +202,27 @@ else
   [ -n "$URL" ] || { echo "schema-snapshot: could not obtain the production connection string" >&2; exit 1; }
 fi
 
+# libpq service files keep credentials out of process arguments.  The URL is
+# passed to the converter only on stdin, then unset before any database client
+# starts.  The generated file has owner-only permissions and is removed on exit.
+SERVICE_FILE="$(mktemp)"
+PASSFILE="$(mktemp)"
+trap 'rm -f "$SERVICE_FILE" "$PASSFILE"' 0
+SNAPSHOT_PY="$REPO/.venv/bin/python"
+[ -x "$SNAPSHOT_PY" ] || SNAPSHOT_PY=python3
+if ! printf '%s' "$URL" | "$SNAPSHOT_PY" "$REPO/ops/schema-snapshot-connection.py" --write-service "$SERVICE_FILE" --write-passfile "$PASSFILE"; then
+  rm -f "$SERVICE_FILE" "$PASSFILE"
+  echo "schema-snapshot: could not prepare the private database connection" >&2
+  exit 1
+fi
+unset URL
+export PGSERVICE=schema_snapshot PGSERVICEFILE="$SERVICE_FILE" PGPASSFILE="$PASSFILE"
+
 # Some bounded build seeds belong only to schema that has actually entered the
 # source ledger.  A production-truth snapshot taken immediately before that
 # migration must leave the seed pending with the migration; embedding it early
 # makes the pending migration fail on its own primary key.
-RENEWAL_SOURCE_APPLIED="$("$PSQL" "$URL" -Atqc \
+RENEWAL_SOURCE_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0230_renewal_decision_delivery.sql')" \
   2>/dev/null)"
 case "$RENEWAL_SOURCE_APPLIED" in
@@ -214,7 +230,7 @@ case "$RENEWAL_SOURCE_APPLIED" in
   *) echo "schema-snapshot: could not read the renewal-delivery ledger state" >&2; exit 1 ;;
 esac
 
-RULE_DELIVERY_APPLIED="$("$PSQL" "$URL" -Atqc \
+RULE_DELIVERY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0291_rule_delivery_layers.sql')" \
   2>/dev/null)"
 case "$RULE_DELIVERY_APPLIED" in
@@ -222,7 +238,7 @@ case "$RULE_DELIVERY_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery ledger state" >&2; exit 1 ;;
 esac
 
-CANONICAL_OWNERSHIP_ACTIVATION_APPLIED="$("$PSQL" "$URL" -Atqc \
+CANONICAL_OWNERSHIP_ACTIVATION_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql')" \
   2>/dev/null)"
 case "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" in
@@ -230,7 +246,7 @@ case "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" in
   *) echo "schema-snapshot: could not read the canonical-ownership activation ledger state" >&2; exit 1 ;;
 esac
 
-RULE_DELIVERY_CUTOVER_APPLIED="$("$PSQL" "$URL" -Atqc \
+RULE_DELIVERY_CUTOVER_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0317_atomic_rule_delivery_cutover.sql')" \
   2>/dev/null)"
 case "$RULE_DELIVERY_CUTOVER_APPLIED" in
@@ -238,7 +254,7 @@ case "$RULE_DELIVERY_CUTOVER_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery cutover ledger state" >&2; exit 1 ;;
 esac
 
-RULE_DELIVERY_REFRESH_APPLIED="$("$PSQL" "$URL" -Atqc \
+RULE_DELIVERY_REFRESH_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0332_refresh_rule_delivery_activation_preimage.sql')" \
   2>/dev/null)"
 case "$RULE_DELIVERY_REFRESH_APPLIED" in
@@ -246,7 +262,7 @@ case "$RULE_DELIVERY_REFRESH_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery refresh ledger state" >&2; exit 1 ;;
 esac
 
-RULE_DELIVERY_RULESET_CONTROL_APPLIED="$("$PSQL" "$URL" -Atqc \
+RULE_DELIVERY_RULESET_CONTROL_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0348_pr_only_main_ruleset_control.sql')" \
   2>/dev/null)"
 case "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" in
@@ -254,7 +270,7 @@ case "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery ruleset-control ledger state" >&2; exit 1 ;;
 esac
 
-RULE_DELIVERY_DIGEST_REPIN_APPLIED="$("$PSQL" "$URL" -Atqc \
+RULE_DELIVERY_DIGEST_REPIN_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0363_rule_delivery_activation_digest_repin.sql')" \
   2>/dev/null)"
 case "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" in
@@ -262,7 +278,7 @@ case "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery digest-repin ledger state" >&2; exit 1 ;;
 esac
 
-SOURCE_MERGE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+SOURCE_MERGE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0471_source_merge_catalog_registry_successor.sql')" \
   2>/dev/null)"
 case "$SOURCE_MERGE_REGISTRY_APPLIED" in
@@ -270,7 +286,7 @@ case "$SOURCE_MERGE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the source-merge registry ledger state" >&2; exit 1 ;;
 esac
 
-CODEX_CONTINUITY_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CODEX_CONTINUITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0481_codex_continuity_registry_activation.sql')" \
   2>/dev/null)"
 case "$CODEX_CONTINUITY_REGISTRY_APPLIED" in
@@ -278,7 +294,7 @@ case "$CODEX_CONTINUITY_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Codex continuity registry ledger state" >&2; exit 1 ;;
 esac
 
-CLAUDE_CONTINUITY_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CLAUDE_CONTINUITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0486_claude_continuity_registry_activation.sql')" \
   2>/dev/null)"
 case "$CLAUDE_CONTINUITY_REGISTRY_APPLIED" in
@@ -286,7 +302,7 @@ case "$CLAUDE_CONTINUITY_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Claude continuity registry ledger state" >&2; exit 1 ;;
 esac
 
-CLAUDE_STARTUP_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CLAUDE_STARTUP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0487_claude_startup_registry_activation.sql')" \
   2>/dev/null)"
 case "$CLAUDE_STARTUP_REGISTRY_APPLIED" in
@@ -294,7 +310,7 @@ case "$CLAUDE_STARTUP_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Claude startup registry ledger state" >&2; exit 1 ;;
 esac
 
-CLAUDE_ACTOR_HYDRATION_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CLAUDE_ACTOR_HYDRATION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0488_claude_actor_hydration_registry_activation.sql')" \
   2>/dev/null)"
 case "$CLAUDE_ACTOR_HYDRATION_REGISTRY_APPLIED" in
@@ -302,7 +318,7 @@ case "$CLAUDE_ACTOR_HYDRATION_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Claude actor hydration registry ledger state" >&2; exit 1 ;;
 esac
 
-CLAUDE_CONFIG_PRESERVATION_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CLAUDE_CONFIG_PRESERVATION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0489_claude_config_preservation_registry_activation.sql')" \
   2>/dev/null)"
 case "$CLAUDE_CONFIG_PRESERVATION_REGISTRY_APPLIED" in
@@ -310,7 +326,7 @@ case "$CLAUDE_CONFIG_PRESERVATION_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Claude config-preservation registry ledger state" >&2; exit 1 ;;
 esac
 
-CODEX_COMPACTION_CHECKPOINT_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CODEX_COMPACTION_CHECKPOINT_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0490_codex_compaction_checkpoint_registry_activation.sql')" \
   2>/dev/null)"
 case "$CODEX_COMPACTION_CHECKPOINT_REGISTRY_APPLIED" in
@@ -318,7 +334,7 @@ case "$CODEX_COMPACTION_CHECKPOINT_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Codex compaction-checkpoint registry ledger state" >&2; exit 1 ;;
 esac
 
-BACKUP_GUARD_STATUS_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+BACKUP_GUARD_STATUS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0491_backup_guard_status_registry_activation.sql')" \
   2>/dev/null)"
 case "$BACKUP_GUARD_STATUS_REGISTRY_APPLIED" in
@@ -326,7 +342,7 @@ case "$BACKUP_GUARD_STATUS_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the backup guard/status registry ledger state" >&2; exit 1 ;;
 esac
 
-SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0492_sourced_shape_forward_correction_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED" in
@@ -334,7 +350,7 @@ case "$SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the sourced shape forward-correction registry ledger state" >&2; exit 1 ;;
 esac
 
-INCIDENT_WORK_REQUEST_LINK_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+INCIDENT_WORK_REQUEST_LINK_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0493_incident_work_request_link_scac_successor.sql')" \
   2>/dev/null)"
 case "$INCIDENT_WORK_REQUEST_LINK_REGISTRY_APPLIED" in
@@ -342,7 +358,7 @@ case "$INCIDENT_WORK_REQUEST_LINK_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the incident/work-request registry ledger state" >&2; exit 1 ;;
 esac
 
-CONTINUITY_ARCHIVE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+CONTINUITY_ARCHIVE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0494_codex_continuity_archive_registry.sql')" \
   2>/dev/null)"
 case "$CONTINUITY_ARCHIVE_REGISTRY_APPLIED" in
@@ -350,7 +366,7 @@ case "$CONTINUITY_ARCHIVE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the continuity-archive registry ledger state" >&2; exit 1 ;;
 esac
 
-R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0495_r06_hooks_correctness_scac_successor.sql')" \
   2>/dev/null)"
 case "$R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED" in
@@ -358,7 +374,7 @@ case "$R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the R06 hooks-correctness registry ledger state" >&2; exit 1 ;;
 esac
 
-DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED" in
@@ -366,7 +382,7 @@ case "$DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the DoctorCRE portfolio registry ledger state" >&2; exit 1 ;;
 esac
 
-R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0497_r07_repo_hygiene_janitor_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED" in
@@ -374,7 +390,7 @@ case "$R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the R07 repo-hygiene janitor registry ledger state" >&2; exit 1 ;;
 esac
 
-V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0498_f09_workflow_truth_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED" in
@@ -382,7 +398,7 @@ case "$V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the V5-F09 workflow truth registry ledger state" >&2; exit 1 ;;
 esac
 
-V5_SCHEDULED_JOB_ADMISSION_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+V5_SCHEDULED_JOB_ADMISSION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0501_scheduled_job_admission_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$V5_SCHEDULED_JOB_ADMISSION_REGISTRY_APPLIED" in
@@ -390,7 +406,7 @@ case "$V5_SCHEDULED_JOB_ADMISSION_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the V5 scheduled job admission registry ledger state" >&2; exit 1 ;;
 esac
 
-GATE_ZERO_OUTCOME_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+GATE_ZERO_OUTCOME_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0503_gate_zero_outcome_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$GATE_ZERO_OUTCOME_REGISTRY_APPLIED" in
@@ -398,7 +414,7 @@ case "$GATE_ZERO_OUTCOME_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Gate Zero outcome registry ledger state" >&2; exit 1 ;;
 esac
 
-FOUNDATION_ASSURANCE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+FOUNDATION_ASSURANCE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0512_foundation_assurance_scac_successor.sql')" \
   2>/dev/null)"
 case "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" in
@@ -406,7 +422,7 @@ case "$FOUNDATION_ASSURANCE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the foundation-assurance registry ledger state" >&2; exit 1 ;;
 esac
 
-DEAL_FIELD_PROVENANCE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+DEAL_FIELD_PROVENANCE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0516_deal_field_change_provenance_and_scac_successor.sql')" \
   2>/dev/null)"
 case "$DEAL_FIELD_PROVENANCE_REGISTRY_APPLIED" in
@@ -418,7 +434,7 @@ esac
 # group, so probing the SUCCESSOR and not the domain migration is what says
 # the v29 registry surface exists. A snapshot taken between the two would be
 # taken inside a transaction that has not committed, which cannot happen.
-PROGRAM_CONTROLLER_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+PROGRAM_CONTROLLER_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0518_program_controller_seams_scac_successor.sql')" \
   2>/dev/null)"
 case "$PROGRAM_CONTROLLER_REGISTRY_APPLIED" in
@@ -431,7 +447,7 @@ esac
 # domain migrations is what says the v30 registry surface exists. A snapshot
 # taken between them would be taken inside a transaction that has not
 # committed, which cannot happen.
-PRODUCER_TRIO_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+PRODUCER_TRIO_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0522_producer_trio_scac_successor.sql')" \
   2>/dev/null)"
 case "$PRODUCER_TRIO_REGISTRY_APPLIED" in
@@ -443,7 +459,7 @@ esac
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v31 registry surface exists. A snapshot taken between the two would be taken
 # inside a transaction that has not committed, which cannot happen.
-DOC_CONVERSATION_WRITE_DOORS_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+DOC_CONVERSATION_WRITE_DOORS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0524_doc_conversation_write_doors_scac_successor.sql')" \
   2>/dev/null)"
 case "$DOC_CONVERSATION_WRITE_DOORS_REGISTRY_APPLIED" in
@@ -455,7 +471,7 @@ esac
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v32 registry surface exists. A snapshot taken between the two would be taken
 # inside a transaction that has not committed, which cannot happen.
-DOC_CONVERSATION_LIST_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+DOC_CONVERSATION_LIST_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0526_doc_conversation_list_scac_successor.sql')" \
   2>/dev/null)"
 case "$DOC_CONVERSATION_LIST_REGISTRY_APPLIED" in
@@ -467,7 +483,7 @@ esac
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v33 registry surface exists. A snapshot taken between the two would be taken
 # inside a transaction that has not committed, which cannot happen.
-NOTIFICATION_PREFERENCES_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+NOTIFICATION_PREFERENCES_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0528_notification_preferences_scac_successor.sql')" \
   2>/dev/null)"
 case "$NOTIFICATION_PREFERENCES_REGISTRY_APPLIED" in
@@ -479,7 +495,7 @@ esac
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v35 registry surface exists. A snapshot taken between the two would be taken
 # inside a transaction that has not committed, which cannot happen.
-DISPATCH_SPINE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+DISPATCH_SPINE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0532_room_dispatch_spine_scac_successor.sql')" \
   2>/dev/null)"
 case "$DISPATCH_SPINE_REGISTRY_APPLIED" in
@@ -491,14 +507,14 @@ esac
 # v35 predecessor. A snapshot may expose v36 only when the registry successor
 # itself is present; the paired domain migration is checked as a second
 # readback so a partial suffix can never masquerade as a current snapshot.
-WR125_DOMAIN_APPLIED="$("$PSQL" "$URL" -Atqc \
+WR125_DOMAIN_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0532a_canonical_ownership_lease_activation.sql')" \
   2>/dev/null)"
 case "$WR125_DOMAIN_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read the WR125 ownership ledger state" >&2; exit 1 ;;
 esac
-WR125_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+WR125_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0532b_ready_plan_amendment_scac_successor.sql')" \
   2>/dev/null)"
 case "$WR125_REGISTRY_APPLIED" in
@@ -507,35 +523,35 @@ case "$WR125_REGISTRY_APPLIED" in
 esac
 
 # WR-000130. 0539 advances the registry after 0538 assurance binding.
-WR130_ASSURANCE_APPLIED="$("$PSQL" "$URL" -Atqc \
+WR130_ASSURANCE_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0538_canonical_ownership_assurance_binding.sql')" \
   2>/dev/null)"
 case "$WR130_ASSURANCE_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read the WR130 assurance ledger state" >&2; exit 1 ;;
 esac
-WR130_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+WR130_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0539_canonical_ownership_assurance_scac_successor.sql')" \
   2>/dev/null)"
 case "$WR130_REGISTRY_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read the WR130 SCAC ledger state" >&2; exit 1 ;;
 esac
-WR132_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+WR132_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0541_release_readiness_scac_successor.sql')" \
   2>/dev/null)"
 case "$WR132_REGISTRY_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read the WR132 SCAC ledger state" >&2; exit 1 ;;
 esac
-MODEL_ROLE_STORE_APPLIED="$("$PSQL" "$URL" -Atqc \
+MODEL_ROLE_STORE_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0542_model_role_store.sql')" \
   2>/dev/null)"
 case "$MODEL_ROLE_STORE_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read the Model Room role-store ledger state" >&2; exit 1 ;;
 esac
-MODEL_ROLE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+MODEL_ROLE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0543_model_role_store_scac_successor.sql')" \
   2>/dev/null)"
 case "$MODEL_ROLE_REGISTRY_APPLIED" in
@@ -543,11 +559,19 @@ case "$MODEL_ROLE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Model Room SCAC ledger state" >&2; exit 1 ;;
 esac
 
+WR130_HOTFIX_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0545_release_readiness_hotfix_scac_successor.sql')" \
+  2>/dev/null)"
+case "$WR130_HOTFIX_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the WR130 hotfix SCAC ledger state" >&2; exit 1 ;;
+esac
+
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v34 registry surface exists. A snapshot taken between the two would be taken
 # inside a transaction that has not committed, which cannot happen.
-SESSION_IDENTITY_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+SESSION_IDENTITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0530_session_identity_scac_successor.sql')" \
   2>/dev/null)"
 case "$SESSION_IDENTITY_REGISTRY_APPLIED" in
@@ -561,7 +585,7 @@ export PGOPTIONS='-c timezone=UTC'
 
 TMP="$(mktemp)"
 SCHEMA_BODY="$(mktemp)"
-trap 'rm -f "$TMP" "$SCHEMA_BODY"' EXIT
+trap 'rm -f "$TMP" "$SCHEMA_BODY" "$SERVICE_FILE" "$PASSFILE"' 0
 
 # THE ROLE PREAMBLE, first in the file so the roles exist before anything that
 # could reference them. See the header for why this cannot be left to 0115.
@@ -747,7 +771,7 @@ fi
 # POLICY naming that role. A disposable rebuild deliberately does NOT mint this
 # production credential; preserve the migration's original conditional boundary
 # in the portable snapshot instead of making CI depend on a fake login.
-if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" > "$SCHEMA_BODY"; then
+if ! "$PG_DUMP" --schema-only --no-owner --no-acl > "$SCHEMA_BODY"; then
   echo "schema-snapshot: pg_dump failed — nothing written" >&2
   exit 1
 fi
@@ -980,7 +1004,7 @@ cat >> "$TMP" <<'GRANTHDR'
 
 GRANTHDR
 
-if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" -f "$GRANTS_SQL" >> "$TMP"; then
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 -f "$GRANTS_SQL" >> "$TMP"; then
   rm -f "$GRANTS_SQL"
   echo "schema-snapshot: could not read the app-role grants — nothing written" >&2
   exit 1
@@ -1006,7 +1030,7 @@ fi
 # database honestly reports itself up to date and the ONLY thing pending is a
 # genuinely new migration — which is exactly the question worth gating a change
 # on: does this new change apply cleanly to the database we actually have?
-if ! "$PG_DUMP" --data-only --no-owner --no-acl --table=schema_migrations "$URL" >> "$TMP"; then
+if ! "$PG_DUMP" --data-only --no-owner --no-acl --table=schema_migrations >> "$TMP"; then
   echo "schema-snapshot: could not dump the applied-migration ledger — nothing written" >&2
   exit 1
 fi
@@ -1105,7 +1129,7 @@ for t in $VOCAB_TABLES; do
 done
 
 # shellcheck disable=SC2086
-if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS "$URL" >> "$TMP"; then
+if ! "$PG_DUMP" --data-only --no-owner --no-acl $VOCAB_ARGS >> "$TMP"; then
   echo "schema-snapshot: could not dump the reference vocabulary — nothing written" >&2
   exit 1
 fi
@@ -1245,7 +1269,7 @@ VERIFY_TAIL
 # A DO block writes nothing to stdout, so a refusal appends no rows. It runs
 # BEFORE the render below for that reason: render first and a drifted catalog
 # would append half a file before anything raised.
-if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 "$URL" -f "$CONTROL_VERIFY_SQL"
+if ! "$PSQL" -X -q -v ON_ERROR_STOP=1 -f "$CONTROL_VERIFY_SQL"
 then
   rm -f "$CONTROL_VERIFY_SQL"
   echo "schema-snapshot: exact reviewed control catalog is missing or drifted — nothing written" >&2
@@ -1261,7 +1285,7 @@ cat >> "$TMP" <<'CONTROL_CATALOG_HEADER'
 -- never dump arbitrary ops.enforcement_control_catalog rows.
 CONTROL_CATALOG_HEADER
 
-if ! sed -e "s/__DECLARED_KEYS__/$DECLARED_KEYS/g" <<'CONTROL_CATALOG_ROWS' | "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP"
+if ! sed -e "s/__DECLARED_KEYS__/$DECLARED_KEYS/g" <<'CONTROL_CATALOG_ROWS' | "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP"
 select format(
   'insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values (%L,%L,%L,%L,%L,%L::timestamptz,%L::timestamptz) on conflict (control_key) do nothing;',
   control_key,implementation_ref,test_ref,enforcement_class,installed,
@@ -1554,7 +1578,7 @@ DOCTRINE_META
 # column cannot silently rot it. The ref sequence is advanced to production's
 # value so a rebuilt database cannot mint a colliding WR ref. Never widen this
 # to siep_command_receipt, siep_lane_lock, or any other runtime/evidence table.
-SIEP_APPLIED="$("$PSQL" "$URL" -Atqc \
+SIEP_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0324_siep_program_authority.sql')" \
   2>/dev/null)"
 case "$SIEP_APPLIED" in
@@ -1563,12 +1587,12 @@ case "$SIEP_APPLIED" in
 esac
 
 if [ "$SIEP_APPLIED" = t ]; then
-  SIEP_DIGEST="$("$PSQL" "$URL" -Atqc "select ops.siep_manifest_digest()" 2>/dev/null)"
+  SIEP_DIGEST="$("$PSQL" -Atqc "select ops.siep_manifest_digest()" 2>/dev/null)"
   case "$SIEP_DIGEST" in
     sha256:*) ;;
     *) echo "schema-snapshot: SIEP manifest digest unreadable — nothing written" >&2; exit 1 ;;
   esac
-  SIEP_PKG_COUNT="$("$PSQL" "$URL" -Atqc "select count(*) from ops.siep_package_contract" 2>/dev/null)"
+  SIEP_PKG_COUNT="$("$PSQL" -Atqc "select count(*) from ops.siep_package_contract" 2>/dev/null)"
   if [ -z "$SIEP_PKG_COUNT" ] || [ "$SIEP_PKG_COUNT" -lt 40 ]; then
     echo "schema-snapshot: SIEP package set implausibly small ($SIEP_PKG_COUNT) — nothing written" >&2
     exit 1
@@ -1589,7 +1613,7 @@ alter table ops.siep_program_dependency disable trigger siep_program_dependency_
 alter table ops.siep_component_alias disable trigger siep_component_alias_sealed_before_insert;
 SIEP_HEADER
 
-  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'SIEP_ROWS'
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'SIEP_ROWS'
 select format('insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, %L::jsonb) on conflict (id) do nothing;', to_jsonb(w))
   from ops.work_request w
  where exists (select 1 from ops.siep_package_contract c where c.work_request_id = w.id)
@@ -1630,7 +1654,7 @@ fi
 # omitting a ledger-visible successor would leave its exact lookups empty.
 # Carry only the sealed version headers and their exact entry sets. Policy
 # epochs, monitor receipts, token evidence, and other runtime state stay out.
-SCAC_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+SCAC_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0468_siep18_forward_mutation_registry.sql')" \
   2>/dev/null)"
 case "$SCAC_REGISTRY_APPLIED" in
@@ -1639,16 +1663,35 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$MODEL_ROLE_REGISTRY_APPLIED" = t ]; then
+  if [ "$WR130_HOTFIX_REGISTRY_APPLIED" = t ]; then
+    [ "$MODEL_ROLE_REGISTRY_APPLIED" = t ] || {
+      echo "schema-snapshot: WR130 hotfix v40 is applied without v39" >&2
+      exit 1
+    }
+    [ "$WR132_REGISTRY_APPLIED" = t ] && [ "$MODEL_ROLE_STORE_APPLIED" = t ] || {
+      echo "schema-snapshot: WR130 hotfix v40 registry is applied without its v39, v38 and 0542 predecessors" >&2
+      exit 1
+    }
+    SCAC_CURRENT_NUMBER=40
+    SCAC_VERSION_COUNT=40
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v40'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v40'")"
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v40.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37','scac-mutation-registry.v38','scac-mutation-registry.v39','scac-mutation-registry.v40'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37','scac-mutation-registry.v38','scac-mutation-registry.v39'"
+    SCAC_FULL_SET_SEAL_COUNT=39
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v40_current()"
+  elif [ "$MODEL_ROLE_REGISTRY_APPLIED" = t ]; then
     [ "$WR132_REGISTRY_APPLIED" = t ] && [ "$MODEL_ROLE_STORE_APPLIED" = t ] || {
       echo "schema-snapshot: Model Room v39 registry is applied without its v38 and 0542 predecessors" >&2
       exit 1
     }
     SCAC_CURRENT_NUMBER=39
     SCAC_VERSION_COUNT=39
-    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
-    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v39'")"
-    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" "$URL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v39'")"
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v39'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v39'")"
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v39.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37','scac-mutation-registry.v38','scac-mutation-registry.v39'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37'"
@@ -1661,9 +1704,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     }
     SCAC_CURRENT_NUMBER=38
     SCAC_VERSION_COUNT=38
-    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
-    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v38'")"
-    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" "$URL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v38'")"
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v38'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v38'")"
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v38.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37','scac-mutation-registry.v38'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36'"
@@ -1676,9 +1719,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     }
     SCAC_CURRENT_NUMBER=37
     SCAC_VERSION_COUNT=37
-    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
-    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v37'")"
-    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" "$URL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v37'")"
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v37'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v37'")"
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v37.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36','scac-mutation-registry.v37'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36'"
@@ -1691,9 +1734,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     }
     SCAC_CURRENT_NUMBER=36
     SCAC_VERSION_COUNT=36
-    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
-    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" "$URL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v36'")"
-    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" "$URL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v36'")"
+    SCAC_TOTAL_ENTRY_COUNT="$("$PSQL" -Atqc "select coalesce(sum(entry_count),0) from ops.scac_mutation_registry_version where registry_version like 'scac-mutation-registry.v%'")"
+    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v36'")"
+    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v36'")"
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v36.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35','scac-mutation-registry.v36'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24','scac-mutation-registry.v25','scac-mutation-registry.v26','scac-mutation-registry.v27','scac-mutation-registry.v28','scac-mutation-registry.v29','scac-mutation-registry.v30','scac-mutation-registry.v31','scac-mutation-registry.v32','scac-mutation-registry.v33','scac-mutation-registry.v34','scac-mutation-registry.v35'"
@@ -2106,7 +2149,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   # emitted snapshot below also keeps its own `not ${SCAC_CURRENT_CATALOG_FUNCTION}`
   # guard, so a snapshot still refuses to seed onto a cluster with drifted
   # privileges. Only the WRITE decision stopped asking a privilege question.
-  SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
+  SCAC_REGISTRY_EXACT="$("$PSQL" -Atqc \
     "select count(*)=$SCAC_VERSION_COUNT
        and array_agg(registry_version order by split_part(registry_version,'.v',2)::integer)=array[$SCAC_VERSION_ARRAY]::text[]
        and sum(entry_count)=$SCAC_TOTAL_ENTRY_COUNT
@@ -2141,7 +2184,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     # the cause. This re-evaluates the SAME comparisons one at a time and
     # prints each — it is diagnostic only and runs ONLY after the gate has
     # already decided to fail, so it cannot turn a red check green.
-    "$PSQL" "$URL" -Atqc \
+    "$PSQL" -Atqc \
       "select 'arm version_count            = '||(count(*)=$SCAC_VERSION_COUNT)::text
          ||E'\n'||'arm version_array           = '||(array_agg(registry_version order by split_part(registry_version,'.v',2)::integer)=array[$SCAC_VERSION_ARRAY]::text[])::text
          ||E'\n'||'arm total_entry_count       = '||(sum(entry_count)=$SCAC_TOTAL_ENTRY_COUNT)::text||' (observed '||sum(entry_count)||', expected $SCAC_TOTAL_ENTRY_COUNT)'
@@ -2156,7 +2199,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
          ||E'\n'||'live_catalog_fn (not an arm)= '||($SCAC_CURRENT_CATALOG_FUNCTION)::text
        from ops.scac_mutation_registry_version v" >&2 2>/dev/null ||
       echo "schema-snapshot: the per-arm breakdown could not be read" >&2
-    "$PSQL" "$URL" -Atqc \
+    "$PSQL" -Atqc \
       "select 'sealed entry-set mismatch '||expected.registry_version||': expected '||expected.entry_set_digest||', observed '||coalesce(sealed.entry_set_digest,'<missing>')
          from (values $SCAC_FULL_SET_SQL) expected(registry_version,entry_set_digest)
          left join ops.scac_mutation_registry_version sealed using(registry_version)
@@ -2176,7 +2219,7 @@ alter table ops.scac_mutation_registry_version disable trigger scac_mutation_reg
 alter table ops.scac_mutation_registry_entry disable trigger scac_mutation_registry_entry_sealed;
 SCAC_REGISTRY_HEADER
 
-  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'SCAC_REGISTRY_ROWS'
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'SCAC_REGISTRY_ROWS'
 select format(
   'insert into ops.scac_mutation_registry_version select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_version, %L::jsonb) on conflict (registry_version) do nothing;',
   jsonb_agg(to_jsonb(v) order by v.registry_version collate "C"))
@@ -2283,7 +2326,7 @@ cat >> "$TMP" <<'DOCTRINE_GATE_CHECK_HEADER'
 -- doctrine gates and says nothing about it.
 DOCTRINE_GATE_CHECK_HEADER
 
-if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'DOCTRINE_GATE_CHECK_ROWS'
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'DOCTRINE_GATE_CHECK_ROWS'
 select format(
   'insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, %L::jsonb) on conflict (check_key) do nothing;',
   to_jsonb(g)) from public.doctrine_gate_check g order by g.check_key;
@@ -2305,7 +2348,7 @@ cat >> "$TMP" <<'AGENT_PROFILE_HEADER'
 -- runtime path creates these; a rebuild without them breaks the bot brief.
 AGENT_PROFILE_HEADER
 
-if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'AGENT_PROFILE_ROWS'
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'AGENT_PROFILE_ROWS'
 select format(
   'insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, %L::jsonb) on conflict (profile_key) do nothing;',
   to_jsonb(p)) from public.agent_profile p order by p.profile_key;
@@ -2322,7 +2365,7 @@ fi
 # ledger a fresh rebuild needs the exact bounded rows to preserve the ownership
 # refusal boundary and its authenticated issuer route.
 if [ "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" = t ]; then
-  CANONICAL_OWNERSHIP_SEEDS_EXACT="$("$PSQL" "$URL" -Atqc \
+  CANONICAL_OWNERSHIP_SEEDS_EXACT="$("$PSQL" -Atqc \
     "select
        (select count(*) = 2
           and count(*) filter (where generation=1 and work_request_ref='WR-000122'
@@ -2354,7 +2397,7 @@ if [ "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" = t ]; then
 -- CARR CANONICAL OWNERSHIP SEEDS (bin/schema-snapshot.sh) — 0532a's exact
 -- stale-contract fences and two issuer-generation rows, not runtime sessions.
 CANONICAL_OWNERSHIP_SEEDS_HEADER
-  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'CANONICAL_OWNERSHIP_SEEDS_ROWS'
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'CANONICAL_OWNERSHIP_SEEDS_ROWS'
 select format(
   'insert into ops.engineering_stale_contract_fence select * from jsonb_populate_record(null::ops.engineering_stale_contract_fence, %L::jsonb) on conflict (generation) do nothing;',
   to_jsonb(f))
@@ -2378,7 +2421,7 @@ fi
 # leaves every completion subject without a policy and the projection empty.
 # Carry only that exact row. Subjects, observations, relations, dispositions,
 # and receipts remain runtime evidence and are never dumped here.
-COMPLETION_REGISTER_APPLIED="$("$PSQL" "$URL" -Atqc \
+COMPLETION_REGISTER_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0431_completion_register_schema.sql')" \
   2>/dev/null)"
 case "$COMPLETION_REGISTER_APPLIED" in
@@ -2387,7 +2430,7 @@ case "$COMPLETION_REGISTER_APPLIED" in
 esac
 
 if [ "$COMPLETION_REGISTER_APPLIED" = t ]; then
-  COMPLETION_POLICY_EXACT="$("$PSQL" "$URL" -Atqc \
+  COMPLETION_POLICY_EXACT="$("$PSQL" -Atqc \
     "select count(*) = 1 and bool_and(
        organization_tenant_id = 'carr-internal'
        and id = '00000000-0000-4000-8000-000000000431'::uuid
@@ -2418,7 +2461,7 @@ if [ "$COMPLETION_REGISTER_APPLIED" = t ]; then
 -- CARR COMPLETION DEFAULT POLICY (bin/schema-snapshot.sh) — one exact,
 -- source-verified configuration row. Runtime completion evidence is excluded.
 COMPLETION_POLICY_HEADER
-  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'COMPLETION_POLICY_ROW'
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'COMPLETION_POLICY_ROW'
 select format(
   'select set_config(''carr.organization_tenant_id'', %L, false);%sinsert into ops.completion_policy select * from jsonb_populate_record(null::ops.completion_policy, %L::jsonb) on conflict (organization_tenant_id, policy_key, policy_version) do nothing;%sreset carr.organization_tenant_id;',
   organization_tenant_id, chr(10), to_jsonb(p), chr(10))
