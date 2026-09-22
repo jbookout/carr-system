@@ -13,6 +13,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 OPS = Path(__file__).resolve().parent
 MODULE_PATH = OPS / "jev_precheck.py"
@@ -20,6 +21,42 @@ SPEC = importlib.util.spec_from_file_location("jev_precheck", MODULE_PATH)
 assert SPEC and SPEC.loader
 pre = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pre)
+
+COMMAND_SPEC = importlib.util.spec_from_file_location(
+    "command_precheck", OPS / "command_precheck.py")
+assert COMMAND_SPEC and COMMAND_SPEC.loader
+command_precheck = importlib.util.module_from_spec(COMMAND_SPEC)
+COMMAND_SPEC.loader.exec_module(command_precheck)
+
+
+class CodexCommandReachabilityTests(unittest.TestCase):
+    def test_codex_wrapper_sends_the_literal_command_to_the_judgment(self):
+        payload = {"tool_name": "functions.exec", "cwd": str(OPS.parent),
+                   "tool_input": 'const r=await tools.exec_command({cmd:"python3 ops/missing.py"}); text(r);'}
+        with mock.patch.object(command_precheck, "check", return_value=(0.93, {}, {})) as judge, \
+             mock.patch.object(command_precheck, "_log"):
+            note = command_precheck.advisory(payload)
+        judge.assert_called_once_with("python3 ops/missing.py", str(OPS.parent))
+        self.assertIn("PRE-CHECK", note)
+
+    def test_dynamic_js_command_is_not_guessed(self):
+        payload = {"tool_name": "functions.exec", "cwd": str(OPS.parent),
+                   "tool_input": 'await tools.exec_command({cmd: generatedCommand});'}
+        with mock.patch.object(command_precheck, "check") as judge:
+            self.assertIsNone(command_precheck.advisory(payload))
+        judge.assert_not_called()
+
+    def test_nested_exec_command_shape_is_supported(self):
+        self.assertEqual(command_precheck._commands(
+            {"tool_name": "exec_command", "tool_input": {"cmd": "python3 ops/missing.py"}}),
+            ["python3 ops/missing.py"])
+
+    def test_codex_nested_workdir_controls_path_facts(self):
+        payload = {"tool_name": "functions.exec", "cwd": "/wrong/tree", "tool_input":
+                   'await tools.exec_command({cmd:"python3 ops/missing.py",workdir:"/right/tree"});'}
+        self.assertEqual(command_precheck._command_cwd(payload), "/right/tree")
+        payload["tool_input"] += ' await tools.exec_command({cmd:"other",workdir:"/another/tree"});'
+        self.assertIsNone(command_precheck._command_cwd(payload))
 
 
 class RealFailureTests(unittest.TestCase):

@@ -43,7 +43,7 @@ cost more than it will ever save.
 
 THREE FILTERS BEFORE ANY MONEY IS SPENT, in order, and each one is free:
 
-  1. Not a Bash call, or an empty command: return.
+  1. No literal shell command in Bash or Codex's exec wrapper: return.
   2. Every statement in the command is a known pure read: return. About two
      thirds of real traffic stops here, and no model is needed to know that a
      grep is a read.
@@ -247,6 +247,59 @@ def check(command, repo=REPO):
     return max(reasons.values()), facts, reasons
 
 
+def _commands(payload):
+    """Read literal commands only; dynamic JS expressions have no safe precheck."""
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+    if tool == "Bash" and isinstance(tool_input, dict):
+        command = tool_input.get("command")
+        return [command] if isinstance(command, str) else []
+    if tool == "exec_command" and isinstance(tool_input, dict):
+        command = tool_input.get("cmd")
+        return [command] if isinstance(command, str) else []
+    if tool != "functions.exec":
+        return []
+    source = tool_input if isinstance(tool_input, str) else tool_input.get("code", "")
+    if not isinstance(source, str):
+        return []
+    commands = []
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\b['\"]?cmd['\"]?\s*:\s*", source):
+        try:
+            command, _ = decoder.raw_decode(source[match.end():])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(command, str) and command not in commands:
+            commands.append(command)
+        if len(commands) == 3:
+            break
+    return commands
+
+
+def _command_cwd(payload):
+    cwd = payload.get("cwd") or payload.get("workingDirectory") or ""
+    if (payload.get("tool_name") or payload.get("toolName")) != "functions.exec":
+        return cwd
+    tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+    source = tool_input if isinstance(tool_input, str) else tool_input.get("code", "")
+    if not isinstance(source, str):
+        return None
+    matches = list(re.finditer(r"\b['\"]?workdir['\"]?\s*:\s*", source))
+    workdirs = []
+    decoder = json.JSONDecoder()
+    for match in matches:
+        try:
+            value, _ = decoder.raw_decode(source[match.end():])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(value, str):
+            return None
+        workdirs.append(value)
+    # Different or dynamic nested working directories make relative facts
+    # ambiguous. Silence is safer than a confident warning about another tree.
+    return workdirs[0] if len(set(workdirs)) == 1 else (cwd if not matches else None)
+
+
 def advisory(payload):
     """The warning text for this tool call, or None. NEVER raises, never denies.
 
@@ -256,37 +309,33 @@ def advisory(payload):
     if os.environ.get("CARR_PRECHECK") == "0":
         return None
     try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if tool != "Bash":
+        command_cwd = _command_cwd(payload)
+        if command_cwd is None:
             return None
-        tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
-        command = (tool_input or {}).get("command") or ""
-        if not command.strip() or is_pure_read(command):
-            return None
-
-        repo = repo_root(payload.get("cwd") or payload.get("workingDirectory") or "")
-        probability, facts, reasons = check(command, repo)
-        if probability is None:
-            return None
-        _log({"command": command[:400], "p": probability, "facts": facts,
-              "reasons": reasons, "repo": repo, "warned": probability >= WARN_AT})
-        if probability < WARN_AT:
-            return None
-
-        lines = [f"PRE-CHECK {probability:.2f} — this command looks likely to fail. "
-                 "It has NOT been blocked; run it anyway if you disagree."]
-        # Show only the facts whose OWN question came back high. The broad
-        # single question this replaced could not do that: it returned one
-        # blended number and the warning had to print every fact beside it,
-        # including the ones the judgment had quietly dismissed.
-        needs = {key: fact for key, fact, _ in QUESTIONS}
-        for key, reason in sorted(reasons.items(), key=lambda item: -item[1]):
-            if reason < WARN_AT:
+        repo = repo_root(command_cwd)
+        warnings = []
+        for command in _commands(payload):
+            if not command.strip() or is_pure_read(command):
                 continue
-            value = facts.get(needs.get(key), [])
-            shown = value if isinstance(value, list) else [str(value)]
-            for item in shown[:3]:
-                lines.append(f"  · {reason:.2f}  {item}")
-        return "\n".join(lines)[:1800]
+            probability, facts, reasons = check(command, repo)
+            if probability is None:
+                continue
+            _log({"command": command[:400], "p": probability, "facts": facts,
+                  "reasons": reasons, "repo": repo, "warned": probability >= WARN_AT})
+            if probability < WARN_AT:
+                break  # one model call per hook; the installed door has a 3s budget
+            lines = [f"PRE-CHECK {probability:.2f} — this command looks likely to fail. "
+                     "It has NOT been blocked; run it anyway if you disagree."]
+            needs = {key: fact for key, fact, _ in QUESTIONS}
+            for key, reason in sorted(reasons.items(), key=lambda item: -item[1]):
+                if reason < WARN_AT:
+                    continue
+                value = facts.get(needs.get(key), [])
+                shown = value if isinstance(value, list) else [str(value)]
+                for item in shown[:3]:
+                    lines.append(f"  · {reason:.2f}  {item}")
+            warnings.append("\n".join(lines))
+            break
+        return "\n".join(warnings)[:1800] if warnings else None
     except Exception:
         return None  # fails open, always
