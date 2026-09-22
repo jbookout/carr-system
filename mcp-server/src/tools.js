@@ -8623,7 +8623,7 @@ registerTools({
 
   "resolve-conflict": {
     write: true,
-    description: "Resolve an open Deal Room cell conflict in one call by applying value a or b through the normal field patch/event path.",
+    description: "Resolve an open Deal Room cell conflict only while its recorded field value is still current, by applying value a or b through the normal field patch/event path.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, conflict_id: { type: "string" },
       winner: { type: "string", enum: ["a", "b"] },
@@ -8631,7 +8631,7 @@ registerTools({
     handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-conflict", args, async () => {
       if (!['a', 'b'].includes(args.winner)) throw new ToolError({ error: "invalid_winner", allowed: ["a", "b"] });
       const found = await c.query(
-        `select id, deal_id, field, value_a, value_b, status
+        `select id, deal_id, field, value_a, value_b, event_a, status
            from deal_conflict where id=$1 for update /* dealroom:get-conflict */`,
         [args.conflict_id],
       );
@@ -8639,6 +8639,9 @@ registerTools({
       const conflict = found.rows[0];
       if (conflict.status !== "open") throw new ToolError({ error: "conflict_already_resolved", conflict_id: conflict.id });
       await lockDealField(c, conflict.deal_id, conflict.field);
+      if (await latestFieldConflict(c, conflict.deal_id, conflict.field, conflict.event_a))
+        throw new ToolError({ error: "newer_change_exists", conflict_id: conflict.id,
+          hint: "This field changed again after the conflict appeared. Open the deal and review its current value before deciding." });
       const value = args.winner === "a" ? conflict.value_a : conflict.value_b;
       const applied = await applyDealRoomField(c, actor, conflict.deal_id, conflict.field,
         value, args.idempotency_key, "resolve-conflict");
