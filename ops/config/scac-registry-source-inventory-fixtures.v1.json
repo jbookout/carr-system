@@ -60296,8 +60296,8 @@
           "operation": "ops/doc-outcome-cards-local-pg-gate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/doc-outcome-cards-local-pg-gate.py",
-          "schema_digest": "56b0e1a61e81ddcd9647cc2d946483c264d72ccb338bb5afac1508b0c11c3aff",
-          "handler_digest": "56b0e1a61e81ddcd9647cc2d946483c264d72ccb338bb5afac1508b0c11c3aff",
+          "schema_digest": "555f9770ca818f4e73349577d03653c05153860b9db6526c4314a43d3d3c4842",
+          "handler_digest": "555f9770ca818f4e73349577d03653c05153860b9db6526c4314a43d3d3c4842",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -60388,7 +60388,7 @@
         "mcp-server/src/tools.js": "271630ddc0abd71b34a0c36cb12c11e4778505ce144c0635717c569a263e2756"
       },
       "expected_count": 883,
-      "expected_sha256": "6868f717fa532d840221b9d1698016285714b8a8f086b83f725a0a0180a868c1"
+      "expected_sha256": "9bf1ef677ff1a248bed6c6408ab7f1581f095905b926b87a5e74d16192b38513"
     }
   ],
   "current_source_review": {
