@@ -206,6 +206,7 @@ fi
 # passed to the converter only on stdin, then unset before any database client
 # starts.  The generated file has owner-only permissions and is removed on exit.
 SERVICE_FILE="$(mktemp)"
+trap 'rm -f "$SERVICE_FILE"' 0
 if ! printf '%s' "$URL" | "$REPO/.venv/bin/python" "$REPO/ops/schema-snapshot-connection.py" --write-service "$SERVICE_FILE"; then
   rm -f "$SERVICE_FILE"
   echo "schema-snapshot: could not prepare the private database connection" >&2
@@ -581,7 +582,7 @@ export PGOPTIONS='-c timezone=UTC'
 
 TMP="$(mktemp)"
 SCHEMA_BODY="$(mktemp)"
-trap 'rm -f "$TMP" "$SCHEMA_BODY" "$SERVICE_FILE"' EXIT
+trap 'rm -f "$TMP" "$SCHEMA_BODY" "$SERVICE_FILE"' 0
 
 # THE ROLE PREAMBLE, first in the file so the roles exist before anything that
 # could reference them. See the header for why this cannot be left to 0115.

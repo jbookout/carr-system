@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -50,6 +51,44 @@ with tempfile.TemporaryDirectory() as directory:
     assert result.returncode == 0 and result.stdout == "" and result.stderr == ""
     assert stat.S_IMODE(service_file.stat().st_mode) == 0o600
     assert "fixture-password" in service_file.read_text(encoding="utf-8")
+
+    # The first psql read happens before the later snapshot temp files and their
+    # broader cleanup trap.  Force that read to fail and prove the service file
+    # is still removed on this early-exit path.
+    fixture = Path(directory) / "fixture"
+    (fixture / "bin").mkdir(parents=True)
+    (fixture / "ops").mkdir()
+    copied_snapshot = fixture / "bin" / "schema-snapshot.sh"
+    snapshot_text = SNAPSHOT.read_text(encoding="utf-8")
+    psql_lookup = 'PSQL=""\nfor c in /opt/homebrew/opt/libpq/bin/psql /usr/local/opt/libpq/bin/psql psql; do'
+    assert psql_lookup in snapshot_text
+    copied_snapshot.write_text(snapshot_text.replace(psql_lookup, 'PSQL="$CARR_TEST_PSQL"\nfor c in; do'), encoding="utf-8")
+    copied_snapshot.chmod(0o755)
+    shutil.copyfile(HELPER, fixture / "ops" / "schema-snapshot-connection.py")
+    (fixture / ".venv" / "bin").mkdir(parents=True)
+    (fixture / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    neon = fixture / "mcp-server" / "node_modules" / ".bin" / "neonctl"
+    neon.parent.mkdir(parents=True)
+    neon.write_text("#!/bin/sh\nprintf '%s\\n' 'postgresql://owner:fixture-password@db.example.test/carr?sslmode=require'\n", encoding="utf-8")  # ci-secret-scan: allow — synthetic local fixture
+    neon.chmod(0o755)
+    fake_bin = fixture / "fake-bin"
+    fake_bin.mkdir()
+    psql_marker = fixture / "psql-called"
+    for name, body in {"pg_dump": "#!/bin/sh\necho 'pg_dump (PostgreSQL) 18.4'\n", "psql": "#!/bin/sh\ntouch \"$CARR_TEST_PSQL_MARKER\"\nexit 71\n", "mktemp": "#!/bin/sh\npath=\"$CARR_TEST_TMP/service\"\n: > \"$path\"\nprintf '%s\\n' \"$path\"\n"}.items():
+        path = fake_bin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+    private_tmp = fixture / "tmp"
+    private_tmp.mkdir()
+    early_failure = subprocess.run(
+        ["/bin/zsh", str(copied_snapshot)],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin", "CARR_TEST_TMP": str(private_tmp), "CARR_TEST_PSQL": str(fake_bin / "psql"), "CARR_TEST_PSQL_MARKER": str(psql_marker)},
+    )
+    assert early_failure.returncode != 0 and psql_marker.exists()
+    assert list(private_tmp.iterdir()) == []
 
 source = SNAPSHOT.read_text(encoding="utf-8")
 assert "unset URL" in source
