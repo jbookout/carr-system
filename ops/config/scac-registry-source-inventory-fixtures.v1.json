@@ -57299,11 +57299,35 @@
   ],
   "current_source_review": {
     "base_version": "v37",
-    "upsert": [],
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:mcp-server/smoke-reads.sh",
+        "ingress_kind": "script_entrypoint",
+        "operation": "mcp-server/smoke-reads.sh",
+        "effect_class": "administrative_mutation",
+        "source_locator": "mcp-server/smoke-reads.sh",
+        "schema_digest": "c4dd65e470a7586e1b01d8bad54c0742f46bec121e4d7eba8c5f97627aede02b",
+        "handler_digest": "c4dd65e470a7586e1b01d8bad54c0742f46bec121e4d7eba8c5f97627aede02b",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ],
     "source_digest_replacements": {},
     "expected_count": 876,
-    "expected_sha256": "08313334a46eb0c465e0efd83265573cb81866889fb74119e7214075858169b4",
-    "reason": "Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
+    "expected_sha256": "ace6ac3aac0203da6b3fc1a375a10498cbc7c5bd5fef9d3497338afcc4af0d8b",
+    "reason": "WR123 smoke and probe rotation changes re-digest reviewed source. Exact current-tree source inventory for WR-000130 v37 successor after main reconciliation; includes the assurance, registry, snapshot, acceptance and Program 6 changes before sealing."
   },
   "historical_artifact_replay_review": {
     "base_version": "v26",

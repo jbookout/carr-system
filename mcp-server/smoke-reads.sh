@@ -104,11 +104,17 @@ if [ -z "$TOKEN" ]; then
   exit 2
 fi
 
+# Keep the bearer out of curl's argv, where a process listing can expose it.
+# curl reads this one config line from stdin; all request bodies use -d.
+curl_auth() {
+  printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl --config - "$@"
+}
+
 # Prove the token is ACCEPTED before running 44 checks, under whichever role it
 # authenticates as. A rejected token would otherwise print dozens of phantom
 # FAILs that look exactly like a broken deploy.
-_pf=$(curl -sS "$API" -X POST \
-    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+_pf=$(curl_auth -sS "$API" -X POST \
+    -H 'content-type: application/json' \
     -d '{"jsonrpc":"2.0","id":0,"method":"tools/list"}' 2>/dev/null)
 if printf '%s' "$_pf" | grep -q '"invalid_token"'; then
   if [ "$PROBE_MODE" -eq 1 ]; then
@@ -174,8 +180,8 @@ call() {
   _id=$((_id+1))
   local _attempt _curl_exit
   for _attempt in $(seq 1 "$CALL_ATTEMPTS"); do
-    RESULT=$(curl -s --max-time 30 -X POST "$API" \
-      -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    RESULT=$(curl_auth -s --max-time 30 -X POST "$API" \
+      -H 'content-type: application/json' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":$_id,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}")
     _curl_exit=$?
     [ "$_curl_exit" -eq 0 ] && [ -n "$RESULT" ] && return
@@ -775,8 +781,8 @@ fi
 echo
 list_call() {
   _id=$((_id+1))
-  RESULT=$(curl -s --max-time 30 -X POST "$API" \
-    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  RESULT=$(curl_auth -s --max-time 30 -X POST "$API" \
+    -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":$_id,\"method\":\"tools/list\",\"params\":{}}")
 }
 

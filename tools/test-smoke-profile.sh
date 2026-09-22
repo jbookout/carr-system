@@ -12,6 +12,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 cat > "$TMP_ROOT/curl" <<'CURL'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SMOKE_PROFILE_CALL_LOG.args"
+cat >> "$SMOKE_PROFILE_CALL_LOG.headers"
 payload=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-d" ]; then
@@ -113,6 +115,10 @@ PROBE_CALLS="$TMP_ROOT/probe.calls"
 run_smoke probe "$PROBE_OUT" "$PROBE_CALLS"
 probe_rc=$?
 check "probe-mode smoke completes without treating policy as a failure" test "$probe_rc" -eq 0
+check "probe bearer is absent from curl process arguments" \
+  bash -c '! grep -Fq probe-token "$1"' _ "$PROBE_CALLS.args"
+check "probe bearer reaches curl through stdin config" \
+  grep -Fq 'header = "Authorization: Bearer probe-token"' "$PROBE_CALLS.headers"
 check "probe mode never calls log-activity" \
   bash -c '! grep -Fq '\''"name":"log-activity"'\'' "$1"' _ "$PROBE_CALLS"
 check "probe mode never calls set-next-action" \
@@ -131,6 +137,10 @@ PARTNER_CALLS="$TMP_ROOT/partner.calls"
 run_smoke partner "$PARTNER_OUT" "$PARTNER_CALLS"
 partner_rc=$?
 check "partner-mode smoke completes" test "$partner_rc" -eq 0
+check "partner bearer is absent from curl process arguments" \
+  bash -c '! grep -Fq partner-token "$1"' _ "$PARTNER_CALLS.args"
+check "partner bearer reaches curl through stdin config" \
+  grep -Fq 'header = "Authorization: Bearer partner-token"' "$PARTNER_CALLS.headers"
 check "partner mode retains the fixed-key log-activity probe" \
   has_call "$PARTNER_CALLS" 'smoke-write-probe-permanent'
 check "partner mode retains the set-next-action probe" \
