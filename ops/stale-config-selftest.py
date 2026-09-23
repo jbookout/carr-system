@@ -59,15 +59,12 @@ CHECK = os.path.join(REPO, "ops", "stale-config-check.py")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import fixture_env  # noqa: E402
 
-failures: list[str] = []
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "lib"))
+from selftest_harness import Checker  # noqa: E402
 
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  ok   {name}")
-    else:
-        print(f"  FAIL {name} {detail}")
-        failures.append(name)
+CHECKER = Checker()
+failures = CHECKER.failures
+check = CHECKER.check
 
 
 def git(repo, *args, must=False):
@@ -210,8 +207,4 @@ with tempfile.TemporaryDirectory() as tmp:
     check("with no origin/main to compare it never blocks", rc == 0,
           f"rc={rc}: {out[:200]}")
 
-print()
-if failures:
-    print(f"FAIL {len(failures)} check(s): {', '.join(failures)}")
-    sys.exit(1)
-print("OK all checks passed")
+sys.exit(CHECKER.summary())
