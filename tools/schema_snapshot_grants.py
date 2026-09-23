@@ -28,7 +28,13 @@ ROLE = rf"(?P<grantee>{IDENT})"
 PRIVILEGES = r"[a-z_]+(?:, [a-z_]+)*"
 COLUMNS = rf"{IDENT}(?:, {IDENT})*"
 FUNCTION_TYPE = rf"(?:{IDENT}\.)?{IDENT}(?: {IDENT})*(?:\[\])?"
-FUNCTION_ARGS = rf"(?:{IDENT} {FUNCTION_TYPE}(?:, {IDENT} {FUNCTION_TYPE})*)?"
+# pg_get_function_identity_arguments() prefixes a non-IN argument with its
+# upper-case mode (0557's ops.meeting_mode_actor() takes only OUT arguments).
+# Catalog identifiers are lower-case, so the mode word cannot be mistaken for a
+# name. Postgres ignores OUT arguments when identifying a function, and so does
+# _snapshot_function_identity() below.
+FUNCTION_ARG = rf"(?:(?:OUT|INOUT|VARIADIC) )?{IDENT} {FUNCTION_TYPE}"
+FUNCTION_ARGS = rf"(?:{FUNCTION_ARG}(?:, {FUNCTION_ARG})*)?"
 FUNCTION_TYPE_ARGS = rf"(?:{FUNCTION_TYPE}(?:, {FUNCTION_TYPE})*)?"
 GRANT_PATTERNS = (
     re.compile(
@@ -100,6 +106,11 @@ def _snapshot_function_identity(schema: str, name: str, arguments: str) -> str:
     types: list[str] = []
     if arguments:
         for argument in _split_commas(arguments):
+            mode, _, rest = argument.partition(" ")
+            if mode == "OUT":
+                continue
+            if mode in ("INOUT", "VARIADIC"):
+                argument = rest
             try:
                 _argument_name, argument_type = argument.split(None, 1)
             except ValueError as exc:
