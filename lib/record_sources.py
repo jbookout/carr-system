@@ -237,10 +237,11 @@ def load_deals_doc(root, mode):
     """
     if mode != MODE_RECORDS:
         path = os.path.join(root, DEALS_REL)
-        if not os.path.exists(path):
+        try:
+            with open(path) as fh:
+                return json.load(fh)
+        except FileNotFoundError:
             return {"deals": [], "captured": ""}
-        with open(path) as fh:
-            return json.load(fh)
 
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("select * from v_export_deals order by name")
