@@ -4600,15 +4600,38 @@ function declaredWorkflowCheckNames() {
     if (!/\.ya?ml$/.test(file)) continue;
     let inJobs = false;
     let current = -1;
+    // A matrix job declares ONE templated name and GitHub reports one check per
+    // matrix value, so the template is expanded here into the names a reader
+    // will actually be asked about (ci.yml's class groups since 2026-09-23).
+    // Only the single-axis `${{ matrix.<axis> }}` shape is expanded; anything
+    // else stays literal and the reader test refuses it, which is the point.
+    const matrices = new Map();
+    let matrixJob = -1;
+    let matrixAxis = null;
     for (const line of readFileSync(join(WORKFLOWS, file), "utf8").split("\n")) {
       if (/^jobs:\s*$/.test(line)) { inJobs = true; current = -1; continue; }
       if (!inJobs) continue;
       if (/^\S/.test(line)) { inJobs = false; continue; }
       const job = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
-      if (job !== null) { current = names.push(job[1]) - 1; continue; }
+      if (job !== null) { current = names.push(job[1]) - 1; matrixJob = -1; continue; }
       const named = /^ {4}name:\s*(\S.*?)\s*$/.exec(line);
       if (named !== null && current >= 0) names[current] = named[1];
+      if (/^ {6}matrix:\s*$/.test(line)) { matrixJob = current; matrixAxis = null; continue; }
+      if (matrixJob !== current || current < 0) continue;
+      const inlineAxis = /^ {8}([A-Za-z0-9_-]+):\s*(\[.*\])\s*$/.exec(line);
+      if (inlineAxis !== null) { matrices.set(`${current}:${inlineAxis[1]}`, JSON.parse(inlineAxis[2])); matrixAxis = null; continue; }
+      const blockAxis = /^ {8}([A-Za-z0-9_-]+):\s*$/.exec(line);
+      if (blockAxis !== null) { matrixAxis = `${current}:${blockAxis[1]}`; matrices.set(matrixAxis, []); continue; }
+      const item = /^ {10}- (?:"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S.*?))\s*$/.exec(line);
+      if (item !== null && matrixAxis !== null) matrices.get(matrixAxis).push(item[1] ?? item[2] ?? item[3]);
     }
+    names.forEach((name, index) => {
+      const template = /^(.*)\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}(.*)$/.exec(name);
+      if (template === null) return;
+      const values = matrices.get(`${index}:${template[2]}`);
+      if (!Array.isArray(values)) return;
+      names.splice(index, 1, ...values.map(value => `${template[1]}${value}${template[3]}`));
+    });
   }
   // And the one check run this repository posts for itself, out of the constant
   // that posts it.

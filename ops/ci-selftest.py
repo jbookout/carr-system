@@ -1261,6 +1261,66 @@ def test_strict_still_owns_the_gates_class():
           "! selected gates" in body)
 
 
+# ------------------------------------------------- 25. the hosted split
+def _hosted_workflow():
+    """ci.yml as a dict, parsed by the js-yaml the server already carries."""
+    import json
+    out = subprocess.run(
+        ["node", "-e",
+         "const y=require('js-yaml');const fs=require('fs');"
+         "process.stdout.write(JSON.stringify(y.load(fs.readFileSync(process.argv[1],'utf8'))))",
+         str(REPO / ".github" / "workflows" / "ci.yml")],
+        cwd=REPO / "mcp-server", capture_output=True, text=True, timeout=60)
+    check("ci.yml parses", out.returncode == 0, out.stderr[-300:])
+    return json.loads(out.stdout) if out.returncode == 0 else {}
+
+
+def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
+    """Joe's ruling 2026-09-23 (audit item 3 of 8): the hosted run is split into
+    parallel jobs by class so a PR waits for the slowest class, not the sum.
+
+    WHAT MUST STAY TRUE, because five files pin it: the required status check
+    on main is the single context `ops/ci.sh --strict`. The ruleset, the
+    automerge pilot and the backup workflow all name it. So the split keeps a
+    job with exactly that name, and that job is a GATE over the class jobs: it
+    needs them, runs `always()` so a red class still reports the context, and
+    fails unless every class job succeeded. Every class in CLASS_ORDER runs in
+    exactly one class job; a class listed nowhere would silently stop running
+    hosted, which is the whole failure this suite exists to catch.
+    """
+    wf = _hosted_workflow()
+    jobs = wf.get("jobs") or {}
+    gates = [k for k, v in jobs.items() if v.get("name") == "ops/ci.sh --strict"]
+    check("exactly one job carries the required context name", len(gates) == 1, gates)
+    if len(gates) != 1:
+        return
+    gate = jobs[gates[0]]
+    needs = gate.get("needs")
+    needs = [needs] if isinstance(needs, str) else list(needs or [])
+    check("the required-context job needs at least one class job", bool(needs), needs)
+    check("the required-context job runs even when a class job fails",
+          "always()" in str(gate.get("if", "")), gate.get("if"))
+    steps = " ".join(json.dumps(st) for st in gate.get("steps", []))
+    check("the required-context job fails unless every needed job succeeded",
+          all(f"needs.{n}.result" in steps for n in needs) and "exit 1" in steps, steps[:200])
+    src = CI.read_text()
+    order = re.search(r'^CLASS_ORDER="([^"]+)"', src, re.M)
+    classes = order.group(1).split() if order else []
+    ran = []
+    for n in needs:
+        job = jobs.get(n) or {}
+        groups = ((job.get("strategy") or {}).get("matrix") or {}).get("classes") or []
+        for g in groups:
+            ran.extend(str(g).replace(",", " ").split())
+        run_lines = " ".join(str(st.get("run", "")) for st in job.get("steps", []))
+        check(f"class job '{n}' runs ops/ci.sh --strict --only its matrix classes",
+              "ops/ci.sh --strict --only" in run_lines and "matrix.classes" in run_lines,
+              run_lines[-160:])
+    check("every CLASS_ORDER class runs in exactly one class job",
+          sorted(ran) == sorted(classes) and len(ran) == len(set(ran)),
+          {"ran": ran, "order": classes})
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -1285,7 +1345,8 @@ def main():
                test_gates_treats_only_78_as_not_configured,
                test_gates_selftests_have_a_process_group_watchdog,
                test_push_floor_defers_the_gates_class_instead_of_running_it,
-               test_strict_still_owns_the_gates_class):
+               test_strict_still_owns_the_gates_class,
+               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip
