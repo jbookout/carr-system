@@ -77,6 +77,15 @@ host, provider, sandbox, or law are outside CARR's control and must be reported
 accurately.
 <!-- carr-product-first-policy:end -->
 
+## Jev in reviews
+
+Decision `d57501f6-00e7-4ff5-a886-c28a5d5501d6` records Joe's direction:
+Jev is authorized to participate in every kind of review. Use it for bounded
+review judgments wherever it helps, including code, CI, pull requests, product
+behavior, and CARR records. Do not ask for a separate Jev-specific approval or
+exclude a review merely because its category is not prelisted. Preserve source
+evidence, required checks, and any distinct reviewer-of-record requirement.
+
 ## Authorized code homes and repository boundaries
 
 Decision `1ceee300-7627-426f-b729-ab339d6984fc` supersedes the former
