@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.machine_prerequisites import openssl_executable  # noqa: E402
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -171,7 +173,7 @@ def verify_envelope(value: Mapping[str, Any], public_key: Path, contract: Mappin
         else:
             os.write(write_fd, signature)
         os.close(write_fd)
-        verified = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key), "-rawin", "-in", input_path, "-sigfile", signature_path], input=input_data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=tuple(item for item in (read_fd, payload_fd, signature_fd) if item >= 0), check=False)
+        verified = subprocess.run([openssl_executable(), "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key), "-rawin", "-in", input_path, "-sigfile", signature_path], input=input_data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=tuple(item for item in (read_fd, payload_fd, signature_fd) if item >= 0), check=False)
     finally:
         try: os.close(read_fd)
         except OSError: pass
