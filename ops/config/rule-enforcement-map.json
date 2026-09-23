@@ -492,13 +492,11 @@
     "conduct_stop": {
       "failure_mode": "Stop block",
       "implementation": [
-        "hooks/conduct-stop-gate.py",
-        "ops/jev_handoff.py"
+        "hooks/conduct-stop-gate.py"
       ],
       "test": [
         "ops/conduct-gate-selftest.py",
-        "ops/delta-resend-selftest.py",
-        "ops/jev-handoff-selftest.py"
+        "ops/delta-resend-selftest.py"
       ]
     },
     "context_rail": {
@@ -592,12 +590,10 @@
     "escalation": {
       "failure_mode": "PreToolUse deny",
       "implementation": [
-        "hooks/escalation-gate.py",
-        "ops/jev_handoff.py"
+        "hooks/escalation-gate.py"
       ],
       "test": [
-        "ops/escalation-gate-selftest.py",
-        "ops/jev-handoff-selftest.py"
+        "ops/escalation-gate-selftest.py"
       ]
     },
     "executor_tier": {
