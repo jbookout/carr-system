@@ -61048,8 +61048,8 @@
           "operation": "ops/scac-mutation-inventory.mjs",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/scac-mutation-inventory.mjs",
-          "schema_digest": "0099b8b7feb2cb5d367c8018160496e20a87ad717841bdbb3847fde24b48c8a9",
-          "handler_digest": "0099b8b7feb2cb5d367c8018160496e20a87ad717841bdbb3847fde24b48c8a9",
+          "schema_digest": "6fe7e1b61ae8028df386ca9347b530a0b923f75b7bf3305821cef4acdcb61c90",
+          "handler_digest": "6fe7e1b61ae8028df386ca9347b530a0b923f75b7bf3305821cef4acdcb61c90",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -61137,7 +61137,7 @@
       ],
       "source_digest_replacements": {},
       "expected_count": 883,
-      "expected_sha256": "a8c62aa4813732c9cdd808b789cf648fd13b1a78f0d009ba2f9051ce197cb781",
+      "expected_sha256": "603bc69e4840a92503c57a1fa57056a919fade40d5f89bbd51073228452043e0",
       "reason": "Hermes Model Room dispatch link: explicit Hermes and CoS profile sets allow record-dispatch-link while the database retains its server-derived hermes-pilot-only check. Existing mcp.js worker-sidewrite and edited script entrypoints are re-digested; no new ingress or database catalog grant."
     }
   ],

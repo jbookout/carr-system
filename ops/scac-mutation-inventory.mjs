@@ -1112,6 +1112,13 @@ export const POST_0552_FORWARD_V46_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v46",
   secdef_execute: { count: 786, digest: "sha256:aba0c1d55d99d62eb5a2166f15857046b4cd6a3eb735b28f4f4ff607d71d9e23" },
 });
+// Measured by the disposable PostgreSQL 17 migration lane after installing
+// the v47 registration function and its four runtime EXECUTE grants.
+export const POST_0553_FORWARD_V47_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0552_FORWARD_V46_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v47",
+  secdef_execute: { count: 790, digest: "sha256:adfc9a5b9e0c3a09a2394b1ee5af3bb109ad3146e10e4a8dec10e1c85abb0531" },
+});
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -13566,8 +13573,7 @@ export function renderHermesDispatchRegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v47 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0552_FORWARD_V46_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = { ...oldCatalogBaseline,
-    projection_version: "scac-db-catalog-projection.v47" };
+  const newCatalogBaseline = POST_0553_FORWARD_V47_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V46_VERSION,
     frozenInventory(REGISTRY_V46_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V47_VERSION, rows, newCatalogBaseline);
@@ -13591,7 +13597,16 @@ export function renderHermesDispatchRegistrySql(rows,
     .replaceAll("Deal Room undo", "Hermes dispatch link")
     .replaceAll(oldSeal.digest, newSeal.digest)
     .replaceAll(oldEntrySet, newEntrySet)
-    .replaceAll(oldCatalog.replaceAll("v46", "v47"), newCatalog);
+    .replaceAll(oldCatalog.replaceAll("v46", "v47"), newCatalog)
+    .replaceAll("observed_count<>786", `observed_count<>${newCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(`observed_digest<>'${oldCatalogBaseline.secdef_execute.digest}'`,
+      `observed_digest<>'${newCatalogBaseline.secdef_execute.digest}'`)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
+    .replaceAll("Hermes dispatch link v46 seed or entry-set seal drifted",
+      "Hermes dispatch link v47 seed or entry-set seal drifted");
   const versionListMarker =
     "'scac-mutation-registry.v41','scac-mutation-registry.v42','scac-mutation-registry.v43','scac-mutation-registry.v44','scac-mutation-registry.v45','scac-mutation-registry.v47'";
   if (sql.split(versionListMarker).length - 1 !== 2)
@@ -14165,8 +14180,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v47.generated.js"] =
     renderRuntimeProjection(v47Rows, {
       version: REGISTRY_V47_VERSION,
-      dbCatalogBaseline: { ...POST_0552_FORWARD_V46_DB_CATALOG_BASELINE,
-        projection_version: "scac-db-catalog-projection.v47" },
+      dbCatalogBaseline: POST_0553_FORWARD_V47_DB_CATALOG_BASELINE,
     });
   artifacts["migrations/0553_hermes_dispatch_link_scac_successor.sql"] =
     renderHermesDispatchRegistrySql(v47Rows,
@@ -14911,8 +14925,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v47.generated.js");
     await writeFile(target, renderRuntimeProjection(frozenInventory(REGISTRY_V47_VERSION), {
       version: REGISTRY_V47_VERSION,
-      dbCatalogBaseline: { ...POST_0552_FORWARD_V46_DB_CATALOG_BASELINE,
-        projection_version: "scac-db-catalog-projection.v47" },
+      dbCatalogBaseline: POST_0553_FORWARD_V47_DB_CATALOG_BASELINE,
     }));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-ready-plan-amendment-registry-migration") {
