@@ -493,7 +493,6 @@
       "failure_mode": "Stop block",
       "implementation": [
         "hooks/conduct-stop-gate.py",
-        "hooks/conduct_patterns.py",
         "ops/jev_handoff.py"
       ],
       "test": [
@@ -594,7 +593,6 @@
       "failure_mode": "PreToolUse deny",
       "implementation": [
         "hooks/escalation-gate.py",
-        "hooks/conduct_patterns.py",
         "ops/jev_handoff.py"
       ],
       "test": [
