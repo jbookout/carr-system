@@ -194,6 +194,9 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         headers={
             "Authorization": f"Bearer {api_key or read_api_key()}",
             "Content-Type": "application/json",
+            # Cloudflare rejects urllib's default Python-urllib signature with
+            # error 1010. Identify this server-side client explicitly.
+            "User-Agent": "carr-typesafe-client/1.0",
         },
     )
 
