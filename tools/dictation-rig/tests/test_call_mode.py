@@ -249,6 +249,58 @@ class CallModeHttpTests(unittest.TestCase):
         )
         start.assert_not_called()
 
+    def test_app_doctorcre_origin_is_allowed_alongside_dealroom(self) -> None:
+        # Partners open the Deal Room at app.doctorcre.com; the record layer's
+        # own host keeps working. Both are exact entries, nothing wider.
+        self.assertIn("https://app.doctorcre.com", call_mode.ALLOWED_ORIGINS)
+        self.assertIn("https://dealroom.doctorcre.com", call_mode.ALLOWED_ORIGINS)
+        for origin in ("https://app.doctorcre.com", "https://dealroom.doctorcre.com"):
+            handler = self.handler("/api/stop", b"{}", origin)
+            with patch.object(call_mode, "stop_recording", return_value={"state": "idle"}) as stop:
+                handler.do_POST()
+            handler.send_json.assert_called_once_with({"state": "idle"})
+            stop.assert_called_once_with()
+
+    def test_lookalike_origins_are_refused(self) -> None:
+        for origin in (
+            "http://app.doctorcre.com",
+            "https://app.doctorcre.com.evil.test",
+            "https://evil.doctorcre.com",
+            "https://doctorcre.com",
+            "https://app.doctorcre.com:8443",
+        ):
+            handler = self.handler("/api/start", b'{"mode":"weekly_deal_call","consent_confirmed":true}', origin)
+            with patch.object(call_mode, "start_recording") as start:
+                handler.do_POST()
+            handler.send_json.assert_called_once_with({"error": "origin_not_allowed"}, 403)
+            start.assert_not_called()
+
+    def test_app_origin_preflight_and_state_read_carry_cors_for_that_origin_only(self) -> None:
+        headers: list[tuple[str, str]] = []
+        handler = object.__new__(call_mode.CallModeHandler)
+        message = Message()
+        message["Origin"] = "https://app.doctorcre.com"
+        handler.headers = message
+        handler.path = "/api/state"
+        handler.send_response = Mock()
+        handler.send_header = lambda name, value: headers.append((name, value))
+        handler.end_headers = Mock()
+        handler.wfile = io.BytesIO()
+        handler.do_OPTIONS()
+        handler.send_response.assert_called_once_with(204)
+        self.assertIn(("Access-Control-Allow-Origin", "https://app.doctorcre.com"), headers)
+        self.assertIn(("Access-Control-Allow-Private-Network", "true"), headers)
+        headers.clear()
+        with patch.object(call_mode, "current_state", return_value={"state": "idle"}):
+            handler.do_GET()
+        self.assertIn(("Access-Control-Allow-Origin", "https://app.doctorcre.com"), headers)
+
+        message.replace_header("Origin", "https://elsewhere.test")
+        headers.clear()
+        with patch.object(call_mode, "current_state", return_value={"state": "idle"}):
+            handler.do_GET()
+        self.assertFalse(any(name == "Access-Control-Allow-Origin" for name, _ in headers))
+
     def test_post_call_report_requires_origin_and_non_simple_header(self) -> None:
         handler = self.handler("/api/post-call?session=s1", b"", None)
         handler.do_GET()
@@ -335,6 +387,62 @@ class PostCallTests(unittest.TestCase):
         normalized = post_call.normalize_distillation(bad, self.context, self.session.name)
         self.assertEqual(normalized["joe_tasks"], [])
         self.assertIn("unknown or ambiguous participant_ids", normalized["review_questions"][0]["question"])
+
+    def test_record_layer_context_is_stored_instead_of_stalling_in_awaiting_context(self) -> None:
+        # The 2026-08-17 stall, reproduced with the shapes get-call-context
+        # really returns (measured live 2026-09-23: 28 of 50 active deals had
+        # owner null; 22 of 23 participant rows were partner "lead" rows with
+        # party_id/ref/name/email null; the one party row had email null).
+        live = {**self.context, "deals": [
+            {"id": "deal-a", "name": "A", "owner": None, "operating_state": "active", "participants": [
+                {"party_id": None, "ref": None, "name": None, "email": None, "role": "lead"},
+            ]},
+            {"id": "deal-b", "name": "B", "owner": "dell", "operating_state": "active", "participants": [
+                {"party_id": None, "ref": None, "name": None, "email": None, "role": "lead"},
+                {"party_id": "p-1", "ref": "P-0001", "name": "Vendor A", "email": None, "role": "listing_side"},
+                {"party_id": "p-1", "ref": "P-0001", "name": "Vendor A", "email": None, "role": "vendor"},
+            ]},
+        ]}
+        # The strict contract alone refuses it: that refusal was the stall.
+        with self.assertRaises(post_call.ContractError):
+            post_call.validate_context(live, self.session.name)
+        stored = post_call.store_context(self.session, live)
+        self.assertEqual(stored["deals"][0]["owner"], "")
+        self.assertEqual(stored["deals"][0]["participants"], [])
+        self.assertEqual(stored["deals"][1]["participants"], [
+            {"party_id": "p-1", "ref": "P-0001", "name": "Vendor A", "email": "", "role": "listing_side, vendor"},
+        ])
+        self.assertIsNotNone(post_call.context_from_session(self.session))
+        status = post_call.process_session(self.session, distiller=lambda _request: self.output(
+            deal_updates=[], draft_proposals=[], joe_tasks=[],
+        ))
+        self.assertEqual(status["state"], "ready_review")
+
+    def test_shaping_never_invents_ids_or_accepts_a_half_identified_party(self) -> None:
+        half = {**self.context, "deals": [
+            {"id": "deal-a", "name": "A", "owner": "joe", "operating_state": "active", "participants": [
+                {"party_id": "p-9", "ref": None, "name": "Half", "email": "", "role": "vendor"},
+            ]},
+        ]}
+        with self.assertRaises(post_call.ContractError):
+            post_call.store_context(self.session, half)
+        extra = {**self.context, "deals": [
+            {"id": "deal-a", "name": "A", "owner": None, "operating_state": "active", "participants": [], "notes": "x"},
+        ]}
+        with self.assertRaises(post_call.ContractError):
+            post_call.store_context(self.session, extra)
+        self.assertIsNone(post_call.context_from_session(self.session))
+
+    def test_context_that_arrives_after_the_transcript_still_produces_the_review_pack(self) -> None:
+        status = post_call.process_session(self.session, distiller=lambda _request: self.output())
+        self.assertEqual(status["state"], "awaiting_context")
+        self.assertFalse((self.session / post_call.REPORT_FILE).exists())
+        post_call.store_context(self.session, self.context)
+        status = post_call.process_session(self.session, distiller=lambda _request: self.output())
+        self.assertEqual(status["state"], "ready_review")
+        report = post_call.report_for_deal_room(self.session)
+        self.assertEqual(report["status"]["state"], "ready_review")
+        self.assertEqual(len(report["report"]["draft_proposals"]), 1)
 
     def test_evidence_is_bounded_and_context_is_consumed_after_local_processing(self) -> None:
         bad = self.output(joe_tasks=[{"title": "Too much", "deal_id": "deal-a", "participant_ids": [], "evidence": "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"}])

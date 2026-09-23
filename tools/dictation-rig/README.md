@@ -30,9 +30,11 @@ page. It does not contain another recorder.
 
 Install or refresh the companion with `bin/install-call-mode.sh`. The installer
 loads `com.carr.call-mode` as a user LaunchAgent and verifies its state endpoint.
-The first connection from `dealroom.doctorcre.com` may trigger Chrome's Local
-Network Access prompt. Allowing it gives that Deal Room origin access to the
-loopback companion; every other web origin is refused by the companion.
+The Deal Room is opened at `app.doctorcre.com` (and still answers at
+`dealroom.doctorcre.com`); the companion admits exactly those two web origins.
+The first connection from either may trigger Chrome's Local Network Access
+prompt. Allowing it gives that Deal Room origin access to the loopback
+companion; every other web origin is refused by the companion.
 
 **Risk color: red, human initiated.** Starting a call fires the audible consent
 announcement and begins client-visible recording, so it only happens after Joe
@@ -47,8 +49,13 @@ audio. This is channel attribution, not biometric speaker recognition, and no
 third-party voiceprint is created or retained.
 
 The post-call extraction/report/draft layer is specified in
-`specs/post-call-workflow-2026-08-10.md`. Call Mode intentionally does not claim
-that unfinished layer is already running.
+`specs/post-call-workflow-2026-08-10.md`. For a weekly call the Deal Room
+supplies the exact, short-lived deal context index (`POST /api/call-context`)
+from the record layer's `get-call-context` verb; without it the local report
+waits in `awaiting_context`. The Deal Room sends it at start and again whenever
+it sees a weekly session still waiting, so a context that arrives after the
+transcript still produces the review pack. Nothing from the pack is written to
+the record, and no Outlook draft is created, until a partner approves that item.
 
 ## Phase B — quill-dictate (system-wide dictation to the active text box)
 
