@@ -65661,7 +65661,7 @@
       ],
       "expected_count": 891,
       "expected_sha256": "461f534e72f76b90a2e25b8a36e28ad027e779d89fb2f1ef0319852ac336eb0f",
-      "reason": "2026-09-23 audit entrypoint batch: every /Users/booko literal in hooks, ops, tools, bin and lib derives from HOME (lib/carr_paths.py; CARR_ROOT and CARR_VAULT still override), the Stop-event rule-pack drift gate runs on the repo interpreter through hooks/hook-meter-run.py (HOOK_TEMPLATE in ops/rule-delivery-cutover.py), hook-meter-run.py keeps the last stderr lines of an error row, and ops/jev_rule_select.py and ops/jev_defect_class.py record a Jev outage row; re-digests those script entrypoints, ops/scac-mutation-inventory.mjs, bin/schema-snapshot.sh and the siep11/siep18 local-pg gates advanced to the v54 frontier; no new ingress, reviewed exact current inventory."
+      "reason": "2026-09-23 audit entrypoint batch: every /Users/booko literal in hooks, ops, tools, bin and lib derives from HOME (lib/carr_paths.py; the checkout and vault environment overrides still apply), the Stop-event rule-pack drift gate runs on the repo interpreter through hooks/hook-meter-run.py (HOOK_TEMPLATE in ops/rule-delivery-cutover.py), hook-meter-run.py keeps the last stderr lines of an error row, and ops/jev_rule_select.py and ops/jev_defect_class.py record a Jev outage row; re-digests those script entrypoints, ops/scac-mutation-inventory.mjs, bin/schema-snapshot.sh and the siep11/siep18 local-pg gates advanced to the v54 frontier; no new ingress, reviewed exact current inventory."
     }
   ],
   "current_source_review": {
