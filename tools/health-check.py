@@ -29,10 +29,9 @@ import health_submodule as _health_sub
 # would have left the render-tamper check dead on any clone outside $HOME.
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-DEFAULT_RECOVERY_VAULT = (
-    "/Users/booko/Library/CloudStorage/"
-    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
-)
+DEFAULT_RECOVERY_VAULT = os.path.join(
+    os.path.expanduser("~"), "Library", "CloudStorage",
+    "GoogleDrive-joe.bookout.carr.us@gmail.com", "My Drive", "CARR AI")
 
 # ── the active-rule-gap acceptance ──────────────────────────────────────────
 # A PERMANENTLY CHOSEN STATE MUST NOT READ AS A PERMANENT FAILURE — rule
@@ -2716,8 +2715,7 @@ except Exception as e:
 # Freshness only: a mirror is insurance, and stale insurance that looks valid
 # is worse than none. Bound action inline per rule 590b11e1.
 try:
-    _mp = ("/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us"
-           "@gmail.com/My Drive/CARR AI/Backups/portability-mirror/MANIFEST.md")
+    _mp = os.path.join(DEFAULT_RECOVERY_VAULT, "Backups", "portability-mirror", "MANIFEST.md")
     if not os.path.exists(_mp):
         print("  ⚠︎ portability-mirror  MISSING · on breach: run tools/db-tap.py run "
               "pipelines/doctrine_mirror.py (see nightly.sh for args)")

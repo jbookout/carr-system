@@ -267,7 +267,11 @@ def shortlist(proposed, classes=None, *, limit=SHORTLIST, client=None,
             {"pick": belongs_question(trimmed, client)},
             timeout=TIMEOUT_SECONDS, client=client, api_key=api_key)
         probabilities = answer["answers"]["pick"].get("probabilities") or {}
-    except Exception:
+    except Exception as exc:
+        try:
+            judge.record("defect_class", proposed.get("claimed"), None, None, error=exc)
+        except Exception:
+            pass
         return [], None
     if not probabilities:
         return [], None
