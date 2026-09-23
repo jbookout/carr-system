@@ -371,16 +371,18 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
     cause = "automation_job";
   }
   await client.query(
-    `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
+    `insert into event (occurred_at, recorded_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
        organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+     values (coalesce($1::timestamptz, now()),
+       case when $19::boolean then clock_timestamp() else now() end,
+       $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
      identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
-     identity.correlation_id]);
+     identity.correlation_id, fields.recorded_at_after_lock === true]);
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
@@ -2043,7 +2045,9 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     ? await c.query(
       `select jsonb_build_object('state',operating_state,'reason',parking_reason,'note',parking_note) as value
          from deal where id=$1`, [dealId])
-    : await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
+    : await c.query(field === "next_date"
+      ? "select next_date::text as value from deal where id=$1"
+      : `select ${field} as value from deal where id=$1`, [dealId]);
   if (!oldRow.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: dealId });
   if (field === "owner") {
     // deal.owner is the board cache; deal_participant(role=lead) remains the
@@ -2080,6 +2084,9 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
   }
   await writeEvent(c, actor, verb, "deal", dealId, {
     field,
+    // The field lock orders writes by commit. Transaction-start `now()` would
+    // let a writer that waited for the lock sort behind the write it replaced.
+    recorded_at_after_lock: true,
     old: { [field]: oldRow.rows[0].value },
     new: { [field]: value },
     human_quote: provenance.human_quote || null,
@@ -3619,6 +3626,9 @@ export const TOOLS = {
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // Legacy phase edits share the Deal Room event stream. Acquire its lock
+      // before versionGuard can lock the deal row, matching Deal Room lock order.
+      if (keys.includes("phase")) await lockDealField(c, s.id, "phase");
       // touchedFields = keys: computed BEFORE the guard so a version bump from
       // some OTHER field can be told apart from a bump on one of THESE fields.
       // See versionGuard's own comment (CONFLICT TIERING, slice S6).
@@ -3629,7 +3639,8 @@ export const TOOLS = {
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
-          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] },
+            recorded_at_after_lock: k === "phase", idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys,
                ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
@@ -3778,7 +3789,9 @@ export const TOOLS = {
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await lockDealField(c, s.id, "owner");
       await versionGuard(c, "deal", s.id, args.base_version);
+      const previousOwner = (await c.query("select owner from deal where id=$1", [s.id])).rows[0]?.owner ?? null;
       const na = await c.query("select id from actor where slug=$1", [args.new_lead]);
       const prev = await c.query(
         `update deal_participant set to_at=now() where deal_id=$1 and role='lead' and to_at is null
@@ -3788,7 +3801,9 @@ export const TOOLS = {
         [s.id, na.rows[0].id, actor.id]);
       await c.query("update deal set owner=$1, updated_by=$2 where id=$3", [args.new_lead, actor.id, s.id]);
       await writeEvent(c, actor, "set-lead", "deal", s.id,
-        { old: { lead: prev.rows[0]?.actor_id || null }, new: { lead: args.new_lead }, idempotency_key: args.idempotency_key });
+        { field: "owner", old: { owner: previousOwner, lead: prev.rows[0]?.actor_id || null },
+          new: { owner: args.new_lead, lead: args.new_lead }, recorded_at_after_lock: true,
+          idempotency_key: args.idempotency_key });
       return { ok: true, new_lead: args.new_lead };
     }),
   },
@@ -8315,13 +8330,17 @@ registerTools({
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       if (typeof args.text !== "string" || !args.text.trim()) throw new ToolError({ error: "text_required" });
       assertDealRoomField("next_date", args.next_date ?? null);
+      // The step also changes next_date. Take that cell's lock first so its
+      // field history cannot race a direct date edit or undo.
+      await lockDealField(c, s.id, "next_date");
       await lockDealField(c, s.id, "next_step");
+      const oldDate = (await c.query("select next_date::text as next_date from deal where id=$1", [s.id])).rows[0]?.next_date ?? null;
       const prior = await c.query(
         "select id, text from deal_note where deal_id=$1 and kind='next_step' order by created_at desc, id desc limit 1 /* dealroom:current-step */",
         [s.id],
       );
       const note = await c.query(
-        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'next_step',$2,$3) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
+        "insert into deal_note (deal_id, kind, text, actor_id, created_at) values ($1,'next_step',$2,$3,clock_timestamp()) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
         [s.id, args.text.trim(), actor.id],
       );
       await c.query(
@@ -8345,6 +8364,14 @@ registerTools({
         field: "next_step",
         old: { next_step: prior.rows[0]?.text ?? null },
         new: { next_step: args.text.trim(), next_date: args.next_date ?? null },
+        recorded_at_after_lock: true,
+        idempotency_key: args.idempotency_key,
+      });
+      await writeEvent(c, actor, "set-next-step", "deal", s.id, {
+        field: "next_date",
+        old: { next_date: oldDate },
+        new: { next_date: args.next_date ?? null },
+        recorded_at_after_lock: true,
         idempotency_key: args.idempotency_key,
       });
       return { ok: true, deal_id: s.id, next_step_id: note.rows[0].id,
@@ -8605,9 +8632,10 @@ registerTools({
     handler: async (c, actor, args) => withEnvelope(c, actor, "revert-deal-field", args, async () => {
       const row = (await c.query(
         `select id,subject_id,field,old_value,new_value from event
-          where id=$1 and subject_type='deal' for update`, [args.event_id])).rows[0];
+          where id=$1 and subject_type='deal'`, [args.event_id])).rows[0];
       if (!row || !DEAL_ROOM_FIELDS.includes(row.field))
         throw new ToolError({ error: "event_not_revertible" });
+      await lockDealField(c, row.subject_id, row.field);
       const latest = (await c.query(
         `select id from event where subject_type='deal' and subject_id=$1 and field=$2
           order by recorded_at desc,id desc limit 1`, [row.subject_id,row.field])).rows[0];
