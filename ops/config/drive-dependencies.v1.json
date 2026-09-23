@@ -582,7 +582,8 @@
         "hooks/gate_paths.py",
         "hooks/guard-unattended.py",
         "hooks/lint-gate.py",
-        "hooks/record-home-gate.py"
+        "hooks/record-home-gate.py",
+        "lib/carr_paths.py"
       ],
       "path_pattern": "{{VAULT}}/**",
       "producer": "policy gates",

@@ -84,7 +84,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 import uuid
 
-CANONICAL_CHECKOUT = Path("/Users/booko/carr-system")
+CANONICAL_CHECKOUT = Path(os.environ.get("CARR_ROOT") or (Path.home() / "carr-system"))
 
 # The exact protocol hooks/worktree-self-plumb.py implements. Both numbers are
 # that hook's, not new ones: a second mutex, or a second staleness threshold,
