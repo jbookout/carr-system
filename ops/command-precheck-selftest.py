@@ -177,7 +177,11 @@ class ModelRoomRouteTests(unittest.TestCase):
             note = hook.advisory({"tool_name": "Bash", "tool_input": {"command": "claude -p 'review this'"}})
         self.assertIn("MODEL ROOM ROUTE", note)
         self.assertIn("Jev direct-work score 0.99", note)
-        self.assertIn("Opus 5.5", note)
+        # The rule text is word-wrapped, so compare on collapsed whitespace.
+        flat = " ".join(note.split())
+        self.assertIn("cheapest tier still qualified", flat)
+        self.assertIn("Opus-always line was a temporary usage-window instruction, now retired", flat)
+        self.assertNotIn("Opus 5.5", flat)
 
     def test_auth_readback_and_text_search_are_not_model_work(self):
         for command in ("claude auth status", "rg claude ops", "hermes kanban show claude"):
