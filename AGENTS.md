@@ -95,8 +95,10 @@ Decision `284028a5-8295-498a-af1e-6cae5c6034e7` records Joe's route:
 call Claude, Grok, and other external models through the Model Room. Before
 attempting a direct model CLI or API call, pull this rule into the preflight
 judgment with Jev and route the work to the named Model Room desk. Verify the
-desk's actual model and result. Joe currently requires Opus 5.5 for all
-subagent work; do not silently delegate a portion to another model. A model
+desk's actual model and result. Choose every subagent by the cheapest tier
+still qualified to do the task correctly, name it on the call, and never
+silently delegate a portion to another model (Joe, 2026-09-23: the earlier
+Opus-always line was a temporary usage-window instruction, now retired). A model
 CLI used solely for authentication or health readback is not a model-work call.
 <!-- carr-model-room-route:end -->
 

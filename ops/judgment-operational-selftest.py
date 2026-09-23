@@ -42,6 +42,8 @@ import unittest
 
 OPS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(OPS)
+sys.path.insert(0, OPS)
+from git_env import fixture_env                                # noqa: E402
 
 
 def load(module_name):
@@ -297,6 +299,40 @@ class ChangeCollectorTests(unittest.TestCase):
             "the change advisory named paths that do not exist, so its file "
             "list is being mis-parsed and every judgment it makes is about "
             "the wrong change: " + ", ".join(missing))
+
+    def test_a_deleted_path_is_reported_as_deleted_not_edited(self):
+        """A deletion is not an edit to a file that no longer exists.
+
+        Found 2026-09-23: a branch that untracked one binary made the property
+        above fail, because the "D" row fell through to "edited". Built on a
+        throwaway repository with no remote, so nothing is fetched. Every git
+        call, including change()'s own, runs under fixture_env(): git exports
+        GIT_DIR into the push hook, and inherited it would aim these calls at
+        the live repository instead of the fixture.
+        """
+        import tempfile
+        from unittest import mock
+        env = fixture_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            def git(*args):
+                subprocess.run(["git", *args], cwd=tmp, check=True, env=env,
+                               capture_output=True, text=True, timeout=60)
+            git("init", "-q", "-b", "base")
+            git("config", "user.email", "selftest@example.invalid")
+            git("config", "user.name", "selftest")
+            for name in ("gone.txt", "kept.txt"):
+                pathlib.Path(tmp, name).write_text(name + "\n")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            git("switch", "-q", "-c", "work")
+            git("rm", "-q", "gone.txt")
+            pathlib.Path(tmp, "kept.txt").write_text("changed\n")
+            git("commit", "-q", "-am", "work")
+            with mock.patch.dict(os.environ, env, clear=True):
+                state = self.module.change(base="base", repo=tmp)
+        self.assertEqual(state["files"]["deleted"], ["gone.txt"])
+        self.assertEqual(state["files"]["edited"], ["kept.txt"])
+        self.assertEqual(state["files"]["added"], [])
 
     def test_it_sees_uncommitted_work(self):
         """The advisory is most useful mid-edit, which is when the first
