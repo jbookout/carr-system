@@ -112,7 +112,10 @@ def main() -> int:
             raise RuntimeError("typed preflight target count and current contract disagree")
         cur.execute("""select count(distinct map_digest),min(map_digest),count(*)
                          from ops.rule_load_layer""")
-        map_versions,tag_digest,tag_count = cur.fetchone()
+        tag_row = cur.fetchone()
+        if tag_row is None:
+            raise RuntimeError("delivery tag identity query returned no row")
+        map_versions,tag_digest,tag_count = tag_row
         tag_coherent = map_versions == 1 and tag_digest == digest and tag_count > 0
         preflight = {"current_mode": current,"requested_mode": args.mode,
                      "targets": target_count,"prior_receipts": receipt_count,
