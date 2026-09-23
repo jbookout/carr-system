@@ -15,15 +15,12 @@ import tempfile
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "peer-broadcast-gate.py")
 
-failures: list[str] = []
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "lib"))
+from selftest_harness import Checker  # noqa: E402
 
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  ok   {name}")
-    else:
-        print(f"  FAIL {name} {detail}")
-        failures.append(name)
+CHECKER = Checker()
+failures = CHECKER.failures
+check = CHECKER.check
 
 
 def run(to, state_dir, tool="SendMessage", transcript=None, transcript_key="transcript_path", session=None):
@@ -281,8 +278,4 @@ with tempfile.TemporaryDirectory() as d:
     check("session B holds its OWN two-peer budget", rc_b2 == 0 and rc_a == 2,
           f"a3={rc_a} b1={rc_b1} b2={rc_b2}")
 
-print()
-if failures:
-    print(f"FAIL {len(failures)} check(s): {', '.join(failures)}")
-    sys.exit(1)
-print("OK all checks passed")
+sys.exit(CHECKER.summary())
