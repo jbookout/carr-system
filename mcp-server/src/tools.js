@@ -3787,7 +3787,9 @@ export const TOOLS = {
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await lockDealField(c, s.id, "owner");
       await versionGuard(c, "deal", s.id, args.base_version);
+      const previousOwner = (await c.query("select owner from deal where id=$1", [s.id])).rows[0]?.owner ?? null;
       const na = await c.query("select id from actor where slug=$1", [args.new_lead]);
       const prev = await c.query(
         `update deal_participant set to_at=now() where deal_id=$1 and role='lead' and to_at is null
@@ -3797,7 +3799,9 @@ export const TOOLS = {
         [s.id, na.rows[0].id, actor.id]);
       await c.query("update deal set owner=$1, updated_by=$2 where id=$3", [args.new_lead, actor.id, s.id]);
       await writeEvent(c, actor, "set-lead", "deal", s.id,
-        { old: { lead: prev.rows[0]?.actor_id || null }, new: { lead: args.new_lead }, idempotency_key: args.idempotency_key });
+        { field: "owner", old: { owner: previousOwner, lead: prev.rows[0]?.actor_id || null },
+          new: { owner: args.new_lead, lead: args.new_lead }, recorded_at_after_lock: true,
+          idempotency_key: args.idempotency_key });
       return { ok: true, new_lead: args.new_lead };
     }),
   },
@@ -8324,13 +8328,17 @@ registerTools({
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       if (typeof args.text !== "string" || !args.text.trim()) throw new ToolError({ error: "text_required" });
       assertDealRoomField("next_date", args.next_date ?? null);
+      // The step also changes next_date. Take that cell's lock first so its
+      // field history cannot race a direct date edit or undo.
+      await lockDealField(c, s.id, "next_date");
       await lockDealField(c, s.id, "next_step");
+      const oldDate = (await c.query("select next_date from deal where id=$1", [s.id])).rows[0]?.next_date ?? null;
       const prior = await c.query(
         "select id, text from deal_note where deal_id=$1 and kind='next_step' order by created_at desc, id desc limit 1 /* dealroom:current-step */",
         [s.id],
       );
       const note = await c.query(
-        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'next_step',$2,$3) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
+        "insert into deal_note (deal_id, kind, text, actor_id, created_at) values ($1,'next_step',$2,$3,clock_timestamp()) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
         [s.id, args.text.trim(), actor.id],
       );
       await c.query(
@@ -8354,6 +8362,14 @@ registerTools({
         field: "next_step",
         old: { next_step: prior.rows[0]?.text ?? null },
         new: { next_step: args.text.trim(), next_date: args.next_date ?? null },
+        recorded_at_after_lock: true,
+        idempotency_key: args.idempotency_key,
+      });
+      await writeEvent(c, actor, "set-next-step", "deal", s.id, {
+        field: "next_date",
+        old: { next_date: oldDate },
+        new: { next_date: args.next_date ?? null },
+        recorded_at_after_lock: true,
         idempotency_key: args.idempotency_key,
       });
       return { ok: true, deal_id: s.id, next_step_id: note.rows[0].id,

@@ -95,6 +95,17 @@ class FakeClient {
     }
     if (sql.includes("dealroom:field-lock")) return { rows: [{}] };
     if (sql.includes("dealroom:close-lead") || sql.includes("dealroom:open-lead")) return { rows: [] };
+    if (sql === "select id from actor where slug=$1")
+      return { rows: [{ id: actors[params[0]].id }] };
+    if (sql.startsWith("update deal_participant set to_at=now()"))
+      return { rows: [{ actor_id: actors[this.deals.get(params[0]).owner].id }] };
+    if (sql.startsWith("insert into deal_participant")) return { rows: [] };
+    if (sql.startsWith("update deal set owner=$1, updated_by=$2 where id=$3")) {
+      const deal = this.deals.get(params[2]);
+      deal.owner = params[0];
+      deal.version += 1;
+      return { rows: [] };
+    }
     if (sql === "select id from actor where slug=$1 and active") {
       const actor = actors[params[0]];
       return { rows: actor ? [{ id: actor.id }] : [] };
@@ -1049,9 +1060,54 @@ test("next-step supersede leaves old rows intact and deal thread is stably newes
   assert.deepEqual(page.thread.map(n => [n.text, n.actor]),
     [["Review counter", "dell"], ["Call landlord", "joe"]]);
   assert.equal(page.next_date, "2026-08-11");
-  assert.deepEqual(page.events.map(e => e.actor), ["dell", "joe"]);
+  assert.deepEqual(page.events.map(e => [e.actor, e.field]),
+    [["dell", "next_date"], ["dell", "next_step"],
+     ["joe", "next_date"], ["joe", "next_step"]]);
+  const dateEvents = db.events.filter(event => event.field === "next_date");
+  assert.deepEqual(dateEvents.map(event => [event.old_value.next_date, event.new_value.next_date]),
+    [[null, "2026-08-10"], ["2026-08-10", "2026-08-11"]]);
   assert.equal(JSON.stringify(page).includes("sf_commission_placeholder"), false);
   assert.equal(JSON.stringify(page).includes("sf_close_date_placeholder"), false);
+});
+
+test("undo of a date edit cannot erase a later date set with the next step", async () => {
+  const db = new FakeClient();
+  await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "date-before-step", deal: "Deal Alpha", field: "next_date",
+    value: "2026-08-10", base_event_id: null,
+  });
+  const firstDateEvent = db.events[0].id;
+  db.tick(1000);
+  await call("set-next-step", db, actors.dell, {
+    idempotency_key: "step-after-date", deal: "Deal Alpha",
+    text: "Review counter", next_date: "2026-08-11",
+  });
+  await assert.rejects(call("revert-deal-field", db, actors.joe, {
+    idempotency_key: "undo-old-date", event_id: firstDateEvent,
+  }), error => error.payload?.error === "newer_change_exists");
+  assert.equal(db.deals.get(ids.deal).next_date, "2026-08-11");
+  assert.equal(db.events.at(-1).field, "next_date");
+  assert.deepEqual(db.events.at(-1).old_value, { next_date: "2026-08-10" });
+});
+
+test("undo of an owner edit cannot erase a later set-lead handoff", async () => {
+  const db = new FakeClient();
+  await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "owner-before-lead", deal: "Deal Alpha", field: "owner",
+    value: "dell", base_event_id: null,
+  });
+  const firstOwnerEvent = db.events[0].id;
+  db.tick(1000);
+  await call("set-lead", db, actors.dell, {
+    idempotency_key: "lead-after-owner", deal: "Deal Alpha",
+    new_lead: "joe", base_version: db.deals.get(ids.deal).version,
+  });
+  await assert.rejects(call("revert-deal-field", db, actors.joe, {
+    idempotency_key: "undo-old-owner", event_id: firstOwnerEvent,
+  }), error => error.payload?.error === "newer_change_exists");
+  assert.equal(db.deals.get(ids.deal).owner, "joe");
+  assert.equal(db.events.at(-1).field, "owner");
+  assert.deepEqual(db.events.at(-1).old_value.owner, "dell");
 });
 
 test("accepted Call Mode actions appear in the normal Deal Room action payload without replacing another task", async () => {
