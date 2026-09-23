@@ -1,27 +1,27 @@
 {
   "schema": "carr-doctorcre-artifact-pin.v1",
   "repository": "jbookout/doctorcre-app",
-  "release_tag": "app-v0.1.0",
-  "release_url": "https://github.com/jbookout/doctorcre-app/releases/tag/app-v0.1.0",
-  "source_commit": "10c8741244a2eab458c1cc9481a3c54b17204711",
-  "archive_url": "https://github.com/jbookout/doctorcre-app/releases/download/app-v0.1.0/doctorcre-app.tar",
-  "archive_bytes": 1972736,
-  "archive_sha256": "bab37e0ce0e43895dc3b88d7ac2ae13bcd74094c740876fde3d418b2c1c77c14",
-  "manifest_url": "https://github.com/jbookout/doctorcre-app/releases/download/app-v0.1.0/doctorcre-app.manifest.json",
-  "manifest_bytes": 10225,
-  "manifest_sha256": "2476125889d2be4fd5eda3b7a4d5f81b3d1accef8d5e20752e5f67b6b1364cb5",
-  "file_count": 61,
+  "release_tag": "app-v0.2.0",
+  "release_url": "https://github.com/jbookout/doctorcre-app/releases/tag/app-v0.2.0",
+  "source_commit": "6fdf8341177ca8fe165908b6b3368b6021057ad6",
+  "archive_url": "https://github.com/jbookout/doctorcre-app/releases/download/app-v0.2.0/doctorcre-app.tar",
+  "archive_bytes": 3256832,
+  "archive_sha256": "e9341d908c5c039e23908a70b98b73515fa2e5b3e55300accf45172d03b7a087",
+  "manifest_url": "https://github.com/jbookout/doctorcre-app/releases/download/app-v0.2.0/doctorcre-app.manifest.json",
+  "manifest_bytes": 20693,
+  "manifest_sha256": "bb5c1b1fa38b95d8162f3a08f0e722ef950a1a58873bce283d121d53fdd92603",
+  "file_count": 129,
   "entrypoint": "workspace.html",
   "contracts": {
     "carr_interface": {
       "schema": "doctorcre-carr-interface.v1",
-      "version": "1.0.0",
-      "sha256": "2eb0d2845fa02fa0fa868c53b9ac5728b933f8c67ff8b42c14c110c72132a1da"
+      "version": "1.20.0",
+      "sha256": "5645c62cdab2c48e02733d2d74a857abe3084d337e08be63331f1ca90c72adfb"
     },
     "route_contract": {
       "schema": "doctorcre-app-routes.v1",
-      "version": "1.0.0",
-      "sha256": "cc3a362eedc33e0d6f4f0ae25bacaedea2fe914197abce0f347fcda17da7b737"
+      "version": "1.11.0",
+      "sha256": "c503e79d7adb67b9a9402f714c146ad01289135ba59e6731011b4c14e2545531"
     }
   }
 }
