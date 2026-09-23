@@ -43,6 +43,13 @@ TWO DELIBERATE EXCEPTIONS, both held by other suites and honoured here:
     ops/context-handoff-gate-selftest.py (Codex hook continuity) and Codex is
     launched from a terminal whose PATH carries Homebrew. It is left as it is
     and is NOT covered here; moving it is a separate decision.
+  * The Stop-event rule-pack-drift-gate.py command keeps its old spelling,
+    because ops/rule-delivery-cutover.py pins that exact string as
+    HOOK_TEMPLATE and refuses the production cutover unless both hook configs
+    carry it once (ops/rule-delivery-cutover-selftest.py holds that parity).
+    That script is a sealed entrypoint, so the template and this command move
+    together in a future registry successor. The gate itself is 3.9-clean:
+    this file runs it under /usr/bin/python3 where that exists.
 
 WHAT IS CHECKED, deterministically and without running a hook:
   1. every command in hooks.json that launches a CARR hook or ops script
@@ -64,6 +71,8 @@ CONFIGS = ("ops/config/hooks.json",)
 PIN = "{{REPO}}/.venv/bin/python "
 FIXED_SYSTEM_LAUNCHER = ("/usr/bin/python3 {{REPO}}/hooks/hook-meter-run.py "
                          "{{REPO}}/hooks/run-record-gate.py ")
+# Pinned verbatim by ops/rule-delivery-cutover.py HOOK_TEMPLATE; see the docstring.
+CUTOVER_TEMPLATE = "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py"
 ASSIGNMENT = re.compile(r"^(?:[A-Z_][A-Z0-9_]*=\S*\s+)*")
 FORBIDDEN = ("/usr/bin/env python3", "/usr/bin/env python ")
 
@@ -103,22 +112,46 @@ def main():
         unpinned = []
         forbidden = []
         fixed = 0
+        cutover = 0
         for event, command in rows:
             body = command[ASSIGNMENT.match(command).end():]
             if body.startswith(FIXED_SYSTEM_LAUNCHER):
                 fixed += 1
-            elif "{{REPO}}/hooks/" in body or "{{REPO}}/ops/" in body:
+                continue
+            if body == CUTOVER_TEMPLATE and event == "Stop":
+                cutover += 1
+                continue
+            if "{{REPO}}/hooks/" in body or "{{REPO}}/ops/" in body:
                 if not body.startswith(PIN):
                     unpinned.append(f"{event}: {command}")
             if any(token in command for token in FORBIDDEN):
                 forbidden.append(f"{event}: {command}")
         check(f"{config}: every CARR hook command names the venv interpreter",
               not unpinned, "\n      " + "\n      ".join(unpinned[:6]))
-        check(f"{config}: no command lets PATH choose python",
+        check(f"{config}: no other command lets PATH choose python",
               not forbidden, "\n      " + "\n      ".join(forbidden[:6]))
         check(f"{config}: exactly the two drift hooks keep the fixed system bootstrap",
               fixed == 2, f"{fixed} command(s) use it")
+        check(f"{config}: exactly one Stop command keeps the cutover template",
+              cutover == 1, f"{cutover} command(s) match it")
     check("the config wires a realistic number of commands", total >= 40, f"only {total}")
+
+    # The one hook still reached through PATH must survive the oldest python3
+    # a machine can hand it. Apple's 3.9 is the floor seen in the wild.
+    system = "/usr/bin/python3"
+    gate = os.path.join(REPO, "hooks", "rule-pack-drift-gate.py")
+    if os.access(system, os.X_OK) and os.path.exists(gate):
+        env = dict(os.environ, CARR_HOOK_FIXTURE="1")
+        payload = json.dumps({"session_id": "hook-interpreter-pin-selftest",
+                              "hook_event_name": "Stop", "cwd": REPO,
+                              "transcript_path": "/nonexistent"})
+        proc = subprocess.run([system, gate], input=payload, capture_output=True,
+                              text=True, env=env, cwd=REPO)
+        check("rule-pack-drift-gate.py runs on the system python3 without a traceback",
+              proc.returncode in (0, 2) and "Traceback" not in proc.stderr,
+              f"exit {proc.returncode} {proc.stderr[-200:]}")
+    else:
+        print("  note no /usr/bin/python3 here; the PATH-reached gate was not exercised on it")
 
     venv = os.path.join(REPO, ".venv", "bin", "python")
     if os.access(venv, os.X_OK):
