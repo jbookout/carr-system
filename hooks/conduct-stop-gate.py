@@ -128,6 +128,7 @@ sys.path.insert(0, REPO)
 from conduct_patterns import (  # noqa: E402
     OFFLOAD, SOFT_WAIT, FENCE, BARE_FENCE_CMD, HANDOFF_PROSE,
     HUMAN_WANTS_COMMAND, HUMAN_WANTS_CHOICE, PROTECTED, bare_id_hits,
+    CLASSIFIER_DENIAL, denied_commands, handoff_was_denied,
 )
 
 # ── WR-000019 S8: the writing shadow check (rule 5be2f462) ─────────────────
@@ -328,92 +329,29 @@ def strip_noise(text):
     return text
 
 
-# A tool result carrying one of these is the harness refusing the session
-# permission, not the session declining to act. Matched on the result text the
-# harness itself writes, so a session cannot manufacture the exemption by
-# talking about being denied — it has to actually have been denied.
-CLASSIFIER_DENIAL = re.compile(
-    r"(denied by the Claude Code auto mode classifier"
-    r"|Blocked by classifier"
-    r"|permission[s]? (?:for this action )?(?:was|were) denied"
-    r"|blocked by the CARR unattended guard"
-    r"|PreToolUse:.*hook error)", re.I)
-
-# Shell scaffolding carries no signal about WHICH command was denied.
-_CMD_NOISE = frozenset("""
-sudo the and for with from into then else done true false null echo cat sed awk
-grep find head tail sort uniq wc cut tee xargs bash zsh sh python python3 node
-npm cd ls rm cp mv mkdir chmod chown export local set unset print printf
-""".split())
+def _jev_hands_off():
+    """ops/jev_handoff.hands_off, or None when the module cannot load. A gate
+    must never fail because its judgment is missing; it falls back to the
+    keyword patterns it always had."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jev_handoff", os.path.join(REPO, "ops", "jev_handoff.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.hands_off
+    except Exception:
+        return None
 
 
-def denied_commands(recs, start):
-    """Commands the harness refused this session permission to run, this turn.
+def scan(assistant, human_last, denied=(), jev=None):
+    """Return (fired, findings). findings = list of (klass, name).
 
-    THE DEADLOCK THIS ENDS (2026-08-22). This gate's command-handoff class says
-    run it, never hand it over. The auto-mode classifier independently refuses
-    some commands. When both fire on the same command the session has no legal
-    move: it cannot run it, and it cannot say so. Joe personally broke that tie
-    twice in one night — which is exactly the babysitting the autonomy rule
-    exists to stop, produced by two controls that were each individually right.
-
-    A denial is only a carve-out for the command it actually denied, so the
-    denied text is returned for matching rather than setting a blanket flag.
+    `jev`, when given, is ops/jev_handoff.hands_off: Jev reads the whole message
+    and catches a handoff written as prose the keyword patterns do not match
+    (Joe, 2026-09-23: "if you can run it yourself you should do that before you
+    ever ask me"). None in the offline selftest, so the suite stays network-free.
     """
-    out = []
-    pending = {}
-    for rec in recs[start:]:
-        msg = rec.get("message") or rec
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                cmd = (block.get("input") or {}).get("command")
-                if isinstance(cmd, str) and cmd.strip():
-                    pending[block.get("id")] = cmd
-            elif block.get("type") == "tool_result":
-                body = block.get("content")
-                if isinstance(body, list):
-                    body = " ".join(b.get("text", "") for b in body if isinstance(b, dict))
-                if not isinstance(body, str) or not CLASSIFIER_DENIAL.search(body):
-                    continue
-                cmd = pending.get(block.get("tool_use_id"))
-                if cmd:
-                    out.append(cmd)
-    return out
-
-
-def _signature(text):
-    """Distinctive tokens, so matching is on the command's substance."""
-    words = re.findall(r"[A-Za-z0-9_./-]{4,}", text or "")
-    return {w.lower() for w in words if w.lower() not in _CMD_NOISE}
-
-
-def handoff_was_denied(assistant, denied):
-    """True when what the session put in front of Joe is a command the harness
-    refused it. Requires real overlap on distinctive tokens, so an unrelated
-    handoff in the same turn is still caught."""
-    shown = "\n".join(re.findall(r"```(?:bash|sh|zsh|shell)?\n(.*?)```", assistant, re.S))
-    if not shown.strip():
-        return False
-    shown_sig = _signature(shown)
-    if not shown_sig:
-        return False
-    for cmd in denied:
-        cmd_sig = _signature(cmd)
-        if not cmd_sig:
-            continue
-        overlap = len(shown_sig & cmd_sig) / max(1, min(len(shown_sig), len(cmd_sig)))
-        if overlap >= 0.5:
-            return True
-    return False
-
-
-def scan(assistant, human_last, denied=()):
-    """Return (fired, findings). findings = list of (klass, name)."""
     findings = []
     prose = strip_noise(assistant)
 
@@ -432,6 +370,10 @@ def scan(assistant, human_last, denied=()):
         for name, pat in HANDOFF_PROSE:
             if pat.search(prose):
                 findings.append(("command_handoff", name))
+        if jev is not None:
+            keyword = any(k == "command_handoff" for k, _ in findings)
+            if jev(assistant, surface="stop", existing_decision=keyword) and not keyword:
+                findings.append(("command_handoff", "jev"))
 
     # (1)+(3) OFFLOAD — exempt if the human asked for a choice, or if the
     # decision is genuinely a protected class that belongs to Joe by rule.
@@ -672,7 +614,8 @@ def main():
         if not assistant:
             sys.exit(0)
 
-        fired, findings = scan(assistant, last_human, denied_commands(recs, start))
+        fired, findings = scan(assistant, last_human, denied_commands(recs, start),
+                               jev=None if payload.get("session_id") == "selftest" else _jev_hands_off())
 
         # WR-000019 S8: the writing shadow check runs regardless of whether
         # any OTHER conduct class fired — it is measuring its own catch rate
