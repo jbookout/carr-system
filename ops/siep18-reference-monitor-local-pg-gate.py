@@ -29,19 +29,19 @@ REPO = Path(__file__).resolve().parents[1]
 # rather than spelled out again. Every prior advance of this gate had to hand-
 # edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
 # check that silently keeps interrogating the superseded frontier.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v46"
-LIVE_REGISTRY_ORDINAL = 46
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v45"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v47"
+LIVE_REGISTRY_ORDINAL = 47
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v46"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:00e79c1c93466e3efad5a77940a508eb44a7c67033fd6a86d043d2146bf4cd0b"
+    "sha256:c8d821b3fedaf3010559e5b9c4f333c5479540706e296a34ba1f4bd0e323619d"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (1977, 883)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (1981, 883)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0551_deal_conflict_scac_successor.sql"
+    "migrations/0552_deal_undo_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0552_deal_undo_scac_successor.sql"
+    "migrations/0553_hermes_dispatch_link_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
