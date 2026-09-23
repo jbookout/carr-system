@@ -157,7 +157,9 @@ def _run_cli(map_data, export_data, *, expect_rc, expect_stdout_contains=None):
 
 def main() -> int:
     partial_map = copy.deepcopy(MAP_BASE)
-    partial_map["rule_controls"]["204391be"] = {"category": "judgment_advisory"}
+    partial_controls = partial_map["rule_controls"]
+    assert isinstance(partial_controls, dict)
+    partial_controls["204391be"] = {"category": "judgment_advisory"}
     partial_export = with_rule(EXPORT_BASE, "204391be",
                                {"enforcement_class": "human_only", "state": "admitted"})
     stale_partial_export = with_rule(EXPORT_BASE, "204391be",
