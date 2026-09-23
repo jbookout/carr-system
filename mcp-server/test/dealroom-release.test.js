@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { TOOLS } from "../src/tools.js";
 import { createLiveClient } from "../../dealroom/js/live-client.js";
-import { createPostCallClient } from "../../dealroom/js/post-call-client.js";
+import { createPostCallClient, loopbackAllowed } from "../../dealroom/js/post-call-client.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const file = (path) => readFile(ROOT + path, "utf8");
@@ -202,7 +202,7 @@ test("post-call client keeps context and Outlook draft creation on narrow loopba
     if (url.endsWith('/api/post-call/drafts/d1/create')) return new Response(JSON.stringify({ draft_id:'d1', idempotent:false }));
     return new Response(JSON.stringify({ error:'not_found' }), { status:404 });
   };
-  const client = createPostCallClient({ fetchImpl });
+  const client = createPostCallClient({ fetchImpl, pageHostname: '127.0.0.1' });
   await client.publishCallContext({ session:'s1', workspace_kind:'team', generated_at:'now', deals:[] });
   await client.getStatus('s1');
   await client.syncStatus('s1');
@@ -214,4 +214,16 @@ test("post-call client keeps context and Outlook draft creation on narrow loopba
   assert.equal(calls[1].url, 'http://127.0.0.1:4682/api/post-call?session=s1');
   assert.deepEqual(JSON.parse(calls[2].init.body), { session:'s1' });
   assert.deepEqual(JSON.parse(calls[3].init.body), { session:'s1', approved_content_hash:'abc123' });
+});
+
+test("post-call client never attempts a loopback fetch from a hosted or unknown page", async () => {
+  for (const pageHostname of ["app.doctorcre.com", "dealroom.doctorcre.com", "localhost.evil.example", "", undefined]) {
+    const calls = [];
+    const client = createPostCallClient({ fetchImpl: async (url) => { calls.push(url); return new Response("{}"); }, pageHostname });
+    await assert.rejects(client.getStatus("s1"), (error) => error.code === "loopback_not_permitted");
+    await assert.rejects(client.publishCallContext({ session: "s1" }), (error) => error.code === "loopback_not_permitted");
+    assert.deepEqual(calls, [], `${pageHostname} must not reach the loopback processor`);
+  }
+  for (const host of ["localhost", "127.0.0.1", "LOCALHOST", "[::1]"]) assert.equal(loopbackAllowed(host), true, host);
+  assert.equal(loopbackAllowed(undefined), false, "no location fails closed");
 });
