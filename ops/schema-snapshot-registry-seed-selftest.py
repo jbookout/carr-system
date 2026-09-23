@@ -94,6 +94,9 @@ RUNTIME_V44 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v44.generat
 RUNTIME_V45 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v45.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V46 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v46.generated.js").read_text(
+    encoding="utf-8"
+)
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -125,7 +128,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 46)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 47)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -243,6 +246,13 @@ assert "SCAC_FULL_SET_SEAL_COUNT=44" in GENERATOR
 assert "ops.scac_mutation_catalog_v45_current()" in GENERATOR
 assert "0551_deal_conflict_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v45"' in RUNTIME_V45
+assert "DEAL_UNDO_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=46" in GENERATOR
+assert "SCAC_VERSION_COUNT=46" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=45" in GENERATOR
+assert "ops.scac_mutation_catalog_v46_current()" in GENERATOR
+assert "0552_deal_undo_scac_successor.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v46"' in RUNTIME_V46
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=43" in GENERATOR
@@ -424,14 +434,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "44", "45"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "45", "46"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 44
-assert loaded_sql.count("sha256:") == 44
-assert FULL_SET_SEALS["scac-mutation-registry.v43"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 45
+assert loaded_sql.count("sha256:") == 45
+assert FULL_SET_SEALS["scac-mutation-registry.v45"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -440,7 +450,7 @@ assert FULL_SET_SEALS["scac-mutation-registry.v43"] in loaded_sql, (
 # feed the loader deliberately broken input and require a nonzero exit, so a
 # seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
-def loader_rejects(seals: dict, count: str, current: str = "45") -> bool:
+def loader_rejects(seals: dict, count: str, current: str = "46") -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(seals, handle)
         path = handle.name

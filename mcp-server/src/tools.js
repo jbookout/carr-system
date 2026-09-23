@@ -371,16 +371,18 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
     cause = "automation_job";
   }
   await client.query(
-    `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
+    `insert into event (occurred_at, recorded_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
        organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+     values (coalesce($1::timestamptz, now()),
+       case when $19::boolean then clock_timestamp() else now() end,
+       $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
      identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
-     identity.correlation_id]);
+     identity.correlation_id, fields.recorded_at_after_lock === true]);
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
@@ -2080,6 +2082,9 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
   }
   await writeEvent(c, actor, verb, "deal", dealId, {
     field,
+    // The field lock orders writes by commit. Transaction-start `now()` would
+    // let a writer that waited for the lock sort behind the write it replaced.
+    recorded_at_after_lock: true,
     old: { [field]: oldRow.rows[0].value },
     new: { [field]: value },
     human_quote: provenance.human_quote || null,
@@ -3619,6 +3624,9 @@ export const TOOLS = {
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // Legacy phase edits share the Deal Room event stream. Acquire its lock
+      // before versionGuard can lock the deal row, matching Deal Room lock order.
+      if (keys.includes("phase")) await lockDealField(c, s.id, "phase");
       // touchedFields = keys: computed BEFORE the guard so a version bump from
       // some OTHER field can be told apart from a bump on one of THESE fields.
       // See versionGuard's own comment (CONFLICT TIERING, slice S6).
@@ -3629,7 +3637,8 @@ export const TOOLS = {
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
-          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] },
+            recorded_at_after_lock: k === "phase", idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys,
                ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
@@ -8605,9 +8614,10 @@ registerTools({
     handler: async (c, actor, args) => withEnvelope(c, actor, "revert-deal-field", args, async () => {
       const row = (await c.query(
         `select id,subject_id,field,old_value,new_value from event
-          where id=$1 and subject_type='deal' for update`, [args.event_id])).rows[0];
+          where id=$1 and subject_type='deal'`, [args.event_id])).rows[0];
       if (!row || !DEAL_ROOM_FIELDS.includes(row.field))
         throw new ToolError({ error: "event_not_revertible" });
+      await lockDealField(c, row.subject_id, row.field);
       const latest = (await c.query(
         `select id from event where subject_type='deal' and subject_id=$1 and field=$2
           order by recorded_at desc,id desc limit 1`, [row.subject_id,row.field])).rows[0];

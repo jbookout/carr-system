@@ -937,6 +937,103 @@ test("parking is a reversible operating state and never changes phase or outcome
   }), /parking_reason_required/);
 });
 
+test("undo waits for a same-field writer and refuses its newer committed edit", async () => {
+  const db = new FakeClient();
+  const first = await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "undo-race-first", deal: "Deal Alpha", field: "phase",
+    value: "negotiation", base_event_id: null,
+  });
+  assert.equal(first.ok, true);
+  const firstEvent = db.events[0].id;
+
+  let resumePatch;
+  let patchAtUpdate;
+  const patchPaused = new Promise(resolve => { patchAtUpdate = resolve; });
+  const originalQuery = db.query.bind(db);
+  let fieldLocked = false;
+  let nextLock;
+  let signalLockQueued;
+  const lockQueued = new Promise(resolve => { signalLockQueued = resolve; });
+  db.query = async (sql, params = []) => {
+    if (sql.includes("dealroom:field-lock")) {
+      if (fieldLocked) {
+        signalLockQueued();
+        await new Promise(resolve => { nextLock = resolve; });
+      }
+      else fieldLocked = true;
+      return { rows: [{}] };
+    }
+    if (sql.includes("dealroom:apply-field") && params[1] === "legal") {
+      patchAtUpdate();
+      await new Promise(resolve => { resumePatch = resolve; });
+    }
+    return originalQuery(sql, params);
+  };
+
+  const patch = call("patch-deal-field", db, actors.dell, {
+    idempotency_key: "undo-race-second", deal: "Deal Alpha", field: "phase",
+    value: "legal", base_event_id: firstEvent,
+  });
+  await patchPaused;
+  const undo = call("revert-deal-field", db, actors.joe, {
+    idempotency_key: "undo-race-undo", event_id: firstEvent,
+  });
+  await lockQueued;
+  resumePatch();
+  assert.equal((await patch).ok, true);
+  nextLock?.();
+  await assert.rejects(undo, error => error.payload?.error === "newer_change_exists");
+  assert.equal(db.deals.get(ids.deal).phase, "legal");
+  assert.equal(db.events.length, 2);
+});
+
+test("undo follows a stale patch that records a conflict against its target event", async () => {
+  const db = new FakeClient();
+  await call("patch-deal-field", db, actors.joe, {
+    idempotency_key: "stale-race-first", deal: "Deal Alpha", field: "phase",
+    value: "negotiation", base_event_id: null,
+  });
+  const firstEvent = db.events[0].id;
+  const originalQuery = db.query.bind(db);
+  let resumeConflict;
+  let signalConflict;
+  const conflictPaused = new Promise(resolve => { signalConflict = resolve; });
+  let releaseLock;
+  let signalLockQueued;
+  const lockQueued = new Promise(resolve => { signalLockQueued = resolve; });
+  let fieldLocked = false;
+  db.query = async (sql, params = []) => {
+    if (sql.includes("dealroom:field-lock")) {
+      if (fieldLocked) {
+        signalLockQueued();
+        await new Promise(resolve => { releaseLock = resolve; });
+      } else fieldLocked = true;
+      return { rows: [{}] };
+    }
+    if (sql.includes("dealroom:create-conflict")) {
+      signalConflict();
+      await new Promise(resolve => { resumeConflict = resolve; });
+    }
+    return originalQuery(sql, params);
+  };
+
+  const stalePatch = call("patch-deal-field", db, actors.dell, {
+    idempotency_key: "stale-race-patch", deal: "Deal Alpha", field: "phase",
+    value: "legal", base_event_id: null,
+  });
+  await conflictPaused;
+  const undo = call("revert-deal-field", db, actors.joe, {
+    idempotency_key: "stale-race-undo", event_id: firstEvent,
+  });
+  await lockQueued;
+  resumeConflict();
+  assert.equal((await stalePatch).ok, false);
+  releaseLock();
+  assert.equal((await undo).ok, true);
+  assert.equal(db.deals.get(ids.deal).phase, "research");
+  assert.equal(db.conflicts[0].event_a, firstEvent);
+});
+
 test("next-step supersede leaves old rows intact and deal thread is stably newest-first", async () => {
   const db = new FakeClient();
   const oldStep = await call("set-next-step", db, actors.joe,
