@@ -58,12 +58,18 @@ live-corrected 2026-08-07):
 
 - **HOLD the trigger key** = push-to-talk: speak while held, release, text
   lands at the cursor of whatever app has focus. The trigger is **right-cmd
-  (54)** on both keyboards. The Logitech receiver reports its immediate-right
-  Command as HID Right Control and its farther-right Control as HID Right GUI;
-  `bin/logitech-keymap.sh` + launchd `com.carr.logitech-keymap` swap those two
-  usages for vendor/product 046d:c52b only. The physical Command immediately
-  right of space is therefore Quill, while the farther-right Control remains
-  an ordinary Control key. The MacBook keyboard is untouched.
+  (54)** on both keyboards. On a Logitech keyboard whose receiver
+  (046d:c52b) reports its immediate-right Command as HID Right Control and
+  its farther-right Control as HID Right GUI, `bin/logitech-keymap.sh` +
+  launchd `com.carr.logitech-keymap` swap those two usages for that
+  vendor/product only, so the physical Command immediately right of space is
+  Quill and the farther-right Control remains an ordinary Control key. The
+  receiver's vendor/product ids cannot tell two different physical Logitech
+  keyboards apart, so a keyboard that already reports those keys correctly
+  (measured on Joe's Mac Studio, 2026-09-23) opts out per machine: if
+  `$HOME/.config/carr/logitech-keymap.off` exists, the script clears any
+  046d:c52b mapping instead of applying the swap. The MacBook keyboard is
+  always untouched.
 - **DOUBLE-TAP the trigger** = toggle conversation mode; inside it, **hold
   space** speaks, release disengages. A QUICK space tap types a normal space
   (replayed synthetically), so typing keeps working inside the mode; **Esc
