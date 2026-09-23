@@ -742,6 +742,37 @@ if [ "$CI_SPLIT_REGISTRY_APPLIED" = t ] && [ "$LOGITECH_KEYMAP_OPTOUT_REGISTRY_A
   echo "schema-snapshot: ci split v56 is applied without v55 predecessor" >&2
   exit 1
 fi
+# DELTA SEAL (Joe's ruling 4 of 8, 2026-09-23). Every registry successor after
+# v56 is one entry in ops/config/scac-registry-successors.v1.json; the
+# generator lists them here as `ordinal|migration file|label`, oldest first.
+# Each is probed exactly as the hand-written blocks above probe theirs, and a
+# successor applied without its predecessor still fails closed. The applied
+# ordinals are collected so the selector cascade below can pick the newest.
+SCAC_DELTA_LISTING="$(node "$REPO/ops/scac-mutation-inventory.mjs" --list-delta-successors)" || {
+  echo "schema-snapshot: could not list delta-seal successors" >&2; exit 1; }
+SCAC_DELTA_APPLIED=""
+SCAC_DELTA_PREV_APPLIED="$CI_SPLIT_REGISTRY_APPLIED"
+SCAC_DELTA_PREV_LABEL="ci split v56"
+while IFS='|' read -r delta_ordinal delta_file delta_label; do
+  [ -n "$delta_ordinal" ] || continue
+  case "$delta_ordinal" in ''|*[!0-9]*) echo "schema-snapshot: malformed delta successor listing" >&2; exit 1 ;; esac
+  delta_applied="$("$PSQL" -Atqc \
+    "select exists (select 1 from schema_migrations where filename='$delta_file')" \
+    2>/dev/null)"
+  case "$delta_applied" in
+    t|f) ;;
+    *) echo "schema-snapshot: could not read $delta_label v$delta_ordinal registry ledger state" >&2; exit 1 ;;
+  esac
+  if [ "$delta_applied" = t ] && [ "$SCAC_DELTA_PREV_APPLIED" != t ]; then
+    echo "schema-snapshot: $delta_label v$delta_ordinal is applied without $SCAC_DELTA_PREV_LABEL predecessor" >&2
+    exit 1
+  fi
+  [ "$delta_applied" = t ] && SCAC_DELTA_APPLIED="$SCAC_DELTA_APPLIED $delta_ordinal"
+  SCAC_DELTA_PREV_APPLIED="$delta_applied"
+  SCAC_DELTA_PREV_LABEL="$delta_label v$delta_ordinal"
+done <<SCAC_DELTA_EOF
+$SCAC_DELTA_LISTING
+SCAC_DELTA_EOF
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2018,6 +2049,21 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                     SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v55'"
                                     SCAC_FULL_SET_SEAL_COUNT=55
                                     SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v56_current()"
+                                    # DELTA-SEAL-CASCADE-BEGIN
+                                    # The probe loop above proved every ordinal in SCAC_DELTA_APPLIED is
+                                    # applied on top of its predecessor, so each one is the new frontier.
+                                    for delta_ordinal in $SCAC_DELTA_APPLIED; do
+                                      SCAC_CURRENT_NUMBER="$delta_ordinal"
+                                      SCAC_VERSION_COUNT="$delta_ordinal"
+                                      SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v$delta_ordinal'")"
+                                      SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v$delta_ordinal'")"
+                                      SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v$delta_ordinal.generated.js"
+                                      SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v$delta_ordinal'"
+                                      SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v$((delta_ordinal - 1))'"
+                                      SCAC_FULL_SET_SEAL_COUNT="$((delta_ordinal - 1))"
+                                      SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v${delta_ordinal}_current()"
+                                    done
+                                    # DELTA-SEAL-CASCADE-END
                                   fi
                                 fi
                               fi

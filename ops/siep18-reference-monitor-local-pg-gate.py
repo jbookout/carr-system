@@ -20,29 +20,28 @@ from psycopg.types.json import Jsonb
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib import scac_successors  # noqa: E402  delta seal: the frontier is read from config
 
-# 0564 installs v56 as the live frontier and demotes v55 to sealed history.
-# Both are pinned: an unreviewed frontier, or a v40 row the successor rewrote
-# instead of sealing, has to fail this gate closed.
+# The live frontier and the sealed predecessor it demotes are READ from the
+# successor config (ops/config/scac-registry-successors.v1.json, the delta
+# seal of 2026-09-23) and from the live migration's own preflight, which is the
+# pin the database enforces. Both stay pinned: an unreviewed frontier, or a row
+# the successor rewrote instead of sealing, has to fail this gate closed.
 #
-# The per-version function names below are DERIVED from these two ordinals
+# The per-version function names below are DERIVED from the two ordinals
 # rather than spelled out again. Every prior advance of this gate had to hand-
 # edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
 # check that silently keeps interrogating the superseded frontier.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v56"
-LIVE_REGISTRY_ORDINAL = 56
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v55"
+_FRONTIER = scac_successors.frontier()
+LIVE_REGISTRY_VERSION = _FRONTIER["live_version"]
+LIVE_REGISTRY_ORDINAL = _FRONTIER["live_ordinal"]
+SEALED_PREDECESSOR_VERSION = _FRONTIER["predecessor_version"]
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
-SEALED_PREDECESSOR_DIGEST = (
-    "sha256:5b1147006cf04906553e334799a70e4eceab43168dea40cb39f649d9fc1b4773"
-)
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2033, 891)
-SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0563_logitech_keymap_optout_scac_successor.sql"
-)
-LIVE_REGISTRY_MIGRATION = (
-    "migrations/0564_ci_split_scac_successor.sql"
-)
+SEALED_PREDECESSOR_DIGEST = _FRONTIER["predecessor_digest"]
+SEALED_PREDECESSOR_ENTRY_COUNTS = _FRONTIER["predecessor_entry_counts"]
+SEALED_PREDECESSOR_MIGRATION = _FRONTIER["predecessor_migration"]
+LIVE_REGISTRY_MIGRATION = _FRONTIER["live_migration"]
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
 LIVE_REGISTRATION_FN = f"ops.scac_mutation_registration_v{LIVE_REGISTRY_ORDINAL}"

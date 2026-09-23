@@ -6,11 +6,14 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib import scac_successors  # noqa: E402  delta seal: successors come from config
 GENERATOR = (ROOT / "bin" / "schema-snapshot.sh").read_text(encoding="utf-8")
 SNAPSHOT = (ROOT / "db" / "schema.sql").read_text(encoding="utf-8")
 FULL_SET_SEALS = json.loads(
@@ -121,12 +124,8 @@ RUNTIME_V53 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v53.generat
 RUNTIME_V54 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v54.generated.js").read_text(
     encoding="utf-8"
 )
-RUNTIME_V55 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v55.generated.js").read_text(
-    encoding="utf-8"
-)
-RUNTIME_V56 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v56.generated.js").read_text(
-    encoding="utf-8"
-)
+SUCCESSORS = scac_successors.successors()
+LIVE_ORDINAL = scac_successors.live_ordinal()
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -158,7 +157,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 57)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, LIVE_ORDINAL + 1)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -339,20 +338,22 @@ assert "SCAC_FULL_SET_SEAL_COUNT=53" in GENERATOR
 assert "ops.scac_mutation_catalog_v54_current()" in GENERATOR
 assert "0562_machine_paths_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v54"' in RUNTIME_V54
-assert "LOGITECH_KEYMAP_OPTOUT_REGISTRY_APPLIED" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=55" in GENERATOR
-assert "SCAC_VERSION_COUNT=55" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=54" in GENERATOR
-assert "ops.scac_mutation_catalog_v55_current()" in GENERATOR
-assert "0563_logitech_keymap_optout_scac_successor.sql" in GENERATOR
-assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v55"' in RUNTIME_V55
-assert "CI_SPLIT_REGISTRY_APPLIED" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=56" in GENERATOR
-assert "SCAC_VERSION_COUNT=56" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=55" in GENERATOR
-assert "ops.scac_mutation_catalog_v56_current()" in GENERATOR
-assert "0564_ci_split_scac_successor.sql" in GENERATOR
-assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v56"' in RUNTIME_V56
+# v55 and v56 keep hand-written selector blocks; everything after them is the
+# delta-seal cascade, one loop fed by the successor config. Each successor's
+# runtime projection must exist and name its own version.
+for entry in SUCCESSORS:
+    runtime = (ROOT / "mcp-server" / "src" / f"scac-mutation-registry.v{entry['version']}.generated.js").read_text(encoding="utf-8")
+    assert f'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{entry["version"]}"' in runtime
+    assert (ROOT / entry["migration"]).exists(), entry["migration"]
+    if entry["version"] <= 56:
+        assert entry["ledger_variable"] in GENERATOR
+        assert f"SCAC_CURRENT_NUMBER={entry['version']}" in GENERATOR
+        assert f"SCAC_VERSION_COUNT={entry['version']}" in GENERATOR
+        assert f"SCAC_FULL_SET_SEAL_COUNT={entry['version'] - 1}" in GENERATOR
+        assert f"ops.scac_mutation_catalog_v{entry['version']}_current()" in GENERATOR
+        assert entry["migration"].split("/")[-1] in GENERATOR
+assert "# DELTA-SEAL-CASCADE-BEGIN" in GENERATOR and "# DELTA-SEAL-CASCADE-END" in GENERATOR
+assert "--list-delta-successors" in GENERATOR
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=43" in GENERATOR
@@ -534,14 +535,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "55", "56"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), str(LIVE_ORDINAL - 1), str(LIVE_ORDINAL)],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 55
-assert loaded_sql.count("sha256:") == 55
-assert FULL_SET_SEALS["scac-mutation-registry.v55"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == LIVE_ORDINAL - 1
+assert loaded_sql.count("sha256:") == LIVE_ORDINAL - 1
+assert FULL_SET_SEALS[f"scac-mutation-registry.v{LIVE_ORDINAL - 1}"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -550,7 +551,7 @@ assert FULL_SET_SEALS["scac-mutation-registry.v55"] in loaded_sql, (
 # feed the loader deliberately broken input and require a nonzero exit, so a
 # seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
-def loader_rejects(seals: dict, count: str, current: str = "56") -> bool:
+def loader_rejects(seals: dict, count: str, current: str = str(LIVE_ORDINAL)) -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(seals, handle)
         path = handle.name
