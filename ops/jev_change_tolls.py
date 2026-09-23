@@ -48,14 +48,30 @@ TOLLS = {
         "The changed files are in `change.files`. Does this change edit a file "
         "that the sealed source inventory tracks as a script entrypoint -- "
         "anything under hooks/, bin/, tools/, pipelines/, ops/ that carries a "
-        "shebang or a main guard, or any file under mcp-server/src/? Editing "
-        "one changes its digest and the seal must be re-derived.",
-        "union the row into current_source_review.upsert in ops/config/"
-        "scac-registry-source-inventory-fixtures.v1.json, then pin the digest "
-        "the ASSERTION reports, not the generator's. They are different "
-        "numbers: the generator prints a digest of the raw rows, while the "
-        "seal covers the REVIEWED set, which is the base version with the "
-        "upserts applied. Run it and read the observed value back: node "
+        "shebang or a main guard, any file under mcp-server/src/, or a GitHub "
+        "workflow under .github/workflows/ (workflows are inventoried too, "
+        "comment edits included)? Editing one changes its digest and the "
+        "seal must be re-derived.",
+        "a re-digest is a forward-only registry successor, not an overlay "
+        "edit. Do NOT union rows into current_source_review.upsert: "
+        "assertCurrentSourceInventoryMatchesFixture only reads that overlay "
+        "when the frontier is REGISTRY_V37_VERSION, so at today's frontier it "
+        "changes nothing. Instead: (1) append a patches[] entry for the NEXT "
+        "version in ops/config/scac-registry-source-inventory-fixtures.v1.json "
+        "carrying the re-digested rows as `upsert` (`remove` only for a "
+        "retired ingress), a reason naming them, and the expected_count and "
+        "expected_sha256 the ASSERTION reports; (2) cut the successor the "
+        "patch belongs to -- the new REGISTRY_V<n> version in "
+        "ops/scac-mutation-inventory.mjs, the generated runtime "
+        "mcp-server/src/scac-mutation-registry.v<n>.generated.js, its "
+        "forward-only migration, the entry-set seal in ops/config/"
+        "scac-registry-full-entry-set-seals.json, and the catalog baseline "
+        "measured on the disposable local PostgreSQL lane, never production; "
+        "(3) advance the snapshot selector, the siep11/siep18 local-pg gates "
+        "and mcp-server/test/siep-11-mutation-registry.test.mjs to the new "
+        "frontier. Copy the most recent successor as the template: `git log "
+        "--oneline -1 -i --grep='as SCAC v[0-9]'` (v53 was c3ab541f, #1146). "
+        "Read the digest back from the assertion, not the generator: node "
         "--input-type=module -e \"import "
         "{assertCurrentSourceInventoryMatchesFixture} from "
         "'./ops/scac-mutation-inventory.mjs'; import {TOOLS} from "
@@ -159,7 +175,11 @@ def change(base="origin/main", repo=REPO):
     names += subprocess.run(["git", "status", "--porcelain=v1"],
                             capture_output=True, text=True, cwd=repo,
                             timeout=60).stdout.splitlines()
-    added, edited = [], []
+    # DELETED IS ITS OWN LIST. A removed path used to fall through to
+    # "edited", so the advisory described a deletion as an edit to a file
+    # that no longer exists, and the collector selftest's "every named path
+    # exists" property failed on any branch that deleted a tracked file.
+    added, edited, deleted = [], [], []
     for row in names:
         # Two shapes reach here. `git diff --name-status` gives "M\tpath";
         # `git status --porcelain` gives "?? path" or " M path". Untracked and
@@ -172,7 +192,10 @@ def change(base="origin/main", repo=REPO):
             status, path = row[:2].strip() or "M", row[3:].strip()
         if not path:
             continue
-        target = added if status.startswith(("A", "??")) else edited
+        if status.startswith("D"):
+            target = deleted
+        else:
+            target = added if status.startswith(("A", "??")) else edited
         if path not in target:
             target.append(path)
     # Whether a file is an entrypoint is a fact the questions CANNOT see, so
@@ -199,7 +222,7 @@ def change(base="origin/main", repo=REPO):
     merged = subprocess.run(
         ["git", "log", "--merges", "--oneline", f"{base}..HEAD"],
         capture_output=True, text=True, cwd=repo, timeout=60).stdout.strip()
-    return {"files": {"added": added, "edited": edited},
+    return {"files": {"added": added, "edited": edited, "deleted": deleted},
             "added_files_with_a_shebang_or_main_guard": shebangs,
             "edited_files_that_are_script_entrypoints": edited_entrypoints,
             "this_branch_merged_another_branch": bool(merged)}
