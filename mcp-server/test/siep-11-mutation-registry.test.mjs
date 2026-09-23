@@ -88,6 +88,12 @@ import {
   REGISTRY_V55_VERSION,
   REGISTRY_V56_VERSION,
   REGISTRY_V57_VERSION,
+  HANDWRITTEN_FRONTIER_COUNTS,
+  LIVE_SUCCESSOR_VERSION,
+  SUCCESSORS,
+  renderDeltaSuccessorRegistrySql,
+  successorEntry,
+  successorRegistryVersion,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -1526,9 +1532,9 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   // The complete generated frontier now includes the v57 successor;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 63);
+    .filter(path => path.startsWith("migrations/")).length, HANDWRITTEN_FRONTIER_COUNTS.migrations + SUCCESSORS.length);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 54);
+    .filter(path => path.startsWith("mcp-server/src/")).length, HANDWRITTEN_FRONTIER_COUNTS.runtimes + SUCCESSORS.length);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2781,14 +2787,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V57_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, LIVE_SUCCESSOR_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 63);
+  assert.equal(migrations.length, HANDWRITTEN_FRONTIER_COUNTS.migrations + SUCCESSORS.length);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 54);
-  assert.equal(paths.length, 117);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", ...SUCCESSORS.map(entry => entry.migration.match(/migrations\/(\d{4})_/)[1])]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, HANDWRITTEN_FRONTIER_COUNTS.runtimes + SUCCESSORS.length);
+  assert.equal(paths.length, HANDWRITTEN_FRONTIER_COUNTS.artifacts + 2 * SUCCESSORS.length);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
@@ -2952,7 +2958,10 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // reviewed administrative entrypoint; it also has a CLI shebang.
   // v40 adds the tracked private snapshot connection helper as one reviewed
   // script ingress; it carries no runtime authorization.
-  assert.equal(rows.length, 553);
+  // v58 (the delta seal, 2026-09-23) adds ops/scac-seal-successor.py, the
+  // driver that measures and binds a successor on a disposable database, as
+  // one reviewed administrative entrypoint.
+  assert.equal(rows.length, 554);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2969,7 +2978,8 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // command-line entrypoints, so discovery advances by the same exact two.
   // WR126 adds the canonical-ownership issuer provisioner.
   // v40 adds the private snapshot connection helper; B09 adds its local PG gate.
-  assert.equal(scripts.length, 544);
+  // v58 adds the delta-seal driver ops/scac-seal-successor.py.
+  assert.equal(scripts.length, 545);
   // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
   // ingress this branch's registry successor does not seal, and the whole point
   // of the predicate is that intent does not enter it.
@@ -3210,4 +3220,88 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
   assert.throws(() => assertLegacyLaunchdSource(
     { ...legacySurface, canonical_program_arguments: [...legacySurface.canonical_program_arguments, "--forged"] },
     legacySurface.repo_plist_relpath, plist), /legacy source mismatch/);
+});
+
+// THE DELTA SEAL (Joe's ruling 4 of 8, 2026-09-23). A registry successor from
+// v55 on is a config entry rendered by one version-parameterised function.
+// These cases are the renderer's own proof: byte-identity with the migrations
+// that were hand-rendered and applied to Production, refusal of a drifted
+// predecessor, refusal of a malformed config, and a fixture patch that records
+// exactly the rows that moved.
+test("delta seal: the generic renderer reproduces the hand-rendered v55, v56 and v57 migrations byte for byte", () => {
+  const committed = path => fs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  for (const ordinal of [55, 56, 57]) {
+    const entry = successorEntry(ordinal);
+    assert.equal(entry.version, ordinal);
+    const rendered = renderDeltaSuccessorRegistrySql(entry, frozenInventory(successorRegistryVersion(ordinal)));
+    assert.equal(rendered, committed(entry.migration), `${entry.migration} is not what the generic renderer produces`);
+  }
+  assert.equal(LIVE_SUCCESSOR_VERSION, successorRegistryVersion(SUCCESSORS.at(-1).version));
+  assert.deepEqual(SUCCESSORS.map(entry => entry.version), SUCCESSORS.map((_, index) => 55 + index));
+});
+
+test("delta seal: a drifted predecessor migration is refused before anything is rendered", () => {
+  const entry = successorEntry(56);
+  const predecessor = fs.readFileSync(new URL(`../../${entry.predecessor_migration}`, import.meta.url), "utf8");
+  assert.throws(() => renderDeltaSuccessorRegistrySql(entry, frozenInventory(successorRegistryVersion(56)), `${predecessor}\n-- one more byte`),
+    /v56 predecessor migration pin drifted/);
+  assert.throws(() => successorEntry(9999), /no successor config entry for v9999/);
+});
+
+test("delta seal: the successor config is validated as a contiguous chain from v55", async () => {
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
+  const configPath = path.join(repoRoot, "ops/config/scac-registry-successors.v1.json");
+  const good = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const cases = [
+    ["a gap in the version chain", config => { config.successors[1].version = 57; }, /contiguous from v55/],
+    ["a migration number that does not move forward", config => { config.successors[1].migration = "migrations/0563_ci_split_scac_successor.sql"; }, /migration must be/],
+    ["a predecessor that is not the previous entry", config => { config.successors[1].predecessor_migration = "migrations/0562_machine_paths_scac_successor.sql"; }, /names predecessor/],
+    ["a reused slug", config => { config.successors[1].slug = "logitech_keymap_optout"; config.successors[1].migration = "migrations/0564_logitech_keymap_optout_scac_successor.sql"; }, /slug is malformed or reused/],
+    ["an unknown catalog category", config => { config.successors[1].catalog_baseline.made_up = { count: 1, digest: `sha256:${"0".repeat(64)}` }; }, /unknown category/],
+    ["a malformed predecessor digest", config => { config.successors[1].predecessor_sha256 = "nope"; }, /predecessor digest is malformed/],
+  ];
+  for (const [why, mutate, expected] of cases) {
+    const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.delta-seal-"));
+    try {
+      fs.mkdirSync(path.join(isolatedRoot, "ops/config"), { recursive: true });
+      fs.mkdirSync(path.join(isolatedRoot, "mcp-server/src"), { recursive: true });
+      for (const name of fs.readdirSync(path.join(repoRoot, "ops/config")))
+        fs.copyFileSync(path.join(repoRoot, "ops/config", name), path.join(isolatedRoot, "ops/config", name));
+      fs.copyFileSync(path.join(repoRoot, "ops/scac-policy-epoch-sql.mjs"), path.join(isolatedRoot, "ops/scac-policy-epoch-sql.mjs"));
+      const config = structuredClone(good);
+      mutate(config);
+      fs.writeFileSync(path.join(isolatedRoot, "ops/config/scac-registry-successors.v1.json"), JSON.stringify(config));
+      const modulePath = path.join(isolatedRoot, "ops/scac-mutation-inventory.delta.mjs");
+      fs.writeFileSync(modulePath, source);
+      let refusal = null;
+      try {
+        execFileSync(process.execPath, [modulePath, "--successor-frontier"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      } catch (error) {
+        refusal = error;
+      }
+      assert.ok(refusal, `${why} was accepted`);
+      assert.match(String(refusal.stderr), expected, `${why} was refused for the wrong reason`);
+    } finally {
+      fs.rmSync(isolatedRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("delta seal: a fixture patch records exactly the rows that moved since the predecessor", async () => {
+  const { successorFixturePatch } = await import("../../ops/scac-mutation-inventory.mjs");
+  const entry = successorEntry(56);
+  const rows = frozenInventory(successorRegistryVersion(56));
+  const patch = successorFixturePatch(entry, rows, "a reviewed reason long enough to pass the forty-character floor");
+  assert.equal(patch.version, "v56");
+  assert.equal(patch.expected_count, rows.length);
+  assert.deepEqual(patch.upsert.map(row => row.ingress_key).sort(), [
+    "github-workflow:ci.yml",
+    "script-entrypoint:bin/schema-snapshot.sh",
+    "script-entrypoint:ops/scac-mutation-inventory.mjs",
+    "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py",
+    "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py",
+  ]);
+  assert.deepEqual(patch.remove, []);
+  assert.throws(() => successorFixturePatch(entry, rows, "too short"), /reviewed reason/);
 });

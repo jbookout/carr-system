@@ -1,0 +1,66 @@
+{
+  "schema_version": "scac-registry-successors.v1",
+  "note": "Delta seal (Joe's ruling 4 of 8, 2026-09-23, decision 2a481bc0). Every SCAC registry successor from v55 on is one entry here: the generator renders its migration and runtime projection from the previous sealed migration, the snapshot selector, the siep11/siep18 local-pg gates, the seed selftest and the siep-11 node test derive their frontier from this list. catalog_baseline holds only the categories that moved, measured on a disposable PostgreSQL by ops/scac-seal-successor.py; the entry-set seal lives in scac-registry-full-entry-set-seals.json as before. v1..v54 stay hand-rendered history; a domain migration may sit between two successors, so migration numbers only have to increase.",
+  "successors": [
+    {
+      "version": 55,
+      "slug": "logitech_keymap_optout",
+      "label": "Logitech keymap opt-out",
+      "migration": "migrations/0563_logitech_keymap_optout_scac_successor.sql",
+      "predecessor_migration": "migrations/0562_machine_paths_scac_successor.sql",
+      "predecessor_sha256": "8276c0e7c1f62bb73e8a0b095a08f8403f35f5646c0a5a7b742395b5907436ca",
+      "catalog_baseline": {
+        "secdef_execute": {
+          "count": 830,
+          "digest": "sha256:44f9bb5280d10fc506d433717595a8d259d83e80f002c6f1035b834479720080"
+        }
+      },
+      "ledger_variable": "LOGITECH_KEYMAP_OPTOUT_REGISTRY_APPLIED"
+    },
+    {
+      "version": 56,
+      "slug": "ci_split",
+      "label": "CI split",
+      "migration": "migrations/0564_ci_split_scac_successor.sql",
+      "predecessor_migration": "migrations/0563_logitech_keymap_optout_scac_successor.sql",
+      "predecessor_sha256": "274950ef2cc76ab56b4f82d5bc7238f8ba65ca5a72ae00070200b69cb348930c",
+      "catalog_baseline": {
+        "secdef_execute": {
+          "count": 834,
+          "digest": "sha256:2404e216eeabc5c0b78899a2e4e422bb6d7d668c01d9ac151b8add3684203f46"
+        }
+      },
+      "ledger_variable": "CI_SPLIT_REGISTRY_APPLIED"
+    },
+    {
+      "version": 57,
+      "slug": "tour_property_registration",
+      "label": "Tour property registration",
+      "migration": "migrations/0566_tour_property_registration_scac_successor.sql",
+      "predecessor_migration": "migrations/0564_ci_split_scac_successor.sql",
+      "predecessor_sha256": "8ae3d17a282f87807d9171b8d5302549ca6a92f280112d0a5f462ea6e3a18da8",
+      "catalog_baseline": {
+        "secdef_execute": {
+          "count": 839,
+          "digest": "sha256:ee5c76ac7654a9bf8a48a49ce50fc1f7f3da104d8f5c146a53ece87c318305cf"
+        }
+      },
+      "ledger_variable": "TOUR_PROPERTY_REGISTRATION_REGISTRY_APPLIED"
+    },
+    {
+      "version": 58,
+      "slug": "delta_seal",
+      "label": "Delta seal",
+      "migration": "migrations/0567_delta_seal_scac_successor.sql",
+      "predecessor_migration": "migrations/0566_tour_property_registration_scac_successor.sql",
+      "predecessor_sha256": "2cb4931880a8fe3c72ae9c0b1d64c6036130f1e9ceb1efe7c9172dffc8a4cb2d",
+      "catalog_baseline": {
+        "secdef_execute": {
+          "count": 843,
+          "digest": "sha256:c2e7a1bd6b79e1eda8e789986c300d59ec34a1f6438837ba5367e096f85a6aa9"
+        }
+      },
+      "ledger_variable": "DELTA_SEAL_REGISTRY_APPLIED"
+    }
+  ]
+}
