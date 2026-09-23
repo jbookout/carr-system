@@ -1,6 +1,6 @@
 {
  "schema": "rule-selection-corpus.v1",
- "note": "Full rule STATEMENTS for judged rule selection, keyed by the same 8-character short id ops/config/rule-triage.v1.json uses. WHY THIS FILE EXISTS: the triage file carries title_gist, which is a HEADLINE -- median 87 characters, and all 211 of them end without terminal punctuation because a title has no sentence to end -- and reason, which is triage metadata about WHERE a rule is delivered rather than what it says. Neither is the rule. Until 2026-09-18 the judged selector scored relevance from the headline alone, which is why it read as weaker than a regex table: it was answering about a title. Source: v_compiled_rules in the record layer, 214 rules averaging 1176 characters.",
+ "note": "Full active rule statements for judged rule selection, keyed by the record layer short id. Refreshed from live standing-context on 2026-09-23; the five retired rules were removed and three newly active rules added. Scope and active-state authority remain in the record layer.",
  "rules": [
   {
    "id": "015183f5",
@@ -163,14 +163,6 @@
    "scope": {}
   },
   {
-   "id": "1e62c007",
-   "gist": "AWAY-MODE ASK RESOLUTION \u2014 who \"stop and ask\" means when Joe is not there",
-   "statement": "AWAY-MODE ASK RESOLUTION \u2014 who \"stop and ask\" means when Joe is not there. Rule 14e0408b holds the gate: money, anything outbound or client-visible, identity-field edits, destructive or irreversible actions, and genuine forks all stop and ask. That gate is unchanged and is not widened. What this rule adds is the one thing it never specified \u2014 the RECIPIENT \u2014 because \"ask\" with no named recipient silently becomes \"ask Joe\", and away mode exists precisely because Joe is not answering.\n\nWHEN AWAY MODE IS ACTIVE, \"ask\" RESOLVES AS FOLLOWS, and never to Joe:\n- CLIENT-FACING OR BINDING goes to DELL, who reads it and sends under his own licence. The test, ruled 2026-08-03 in decision 8b7f7517: will a human outside Joe and Dell see it, or does it bind Joe or a client? That covers LOIs and counters, PSA documents, any email to a client, prospect, landlord, listing agent or vendor, comparison sheets and search reports, proposals, introductions between parties, and anything carrying a number a client relies on. SOCIAL MEDIA IS CARVED OUT of this class by Joe's ruling and does not require Dell.\n- INTERNAL AND IRREVERSIBLE goes to the CEO session's own judgment, exercised through the red-team protocol when it is unsure. Internal means the consequence stops inside the system: schema, records, renders, jobs, config.\n- MONEY GOES TO NOBODY. It waits for Joe. No away-mode delegation covers spending, and a purchase that cannot wait a week was never a purchase, it was an emergency and belongs to a human on a phone.\n\nOUTSIDE AWAY MODE NOTHING CHANGES: \"ask\" means Joe, exactly as it does today.\n\nTWO STANDING CONSTRAINTS. First, an ask routed to Dell is a REVIEW, not a rubber stamp: he reads the artifact itself and not a summary of it, and the session hands him the actual text along with what it would send and what it is unsure about. Second, THE ROUTING DECISION IS NEVER MADE BY THE ACTING PARTY ALONE \u2014 if the seat that produced the artifact is also the seat deciding it does not need Dell, that is the maker checking its own work, and the answer is Dell.",
-   "scope": {
-    "section": "authority-delegation"
-   }
-  },
-  {
    "id": "1f3a7372",
    "gist": "A SCHEDULED ROUTINE LOGS ITS FINDINGS TO THE RECORD BEFORE IT ENDS \u2014 an unattended run that only prints is a",
    "statement": "A SCHEDULED ROUTINE LOGS ITS FINDINGS TO THE RECORD BEFORE IT ENDS \u2014 an unattended run that only prints is a run whose findings die with the session. Every scheduled task, cron job, heartbeat, nightly chain step and autonomous routine ends by writing what it FOUND into the record layer through the verbs, not merely by printing a report into a transcript no one will re-read. The reason is structural, not tidiness: an unattended run has no human in the loop to notice a finding and act on it, so the transcript is the only place it exists, and the next run starts blind. What must be written: (a) any DEFECT or breakage the run discovered, as a loop, so it survives into a session that can fix it; (b) any DECISION the run needs from a human, as a loop with marker 'decision', so it reaches the Monday brief instead of waiting to be rediscovered; (c) any RULING the run applied and any record it changed, through the verb that owns that record, which is already the write law; (d) the run's own completion signal, where a downstream gate reads one \u2014 a routine whose gate cannot see that it ran will double-fire, which is not a hypothetical (the 2026-08-09 idea-bank resurface hit exactly this). What does NOT need writing: a clean run that found nothing, which should stay silent rather than mint a row per firing. The test is the same one the taught-rule test uses, aimed at the next run instead of the next session: would the system have to discover this again? If yes, it goes in the record before the run ends.",
@@ -206,6 +198,12 @@
     "quote_absent": true,
     "tier_verdict": "shared"
    }
+  },
+  {
+   "id": "204391be",
+   "gist": "MISSING VERB, BUILD IT",
+   "statement": "MISSING VERB, BUILD IT. Binding at the moment a session, while building or researching a product surface, finds that the record layer has no verb for something the surface needs (no door to list, create, read, change or revoke the record it must show): the session BUILDS the verb through the existing heavy path (Work Request, plan, review, registry successor, release) without stopping to ask Joe whether to file it. Joe has pre-agreed to every such Work Request; the moratorium clause that requires his agreement for a prerequisite ahead of product is satisfied in advance for the missing-verb case. The session still names the product task the verb unblocks, still runs the full protocol, and plan ACCEPTANCE stays Joe act (accept-ready-plan is human-only), so the ask to Joe shrinks to one word at that gate. TEST that separates it from its neighbour: the trigger is a verb that does not exist at all, proved by list-verbs and the registrySource file; a verb that exists but refuses the caller is a permission question and is NOT this rule. Boundary case easy to get wrong: a verb missing on the APP side (the app never wired it) is app work, not a record-layer gap; check the registry before filing. Provenance: 2026-09-18 Joe, when the Conversations page needed a list verb the store lacked.",
+   "scope": {}
   },
   {
    "id": "20d106f1",
@@ -322,14 +320,6 @@
    "gist": "Capture and rendering are separate decisions",
    "statement": "Capture and rendering are separate decisions. When pulling from any source platform, capture EVERY available field by default, including listing-agent and owner contacts, property managers, FEMA and flood data, parking, zoning, acreage and storeys. Never prune an export because a field will not appear in the client-facing report. Apply client-facing rules at render time instead. A missing column costs another trip to the platform, which is the scarce and risky resource; an unused column costs nothing. The go-through-the-listing-agent rule governs the outbound action, never possession of the data.",
    "scope": {}
-  },
-  {
-   "id": "2dbb0ad8",
-   "gist": "SUBAGENTS \u2014 COST IS THE GATE, NOT NOVELTY",
-   "statement": "SUBAGENTS \u2014 COST IS THE GATE, NOT NOVELTY. Firing an agent with a DEFINED SEAT is ordinary work needing no permission: route to it, fire it, report in one line what and why. Novelty is not the trigger. STOP AND ASK only for a genuinely expensive fan-out with NO existing seat \u2014 roughly more than ten agents, or a wholly new orchestration pattern \u2014 and name the cost when asking. SHAPE RULE: simple fan-out only, narrow jobs, each worker sees only what its job needs. TIERING: routine Haiku/Sonnet delegation inside an owned task is pre-approved; hard floors (client voice, Opus-only) never downtier.\n[Provenance: supersedes the original \"suggest, Joe decides, wait\" gate, which predated the agent roster.]",
-   "scope": {
-    "section": "Authority and delegation \u2014 who decides, who does the work"
-   }
   },
   {
    "id": "2e362970",
@@ -682,14 +672,6 @@
    "scope": {}
   },
   {
-   "id": "61551180",
-   "gist": "A PRESENT THREAT OUTRANKS A POSSIBLE FUTURE USE, WHEN THE PROTECTION IS REVERSIBLE",
-   "statement": "A PRESENT THREAT OUTRANKS A POSSIBLE FUTURE USE, WHEN THE PROTECTION IS REVERSIBLE. Take the protection now and pay the cost of undoing it later; do not leave an exposure open to preserve an option nobody has exercised yet.\n\nTHE TEST, three questions in order. (1) Is the threat LIVE \u2014 does the exposure exist today, not on a projected roadmap? (2) Is the protection REVERSIBLE at low cost \u2014 can it be undone in minutes when the future use arrives, without data loss or a migration? (3) Is the future use SPECULATIVE \u2014 is it \"we may want this\" rather than a dated commitment with work already scheduled against it? Three yeses means protect now and say plainly what was given up. A NO on reversibility is the one that flips the answer: an irreversible protection against a speculative threat is a different decision and goes back to the partner.\n\nWHAT IT IS NOT. This is not a licence to lock things down by reflex, and it does not touch the standing gate \u2014 money, anything outbound or client-visible, identity edits, destructive or irreversible actions and genuine forks still stop and ask. It settles only the narrow case where the ONLY argument for leaving an exposure open is a use that has not started.\n\nRECORD WHAT WAS TRADED, at the moment of the trade. The future use does not stop being wanted because it lost; it becomes a parked item with the trigger that would revive it. A protection taken without recording its cost reads later as an arbitrary restriction, and the next session removes it without knowing why it was there.\n\nORIGIN, Joe 2026-08-04, on disabling Cloudflare Email Routing for practicecre.com: he named both sides in one sentence and ruled without being asked to. The exposure was live \u2014 an \"Add missing records\" button one click from publishing Cloudflare MX and downgrading a hard SPF fail to a softfail, silently undoing a lockdown finished minutes earlier. The reversal is a few clicks. The future use, a system mailbox, was real but unstarted, and was parked as idea #54 carrying the trigger that would justify building it: wanting DMARC aggregate reports, which only work cleanly on a domain the partner owns.",
-   "scope": {
-    "section": "operating-mechanics"
-   }
-  },
-  {
    "id": "6172e7d5",
    "gist": "GROK RUNS THE WATCH-VIDEO SKILL, AND IT IS THE DEFAULT SEAT FOR VIDEO AND IMAGE SOURCES",
    "statement": "GROK RUNS THE WATCH-VIDEO SKILL, AND IT IS THE DEFAULT SEAT FOR VIDEO AND IMAGE SOURCES. Grok Build is an installed local CLI with its own retrieval and its own multimodal reading. Hand it the vetted skill procedure verbatim, plus an explicit specification of what to return, and it executes the pipeline and reports back. When a session cannot pull a media source itself, this is the move \u2014 delegate the skill, do not stop at the failed download.\n\nFOR VIDEO, the procedure is watch-video steps 0 through 3: confirm ffmpeg and ffprobe are present, download to a scratch directory, read the duration, extract scene-change frames with an interval-sampling fallback for clips where the scene filter finds too few, then view the frames. Grok reads the frames itself and returns a description detailed enough to rebuild what is on screen.\n\nINVOCATION, verified 2026-08-14: sandbox profile `workspace`, model grok-4.5, reasoning effort high, print mode, the brief passed as the prompt argument, cwd set to the scratch directory. Three things each cost a retry and are worth knowing once \u2014 the `read-only` profile cannot write frames, there is no `workspace-write` profile and the CLI refuses to start when handed that name, and `--always-approve` should be omitted. Extract frames at width 1600 or larger, never 512, whenever on-screen text is the substance of the source.\n\nSPECIFY WHAT YOU WANT, ITEM BY ITEM. The quality of what comes back tracks the specificity of the ask. For a design reference that means naming every dimension separately: overall layout and proportions, the grid and its projection, how the elements vary and what drives the variation, how connections are drawn, what moves and how, every label transcribed verbatim, the palette, the motion beat by beat, and an explicit statement of what could not be made out. Tell it to mark inferences as inferences.\n\nTHE SESSION STILL VERIFIES FIRST-HAND. Grok leaves its frames on disk. Open two of them and check its report against the pixels before using any of it, per rules 94806da2 and fa217e48. On 2026-08-14 the report was accurate and it was checked anyway.\n\nTHIS EXTENDS RULE 57d13061, GROK-FIRST FOR X, FROM POST TEXT TO ATTACHED MEDIA. Media attached to a post is part of the source under rule 557838a5, so a post whose substance is a video or an image gets the same Grok-first treatment its text already gets.\n\nPROVENANCE: Joe's order on 2026-08-14 during the isometric-map build, after the session reported a video as out of reach rather than delegating it to a seat that could read it.",
@@ -764,19 +746,6 @@
     "source": "introduction-rules.md, added 2026-07-13 as \"the Practice OS steering rule\"; no author stamped in the file",
     "section": "delivery_weighted",
     "taught_on": "2026-07-13"
-   }
-  },
-  {
-   "id": "708c2150",
-   "gist": "Risk colors on every automation: green = read-only/own files \u00b7 yellow = drafts, human approves \u00b7 red =",
-   "statement": "Risk colors on every automation: green = read-only/own files \u00b7 yellow = drafts, human approves \u00b7 red = money/outbound/publishing/client-visible, always ends at Joe. State the color at creation; nothing red ever runs alone.",
-   "scope": {
-    "key": "standing-mechanics#10",
-    "source": "ai-operating-notes.md",
-    "section": "standing-mechanics",
-    "provenance": "imported from ai-operating-notes.md [standing-mechanics], no verbatim quote recorded",
-    "quote_absent": true,
-    "tier_verdict": "shared"
    }
   },
   {
@@ -1141,6 +1110,12 @@
    "scope": {}
   },
   {
+   "id": "a2e78f48",
+   "gist": "AUTONOMOUS REPAIR OF KNOWN ISSUES, Joe's ruling 2026-09-16 from the Control Room prototype review",
+   "statement": "AUTONOMOUS REPAIR OF KNOWN ISSUES, Joe's ruling 2026-09-16 from the Control Room prototype review: when the system detects that something is broken and the fix is known, agents repair it on discovery rather than queueing an approve/decline for Joe. The Control Room shows a briefing \"X was detected and a repair was made\", and opening it gives what was broken, why that fix was chosen, and how it is better now. This does not widen the existing production safeguards: a repair whose effect is a Worker release, migration, deletion or credential change still runs the heavy path, and the briefing records that too. What it removes is the human approval step for repairs inside those safeguards.",
+   "scope": {}
+  },
+  {
    "id": "a3f6c7f9",
    "gist": "Diagnose before restructuring: point to a real task that was slow, never a hypothetical",
    "statement": "Diagnose before restructuring: point to a real task that was slow, never a hypothetical.",
@@ -1187,14 +1162,6 @@
    "gist": "A CHECK MUST COMPARE THE ARTIFACT AGAINST WHAT IT SHOULD BE, AND A SUCCESS SIGNAL MUST BE DERIVED FROM",
    "statement": "A CHECK MUST COMPARE THE ARTIFACT AGAINST WHAT IT SHOULD BE, AND A SUCCESS SIGNAL MUST BE DERIVED FROM READING THAT ARTIFACT. Binds at two named moments.\n\nMOMENT 1 \u2014 BUILDING OR REVIEWING ANY GUARD. The test is never \"is it non-empty\" and never \"did the command exit 0\". Ask what the artifact looks like when it is RIGHT, and compare against that: a floor derived from the last known-good instance, a structural marker the producer writes only on success, a count. On 2026-08-07 bin/backup-dump.sh guarded the nightly backup with `[ -s \"$OUT.tmp\" ]` \u2014 more than zero bytes. pg_dump lost its Neon connection mid-dump, age encrypted the empty stream into a 200-byte file, the guard passed it, `mv` promoted it to that day's official backup, the archiver uploaded it to R2 as the durable off-Mac copy, and the dead-man switch was pinged. Nine months of nightly backups were one Neon blip away from the same fate.\n\nMOMENT 2 \u2014 WIRING ANY SIGNAL THAT REPORTS ON WORK. A signal that reports on work it did not read is a FALSE signal and gets rewired or removed, never left in place. Three instruments agreed the backup succeeded that night and not one had read it: the healthchecks dead-man ping fired because the chain reached the end rather than because the backup was good; `set -eu` without `set -o pipefail` returned age's exit status instead of pg_dump's, so the failing stage was invisible; and the success line printed `du -h`, which floors at the 4K block size and therefore physically could not display 200 bytes as wrong. A hang is the same defect at the limit \u2014 the R2 archiver blocked for 3h20m on an untimed DB read, so the chain never returned, `set -e` never fired, and the scheduled task reported nothing at all. An exit-code check can never catch that, because there is no exit code.\n\nTHE PRACTICAL TEST, applied at build time and at review time: name the artifact, then point at the line that reads it. If no line reads it, the check is decoration and must be treated as an outstanding defect, not a passing check. Corollary for every threshold: state what the number is measured FROM, because an instrument can go on printing a confident figure long after the thing it measures stopped being the thing you care about \u2014 restore-rehearse.sh reported a backup as \"28h old\" from its mtime when a git history purge had rewritten the file, while the dump was seven days old.",
    "scope": {}
-  },
-  {
-   "id": "aa411351",
-   "gist": "THE ESCALATION GATE IS DRAWN BY AUDIENCE, NOT BY DIFFICULTY \u2014 AND THE REPLACEMENT FOR ASKING IS RESEARCH",
-   "statement": "THE ESCALATION GATE IS DRAWN BY AUDIENCE, NOT DIFFICULTY \u2014 THE REPLACEMENT FOR ASKING IS RESEARCH. A decision goes to Joe if and only if it is CLIENT-FACING (a client, prospect, landlord, listing agent, or vendor will see it, or it binds Joe or a client), PUBLIC-FACING, MONEY, or DESTRUCTIVE/IRREVERSIBLE. Everything internal is the session's own call, DECIDED AND REPORTED, never presented for approval: schema, records, renders, jobs, config, permissions, rule authorship, refactors, agent/skill design, and the system's own operating procedure. This closes rule 14e0408b's \"genuine fork\" loophole \u2014 on an internal fork that clause no longer escalates. DIFFICULTY IS NOT A TICKET TO ESCALATE; neither is novelty, a two-way door, or the fact Joe would probably have an opinion. THE REPLACEMENT BEHAVIOR IS RESEARCH, NOT ASKING: when not confident, become confident \u2014 read the code, run the query, test the surface live, read the full verb list, convene the council, spawn a red team. The cost being measured is Joe's attention, not the session's risk; report what was decided and why in one line, and move.\n[Provenance: Joe \u2014 \"a human cannot hold up to that amount of thinking on system problems... you will be more effective researching solutions yourself.\"]",
-   "scope": {
-    "section": "Authority and delegation \u2014 who decides, who does the work"
-   }
   },
   {
    "id": "ab814a26",
@@ -1261,6 +1228,12 @@
    "scope": {
     "section": "operating-mechanics"
    }
+  },
+  {
+   "id": "b7ec8f3b",
+   "gist": "DOCTORCRE SURFACE GRAMMAR, from Joe's review of the V5-UX-S01 prototypes on 2026-09-16, applied site-wide",
+   "statement": "DOCTORCRE SURFACE GRAMMAR, from Joe's review of the V5-UX-S01 prototypes on 2026-09-16, applied site-wide: (1) A good title does the job; no descriptive sentence under a title, no \"nothing needs you\" / \"one thing is broken, nothing is stuck\" narration \u2014 that register is refused as AI voice. (2) Toggles (theme, density, motion) are single icons whose on/off state is shown by filled vs hollow color, not words; a dropdown shows its own title and then the selected option. (3) Tiles list their items directly; an item opens an on-screen popup with full detail and the ability to enter data or answer it, never a link that autoscrolls the same page; when a destination is a whole surface it opens in its own tab. (4) Times are AM/PM, never 24-hour; due dates use a real calendar picker with a typed-date fallback. (5) Doc is one floating icon at the bottom right on every tab, an actual LLM agent that reads the current page for context, with Quill dictation inside the chat window; no per-tile \"Ask Doc\" buttons. (6) Team is Joe and Dell by definition: never label \"Joe and Dell\" or \"Team Book\"; the combined deal list gets a plain name. (7) Kanban cards move by mouse drag with no Move button (a keyboard path stays available but not as a visible button). (8) Motion is slower and calmer, a slow disappearing ring rather than a fast spinner. (9) Every control that looks interactive must do something. (10) Repairs of known issues are reported as done, not queued for approval (see the companion rule on autonomous repair).",
+   "scope": {}
   },
   {
    "id": "ba5730c5",

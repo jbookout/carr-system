@@ -1,9 +1,9 @@
 {
   "counts": {
-    "core": 22,
-    "gate": 62,
+    "core": 20,
+    "gate": 60,
     "gone": 0,
-    "jit": 127
+    "jit": 129
   },
   "fallback_narrowing": {
     "delegation-council": {
@@ -27,7 +27,7 @@
       ]
     }
   },
-  "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f). ROWS PRUNED 2026-08-27 (WR-000019 rule-retirement batch): Joe accepted and executed the batch this slice's 11 GONE rows named (each already carrying its merge_target in this file); the 11 rows are removed from `rules` and `counts.gone` moves 11 -> 0, keeping this file in exact id-for-id parity with the now-208-row ops/config/rule-enforcement-map.json rule_controls, per ops/rule-triage-selftest.py's coverage checks. The 219/205 figures above describe the file as generated at S7 time and are left as historical record.",
+  "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f). ROWS PRUNED 2026-08-27 (WR-000019 rule-retirement batch): Joe accepted and executed the batch this slice's 11 GONE rows named (each already carrying its merge_target in this file); the 11 rows are removed from `rules` and `counts.gone` moves 11 -> 0, keeping this file in exact id-for-id parity with the now-208-row ops/config/rule-enforcement-map.json rule_controls, per ops/rule-triage-selftest.py's coverage checks. The 219/205 figures above describe the file as generated at S7 time and are left as historical record. LIVE PARITY REPAIRED 2026-09-23: removed five retired ids and added three active rules (204391be, a2e78f48, b7ec8f3b) with their existing production pack memberships; current map and triage each carry 209 active rules.",
   "rules": [
     {
       "home": "jit",
@@ -176,13 +176,6 @@
       "title_gist": "WHEN A STOP GATE REOPENS A TURN, SEND THE DELTA, NOT THE MESSAGE AGAIN"
     },
     {
-      "carrying_control": "no_send_worker",
-      "home": "gate",
-      "id": "1e62c007",
-      "reason": "Already machine-enforced via control 'no_send_worker' (mcp-server/src/mcp.js); binds before away-mode write. Failure mode on violation: capability absent",
-      "title_gist": "AWAY-MODE ASK RESOLUTION \u2014 who \"stop and ask\" means when Joe is not there"
-    },
-    {
       "carrying_control": "completion_evidence",
       "home": "gate",
       "id": "1f3a7372",
@@ -216,6 +209,13 @@
       "id": "1fddcffb",
       "reason": "Core routing test: the always-read core holds only what every session needs regardless of task. The founding definition of 'core' itself, which this very S7 triage operationalizes. Its named enforcement (00_Context/sweep-sop.md) is a pre-cutover file pointer and reads stale; the TEST it states is exactly what this slice applies via rule-triage.v1.json instead.",
       "title_gist": "Core routing test: the always-read core holds ONLY what every session needs regardless of task"
+    },
+    {
+      "home": "jit",
+      "id": "204391be",
+      "jit_trigger_hint": "Deliver with engineering-git or governance-rules when product work discovers a missing record-layer verb.",
+      "reason": "The missing-verb obligation binds during a product build or research task; its existing production load tag names both packs.",
+      "title_gist": "MISSING VERB, BUILD IT"
     },
     {
       "home": "jit",
@@ -302,12 +302,6 @@
       "jit_trigger_hint": "Delivered by pack(s) records-intake \u2014 fires on: Capture and rendering are separate decisions",
       "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
       "title_gist": "Capture and rendering are separate decisions"
-    },
-    {
-      "home": "core",
-      "id": "2dbb0ad8",
-      "reason": "Delegation economics posture: cost is the gate on spawning a subagent, not novelty. The universal test applied before any delegation anywhere in the system.",
-      "title_gist": "SUBAGENTS \u2014 COST IS THE GATE, NOT NOVELTY"
     },
     {
       "detector": {
@@ -698,13 +692,6 @@
     },
     {
       "home": "jit",
-      "id": "61551180",
-      "jit_trigger_hint": "Fires on the specific moment named in the rule: A PRESENT THREAT OUTRANKS A POSSIBLE FUTURE USE, WHEN THE PROTECTION IS REVERSIBLE",
-      "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
-      "title_gist": "A PRESENT THREAT OUTRANKS A POSSIBLE FUTURE USE, WHEN THE PROTECTION IS REVERSIBLE"
-    },
-    {
-      "home": "jit",
       "id": "6172e7d5",
       "jit_trigger_hint": "Delivered by pack(s) source-study \u2014 fires on: GROK RUNS THE WATCH-VIDEO SKILL, AND IT IS THE DEFAULT SEAT FOR VIDEO AND IMAGE SOURCES",
       "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
@@ -779,13 +766,6 @@
       "jit_trigger_hint": "Drafting a vendor introduction, a shared guest list, or answering 'who do we know' for a specific client/vendor pairing.",
       "reason": "Ordering three soft factors for one client's need is judgment; the ORDER is fixed but the weighing per case is not. (No planned_control named.)",
       "title_gist": "Delivery tier is the last tiebreaker, below hard blocks and vertical/state fit, above relationship stage"
-    },
-    {
-      "carrying_control": "completion_evidence",
-      "home": "gate",
-      "id": "708c2150",
-      "reason": "Already machine-enforced via control 'completion_evidence' (hooks/completion-evidence-gate.py); binds automation completion claim. Failure mode on violation: Stop block",
-      "title_gist": "Risk colors on every automation: green = read-only/own files \u00b7 yellow = drafts, human approves \u00b7 red ="
     },
     {
       "home": "jit",
@@ -1104,6 +1084,13 @@
     },
     {
       "home": "jit",
+      "id": "a2e78f48",
+      "jit_trigger_hint": "Deliver with engineering-git when a known defect is found and its repair is available.",
+      "reason": "Autonomous repair binds when engineering work finds a known fix; the existing production load tag names engineering-git.",
+      "title_gist": "AUTONOMOUS REPAIR OF KNOWN ISSUES"
+    },
+    {
+      "home": "jit",
       "id": "a3f6c7f9",
       "jit_trigger_hint": "Delivered by pack(s) governance-rules \u2014 fires on: Diagnose before restructuring: point to a real task that was slow, never a hypothetical",
       "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
@@ -1141,12 +1128,6 @@
       "id": "a9ecd5b4",
       "reason": "Already machine-enforced via control 'completion_evidence' (hooks/completion-evidence-gate.py); binds check result report. Failure mode on violation: Stop block",
       "title_gist": "A CHECK MUST COMPARE THE ARTIFACT AGAINST WHAT IT SHOULD BE, AND A SUCCESS SIGNAL MUST BE DERIVED FROM"
-    },
-    {
-      "home": "core",
-      "id": "aa411351",
-      "reason": "The one human gate, drawn by audience not difficulty (client-facing/public/money/irreversible). Survivor of the 'stop asking permission' merge family below; closes 14e0408b's genuine-fork loophole. Needed before any escalation call, every session.",
-      "title_gist": "THE ESCALATION GATE IS DRAWN BY AUDIENCE, NOT BY DIFFICULTY \u2014 AND THE REPLACEMENT FOR ASKING IS RESEARCH"
     },
     {
       "home": "core",
@@ -1209,6 +1190,13 @@
       "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires on: WHEN TO CONVENE A FRONTIER-MODEL COUNCIL \u2014 the decision procedure, so convening is never\u2026",
       "reason": "No machine predicate exists for this today (judgment_ambient) \u2014 a real situational judgment call, not a universal law.",
       "title_gist": "WHEN TO CONVENE A FRONTIER-MODEL COUNCIL \u2014 the decision procedure, so convening is never a mood or a ritual"
+    },
+    {
+      "home": "jit",
+      "id": "b7ec8f3b",
+      "jit_trigger_hint": "Deliver with surface-doctrine when building or reviewing a DoctorCRE surface.",
+      "reason": "The site-wide DoctorCRE surface grammar binds during surface work; the existing production load tag names surface-doctrine.",
+      "title_gist": "DOCTORCRE SURFACE GRAMMAR"
     },
     {
       "detector": {

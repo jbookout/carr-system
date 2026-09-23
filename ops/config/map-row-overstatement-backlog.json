@@ -11,11 +11,6 @@
       "reason": "rule_controls lists post_action_verification/completion_evidence, but that checks task-completion claims, not metric-authoring shape -- mismatch; a direct diff-time check is concrete and buildable."
     },
     {
-      "rule": "708c2150",
-      "rule_name": "Risk colors (green/yellow/red) on every automation, red always ends at Joe",
-      "reason": "No existing check confirmed this session."
-    },
-    {
       "rule": "73381d78",
       "rule_name": "A config file read by two parsers has two contracts",
       "reason": "No existing check confirmed this session; concrete given the rule's own worked example (db.env)."
