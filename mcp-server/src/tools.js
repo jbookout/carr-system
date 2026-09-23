@@ -2045,7 +2045,9 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     ? await c.query(
       `select jsonb_build_object('state',operating_state,'reason',parking_reason,'note',parking_note) as value
          from deal where id=$1`, [dealId])
-    : await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
+    : await c.query(field === "next_date"
+      ? "select next_date::text as value from deal where id=$1"
+      : `select ${field} as value from deal where id=$1`, [dealId]);
   if (!oldRow.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: dealId });
   if (field === "owner") {
     // deal.owner is the board cache; deal_participant(role=lead) remains the
@@ -8332,7 +8334,7 @@ registerTools({
       // field history cannot race a direct date edit or undo.
       await lockDealField(c, s.id, "next_date");
       await lockDealField(c, s.id, "next_step");
-      const oldDate = (await c.query("select next_date from deal where id=$1", [s.id])).rows[0]?.next_date ?? null;
+      const oldDate = (await c.query("select next_date::text as next_date from deal where id=$1", [s.id])).rows[0]?.next_date ?? null;
       const prior = await c.query(
         "select id, text from deal_note where deal_id=$1 and kind='next_step' order by created_at desc, id desc limit 1 /* dealroom:current-step */",
         [s.id],

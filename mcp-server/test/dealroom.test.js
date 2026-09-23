@@ -144,6 +144,12 @@ class FakeClient {
       const deal = this.deals.get(params[0]);
       return { rows: deal ? [{ value: deal[field] }] : [] };
     }
+    if (sql === "select next_date::text as value from deal where id=$1" ||
+        sql === "select next_date::text as next_date from deal where id=$1") {
+      const deal = this.deals.get(params[0]);
+      const key = sql.includes("as value") ? "value" : "next_date";
+      return { rows: deal ? [{ [key]: deal.next_date }] : [] };
+    }
     if (sql.startsWith("select jsonb_build_object('state',operating_state")) {
       const deal = this.deals.get(params[0]);
       return { rows: deal ? [{ value: { state: deal.operating_state,
@@ -1088,6 +1094,35 @@ test("undo of a date edit cannot erase a later date set with the next step", asy
   assert.equal(db.deals.get(ids.deal).next_date, "2026-08-11");
   assert.equal(db.events.at(-1).field, "next_date");
   assert.deepEqual(db.events.at(-1).old_value, { next_date: "2026-08-10" });
+});
+
+test("date undo reads PostgreSQL dates as calendar text, including after set-next-step", async () => {
+  for (const verb of ["patch-deal-field", "set-next-step"]) {
+    const db = new FakeClient();
+    db.deals.get(ids.deal).next_date = "2026-08-10";
+    const originalQuery = db.query.bind(db);
+    db.query = async (sql, params) => {
+      const result = await originalQuery(sql, params);
+      if (/^select next_date(?: as value)? from deal where id=\$1$/.test(sql) && result.rows[0]) {
+        const key = sql.includes("as value") ? "value" : "next_date";
+        result.rows[0][key] = new Date("2026-08-10T00:00:00.000Z");
+      }
+      return result;
+    };
+    if (verb === "patch-deal-field") {
+      await call(verb, db, actors.joe, { idempotency_key: "date-patch",
+        deal: "Deal Alpha", field: "next_date", value: "2026-08-11", base_event_id: null });
+    } else {
+      await call(verb, db, actors.joe, { idempotency_key: "date-step",
+        deal: "Deal Alpha", text: "Call landlord", next_date: "2026-08-11" });
+    }
+    const event = db.events.find(row => row.field === "next_date");
+    assert.deepEqual(event.old_value, { next_date: "2026-08-10" });
+    const result = await call("revert-deal-field", db, actors.joe,
+      { idempotency_key: `undo-${verb}`, event_id: event.id });
+    assert.equal(result.ok, true);
+    assert.equal(db.deals.get(ids.deal).next_date, "2026-08-10");
+  }
 });
 
 test("undo of an owner edit cannot erase a later set-lead handoff", async () => {

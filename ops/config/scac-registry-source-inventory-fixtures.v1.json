@@ -61009,11 +61009,11 @@
         }
       ],
       "source_digest_replacements": {
-        "mcp-server/src/tools.js": "1b7f7982489d0f9433e99cbd5df0c5f9730d1e8a5f1e511da2703daeeb3cdce4"
+        "mcp-server/src/tools.js": "bc0de40bf5d988800a9164965a3603e04fb42d8387595f5f404b88eaa5a5a54b"
       },
       "expected_count": 883,
-      "expected_sha256": "17a1c84f69c6d927fe4da3f9b29a5352629cd5acd41bcff679865ba348f01ee3",
-      "reason": "DoctorCRE B11 Deal Room undo race: the existing revert-deal-field MCP handler now takes the same-field lock before its newest-change check without locking the event row it reverts (avoiding an FK lock-order deadlock), and Deal Room field writes stamp recorded_at after that lock. The existing set-lead and set-next-step MCP handlers now take the owner and next_date field locks respectively (set-next-step takes next_date before next_step) and record owner/next_date field events (and set-next-step's next_step note timestamp) after those locks, so undo and direct field edits serialize with them. The registry generator, snapshot selector, and database acceptance readers advance with the live v46 frontier. The existing tools.js rows and four existing script entrypoints are re-digested; no new ingress, authority, product mutation, or background work is introduced."
+      "expected_sha256": "4571e1077511714b19b45e868e820ccc038c3be5ae298977ca0933787ec29e11",
+      "reason": "DoctorCRE B11 Deal Room undo race: the existing revert-deal-field MCP handler now takes the same-field lock before its newest-change check without locking the event row it reverts (avoiding an FK lock-order deadlock), and Deal Room field writes stamp recorded_at after that lock. The existing set-lead and set-next-step MCP handlers now take the owner and next_date field locks respectively (set-next-step takes next_date before next_step) and record owner/next_date field events (and set-next-step's next_step note timestamp) after those locks, so undo and direct field edits serialize with them. Both date readbacks now cast to calendar text so PostgreSQL date objects cannot poison the undo event. The registry generator, snapshot selector, and database acceptance readers advance with the live v46 frontier. The existing tools.js rows and four existing script entrypoints are re-digested; no new ingress, authority, product mutation, or background work is introduced."
     }
   ],
   "current_source_review": {
