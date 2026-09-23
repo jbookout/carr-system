@@ -88,6 +88,18 @@ behavior, and CARR records. Do not ask for a separate Jev-specific approval or
 exclude a review merely because its category is not prelisted. Preserve source
 evidence, required checks, and any distinct reviewer-of-record requirement.
 
+## Model Room before another model
+
+<!-- carr-model-room-route:start -->
+Decision `284028a5-8295-498a-af1e-6cae5c6034e7` records Joe's route:
+call Claude, Grok, and other external models through the Model Room. Before
+attempting a direct model CLI or API call, pull this rule into the preflight
+judgment with Jev and route the work to the named Model Room desk. Verify the
+desk's actual model and result. Joe currently requires Opus 5.5 for all
+subagent work; do not silently delegate a portion to another model. A model
+CLI used solely for authentication or health readback is not a model-work call.
+<!-- carr-model-room-route:end -->
+
 ## Authorized code homes and repository boundaries
 
 Decision `1ceee300-7627-426f-b729-ab339d6984fc` supersedes the former
