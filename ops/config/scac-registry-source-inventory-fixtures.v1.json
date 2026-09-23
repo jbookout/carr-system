@@ -61605,6 +61605,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:ops/rule-delivery-local-pg-acceptance.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/rule-delivery-local-pg-acceptance.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/rule-delivery-local-pg-acceptance.py",
+          "schema_digest": "ada9b2d45732fd1c56ef7d15c00cf5bf120c2b123bc6edd517bc54aeef1145a5",
+          "handler_digest": "ada9b2d45732fd1c56ef7d15c00cf5bf120c2b123bc6edd517bc54aeef1145a5",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:ops/scac-mutation-inventory.mjs",
           "ingress_kind": "script_entrypoint",
           "operation": "ops/scac-mutation-inventory.mjs",
@@ -61675,7 +61698,7 @@
         }
       ],
       "expected_count": 883,
-      "expected_sha256": "987fb67d785cdadcbd9d416637552df061411cab9f510aee798ea04557a9a018",
+      "expected_sha256": "6281d66fa5bb0f5c8519f5efb948e3097f79c858c394d7b47717fd9a12f5f6f2",
       "reason": "Joe-directed scoped rule delivery and Hermes v47 successor source re-digest; reviewed exact current inventory."
     }
   ],
