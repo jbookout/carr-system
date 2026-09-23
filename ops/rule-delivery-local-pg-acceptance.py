@@ -57,6 +57,7 @@ POST_0478_ACTIVATION_DIGEST = "eebfa2d627dfbbc65ae06e623724487158b940c9376cd30db
 # rules moves the reviewed map digest without changing any of the eight pack
 # cutover targets. Migration 0483 carries that guarded forward repin.
 POST_0483_ACTIVATION_DIGEST = "784e05273341f5f7c16f96d1f0fb1516d8c605cb3287dec32aa37a1211dd0cb8"
+POST_0553_ACTIVATION_DIGEST = "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -430,7 +431,22 @@ def main() -> int:
                 where map_digest=%s""",
             (POST_0483_ACTIVATION_DIGEST,),
         )
-        check("the post-0483 fixture is the exact eight on the current map",
+        check("the post-0483 fixture is the exact eight on the historical map",
+              one(cur)[0] == len(EXPECTED_IDS))
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0553_ACTIVATION_DIGEST, POST_0483_ACTIVATION_DIGEST),
+        )
+        check("0553 repins exactly the eight post-0483 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0553_ACTIVATION_DIGEST,),
+        )
+        check("the post-0553 fixture is the exact eight on the live map",
               one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
