@@ -111,7 +111,7 @@ def run_diarizer(
             log(f"SPEAKERS skipped {wav_path.name}: {type(exc).__name__}: {exc}")
             return []
         if result.returncode != 0 or not out_path.exists():
-            detail = (result.stderr or result.stdout or "").strip()[-300:]
+            detail = " | ".join((result.stderr or result.stdout or "").strip()[-300:].splitlines())
             log(f"SPEAKERS skipped {wav_path.name} (rc={result.returncode}): {detail}")
             return []
         try:
