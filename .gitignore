@@ -108,3 +108,14 @@ xcrun_db
 # every run. Same lane as the whisper-server.log entry above.
 tools/doc-convo/assets/render-daemon.log
 tools/doc-convo/assets/.render-daemon.pid
+
+# Local secrets files. No .env file is tracked (checked 2026-09-23); a
+# committed .env.example template, if one is ever added, stays trackable.
+.env
+.env.*
+!.env.example
+
+# Rendered output. output/pdf/CARR-Tour-Packet-reference.pdf was tracked from
+# #793 with no reader anywhere in the tree (untracked 2026-09-23). Rendered
+# output is not source.
+output/
