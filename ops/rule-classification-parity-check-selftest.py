@@ -156,6 +156,13 @@ def _run_cli(map_data, export_data, *, expect_rc, expect_stdout_contains=None):
 
 
 def main() -> int:
+    partial_map = copy.deepcopy(MAP_BASE)
+    partial_map["rule_controls"]["204391be"] = {"category": "judgment_advisory"}
+    partial_export = with_rule(EXPORT_BASE, "204391be",
+                               {"enforcement_class": "human_only", "state": "admitted"})
+    stale_partial_export = with_rule(EXPORT_BASE, "204391be",
+                                     {"enforcement_class": "judgment_advisory",
+                                      "state": "admitted"})
     cases = [
         case_unit_buckets(),
         case("matching buckets pass", MAP_BASE, EXPORT_BASE,
@@ -178,6 +185,10 @@ def main() -> int:
              with_rule(EXPORT_BASE, "zzzzzzzz",
                        {"enforcement_class": "machine_enforceable", "state": "admitted"}),
              expect_ok=False),
+        case("exact partial-admission exception preserves the advisory duty",
+             partial_map, partial_export, expect_ok=True, expect_compared=3),
+        case("partial-admission exception fails once the database catches up",
+             partial_map, stale_partial_export, expect_ok=False, expect_compared=3),
         case_cli_matching_passes(),
         case_cli_divergent_fails(),
         case_cli_unmapped_export_rule_fails(),

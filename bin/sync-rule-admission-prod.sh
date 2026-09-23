@@ -185,8 +185,11 @@ if (( ! APPLY )); then
 fi
 
 print "== backfilling the reviewed enforcement map into production =="
-if ! DATABASE_URL="$DSN" "$PY" "$REPO/tools/sync-rule-admission.py"; then
-  rc=$?
+set +e
+DATABASE_URL="$DSN" "$PY" "$REPO/tools/sync-rule-admission.py"
+rc=$?
+set -e
+if (( rc != 0 )); then
   stamp "FAIL backfill rc=$rc"
   print -u2 "the backfill refused or failed; production is unchanged."
   print -u2 "if it named an active rule absent from the reviewed enforcement map,"
@@ -202,8 +205,11 @@ fi
 # reviewed file would reopen exactly that gap on the half nobody happened to run.
 print ""
 print "== installing the reviewed delivery tags (layer0 / control / pack) =="
-if ! DATABASE_URL="$DSN" "$PY" "$REPO/tools/sync-rule-load-layers.py"; then
-  rc=$?
+set +e
+DATABASE_URL="$DSN" "$PY" "$REPO/tools/sync-rule-load-layers.py"
+rc=$?
+set -e
+if (( rc != 0 )); then
   stamp "FAIL delivery tags rc=$rc"
   print -u2 "the delivery tags refused or failed; the admission half above DID land."
   print -u2 "if it named an active rule with no reviewed delivery tag, that rule is"
@@ -236,8 +242,7 @@ set -e
 if (( drc == 0 )); then
   stamp "OK delivery tags applied and verified"
   print "every active rule in production now carries a reviewed delivery tag."
-  print "Delivery stays in SHADOW mode until Joe flips ops.rule_delivery_policy:"
-  print "the selector runs beside full recitation and nothing is cut yet."
+  print "Check ops.rule_delivery_policy and standing-context for the active delivery mode."
 else
   stamp "FAIL delivery applied but audit rc=$drc"
   print -u2 "THE TAGS LANDED AND THE DELIVERY AUDIT STILL DISAGREES. The counts above"
