@@ -43,13 +43,11 @@ TWO DELIBERATE EXCEPTIONS, both held by other suites and honoured here:
     ops/context-handoff-gate-selftest.py (Codex hook continuity) and Codex is
     launched from a terminal whose PATH carries Homebrew. It is left as it is
     and is NOT covered here; moving it is a separate decision.
-  * The Stop-event rule-pack-drift-gate.py command keeps its old spelling,
-    because ops/rule-delivery-cutover.py pins that exact string as
-    HOOK_TEMPLATE and refuses the production cutover unless both hook configs
-    carry it once (ops/rule-delivery-cutover-selftest.py holds that parity).
-    That script is a sealed entrypoint, so the template and this command move
-    together in a future registry successor. The gate itself is 3.9-clean:
-    this file runs it under /usr/bin/python3 where that exists.
+  * The Stop-event rule-pack-drift-gate.py command is pinned verbatim by
+    ops/rule-delivery-cutover.py HOOK_TEMPLATE, which refuses the production
+    cutover unless both hook configs carry it exactly once. Since 2026-09-23
+    that template names the venv through the meter, so it is checked here for
+    exact spelling as well as for the pin.
 
 WHAT IS CHECKED, deterministically and without running a hook:
   1. every command in hooks.json that launches a CARR hook or ops script
@@ -71,8 +69,11 @@ CONFIGS = ("ops/config/hooks.json",)
 PIN = "{{REPO}}/.venv/bin/python "
 FIXED_SYSTEM_LAUNCHER = ("/usr/bin/python3 {{REPO}}/hooks/hook-meter-run.py "
                          "{{REPO}}/hooks/run-record-gate.py ")
-# Pinned verbatim by ops/rule-delivery-cutover.py HOOK_TEMPLATE; see the docstring.
-CUTOVER_TEMPLATE = "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py"
+# Pinned verbatim by ops/rule-delivery-cutover.py HOOK_TEMPLATE. Since
+# 2026-09-23 it is on the venv through the meter like every other hook; the
+# exact spelling is still held here because the cutover script refuses a
+# production transition unless both hook configs carry it exactly once.
+CUTOVER_TEMPLATE = "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py"
 ASSIGNMENT = re.compile(r"^(?:[A-Z_][A-Z0-9_]*=\S*\s+)*")
 FORBIDDEN = ("/usr/bin/env python3", "/usr/bin/env python ")
 
@@ -120,7 +121,6 @@ def main():
                 continue
             if body == CUTOVER_TEMPLATE and event == "Stop":
                 cutover += 1
-                continue
             if "{{REPO}}/hooks/" in body or "{{REPO}}/ops/" in body:
                 if not body.startswith(PIN):
                     unpinned.append(f"{event}: {command}")
@@ -136,8 +136,9 @@ def main():
               cutover == 1, f"{cutover} command(s) match it")
     check("the config wires a realistic number of commands", total >= 40, f"only {total}")
 
-    # The one hook still reached through PATH must survive the oldest python3
-    # a machine can hand it. Apple's 3.9 is the floor seen in the wild.
+    # The two drift hooks still bootstrap from the fixed system python3, and the
+    # rule-pack drift gate did until 2026-09-23; keep proving the gate survives
+    # the oldest python3 a machine can hand it. Apple's 3.9 is the floor seen.
     system = "/usr/bin/python3"
     gate = os.path.join(REPO, "hooks", "rule-pack-drift-gate.py")
     if os.access(system, os.X_OK) and os.path.exists(gate):

@@ -121,9 +121,10 @@ jobs:
           # other class reads the tree as it stands and does not care.
           fetch-depth: 0
 
-      # DO NOT ADD `cache:` TO THE TWO SETUP ACTIONS BELOW. It was tried on this
-      # branch on 2026-08-20, measured end to end against a real cache hit, and
-      # it makes the job SLOWER. Numbers, baseline against cache-hit run:
+      # DO NOT ADD `cache:` TO THE TWO SETUP ACTIONS BELOW without re-measuring.
+      # It was tried on this branch on 2026-08-20, when a whole run took about
+      # four minutes, measured end to end against a real cache hit, and it made
+      # the job SLOWER. Numbers, baseline against cache-hit run (2026-08-20):
       #
       #   setup-python      0s -> 5s    (restoring the cache)
       #   setup-node        7s -> 10s   (restoring the cache)
@@ -135,13 +136,16 @@ jobs:
       # still unpacks and installs every package, and `npm ci` still builds
       # node_modules from scratch. Downloading was never the expensive half.
       #
-      # The billing mechanic that made this look attractive is real and worth
-      # keeping in mind for other work: GitHub bills each JOB rounded UP to the
-      # whole minute, so only crossing a 60-second line saves anything. Measured
-      # over 18 successful runs the job ran 203s to 275s, median 249s, with the
-      # line at 240s. But the dependency steps cannot deliver a crossing, and
-      # 61% of the run is ops/ci.sh doing genuine work. Spend has to come out of
-      # run COUNT, not run duration.
+      # The billing mechanic that made this look attractive is real: GitHub
+      # bills each JOB rounded UP to the whole minute, so only crossing a
+      # 60-second line saves anything. The 2026-08-20 reasoning (18 runs, 203s
+      # to 275s, median 249s, a 240s line in reach) no longer describes the job:
+      # in the week of 2026-09-23 the last 15 hosted runs took 14 to 18 minutes
+      # each, against the 30-minute ceiling above, and almost all of that is
+      # ops/ci.sh --strict doing genuine work. The dependency-cache conclusion
+      # above was measured on the four-minute job and has not been re-measured
+      # at this length. Spend still has to come out of run COUNT, not from
+      # trimming seconds off setup.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
