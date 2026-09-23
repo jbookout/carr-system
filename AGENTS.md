@@ -9,8 +9,10 @@ code work happens — booted with no instructions at all.
 Call `mcp__carr__standing_context` directly FIRST. Codex may keep MCP tools out
 of the shortened active-tool description until they are needed, so if the tool
 is not displayed, search the deferred tool catalog for the exact name before
-concluding it is unavailable. Recite the counts it returns in your first
-response, so the partner can see what is binding you.
+concluding it is unavailable. In the first response, report the number of
+shared and personal rules actually delivered, alongside the available corpus
+counts. Do not describe corpus counts as rules loaded into the session. Fetch
+full text only for rules binding the current task or explicit rule IDs.
 
 Only when the direct MCP tool is genuinely unavailable or returns a service
 error, use the checkout's fallback:
