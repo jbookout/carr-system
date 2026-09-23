@@ -720,15 +720,15 @@ if [ "$MACHINE_PATHS_REGISTRY_APPLIED" = t ] && [ "$OPENSSL_RESOLUTION_REGISTRY_
   echo "schema-snapshot: machine paths v54 is applied without v53 predecessor" >&2
   exit 1
 fi
-JEV_REQUIREMENTS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0563_jev_requirements_scac_successor.sql')" \
+LOGITECH_KEYMAP_OPTOUT_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0563_logitech_keymap_optout_scac_successor.sql')" \
   2>/dev/null)"
-case "$JEV_REQUIREMENTS_REGISTRY_APPLIED" in
+case "$LOGITECH_KEYMAP_OPTOUT_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read jev requirements v55 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read logitech keymap opt-out v55 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$JEV_REQUIREMENTS_REGISTRY_APPLIED" = t ] && [ "$MACHINE_PATHS_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: jev requirements v55 is applied without v54 predecessor" >&2
+if [ "$LOGITECH_KEYMAP_OPTOUT_REGISTRY_APPLIED" = t ] && [ "$MACHINE_PATHS_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: logitech keymap opt-out v55 is applied without v54 predecessor" >&2
   exit 1
 fi
 
@@ -1987,7 +1987,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                 SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v53'"
                                 SCAC_FULL_SET_SEAL_COUNT=53
                                 SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v54_current()"
-                                if [ "$JEV_REQUIREMENTS_REGISTRY_APPLIED" = t ]; then
+                                if [ "$LOGITECH_KEYMAP_OPTOUT_REGISTRY_APPLIED" = t ]; then
                                   SCAC_CURRENT_NUMBER=55
                                   SCAC_VERSION_COUNT=55
                                   SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v55'")"

@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0563 installs v55 as the live frontier and demotes v54 to sealed history.
+# 0562 installs v54 as the live frontier and demotes v53 to sealed history.
 # Both are pinned: an unreviewed frontier, or a v40 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
@@ -41,7 +41,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0562_machine_paths_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0563_jev_requirements_scac_successor.sql"
+    "migrations/0563_logitech_keymap_optout_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
