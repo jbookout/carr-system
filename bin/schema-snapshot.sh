@@ -665,6 +665,17 @@ if [ "$MEETING_MODE_REGISTRY_APPLIED" = t ] && [ "$RULE_DELIVERY_REGISTRY_APPLIE
   echo "schema-snapshot: meeting mode v49 is applied without v48 predecessor" >&2
   exit 1
 fi
+MACHINE_ROLE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0558_machine_role_headroom_scac_successor.sql')" \
+  2>/dev/null)"
+case "$MACHINE_ROLE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read machine role v50 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$MACHINE_ROLE_REGISTRY_APPLIED" = t ] && [ "$MEETING_MODE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: machine role v50 is applied without v49 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -1871,6 +1882,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v48'"
                       SCAC_FULL_SET_SEAL_COUNT=48
                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v49_current()"
+                      if [ "$MACHINE_ROLE_REGISTRY_APPLIED" = t ]; then
+                        SCAC_CURRENT_NUMBER=50
+                        SCAC_VERSION_COUNT=50
+                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v50'")"
+                        SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v50'")"
+                        SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v50.generated.js"
+                        SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v50'"
+                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v49'"
+                        SCAC_FULL_SET_SEAL_COUNT=49
+                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v50_current()"
+                      fi
                     fi
                   fi
                 fi

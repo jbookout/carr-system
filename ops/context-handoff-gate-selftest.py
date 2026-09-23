@@ -520,8 +520,15 @@ def fallback_and_hook_sequence():
               (typed_bad_proc.returncode, typed_bad_out,
                typed_bad_proc.stderr))
 
+        # The Stop headroom notice fires once per task, so a repeated Stop on
+        # the same task is silent; the spoof probe below therefore needs its
+        # own fresh task to observe which event the hook actually honored.
+        proc, repeat_stop = run_hook(root, "Stop", transcript, session="sequence")
+        check("Stop headroom notice fires once per task",
+              proc.returncode == 0 and repeat_stop is None, repeat_stop)
+
         spoofed_stop = json.dumps({
-            "hook_event_name": "PostToolUse", "session_id": "sequence",
+            "hook_event_name": "PostToolUse", "session_id": "spoofed-sequence",
             "prompt_id": "spoofed-stop", "tool_use_id": "spoofed-tool",
             "transcript_path": str(transcript),
         })
