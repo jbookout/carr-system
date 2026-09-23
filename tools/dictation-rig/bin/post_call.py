@@ -160,8 +160,67 @@ def validate_context(value: Any, session: str) -> dict[str, Any]:
     return value
 
 
+def shape_record_layer_context(value: Any) -> Any:
+    """Bring the record layer's get-call-context rows to the exact contract.
+
+    The 2026-08-17 weekly call stalled in ``awaiting_context`` because this
+    boundary refused every index the Deal Room could actually send: the record
+    layer returns ``owner: null`` for an unowned deal, returns the partners'
+    own ``lead`` rows (an actor, so party_id/ref/name/email are all null), and
+    returns ``email: null`` for a party with no address on file.  Any one of
+    those failed ``validate_context`` and nothing was stored.
+
+    Only those three shapes are repaired, and nothing is inferred: a null text
+    value becomes "", a participant without an exact party_id and ref is not a
+    counterparty the distiller may address and is dropped, and one party named
+    twice on a deal (two roles) is kept once with both roles.  IDs are never
+    matched by name, deals are never added or removed, and every other field
+    still goes through the strict validation that follows.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("deals"), list):
+        return value
+    shaped = dict(value)
+    deals: list[Any] = []
+    for deal in value["deals"]:
+        if not isinstance(deal, dict):
+            deals.append(deal)
+            continue
+        deal = dict(deal)
+        for field in ("name", "owner", "operating_state"):
+            if field in deal and deal[field] is None:
+                deal[field] = ""
+        participants = deal.get("participants")
+        if isinstance(participants, list):
+            kept: list[Any] = []
+            by_party: dict[str, dict[str, Any]] = {}
+            for party in participants:
+                if not isinstance(party, dict):
+                    kept.append(party)
+                    continue
+                party_id, ref = party.get("party_id"), party.get("ref")
+                if party_id is None and ref is None:
+                    continue
+                party = dict(party)
+                for field in ("name", "email", "role"):
+                    if field in party and party[field] is None:
+                        party[field] = ""
+                if isinstance(party_id, str) and party_id in by_party:
+                    first = by_party[party_id]
+                    if first.get("ref") == party.get("ref"):
+                        roles = [r for r in (first.get("role"), party.get("role")) if isinstance(r, str) and r]
+                        first["role"] = ", ".join(dict.fromkeys(roles))
+                        continue
+                if isinstance(party_id, str):
+                    by_party[party_id] = party
+                kept.append(party)
+            deal["participants"] = kept
+        deals.append(deal)
+    shaped["deals"] = deals
+    return shaped
+
+
 def store_context(session_dir: Path, context: dict[str, Any]) -> dict[str, Any]:
-    context = validate_context(context, session_dir.name)
+    context = validate_context(shape_record_layer_context(context), session_dir.name)
     old = read_json(session_dir / CONTEXT_FILE) or {}
     # Retain physical-channel labels written at recording start; only Deal Room's
     # exact index becomes available to the model, and it is consumed on success.
