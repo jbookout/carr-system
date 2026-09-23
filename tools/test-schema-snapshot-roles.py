@@ -189,6 +189,17 @@ def main():
               sql[registry_entry_tail:registry_trigger_enable],
               re.I,
           ) is not None)
+    # 2026-09-23: rendering every sealed SCAC version's full entry set grew the
+    # file to 114.8 MB and GitHub refused the push (GH001, 100 MiB). The
+    # generator now writes each distinct entry once; this ceiling makes the
+    # next regression a test failure instead of a refused push.
+    snapshot_bytes = os.path.getsize(SNAPSHOT)
+    check("the snapshot stays far below GitHub's 100 MiB file limit",
+          snapshot_bytes < 50 * 1024 * 1024, f"{snapshot_bytes} bytes")
+    check("SCAC entries are restored from a deduplicated pool",
+          "create temporary table carr_scac_entry_pool" in sql
+          and sql.count("insert into ops.scac_mutation_registry_entry select r.* from") >= 1
+          and "drop table pg_temp.carr_scac_entry_pool;" in sql)
     check("the generator owns the deferred-trigger restore transaction",
           "CARR SNAPSHOT DATA RESTORE TRANSACTION BEGIN" in generator
           and "CARR SNAPSHOT DATA RESTORE TRANSACTION COMMIT" in generator

@@ -676,6 +676,17 @@ if [ "$MACHINE_ROLE_REGISTRY_APPLIED" = t ] && [ "$MEETING_MODE_REGISTRY_APPLIED
   echo "schema-snapshot: machine role v50 is applied without v49 predecessor" >&2
   exit 1
 fi
+SNAPSHOT_DEDUP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0559_schema_snapshot_dedup_scac_successor.sql')" \
+  2>/dev/null)"
+case "$SNAPSHOT_DEDUP_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read snapshot dedup v51 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$SNAPSHOT_DEDUP_REGISTRY_APPLIED" = t ] && [ "$MACHINE_ROLE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: snapshot dedup v51 is applied without v50 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -1892,6 +1903,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                         SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v49'"
                         SCAC_FULL_SET_SEAL_COUNT=49
                         SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v50_current()"
+                        if [ "$SNAPSHOT_DEDUP_REGISTRY_APPLIED" = t ]; then
+                          SCAC_CURRENT_NUMBER=51
+                          SCAC_VERSION_COUNT=51
+                          SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v51'")"
+                          SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v51'")"
+                          SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v51.generated.js"
+                          SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v51'"
+                          SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v50'"
+                          SCAC_FULL_SET_SEAL_COUNT=50
+                          SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v51_current()"
+                        fi
                       fi
                     fi
                   fi
@@ -2439,16 +2461,59 @@ alter table ops.scac_mutation_registry_version disable trigger scac_mutation_reg
 alter table ops.scac_mutation_registry_entry disable trigger scac_mutation_registry_entry_sealed;
 SCAC_REGISTRY_HEADER
 
+  # EACH DISTINCT ENTRY IS WRITTEN ONCE (2026-09-23). Every sealed version
+  # carries its complete entry set, so rendering each version's rows in full
+  # repeated ~2,000 near-identical entries per seal: v1-v50 was 84,414 rows but
+  # only 4,275 distinct entries, 109.6 MB of a 114.8 MB file, and the push of
+  # the 0558 refresh was refused by GitHub's 100 MiB limit (GH001). An entry is
+  # fully determined by its entry_digest apart from registry_version and
+  # registered_at, and each version has one registered_at, so the file carries
+  # a pool of distinct entries (grouped by the version that introduced them, so
+  # a new seal appends lines rather than rewriting them) plus each version's
+  # ordered digest list, and the restore joins them back into byte-identical
+  # rows. Both premises are asserted below before anything is rendered; the
+  # closing verification block still recomputes every count and digest from
+  # the restored rows, so a lossy rendering cannot restore silently.
   if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'SCAC_REGISTRY_ROWS'
+do $carr_scac_render_premises$
+begin
+  if exists(select 1 from ops.scac_mutation_registry_entry e group by e.entry_digest
+            having count(distinct to_jsonb(e) - 'registry_version' - 'registered_at') > 1) then
+    raise exception 'an SCAC entry_digest carries differing row content; the deduplicated rendering would be lossy';
+  end if;
+  if exists(select 1 from ops.scac_mutation_registry_entry e group by e.registry_version
+            having count(distinct e.registered_at) > 1) then
+    raise exception 'an SCAC registry version carries more than one registered_at; the deduplicated rendering would be lossy';
+  end if;
+end
+$carr_scac_render_premises$;
 select format(
   'insert into ops.scac_mutation_registry_version select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_version, %L::jsonb) on conflict (registry_version) do nothing;',
   jsonb_agg(to_jsonb(v) order by v.registry_version collate "C"))
 from ops.scac_mutation_registry_version v;
+select 'create temporary table carr_scac_entry_pool (entry_digest text primary key, entry jsonb not null) on commit drop;';
+with ordinal as (
+  select v.registry_version,
+         coalesce((regexp_match(v.registry_version, '\.v([0-9]+)$'))[1]::int, 0) as n
+  from ops.scac_mutation_registry_version v
+), first_seen as (
+  select distinct on (e.entry_digest) e.entry_digest, e.ingress_key, o.n, o.registry_version,
+         to_jsonb(e) - 'registry_version' - 'registered_at' as entry
+  from ops.scac_mutation_registry_entry e join ordinal o using (registry_version)
+  order by e.entry_digest, o.n, o.registry_version collate "C"
+)
 select format(
-  'insert into ops.scac_mutation_registry_entry select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_entry, %L::jsonb) on conflict (registry_version,ingress_key) do nothing;',
-  jsonb_agg(to_jsonb(e) order by e.ingress_key collate "C"))
+  'insert into pg_temp.carr_scac_entry_pool select p->>''entry_digest'', p from jsonb_array_elements(%L::jsonb) p;',
+  jsonb_agg(f.entry order by f.ingress_key collate "C", f.entry_digest collate "C"))
+from first_seen f
+group by f.n, f.registry_version order by f.n, f.registry_version collate "C";
+select format(
+  'insert into ops.scac_mutation_registry_entry select r.* from jsonb_array_elements_text(%L::jsonb) with ordinality d(entry_digest, n) join pg_temp.carr_scac_entry_pool p using (entry_digest) cross join lateral jsonb_populate_record(null::ops.scac_mutation_registry_entry, p.entry || %L::jsonb) r order by d.n on conflict (registry_version,ingress_key) do nothing;',
+  jsonb_agg(e.entry_digest order by e.ingress_key collate "C"),
+  jsonb_build_object('registry_version', e.registry_version, 'registered_at', min(e.registered_at)))
 from ops.scac_mutation_registry_entry e
 group by e.registry_version order by e.registry_version;
+select 'drop table pg_temp.carr_scac_entry_pool;';
 SCAC_REGISTRY_ROWS
   then
     echo "schema-snapshot: could not render the exact SCAC registry — nothing written" >&2

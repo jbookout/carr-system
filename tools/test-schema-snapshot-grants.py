@@ -38,8 +38,10 @@ import sys
 from schema_snapshot_grants import (
     SECTION_MARKER,
     SnapshotGrantError,
+    _snapshot_function_identity,
     carr_grants_section_lines,
     grants_to_role,
+    match_generated_grant,
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -158,6 +160,18 @@ def main(argv):
         destructive_refused = False
     check("multi-statement/comment SQL disguised as a writer GRANT is refused",
           destructive_refused)
+
+    # 0557's ops.meeting_mode_actor() takes only OUT arguments, and
+    # pg_get_function_identity_arguments() prints them with their mode. The
+    # grammar refused that line, so every snapshot refreshed past 0557 failed
+    # here; Postgres ignores OUT arguments in a function's identity.
+    out_only = match_generated_grant(
+        "revoke all on function ops.meeting_mode_actor(OUT actor_id uuid, "
+        "OUT actor_slug text, OUT is_partner boolean, OUT tenant text) from public;")
+    check("an OUT-only function revoke parses to its argument-free identity",
+          _snapshot_function_identity(out_only["schema"], out_only["object"],
+                                       out_only["function_args"])
+          == "ops.meeting_mode_actor()")
 
     applied_migrations = {
         migration for migration in ROLE_GRANT_MIGRATIONS.values()
