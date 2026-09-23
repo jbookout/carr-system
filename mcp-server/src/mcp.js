@@ -461,8 +461,9 @@ export const PROFILES = {
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-defect",
-    // A runtime-only door: exact queue receipts, fixed provenance, no raw room prose.
-    "project-room-queue",
+    // Runtime-only dispatch doors. The link's database function independently
+    // requires the server-derived hermes-pilot actor.
+    "project-room-queue", "record-dispatch-link",
   ]),
 
   // HERMES CoS (loop #459). This is a separate server-locked capability door,
@@ -473,7 +474,7 @@ export const PROFILES = {
   "hermes-cos": new Set([
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
-    "record-defect", "project-room-queue", "update-deal", "add-premises",
+    "record-defect", "project-room-queue", "record-dispatch-link", "update-deal", "add-premises",
   ]),
 };
 
@@ -522,13 +523,13 @@ const PROFILE_NOTICE = {
   hermes:
     "\n\n<notice>This session runs on the HERMES profile: every read verb, plus exactly nine " +
     "additive write verbs — log-activity, stamp-touch, add-loop, update-loop, set-next-action, " +
-    "complete-action, add-critical-date, record-finding, record-defect, and one runtime-only " +
-    "shape-checked queue projection door. Every other write verb " +
+    "complete-action, add-critical-date, record-finding, record-defect, and two runtime-only " +
+    "dispatch doors: shape-checked queue projection and a database-restricted dispatch link. Every other write verb " +
     "refuses with not_in_profile: no advancing a deal, no creating a party, no merging, no touching " +
     "a rule, no drafting a client document, and there is no send verb in this system at all. This " +
     "profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be " +
     "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
-    "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
+    "File what he tells you to file; for anything outside those nine business verbs and two dispatch doors, say what you would have " +
     "written and hand it back for a human.</notice>",
   "hermes-cos":
     "\n\n<notice>This session runs on the HERMES CoS profile: the ordinary Hermes business-write set " +
