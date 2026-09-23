@@ -298,6 +298,34 @@ class ChangeCollectorTests(unittest.TestCase):
             "list is being mis-parsed and every judgment it makes is about "
             "the wrong change: " + ", ".join(missing))
 
+    def test_a_deleted_path_is_reported_as_deleted_not_edited(self):
+        """A deletion is not an edit to a file that no longer exists.
+
+        Found 2026-09-23: a branch that untracked one binary made the property
+        above fail, because the "D" row fell through to "edited". Built on a
+        throwaway repository with no remote, so nothing is fetched.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            def git(*args):
+                subprocess.run(["git", *args], cwd=tmp, check=True,
+                               capture_output=True, text=True, timeout=60)
+            git("init", "-q", "-b", "base")
+            git("config", "user.email", "selftest@example.invalid")
+            git("config", "user.name", "selftest")
+            for name in ("gone.txt", "kept.txt"):
+                pathlib.Path(tmp, name).write_text(name + "\n")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            git("switch", "-q", "-c", "work")
+            git("rm", "-q", "gone.txt")
+            pathlib.Path(tmp, "kept.txt").write_text("changed\n")
+            git("commit", "-q", "-am", "work")
+            state = self.module.change(base="base", repo=tmp)
+        self.assertEqual(state["files"]["deleted"], ["gone.txt"])
+        self.assertEqual(state["files"]["edited"], ["kept.txt"])
+        self.assertEqual(state["files"]["added"], [])
+
     def test_it_sees_uncommitted_work(self):
         """The advisory is most useful mid-edit, which is when the first
         version was blind: it diffed origin/main...HEAD only."""
