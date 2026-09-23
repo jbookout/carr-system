@@ -121,8 +121,8 @@ def main() -> int:
     doctorcre = first.get("doctorcre_artifact")
     check("0i. manifest binds the independent DoctorCRE source and archive",
           isinstance(doctorcre, dict)
-          and doctorcre.get("source_commit") == "10c8741244a2eab458c1cc9481a3c54b17204711"
-          and doctorcre.get("archive_sha256") == "bab37e0ce0e43895dc3b88d7ac2ae13bcd74094c740876fde3d418b2c1c77c14"
+          and doctorcre.get("source_commit") == "6fdf8341177ca8fe165908b6b3368b6021057ad6"
+          and doctorcre.get("archive_sha256") == "e9341d908c5c039e23908a70b98b73515fa2e5b3e55300accf45172d03b7a087"
           and first.get("artifact_paths") == ["mcp-server"])
 
     # Seed the exact failure with the same numeric prefix but a different
