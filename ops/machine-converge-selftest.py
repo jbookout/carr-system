@@ -64,6 +64,7 @@ COPIES = [
     "hooks/machine-converge.py",
     "lib/claude_continuity_config.py",
     "lib/machine_prerequisites.py",
+    "lib/machine_role.py",
     "mcp-server/continuity-stdio-proxy.mjs",
     "ops/claude-continuity-hook.py",
     "ops/config-as-code.py",
@@ -312,12 +313,48 @@ def case_dirty_tree_refuses_ff_but_still_applies(tmp):
     }
 
 
+def write_role(home, role):
+    d = os.path.join(home, ".config", "carr")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "machine-role.json"), "w", encoding="utf-8") as fh:
+        fh.write('{"role": "%s"}' % role)
+
+
+def case_marker_secondary_converges(tmp):
+    """Joe's second Mac: owner email AND joe slug, but marked secondary ->
+    it converges like any secondary (the 2026-09-23 Studio move)."""
+    repo, home, stubs = build_fixture(tmp, owner_email(), actor_slug="joe")
+    write_role(home, "secondary")
+    r = run_hook(repo, home, stubs, tmp)
+    return {
+        "hook exits 0": r.returncode == 0,
+        "checkout fast-forwarded to origin/main":
+            git(repo, "rev-parse", "HEAD") == git(repo, "rev-parse", "origin/main"),
+        "brief line reports the apply": "re-applied" in r.stdout,
+    }
+
+
+def case_marker_primary_noop(tmp):
+    """Marked primary outranks a non-owner slug: nothing moves."""
+    repo, home, stubs = build_fixture(tmp, "dell@example.com", actor_slug="dell")
+    write_role(home, "primary")
+    before = git(repo, "rev-parse", "HEAD")
+    r = run_hook(repo, home, stubs, tmp)
+    return {
+        "hook exits 0": r.returncode == 0,
+        "prints nothing": r.stdout.strip() == "",
+        "checkout not moved": git(repo, "rev-parse", "HEAD") == before,
+    }
+
+
 def main():
     cases = [
         ("secondary machine converges", case_secondary_converges),
         ("primary machine (actor slug) is a no-op", case_primary_noop),
         ("primary machine (owner-email fallback) is a no-op", case_owner_fallback_noop),
         ("dirty tree refuses ff, keeps the edit, still applies", case_dirty_tree_refuses_ff_but_still_applies),
+        ("marked secondary converges despite owner identity", case_marker_secondary_converges),
+        ("marked primary is a no-op despite non-owner slug", case_marker_primary_noop),
     ]
     passed = failed = 0
     for name, fn in cases:
