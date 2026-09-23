@@ -275,6 +275,12 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0546_read_doc_outcome_cards_successor.sql",
         "0547_read_doc_outcome_cards_scac_successor.sql",
     ),
+    # V5-UX-B11: 0556 installs the Meeting Mode store and its eight writer
+    # doors; 0557 seals that catalog as v49. Same deferred-epoch boundary.
+    (
+        "0556_meeting_mode_store.sql",
+        "0557_meeting_mode_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -297,6 +303,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0546_read_doc_outcome_cards_successor.sql",
         "0547_read_doc_outcome_cards_scac_successor.sql",
+    ),
+    (
+        "0556_meeting_mode_store.sql",
+        "0557_meeting_mode_scac_successor.sql",
     ),
 )
 

@@ -1316,11 +1316,14 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # WR-000119 joins it too: its centre case mints a link with NO ack beside a
   # dispatch with no link at all and asserts the two nulls are different, which
   # is a claim about rows and not about a shaper.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine; do
+  # V5-UX-B11 Meeting Mode joins it: two devices, one row, one acceptance and
+  # one processing owner are claims about real locks on separate connections.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
            CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
+           CARR_MEETING_MODE_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2

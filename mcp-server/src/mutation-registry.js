@@ -4,8 +4,12 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v41 is the runtime selector after the B09 outcome-card read. Its sealed
-// catalog admits the new tool and preserves earlier versions as history.
+// v49 is the runtime selector after V5-UX-B11 Meeting Mode. Its sealed
+// catalog admits the eight meeting verbs and preserves earlier versions as
+// history; v42-v48 registered no verb, so the selector stayed on v41 until now.
+//
+// Superseded note (B09): v41 was the runtime selector because it admitted the
+// outcome-card read.
 //
 // Superseded note (WR-000119): v35 was the runtime selector because it installed the DISPATCH SPINE --
 // TWO new security-definer WRITE ingresses and TWO new verbs in a NEW family
@@ -37,7 +41,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v41.generated.js";
+} from "./scac-mutation-registry.v49.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
