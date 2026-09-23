@@ -157,6 +157,45 @@ class SpendsNothingUnnecessarilyTests(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+class ModelRoomRouteTests(unittest.TestCase):
+    def test_rule_is_available_from_another_checkout(self):
+        with tempfile.TemporaryDirectory() as other_checkout:
+            self.assertIn("Model Room", hook.model_room_rule(other_checkout))
+
+    def test_direct_model_work_pulls_rule_before_command(self):
+        class _Client:
+            @staticmethod
+            def noul(*args, **kwargs): return "question"
+        class _Judge:
+            @staticmethod
+            def judge(state, questions, timeout):
+                self_rule = state["model_room_rule"]
+                assert "Model Room" in self_rule
+                return {"answers": {"direct_model_work": {"noul": 0.99}}}
+        with mock.patch.object(hook, "_sibling", side_effect=lambda name:
+                               _Judge if name == "jev_judge" else _Client):
+            note = hook.advisory({"tool_name": "Bash", "tool_input": {"command": "claude -p 'review this'"}})
+        self.assertIn("MODEL ROOM ROUTE", note)
+        self.assertIn("Jev direct-work score 0.99", note)
+        self.assertIn("Opus 5.5", note)
+
+    def test_auth_readback_and_text_search_are_not_model_work(self):
+        for command in ("claude auth status", "rg claude ops", "hermes kanban show claude"):
+            with mock.patch.object(hook, "_sibling", side_effect=AssertionError("no Jev call")):
+                self.assertIsNone(hook.model_room_advisory(command))
+
+    def test_package_launcher_is_routed(self):
+        with mock.patch.object(hook, "_sibling", side_effect=RuntimeError("Jev offline")):
+            self.assertIn("MODEL ROOM ROUTE", hook.model_room_advisory(
+                "npx -y @anthropic-ai/claude-code -p review"))
+
+    def test_credential_command_never_sends_text_to_jev(self):
+        with mock.patch.object(hook, "_sibling", side_effect=AssertionError("secret sent")):
+            note = hook.model_room_advisory("API_KEY=secret claude -p test")
+        self.assertIn("MODEL ROOM ROUTE", note)
+        self.assertNotIn("secret", note)
+
+
 class _Facts:
     @staticmethod
     def environment_facts(command, repo=None):
