@@ -113,6 +113,43 @@ def main() -> int:
                 and fleet_dest.read_text(encoding="utf-8") == desired_fleet,
                 (external, calls),
             ))
+
+            # A Mac demoted to secondary: its primary-only job is unloaded and
+            # moved to quarantine, never deleted, and a second retire refuses
+            # to overwrite the first quarantined copy.
+            original_quarantine = mod.LAUNCHD_QUARANTINE
+            mod.LAUNCHD_QUARANTINE = str(root / "quarantine")
+            try:
+                name = "com.carr.nightly-record-layer.plist"
+                live = root / name
+                live.write_text(plist("com.carr.nightly-record-layer"), encoding="utf-8")
+                calls.clear()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    planned = mod.retire_primary_only_plist(name, str(live), False)
+                cases.append(check(
+                    "dry-run retire touches nothing",
+                    planned == "planned" and calls == [] and live.exists(),
+                    (planned, calls),
+                ))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    retired = mod.retire_primary_only_plist(name, str(live), True)
+                moved = root / "quarantine" / name
+                cases.append(check(
+                    "secondary retires a primary-only job: unloaded and moved aside",
+                    retired == "retired" and not live.exists() and moved.exists()
+                    and [call[:2] for call in calls] == [["launchctl", "unload"]],
+                    (retired, calls),
+                ))
+                live.write_text(plist("com.carr.nightly-record-layer"), encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    again = mod.retire_primary_only_plist(name, str(live), True)
+                cases.append(check(
+                    "retire refuses to overwrite an earlier quarantined copy",
+                    again == "failed" and live.exists(),
+                    again,
+                ))
+            finally:
+                mod.LAUNCHD_QUARANTINE = original_quarantine
     finally:
         mod.subprocess.run = original_run
         if original_active is None:

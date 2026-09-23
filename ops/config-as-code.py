@@ -61,6 +61,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
 from lib import claude_continuity_config as continuity_config
+from lib import machine_role
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
@@ -173,6 +174,11 @@ TASKS_REPO = os.path.join(REPO, "ops", "scheduled-tasks")
 # a second scheduler source of truth.
 TASKS_QUARANTINE = os.path.join(
     HOME, ".claude", "scheduled-tasks-quarantine", "carr-primary-only"
+)
+# Same idea for launch agents: a primary-only plist found on a secondary is
+# unloaded and moved here, never deleted, so demoting a Mac is reversible.
+LAUNCHD_QUARANTINE = os.path.join(
+    HOME, "Library", "LaunchAgents-quarantine", "carr-primary-only"
 )
 LAUNCHD_SRC = os.path.join(HOME, "Library", "LaunchAgents")
 LAUNCHD_REPO = os.path.join(REPO, "ops", "launchd")
@@ -457,32 +463,16 @@ def scheduled_task_install_plan():
     return {"install": [], **secondary_scheduled_task_state()}
 
 
-def _owner_email():
-    """The repo owner's git identity, read from the ONE place it is written.
-
-    ops/githooks/pre-push has decided since 2026-08-03 who may push to main, and
-    duplicating its constant here would create the two-copies problem this file
-    exists to prevent. Parsed rather than re-declared; the shell hook is left
-    untouched so the push path cannot regress. Missing or unreadable returns ""
-    which makes IS_PRIMARY false, and false is the safe direction: a machine
-    that cannot prove it is primary installs only the per-machine jobs.
-    """
-    try:
-        with open(os.path.join(REPO, "ops", "githooks", "pre-push"),
-                  encoding="utf-8") as fh:
-            m = re.search(r'^OWNER_EMAIL="([^"]+)"', fh.read(), re.M)
-        return m.group(1) if m else ""
-    except OSError:
-        return ""
-
-
 def _is_primary():
-    owner = _owner_email()
-    if not owner:
-        return False
+    """Primary is decided in ONE place, lib/machine_role.py: the per-machine
+    marker ~/.config/carr/machine-role.json when present, else git user.email
+    against OWNER_EMAIL in ops/githooks/pre-push (the determinant this file
+    used alone until 2026-09-23). Anything unprovable returns False, and false
+    is the safe direction: a machine that cannot prove it is primary installs
+    only the per-machine jobs."""
     me = subprocess.run(["git", "-C", REPO, "config", "user.email"],
                         capture_output=True, text=True, env=_git_env()).stdout.strip()
-    return me == owner
+    return machine_role.is_primary(REPO, git_email=me)
 
 
 IS_PRIMARY = _is_primary()
@@ -1611,6 +1601,28 @@ def cmd_pull(apply):
     return 0
 
 
+def retire_primary_only_plist(filename, live, apply):
+    """Unload a primary-only job found on a secondary and move its plist aside.
+
+    Happens when a Mac that used to be primary is marked secondary. Returns
+    ``retired``, ``planned`` (dry run), or ``failed``. Refuses to overwrite an
+    earlier quarantined copy, same rule as the scheduled-task quarantine.
+    """
+    dest = os.path.join(LAUNCHD_QUARANTINE, filename)
+    if not apply:
+        print(f"  would retire  {filename} (primary-only job on a secondary) -> {dest}")
+        return "planned"
+    if os.path.exists(dest):
+        print(f"  ERROR  quarantine already has {dest}; refusing to overwrite it")
+        return "failed"
+    subprocess.run(["launchctl", "unload", "-w", live],
+                   capture_output=True, check=False)
+    os.makedirs(LAUNCHD_QUARANTINE, exist_ok=True)
+    shutil.move(live, dest)
+    print(f"  RETIRED  {filename} (primary-only job on a secondary) -> {dest}")
+    return "retired"
+
+
 def install_launchd_plist(filename, dest, body, body_matches):
     """Render and load one plist without letting an active job unload itself.
 
@@ -1921,7 +1933,12 @@ def cmd_install(apply):
             print(f"  SKIP  {f} (definition only: {DEFINITION_ONLY[f]})")
             continue
         if f in PRIMARY_ONLY and not IS_PRIMARY:
-            print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
+            live = os.path.join(LAUNCHD_SRC, f)
+            if os.path.exists(live):
+                if retire_primary_only_plist(f, live, apply) == "failed":
+                    launchd_activation_failures.append(f)
+            else:
+                print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
             continue
         if f in SECONDARY_ONLY and IS_PRIMARY:
             print(f"  SKIP  {f} (the nightly chain already does this here)")
