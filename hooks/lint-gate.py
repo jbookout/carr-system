@@ -282,7 +282,7 @@ def code_review(payload):
             raise RuntimeError("review_module_unavailable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        hits = []
+        hits, shadow = [], []
         for path in paths:
             rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
             path_receipt = {"path": rel}
@@ -326,7 +326,9 @@ def code_review(payload):
             region = {"path": rel, "line": 0,
                       "kind": "just written by this session",
                       "code": code}
-            scores = module.review_one(region)
+            # Shadow only: the same request also asks whether the change fits
+            # the task, records would_block beside this advisory, never blocks.
+            scores = module.review_for_edit(region, payload)
             model = scores.get("_model")
             if not isinstance(model, str) or not model.strip():
                 raise RuntimeError("missing_model_readback")
@@ -336,12 +338,17 @@ def code_review(payload):
             for name, value in scores.items():
                 if not name.startswith("_") and value >= REVIEW_AT:
                     hits.append((rel, name, value))
+            if scores.get("_would_block") and not shadow:
+                shadow.append({"path": rel, "question": "task_fit_would_block",
+                               "probability": scores["_would_block"],
+                               "effect": "shadow_would_block_advisory_only"})
         hits.sort(key=lambda item: -item[2])
         for rel, name, value in hits:
             receipt["findings"].append({
                 "path": rel, "question": name, "probability": value,
                 "effect": "advisory_only",
             })
+        receipt["findings"].extend(shadow)
         if not receipt["models"]:
             receipt["status"] = "skipped"
             receipt["reason"] = "no_jev_candidate"
