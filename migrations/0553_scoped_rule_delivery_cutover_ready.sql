@@ -20,7 +20,12 @@ begin
   end if;
 end $rule_delivery_0553$;
 
-grant select on ops.rule_delivery_policy,
-                ops.rule_delivery_activation_target,
-                ops.rule_load_layer
-  to carr_authority_joe;
+do $rule_delivery_0553_grant$
+begin
+  if exists (select 1 from pg_roles where rolname='carr_authority_joe') then
+    grant select on ops.rule_delivery_policy,
+                    ops.rule_delivery_activation_target,
+                    ops.rule_load_layer
+      to carr_authority_joe;
+  end if;
+end $rule_delivery_0553_grant$;
