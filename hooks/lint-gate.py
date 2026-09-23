@@ -32,11 +32,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-VAULT = ("/Users/booko/Library/CloudStorage/"
-         "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
-RUN_SH = "/Users/booko/carr-system/run.sh"
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+# Derived from HOME, not typed in (2026-09-23 audit): the literal /Users/booko
+# spelling was right on one machine and silently matched nothing on any other.
+VAULT = os.path.join(os.path.expanduser("~"), "Library", "CloudStorage",
+                     "GoogleDrive-joe.bookout.carr.us@gmail.com", "My Drive", "CARR AI")
+CANONICAL = os.environ.get("CARR_ROOT") or os.path.join(os.path.expanduser("~"), "carr-system")
+RUN_SH = os.path.join(CANONICAL, "run.sh")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib.rule_delivery_preuse import (  # noqa:E402
     POSTWRITE_RECEIPT_SCHEMA, digest, postwrite_reviewer_digest, receipt_id,
@@ -380,7 +383,7 @@ def main():
         res = subprocess.run(
             [RUN_SH, "lint", path, "--surface", surface],
             capture_output=True, text=True, timeout=TIMEOUT,
-            cwd="/Users/booko/carr-system",
+            cwd=CANONICAL,
         )
         out = (res.stdout or "") + (res.stderr or "")
         if not out.strip():

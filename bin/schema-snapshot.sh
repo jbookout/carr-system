@@ -709,15 +709,15 @@ if [ "$OPENSSL_RESOLUTION_REGISTRY_APPLIED" = t ] && [ "$JEV_HANDOFF_REGISTRY_AP
   echo "schema-snapshot: openssl resolution v53 is applied without v52 predecessor" >&2
   exit 1
 fi
-JEV_REQUIREMENTS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0562_jev_requirements_scac_successor.sql')" \
+MACHINE_PATHS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0562_machine_paths_scac_successor.sql')" \
   2>/dev/null)"
-case "$JEV_REQUIREMENTS_REGISTRY_APPLIED" in
+case "$MACHINE_PATHS_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read jev requirements v54 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read machine paths v54 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$JEV_REQUIREMENTS_REGISTRY_APPLIED" = t ] && [ "$OPENSSL_RESOLUTION_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: jev requirements v54 is applied without v53 predecessor" >&2
+if [ "$MACHINE_PATHS_REGISTRY_APPLIED" = t ] && [ "$OPENSSL_RESOLUTION_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: machine paths v54 is applied without v53 predecessor" >&2
   exit 1
 fi
 
@@ -1966,7 +1966,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                               SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v52'"
                               SCAC_FULL_SET_SEAL_COUNT=52
                               SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v53_current()"
-                              if [ "$JEV_REQUIREMENTS_REGISTRY_APPLIED" = t ]; then
+                              if [ "$MACHINE_PATHS_REGISTRY_APPLIED" = t ]; then
                                 SCAC_CURRENT_NUMBER=54
                                 SCAC_VERSION_COUNT=54
                                 SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v54'")"

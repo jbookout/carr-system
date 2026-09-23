@@ -1099,7 +1099,7 @@ BACKUP_RC=$LAST_STEP_RC
 # and swallows the rest of the file. It parsed as an unmatched brace 200 lines
 # later, which is a long way from the cause.
 portability_root="${CARR_EXPORT_HOME:-}"
-[ -n "$portability_root" ] || portability_root="/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
+[ -n "$portability_root" ] || portability_root="$HOME/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
 # THE CAPABILITY THIS STEP WAS PINNED TO IS ONE NO AGENT MAY EVER HOLD, so the
 # step deleted itself quietly. carr_backup's password is deliberately a value
 # nothing here can possess — migration 0119 says so in capitals ("THE PASSWORD IS

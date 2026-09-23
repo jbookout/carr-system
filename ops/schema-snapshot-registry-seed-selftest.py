@@ -326,12 +326,12 @@ assert "SCAC_FULL_SET_SEAL_COUNT=52" in GENERATOR
 assert "ops.scac_mutation_catalog_v53_current()" in GENERATOR
 assert "0561_openssl_resolution_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v53"' in RUNTIME_V53
-assert "JEV_REQUIREMENTS_REGISTRY_APPLIED" in GENERATOR
+assert "MACHINE_PATHS_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=54" in GENERATOR
 assert "SCAC_VERSION_COUNT=54" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=53" in GENERATOR
 assert "ops.scac_mutation_catalog_v54_current()" in GENERATOR
-assert "0562_jev_requirements_scac_successor.sql" in GENERATOR
+assert "0562_machine_paths_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v54"' in RUNTIME_V54
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR

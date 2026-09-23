@@ -41,7 +41,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0561_openssl_resolution_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0562_jev_requirements_scac_successor.sql"
+    "migrations/0562_machine_paths_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
