@@ -299,7 +299,14 @@ def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
                              {"rank": rank_question(rules, client)},
                              client=client, api_key=api_key)
         probabilities = answer["answers"]["rank"].get("probabilities") or {}
-    except Exception:
+    except Exception as exc:
+        # An outage must leave a row (2026-09-23 audit: Jev was dead for a
+        # day and nothing said so). record() never raises.
+        try:
+            judge.record("rule_select", situation.get("surface") if isinstance(situation, dict) else None,
+                         None, None, error=exc)
+        except Exception:
+            pass
         return list(rules)
     if not probabilities:
         return list(rules)

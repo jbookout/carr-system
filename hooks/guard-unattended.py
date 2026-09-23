@@ -327,9 +327,10 @@ def _vault_spellings():
     exists here. Additive on purpose (2026-08-10 audit): the hardcodedは
     pair is kept verbatim so this machine's matching cannot regress, while a second
     machine stops running a vault guard that matches no path it owns."""
+    home = os.path.expanduser("~")
     fixed = (
-        "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
-        "/Users/booko/My Drive/CARR AI/",
+        home + "/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
+        home + "/My Drive/CARR AI/",
     )
     try:
         from gate_paths import vault_roots

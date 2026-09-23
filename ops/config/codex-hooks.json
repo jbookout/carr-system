@@ -148,7 +148,7 @@
           },
           {
             "type": "command",
-            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py",
+            "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py",
             "timeout": 20
           }
         ]
