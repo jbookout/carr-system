@@ -42,6 +42,8 @@ import unittest
 
 OPS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(OPS)
+sys.path.insert(0, OPS)
+from git_env import fixture_env                                # noqa: E402
 
 
 def load(module_name):
@@ -303,12 +305,17 @@ class ChangeCollectorTests(unittest.TestCase):
 
         Found 2026-09-23: a branch that untracked one binary made the property
         above fail, because the "D" row fell through to "edited". Built on a
-        throwaway repository with no remote, so nothing is fetched.
+        throwaway repository with no remote, so nothing is fetched. Every git
+        call, including change()'s own, runs under fixture_env(): git exports
+        GIT_DIR into the push hook, and inherited it would aim these calls at
+        the live repository instead of the fixture.
         """
         import tempfile
+        from unittest import mock
+        env = fixture_env()
         with tempfile.TemporaryDirectory() as tmp:
             def git(*args):
-                subprocess.run(["git", *args], cwd=tmp, check=True,
+                subprocess.run(["git", *args], cwd=tmp, check=True, env=env,
                                capture_output=True, text=True, timeout=60)
             git("init", "-q", "-b", "base")
             git("config", "user.email", "selftest@example.invalid")
@@ -321,7 +328,8 @@ class ChangeCollectorTests(unittest.TestCase):
             git("rm", "-q", "gone.txt")
             pathlib.Path(tmp, "kept.txt").write_text("changed\n")
             git("commit", "-q", "-am", "work")
-            state = self.module.change(base="base", repo=tmp)
+            with mock.patch.dict(os.environ, env, clear=True):
+                state = self.module.change(base="base", repo=tmp)
         self.assertEqual(state["files"]["deleted"], ["gone.txt"])
         self.assertEqual(state["files"]["edited"], ["kept.txt"])
         self.assertEqual(state["files"]["added"], [])
