@@ -1,3 +1,4 @@
+import { escapeHtml } from "./esc.js";
 // Clients and Vendors: the browser half of the Journey 1 business read.
 //
 // THE URL IS THE VIEW'S MEMORY. Search text, every filter, the sort, the page
@@ -81,9 +82,6 @@ const scopeButtons = dom.scopeSwitch ? [...dom.scopeSwitch.querySelectorAll("[da
 const view = Object.assign(createBusinessState(), { freshnessKey: null, returnFocusId: null });
 let searchTimer = null;
 
-const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-}[char]));
 
 function formatMoment(value) {
   const date = new Date(value);
@@ -337,7 +335,7 @@ function renderPager(payload) {
   const link = (id, label, page, enabled, rel) => enabled
     ? `<a class="action secondary-action" id="${id}" rel="${rel}" href="${escapeHtml(viewHref({ ...view.query, page }))}">${label}</a>`
     : `<span class="action secondary-action disabled" id="${id}" aria-disabled="true">${label}</span>`;
-  dom.pager.innerHTML = `${link("pagerPrevious", "Previous", Math.max(1, view.query.page - 1), summary.hasPrevious, "prev")}<span class="pager-position">Page ${summary.page} of ${summary.pageCount}</span>${link("pagerNext", "Next", view.query.page + 1, summary.hasNext, "next")}`;
+  dom.pager.innerHTML = `${link("pagerPrevious", "Previous", Math.max(1, view.query.page - 1), summary.hasPrevious, "prev")}<span class="pager-position">Page ${escapeHtml(summary.page)} of ${escapeHtml(summary.pageCount)}</span>${link("pagerNext", "Next", view.query.page + 1, summary.hasNext, "next")}`;
 }
 
 function renderList() {

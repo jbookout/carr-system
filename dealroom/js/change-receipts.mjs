@@ -26,6 +26,8 @@
  * live-client.js and inventing a second copy here would let the two drift.
  */
 
+import { escapeHtml as escapeText } from './esc.js';
+
 /**
  * The fields `revert-deal-field` will act on. This is the client-side home for
  * that list — app.js imports it back rather than keeping its own copy — and it
@@ -84,12 +86,9 @@ const MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', '
 
 const SLUG = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 
-/** Escape for HTML text and attribute contexts. app.js uses this as its `esc`. */
-export function escapeText(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[char]));
-}
+/** Escape for HTML text and attribute contexts. app.js uses this as its `esc`.
+ * One implementation, in esc.js; re-exported here under its historical name. */
+export { escapeText };
 
 /** Why a work record is parked. Single home; app.js imports this. */
 export function parkingReasonLabel(reason) {
