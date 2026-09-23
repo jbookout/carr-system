@@ -10,10 +10,11 @@ became a mobile extension, both Macs carried the owner email, so both would have
 installed the primary-only jobs and every one of them would have run twice.
 
 THE MARKER. ~/.config/carr/machine-role.json, {"role": "primary"} or
-{"role": "secondary"}, written per machine by bin/set-machine-role.sh. It is
-deliberately per machine: ~/.config/carr is otherwise copied wholesale between
-Macs at migration, so the setter refuses nothing and the file is expected to be
-rewritten on each Mac after a copy.
+{"role": "secondary"}, written per machine by
+`ops/config-as-code.py set-role primary|secondary`. It is deliberately per
+machine, but ~/.config/carr is copied wholesale between Macs at migration, so
+rewrite it on each Mac after a copy. Mark the old primary secondary BEFORE
+marking the new one primary, so the shared jobs never run on both.
 
 PRECEDENCE. A valid marker wins. A missing marker falls back to the old
 determinant (git email vs OWNER_EMAIL), so every machine that has never been
@@ -45,6 +46,21 @@ def read_marker(home=None):
     except Exception:
         return "invalid"
     return role if role in ROLES else "invalid"
+
+
+def write_marker(role, home=None):
+    """Atomically write this machine's role; 0600 like the rest of ~/.config/carr."""
+    if role not in ROLES:
+        raise ValueError(f"role must be one of {ROLES}")
+    path = role_file(home)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"role": role}, fh)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return path
 
 
 def owner_email(repo):

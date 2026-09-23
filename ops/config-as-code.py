@@ -2165,6 +2165,17 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "set-role":
+        # Writes ~/.config/carr/machine-role.json, then installs in a fresh
+        # process: IS_PRIMARY is fixed at import, so this one would still
+        # carry the old role. A secondary retires its primary-only jobs.
+        role = sys.argv[2] if len(sys.argv) > 2 else ""
+        if role not in machine_role.ROLES:
+            print("usage: ops/config-as-code.py set-role primary|secondary")
+            return 64
+        print(f"machine role: {role} ({machine_role.write_marker(role)})")
+        return subprocess.run([sys.executable, os.path.abspath(__file__),
+                               "install", "--apply"], stdin=subprocess.DEVNULL).returncode
     print(__doc__)
     return 2
 

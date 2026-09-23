@@ -117,8 +117,8 @@ def main() -> int:
             # A Mac demoted to secondary: its primary-only job is unloaded and
             # moved to quarantine, never deleted, and a second retire refuses
             # to overwrite the first quarantined copy.
-            original_quarantine = mod.LAUNCHD_QUARANTINE
-            mod.LAUNCHD_QUARANTINE = str(root / "quarantine")
+            original_quarantine = getattr(mod, "LAUNCHD_QUARANTINE")
+            setattr(mod, "LAUNCHD_QUARANTINE", str(root / "quarantine"))
             try:
                 name = "com.carr.nightly-record-layer.plist"
                 live = root / name
@@ -149,7 +149,7 @@ def main() -> int:
                     again,
                 ))
             finally:
-                mod.LAUNCHD_QUARANTINE = original_quarantine
+                setattr(mod, "LAUNCHD_QUARANTINE", original_quarantine)
     finally:
         mod.subprocess.run = original_run
         if original_active is None:

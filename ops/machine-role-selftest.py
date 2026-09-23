@@ -36,6 +36,12 @@ def main():
         run("unknown role fails closed", '{"role": "boss"}', OWNER, False),
         run("unparseable marker fails closed", "not json", OWNER, False),
     ]
+    with tempfile.TemporaryDirectory(prefix="machine-role-") as home:
+        path = machine_role.write_marker("secondary", home=home)
+        ok = (machine_role.read_marker(home) == "secondary"
+              and oct(os.stat(path).st_mode & 0o777) == "0o600")
+        print(f"{'PASS' if ok else 'FAIL'}  write_marker round-trips at 0600")
+        cases.append(ok)
     print(f"machine-role-selftest: {sum(cases)}/{len(cases)} passed")
     return 0 if all(cases) else 1
 
