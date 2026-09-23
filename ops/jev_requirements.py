@@ -245,7 +245,7 @@ def _git(args, cwd, deadline):
 
 # A GIT_DIR or GIT_INDEX_FILE inherited from a caller overrides -C, so every
 # call runs under ops/git_env.py's scrubbed environment when it loads.
-_GIT_ENV = {}
+_GIT_ENV: dict = {}
 
 
 def turn_diff(paths, since, deadline):
