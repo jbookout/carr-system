@@ -62,8 +62,9 @@ class FakeDesks:
     """Stands in for the Model Room. With `edit`, it rewrites calc.py in the copy it is
     handed, the way the writable Sol fixer desk does; with a diff answer, it only talks."""
 
-    def __init__(self, answer="", status="completed", raises=None, edit=None):
+    def __init__(self, answer="", status="completed", raises=None, edit=None, runs_tests=False):
         self.answer, self.status, self.raises, self.edit = answer, status, raises, edit
+        self.runs_tests = runs_tests
         self.sent: list = []
 
     def __call__(self, desk, text, cwd=None):
@@ -73,6 +74,8 @@ class FakeDesks:
         if self.edit and cwd:
             with open(os.path.join(cwd, "calc.py"), "w") as fh:
                 fh.write(self.edit)
+        if self.runs_tests and cwd:  # running the test in the copy rewrites Python's bytecode cache
+            write_cache(cwd, b"desk run")
         return {"status": self.status, "result": self.answer}
 
 
@@ -111,6 +114,26 @@ def sol_edits_in_copy_are_applied_and_kept():
     assert "a + b" in open(os.path.join(d, "calc.py")).read()
 
 
+def write_cache(d, payload):
+    os.makedirs(os.path.join(d, "__pycache__"), exist_ok=True)
+    with open(os.path.join(d, "__pycache__", "calc.cpython-314.pyc"), "wb") as fh:
+        fh.write(payload)
+
+
+def bytecode_caches_never_block_the_fix():
+    # Live escalation 2026-09-24: the real folder already had __pycache__ from running the test once,
+    # Sol's test run in the copy rewrote it, and the read-back patch failed to apply on the .pyc.
+    # The live folder was not a git repo, so the copy skipped __pycache__ and the patch re-created it.
+    d = tempfile.mkdtemp(prefix="flash-escalate-nogit-")
+    with open(os.path.join(d, "calc.py"), "w") as fh:
+        fh.write(BROKEN)
+    write_cache(d, b"local run")
+    out = fr.escalate("fix add", d, "t9", "err", ["calc.py"], "auto", test_cmd="python3 calc.py",
+                      dispatcher=FakeDesks(edit=BROKEN.replace("a - b", "a + b"), runs_tests=True))
+    assert out["outcome"] == "fixed_by_desk", out
+    assert "a + b" in open(os.path.join(d, "calc.py")).read()
+
+
 def passing_desk_patch_is_kept():
     d = repo()
     out = fr.escalate("fix add", d, "t4", "err", ["calc.py"], "auto",
@@ -142,6 +165,7 @@ check("code failure goes to Sol with files and test", code_failure_goes_to_sol_w
 check("judgment call goes to Opus", judgment_goes_to_opus)
 check("suggest mode dispatches nothing", suggest_mode_dispatches_nothing)
 check("Sol's edits in the copy are applied and kept", sol_edits_in_copy_are_applied_and_kept)
+check("bytecode caches never block Sol's fix", bytecode_caches_never_block_the_fix)
 check("a desk patch that passes the test is kept", passing_desk_patch_is_kept)
 check("a desk patch that fails the test is reverted", failing_desk_patch_is_reverted)
 check("a desk outage never crashes flash-run", desk_outage_never_crashes)
