@@ -2,7 +2,7 @@
  * found; it is intentionally not an approval, publication, or dismissal. */
 
 export const DELIVERABLE_QC_VERSION = "1.1.0";
-export const DELIVERABLE_QC_RULESET_VERSION = "1.1.0";
+export const DELIVERABLE_QC_RULESET_VERSION = "1.2.0";
 
 const LEAKAGE_KEYWORDS = /(?:\b(?:provider|rights?|evidence|verifier|internal(?:\s+id)?|access\s*notes?|contact)\b|\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|\b(?:\+?\d[\d .()-]{7,}\d)\b)/i;
 const UNSAFE_URL = /\b(?:javascript|data|file|vbscript):/i;
@@ -44,8 +44,11 @@ export const TOUR_PACKET_QC_ADAPTER = Object.freeze({
   markerAttribute: "data-property-marker",
   identityAttribute: "data-property-ref",
   sequenceAttribute: "data-route-sequence",
-  requiredFactFields: ["route_label", "name", "address", "as_of", "caveat"],
-  displayedFactFields: ["suite", "property_type", "size", "asking_economics", "availability", "parking"],
+  requiredFactFields: ["route_label", "name", "address", "as_of"],
+  // caveat is optional client-facing content, never a mandatory boilerplate
+  // default: when a property genuinely carries one it must still display
+  // (this list), but its absence is not itself a finding.
+  displayedFactFields: ["suite", "property_type", "size", "asking_economics", "availability", "parking", "caveat"],
   brand: "CARR",
   brandColors: ["#002F6C", "#F57F29"],
 });
@@ -95,7 +98,10 @@ export function inspectDeliverable(input) {
   const asOf = expected.asOf || facts.as_of;
   const caveat = expected.caveat || facts.caveat;
   if (!asOf || !containsText(html, asOf)) findings.push(finding("QC-FACT-001", "required_facts", "Required as-of value is absent from the rendered deliverable.", { asOf: asOf || null }));
-  if (!caveat || !containsText(html, caveat)) findings.push(finding("QC-FACT-002", "required_facts", "Required caveat is absent from the rendered deliverable.", { caveat: caveat || null }));
+  // caveat is optional client-facing content, never a mandatory boilerplate
+  // default: it is checked only when the facts genuinely supply one, and its
+  // absence is never itself a finding.
+  if (caveat && !containsText(html, caveat)) findings.push(finding("QC-FACT-002", "required_facts", "A supplied caveat is absent from the rendered deliverable.", { caveat }));
   if (!Array.isArray(rawItems)) findings.push(finding("QC-FACT-003", "required_facts", "Facts collection is missing or invalid."));
 
   const items = Array.isArray(rawItems) ? orderedItems(rawItems, artifactType) : [];

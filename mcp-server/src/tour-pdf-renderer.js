@@ -2,8 +2,8 @@ import fontkit from "@pdf-lib/fontkit";
 import { decodePDFRawStream, PDFDocument, PDFName, PDFString, rgb } from "pdf-lib";
 import { formatApprovedMetric, renderTourPacket } from "./tour-packet-render.js";
 
-export const TOUR_PDF_RENDERER_VERSION = "1.0.3";
-export const TOUR_PDF_TEMPLATE_VERSION = "1.0.0";
+export const TOUR_PDF_RENDERER_VERSION = "1.1.0";
+export const TOUR_PDF_TEMPLATE_VERSION = "1.1.0";
 
 const PAGE = [612, 792];
 const NAVY = rgb(0, 47 / 255, 108 / 255);
@@ -136,7 +136,9 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     page.drawRectangle({ x: 42, y: 119, width: 528, height: 130, color: PAPER, borderColor: ORANGE, borderWidth: 1.5 });
     page.drawText("FACTS-ONLY CLIENT NOTE", { x: 58, y: 224, size: 8.5, font: bold, color: NAVY });
     drawLines(page, wrap(`As of ${formatAsOf(property.as_of)}`, regular, 9.5, 494, 1), { x: 58, y: 204, size: 9.5, lineHeight: 13, font: regular, color: INK });
-    drawLines(page, wrap(property.caveat, regular, 9.5, 494, 5), { x: 58, y: 184, size: 9.5, lineHeight: 13, font: regular, color: MUTED });
+    // caveat is optional client-facing content, not a boilerplate default:
+    // print the line only when this property genuinely carries one.
+    if (property.caveat) drawLines(page, wrap(property.caveat, regular, 9.5, 494, 5), { x: 58, y: 184, size: 9.5, lineHeight: 13, font: regular, color: MUTED });
 
     const marker = packet.markers[index];
     const packetRefLine = measuredSingleLine(`Packet ref: ${property.property_ref}`, regular, 6.5, 528);
