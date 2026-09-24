@@ -830,6 +830,39 @@ if [ "$ANSWER_JOE_ATOMIC_PAIR_REGISTRY_APPLIED" = t ] && [ "$ANSWER_JOE_REGISTRY
   echo "schema-snapshot: answering Joe atomic pair v64 is applied without v63 predecessor" >&2
   exit 1
 fi
+RESOURCE_OBSERVATION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0581_resource_observation_scac_successor.sql')" \
+  2>/dev/null)"
+case "$RESOURCE_OBSERVATION_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read resource observation v65 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$RESOURCE_OBSERVATION_REGISTRY_APPLIED" = t ] && [ "$ANSWER_JOE_ATOMIC_PAIR_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: resource observation v65 is applied without v64 predecessor" >&2
+  exit 1
+fi
+RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0582_resource_observation_migrate_py_reseal.sql')" \
+  2>/dev/null)"
+case "$RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read resource observation migrate.py reseal v66 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" = t ] && [ "$RESOURCE_OBSERVATION_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: resource observation migrate.py reseal v66 is applied without v65 predecessor" >&2
+  exit 1
+fi
+TIMEBOMB_AUDIT_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0584_timebomb_audit_scac_successor.sql')" \
+  2>/dev/null)"
+case "$TIMEBOMB_AUDIT_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read timebomb audit v67 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$TIMEBOMB_AUDIT_REGISTRY_APPLIED" = t ] && [ "$RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: timebomb audit v67 is applied without v66 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2191,6 +2224,39 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                     SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v63'"
                                                     SCAC_FULL_SET_SEAL_COUNT=63
                                                     SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v64_current()"
+                                                    if [ "$RESOURCE_OBSERVATION_REGISTRY_APPLIED" = t ]; then
+                                                      SCAC_CURRENT_NUMBER=65
+                                                      SCAC_VERSION_COUNT=65
+                                                      SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v65'")"
+                                                      SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v65'")"
+                                                      SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v65.generated.js"
+                                                      SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v65'"
+                                                      SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v64'"
+                                                      SCAC_FULL_SET_SEAL_COUNT=64
+                                                      SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v65_current()"
+                                                      if [ "$RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" = t ]; then
+                                                        SCAC_CURRENT_NUMBER=66
+                                                        SCAC_VERSION_COUNT=66
+                                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v66'")"
+                                                        SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v66'")"
+                                                        SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v66.generated.js"
+                                                        SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v66'"
+                                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v65'"
+                                                        SCAC_FULL_SET_SEAL_COUNT=65
+                                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v66_current()"
+                                                        if [ "$TIMEBOMB_AUDIT_REGISTRY_APPLIED" = t ]; then
+                                                          SCAC_CURRENT_NUMBER=67
+                                                          SCAC_VERSION_COUNT=67
+                                                          SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v67'")"
+                                                          SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v67'")"
+                                                          SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v67.generated.js"
+                                                          SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v67'"
+                                                          SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v66'"
+                                                          SCAC_FULL_SET_SEAL_COUNT=66
+                                                          SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v67_current()"
+                                                        fi
+                                                      fi
+                                                    fi
                                                   fi
                                                 fi
                                               fi

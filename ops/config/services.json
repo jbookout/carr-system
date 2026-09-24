@@ -264,6 +264,25 @@
       ]
     },
     {
+      "key": "timebomb-audit",
+      "name": "Weekly time-bomb audit",
+      "purpose": "Scans tracked source for time-bomb signatures (code that breaks, or silently changes behaviour, purely because time passes or history/data/counters grow), computes deterministic headroom for repo-history windows and literal dates, asks Jev to rank the rest, and files new findings to the record layer and the partner-room queue. Monday 03:30. See ops/timebomb-audit.py.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "ops/timebomb-audit.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.timebomb-audit.plist",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 259200,
+          "notes": "Weekly, Monday 03:30 local. Grace spans a long weekend / a missed Monday plus buffer to the following run — same reasoning calendar-eventkit and local-briefs use for their own weekend stand-down."
+        }
+      ]
+    },
+    {
       "key": "calendar-prebrief-joe",
       "name": "Joe calendar prebrief projection",
       "purpose": "Runs the sponsor-bound local EventKit prebrief adapter. Its launchd tick may schedule and claim only the existing Joe live jobs lease; activation remains receipt-backed and explicit.",
