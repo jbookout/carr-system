@@ -772,29 +772,41 @@ PYEOF
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
-  # gate-replay-coverage JOINED 2026-09-24 (defect class
-  # capability-reported-live-before-first-human-use, PR #1224 and PR #1225).
-  # Same kind again: repository content only (a changed-file diff against
-  # origin/main), no machine state, no database. It requires that any diff
-  # touching a hooks/*.py gate, a lib/ file a hook imports, or a path listed
-  # in ops/config/gate-replay-map.json ALSO change or add a selftest that
-  # references a fixture under ops/fixtures/real-replay/ and the changed
-  # gate's own module — the fix Jev picked at confidence 1.0 for the recurring
-  # defect class where a gate shipped tested only against invented data and
-  # never fired on real traffic. It is a distinct file from
-  # ops/config/gate-baseline.json (hooks/gate-integrity.py's blessed-hash
-  # baseline) and never touches it.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check gate-replay-coverage; do
+             boot-budget-check core-rule-ids-check; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
            failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
+
+  # GATE REPLAY JOINED 2026-09-24 (defect class capability-reported-live-
+  # before-first-human-use: PR #1224's Stop gate never fired on 803 real
+  # receipts, PR #1225's shell regexes were proven only on invented commands).
+  # ops/gate-replay.py RUNS every gate in hooks/ over the committed real
+  # fixtures in ops/fixtures/real-replay/, the way the harness runs it, and
+  # compares every verdict with the committed snapshot there. It computes
+  # nothing from a base ref: it runs everything, every time. It is outside the
+  # loop above for two reasons: it takes about a minute, so it gets its own
+  # timeout, and it may answer 78 (NOT CONFIGURED) on a local interpreter
+  # without requirements.lock, which is announced like any other skip. On a
+  # hosted runner it never answers 78; a missing dependency there is a failure.
+  if [ -f ops/gate-replay.py ]; then
+    "$PY" "$CI_TIMEOUT_HELPER" 900 "$PY" ops/gate-replay.py >"$LOGDIR/gate-gate-replay.log" 2>&1
+    local rrc=$?
+    if [ "$rrc" -eq 78 ]; then
+      skiplist="$skiplist gate-replay.py"
+      printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
+        gate-replay.py "$(tail -1 "$LOGDIR/gate-gate-replay.log" 2>/dev/null)" >&2
+    elif [ "$rrc" -ne 0 ]; then
+      inherited_abort gate-replay "$PY" ops/gate-replay.py
+      failures="$failures gate-replay"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
+    fi
+  fi
 
   # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
   if [ "$(tree_fingerprint)" != "$tree_before" ]; then

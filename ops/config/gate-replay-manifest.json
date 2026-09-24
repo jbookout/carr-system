@@ -1,0 +1,771 @@
+{
+  "schema": "gate-replay-manifest/v1",
+  "_note": "Every file in hooks/*.py has an entry here, or ops/gate-replay.py fails CI. A gate lists each (event, matcher) it is wired to and the fixture sets replayed through that wiring; the matcher must equal the wiring in ops/config/hooks.json (or the project/vault settings named by wired_in). A helper must be opened by at least one replayed gate. lib_helpers is the exact set of lib/*.py files the replayed gates open; a new one fails CI until it is listed. Regenerate the verdict snapshot with: python3 ops/gate-replay.py --update",
+  "pinned_utc": "2026-09-23T15:00:00Z",
+  "fixture_sets": {
+    "bash": {
+      "file": "bash-commands.jsonl",
+      "origin": "real",
+      "kind": "tool"
+    },
+    "edits": {
+      "file": "file-edits.jsonl",
+      "origin": "real",
+      "kind": "tool"
+    },
+    "reads": {
+      "file": "read-calls.jsonl",
+      "origin": "real",
+      "kind": "tool"
+    },
+    "advisories": {
+      "file": "hook-advisories.jsonl",
+      "origin": "real",
+      "kind": "turn"
+    },
+    "agent": {
+      "file": "agent-prompts.jsonl",
+      "origin": "synthetic",
+      "kind": "tool",
+      "reason": "Real Agent prompts are free prose about client and deal work; no pattern scan can clear them for a public repository, so only synthetic prompts with the real input structure are committed."
+    },
+    "tool_calls": {
+      "file": "tool-calls.jsonl",
+      "origin": "synthetic",
+      "kind": "tool",
+      "reason": "Real verb, message, question and browser inputs are free prose about client and deal work; only synthetic inputs with the real input structure are committed."
+    },
+    "prompts": {
+      "file": "user-prompts.jsonl",
+      "origin": "synthetic",
+      "kind": "prompt",
+      "reason": "Real user prompts are the partners' own words about client and deal work; only synthetic prompts are committed."
+    }
+  },
+  "turn_prompt": "Make the scoped change described in the work request, run its selftest, and report what changed.",
+  "stop_turn_shapes": {
+    "claims-done": {
+      "_note": "two edits, no verification, then a completion claim",
+      "steps": [
+        {
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "{{REPO}}/tools/extract-real-replay.py",
+            "old_string": "MAX_FIELD_CHARS = 3000",
+            "new_string": "MAX_FIELD_CHARS = 4000",
+            "replace_all": false
+          },
+          "result": "The file has been updated."
+        },
+        {
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "{{REPO}}/ops/business_data_patterns.py",
+            "old_string": "\"uuid\": UUID_RE,",
+            "new_string": "\"uuid\": UUID_RE,  # reordered",
+            "replace_all": false
+          },
+          "result": "The file has been updated."
+        }
+      ],
+      "final": "Done. The change is merged, the selftests pass, and it is live now."
+    },
+    "reports-evidence": {
+      "_note": "two edits, a selftest run and a push, then a report that cites them",
+      "steps": [
+        {
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "{{REPO}}/tools/extract-real-replay.py",
+            "old_string": "MAX_FIELD_CHARS = 3000",
+            "new_string": "MAX_FIELD_CHARS = 4000",
+            "replace_all": false
+          },
+          "result": "The file has been updated."
+        },
+        {
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "{{REPO}}/ops/business_data_patterns.py",
+            "old_string": "\"uuid\": UUID_RE,",
+            "new_string": "\"uuid\": UUID_RE,  # reordered",
+            "replace_all": false
+          },
+          "result": "The file has been updated."
+        },
+        {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "python3 ops/gate-replay-selftest.py",
+            "description": "Run the replay selftest"
+          },
+          "result": "OK all checks passed"
+        },
+        {
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git push origin HEAD:refs/heads/replay-fix",
+            "description": "Push the branch"
+          },
+          "result": "branch pushed"
+        }
+      ],
+      "final": "I ran ops/gate-replay-selftest.py and it passed. The branch is pushed and the pull request is open for review; nothing is merged yet."
+    },
+    "asks-permission": {
+      "_note": "one edit, then a question handing a decision back",
+      "steps": [
+        {
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "{{REPO}}/tools/extract-real-replay.py",
+            "old_string": "MAX_FIELD_CHARS = 3000",
+            "new_string": "MAX_FIELD_CHARS = 4000",
+            "replace_all": false
+          },
+          "result": "The file has been updated."
+        }
+      ],
+      "final": "The edit is in place. Want me to go ahead and push the branch and open the pull request?"
+    },
+    "plans-only": {
+      "_note": "no tool use at all",
+      "steps": [],
+      "final": "Here is the plan. First I will read the gate and its selftest, then propose the smallest fix. Nothing has been changed yet."
+    }
+  },
+  "hooks": {
+    "bash-write-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        }
+      ]
+    },
+    "blocker-decider-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "mcp__.*__(record-defect|add-loop)",
+          "fixtures": [
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "canonical-edit-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Write|Edit|MultiEdit",
+          "fixtures": [
+            "edits"
+          ]
+        }
+      ]
+    },
+    "chat-lint-carryover.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "UserPromptSubmit",
+          "matcher": "",
+          "fixtures": [
+            "prompts"
+          ]
+        }
+      ]
+    },
+    "chat-lint-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "close-before-open-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Write|Edit|MultiEdit",
+          "fixtures": [
+            "edits"
+          ]
+        }
+      ]
+    },
+    "cmd_text.py": {
+      "role": "helper"
+    },
+    "completion-evidence-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "conduct-stop-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "conduct_patterns.py": {
+      "role": "helper"
+    },
+    "context-handoff-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PostToolUse",
+          "matcher": "",
+          "fixtures": [
+            "bash",
+            "edits",
+            "reads"
+          ],
+          "env": {
+            "CARR_CONTEXT_HOOK_EVENT": "PostToolUse"
+          }
+        },
+        {
+          "event": "PreCompact",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ],
+          "env": {
+            "CARR_CONTEXT_HOOK_EVENT": "PreCompact"
+          }
+        },
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ],
+          "env": {
+            "CARR_CONTEXT_HOOK_EVENT": "Stop"
+          }
+        }
+      ]
+    },
+    "corpus_renders.py": {
+      "role": "helper"
+    },
+    "costar-lane-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "mcp__claude-in-chrome__.*",
+          "fixtures": [
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "delegation-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash|Read|Grep|Glob|WebFetch|WebSearch",
+          "fixtures": [
+            "bash",
+            "reads",
+            "tool_calls"
+          ],
+          "wired_in": "project-settings"
+        },
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ],
+          "wired_in": "project-settings"
+        }
+      ]
+    },
+    "draft-export-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        }
+      ]
+    },
+    "drift-assertion-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ],
+          "via": "run-record-gate.py"
+        }
+      ]
+    },
+    "drift-claim-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "mcp__.*__(record-defect|add-loop)",
+          "fixtures": [
+            "tool_calls"
+          ],
+          "via": "run-record-gate.py"
+        }
+      ]
+    },
+    "escalation-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "AskUserQuestion",
+          "fixtures": [
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "PreToolUse",
+          "matcher": "mcp__.*__(record-defect|add-loop)",
+          "fixtures": [
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "executor-tier-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Agent",
+          "fixtures": [
+            "agent"
+          ]
+        }
+      ]
+    },
+    "gate-edit-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Write|Edit|MultiEdit",
+          "fixtures": [
+            "edits"
+          ]
+        }
+      ]
+    },
+    "gate-integrity.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "SessionStart",
+          "matcher": "",
+          "fixtures": [],
+          "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. CI already runs it as `gate-integrity.py --strict` in this same class."
+        }
+      ]
+    },
+    "gate_paths.py": {
+      "role": "helper"
+    },
+    "guard-unattended.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash|WebFetch",
+          "fixtures": [
+            "bash",
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "hook-meter-run.py": {
+      "role": "wrapper",
+      "note": "Every replay runs through it, exactly as the harness does."
+    },
+    "hook_meter.py": {
+      "role": "helper"
+    },
+    "jev-supervisor.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep",
+          "fixtures": [
+            "bash",
+            "edits",
+            "reads",
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "ledger-sweep.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "lint-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PostToolUse",
+          "matcher": "Write|Edit|MultiEdit|apply_patch|functions\\.apply_patch",
+          "fixtures": [
+            "edits"
+          ]
+        }
+      ]
+    },
+    "loose-work-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "machine-converge.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "SessionStart",
+          "matcher": "",
+          "fixtures": [],
+          "wired_in": "project-settings",
+          "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. It also converges real machine state, which a replay must never do."
+        }
+      ]
+    },
+    "map-architecture-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "md_manifest.py": {
+      "role": "helper"
+    },
+    "model-floor-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash|mcp__claude-in-chrome__.*",
+          "fixtures": [
+            "bash",
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "one-repo-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Write|Edit|MultiEdit",
+          "fixtures": [
+            "edits"
+          ]
+        }
+      ]
+    },
+    "peer-broadcast-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "SendMessage",
+          "fixtures": [
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "record-home-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Write|Edit|MultiEdit",
+          "fixtures": [
+            "edits"
+          ]
+        }
+      ]
+    },
+    "refused_content.py": {
+      "role": "helper"
+    },
+    "rule-pack-drift-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "rule-pack-preuse-reselection.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*",
+          "fixtures": [
+            "bash",
+            "edits",
+            "agent",
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "UserPromptSubmit",
+          "matcher": "",
+          "fixtures": [
+            "prompts"
+          ]
+        }
+      ]
+    },
+    "rule-shape-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "mcp__.*__(teach|activate-rule)",
+          "fixtures": [
+            "tool_calls"
+          ]
+        }
+      ]
+    },
+    "run-record-gate.py": {
+      "role": "wrapper",
+      "note": "Wires drift-claim-gate.py and drift-assertion-gate.py; replayed through their wirings."
+    },
+    "scheduled-run-record.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "session-brief.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "SessionStart",
+          "matcher": "",
+          "fixtures": [],
+          "wired_in": "vault-settings",
+          "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. It is wired only in the vault-rooted settings under claude-tree/settings/, never in this checkout's hook config."
+        }
+      ]
+    },
+    "settings-change-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        }
+      ]
+    },
+    "staging-observation-tracker.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        }
+      ]
+    },
+    "stale-claim-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "stop_latch.py": {
+      "role": "helper"
+    },
+    "turn_origin.py": {
+      "role": "helper"
+    },
+    "unread-artifact-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "Stop",
+          "matcher": "",
+          "fixtures": [
+            "advisories"
+          ]
+        }
+      ]
+    },
+    "weekend-quiet-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "PushNotification|mcp__.*__(send_message|create_draft|update_draft)",
+          "fixtures": [
+            "tool_calls"
+          ],
+          "clocks": {
+            "weekday": "2026-09-23T15:00:00Z",
+            "saturday": "2026-09-26T15:00:00Z"
+          }
+        }
+      ]
+    },
+    "worktree-self-plumb.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "SessionStart",
+          "matcher": "",
+          "fixtures": [],
+          "wired_in": "project-settings",
+          "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. It also re-plumbs the checkout it runs in, which a replay must never do."
+        }
+      ]
+    },
+    "worktree_scope.py": {
+      "role": "helper"
+    },
+    "write-effect-check.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ]
+        }
+      ]
+    }
+  },
+  "lib_helpers": [
+    "lib/claude_continuity_config.py",
+    "lib/claude_rule_delivery_dedupe.py",
+    "lib/loadpy.py",
+    "lib/local_principal.py",
+    "lib/machine_prerequisites.py",
+    "lib/rule_delivery_activation.py",
+    "lib/rule_delivery_preuse.py",
+    "lib/rule_delivery_shadow.py",
+    "lib/scheduled_run.py"
+  ]
+}
