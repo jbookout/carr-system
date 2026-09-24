@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Acceptance test for ops/no-client-names-gate.py.
 
-Hermetic: it builds its own name list from INVENTED names (never a real one —
-that is the point of the gate) and plants them in a throwaway git repository,
-so it needs no network, no record layer and no state from this checkout. It
-proves, in order:
+Hermetic: it builds its name list from INVENTED names (never a real one; that
+is the point of the gate), uses a throwaway test key generated here (never the
+real CARR_NAME_GUARD_KEY, which this test clears from its environment), and
+plants the names in a throwaway git repository. It proves, in order:
 
   * the canonical form: case, apostrophes, punctuation, hyphens and underscores
-    all normalise to the same hash, and matching stops at token boundaries;
-  * a planted name FAILS the gate end to end (real `git ls-files`, real exit 1),
-    in file contents and in a file path, and the output never prints the name;
-  * an allowlisted (path, hash) pair passes, and covers only that one file;
-  * the committed list itself is hashes only and loads.
+    all normalise the same way, and matching stops at token boundaries;
+  * LOCAL mode: a planted name FAILS the gate end to end (real `git ls-files`,
+    real exit 1), in file contents and in a file path, and the output never
+    prints the name;
+  * HMAC mode: the built file carries no plain digest of any name, a planted
+    name fails the same way, and a WRONG key fails loudly (key_check);
+  * with neither source the gate SKIPS LOUDLY (WARNING line, exit 0);
+  * the allowlist covers FILES pinned by content: an edited pinned file is no
+    longer covered, and an allowlist entry carrying a name digest is refused;
+  * the committed tree carries no plain name-hash list and no name digest.
 """
 from __future__ import annotations
 
@@ -19,6 +24,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -36,22 +43,22 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 PLANTED = ["Zebulon Quaxmire", "Orrin Fettlewick-Paine", "Glimmerstone Dental Arts"]
+TEST_KEY = "selftest-" + secrets.token_hex(16)   # throwaway; never the real key
 
 
-def h(s: str) -> str:
+def sha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
 checks: list[tuple[str, bool]] = []
 
-# ── canonical form ─────────────────────────────────────────────────────────
+# ── canonical form and matching ────────────────────────────────────────────
 same = {gate.canonical(v) for v in ("Orrin Fettlewick-Paine", "ORRIN fettlewick_paine",
                                     "orrin  Fettlewick—Paine", "Orrin Fettlewick'-Paine")}
 checks.append(("canonical form ignores case, punctuation and separators", same == {"orrin fettlewick paine"}))
 checks.append(("an apostrophe is dropped, not split", gate.canonical("O'Quaxmire") == "oquaxmire"))
 
-names = gate.NameList({h(gate.canonical(n)) for n in PLANTED},
-                      {h(gate.canonical(n).split()[0]) for n in PLANTED}, 3)
+names = gate.NameList.from_names(PLANTED)
 checks.append(("a planted name is found mid-sentence",
                [ln for ln, _ in names.hits("x\nmet Zebulon Quaxmire today\n")] == [2]))
 checks.append(("matching is token-bounded (no hit inside a longer word)",
@@ -60,18 +67,54 @@ checks.append(("a hyphenated CamelCase path form is found",
                len(list(names.hits("DNA/Orrin-Fettlewick-Paine.md"))) == 1))
 checks.append(("an unlisted name is not found", list(names.hits("Zebulon Smith")) == []))
 
+doc = gate.build_hmac_doc(PLANTED, TEST_KEY.encode())
+blob = json.dumps(doc)
+plain = [sha(gate.canonical(n)) for n in PLANTED] + [sha(gate.canonical(n).split()[0]) for n in PLANTED]
+checks.append(("the HMAC file carries no plain sha256 of any name or first token",
+               not any(p in blob for p in plain)))
+hn = gate.NameList.from_hmacs(doc, TEST_KEY.encode())
+checks.append(("HMAC mode finds the same names", len(list(hn.hits("glimmerstone DENTAL arts"))) == 1))
+
 
 # ── end to end, through a real git repository ───────────────────────────────
-def run_gate(repo: Path, allow: list[dict]) -> tuple[int, str]:
-    hashes = repo.parent / "hashes.json"
-    hashes.write_text(json.dumps({"max_tokens": 3, "sha256": sorted(names.full),
-                                  "first_token_sha256": sorted(names.first)}))
+def run_gate(repo: Path, allow: list[dict], *, local: bool = True, key: str | None = None,
+             hmacs: dict | None = None) -> tuple[int, str]:
+    names_f = repo.parent / "names.local.txt"
+    names_f.write_text("\n".join(PLANTED) + "\n")
+    hmacs_f = repo.parent / "hmacs.json"
+    if hmacs is not None:
+        hmacs_f.write_text(json.dumps(hmacs))
+    elif hmacs_f.exists():
+        hmacs_f.unlink()
     allow_f = repo.parent / "allow.json"
     allow_f.write_text(json.dumps({"entries": allow}))
+    saved = {k: os.environ.get(k) for k in (gate.NAMES_ENV, gate.KEY_ENV, "GITHUB_ACTIONS")}
+    # A path that does not exist disables the ~/carr-system fallback too.
+    os.environ[gate.NAMES_ENV] = str(names_f) if local else str(repo.parent / "absent.txt")
+    os.environ.pop("GITHUB_ACTIONS", None)
+    if key is None:
+        os.environ.pop(gate.KEY_ENV, None)
+    else:
+        os.environ[gate.KEY_ENV] = key
     out, err = io.StringIO(), io.StringIO()
-    with redirect_stdout(out), redirect_stderr(err):
-        rc = gate.main(["--repo", str(repo), "--hashes", str(hashes), "--allow", str(allow_f)])
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                rc = gate.main(["--repo", str(repo), "--hmacs", str(hmacs_f), "--allow", str(allow_f)])
+            except SystemExit as e:
+                rc = int(e.code or 0)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     return rc, out.getvalue() + err.getvalue()
+
+
+def no_name_in(text: str) -> bool:
+    low = text.lower().replace("zebulon_quaxmire-intake.txt", "")
+    return not any(t in low for t in ("glimmerstone", "quaxmire", "fettlewick"))
 
 
 with tempfile.TemporaryDirectory(prefix="no-client-names-") as tmp:
@@ -82,39 +125,66 @@ with tempfile.TemporaryDirectory(prefix="no-client-names-") as tmp:
     (repo / "clean.md").write_text("A dentist in the panhandle, no names here.\n")
     subprocess.run(["git", "-C", str(repo), "add", "clean.md"], check=True, env=env)
     rc, _ = run_gate(repo, [])
-    checks.append(("a clean tree passes", rc == 0))
+    checks.append(("a clean tree passes (local mode)", rc == 0))
 
     (repo / "notes.md").write_text("Follow up with glimmerstone DENTAL arts on Friday.\n")
     (repo / "Zebulon_Quaxmire-intake.txt").write_text("nothing\n")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=env)
     rc, text = run_gate(repo, [])
-    checks.append(("a planted name in contents FAILS the gate", rc == 1 and "notes.md:1" in text))
-    checks.append(("a planted name in a file path FAILS the gate",
+    checks.append(("local mode: a planted name in contents FAILS the gate", rc == 1 and "notes.md:1" in text))
+    checks.append(("local mode: a planted name in a file path FAILS the gate",
                    "Zebulon_Quaxmire-intake.txt:path" in text))
-    checks.append(("the failure output never prints the name",
-                   "glimmerstone" not in text.lower() and "quaxmire" not in text.lower().replace(
-                       "zebulon_quaxmire-intake.txt", "")))
+    checks.append(("local mode: the failure output never prints the name", no_name_in(text)))
 
-    allow = [{"path": "notes.md", "sha256": h("glimmerstone dental arts"), "reason": "test"},
-             {"path": "Zebulon_Quaxmire-intake.txt", "sha256": h("zebulon quaxmire"), "reason": "test"}]
+    rc, text = run_gate(repo, [], local=False, key=TEST_KEY, hmacs=doc)
+    checks.append(("HMAC mode: a planted name FAILS the gate", rc == 1 and "notes.md:1" in text))
+    checks.append(("HMAC mode: the failure output never prints the name", no_name_in(text)))
+
+    rc, text = run_gate(repo, [], local=False, key="selftest-wrong-" + secrets.token_hex(8), hmacs=doc)
+    checks.append(("HMAC mode: a wrong key fails loudly (key_check)", rc == 1 and "key_check" in text))
+
+    rc, text = run_gate(repo, [], local=False, key=None)
+    checks.append(("no local list and no key: SKIPS LOUDLY with exit 0",
+                   rc == 0 and "WARNING no-client-names-gate SKIPPED" in text))
+    rc, text = run_gate(repo, [], local=False, key=TEST_KEY, hmacs=None)
+    checks.append(("key set but no HMAC file: SKIPS LOUDLY", rc == 0 and "SKIPPED" in text))
+
+    pin = lambda p: hashlib.sha256((repo / p).read_bytes()).hexdigest()  # noqa: E731
+    allow = [{"path": "notes.md", "file_sha256": pin("notes.md"), "reason": "test"},
+             {"path": "Zebulon_Quaxmire-intake.txt", "file_sha256": pin("Zebulon_Quaxmire-intake.txt"),
+              "reason": "test"}]
     rc, _ = run_gate(repo, allow)
-    checks.append(("allowlisted (path, name) pairs pass", rc == 0))
+    checks.append(("allowlisted, content-pinned files pass", rc == 0))
+
+    (repo / "notes.md").write_text("Follow up with glimmerstone DENTAL arts on Monday.\n")
+    rc, text = run_gate(repo, allow)
+    checks.append(("an EDITED pinned file is no longer covered", rc == 1 and "notes.md:1" in text))
 
     (repo / "other.md").write_text("glimmerstone dental arts again\n")
     subprocess.run(["git", "-C", str(repo), "add", "other.md"], check=True, env=env)
-    rc, text = run_gate(repo, allow)
-    checks.append(("an allowlist pair covers only its own file", rc == 1 and "other.md:1" in text))
+    rc, text = run_gate(repo, [dict(allow[0], file_sha256=pin("notes.md")), allow[1]])
+    checks.append(("an allowlist entry covers only its own file", rc == 1 and "other.md:1" in text))
 
-# ── the committed list ──────────────────────────────────────────────────────
-committed = json.loads((HERE / "config" / "client-name-hashes.v1.json").read_text())
-hexes = committed["sha256"] + committed["first_token_sha256"]
-checks.append(("the committed list is hashes only",
-               all(len(x) == 64 and all(c in "0123456789abcdef" for c in x) for x in hexes)
-               and set(committed) >= {"sha256", "first_token_sha256", "max_tokens"}))
-allow_doc = json.loads((HERE / "config" / "client-name-allowlist.v1.json").read_text())
-checks.append(("every allowlist entry names a listed hash and gives a reason",
-               all(e["sha256"] in set(committed["sha256"]) and e.get("reason")
+    try:
+        run_gate(repo, [{"path": "notes.md", "sha256": sha("glimmerstone dental arts"), "reason": "x"}])
+        refused = False
+    except ValueError:
+        refused = True
+    checks.append(("an allowlist entry carrying a name digest is refused", refused))
+
+# ── the committed tree ──────────────────────────────────────────────────────
+checks.append(("no plain name-hash list is committed",
+               not (HERE / "config" / "client-name-hashes.v1.json").exists()))
+allow_doc = json.loads((HERE / "config" / "client-name-allowlist.v2.json").read_text())
+checks.append(("every committed allowlist entry is a file with a reason, no name digest",
+               all(set(e) <= {"path", "file_sha256", "reason"} and e.get("reason")
                    for e in allow_doc["entries"])))
+hm = HERE / "config" / "client-name-hmacs.v1.json"
+if hm.exists():
+    hdoc = json.loads(hm.read_text())
+    checks.append(("the committed HMAC file carries key_check and keyed digests only",
+                   set(hdoc) >= {"key_check", "hmac_sha256", "first_token_hmac_sha256", "max_tokens"}
+                   and "sha256" not in hdoc))
 
 failed = [label for label, ok in checks if not ok]
 for label, ok in checks:
