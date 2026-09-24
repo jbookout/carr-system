@@ -1,6 +1,6 @@
 {
   "schema": "gate-replay-manifest/v1",
-  "_note": "Every file in hooks/*.py has an entry here, or ops/gate-replay.py fails CI. A gate lists each (event, matcher) it is wired to and the fixture sets replayed through that wiring; the matcher must equal the wiring in ops/config/hooks.json (or the project/vault settings named by wired_in). A helper must be opened by at least one replayed gate. lib_helpers is the exact set of lib/*.py files the replayed gates open; a new one fails CI until it is listed. Regenerate the verdict snapshot with: python3 ops/gate-replay.py --update",
+  "_note": "Every file in hooks/*.py has an entry here, or ops/gate-replay.py fails CI. A gate lists each (event, matcher) it is wired to and the fixture sets replayed through that wiring; the matcher must equal the wiring in ops/config/hooks.json (wired_in hooks.json) or in the tracked project settings, .claude/settings.json or claude-tree/settings/ (wired_in project-settings); nothing else is accepted, and every wiring, no_replay ones included, is checked against that config. no_replay is allowed only on SessionStart. Every replayed wiring must reach a verdict other than allow on some fixture (the scenarios set exists for that), or carry an allow_only reason. A helper must be executed by at least one replayed gate. lib_helpers is the exact set of lib/*.py files the replayed gates execute; a new one fails CI until it is listed. Regenerate the verdict snapshot with: python3 ops/gate-replay.py --update",
   "pinned_utc": "2026-09-23T15:00:00Z",
   "fixture_sets": {
     "bash": {
@@ -40,6 +40,12 @@
       "origin": "synthetic",
       "kind": "prompt",
       "reason": "Real user prompts are the partners' own words about client and deal work; only synthetic prompts are committed."
+    },
+    "scenarios": {
+      "file": "gate-scenarios.jsonl",
+      "origin": "synthetic",
+      "kind": "scenario",
+      "reason": "Each record is written to drive one gate wiring down its deny, reopen or announce path, because the real records never reached it. Every record names the verdict it expects, and a mismatch fails CI whatever the snapshot says."
     }
   },
   "turn_prompt": "Make the scoped change described in the work request, run its selftest, and report what changed.",
@@ -142,7 +148,8 @@
           "event": "PreToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
+            "bash",
+            "scenarios"
           ]
         }
       ]
@@ -154,7 +161,8 @@
           "event": "PreToolUse",
           "matcher": "mcp__.*__(record-defect|add-loop)",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -166,7 +174,8 @@
           "event": "PreToolUse",
           "matcher": "Write|Edit|MultiEdit",
           "fixtures": [
-            "edits"
+            "edits",
+            "scenarios"
           ]
         }
       ]
@@ -178,7 +187,8 @@
           "event": "UserPromptSubmit",
           "matcher": "",
           "fixtures": [
-            "prompts"
+            "prompts",
+            "scenarios"
           ]
         }
       ]
@@ -190,8 +200,10 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
-          ]
+            "advisories",
+            "scenarios"
+          ],
+          "allow_only": "Never blocks or announces by design since 2026-08-16: every path exits 0 with empty stdout, and a finding is parked in a carry file for the NEXT UserPromptSubmit (carry(), called from main()). That next half is covered by the chat-lint-carryover.py scenario."
         }
       ]
     },
@@ -202,7 +214,8 @@
           "event": "PreToolUse",
           "matcher": "Write|Edit|MultiEdit",
           "fixtures": [
-            "edits"
+            "edits",
+            "scenarios"
           ]
         }
       ]
@@ -217,7 +230,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -229,7 +243,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -246,7 +261,8 @@
           "fixtures": [
             "bash",
             "edits",
-            "reads"
+            "reads",
+            "scenarios"
           ],
           "env": {
             "CARR_CONTEXT_HOOK_EVENT": "PostToolUse"
@@ -256,17 +272,20 @@
           "event": "PreCompact",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ],
           "env": {
             "CARR_CONTEXT_HOOK_EVENT": "PreCompact"
-          }
+          },
+          "allow_only": "hook_main() returns 0 for PreCompact right after audit(), before any announce() call site; the one announce-capable error path also no-ops for non-Stop events. PreCompact is record-only by construction."
         },
         {
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ],
           "env": {
             "CARR_CONTEXT_HOOK_EVENT": "Stop"
@@ -284,7 +303,8 @@
           "event": "PreToolUse",
           "matcher": "mcp__claude-in-chrome__.*",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -298,7 +318,8 @@
           "fixtures": [
             "bash",
             "reads",
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ],
           "wired_in": "project-settings"
         },
@@ -306,7 +327,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ],
           "wired_in": "project-settings"
         }
@@ -319,7 +341,8 @@
           "event": "PreToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
+            "bash",
+            "scenarios"
           ]
         }
       ]
@@ -331,7 +354,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ],
           "via": "run-record-gate.py"
         }
@@ -344,7 +368,8 @@
           "event": "PreToolUse",
           "matcher": "mcp__.*__(record-defect|add-loop)",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ],
           "via": "run-record-gate.py"
         }
@@ -357,14 +382,16 @@
           "event": "PreToolUse",
           "matcher": "AskUserQuestion",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         },
         {
           "event": "PreToolUse",
           "matcher": "mcp__.*__(record-defect|add-loop)",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -376,7 +403,8 @@
           "event": "PreToolUse",
           "matcher": "Agent",
           "fixtures": [
-            "agent"
+            "agent",
+            "scenarios"
           ]
         }
       ]
@@ -388,7 +416,8 @@
           "event": "PreToolUse",
           "matcher": "Write|Edit|MultiEdit",
           "fixtures": [
-            "edits"
+            "edits",
+            "scenarios"
           ]
         }
       ]
@@ -415,7 +444,8 @@
           "matcher": "Bash|WebFetch",
           "fixtures": [
             "bash",
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -437,15 +467,19 @@
             "bash",
             "edits",
             "reads",
-            "tool_calls"
-          ]
+            "tool_calls",
+            "scenarios"
+          ],
+          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
         },
         {
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
-          ]
+            "advisories",
+            "scenarios"
+          ],
+          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
         }
       ]
     },
@@ -456,7 +490,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -468,7 +503,8 @@
           "event": "PostToolUse",
           "matcher": "Write|Edit|MultiEdit|apply_patch|functions\\.apply_patch",
           "fixtures": [
-            "edits"
+            "edits",
+            "scenarios"
           ]
         }
       ]
@@ -480,8 +516,10 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
-          ]
+            "advisories",
+            "scenarios"
+          ],
+          "allow_only": "Both findings read real git state: loose_tracked() needs a dirty tracked tree and unpushed_count() a configured remote. The sandbox is a clean one-commit repo with no remote by design, and transcript steps are never executed, so neither can be staged without letting the replay mutate the tree it checks."
         }
       ]
     },
@@ -504,7 +542,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -520,7 +559,8 @@
           "matcher": "Bash|mcp__claude-in-chrome__.*",
           "fixtures": [
             "bash",
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -532,7 +572,8 @@
           "event": "PreToolUse",
           "matcher": "Write|Edit|MultiEdit",
           "fixtures": [
-            "edits"
+            "edits",
+            "scenarios"
           ]
         }
       ]
@@ -544,7 +585,8 @@
           "event": "PreToolUse",
           "matcher": "SendMessage",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -556,7 +598,8 @@
           "event": "PreToolUse",
           "matcher": "Write|Edit|MultiEdit",
           "fixtures": [
-            "edits"
+            "edits",
+            "scenarios"
           ]
         }
       ]
@@ -571,7 +614,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -586,14 +630,16 @@
             "bash",
             "edits",
             "agent",
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         },
         {
           "event": "UserPromptSubmit",
           "matcher": "",
           "fixtures": [
-            "prompts"
+            "prompts",
+            "scenarios"
           ]
         }
       ]
@@ -605,7 +651,8 @@
           "event": "PreToolUse",
           "matcher": "mcp__.*__(teach|activate-rule)",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ]
         }
       ]
@@ -621,8 +668,10 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
-          ]
+            "advisories",
+            "scenarios"
+          ],
+          "allow_only": "A recorder that NEVER BLOCKS (its docstring): main() always returns 0 and no announce, block or deny call exists in the file."
         }
       ]
     },
@@ -633,8 +682,8 @@
           "event": "SessionStart",
           "matcher": "",
           "fixtures": [],
-          "wired_in": "vault-settings",
-          "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. It is wired only in the vault-rooted settings under claude-tree/settings/, never in this checkout's hook config."
+          "wired_in": "project-settings",
+          "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. It is wired in the tracked project settings under claude-tree/settings/, which the check reads and verifies."
         }
       ]
     },
@@ -645,15 +694,19 @@
           "event": "PreToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
-          ]
+            "bash",
+            "scenarios"
+          ],
+          "allow_only": "Never writes to stdout and never exits 2 anywhere in the file; its announce() writes only to stderr, which the harness (and hook-meter-run.py's classifier) do not read as a verdict. Suspected defect reported, not asserted here."
         },
         {
           "event": "PostToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
-          ]
+            "bash",
+            "scenarios"
+          ],
+          "allow_only": "Never writes to stdout and never exits 2 anywhere in the file; its messages go to stderr only, which is not a verdict. Suspected defect reported, not asserted here."
         }
       ]
     },
@@ -664,15 +717,19 @@
           "event": "PreToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
-          ]
+            "bash",
+            "scenarios"
+          ],
+          "allow_only": "A pure recorder: main() always exits 0 ('this tracker never blocks; it only ever observes') and handle() prints nothing."
         },
         {
           "event": "PostToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
-          ]
+            "bash",
+            "scenarios"
+          ],
+          "allow_only": "A pure recorder: main() always exits 0 ('this tracker never blocks; it only ever observes') and handle() prints nothing."
         }
       ]
     },
@@ -683,7 +740,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -701,7 +759,8 @@
           "event": "Stop",
           "matcher": "",
           "fixtures": [
-            "advisories"
+            "advisories",
+            "scenarios"
           ]
         }
       ]
@@ -713,7 +772,8 @@
           "event": "PreToolUse",
           "matcher": "PushNotification|mcp__.*__(send_message|create_draft|update_draft)",
           "fixtures": [
-            "tool_calls"
+            "tool_calls",
+            "scenarios"
           ],
           "clocks": {
             "weekday": "2026-09-23T15:00:00Z",
@@ -744,15 +804,19 @@
           "event": "PreToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
-          ]
+            "bash",
+            "scenarios"
+          ],
+          "allow_only": "Never writes to stdout and never exits 2; its detection message goes to stderr only, which is not a verdict. Suspected defect reported, not asserted here."
         },
         {
           "event": "PostToolUse",
           "matcher": "Bash",
           "fixtures": [
-            "bash"
-          ]
+            "bash",
+            "scenarios"
+          ],
+          "allow_only": "Never writes to stdout and never exits 2; its detection message goes to stderr only, which is not a verdict. Suspected defect reported, not asserted here."
         }
       ]
     }

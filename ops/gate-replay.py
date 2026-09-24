@@ -16,28 +16,38 @@ behaviour, not text.
 
 WHAT IT DOES, EVERY RUN, WITH NOTHING COMPUTED FROM A BASE REF:
 
-  1. LEAK SCAN. Every committed fixture, the manifest, and the verdict snapshot
-     are scanned key-by-key and value-by-value with
-     ops/business_data_patterns.py. Any hit fails. The repository is public.
+  1. LEAK SCAN. Every file under the fixture directory and every fixture file
+     the manifest names (any extension, `#` comment lines included), the
+     manifest, and the verdict snapshot are scanned with
+     ops/business_data_patterns.py: its shape patterns AND the real client
+     roster (a local roster where one exists, the committed salted hashes of
+     it everywhere). Any hit fails. No roster at all fails. The repository is
+     public.
   2. MANIFEST COVERAGE. ops/config/gate-replay-manifest.json must name every
      hooks/*.py file (gate, helper, or wrapper). Every hook wiring in
-     ops/config/hooks.json and in .claude/settings.json must appear as a
-     manifest wiring with the same event and matcher, and every manifest
-     wiring must still exist there (or name the vault settings file that holds
-     it). A fixture set a wiring names must contain records its matcher
-     actually selects.
+     ops/config/hooks.json, .claude/settings.json and the tracked project
+     settings under claude-tree/settings/ must appear as a manifest wiring
+     with the same event and matcher, and every manifest wiring, no_replay
+     ones included, must still exist there. no_replay is allowed only on
+     SessionStart. A fixture set a wiring names must contain records its
+     matcher actually selects.
   3. REPLAY. Each wiring's fixtures are fed to the gate as the harness feeds
      them: `python hooks/hook-meter-run.py hooks/<gate>.py` in a subprocess,
      the hook's JSON contract on stdin. The verdict is read from the telemetry
      line hook-meter-run.py itself writes (outcome, register, reopen,
      deny_class), so this check classifies exactly as production telemetry
-     does. A gate that crashes, exits outside {0, 2}, times out, or writes
-     outside out/ fails CI.
-  4. HELPER EVIDENCE. Every Python module the gate processes execute is
+     does. A gate that crashes, exits outside {0, 2}, times out, writes
+     outside out/, or FAILS OPEN (logs its own ALLOW(internal-error),
+     ALLOW(parse-error) and the like, then exits 0) fails CI.
+  4. TEETH. Every synthetic scenario record must reach the verdict it
+     `expect`s, and every replayed wiring must reach some verdict other than
+     allow, or say why it never can (`allow_only`). Neither is satisfied by
+     re-blessing the snapshot, so a gate that silently stops denying fails.
+  5. HELPER EVIDENCE. Every Python module the gate processes execute is
      recorded by an audit hook. Each helper in hooks/ must be executed by some replayed
      gate, and the set of lib/*.py files executed must equal the manifest's
      lib_helpers list exactly.
-  5. SNAPSHOT. The verdicts (one TSV row per non-allow verdict, plus a counts
+  6. SNAPSHOT. The verdicts (one TSV row per non-allow verdict, plus a counts
      row per gate and event) must equal
      ops/fixtures/real-replay/verdict-snapshot.tsv. A change in any
      verdict fails CI until the snapshot is regenerated in the same pull
@@ -45,8 +55,9 @@ WHAT IT DOES, EVERY RUN, WITH NOTHING COMPUTED FROM A BASE REF:
 
 DETERMINISM. The snapshot must be identical on a fresh Linux runner and on a
 developer Mac with years of local state, so each worker replays inside its own
-sandbox copy of the tracked tree (with its own single-commit git repository,
-never under a temp-directory prefix the gates treat specially, file times set
+sandbox copy of the TRACKED tree only, untracked files never copied (with its
+own single-commit git repository, never under a temp-directory prefix the gates
+treat specially, which is refused outright, file times set
 to the pinned instant), and every invocation gets a fresh HOME, TMPDIR and
 out/. ops/gate_replay_shim/sitecustomize.py pins the clock, refuses sockets,
 and records executed modules. A PATH shim turns network tools into failures.
@@ -92,6 +103,10 @@ SNAPSHOT = FIXTURE_DIR / "verdict-snapshot.tsv"
 SHIM_DIR = REPO / "ops" / "gate_replay_shim"
 HOOKS_CONFIG = REPO / "ops" / "config" / "hooks.json"
 PROJECT_SETTINGS = REPO / ".claude" / "settings.json"
+# Tracked project settings the vault-rooted checkouts install (session-brief is
+# wired only here). They are tracked, so every wiring in them is verified too.
+CLAUDE_TREE_SETTINGS = REPO / "claude-tree" / "settings"
+WIRED_IN = ("hooks.json", "project-settings")
 
 SESSION_ID = bdp.REPLAY_SESSION_ID
 INVOCATION_TIMEOUT = 45.0
@@ -144,41 +159,58 @@ def epoch_of(stamp: str) -> float:
 # ------------------------------------------------------------------ leak scan
 
 def leak_scan(paths: Iterable[Path]) -> List[str]:
-    """One finding per (file, line, pattern). Never echoes the matched text."""
+    """One finding per (file, line, pattern). Never echoes the matched text.
+
+    Every line of every file is scanned, `#` comment lines included, whatever
+    the extension: a .json file is also scanned decoded, and each .jsonl line
+    that parses is scanned decoded (keys and values one by one); any line that
+    does not parse, and every line of any other file, is scanned as text.
+    """
     findings: List[str] = []
+    if not bdp.roster():
+        findings.append("no client roster: neither a local roster nor "
+                        "ops/config/client-name-hashes.json could be read")
     for path in paths:
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError as err:
-            findings.append(f"{path.name}: unreadable ({err.strerror})")
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as err:
+            findings.append(f"{path.name}: unreadable ({getattr(err, 'strerror', None) or err})")
             continue
         if path.suffix == ".json":
             try:
-                hits = bdp.scan_value(json.loads("\n".join(lines)))
+                hits = bdp.scan_value(json.loads(text))
             except ValueError:
                 hits = [("unparseable-json", "$")]
             findings.extend(f"{path.name}: {name} at {where}" for name, where in hits)
-            continue
-        for number, line in enumerate(lines, 1):
-            if not line.strip() or line.startswith("#"):
+        for number, line in enumerate(text.splitlines(), 1):
+            if not line.strip():
                 continue
-            if path.suffix == ".jsonl":
+            value: Any = None
+            if path.suffix == ".jsonl" and not line.startswith("#"):
                 try:
-                    value: Any = json.loads(line)
+                    value = json.loads(line)
                 except ValueError:
                     findings.append(f"{path.name}:{number}: not JSON")
-                    continue
-            else:
+            elif path.suffix == ".tsv" and not line.startswith("#"):
                 value = line.split("\t")
+            if value is None:
+                if path.suffix == ".json":
+                    continue  # already scanned decoded, and a raw JSON line is escaped text
+                value = line
             for name, where in bdp.scan_value(value):
                 findings.append(f"{path.name}:{number}: {name} at {where}")
     return findings
 
 
-def leak_scan_targets(fixture_dir: Path = FIXTURE_DIR, manifest: Path = MANIFEST) -> List[Path]:
-    targets = sorted(p for p in fixture_dir.iterdir()
-                     if p.is_file() and p.suffix in (".jsonl", ".tsv", ".json"))
-    return targets + [manifest]
+def leak_scan_targets(fixture_dir: Path = FIXTURE_DIR, manifest: Path = MANIFEST,
+                      manifest_data: Optional[Dict[str, Any]] = None) -> List[Path]:
+    """Every file in the fixture directory, every fixture file the manifest
+    names wherever it lives, the manifest itself: no extension filter."""
+    targets = {p for p in fixture_dir.rglob("*") if p.is_file()}
+    for spec in (manifest_data or {}).get("fixture_sets", {}).values():
+        if isinstance(spec, dict) and spec.get("file"):
+            targets.add(fixture_dir / spec["file"])
+    return sorted(targets) + [manifest]
 
 
 # ------------------------------------------------------------------ manifest coverage
@@ -192,13 +224,21 @@ def wiring_key(gate: str, event: str, matcher: str, env_event: str = "") -> Tupl
 
 
 def config_wirings(hooks_config: Path = HOOKS_CONFIG,
-                   project_settings: Path = PROJECT_SETTINGS) -> Dict[Tuple[str, str, str, str], str]:
+                   project_settings: Path = PROJECT_SETTINGS,
+                   tree_settings: Optional[Path] = CLAUDE_TREE_SETTINGS) -> Dict[Tuple[str, str, str, str], str]:
     """Every (gate, event, matcher, context-env) wired in tracked hook config,
     mapped to the file it came from. For a gate run through run-record-gate.py
     the wired gate is the argument, which is what the harness actually runs."""
     found: Dict[Tuple[str, str, str, str], str] = {}
-    for source, label in ((hooks_config, "ops/config/hooks.json"),
-                          (project_settings, ".claude/settings.json")):
+    sources = [(hooks_config, "ops/config/hooks.json"), (project_settings, ".claude/settings.json")]
+    if tree_settings is not None and tree_settings.is_dir():
+        # user.settings.json is an unreferenced snapshot of USER-level
+        # settings; the user level is generated from ops/config/hooks.json,
+        # which is already read above. The rest are project settings.
+        sources += [(p, f"claude-tree/settings/{p.name}")
+                    for p in sorted(tree_settings.glob("*.settings.json"))
+                    if p.name != "user.settings.json"]
+    for source, label in sources:
         try:
             with open(source, encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -253,9 +293,16 @@ def check_manifest(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, 
             key = wiring_key(name, wiring["event"], wiring.get("matcher", ""), env_event)
             declared.add(key)
             where = wiring.get("wired_in", "hooks.json")
-            if where in ("hooks.json", "project-settings") and key not in wired:
+            if where not in WIRED_IN:
+                errors.append(f"{name}: wired_in must be one of {', '.join(WIRED_IN)}, not {where!r}: "
+                              "a wiring the tracked config cannot confirm is not exempt")
+            if key not in wired:
                 errors.append(f"{name}: manifest wiring {wiring['event']} '{wiring.get('matcher', '')}' "
-                              f"is not wired in ops/config/hooks.json or .claude/settings.json")
+                              "is not wired in ops/config/hooks.json, .claude/settings.json or "
+                              "claude-tree/settings/")
+            if wiring.get("no_replay") and wiring["event"] != "SessionStart":
+                errors.append(f"{name} {wiring['event']}: no_replay is allowed only on SessionStart; "
+                              "every other event has a payload a fixture can carry")
             if wiring.get("no_replay"):
                 if wiring.get("fixtures"):
                     errors.append(f"{name}: a no_replay wiring must not list fixtures")
@@ -268,7 +315,7 @@ def check_manifest(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, 
                 if set_name not in sets:
                     errors.append(f"{name}: unknown fixture set {set_name}")
                     continue
-                selected += len(select(fixtures.get(set_name, []), sets[set_name], wiring))
+                selected += len(select(fixtures.get(set_name, []), sets[set_name], wiring, name))
             if selected == 0:
                 errors.append(f"{name} {wiring['event']} '{wiring.get('matcher', '')}': "
                               f"its fixture sets hold no record its matcher selects")
@@ -281,8 +328,13 @@ def check_manifest(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, 
     return errors
 
 
-def select(records: List[Dict[str, Any]], spec: Dict[str, Any], wiring: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The records of one fixture set that this wiring's matcher selects."""
+def select(records: List[Dict[str, Any]], spec: Dict[str, Any], wiring: Dict[str, Any],
+           gate: str = "") -> List[Dict[str, Any]]:
+    """The records of one fixture set that this wiring's matcher selects. A
+    scenario record names the one gate and event it was written for."""
+    if spec.get("kind") == "scenario":
+        return [r for r in records if r.get("gate") == gate and r.get("event") == wiring.get("event")
+                and r.get("matcher", wiring.get("matcher", "")) == wiring.get("matcher", "")]
     if spec.get("kind") != "tool":
         return records
     matcher = wiring.get("matcher", "")
@@ -318,8 +370,11 @@ class Worker:
 
 
 def tracked_files(repo: Path) -> List[str]:
+    """Only what git tracks (the index). Untracked files are never copied: a
+    replay must see what CI sees, and an untracked scratch file (a local
+    roster, a draft) must never shape a verdict or reach the sandbox."""
     out = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        ["git", "ls-files", "-z", "--cached"],
         cwd=repo, env=git_env.scrubbed_env(), capture_output=True, check=True)
     names = [n for n in out.stdout.decode("utf-8", "surrogateescape").split("\0") if n]
     return sorted(set(names))
@@ -391,7 +446,7 @@ def reset(path: Path) -> None:
 
 def prepare_invocation(worker: Worker) -> None:
     for path in (worker.home, worker.tmp, worker.repo / "out", worker.telemetry, worker.trace,
-                 worker.transcript):
+                 worker.transcript, worker.state / "guard.log"):
         reset(path)
     worker.home.mkdir()
     worker.tmp.mkdir()
@@ -429,9 +484,19 @@ class Invocation:
         return self.event if not self.matcher else f"{self.event}[{self.matcher}]"
 
 
+# Placeholders a fixture may use for text the public-repo leak scan must never
+# see literally. The only one is the public vendor domain costar-lane-gate.py
+# itself names (BANNED_DOMAIN there): a hostname in a fixture always fails the
+# scan, so the scenario that proves the gate denies it spells it this way.
+PLACEHOLDERS = {"{{BANNED_VENDOR_HOST}}": "costar" + "." + "com"}
+
+
 def substitute(value: Any, repo: str, home: str) -> Any:
     if isinstance(value, str):
-        return value.replace("{{REPO}}", repo).replace("{{HOME}}", home)
+        value = value.replace("{{REPO}}", repo).replace("{{HOME}}", home)
+        for token, text in PLACEHOLDERS.items():
+            value = value.replace(token, text)
+        return value
     if isinstance(value, list):
         return [substitute(v, repo, home) for v in value]
     if isinstance(value, dict):
@@ -459,8 +524,14 @@ def transcript_lines(inv: Invocation, worker: Worker, manifest: Dict[str, Any]) 
         lines.append(line)
         parent = uid
 
+    # A scenario may open the transcript with raw records (a scheduled run's
+    # queue-operation launch marker) and name the model the turn ran on.
+    for raw in inv.record.get("raw_head") or []:
+        lines.append(substitute(raw, repo, home))
+    model = str(inv.record.get("model") or "claude-opus-5-5")
+
     def assistant(offset: int, content: List[Dict[str, Any]], suffix: str) -> None:
-        add("assistant", offset, {"message": {"role": "assistant", "model": "claude-opus-5-5",
+        add("assistant", offset, {"message": {"role": "assistant", "model": model,
                                               "id": f"msg_replay_{rid}_{suffix}", "type": "message",
                                               "content": content}})
 
@@ -472,8 +543,11 @@ def transcript_lines(inv: Invocation, worker: Worker, manifest: Dict[str, Any]) 
             {"type": "tool_result", "tool_use_id": use_id, "content": result}]},
             "toolUseResult": {"stdout": result, "stderr": "", "interrupted": False}})
 
-    prompt = inv.record.get("prompt") or manifest["turn_prompt"]
-    add("user", 120, {"message": {"role": "user", "content": prompt}, "promptId": f"replay-{rid}"})
+    if not inv.record.get("no_prompt"):
+        # A scenario may omit the partner's prompt (an unattended run, a
+        # session a scheduled task started): some gates act only then.
+        prompt = inv.record.get("prompt") or manifest["turn_prompt"]
+        add("user", 120, {"message": {"role": "user", "content": prompt}, "promptId": f"replay-{rid}"})
     if inv.fixture_set in manifest["fixture_sets"] and manifest["fixture_sets"][inv.fixture_set]["kind"] == "turn":
         # The REAL advisory record sits where the harness put it, straight
         # after the prompt; the rest of the turn is one of the manifest's
@@ -490,7 +564,19 @@ def transcript_lines(inv: Invocation, worker: Worker, manifest: Dict[str, Any]) 
             tool_step(100 - 10 * index, step["tool_name"], step["tool_input"],
                       step.get("result", ""), f"s{index}")
         assistant(5, [{"type": "text", "text": shape["final"]}], "final")
-    elif "tool_name" in inv.record:
+        return lines
+    if inv.fixture_set in manifest["fixture_sets"] and manifest["fixture_sets"][inv.fixture_set]["kind"] == "scenario":
+        # A synthetic scenario written to drive one gate down its deny or
+        # reopen path: its own prompt, an optional advisory, its own steps
+        # and final text, then (for a tool event) the call under judgment.
+        if inv.record.get("attachment"):
+            add("attachment", 110, {"attachment": substitute(inv.record["attachment"], repo, home)})
+        for index, step in enumerate(inv.record.get("steps") or []):
+            tool_step(100 - 10 * index, step["tool_name"], step["tool_input"],
+                      step.get("result", ""), f"s{index}")
+        if inv.record.get("final"):
+            assistant(6, [{"type": "text", "text": inv.record["final"]}], "final")
+    if "tool_name" in inv.record:
         # The call under judgment is already in the transcript when PreToolUse
         # fires, exactly as in a live session.
         assistant(5, [{"type": "tool_use", "id": f"toolu_replay_{rid}",
@@ -539,18 +625,22 @@ def invocations(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, Any
         for wiring in entry.get("wirings", []):
             if wiring.get("no_replay"):
                 continue
-            clocks = wiring.get("clocks") or {"": manifest["pinned_utc"]}
             for set_name in wiring["fixtures"]:
                 spec = manifest["fixture_sets"][set_name]
-                for record in select(fixtures[set_name], spec, wiring):
+                for record in select(fixtures[set_name], spec, wiring, gate):
                     shape = None
+                    clocks = wiring.get("clocks") or {"": manifest["pinned_utc"]}
                     if spec["kind"] == "turn":
                         shape = shapes[int(record["id"], 16) % len(shapes)]
+                    if spec["kind"] == "scenario" and record.get("clock"):
+                        clocks = {record.get("clock_label", "scenario"): record["clock"]}
                     for label, stamp in sorted(clocks.items()):
                         out.append(Invocation(
                             gate=gate, event=wiring["event"], matcher=wiring.get("matcher", ""),
                             fixture_set=set_name, record=record, via=wiring.get("via"),
-                            env=dict(wiring.get("env") or {}), clock_label=label,
+                            env={**(wiring.get("env") or {}),
+                                 **((record.get("env") or {}) if spec["kind"] == "scenario" else {})},
+                            clock_label=label,
                             clock=epoch_of(stamp) if stamp else pinned, shape=shape))
     return out
 
@@ -700,9 +790,70 @@ def classify(row: Dict[str, Any]) -> str:
     return "allow"
 
 
+# A gate that catches its own exception logs ALLOW(internal-error),
+# ALLOW(parse-error), shadow-writing ALLOW(import-failed) and so on, then
+# exits 0. Other ALLOW(...) tags (outside-repo, worktree, no-transcript) are
+# ordinary decisions and do not match.
+FAIL_OPEN_RE = re.compile(r"ALLOW\(([a-z-]*(?:error|fail(?:ed|ure)?)[a-z-]*)\)")
+
+
+def fail_open_lines(worker: Worker) -> List[str]:
+    """The fail-open tags any log this invocation wrote carries. Looks in the
+    guard log, out/ and HOME, without following the ~/carr-system symlink."""
+    tags: List[str] = []
+    roots = [worker.state / "guard.log", worker.repo / "out", worker.home, worker.tmp]
+    for root in roots:
+        if root.is_file():
+            files = [root]
+        elif root.is_dir():
+            files = [Path(d) / f for d, _dirs, names in os.walk(root, followlinks=False) for f in names]
+        else:
+            continue
+        for path in files:
+            try:
+                if path.is_symlink() or path.stat().st_size > 4_000_000:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for match in FAIL_OPEN_RE.finditer(text):
+                tag = f"ALLOW({match.group(1)}) in {path.name}"
+                if tag not in tags:
+                    tags.append(tag)
+    return tags
+
+
+def seed_scenario(inv: Invocation, worker: Worker) -> None:
+    """Lay down the state a scenario says an EARLIER turn or hook left behind.
+
+    Only per-invocation places are writable: HOME and out/ are both reset
+    before every invocation, so nothing seeded here outlives it or reaches
+    the tracked tree. home_git_repos makes a second git working tree for the
+    gates whose policy is about code landing outside this repository."""
+    record = inv.record
+    repo, home = str(worker.repo), str(worker.home)
+    for base, files in ((worker.home, record.get("home_files")),
+                        (worker.repo / "out", record.get("out_files"))):
+        for rel, content in (files or {}).items():
+            target = (base / rel).resolve()
+            if not str(target).startswith(str(base.resolve()) + os.sep):
+                raise ValueError(f"scenario file escapes its root: {rel}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            text = content if isinstance(content, str) else json.dumps(content)
+            target.write_text(substitute(text, repo, home), encoding="utf-8")
+    for rel in record.get("home_git_repos") or []:
+        target = worker.home / rel
+        target.mkdir(parents=True, exist_ok=True)
+        env = git_env.fixture_env()
+        env.update(NO_BACKGROUND_GIT)
+        subprocess.run(["git", "init", "-q", "-b", "other"], cwd=target, env=env,
+                       check=True, capture_output=True)
+
+
 def run_one(inv: Invocation, worker: Worker, manifest: Dict[str, Any]) -> Result:
     started = time.monotonic()
     prepare_invocation(worker)
+    seed_scenario(inv, worker)
     with open(worker.transcript, "w", encoding="utf-8") as handle:
         for line in transcript_lines(inv, worker, manifest):
             handle.write(json.dumps(line) + "\n")
@@ -719,7 +870,7 @@ def run_one(inv: Invocation, worker: Worker, manifest: Dict[str, Any]) -> Result
         "CARR_GATE_REPLAY_TRACE": str(worker.trace),
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         **NO_BACKGROUND_GIT,
-        **inv.env,
+        **{k: substitute(str(v), str(worker.repo), str(worker.home)) for k, v in inv.env.items()},
     }
     target = worker.repo / "hooks" / (inv.via or inv.gate)
     argv = [sys.executable, str(worker.repo / "hooks" / "hook-meter-run.py"), str(target)]
@@ -759,6 +910,14 @@ def run_one(inv: Invocation, worker: Worker, manifest: Dict[str, Any]) -> Result
         # OWN functions instead, so the verdict still means what telemetry means.
         telemetry = wrapper_row(stdout, stderr, proc.returncode, inv.event)
     verdict = classify(telemetry)
+    fail_open = fail_open_lines(worker)
+    if fail_open:
+        # The gate caught its own crash and allowed: exit 0, no telemetry
+        # error, but its log says ALLOW(internal-error) or the like. That is a
+        # crash the harness would never see, so it is a crash here.
+        return Result(inv, "error", "fail-open",
+                      "the gate failed open: " + " | ".join(fail_open[:3]),
+                      opened=opened, seconds=time.monotonic() - started)
     detail = ""
     if verdict == "error":
         detail = f"exit {telemetry.get('exit')}\n{telemetry.get('error_tail') or stderr[-1200:]}"
@@ -777,11 +936,46 @@ class Report:
     mutated: List[str]
 
 
+class WorkdirRefused(Exception):
+    pass
+
+
+def temp_prefixes() -> List[str]:
+    prefixes = {"/tmp", "/var/tmp", "/var/folders", "/private/tmp", "/private/var/tmp",
+                "/private/var/folders", "/dev/shm", tempfile.gettempdir()}
+    if os.environ.get("TMPDIR"):
+        prefixes.add(os.environ["TMPDIR"])
+    resolved = set()
+    for prefix in prefixes:
+        resolved.add(prefix.rstrip("/"))
+        resolved.add(os.path.realpath(prefix).rstrip("/"))
+    return sorted(p for p in resolved if p)
+
+
+def replay_workdir() -> Path:
+    """Where sandboxes are built: CARR_GATE_REPLAY_WORKDIR or ~/.cache.
+
+    Never under a temp prefix. Many gates treat a path under /tmp (or the
+    platform temp dir) as a fixture or scratch path and wave it through, so a
+    sandbox there would replay the exempt branch of every such gate instead
+    of the production one, and the snapshot would record the wrong verdicts."""
+    chosen = (os.environ.get("CARR_GATE_REPLAY_WORKDIR")
+              or os.path.join(os.path.expanduser("~"), ".cache", "carr-gate-replay"))
+    real = os.path.realpath(chosen)
+    for prefix in temp_prefixes():
+        for candidate in (os.path.abspath(chosen), real):
+            if candidate == prefix or candidate.startswith(prefix + "/"):
+                raise WorkdirRefused(
+                    f"replay workdir {chosen} is under the temp prefix {prefix}; gates treat "
+                    "temp paths as scratch, so the replay would not see production verdicts. "
+                    "Set CARR_GATE_REPLAY_WORKDIR to a directory outside any temp prefix.")
+    return Path(chosen)
+
+
 def replay(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, Any]]], jobs: int,
            keep: bool = False, source: Path = REPO, progress: bool = True) -> Report:
     work = invocations(manifest, fixtures)
-    base_dir = Path(os.environ.get("CARR_GATE_REPLAY_WORKDIR")
-                    or os.path.join(os.path.expanduser("~"), ".cache", "carr-gate-replay"))
+    base_dir = replay_workdir()
     base_dir.mkdir(parents=True, exist_ok=True)
     run_root = Path(tempfile.mkdtemp(prefix="run-", dir=str(base_dir))).resolve()
     started = time.monotonic()
@@ -838,6 +1032,44 @@ def helper_errors(manifest: Dict[str, Any], results: List[Result]) -> List[str]:
         errors.append(f"{path} is executed by a replayed gate but is not in the manifest's lib_helpers")
     for path in sorted(listed - lib_opened):
         errors.append(f"{path} is in the manifest's lib_helpers, but no replayed gate executed it")
+    return errors
+
+
+def behaviour_errors(manifest: Dict[str, Any], results: List[Result]) -> List[str]:
+    """Two checks a snapshot re-bless cannot satisfy.
+
+    1. Every scenario record reaches the verdict it `expect`s. A scenario is
+       written to drive a gate down its deny or reopen path, so a gate that
+       stops denying fails here even if someone rewrites the snapshot.
+    2. Every replayed gate wiring reaches some verdict other than allow, or
+       its manifest wiring says why it never can (`allow_only`). A wiring that
+       only ever allows proves nothing about the gate's teeth."""
+    errors: List[str] = []
+    sets = manifest["fixture_sets"]
+    seen: Dict[Tuple[str, str], Set[str]] = {}
+    for result in results:
+        inv = result.inv
+        seen.setdefault((inv.gate, inv.row_event), set()).add(result.verdict)
+        if sets.get(inv.fixture_set, {}).get("kind") == "scenario":
+            expected = inv.record.get("expect")
+            if result.verdict != expected:
+                errors.append(f"SCENARIO {inv.gate} {inv.row_event} {inv.fixture_key}: expected "
+                              f"{expected}, got {result.verdict} ({inv.record.get('why', '')[:90]})")
+    for gate, entry in sorted(manifest["hooks"].items()):
+        if entry.get("role") != "gate":
+            continue
+        for wiring in entry.get("wirings", []):
+            if wiring.get("no_replay"):
+                continue
+            matcher = wiring.get("matcher", "")
+            row_event = wiring["event"] if not matcher else f"{wiring['event']}[{matcher}]"
+            verdicts = seen.get((gate, row_event), set())
+            if verdicts and verdicts <= {"allow"} and not wiring.get("allow_only"):
+                errors.append(f"{gate} {row_event}: every replayed verdict is allow; add a scenario "
+                              "on its deny or reopen path, or an allow_only reason")
+            if wiring.get("allow_only") and verdicts - {"allow"}:
+                errors.append(f"{gate} {row_event}: declared allow_only, but it reached "
+                              f"{', '.join(sorted(verdicts - {'allow'}))}")
     return errors
 
 
@@ -934,6 +1166,34 @@ def missing_dependencies() -> List[str]:
     return [name for name in LOCKED_IMPORTS if importlib.util.find_spec(name) is None]
 
 
+def run_only(manifest: Dict[str, Any], args: argparse.Namespace) -> int:
+    """Replay a few gates and print every non-allow verdict and each scenario
+    outcome. For writing scenarios; CI never runs this path."""
+    wanted = {g.strip() for g in args.only.split(",") if g.strip()}
+    manifest = json.loads(json.dumps(manifest))
+    manifest["hooks"] = {k: v for k, v in manifest["hooks"].items()
+                         if k in wanted or v.get("role") != "gate"}
+    if args.scenarios:
+        manifest["fixture_sets"]["scenarios"]["file"] = str(Path(args.scenarios).resolve())
+    fixtures = load_fixtures(manifest)
+    report = replay(manifest, fixtures, args.jobs, keep=args.keep_sandbox, progress=False)
+    counts: Dict[Tuple[str, str], Dict[str, int]] = {}
+    for result in report.results:
+        key = (result.inv.gate, result.inv.row_event)
+        counts.setdefault(key, {})
+        counts[key][result.verdict] = counts[key].get(result.verdict, 0) + 1
+        if result.verdict != "allow" or result.inv.fixture_set == "scenarios":
+            print("\t".join(result.row)[:260])
+            if result.verdict == "error":
+                print("    " + " | ".join(result.detail.strip().splitlines()[-4:])[:400])
+    for (gate, event), c in sorted(counts.items()):
+        print(f"(all) {gate} {event}: " + " ".join(f"{k}={v}" for k, v in sorted(c.items())))
+    errors = [e for e in behaviour_errors(manifest, report.results) if e.startswith("SCENARIO")]
+    for line in errors:
+        print(line)
+    return 1 if errors else 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--update", action="store_true", help="rewrite the verdict snapshot")
@@ -941,11 +1201,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--keep-sandbox", action="store_true")
     parser.add_argument("--timing", action="store_true", help="print the slowest wirings")
     parser.add_argument("--report", help="also write every result, with crash detail, as JSON lines here")
+    parser.add_argument("--only", help="DIAGNOSTIC: replay only these comma-separated gates and print "
+                        "their verdicts; skips coverage, helper and snapshot checks, never writes")
+    parser.add_argument("--scenarios", help="DIAGNOSTIC (with --only): read the scenario set from this file")
     args = parser.parse_args(argv)
 
     failures: List[str] = []
     manifest = load_manifest()
-    leaks = leak_scan(leak_scan_targets())
+    if args.only:
+        return run_only(manifest, args)
+    print(f"gate-replay: leak scan against {bdp.roster().describe()}")
+    leaks = leak_scan(leak_scan_targets(manifest_data=manifest))
     for finding in leaks:
         failures.append(f"LEAK {finding}")
     fixtures = load_fixtures(manifest)
@@ -971,7 +1237,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(message + " — NOT CONFIGURED here; run it with the repo's .venv/bin/python")
         return 78
 
-    report = replay(manifest, fixtures, args.jobs, keep=args.keep_sandbox)
+    try:
+        report = replay(manifest, fixtures, args.jobs, keep=args.keep_sandbox)
+    except WorkdirRefused as err:
+        print(f"gate-replay: FAIL — {err}")
+        return 1
     results = report.results
     errors = [r for r in results if r.verdict == "error"]
     for result in errors[:25]:
@@ -982,6 +1252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for line in report.mutated:
         failures.append(f"a gate wrote tracked or new content outside out/ during replay: {line}")
     failures.extend(helper_errors(manifest, results))
+    failures.extend(behaviour_errors(manifest, results))
 
     if args.report:
         with open(args.report, "w", encoding="utf-8") as handle:

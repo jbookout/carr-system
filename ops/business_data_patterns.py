@@ -201,6 +201,134 @@ PATTERNS = {
 }
 
 
+# ------------------------------------------------------------------ the roster
+#
+# THE REGEXES ABOVE CANNOT KNOW A NAME. On 2026-09-24 six edit records reached
+# the public fixtures carrying real client and practice names, each paired with
+# its pseudonym: edits made by the client-name scrub itself. A name without a
+# title, a credential or a practice word matches no shape. So every string is
+# also checked against the REAL roster.
+#
+# Where the roster comes from, first found wins for the plaintext side:
+#   $CARR_CLIENT_ROSTER, out/client-roster.local.txt in this checkout,
+#   ~/carr-system/out/client-roster.local.txt, ~/.config/carr/client-roster.txt
+# Each is local and untracked: one name per line, `#` comments allowed.
+# The committed fallback, which is what a CI runner has, is
+# ops/config/client-name-hashes.json: SALTED hashes of the same normalised
+# names, never the names. tools/build-client-name-hashes.py regenerates it from
+# a local roster. Both sides are checked whenever both exist.
+#
+# Matching is on normalised word runs: camelCase is split, everything is
+# lower-cased, and only [a-z0-9] runs count as words. So a name hides behind
+# neither case, punctuation, a hyphen, a path, nor running its words together.
+
+import functools  # noqa: E402
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPO = Path(__file__).resolve().parent.parent
+HASHES_PATH = _REPO / "ops" / "config" / "client-name-hashes.json"
+ROSTER_ENV = "CARR_CLIENT_ROSTER"
+_CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])")
+_WORD = re.compile(r"[a-z0-9]+")
+MIN_NAME_CHARS = 4
+
+
+def roster_tokens(text: str) -> List[str]:
+    return _WORD.findall(_CAMEL.sub(" ", text).lower())
+
+
+def roster_key(name: str) -> str:
+    return " ".join(roster_tokens(name))
+
+
+def name_hash(salt: str, key: str) -> str:
+    return hashlib.sha256(f"{salt}\0{key}".encode("utf-8")).hexdigest()[:20]
+
+
+def roster_candidates() -> List[Path]:
+    paths = []
+    if os.environ.get(ROSTER_ENV):
+        paths.append(Path(os.environ[ROSTER_ENV]))
+    paths += [_REPO / "out" / "client-roster.local.txt",
+              Path.home() / "carr-system" / "out" / "client-roster.local.txt",
+              Path.home() / ".config" / "carr" / "client-roster.txt"]
+    return paths
+
+
+def read_roster_file(path: Path) -> Set[str]:
+    keys: Set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key = roster_key(line)
+        if len(key) >= MIN_NAME_CHARS:
+            keys.add(key)
+    return keys
+
+
+class Roster:
+    """The names, plain and hashed, and the word-run lengths they span."""
+
+    def __init__(self, plain: Set[str], salt: str, hashes: Set[str],
+                 lengths: Set[int], sources: List[str]) -> None:
+        self.plain = plain
+        self.salt = salt
+        self.hashes = hashes
+        self.lengths = sorted(lengths | {len(k.split()) for k in plain})
+        self.sources = sources
+
+    def __bool__(self) -> bool:
+        return bool(self.plain or self.hashes)
+
+    def hits(self, text: str) -> bool:
+        tokens = roster_tokens(text)
+        for n in self.lengths:
+            for i in range(len(tokens) - n + 1):
+                key = " ".join(tokens[i:i + n])
+                if len(key) < MIN_NAME_CHARS:
+                    continue
+                if key in self.plain:
+                    return True
+                if self.hashes and name_hash(self.salt, key) in self.hashes:
+                    return True
+        return False
+
+    def describe(self) -> str:
+        return ", ".join(self.sources) if self.sources else "NO ROSTER"
+
+
+def load_roster(extra_plain: Iterable[Path] = (), hashes_path: Path = HASHES_PATH,
+                use_default_plain: bool = True) -> Roster:
+    plain: Set[str] = set()
+    sources: List[str] = []
+    candidates = list(extra_plain) + (roster_candidates() if use_default_plain else [])
+    for path in candidates:
+        if path.is_file():
+            names = read_roster_file(path)
+            plain |= names
+            sources.append(f"local roster ({len(names)} names)")
+            break
+    salt, hashes, lengths = "", set(), set()
+    try:
+        data = json.loads(hashes_path.read_text(encoding="utf-8"))
+        salt = str(data["salt"])
+        hashes = set(data["hashes"])
+        lengths = {int(n) for n in data["lengths"]}
+        sources.append(f"hashed roster ({len(hashes)} names)")
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return Roster(plain, salt, hashes, lengths, sources)
+
+
+@functools.lru_cache(maxsize=1)
+def roster() -> Roster:
+    return load_roster()
+
+
 def find_matches(text: str, *, exempt_uuids: Iterable[str] = ALLOWED_UUIDS) -> List[str]:
     """Names of every pattern that matches `text`, in PATTERNS order.
 
@@ -219,6 +347,8 @@ def find_matches(text: str, *, exempt_uuids: Iterable[str] = ALLOWED_UUIDS) -> L
             continue
         if pattern.search(text):
             hits.append(name)
+    if roster().hits(text):
+        hits.append("roster_name")
     return hits
 
 

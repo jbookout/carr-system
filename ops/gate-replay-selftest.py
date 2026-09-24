@@ -134,8 +134,63 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-leak-") as tmp:
     tsv.write_text("# header\nbash-write-gate.py\tPreToolUse\tbash:x\tdeny\tDr Smith refused\n")
     check("CI scan reads the TSV snapshot too", GR.leak_scan([tsv]))
 
-committed = GR.leak_scan(GR.leak_scan_targets())
+committed = GR.leak_scan(GR.leak_scan_targets(manifest_data=GR.load_manifest()))
 check("every committed fixture, the manifest and the snapshot scan clean", committed == [], committed[:5])
+check("the committed hashed roster loads, so CI checks real names without the roster",
+      len(bdp.load_roster(use_default_plain=False).hashes) > 100)
+
+# THE ROSTER. A plain name matches no regex; only the roster knows it. The
+# name below is invented for this test and is on no roster.
+PLANTED_NAME = "Quillon Barstow"
+NAME_SHAPES = {
+    "as written": "met Quillon Barstow at the site",
+    "lower case": "met quillon barstow at the site",
+    "run together in camel case": "see QuillonBarstow.md for notes",
+    "hyphenated in a path": "{{REPO}}/notes/quillon-barstow/intake.txt",
+    "underscored": "rename Quillon_Barstow_v2",
+    "as an edit's old_string": "PAIRS = [('Quillon Barstow', 'Alder Finch')]",
+}
+real_roster = bdp.roster
+with tempfile.TemporaryDirectory(prefix="gate-replay-roster-") as tmp:
+    roster_file = Path(tmp) / "roster.txt"
+    roster_file.write_text("# test roster\n" + PLANTED_NAME + "\n")
+    plain = bdp.load_roster(extra_plain=[roster_file], hashes_path=Path(tmp) / "none.json",
+                            use_default_plain=False)
+    hashes_file = Path(tmp) / "hashes.json"
+    builder = load("build_client_name_hashes_under_test", REPO / "tools" / "build-client-name-hashes.py")
+    builder.main(["--roster", str(roster_file), "--out", str(hashes_file)])
+    hashed = bdp.load_roster(hashes_path=hashes_file, use_default_plain=False)
+    check("the hash file holds no plaintext name", "quillon" not in hashes_file.read_text().lower())
+    for label, text in NAME_SHAPES.items():
+        check(f"local roster catches a planted name {label}", plain.hits(text), text)
+        check(f"hashed roster (CI) catches a planted name {label}", hashed.hits(text), text)
+    check("one word of a two-word name alone is not a hit", not hashed.hits("the quillon file"))
+    try:
+        bdp.roster = lambda: hashed  # type: ignore[assignment]
+        check("find_matches reports a roster name with no other pattern firing",
+              bdp.find_matches("met Quillon Barstow") == ["roster_name"],
+              bdp.find_matches("met Quillon Barstow"))
+        comment = Path(tmp) / "fixture.jsonl"
+        comment.write_text("# note: Quillon Barstow\n" + json.dumps({"id": "x"}) + "\n")
+        check("CI scan reads # comment lines", any("roster_name" in f for f in GR.leak_scan([comment])),
+              GR.leak_scan([comment]))
+        odd = Path(tmp) / "notes.md"
+        odd.write_text("intake for QuillonBarstow\n")
+        check("CI scan reads a fixture file of any extension",
+              any("roster_name" in f for f in GR.leak_scan([odd])), GR.leak_scan([odd]))
+        fixture_dir = Path(tmp) / "fx"
+        (fixture_dir / "deep").mkdir(parents=True)
+        (fixture_dir / "deep" / "extra.yaml").write_text("x: 1\n")
+        targets = GR.leak_scan_targets(fixture_dir, Path(tmp) / "manifest.json",
+                                       {"fixture_sets": {"s": {"file": "../elsewhere.jsonl"}}})
+        check("scan targets include every file under the fixture dir and every manifest-named file",
+              fixture_dir / "deep" / "extra.yaml" in targets
+              and fixture_dir / "../elsewhere.jsonl" in targets, targets)
+        bdp.roster = lambda: bdp.Roster(set(), "", set(), set(), [])  # type: ignore[assignment]
+        check("with no roster at all, the scan fails rather than passing blind",
+              any("no client roster" in f for f in GR.leak_scan([])))
+    finally:
+        bdp.roster = real_roster  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------- extractor
@@ -201,6 +256,42 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-extract-") as tmp:
     check("extractor keeps a nested build_receipt advisory and marks it",
           len(advisories) == 1 and advisories[0]["has_build_receipt"] is True, advisories)
 
+# NAME-BEARING EDITS: the 2026-09-24 leak was the client-name scrub's own edits.
+check("scrub-style rename: only capitalised words swapped",
+      EX.scrub_style_rename("owner = 'Quillon Barstow'", "owner = 'Alder Finch'"))
+check("a code edit that changes structure is not a scrub",
+      not EX.scrub_style_rename("MAX = 3000", "MAX = 4000  # raised"))
+check("a lower-case identifier rename is not a scrub",
+      not EX.scrub_style_rename("value = count", "value = total"))
+with tempfile.TemporaryDirectory(prefix="gate-replay-extract2-") as tmp:
+    project = Path(tmp) / "-Users-booko-carr-system"
+    project.mkdir()
+    uses = [
+        ("t1", "Edit", {"file_path": "/Users/booko/carr-system/exporters/targets.py",
+                        "old_string": "x = 1", "new_string": "x = 2"}),
+        ("t2", "Edit", {"file_path": "/Users/booko/carr-system/hooks/x.py",
+                        "old_string": "DOSSIER_FILES = {}", "new_string": "DOSSIER_FILES = load()"}),
+        ("t3", "Edit", {"file_path": "/Users/booko/carr-system/hooks/x.py",
+                        "old_string": "name: Quillon Barstow", "new_string": "name: Alder Finch"}),
+        ("t4", "MultiEdit", {"file_path": "/Users/booko/carr-system/hooks/x.py", "edits": [
+            {"old_string": "a = 1", "new_string": "a = 2"},
+            {"old_string": "see Quillon", "new_string": "see Alder"}]}),
+        ("t5", "Edit", {"file_path": "/Users/booko/carr-system/hooks/x.py",
+                        "old_string": "timeout = 30", "new_string": "timeout = 45"}),
+    ]
+    row = transcript_record(type="assistant", message={"role": "assistant", "content": [
+        {"type": "tool_use", "id": uid, "name": name, "input": body} for uid, name, body in uses]})
+    (project / f"{SESSION}.jsonl").write_text(json.dumps(row) + "\n")
+    out = EX.extract(tmp, tracked=({"hooks/x.py", "exporters/targets.py"}, {"", "hooks", "exporters"}))
+    kept = [r["tool_input"] for r in out["file-edits.jsonl"]]
+    blob = json.dumps(kept)
+    check("extractor drops any edit to exporters/targets.py", "targets.py" not in blob, kept)
+    check("extractor drops any edit that mentions DOSSIER_FILES", "DOSSIER_FILES" not in blob, kept)
+    check("extractor drops a scrub-style rename, in an Edit and inside a MultiEdit",
+          "Quillon" not in blob and "Alder" not in blob, kept)
+    check("extractor keeps an ordinary edit", len(kept) == 1 and kept[0].get("new_string") == "timeout = 45",
+          kept)
+
 
 # ---------------------------------------------------------------- manifest coverage
 
@@ -238,6 +329,46 @@ errors = GR.check_manifest(manifest, REAL_FIXTURES, REPO / "hooks", wired)
 check("a wiring whose matcher selects no fixture record fails",
       any("executor-tier-gate.py" in e and "selects" in e for e in errors), errors)
 
+manifest = json.loads(json.dumps(REAL_MANIFEST))
+wiring = manifest["hooks"]["bash-write-gate.py"]["wirings"][0]
+wiring["no_replay"] = "too hard"
+wiring["fixtures"] = []
+errors = GR.check_manifest(manifest, REAL_FIXTURES, REPO / "hooks", REAL_WIRED)
+check("no_replay on any event but SessionStart fails",
+      any("bash-write-gate.py" in e and "only on SessionStart" in e for e in errors), errors)
+
+manifest = json.loads(json.dumps(REAL_MANIFEST))
+manifest["hooks"]["session-brief.py"]["wirings"][0]["wired_in"] = "vault-settings"
+errors = GR.check_manifest(manifest, REAL_FIXTURES, REPO / "hooks", REAL_WIRED)
+check("wired_in other than hooks.json or project-settings fails",
+      any("session-brief.py" in e and "wired_in must be" in e for e in errors), errors)
+
+wired = {k: v for k, v in REAL_WIRED.items() if k[0] != "session-brief.py"}
+errors = GR.check_manifest(REAL_MANIFEST, REAL_FIXTURES, REPO / "hooks", wired)
+check("a no_replay SessionStart wiring still has to be wired in tracked config",
+      any("session-brief.py" in e and "not wired" in e for e in errors), errors)
+
+tmp_root = tempfile.gettempdir()
+old_workdir = os.environ.get("CARR_GATE_REPLAY_WORKDIR")
+try:
+    for label, candidate in (("the platform temp dir", os.path.join(tmp_root, "replay")),
+                             ("/tmp", "/tmp/replay"), ("/private/tmp", "/private/tmp/replay")):
+        os.environ["CARR_GATE_REPLAY_WORKDIR"] = candidate
+        try:
+            GR.replay_workdir()
+            refused = False
+        except GR.WorkdirRefused:
+            refused = True
+        check(f"a replay workdir under {label} is refused", refused)
+    os.environ["CARR_GATE_REPLAY_WORKDIR"] = str(Path.home() / ".cache" / "carr-gate-replay")
+    check("a replay workdir under the user cache is accepted",
+          GR.replay_workdir() == Path.home() / ".cache" / "carr-gate-replay")
+finally:
+    if old_workdir is None:
+        os.environ.pop("CARR_GATE_REPLAY_WORKDIR", None)
+    else:
+        os.environ["CARR_GATE_REPLAY_WORKDIR"] = old_workdir
+
 
 # ---------------------------------------------------------------- replay on a miniature repo
 
@@ -272,6 +403,19 @@ if command.startswith("crash "):
     raise RuntimeError("mini gate fell over")
 if command.startswith("hang "):
     time.sleep(30)
+if command.startswith("failopen "):
+    with open(os.environ["CARR_HOOK_GUARD_LOG"], "a") as fh:
+        fh.write("mini-gate ALLOW(internal-error) KeyError: 'x'\\n")
+    sys.exit(0)
+if command.startswith("outside "):
+    with open(os.environ["CARR_HOOK_GUARD_LOG"], "a") as fh:
+        fh.write("mini-gate ALLOW(outside-repo) /elsewhere\\n")
+    sys.exit(0)
+if command.startswith("seeded "):
+    if os.path.exists(os.path.join(os.environ["HOME"], "state", "peers.json")):
+        print("MINI GATE saw the seeded state", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
 if command.startswith("scribble "):
     open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scribbled.txt"), "w").write("x")
 sys.exit(0)
@@ -315,6 +459,9 @@ def mini_repo(root: Path, behaviour: str, extra: str = "") -> Path:
     (repo / "hooks" / "mini-stop.py").write_text(STOP_GATE)
     (repo / ".gitignore").write_text("out/\n.venv/\n")
     git(repo, "init", "-q", "-b", "work")
+    git(repo, "add", "-A")
+    # Untracked, so the sandbox must never see it (it copies the index only).
+    (repo / "hooks" / "untracked_scratch.py").write_text("SCRATCH = 1\n")
     return repo
 
 
@@ -364,7 +511,10 @@ def verdicts(report: Any) -> Dict[str, Any]:
 
 
 work = Path(tempfile.mkdtemp(prefix="gate-replay-selftest-"))
-os.environ["CARR_GATE_REPLAY_WORKDIR"] = str(work / "runs")
+# The sandboxes themselves must not live under a temp prefix (the runner
+# refuses one), so they go under the user cache; the mini repos stay in temp.
+RUNS = Path.home() / ".cache" / "carr-gate-replay-selftest" / f"runs-{os.getpid()}"
+os.environ["CARR_GATE_REPLAY_WORKDIR"] = str(RUNS)
 calls: List[List[str]] = []
 real_run = GR.subprocess.run
 
@@ -430,6 +580,70 @@ try:
     check("a listed helper nothing executed fails", any("never_used.py" in e for e in herrors), herrors)
     check("a listed lib helper nothing executed fails", any("lib/not_opened.py" in e for e in herrors), herrors)
 
+    repo = mini_repo(work, BEHAVIOUR_DENY_RM)  # the loosened variant above replaced it
+    check("the sandbox copies only tracked files: an untracked file in the source is left out",
+          "hooks/untracked_scratch.py" not in GR.tracked_files(repo)
+          and "hooks/mini-gate.py" in GR.tracked_files(repo))
+
+    write_fixtures(fixtures_dir, ["failopen now", "outside now"])
+    got = verdicts(run(repo, fixtures_dir, manifest))
+    check("a gate that logs ALLOW(internal-error) and exits 0 is a fail-open crash, not an allow",
+          got["failopen now"].verdict == "error" and got["failopen now"].reason == "fail-open",
+          got["failopen now"].row)
+    check("an ordinary ALLOW(outside-repo) decision is still an allow",
+          got["outside now"].verdict == "allow", got["outside now"].row)
+
+    # Scenarios: each names the verdict it expects, whatever the snapshot says.
+    write_fixtures(fixtures_dir, ["git status"])
+    scen_manifest = json.loads(json.dumps(manifest))
+    scen_manifest["fixture_sets"]["scenarios"] = {"file": "scen.jsonl", "origin": "synthetic", "kind": "scenario"}
+    scen_manifest["hooks"]["mini-gate.py"]["wirings"][0]["fixtures"] = ["bash", "scenarios"]
+    scen_rows = [
+        {"id": "5c00000000a1", "gate": "mini-gate.py", "event": "PreToolUse", "matcher": "Bash",
+         "expect": "deny", "why": "delete", "tool_name": "Bash", "tool_input": {"command": "rm -rf x"}},
+        {"id": "5c00000000a2", "gate": "mini-gate.py", "event": "PreToolUse", "matcher": "Bash",
+         "expect": "deny", "why": "wrongly expected", "tool_name": "Bash", "tool_input": {"command": "git log"}},
+        {"id": "5c00000000a3", "gate": "other-gate.py", "event": "PreToolUse", "matcher": "Bash",
+         "expect": "deny", "why": "another gate's record", "tool_name": "Bash", "tool_input": {"command": "rm x"}},
+    ]
+    (fixtures_dir / "scen.jsonl").write_text("".join(json.dumps(r) + "\n" for r in scen_rows))
+    scen = run(repo, fixtures_dir, scen_manifest)
+    berrors = GR.behaviour_errors(scen_manifest, scen.results)
+    check("a scenario that reaches its expected verdict passes",
+          not any("5c00000000a1" in e for e in berrors), berrors)
+    check("a scenario whose verdict differs from its expect fails CI",
+          any(e.startswith("SCENARIO") and "5c00000000a2" in e for e in berrors), berrors)
+    check("a scenario record is replayed only through the gate it names",
+          not any("5c00000000a3" in r.inv.fixture_key for r in scen.results))
+
+    seed_rows = [
+        {"id": "5c00000000b1", "gate": "mini-gate.py", "event": "PreToolUse", "matcher": "Bash",
+         "expect": "deny", "why": "seeded", "home_files": {"state/peers.json": {"peers": 2}},
+         "tool_name": "Bash", "tool_input": {"command": "seeded now"}},
+        {"id": "5c00000000b2", "gate": "mini-gate.py", "event": "PreToolUse", "matcher": "Bash",
+         "expect": "allow", "why": "no seed, and the last invocation's seed must be gone",
+         "tool_name": "Bash", "tool_input": {"command": "seeded again"}},
+    ]
+    (fixtures_dir / "scen.jsonl").write_text("".join(json.dumps(r) + "\n" for r in seed_rows))
+    seeded = run(repo, fixtures_dir, scen_manifest)
+    serrors = [e for e in GR.behaviour_errors(scen_manifest, seeded.results) if e.startswith("SCENARIO")]
+    check("a scenario's home_files reach the gate, and never leak into the next invocation",
+          serrors == [], serrors)
+    check("the vendor-host placeholder is filled in at run time, never stored",
+          GR.substitute("https://{{BANNED_VENDOR_HOST}}/x", "/r", "/h") == "https://costar" + ".com/x")
+
+    allow_manifest = json.loads(json.dumps(manifest))
+    allow_run = run(repo, fixtures_dir, allow_manifest)
+    aerrors = GR.behaviour_errors(allow_manifest, allow_run.results)
+    check("a wiring whose every verdict is allow, with no allow_only reason, fails",
+          any("mini-gate.py" in e and "every replayed verdict is allow" in e for e in aerrors), aerrors)
+    allow_manifest["hooks"]["mini-gate.py"]["wirings"][0]["allow_only"] = "records only"
+    check("the same wiring with an allow_only reason passes",
+          not any("mini-gate.py" in e for e in GR.behaviour_errors(allow_manifest, allow_run.results)))
+    scen_manifest["hooks"]["mini-gate.py"]["wirings"][0]["allow_only"] = "claims it never denies"
+    check("an allow_only wiring that does deny fails",
+          any("declared allow_only" in e for e in GR.behaviour_errors(scen_manifest, scen.results)))
+
     write_fixtures(fixtures_dir, ["crash now", "hang now", "scribble now"])
     old_timeout = GR.INVOCATION_TIMEOUT
     GR.INVOCATION_TIMEOUT = 5.0
@@ -456,5 +670,6 @@ finally:
     GR.subprocess.run = real_run
     LISTENER.close()
     shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(RUNS, ignore_errors=True)
 
 sys.exit(CHECK.summary())
