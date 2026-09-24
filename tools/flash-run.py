@@ -26,7 +26,10 @@ THE FLOW for `flash-run "<task>" --test "<command>"`:
   4. the chosen patch is applied to the real tree and the tests run again there.
      Review triage (#17) scores the risk of the change.
   5. on failure: the mistake is written to the notebook and a handoff pack (#10)
-     is written for Claude/Codex; --escalate auto sends it to `claude -p`.
+     is written; --escalate auto sends it through the Model Room (2026-09-24,
+     Flash replaces Sonnet for scoped coding): a failed task to the Sol fixer desk,
+     whose change is applied only if the test passes; a task routed away as a
+     design/judgment call to the Opus desk. Never a direct model call.
 
 Every run appends one row to out/flash-runs.jsonl, the real-use record the week
 of tracking reads (`flash-run stats`).
@@ -45,6 +48,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -268,21 +272,134 @@ def apply_patch(cwd, patch):
         os.unlink(name)
 
 
-def escalate(task, cwd, run_id, failure, changed, mode):
+# Joe's decision 2026-09-24: Flash replaces Sonnet for scoped, testable coding, and what it
+# cannot do goes to Sol or Opus through the Model Room (decision 284028a5: no direct model
+# calls). A failed attempt is a code problem -> the Sol fixer desk (writable, no room seat),
+# which edits a throwaway copy of the task folder; flash-run reads that back as a patch,
+# applies it to the real folder and keeps it only if the test passes. A task routed away
+# before any attempt is a design/judgment call -> the Opus desk, in the background.
+# Why not the Sol room seat (codex-desk): it is read-only on purpose, because it answers
+# partner-room turns inside the canonical checkout, which must stay clean.
+ESCALATION_DESKS = {"code": "sol-fixer", "judgment": "claude-desktop"}
+ESCALATION_FILE_CHARS = 20000
+DIFF_BLOCK = re.compile(r"```(?:diff|patch)\s*\n(.*?)```", re.S)
+
+
+def extract_diff(answer):
+    match = DIFF_BLOCK.search(answer or "")
+    return match.group(1) if match else None
+
+
+def _load_path(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _room_dispatch(desk, text, cwd=None):
+    room = _load_path(os.path.join(REPO, "tools", "room-bridge", "dispatch.py"), "room_dispatch")
+    return room.dispatch(desk, text, cwd=cwd) if cwd else room.dispatch(desk, text)
+
+
+def _file_section(cwd, paths):
+    parts, budget = [], ESCALATION_FILE_CHARS
+    for rel in paths:
+        try:
+            with open(os.path.join(cwd, rel), encoding="utf-8") as fh:
+                body = fh.read(budget)
+        except (OSError, UnicodeDecodeError):
+            continue
+        parts.append(f"--- {rel} ---\n{body}")
+        budget -= len(body)
+        if budget <= 0:
+            break
+    return "\n\n".join(parts)
+
+
+def _revert(cwd, patch):
+    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as fh:
+        fh.write(patch)
+        name = fh.name
+    try:
+        _sh(["git", "apply", "-R", "--whitespace=nowarn", name], cwd, 120)
+    finally:
+        os.unlink(name)
+
+
+def escalate(task, cwd, run_id, failure, files, mode, *, test_cmd=None, kind="code",
+             dispatcher=None):
+    """Write the handoff pack; in auto mode send it to the Model Room desk for `kind`.
+
+    Returns {"handoff", "desk", "outcome", "detail"}. Never raises on a desk problem."""
     done = _lib("jev_done_checks")
-    pack = done.build_handoff(task, "", changed, failure_output=failure)
+    pack = done.build_handoff(task, "", files, failure_output=failure)
     text = pack.get("pack") if isinstance(pack, dict) else None
     if not text:
         text = f"Task:\n{task}\n\nLast failure:\n{(failure or '')[-4000:]}"
+    if test_cmd:
+        text += f"\n\nThe task is done when this passes: {test_cmd}"
+    section = _file_section(cwd, files)
+    if section:
+        text += "\n\nRelevant files as they stand now:\n\n" + section
+    if kind == "code":
+        text += ("\n\nMake the fix by editing the files directly in your working directory "
+                 "(a disposable copy of the project) and run the test there. The local harness "
+                 "reads your changes back, applies them to the real project and re-runs the test. "
+                 "If you cannot edit, reply with ONE unified diff in a ```diff block instead.")
+    else:
+        text += f"\n\nThe project is at: {cwd}"
     os.makedirs(HANDOFF_DIR, exist_ok=True)
     path = os.path.join(HANDOFF_DIR, f"{run_id}.md")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
-    _say(f"handoff pack for Claude/Codex: {path}")
-    if mode == "auto" and shutil.which("claude"):
-        _say("escalating to Claude (claude -p) with the handoff pack")
-        subprocess.run(["claude", "-p", text, "--permission-mode", "acceptEdits"], cwd=cwd)
-    return path
+    desk = ESCALATION_DESKS.get(kind, ESCALATION_DESKS["code"])
+    result = {"handoff": path, "desk": desk, "outcome": "handoff_written", "detail": None}
+    _say(f"handoff pack: {path}")
+    if mode != "auto":
+        _say(f"to escalate: send it to the {desk} Model Room desk (or rerun with --escalate auto)")
+        return result
+    _say(f"escalating to the {desk} Model Room desk")
+    copy_dir = None
+    try:
+        if kind == "code":
+            copy_dir = tempfile.mkdtemp(prefix=f"flash-escalate-{run_id}-")
+            make_copy(cwd, copy_dir)
+        send = dispatcher or _room_dispatch
+        reply = send(desk, text, cwd=copy_dir) if copy_dir else send(desk, text)
+        status = (reply or {}).get("status")
+        answer = (reply or {}).get("result") or ""
+        if answer:
+            with open(path[:-3] + ".answer.md", "w", encoding="utf-8") as fh:
+                fh.write(answer)
+        patch = (read_patch(copy_dir) if copy_dir else "") or (
+            extract_diff(answer) if kind == "code" else None)
+    except Exception as exc:
+        result.update(outcome="dispatch_failed", detail=f"{type(exc).__name__}: {exc}"[:300])
+        _say(f"could not reach {desk}: {result['detail']}")
+        return result
+    finally:
+        if copy_dir:
+            shutil.rmtree(copy_dir, ignore_errors=True)
+    if not patch:
+        result.update(outcome="dispatched", detail=status)
+        return result
+    ok, msg = apply_patch(cwd, patch)
+    if not ok:
+        result.update(outcome="desk_patch_did_not_apply", detail=msg[:300])
+        return result
+    if test_cmd:
+        code, out = _sh(test_cmd, cwd, TEST_TIMEOUT)
+        if code != 0:
+            _revert(cwd, patch)
+            result.update(outcome="desk_patch_failed_reverted", detail=out[-300:])
+            _say(f"{desk}'s change failed the test and was reverted")
+            return result
+    result.update(outcome="fixed_by_desk", detail=status)
+    _say(f"applied {desk}'s change" + (" and the test passes" if test_cmd else ""))
+    return result
 
 
 def cmd_run(a):
@@ -308,7 +425,8 @@ def cmd_run(a):
     if route.get("verdict") == "escalate" and not a.force:
         _say("routed away from the local model: " + json.dumps(route.get("detail"))[:600])
         row["outcome"] = "routed_escalate"
-        row["handoff"] = escalate(task, cwd, run_id, None, [], a.escalate)
+        row["escalation"] = escalate(task, cwd, run_id, None, [], a.escalate, kind="judgment")
+        row["handoff"] = row["escalation"]["handoff"]
         _append(RUNS_LOG, row)
         return 4
 
@@ -375,7 +493,13 @@ def cmd_run(a):
                                     f"{attempts} attempts; last failure: {failure[-500:]}",
                                     "escalated", source=f"flash-run {run_id}")
             row["outcome"] = "no_candidate"
-            row["handoff"] = escalate(task, cwd, run_id, failure, [], a.escalate)
+            row["escalation"] = escalate(task, cwd, run_id, failure, context_files[:8],
+                                         a.escalate, test_cmd=a.test)
+            row["handoff"] = row["escalation"]["handoff"]
+            if row["escalation"]["outcome"] == "fixed_by_desk":
+                row["outcome"] = "fixed_by_desk"
+                _append(RUNS_LOG, row)
+                return 0
             _append(RUNS_LOG, row)
             return 5
 
