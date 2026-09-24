@@ -758,32 +758,44 @@ class Pipeline:
             raise StepFailed("health", res.rc or 1, res.log,
                               "health read did not complete — an unavailable read is never a pass")
         new = health_regression([] if not baseline_complete else baseline_findings, findings)
-        # Belt-and-suspenders for point A ("a nonzero health exit with no new
+        # NARROW backstop for point A ("a nonzero health exit with no new
         # finding line now passes... any rc != 0 must fail") and point 3 of
-        # the second AND third rounds of review.
+        # the second AND third rounds of review — NOT the "hard runtime
+        # guard" this comment used to call it. Round 7 of the same review
+        # corrected that: this condition is keyed on `not findings` (the
+        # WHOLE parsed findings list being empty), which on a real run is
+        # essentially never true — a real baseline/live read is essentially
+        # always rc=1 with SOME findings present (98 standing rule gaps on a
+        # normal day), so this line almost never fires in production, same
+        # as the whole-run `not _FINDINGS` check it mirrors inside tools/
+        # health-check.py's own `_canonical_health`.
         #
-        # The pipeline-side condition here is deliberately narrow — "live
-        # recorded NOTHING at all," not "baseline was clean" — because a
-        # REAL baseline is essentially always rc=1 (98 standing rule gaps on
-        # a normal day), so a condition keyed on `baseline_rc == 0` almost
-        # never fired in production; that was the bug the third round of
-        # review caught with a real run. tools/health-check.py now carries
-        # its OWN runtime self-check (`_canonical_health`'s trailing
-        # `if rc == 1 and not _FINDINGS:`): whenever `rc` ends up 1 with
-        # NOTHING recorded to explain it, health-check.py itself records an
-        # `unrecorded_failure` hard_error finding — which health_regression
-        # above already fails on unconditionally, live or baseline, via its
-        # own hard_error rule. So THIS backstop only needs to catch the case
-        # health-check.py's self-check cannot see: the `--findings-json`
-        # payload never landing at all (a crash between the happy path and
-        # `_write_findings_json`, or between `sys.exit` and this reading it)
-        # — `complete` already guards that above, so by the time we reach
-        # here `findings` is a genuine reflection of what ran. This stays as
-        # a hard runtime guard against a FUTURE path in that file shipping
-        # without ANY finding call at all, belt-and-suspenders alongside
-        # tools/health-check-findings-selftest.py's static, per-BRANCH proof
-        # (point 3 of the third round: "per branch, not per section") and
-        # its mutation tests.
+        # The REAL backstop for a section quietly going red with nothing to
+        # explain it now lives in tools/health-check.py itself:
+        # `_section_runtime_guard`, called at the end of every section of
+        # `_canonical_health` with a snapshot of `len(_FINDINGS)`/`rc` taken
+        # when THAT section started. It catches the case this line cannot —
+        # one later section flipping `rc` to 1 with no finding of its own,
+        # while EARLIER sections' standing debt already makes the overall
+        # `findings` list (and `_FINDINGS`) non-empty — by scoping the check
+        # to one section's own transition instead of the whole run's
+        # accumulated count. When it fires, it records an `unrecorded_
+        # failure` hard_error finding that `health_regression` above already
+        # fails on unconditionally, live or baseline, via its own hard_error
+        # rule — so THIS line only needs to catch what neither guard can
+        # see: the `--findings-json` payload never landing at all (a crash
+        # between the happy path and `_write_findings_json`, or between
+        # `sys.exit` and this reading it) turning `findings` into an empty
+        # list here even though `res.rc` is nonzero — `complete` already
+        # guards the "never landed" case above, so by the time we reach here
+        # `findings` is a genuine reflection of what ran, and an empty list
+        # with a nonzero rc means every section that ran was silent, which
+        # only happens if `_section_runtime_guard` itself was removed from
+        # every section or never wired up for a brand-new one. Kept as a
+        # narrow, last-resort belt-and-suspenders alongside tools/health-
+        # check-findings-selftest.py's static, per-BRANCH proof (point 3 of
+        # the third round: "per branch, not per section") and its mutation
+        # tests, and alongside `_section_runtime_guard`'s own runtime tests.
         if not new and res.rc != 0 and not findings:
             new = [f"./run.sh health exited {res.rc} but recorded no finding at all "
                   f"to explain it — treated as unavailable, never a pass"]
@@ -1638,7 +1650,24 @@ HEALTH_REGRESSION_EXCLUDED_KEYS = frozenset({"repo_loose_work"})
 # appearance) is still legitimately excused from a same-baseline RISE by the
 # `time_rolling` branch below — only the null-baseline "first appearance"
 # carve-out needed narrowing, not the whole flag.
-HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST = frozenset({"export_receipt", "job_missing_due"})
+#
+# `doctrine_stale` joined this allowlist in round 7: unlike `doctrine_gate`
+# (a count of gate BLOCKS in the last 24h, driven by what actually happened
+# on this release — a real regression can push it from 0 to 40), a
+# `doctrine_stale` finding's COUNT is how many doctrine sections have
+# crossed their own, independently-set `review_after` date — a clock
+# threshold with nothing to do with any particular release. A section
+# crossing that threshold for the first time between the pre-promote
+# baseline read and the post-promote live read is exactly the "first
+# appearance of a clock-driven finding, nothing to regress against" case
+# this allowlist exists for (see the docstring below), the same as
+# `export_receipt`'s STALE branch crossing its own 26h clock. `doctrine_
+# gate` stays OFF this allowlist for the reason above: it is time_rolling
+# only in the narrower sense that an EXISTING baseline entry's count may
+# rise on the clock (a rolling 24h window aging forward), not in the sense
+# that its first-ever appearance is clock noise.
+HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST = frozenset(
+    {"export_receipt", "job_missing_due", "doctrine_stale"})
 
 
 def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
@@ -1672,12 +1701,16 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
     `HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST` (point 2 of round 4 of
     review): `time_rolling=True` marks a whole KEY as one whose COUNT can
     rise on the clock alone, not that every such key's very first
-    appearance is itself clock noise. `doctrine_gate`/`doctrine_stale` are
-    also `time_rolling=True` in tools/health-check.py, but a release that
-    introduces 40 gate failures where there were 0 before is a real
-    regression and must still fail — so a `time_rolling` key with no
-    baseline entry and NOT on the allowlist falls through to the same "new"
-    treatment as any other finding, below.
+    appearance is itself clock noise. `doctrine_gate` is also `time_
+    rolling=True` in tools/health-check.py, but a release that introduces
+    40 gate failures where there were 0 before is a real regression and
+    must still fail — it is deliberately NOT on the allowlist, so a first
+    appearance still falls through to the same "new" treatment as any other
+    finding, below (see `test_point2r4_a_new_doctrine_gate_finding_with_
+    no_baseline_still_fails` in ops/release-pipeline-selftest.py).
+    `doctrine_stale` joined the allowlist in round 7 (see that constant's
+    own comment for why its first appearance IS clock noise, unlike
+    `doctrine_gate`'s).
 
     Note for a reader of a failing gate: `count` accumulates by (key,
     subject) within one run (see tools/health-check.py's `_canonical_

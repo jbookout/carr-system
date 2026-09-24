@@ -835,6 +835,30 @@ class HealthGate(Base):
                             health_findings=[stale_export, missing_due])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
 
+    def test_round7_doctrine_stale_first_appearance_is_excused(self):
+        # Round 7: doctrine_stale joined HEALTH_REGRESSION_FIRST_APPEARANCE_
+        # ALLOWLIST — it is clock-driven (a section crossing its own
+        # review_after date between the baseline read and the live read),
+        # not caused by this release, so a first appearance with no
+        # baseline entry must be excused exactly like export_receipt's
+        # STALE branch and job_missing_due above.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        new_stale = _finding("doctrine_stale", "2 stale sections", count=2,
+                             time_rolling=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[],
+                            health_findings=[new_stale])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_round7_doctrine_gate_is_still_not_on_the_allowlist(self):
+        # Confirms the allowlist addition is scoped to doctrine_stale only:
+        # doctrine_gate must remain excluded (see test_point2r4_a_new_
+        # doctrine_gate_finding_with_no_baseline_still_fails above, which
+        # already pins this behavior — this test pins the constant itself
+        # so the two cannot silently drift apart).
+        self.assertNotIn("doctrine_gate", rp.HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST)
+        self.assertIn("doctrine_stale", rp.HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST)
+
     def test_point1_repo_loose_work_is_excluded_from_the_gate(self):
         # Point 1 of the second round of review: even reading baseline and
         # post-promote in the same worktree, migrate-apply legitimately

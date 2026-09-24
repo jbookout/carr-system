@@ -83,6 +83,24 @@ def _load_finding_functions() -> dict:
     return ns
 
 
+def _load_finding_and_guard_functions() -> dict:
+    """Exec `_canonical_finding` and `_section_runtime_guard` together (round
+    7's real per-section runtime guard) — the guard calls `_canonical_
+    finding` by name, so both must land in the SAME namespace, hermetically,
+    with no other top-level code in health-check.py running. This is the
+    actual shipped code, run directly, the same pattern `_load_finding_
+    functions` above uses for `_canonical_finding`/`_write_findings_json`."""
+    mod = ast.Module(body=[_find_function("_canonical_finding"),
+                            _find_function("_section_runtime_guard")],
+                     type_ignores=[])
+    ast.fix_missing_locations(mod)
+    ns = {"_FINDINGS": [], "json": json, "datetime": datetime, "timezone": timezone}
+    import os as _os
+    ns["os"] = _os
+    exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)  # noqa: S102 — trusted repo source
+    return ns
+
+
 # _canonical_contradiction_alarm is a verified delegate, not a stand-in: its
 # own rc=1-equivalent path (`return 1` in its RED branch) is separately
 # proven to have a preceding _canonical_finding(...) call by the same check
@@ -698,6 +716,94 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
         overlap = business_keys & hard_error_keys
         self.assertEqual(overlap, set(),
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
+
+    def test_every_section_calls_the_runtime_guard(self):
+        # Round 7: every top-level `if CANONICAL_SECTION in (...)`/`if
+        # CANONICAL_SECTION == "all":` section (and the doctrine/repo_status
+        # pair sharing one such block) must call `_section_runtime_guard` at
+        # its own end — a static check that a section was not added (or the
+        # existing call accidentally dropped) without wiring up the real
+        # per-section backstop this round added. Six calls are expected:
+        # exports, jobs, registry_integrity, doctrine, repo_status,
+        # credential_health.
+        fn = _find_function("_canonical_health")
+        names = set()
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_section_runtime_guard" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                names.add(node.args[0].value)
+        expected = {"exports", "jobs", "registry_integrity", "doctrine",
+                   "repo_status", "credential_health"}
+        self.assertEqual(names, expected,
+                         f"_section_runtime_guard call sites changed: {names}")
+
+
+class SectionRuntimeGuard(unittest.TestCase):
+    """Round 7 of an independent review of PR #1237: the OLD whole-run
+    backstop (`if rc == 1 and not _FINDINGS:`, at the bottom of
+    `_canonical_health`) almost never fires on a real run, because standing
+    debt from an earlier section (98 rule_enforcement gaps, on a normal day)
+    already makes `_FINDINGS` non-empty long before any LATER section might
+    silently go red without recording why. `_section_runtime_guard` is the
+    real fix: it is scoped to ONE section's own rc-flipping transition
+    (`rc_before` 0 -> `rc_now` 1, with `len(_FINDINGS)` unchanged from that
+    section's own starting snapshot), so it fires per section regardless of
+    how much unrelated standing debt already exists elsewhere. Proven here
+    by execing the actual shipped `_canonical_finding`/`_section_runtime_
+    guard` hermetically (same pattern as `FindingFunctions` above) rather
+    than re-implementing the logic."""
+
+    def setUp(self):
+        self.ns = _load_finding_and_guard_functions()
+        self.finding = self.ns["_canonical_finding"]
+        self.guard = self.ns["_section_runtime_guard"]
+
+    def test_a_section_that_sets_rc_without_a_finding_is_caught(self):
+        # Unrelated standing debt from an EARLIER section, exactly the
+        # condition that defeats the old whole-run `not _FINDINGS` check.
+        self.finding("rule_enforcement", "98 active rule gaps", count=98)
+        findings_before = len(self.ns["_FINDINGS"])
+        # This section's own logic: sets rc=1 but records nothing.
+        self.guard("doctrine", findings_before, 0, 1)
+        new_rows = self.ns["_FINDINGS"][len(self.ns["_FINDINGS"]) - 1:]
+        self.assertEqual(len(new_rows), 1,
+                         "the guard did not record anything for a section that set rc=1 "
+                         "with no finding of its own, even though unrelated standing "
+                         "findings already existed")
+        row = new_rows[0]
+        self.assertEqual(row["key"], "unrecorded_failure")
+        self.assertEqual(row["subject"], "doctrine")
+        self.assertTrue(row["hard_error"])
+        self.assertIn("doctrine", row["detail"])
+
+    def test_a_section_that_records_its_own_finding_is_not_double_flagged(self):
+        findings_before = len(self.ns["_FINDINGS"])
+        self.finding("control_state", "doctrine/rule controls unreadable", hard_error=True)
+        self.guard("doctrine", findings_before, 0, 1)
+        # Only the section's OWN finding — the guard must not pile an
+        # unrecorded_failure on top of a section that explained itself.
+        self.assertEqual(len(self.ns["_FINDINGS"]) - findings_before, 1)
+        self.assertEqual(self.ns["_FINDINGS"][-1]["key"], "control_state")
+
+    def test_a_later_section_reached_with_rc_already_1_is_not_blamed(self):
+        # rc was already 1 from an EARLIER section that explained itself;
+        # THIS section's own logic left rc at 1 (never flipped it, and
+        # itself recorded nothing) — rc_before=1, not 0, so this section did
+        # not cause the transition and must not be blamed for it.
+        self.finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
+        findings_before = len(self.ns["_FINDINGS"])
+        self.guard("jobs", findings_before, 1, 1)
+        self.assertEqual(len(self.ns["_FINDINGS"]), findings_before,
+                         "a later section reached with rc already 1 from an earlier, "
+                         "already-explained section must not be flagged for a transition "
+                         "it did not make")
+
+    def test_a_clean_section_is_not_flagged(self):
+        findings_before = len(self.ns["_FINDINGS"])
+        self.guard("exports", findings_before, 0, 0)
+        self.assertEqual(len(self.ns["_FINDINGS"]), findings_before)
 
 
 class ForElseBreakHandling(unittest.TestCase):
