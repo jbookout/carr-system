@@ -50,6 +50,7 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from typing import Any
 
 UNKNOWN = 3
 USAGE = 2
@@ -72,12 +73,15 @@ def load_target(config: Path, env: str) -> dict:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot read {config}: {exc}") from exc
     account = doc.get("account_id")
+    section: dict[str, Any]
     if env == "production":
         section = doc
     else:
-        section = (doc.get("env") or {}).get(env)
-        if not isinstance(section, dict):
+        envs = doc.get("env")
+        found = envs.get(env) if isinstance(envs, dict) else None
+        if not isinstance(found, dict):
             raise ConfigError(f"{config} has no [env.{env}] section")
+        section = found
         account = section.get("account_id", account)
     script = section.get("name")
     # migrations are inheritable in wrangler: an env without its own list uses
