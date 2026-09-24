@@ -39,7 +39,8 @@ class FakeClient:
         return {"type": "noul", "instructions": instructions,
                 "criteria": {"true": true, "false": false}}
 
-    def ask(self, state, questions, timeout):
+    def ask(self, state, questions, timeout, purpose="call"):
+        self.purpose = purpose
         self.state = state
         self.questions = questions
         self.timeout = timeout
@@ -74,8 +75,8 @@ class AdvisoryTests(unittest.TestCase):
 
     def test_missing_or_invalid_answers_are_unavailable(self):
         class Broken(FakeClient):
-            def ask(self, state, questions, timeout):
-                row = super().ask(state, questions, timeout)
+            def ask(self, state, questions, timeout, purpose="call"):
+                row = super().ask(state, questions, timeout, purpose)
                 row["answers"][advisory.FACETS[0]]["noul"] = 1.2
                 return row
         with self.assertRaises(advisory.AdvisoryUnavailable):

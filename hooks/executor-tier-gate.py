@@ -81,13 +81,17 @@ except Exception:                       # a missing meter must not change a verd
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
+binding_required_facets = None  # type: Optional[Callable[..., Any]]
 turn_required_facets = None  # type: Optional[Callable[[Any], Any]]
+fetch_session_receipts = None  # type: Optional[Callable[..., Any]]
 load_transcript = None  # type: Optional[Callable[..., Any]]
 prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
 prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
 try:                                    # same fail-open posture as jev_pick below
     from lib.jev_required_actions import (
-        prompt_names_facet, prompt_names_not_applicable, turn_required_facets)
+        binding_required_facets, prompt_names_facet, prompt_names_not_applicable,
+        turn_required_facets)
+    from lib.jev_server_receipts import fetch_session_receipts
     from lib.transcript_read import load_transcript
 except Exception:
     pass
@@ -206,8 +210,9 @@ def missing_required_actions_in_prompt(payload, prompt):
     prompt with the turn's advisory, so a required action stopped at the
     parent and never reached the subagent that would actually do the work.
     """
-    if (turn_required_facets is None or prompt_names_not_applicable is None
-            or prompt_names_facet is None or load_transcript is None):
+    if (binding_required_facets is None or prompt_names_not_applicable is None
+            or prompt_names_facet is None or load_transcript is None
+            or fetch_session_receipts is None or turn_required_facets is None):
         return []
     if prompt_names_not_applicable(prompt):
         return []
@@ -223,8 +228,23 @@ def missing_required_actions_in_prompt(payload, prompt):
             session=payload.get("session_id") or payload.get("sessionId"),
             log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
         # The genuine human prompt's own advisory only (round 4): advisories
-        # carried by folded notifications are not consulted.
-        required, _turn_key = turn_required_facets(recs)
+        # carried by folded notifications are not consulted. SERVER-VERIFIED
+        # (2026-09-24): the facets come from the Worker's own build_advisory
+        # rows, and the prompt boundary only from the transcript's uuid chain
+        # anchored on this very tool_use, so a forged prompt or advisory
+        # appended to the transcript cannot shrink the list. With the server
+        # unreachable the on-chain transcript copy is used, and logged.
+        session = payload.get("session_id") or payload.get("sessionId")
+        # A real Claude transcript always carries uuids and always reads the
+        # server; a uuid-less fixture with no advisory never reaches the network.
+        has_chain = any(isinstance(r, dict) and r.get("uuid") for r in recs)
+        server = (fetch_session_receipts(session)
+                  if has_chain or turn_required_facets(recs)[0] is not None else None)
+        required, _turn_key, info = binding_required_facets(
+            recs, server, anchor_tool_use_id=payload.get("tool_use_id"))
+        if info.get("server") != "ok" or info.get("basis") != "server":
+            log(f"JEV-REQUIRED-ACTIONS(unverified) server={info.get('server')} "
+                f"reason={info.get('reason')} basis={info.get('basis')}")
     except Exception as exc:
         log(f"JEV-REQUIRED-ACTIONS(unavailable) {exc}")
         return []

@@ -383,14 +383,17 @@ def _semantic_adviser(situation: str) -> list[dict]:
     return module.advise(situation)
 
 
-def _build_adviser(situation: str) -> dict:
+def _build_adviser(situation: str, session_id: str | None = None) -> dict:
     path = REPO / "ops/jev_build_advisory.py"
     spec = importlib.util.spec_from_file_location("jev_build_advisory_live", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("build advisory unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.advise(situation)
+    # The session id is passed explicitly: the Worker keys its build_advisory
+    # receipt row to it (ops/typesafe_client.py SERVER_VERB), and a hook's
+    # environment need not carry the session variables a Bash tool call does.
+    return module.advise(situation, session_id=session_id)
 
 
 def _build_unavailable() -> dict:
@@ -489,7 +492,8 @@ def _process_prompt(payload: dict, runner: Callable,
                                  "not_attempted_oversize")
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
     try:
-        build = (build_adviser or _build_adviser)(prompt)
+        build = (build_adviser(prompt) if build_adviser is not None
+                 else _build_adviser(prompt, payload.get("session_id")))
         if not isinstance(build, dict):
             raise RuntimeError("build adviser returned malformed advice")
     except Exception:

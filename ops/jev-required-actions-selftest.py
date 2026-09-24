@@ -512,16 +512,60 @@ def evaluate_required_actions_shapes():
 # real-hook checks (completion-evidence-gate.py)
 # ---------------------------------------------------------------------------
 
-def run_gate(records, session, state, env_extra=None):
+EMPTY_SERVER = {"status": "ok", "receipts": []}
+
+
+def server_fixture(server):
+    """Write `server` (the object lib/jev_server_receipts.fetch_session_receipts
+    would return) to a temp file for CARR_JEV_SERVER_RECEIPTS_FIXTURE, so no
+    selftest ever reaches the deployed Worker."""
+    fh = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump(server, fh)
+    fh.close()
+    return fh.name
+
+
+def server_call_row(facets, when=1, question_ids=None, receipt_id=None):
+    return {"receipt_id": receipt_id or f"srv-{when}-{'-'.join(facets)}",
+            "recorded_at": ts(when), "purpose": "call",
+            "question_ids": question_ids or [], "facets": facets,
+            "model": "jev-1.13.0", "state_sha256": "0" * 64, "prompt_sha256": None,
+            "answers": None}
+
+
+def linked(records):
+    """Give every JSON record a uuid and chain its parentUuid to the record
+    before it, the way Claude Code writes a real transcript. The Stop gate now
+    trusts a prompt, an advisory or a refusal only when it is on that chain
+    (lib/jev_required_actions.chain_view), so a fixture must be a real chain.
+    Str items (tamper lines) pass through unchanged and break nothing."""
+    out, parent = [], None
+    for i, row in enumerate(records):
+        if isinstance(row, str):
+            out.append(row)
+            continue
+        row = dict(row)
+        row["uuid"] = row.get("uuid") if row.get("uuid") and not str(row["uuid"]).startswith("u-") \
+            else f"chain-{i}-{row.get('uuid') or 'r'}"
+        row["parentUuid"] = parent
+        parent = row["uuid"]
+        out.append(row)
+    return out
+
+
+def run_gate(records, session, state, env_extra=None, server=None):
     """A str item in `records` is written RAW (a tamper line); anything else
-    is written as one JSON object per line."""
+    is written as one JSON object per line. `server` is what the Worker's
+    read-jev-call-receipts would return (default: reachable, no rows)."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in records:
+        for row in linked(records):
             fh.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
         path = fh.name
+    fixture = server_fixture(EMPTY_SERVER if server is None else server)
     try:
         hook = os.path.join(REPO, "hooks", "completion-evidence-gate.py")
-        env = {**os.environ, "CARR_STOP_LATCH_STATE": state}
+        env = {**os.environ, "CARR_STOP_LATCH_STATE": state,
+               "CARR_JEV_SERVER_RECEIPTS_FIXTURE": fixture}
         env.update(env_extra or {})
         proc = subprocess.run(
             [sys.executable, hook], text=True, capture_output=True, timeout=30,
@@ -532,6 +576,7 @@ def run_gate(records, session, state, env_extra=None):
         return body.get("decision") == "block", body.get("reason", "")
     finally:
         os.unlink(path)
+        os.unlink(fixture)
 
 
 def known_bad_required_with_no_evidence_reopens():
@@ -557,11 +602,14 @@ def known_good_real_jev_call_receipt_passes():
                     when=1, session=session)])
         # Point the gate at OUR calls file, not the real out/jev-calls.jsonl.
         env = {"CARR_JEV_CALLS_LOG_OVERRIDE": calls_path}
-        blocked, _ = run_gate(records, session, state, env_extra=env)
+        server = {"status": "ok", "receipts": [server_call_row(["architecture_or_design"], 1)]}
+        blocked, _ = run_gate(records, session, state, env_extra=env, server=server)
+        local_only, _ = run_gate(records, session + "-local", state, env_extra=env)
         os.unlink(calls_path)
-        ok = not blocked
-        print(f"{'PASS' if ok else 'FAIL'}  KNOWN-GOOD: a real per-facet Jev call "
-              "receipt this turn -> does not reopen")
+        ok = not blocked and local_only
+        print(f"{'PASS' if ok else 'FAIL'}  KNOWN-GOOD: a real per-facet Jev call the SERVER "
+              "recorded this turn -> does not reopen; the same call only in the local file "
+              f"-> reopens (server={blocked}, local-only={local_only})")
         return ok
 
 
@@ -939,9 +987,10 @@ def forge_detection_event_recorded_end_to_end():
                     events.append(row)
     except OSError:
         pass
-    ok = blocked is False and len(events) == 1 and events[0]["write_like"] is True
-    print(f"{'PASS' if ok else 'FAIL'}  forge detection end-to-end: the forged receipt passes the "
-          f"verdict but a write-like detection event is recorded (events={len(events)})")
+    ok = blocked is True and len(events) == 1 and events[0]["write_like"] is True
+    print(f"{'PASS' if ok else 'FAIL'}  forge detection end-to-end: the forged receipt no longer "
+          f"passes (no server row) and a write-like detection event is recorded "
+          f"(blocked={blocked}, events={len(events)})")
     return ok
 
 
@@ -1020,13 +1069,14 @@ def receipt_unexplained_event_recorded_end_to_end():
         with open(log) as fh:
             for line in fh:
                 row = json.loads(line)
-                if row.get("session") == session and row.get("event") == "jev_receipt_unexplained":
+                if row.get("session") == session and row.get("event") == "jev_local_receipt_unverified":
                     events.append(row)
     except OSError:
         pass
-    ok = blocked is False and len(events) == 1
+    ok = blocked is True and len(events) == 1
     print(f"{'PASS' if ok else 'FAIL'}  backstop end-to-end: an indirect forge the mention check "
-          f"misses passes the verdict but records jev_receipt_unexplained (events={len(events)})")
+          f"misses no longer passes (no server row) and records jev_local_receipt_unverified "
+          f"(blocked={blocked}, events={len(events)})")
     return ok
 
 
@@ -1053,11 +1103,13 @@ def run_gate_stubbed(records, session, state, requirements_stub):
     """The real hook's main(), with #1228's live requirement checklist
     replaced by a fixed answer so the case is offline and deterministic."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in records:
+        for row in linked(records):
             fh.write(json.dumps(row) + "\n")
         path = fh.name
+    fixture = server_fixture(EMPTY_SERVER)
     try:
         env = {**os.environ, "CARR_STOP_LATCH_STATE": state,
+               "CARR_JEV_SERVER_RECEIPTS_FIXTURE": fixture,
                "CARR_JEV_CALLS_LOG_OVERRIDE": "/nonexistent.jsonl",
                "CEG_HOOK": os.path.join(REPO, "hooks", "completion-evidence-gate.py"),
                "CEG_JEV_REQUIREMENTS_STUB": json.dumps(requirements_stub)}
@@ -1075,6 +1127,7 @@ def run_gate_stubbed(records, session, state, requirements_stub):
         return body.get("decision") == "block", body.get("reason", "")
     finally:
         os.unlink(path)
+        os.unlink(fixture)
 
 
 def mixed_claim_reopen_with_refused_facet_names_only_the_claim():
@@ -1208,14 +1261,16 @@ def tamper_line_does_not_switch_the_agent_facet_check_off():
     was allowed. Now it is still refused."""
     session = f"s-tamper-agent-{os.getpid()}"
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in (real_human_prompt("P1", 0),
-                    real_advisory(["architecture_or_design"], "r-tamper-agent", 1)):
+        for row in linked([real_human_prompt("P1", 0),
+                           real_advisory(["architecture_or_design"], "r-tamper-agent", 1)]):
             fh.write(json.dumps(row) + "\n")
         fh.write("not json at all\n")
         path = fh.name
+    fixture = server_fixture(EMPTY_SERVER)
     try:
         proc = subprocess.run(
             [sys.executable, os.path.join(REPO, "hooks", "executor-tier-gate.py")],
+            env={**os.environ, "CARR_JEV_SERVER_RECEIPTS_FIXTURE": fixture},
             text=True, capture_output=True, timeout=60,
             input=json.dumps({"tool_name": "Agent", "session_id": session,
                               "transcript_path": path,
@@ -1223,6 +1278,7 @@ def tamper_line_does_not_switch_the_agent_facet_check_off():
                                              "prompt": "count the DENY lines in the log"}}))
     finally:
         os.unlink(path)
+        os.unlink(fixture)
     out = {}
     for line in proc.stdout.splitlines():
         try:

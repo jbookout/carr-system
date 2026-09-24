@@ -61,12 +61,56 @@ advisory record all read as "unavailable" rather than inventing a requirement
 or raising — callers log that and let the turn through, the same posture as
 every other gate in this repository.
 
-Fixtures: ops/jev-required-actions-selftest.py
+SERVER-SIDE VERIFICATION (2026-09-24, after a reviewer bypassed every gate here
+by appending ONE forged record — a fake user prompt, a fake build advisory, or
+a fake out/jev-calls.jsonl receipt plus a fake python tool_use/tool_result
+pair). Both files this module used to trust are writable by the gated model,
+which runs as the same OS user as the hooks. So, when a caller passes
+`server` (lib/jev_server_receipts.fetch_session_receipts's result):
+
+  * a facet counts as CALLED only from a server row: ops/typesafe_client.py's
+    ask() now goes through the Worker's ask-jev verb, which makes the vendor
+    call itself and appends a server-timestamped receipt before answering. A
+    local receipt with no server row is logged as unverified and credits
+    nothing;
+  * the REQUIRED facets are recomputed from the server's own build_advisory
+    rows — Jev's answers as the Worker recorded them — unioned over this
+    turn's window, so an extra advisory the model makes for itself can only
+    add a facet, never remove one; the transcript's advisory copy is used only
+    when the server has no row for this turn, and is then marked unverified;
+  * when the server cannot be read, nothing is credited and the result says
+    so (`server.status` "unreachable" and its reason): every required facet
+    not named in a refusal is missing, loudly, never silently passed.
+
+DEFENSE IN DEPTH: THE UUID CHAIN. Claude Code writes every record with a
+parentUuid naming the record IT wrote before (logicalParentUuid across a
+compaction). A record appended by anyone else is therefore not an ancestor of
+the newest genuine record. chain_view() walks back from that head — anchored
+on the Stop payload's last_assistant_message, or on the PreToolUse payload's
+tool_use_id — and the turn boundary, the prompt's advisory copy, and the
+assistant text a refusal is read from must all be on that chain. Measured on
+the 7 real local transcripts before writing this: 283 of 283 genuine human
+prompts and 177 of 177 prompt advisories are ancestors of the head. Genuine
+LEAVES exist (parallel tool results, PreToolUse hook context), so leaves are
+not dropped wholesale; only the records the verdict hinges on are held to the
+chain. Records that look like prompts but sit off the chain are returned as
+orphans for the caller to log.
+
+THE HONEST LIMIT. A model that REWRITES the transcript (not appends) can
+splice a record onto the chain, and can make real ask-jev calls. What it
+cannot do is erase or backdate a server row, so a spliced prompt cannot drop
+the genuine advisory's facets from the union window, and it cannot credit a
+facet without a real Jev call. hooks/gate-integrity.py's header states the
+same limit for the gates themselves: same-uid means detection, not prevention,
+until ops/harden-gates.sh is run.
+
+Fixtures: ops/jev-required-actions-selftest.py, ops/jev-server-receipts-selftest.py
 """
 
+import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 BUILD_RECEIPT_SCHEMA = "jev-build-turn-receipt/v1"
 BUILD_ADVISORY_UNAVAILABLE_SCHEMA = "jev-build-advisory-unavailable/v1"
@@ -881,8 +925,400 @@ def semantic_creation_receipt_missing(turn_recs, written_paths):
     return any_unavailable or bool(uncovered)
 
 
+# ---------------------------------------------------------------------------
+# THE UUID CHAIN (defense in depth — see the module docstring).
+# ---------------------------------------------------------------------------
+
+CHAIN_MESSAGE_TYPES = ("user", "assistant", "attachment", "system")
+
+
+def _parent_uuid(rec):
+    parent = rec.get("parentUuid")
+    if not parent:
+        # A compaction boundary carries parentUuid null and names the record
+        # it logically continues in logicalParentUuid.
+        parent = rec.get("logicalParentUuid")
+    return parent if isinstance(parent, str) and parent else None
+
+
+def _assistant_text(rec):
+    msg = rec.get("message") if isinstance(rec, dict) else None
+    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        return None
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def _tool_use_ids(rec):
+    msg = rec.get("message") if isinstance(rec, dict) else None
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return ()
+    return tuple(b.get("id") for b in content
+                 if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"))
+
+
+def chain_head(recs, anchor_text=None, anchor_tool_use_id=None):
+    """(head record, anchor kind). The head is the LAST record carrying the
+    Stop payload's final assistant text, or the assistant record carrying the
+    PreToolUse payload's tool_use id; failing both, the last record with a
+    uuid. Returns (None, "none") when no record carries a uuid."""
+    with_uuid = [r for r in recs or () if isinstance(r, dict) and r.get("uuid")]
+    if not with_uuid:
+        return None, "none"
+    if isinstance(anchor_tool_use_id, str) and anchor_tool_use_id:
+        for rec in reversed(with_uuid):
+            if anchor_tool_use_id in _tool_use_ids(rec):
+                return rec, "tool_use_id"
+    if isinstance(anchor_text, str) and anchor_text.strip():
+        want = anchor_text.strip()
+        for rec in reversed(with_uuid):
+            text = _assistant_text(rec)
+            if isinstance(text, str) and text.strip() == want:
+                return rec, "last_assistant_message"
+    return with_uuid[-1], "newest_record"
+
+
+def ancestor_uuids(recs, head):
+    """Every uuid on the parent chain from `head` back to the root."""
+    by_uuid = {r["uuid"]: r for r in recs or () if isinstance(r, dict) and r.get("uuid")}
+    seen = set()
+    cur = head
+    while isinstance(cur, dict) and cur.get("uuid") and cur["uuid"] not in seen:
+        seen.add(cur["uuid"])
+        parent = _parent_uuid(cur)
+        cur = by_uuid.get(parent) if parent else None
+    return seen
+
+
+def _is_genuine_prompt(rec):
+    return (isinstance(rec, dict) and rec.get("type") == "user"
+            and is_real_user_turn(rec) and not is_synthetic_continuation(rec))
+
+
+def chain_view(recs, anchor_text=None, anchor_tool_use_id=None):
+    """The transcript as the gate may trust it for its turn boundary, its
+    prompt advisory, and its refusal text:
+
+        {"recs": [...], "chain": bool, "anchor": <kind>, "head": <uuid>,
+         "orphans": [{"uuid", "type", "timestamp", "kind"}, ...]}
+
+    `recs` keeps every record on the ancestor chain of the anchored head plus
+    every metadata record that carries no uuid and is not a message (queue
+    operations, titles, snapshots). A user/assistant/attachment/system record
+    that is OFF the chain is dropped; the ones that would have mattered (a
+    genuine-looking prompt, a build advisory, a JEV-REFUSED line) are listed
+    in `orphans`. When no record carries a uuid at all (a non-Claude client,
+    or a hand-built fixture), the chain cannot be walked: `chain` is False
+    and `recs` is the input unchanged."""
+    recs = [r for r in recs or () if isinstance(r, dict)]
+    head, anchor = chain_head(recs, anchor_text, anchor_tool_use_id)
+    if head is None:
+        return {"recs": recs, "chain": False, "anchor": anchor, "head": None, "orphans": []}
+    anc = ancestor_uuids(recs, head)
+    kept, orphans = [], []
+    for rec in recs:
+        uid = rec.get("uuid")
+        if uid in anc:
+            kept.append(rec)
+            continue
+        if not uid and rec.get("type") not in CHAIN_MESSAGE_TYPES:
+            kept.append(rec)
+            continue
+        kind = None
+        if _is_genuine_prompt(rec):
+            kind = "user_prompt"
+        elif _advisory_receipts([rec]):
+            kind = "build_advisory"
+        elif refusals_in_texts([_assistant_text(rec) or ""]):
+            kind = "refusal_text"
+        if kind:
+            orphans.append({"uuid": uid, "type": rec.get("type"),
+                            "timestamp": rec.get("timestamp"), "kind": kind})
+    return {"recs": kept, "chain": True, "anchor": anchor, "head": head.get("uuid"),
+            "orphans": orphans}
+
+
+def full_turn_slice(recs, trusted_recs):
+    """This turn's records from the UNFILTERED transcript, starting at the
+    trusted (on-chain) turn boundary: for data that legitimately lives on
+    leaves (written paths, post-write reviews, tool calls naming the ledger),
+    none of which can remove a required facet."""
+    idx = latest_user_turn_index(trusted_recs)
+    if idx < 0:
+        return []
+    boundary = trusted_recs[idx]
+    recs = list(recs or ())
+    uid = boundary.get("uuid") if isinstance(boundary, dict) else None
+    for i, rec in enumerate(recs):
+        if rec is boundary or (uid and isinstance(rec, dict) and rec.get("uuid") == uid):
+            return recs[max(0, i - 1):]
+    return current_turn_slice(recs)
+
+
+# ---------------------------------------------------------------------------
+# SERVER-SIDE RECEIPTS (see the module docstring).
+# ---------------------------------------------------------------------------
+
+# Imported lazily-safe: lib/rule_delivery_preuse.py is the one home of the
+# threshold ops/jev_build_advisory.py applies when it turns Jev's facet
+# probabilities into required_actions. The gate recomputes the same thing from
+# the server's copy of those probabilities.
+try:
+    from lib.rule_delivery_preuse import BUILD_ACTION_THRESHOLD
+except Exception:  # pragma: no cover - the constant is also pinned by the selftest
+    BUILD_ACTION_THRESHOLD = 0.50
+
+# Server clock versus the transcript's clock (both NTP-disciplined).
+SERVER_SKEW_SECONDS = 10
+# How long before its own prompt record a prompt's advisory row may land (the
+# UserPromptSubmit hook can finish before the record is stamped). Used only to
+# tell a repeated prompt text's rows apart.
+ADVISORY_LEAD_SECONDS = 120
+PURPOSE_CALL = "call"
+PURPOSE_BUILD_ADVISORY = "build_advisory"
+
+
+def prompt_digest(value):
+    """sha256 of the canonical JSON of `value` — the same digest the
+    UserPromptSubmit hook stamps as prompt_sha256 and the Worker stores for a
+    build_advisory row (lib/rule_delivery_preuse.py's digest())."""
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _prompt_digests(rec):
+    """Every digest this prompt record's text could have been submitted as:
+    each text block, and the text blocks joined."""
+    msg, _role = _record_message(rec)
+    content = msg.get("content") if isinstance(msg, dict) else None
+    texts = []
+    if isinstance(content, str):
+        texts.append(content)
+    elif isinstance(content, list):
+        blocks = [b.get("text") for b in content
+                  if isinstance(b, dict) and b.get("type") in ("text", "input_text")
+                  and isinstance(b.get("text"), str)]
+        texts.extend(blocks)
+        if blocks:
+            texts.append("\n".join(blocks))
+    return {prompt_digest(t) for t in texts}
+
+
+def _chain_prompt_texts(trusted_recs):
+    """Digests of every text on the trusted chain that the UserPromptSubmit
+    hook could have been handed: each user record's text, and each
+    queued_command attachment's prompt."""
+    out = set()
+    for rec in trusted_recs or ():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("type") == "user":
+            out |= _prompt_digests(rec)
+            # A cross-session message is recorded with a one-line preface
+            # ("Another Claude session sent a message:") and sometimes a
+            # trailing safety note, neither of which the hook saw.
+            first = _first_text_block(rec.get("message") or {})
+            if isinstance(first, str) and "<cross-session-message" in first:
+                body = first[first.index("<cross-session-message"):]
+                out.add(prompt_digest(body))
+                close = "</cross-session-message>"
+                if close in body:
+                    out.add(prompt_digest(body[:body.index(close) + len(close)]))
+        if rec.get("type") == "queue-operation" and isinstance(rec.get("content"), str):
+            out.add(prompt_digest(rec["content"]))
+        attachment = rec.get("attachment")
+        if isinstance(attachment, dict) and attachment.get("type") == "queued_command":
+            prompt = attachment.get("prompt")
+            if isinstance(prompt, str):
+                out.add(prompt_digest(prompt))
+            elif isinstance(prompt, list):
+                blocks = [b.get("text") for b in prompt
+                          if isinstance(b, dict) and isinstance(b.get("text"), str)]
+                out |= {prompt_digest(t) for t in blocks}
+                if blocks:
+                    out.add(prompt_digest("\n".join(blocks)))
+    return out
+
+
+def _genuine_prompt_indices(recs):
+    runs = _user_prompt_runs(recs)
+    if runs:
+        return [run["start"] for run in runs if not is_synthetic_continuation(run["first_rec"])]
+    return [i for i, rec in enumerate(recs) if is_real_user_turn(rec)]
+
+
+def facets_from_advisory_answers(answers):
+    """Required facets from a server build_advisory row's answers, applying
+    the same threshold ops/jev_build_advisory.py applies. None when the
+    answers are not a complete, readable set."""
+    if not isinstance(answers, dict):
+        return None
+    out = []
+    for facet in FACET_NAMES:
+        answer = answers.get(facet)
+        if not isinstance(answer, dict):
+            return None
+        try:
+            value = float(answer.get("noul"))
+        except (TypeError, ValueError):
+            return None
+        if not 0.0 <= value <= 1.0:
+            return None
+        if value >= BUILD_ACTION_THRESHOLD:
+            out.append(facet)
+    return out
+
+
+def binding_advisory_rows(server_rows, trusted_recs, boundary_ts, now=None):
+    """The server build_advisory rows that bind this turn (see the module
+    docstring): every row whose prompt digest matches this turn's prompt and
+    was recorded after the PREVIOUS genuine prompt, plus every row recorded
+    from this turn's boundary onward that does not match an EARLIER prompt.
+    Returns (rows, unmatched_rows)."""
+    if boundary_ts is None:
+        return [], []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    indices = _genuine_prompt_indices(trusted_recs)
+    idx = latest_user_turn_index(trusted_recs)
+    current = _prompt_digests(trusted_recs[idx]) if idx >= 0 else set()
+    earlier, prev_ts = set(), None
+    for i in indices:
+        if i < idx:
+            earlier |= _prompt_digests(trusted_recs[i])
+            prev_ts = _record_timestamp(trusted_recs[i]) or prev_ts
+    # Round 4's rule, kept: a folded continuation (task notification, Stop
+    # feedback, cross-session message, a message queued mid-turn, a
+    # "continue from where you left off" resume) gets its own advisory from
+    # the same hook, and that advisory does NOT bind the turn. Its server row
+    # is recognised by the continuation's own text on the chain — a user
+    # record, or a queued_command attachment (the shape a mid-turn message
+    # takes; measured on the real transcripts, every otherwise-unmatched
+    # advisory row was one of these). What stays unmatched is a row whose
+    # text appears nowhere on the chain: one the model asked for itself.
+    earlier |= _chain_prompt_texts(trusted_recs) - current
+    rows, unmatched = [], []
+    upper = now + timedelta(seconds=SERVER_SKEW_SECONDS)
+    # A prompt whose text repeats an earlier one ("continue") shares its
+    # digest; the earlier prompt's row must not bind this turn, so for a
+    # repeated text the row must also sit near this turn's own boundary.
+    lower = prev_ts
+    if current & earlier:
+        near = boundary_ts - timedelta(seconds=ADVISORY_LEAD_SECONDS)
+        lower = near if lower is None or near > lower else lower
+    for row in server_rows or ():
+        if row.get("purpose") != PURPOSE_BUILD_ADVISORY:
+            continue
+        at = _parse_ts(row.get("recorded_at"))
+        if at is None or at > upper:
+            continue
+        sha = row.get("prompt_sha256")
+        if sha in current and (lower is None or at > lower):
+            rows.append(row)
+        elif (at >= boundary_ts - timedelta(seconds=SERVER_SKEW_SECONDS)
+              and sha not in earlier and sha not in current):
+            rows.append(row)
+            unmatched.append(row)
+    return rows, unmatched
+
+
+def server_credited_calls(server_rows, boundary_ts, required, now=None):
+    """(covered facets, crediting rows) from server `call` rows recorded in
+    this turn's window."""
+    if not required or boundary_ts is None:
+        return set(), []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    lower = boundary_ts - timedelta(seconds=SERVER_SKEW_SECONDS)
+    upper = now + timedelta(seconds=SERVER_SKEW_SECONDS)
+    covered, credited = set(), []
+    for row in server_rows or ():
+        if row.get("purpose") != PURPOSE_CALL:
+            continue
+        at = _parse_ts(row.get("recorded_at"))
+        if at is None or at < lower or at > upper:
+            continue
+        hit = [f for f in required if _call_covers_facet(row, f)]
+        if hit:
+            covered.update(hit)
+            credited.append(row)
+    return covered, credited
+
+
+def unverified_local_receipts(local_rows, server_rows):
+    """Local out/jev-calls.jsonl rows credited-looking for this turn that the
+    server has no row for: a forged row, or a call that fell back to the
+    vendor directly. Either way it credits nothing."""
+    server_ids = {r.get("receipt_id") for r in server_rows or () if r.get("receipt_id")}
+    return [row for row in local_rows or ()
+            if not row.get("server_receipt_id") or row.get("server_receipt_id") not in server_ids]
+
+
+def server_required_facets(server_rows, trusted_recs, boundary_ts, transcript_required,
+                           turn_key, now=None):
+    """(required, turn_key, basis, unmatched_rows) for this turn.
+
+    `server_rows` None means the server could not be read. basis is
+    "server" (the union of the binding server build_advisory rows),
+    "server_and_transcript" (the transcript copy named a facet the server rows
+    did not — kept, since only adding is safe), "transcript_unverified" (no
+    readable server row; the on-chain transcript copy is all there is), or
+    None (nothing readable anywhere: fail open, as before)."""
+    unmatched = []
+    if server_rows is not None:
+        rows, unmatched = binding_advisory_rows(server_rows, trusted_recs, boundary_ts, now=now)
+        union, readable = [], False
+        for row in rows:
+            facets = facets_from_advisory_answers(row.get("answers"))
+            if facets is None:
+                continue
+            readable = True
+            for facet in facets:
+                if facet not in union:
+                    union.append(facet)
+        if readable:
+            required = [f for f in FACET_NAMES if f in union]
+            turn_key = turn_key or rows[0].get("receipt_id")
+            if transcript_required and set(transcript_required) - set(required):
+                both = set(required) | set(transcript_required)
+                return ([f for f in FACET_NAMES if f in both], turn_key,
+                        "server_and_transcript", unmatched)
+            return required, turn_key, "server", unmatched
+    if transcript_required is not None:
+        return transcript_required, turn_key, "transcript_unverified", unmatched
+    return None, turn_key, None, unmatched
+
+
+def binding_required_facets(recs, server, anchor_text=None, anchor_tool_use_id=None,
+                            now=None):
+    """For a PreToolUse caller (hooks/executor-tier-gate.py): this turn's
+    required facets as the server records them, from the chain-trusted view.
+    Returns (facets or None, turn_key, info) with info {"basis", "server",
+    "reason", "chain", "orphans"}."""
+    view = chain_view(recs, anchor_text=anchor_text, anchor_tool_use_id=anchor_tool_use_id)
+    trusted = view["recs"]
+    transcript_required, turn_key = turn_required_facets(trusted)
+    boundary_ts = turn_boundary_timestamp(trusted)
+    server_ok = isinstance(server, dict) and server.get("status") == "ok"
+    rows = [r for r in (server.get("receipts") or []) if isinstance(r, dict)] if server_ok else None
+    required, turn_key, basis, _unmatched = server_required_facets(
+        rows, trusted, boundary_ts, transcript_required, turn_key, now=now)
+    return required, turn_key, {
+        "basis": basis, "server": "ok" if server_ok else "unreachable",
+        "reason": None if server_ok else (server.get("reason") if isinstance(server, dict) else None),
+        "chain": view["chain"], "orphans": view["orphans"]}
+
+
 def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, written_paths,
-                              now=None):
+                              now=None, server=None, full_turn_recs=None):
     """One-call summary for a Stop-time caller.
 
     `recs` is the WHOLE transcript (this module scopes to the current turn
@@ -904,20 +1340,66 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     `turn_key` is a value unique to THIS turn's advisory (its receipt id, or
     its prompt hash) for callers that need a per-turn latch identity rather
     than a per-session one.
+
+    With `server` (lib/jev_server_receipts.fetch_session_receipts's result)
+    the verdict is taken against the server's own rows — see the module
+    docstring's SERVER-SIDE VERIFICATION. `recs` should then be the
+    chain-trusted view (chain_view()["recs"]) and `full_turn_recs` the
+    unfiltered turn slice (full_turn_slice()) for the leaf-borne data. The
+    result gains a "server" block: {"status", "reason", "advisory_basis",
+    "unmatched_advisories", "unverified_local_receipts"}. Without `server`
+    the pre-server behaviour is unchanged (kept for callers and fixtures that
+    predate it).
     """
-    turn_slice = current_turn_slice(recs)
-    required, turn_key = turn_required_facets(recs)
-    if required is None:
-        return {"status": "unavailable", "required": [], "missing": [],
-                "refused": [], "turn_key": turn_key}
-    if not required:
-        return {"status": "none", "required": [], "missing": [],
-                "refused": [], "turn_key": turn_key}
-    refusals = refusals_in_texts(window_texts)
+    turn_slice = full_turn_recs if full_turn_recs is not None else current_turn_slice(recs)
+    transcript_required, turn_key = turn_required_facets(recs)
     boundary_ts = turn_boundary_timestamp(recs)
     call_rows = load_jev_call_receipts(jev_calls_path)
-    called, credited = credited_calls_this_turn(
-        call_rows, session_id, boundary_ts, required, now=now)
+    server_block = None
+    server_rows = []
+    required = transcript_required
+    if server is not None:
+        server_ok = isinstance(server, dict) and server.get("status") == "ok"
+        if server_ok:
+            server_rows = [r for r in (server.get("receipts") or []) if isinstance(r, dict)]
+        server_block = {"status": "ok" if server_ok else "unreachable",
+                        "reason": None if server_ok else (
+                            server.get("reason") if isinstance(server, dict) else "no_result"),
+                        "advisory_basis": None, "unmatched_advisories": [],
+                        "unverified_local_receipts": []}
+        required, turn_key, basis, unmatched = server_required_facets(
+            server_rows if server_ok else None, recs, boundary_ts,
+            transcript_required, turn_key, now=now)
+        server_block["advisory_basis"] = basis
+        server_block["unmatched_advisories"] = [
+            {k: r.get(k) for k in ("receipt_id", "recorded_at", "prompt_sha256")}
+            for r in unmatched]
+    if required is None or not required:
+        out = {"status": "unavailable" if required is None else "none",
+               "required": [], "missing": [], "refused": [], "turn_key": turn_key}
+        if server_block is not None:
+            out["server"] = server_block
+        return out
+    refusals = refusals_in_texts(window_texts)
+    if server_block is None:
+        called, credited = credited_calls_this_turn(
+            call_rows, session_id, boundary_ts, required, now=now)
+        answered = answered_calls_this_turn(call_rows, session_id, boundary_ts, now=now)
+    else:
+        # CREDIT COMES ONLY FROM THE SERVER. A local receipt that looks like it
+        # covers a facet but has no server row is recorded, never counted.
+        called, credited = server_credited_calls(server_rows, boundary_ts, required, now=now)
+        _local_covered, local_credited = credited_calls_this_turn(
+            call_rows, session_id, boundary_ts, required, now=now)
+        server_block["unverified_local_receipts"] = [
+            {k: row.get(k) for k in ("ts", "session", "facets", "question_ids",
+                                     "server_receipt_id", "server_error")}
+            for row in unverified_local_receipts(local_credited, server_rows)]
+        answered = [r for r in server_rows if r.get("purpose") == PURPOSE_CALL]
+        if server_block["status"] != "ok":
+            # Nothing is verifiable; a local receipt still shows Jev answering,
+            # which is all the false-outage rule below needs.
+            answered = answered_calls_this_turn(call_rows, session_id, boundary_ts, now=now)
     # FALSE-OUTAGE REFUSALS (bypass hunt, PR #1224). A refusal whose every
     # reason claims Jev was unreachable/unavailable/down/402 does not satisfy
     # its facet when this turn shows Jev answering: a successful receipt in
@@ -926,7 +1408,6 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     # facets come only from a readable advisory). Refusals giving any other
     # reason still count. The facet then stays missing and the gate names the
     # contradiction.
-    answered = answered_calls_this_turn(call_rows, session_id, boundary_ts, now=now)
     jev_answered = {"advisory_answered": True, "receipts_ok": len(answered)}
     contradicted = sorted(
         facet for facet, reasons in refusals.items()
@@ -937,11 +1418,15 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
             and "semantic_creation" not in called
             and semantic_creation_receipt_missing(turn_slice, written_paths)):
         missing.add("semantic_creation")
-    return {"status": "required", "required": required,
-            "missing": sorted(missing), "refused": sorted(refused),
-            "turn_key": turn_key,
-            "contradicted_refusals": [f for f in contradicted if f in missing],
-            "jev_answered": jev_answered,
-            "credited_receipts": [
-                {k: row.get(k) for k in ("ts", "session", "facets", "question_ids")}
-                for row in credited]}
+    out = {"status": "required", "required": required,
+           "missing": sorted(missing), "refused": sorted(refused),
+           "turn_key": turn_key,
+           "contradicted_refusals": [f for f in contradicted if f in missing],
+           "jev_answered": jev_answered,
+           "credited_receipts": [
+               {k: row.get(k) for k in ("ts", "recorded_at", "receipt_id", "session",
+                                        "facets", "question_ids")}
+               for row in credited]}
+    if server_block is not None:
+        out["server"] = server_block
+    return out
