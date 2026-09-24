@@ -40,11 +40,27 @@ from git_env import fixture_env  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "tools"))
-from fleet_sync_sibling_safety import sync_sibling  # noqa: E402
+from fleet_sync_sibling_safety import EXIT_CODES, sync_sibling  # noqa: E402
 
 MODULE = os.path.join(REPO, "tools", "fleet_sync_sibling_safety.py")
+TOOLS_DIR = os.path.join(REPO, "tools")
 ENV = dict(fixture_env(), GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+# The EXACT inline dispatch snippet bin/fleet-sync.sh runs for each sibling —
+# see its sync_siblings(). Exercised here as a subprocess (not by importing
+# and calling sync_sibling() directly, which the other tests already do) so
+# the exit-code convention the CALLER relies on is proved end-to-end, without
+# tools/fleet_sync_sibling_safety.py itself ever being run as a script (it
+# carries no shebang and no main guard on purpose — see its module docstring).
+DISPATCH_SNIPPET = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[4])\n"
+    "from fleet_sync_sibling_safety import EXIT_CODES, sync_sibling\n"
+    "status, message = sync_sibling(sys.argv[1], sys.argv[2], sys.argv[3])\n"
+    "print('fleet-sync:   ' + message)\n"
+    "sys.exit(EXIT_CODES[status])\n"
+)
 
 
 def git(cwd, *args):
@@ -81,7 +97,7 @@ def build_pair(tmp, name="doctorcre-app"):
 
 def run_module(path, name, branch="main"):
     return subprocess.run(
-        [sys.executable, MODULE, path, name, branch],
+        [sys.executable, "-c", DISPATCH_SNIPPET, path, name, branch, TOOLS_DIR],
         capture_output=True, text=True, env=ENV,
     )
 

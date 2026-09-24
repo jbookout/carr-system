@@ -66,9 +66,12 @@ fi
 
 # sync_siblings — fast-forward every sibling checkout named in
 # ops/config/fleet-sync-siblings.json (the single source of truth for the
-# list). Exit statuses are printed but deliberately never inspected: a
-# sibling's outcome must never affect $canonical_status or stop the wiring
-# re-render below.
+# list), through the tools/fleet_sync_sibling_safety.py LIBRARY (no shebang,
+# no main guard on purpose — this inline snippet is the only dispatch, so the
+# helper never becomes a second sealed SCAC ingress for the same one job this
+# already-inventoried script covers). Exit statuses are printed but
+# deliberately never inspected: a sibling's outcome must never affect
+# $canonical_status or stop the wiring re-render below.
 sync_siblings() {
   local siblings_json="$REPO/ops/config/fleet-sync-siblings.json"
   [ -f "$siblings_json" ] || return 0
@@ -87,7 +90,14 @@ except Exception:
   print -r -- "fleet-sync: sibling repos —"
   local name
   for name in ${(f)siblings}; do
-    "$PY" "$REPO/tools/fleet_sync_sibling_safety.py" "${REPO:h}/$name" "$name" main
+    "$PY" -c '
+import sys
+sys.path.insert(0, sys.argv[4])
+from fleet_sync_sibling_safety import EXIT_CODES, sync_sibling
+status, message = sync_sibling(sys.argv[1], sys.argv[2], sys.argv[3])
+print("fleet-sync:   " + message)
+sys.exit(EXIT_CODES[status])
+' "${REPO:h}/$name" "$name" main "$REPO/tools"
     # Intentionally ignore $? here. See the header note: a sibling's skip or
     # failure is never allowed to change this job's own exit code.
   done
