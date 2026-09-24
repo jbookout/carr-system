@@ -186,7 +186,12 @@ def already_raised(session, hits):
 def main():
     try:
         payload = json.load(sys.stdin)
-    except Exception:
+    except Exception as exc:
+        # Logged, never silent (2026-09-24). This exit was bare, and when
+        # run-record-gate handed this gate a drained stdin it allowed every
+        # Stop with no trace; drift-claim-gate's ALLOW(parse-error) line is how
+        # the same fault was found there.
+        log(f"ALLOW(parse-error) {exc}")
         sys.exit(0)
     try:
         if (payload.get("hook_event_name") or "Stop") != "Stop":

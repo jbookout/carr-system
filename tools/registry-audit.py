@@ -105,7 +105,7 @@ STOP = {"the", "and", "for", "llc", "pllc", "inc", "pa", "pc", "dds", "dmd", "md
 def tokens(*parts):
     """Word set for loose identity comparison.
 
-    Dossier filenames are CamelCase-and-hyphen ("GulfCoastPelvicFloor",
+    Dossier filenames are CamelCase-and-hyphen ("HarborlinePelvicTherapy",
     "PremierHealthWellness-RandallMacDonnell"), so a naive lowercase split makes
     one giant token that matches nothing and reports a false mismatch. Split on
     the case boundary first.

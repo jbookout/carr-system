@@ -528,3 +528,18 @@ TOLLS
 fi
 
 exit 0
+
+# ---------------------------------------------------------------------------
+# CLIENT-NAME NOTE, a REPORTER and not a gate (decision 4d6ce1c7, 2026-09-24).
+# Joe: no bulk scrub and no history rewrite; new lines should ideally carry no
+# client name, and old ones convert gradually as they are touched. This prints
+# file:line for any line the branch ADDS against main that carries a name from
+# the gitignored local list, never the name itself, and a one-line reminder to
+# swap in a pseudonym. It never changes the push's outcome: its exit status is
+# discarded, it is silent when the local list is absent, and it has no CI step.
+# ---------------------------------------------------------------------------
+if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/ops/githooks/client-name-warn.py" ] \
+    && command -v python3 >/dev/null 2>&1; then
+  python3 "$REPO_ROOT/ops/githooks/client-name-warn.py" "origin/main...HEAD" "$REPO_ROOT" || true
+fi
+exit 0

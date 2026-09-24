@@ -132,30 +132,30 @@ CASES = [
         codex_assistant("Done."),
     ], True),
     ("Codex nested CARR write requires evidence", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "const row = await tools.mcp__carr__update_deal({ id: 'd1', stage: 'LOI' });"),
         codex_assistant("Completed."),
     ], True),
     ("Codex nested generic call verb requires evidence", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__call_verb({ verb: 'update-deal', args: { id: 'd1' } });"),
         codex_assistant("Done."),
     ], True),
     ("Codex nested CARR read is fresh evidence", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__update_deal({ id: 'd1' });"),
         codex_tool("exec", "const fresh = await tools.mcp__carr__get_deal({ id: 'd1' });"),
         codex_assistant("Done and verified."),
     ], False),
     ("Codex history wrapper cannot reset the mutation window", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__update_deal({ id: 'd1' });"),
         codex_wrapper("Earlier work and environment context."),
         codex_assistant("Done."),
     ], True),
     ("Codex create national market deal requires evidence", [
         codex_user("add market"),
-        codex_tool("exec", "await tools.mcp__carr__create_national_market_deal({ account: 'Musicologie' });"),
+        codex_tool("exec", "await tools.mcp__carr__create_national_market_deal({ account: 'Cadence Studio' });"),
         codex_assistant("Done."),
     ], True),
     ("Codex patch deal field requires evidence", [
@@ -209,7 +209,7 @@ CASES = [
         codex_assistant("Completed."),
     ], True),
     ("CARR read action permits completion", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),
         codex_tool("exec", "await tools.mcp__carr__review_queue({});"),
         codex_assistant("Done and verified."),
