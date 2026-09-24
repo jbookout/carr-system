@@ -25,7 +25,7 @@ import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
-import { anchorCommittedCensusWrite, readWorkflowCensusAnchor } from "./workflow-census-anchor.js";
+import { anchorCommittedCensusWrite, applyCommittedCensusReanchor, readWorkflowCensusAnchor } from "./workflow-census-anchor.js";
 import { parksADecision, classifyLoopText, needsDecider, loopRowText,
          ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
@@ -902,6 +902,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
     client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
   if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
+  // The V5-F09 census write and re-anchor read the external anchor's head
+  // before their door, which refuses unless the database head matches it.
+  if (name === "record-workflow-census" || name === "reanchor-workflow-census")
+    client.workflowCensusAnchor = () => readWorkflowCensusAnchor(env);
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
@@ -934,6 +938,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
     // same idempotency_key replays it and re-advances the anchor.
     if (name === "record-workflow-census")
       return await anchorCommittedCensusWrite(env, result, payload => new ToolError(payload));
+    // The re-anchor receipt is committed first, then applied to the anchor as
+    // a compare-and-set on the old head it names.
+    if (name === "reanchor-workflow-census")
+      return await applyCommittedCensusReanchor(env, result, payload => new ToolError(payload));
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});

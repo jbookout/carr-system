@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { ToolError, executeRegisteredTool, TOOLS } from "../src/tools.js";
 
 const AGENT = { id: "10000000-0000-0000-0000-000000000041", slug: "joe-local", human: false, via: "test" };
+const JOE = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "oauth-google" };
 
 async function rejected(fn) {
   try { await fn(); assert.fail("expected refusal"); }
@@ -17,13 +18,28 @@ const CENSUS = Object.freeze({
   summary: { workflows: 1, false_operational: 1 },
 });
 
-// Mirrors ops.record_workflow_census / ops.read_workflow_census
-// (migrations/0595): the door takes the census and the key only; principal and
-// time come from the server side, and the chain fields are computed there.
+const GUARD_FUNCTIONS = Object.freeze({ workflow_census_record_append_only: "6".repeat(64),
+  workflow_census_record_chain_guard: "7".repeat(64), workflow_census_record_no_truncate: "6".repeat(64) });
+
+// Mirrors ops.record_workflow_census / ops.read_workflow_census /
+// ops.reanchor_workflow_census (migrations/0595): the write door takes the
+// census, the key and the anchored head the Worker read; principal and time
+// come from the server side, and the chain fields are computed there. The
+// fake's anchor follows its own rows, as a Worker whose advances all landed.
 class CensusFake {
-  constructor({ doorError = null, readResult = undefined } = {}) {
-    this.calls = []; this.toolCalls = new Map(); this.rows = [];
+  constructor({ doorError = null, readResult = undefined, anchor = "follow" } = {}) {
+    this.calls = []; this.toolCalls = new Map(); this.rows = []; this.anchorReads = 0;
     this.doorError = doorError; this.readResult = readResult;
+    if (anchor === "follow") {
+      this.workflowCensusAnchor = async () => {
+        this.anchorReads += 1;
+        const last = this.rows.at(-1);
+        return last ? { state: "present", seq: Number(last.seq), row_hash: last.row_hash,
+          anchored_at: "2026-09-24T09:10:09.000Z", last_reanchor: null } : { state: "absent", last_reanchor: null };
+      };
+    } else if (anchor !== null) {
+      this.workflowCensusAnchor = async () => { this.anchorReads += 1; return anchor; };
+    }
   }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
@@ -38,8 +54,8 @@ class CensusFake {
       return { rows: [] };
     }
     if (sql.includes("ops.record_workflow_census")) {
-      if (this.doorError) throw new Error(this.doorError);
-      assert.equal(params.length, 2, "the door takes the census and the key, nothing else");
+      if (this.doorError) throw Object.assign(new Error(this.doorError), this.doorErrorDetail ?? {});
+      assert.equal(params.length, 4, "the door takes the census, the key and the anchored head, nothing else");
       const seq = this.rows.length + 1;
       const row = {
         seq: String(seq), recorded_at: `2026-09-24T09:10:0${seq}.000000Z`, principal: "joe-local",
@@ -59,7 +75,18 @@ class CensusFake {
         latest_payload: this.rows.at(-1)?.payload ?? null,
         guards: { workflow_census_record_append_only: "A", workflow_census_record_chain_guard: "A",
           workflow_census_record_no_truncate: "A" },
+        guard_functions: { ...GUARD_FUNCTIONS },
       } }] };
+    }
+    if (sql.includes("ops.reanchor_workflow_census")) {
+      if (this.doorError) throw Object.assign(new Error(this.doorError), this.doorErrorDetail ?? {});
+      assert.equal(params.length, 6);
+      const [oldSeq, oldHash, newSeq, newHash, reason] = params;
+      return { rows: [{ receipt_id: "0f0e0d0c-0b0a-4908-8706-050403020100",
+        recorded_at: "2026-09-24T09:20:00.000000Z", actor: "joe", verified_partner: "joe", reason,
+        old_seq: oldSeq === null ? null : String(oldSeq), old_row_hash: oldHash,
+        new_seq: newSeq === null ? null : String(newSeq), new_row_hash: newHash,
+        rows_reattested: "1", replayed: false }] };
     }
     throw new Error(`CensusFake: unhandled query: ${sql}`);
   }
@@ -84,6 +111,11 @@ test("record-workflow-census sends the census and the key to the door and return
   const door = c.calls.find(call => call.sql.includes("ops.record_workflow_census"));
   assert.deepEqual(JSON.parse(door.params[0]), CENSUS);
   assert.equal(door.params[1], "k-1");
+  assert.deepEqual(door.params.slice(2), [null, null], "an absent anchor is passed as a null head");
+  await executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-1b", census: structuredClone(CENSUS) });
+  const second = c.calls.filter(call => call.sql.includes("ops.record_workflow_census"))[1];
+  assert.deepEqual(second.params.slice(2), [1, "1".repeat(64)], "the anchored head goes to the door");
   assert.ok(!door.params.includes("joe-local"), "the handler never passes the actor to the door");
 });
 
@@ -112,6 +144,84 @@ test("a door refusal comes back by name, not as an unhandled failure", async () 
   }
 });
 
+test("record-workflow-census refuses before the door when the anchor cannot be read", async () => {
+  for (const anchor of [null, { state: "unavailable", detail: "anchor_unreachable" }, { state: "present", seq: "1" }]) {
+    const c = new CensusFake({ anchor });
+    const payload = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census",
+      { idempotency_key: "k-u", census: structuredClone(CENSUS) }));
+    assert.equal(payload.error, "workflow_census_anchor_unavailable", JSON.stringify(anchor));
+    assert.ok(!c.calls.some(call => call.sql.includes("ops.record_workflow_census")));
+  }
+});
+
+test("the door's anchor refusals come back by name, with the database's detail and a hint", async () => {
+  for (const [name, detail] of [["workflow_census_anchor_gap", "database_one_linked_row_ahead_of_anchor"],
+    ["workflow_census_tampered", "database_head_is_not_anchored_head"]]) {
+    const c = new CensusFake({ doorError: name });
+    c.doorErrorDetail = { detail };
+    const payload = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census",
+      { idempotency_key: `k-${name}`, census: structuredClone(CENSUS) }));
+    assert.equal(payload.error, name);
+    assert.equal(payload.detail, detail);
+    assert.match(payload.hint, /reanchor-workflow-census/);
+  }
+});
+
+test("a retried key is replayed by the envelope without reading the anchor, so a gap can recover", async () => {
+  const c = new CensusFake();
+  const first = await executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-r", census: structuredClone(CENSUS) });
+  const reads = c.anchorReads;
+  c.workflowCensusAnchor = async () => { throw new Error("the anchor must not be read on a replay"); };
+  const again = await executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-r", census: structuredClone(CENSUS) });
+  assert.equal(again.seq, first.seq);
+  assert.equal(again.row_hash, first.row_hash);
+  assert.equal(reads, 1);
+  assert.equal(c.calls.filter(call => call.sql.includes("ops.record_workflow_census")).length, 1);
+});
+
+test("reanchor-workflow-census is partner-authority only and takes no actor, head or count from the caller", () => {
+  const tool = TOOLS["reanchor-workflow-census"];
+  assert.equal(tool.write, true);
+  assert.equal(tool.humanOnly, true);
+  assert.equal(tool.authorityOnly, true);
+  assert.equal(tool.inputSchema.additionalProperties, false);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["accept_head", "idempotency_key", "reason"]);
+  assert.equal(TOOLS["record-workflow-census"].authorityOnly, undefined);
+});
+
+test("reanchor-workflow-census refuses the writer's machine actor before any database call", async () => {
+  const c = new CensusFake();
+  const payload = await rejected(() => executeRegisteredTool(c, AGENT, "reanchor-workflow-census",
+    { idempotency_key: "r-0", reason: "x", accept_head: null }));
+  assert.equal(payload.error, "human_only_verb_requires_verified_partner");
+  assert.equal(c.calls.length, 0);
+});
+
+test("reanchor-workflow-census passes the anchor it read and the head the partner accepts, and returns the receipt", async () => {
+  const c = new CensusFake({ anchor: { state: "present", seq: 1, row_hash: "1".repeat(64),
+    anchored_at: "2026-09-24T09:10:09.000Z", last_reanchor: null } });
+  const out = await executeRegisteredTool(c, JOE, "reanchor-workflow-census",
+    { idempotency_key: "r-1", reason: "writer lost the key of seq 2", accept_head: { seq: 2, row_hash: "2".repeat(64) } });
+  const door = c.calls.find(call => call.sql.includes("ops.reanchor_workflow_census"));
+  assert.deepEqual(door.params, [1, "1".repeat(64), 2, "2".repeat(64), "writer lost the key of seq 2", "r-1"]);
+  assert.deepEqual(out.receipt.old_head, { seq: 1, row_hash: "1".repeat(64) });
+  assert.deepEqual(out.receipt.new_head, { seq: 2, row_hash: "2".repeat(64) });
+  assert.equal(out.receipt.rows_reattested, 1);
+  assert.equal(out.receipt.actor, "joe");
+  for (const [args, error] of [
+    [{ idempotency_key: "r-2", reason: " ", accept_head: null }, "workflow_census_reanchor_reason_required"],
+    [{ idempotency_key: "r-3", reason: "x", accept_head: { seq: 2, row_hash: "Z" } }, "workflow_census_anchor_invalid"],
+  ]) assert.equal((await rejected(() => executeRegisteredTool(c, JOE, "reanchor-workflow-census", args))).error, error);
+  const unread = new CensusFake({ anchor: { state: "unavailable", detail: "anchor_unreachable" } });
+  assert.equal((await rejected(() => executeRegisteredTool(unread, JOE, "reanchor-workflow-census",
+    { idempotency_key: "r-4", reason: "x", accept_head: null }))).error, "workflow_census_anchor_unavailable");
+  const moved = new CensusFake({ doorError: "workflow_census_reanchor_head_moved" });
+  assert.equal((await rejected(() => executeRegisteredTool(moved, JOE, "reanchor-workflow-census",
+    { idempotency_key: "r-5", reason: "x", accept_head: null }))).error, "workflow_census_reanchor_head_moved");
+});
+
 test("read-workflow-census returns the chain as served, bounded by max_rows", async () => {
   const c = new CensusFake();
   await executeRegisteredTool(c, AGENT, "record-workflow-census", { idempotency_key: "k-a", census: structuredClone(CENSUS) });
@@ -125,11 +235,14 @@ test("read-workflow-census returns the chain as served, bounded by max_rows", as
   const read = c.calls.find(call => call.sql.startsWith("select ops.read_workflow_census"));
   assert.deepEqual(read.params, [20000]);
   assert.equal(out.guards.workflow_census_record_chain_guard, "A");
-  assert.deepEqual(out.anchor, { state: "unavailable", detail: "anchor_not_bound" },
+  assert.deepEqual(out.guard_functions, GUARD_FUNCTIONS);
+  delete c.workflowCensusAnchor;
+  const unbound = await executeRegisteredTool(c, AGENT, "read-workflow-census", {});
+  assert.deepEqual(unbound.anchor, { state: "unavailable", detail: "anchor_not_bound" },
     "a client with no anchor attached answers unavailable, which the reader refuses");
   const bad = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", { max_rows: 0 }));
   assert.equal(bad.error, "workflow_census_max_rows_invalid");
-  assert.equal(c.calls.filter(call => call.sql.startsWith("select ops.read_workflow_census")).length, 1,
+  assert.equal(c.calls.filter(call => call.sql.startsWith("select ops.read_workflow_census")).length, 2,
     "a refused max_rows never reaches the read door");
 });
 
@@ -158,9 +271,12 @@ test("read-workflow-census reads the anchor before the chain and returns it as s
     anchored_at: "2026-09-24T09:10:01.000Z" });
 });
 
-test("read-workflow-census refuses a store answer with no guard report", async () => {
-  const c = new CensusFake({ readResult: { schema_version: "workflow-census-chain.v1",
-    server_now: "2026-09-24T10:00:00.000000Z", row_count: 0, truncated: false, chain: [], latest_payload: null } });
-  const payload = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", {}));
-  assert.equal(payload.error, "workflow_census_unavailable");
+test("read-workflow-census refuses a store answer with no guard or guard-function report", async () => {
+  const base = { schema_version: "workflow-census-chain.v1", server_now: "2026-09-24T10:00:00.000000Z",
+    row_count: 0, truncated: false, chain: [], latest_payload: null };
+  for (const readResult of [base, { ...base, guards: {} }, { ...base, guard_functions: {} }]) {
+    const c = new CensusFake({ readResult });
+    const payload = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", {}));
+    assert.equal(payload.error, "workflow_census_unavailable");
+  }
 });

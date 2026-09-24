@@ -8,5 +8,11 @@
   "writer_cadence_seconds": 86400,
   "freshness_window_seconds": 93600,
   "freshness_window_note": "26 hours for a daily writer (coordinator contract, 2026-09-24). If the writer is ever scheduled more often, set this to 2 x writer_cadence_seconds + 7200.",
-  "max_chain_rows": 20000
+  "max_chain_rows": 20000,
+  "guard_function_sha256": {
+    "workflow_census_record_append_only": "6b9b0ad232aa91107a67aa3a585136f41f36dec5232e617e919219259b4a2f13",
+    "workflow_census_record_chain_guard": "746d9a0d2a7b3e602d4bf975a37acef214b9367cf1728cb5b7e786928d22869f",
+    "workflow_census_record_no_truncate": "6b9b0ad232aa91107a67aa3a585136f41f36dec5232e617e919219259b4a2f13"
+  },
+  "guard_function_sha256_note": "sha256 of '<schema>.<function name>' + newline + the function's source (pg_proc.prosrc) for the function each guard trigger calls, as ops.read_workflow_census serves it under guard_functions. prosrc is the text between the dollar quotes in migrations/0595_workflow_census_store.sql, byte for byte; ops/workflow-census-attestation-selftest.py recomputes these from that file and the local Postgres gate from a real database, so a change to a guard body that is not re-pinned here fails both. A served digest that differs means the guard was replaced (or its trigger re-pointed) while the trigger stayed ENABLE ALWAYS, and the reader answers tampered."
 }

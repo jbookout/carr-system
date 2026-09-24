@@ -289,8 +289,12 @@ def _canonical_workflow_truth():
 
     THE ONE CASE THAT IS A FINDING, AND TURNS HEALTH RED.  ``tampered``: the
     store's guard triggers are not ENABLE ALWAYS (someone disabled them, or
-    re-enabled them as ordinary triggers), or the chain's head does not match the
-    external anchor the Worker recorded at commit.  Either is a fault in the
+    re-enabled them as ordinary triggers), a guard's function source no longer
+    matches its pinned digest (the body was replaced), or the chain's head does
+    not match the external anchor the Worker recorded at commit.  An
+    ``anchor_gap`` (one committed row the anchor has not taken yet) is not a
+    finding: the writer's retry clears it, and a run that could not is already
+    a failed scheduled run.  Either is a fault in the
     store, not a standing fact about the repository, so it prints a
     CANONICAL_FINDING naming the guards or the two heads and returns True.
     Every other reason stays a plain UNAVAILABLE line.
@@ -319,6 +323,10 @@ def _canonical_workflow_truth():
     if census["detail"] == "guard_not_enforced":
         _canonical_finding("workflow_census_guards",
                            "store trigger(s) not ENABLE ALWAYS: "
+                           + ", ".join(census.get("guards") or ()))
+    elif census["detail"] == "guard_function_replaced":
+        _canonical_finding("workflow_census_guards",
+                           "store guard function(s) replaced: "
                            + ", ".join(census.get("guards") or ()))
     else:
         _canonical_finding("workflow_census_anchor",

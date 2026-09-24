@@ -385,10 +385,11 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // Answering Joe (0575) adds one human-only, authority-only write.
   // DoctorCRE V5-UX-C02/C06 (0579) adds one read and one write:
   // read-resource-dashboard and record-resource-observation.
-  // The V5-F09 workflow census store (0595) adds one write and one read:
-  // record-workflow-census and read-workflow-census.
-  assert.equal(rows.length, 283);
-  assert.equal(rows.filter(row => row.write).length, 200);
+  // The V5-F09 workflow census store (0595) adds two writes and one read:
+  // record-workflow-census, reanchor-workflow-census (human-only,
+  // authority-only) and read-workflow-census.
+  assert.equal(rows.length, 284);
+  assert.equal(rows.filter(row => row.write).length, 201);
   assert.equal(rows.filter(row => !row.write).length, 83);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);

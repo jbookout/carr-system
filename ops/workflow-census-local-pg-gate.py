@@ -39,17 +39,38 @@ WHAT IT PROVES, each by a refusal or a verdict on real rows:
      disable followed by a plain ENABLE (state 'O') reads as tampered.
   7. The reviewer's wholesale rewrite (disable the triggers, delete, re-insert
      a clean chain, re-enable ALWAYS) verifies on its own and reads as tampered
-     against the anchor the Worker would have recorded.
+     against the anchor the Worker would have recorded -- and STAYS tampered
+     after the next write: the door refuses to append to a head the anchor does
+     not hold, and the anchor refuses a row linked to the forged head.
   8. Freshness is measured on the DATABASE clock: a genesis row 27 hours old by
      that clock is stale, and read with max_rows smaller than the chain the
      answer says truncated.
+  9. The read door's guard function digests are the pins in the checked-in
+     attestation config; a guard body replaced while its trigger stays ENABLE
+     ALWAYS reads tampered, with or without a forged row, and stays tampered
+     after the next write.
+ 10. A write that commits but never reaches the anchor (the crash window)
+     reads anchor_gap; the door refuses any other write meanwhile; the writer's
+     retry of the SAME key replays the row, advances the anchor and the chain
+     attests again, and a later retry of it answers replayed.
+ 11. The re-anchor door runs only as carr_authority with a verified partner,
+     refuses a moved or unneeded head, records a receipt with the rows the
+     anchor never vouched for, and once applied the chain attests with the
+     receipt named in the claim.
+
+THE ANCHOR here is the Worker's own decision code: every advance and re-anchor
+runs mcp-server/src/workflow-census-anchor.js's decideAnchorAdvance /
+decideAnchorReanchor under node, over state this gate keeps as the Durable
+Object would, so the strict-linkage rule is the deployed rule, not a copy.
 """
 
 from __future__ import annotations
 
 import copy
 import functools
+import json
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -58,7 +79,8 @@ from typing import Any, Callable
 import psycopg
 from psycopg.types.json import Jsonb
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
 
 from gate_runtime_role import rollback_only_connection  # noqa: E402
 from lib.workflow_census_attestation import load_config, row_hash, verify_census_chain  # noqa: E402
@@ -66,6 +88,12 @@ from lib.workflow_census_attestation import load_config, row_hash, verify_census
 WRITER = "workflow-census-gate"
 WRITER_LOGIN = "workflow_census_gate_writer"
 READER_LOGIN = "workflow_census_gate_reader"
+AUTHORITY_LOGIN = "workflow_census_gate_authority"
+ANCHOR_MODULE = REPO / "mcp-server" / "src" / "workflow-census-anchor.js"
+PINNED_GUARD_FUNCTIONS = json.loads(
+    (REPO / "ops" / "config" / "workflow-census-attestation.v1.json").read_text(encoding="utf-8")
+)["guard_function_sha256"]
+MIGRATION = (REPO / "migrations" / "0595_workflow_census_store.sql").read_text(encoding="utf-8")
 # Escapes, a BMP character above U+E000 and an astral one, keys whose code-point
 # order differs from their UTF-16 order: every place the two canonical
 # renderings could disagree, so the cross-language check below means something.
@@ -99,7 +127,68 @@ def config(*principals: str, sessions: tuple[str, ...] = (WRITER_LOGIN,)) -> dic
         "writer_principals": list(principals or (WRITER,)),
         "writer_db_session_principals": list(sessions),
         "writer_cadence_seconds": 86400, "freshness_window_seconds": 93600,
-        "max_chain_rows": 20000})
+        "max_chain_rows": 20000, "guard_function_sha256": PINNED_GUARD_FUNCTIONS})
+
+
+_DECIDE = """
+const m = await import(process.argv[1]);
+const input = JSON.parse(process.argv[2]);
+const now = "2026-09-24T00:00:00.000Z";
+const out = input.kind === "advance"
+  ? m.decideAnchorAdvance(input.stored, input.proposed, now, seq => input.history[String(seq)])
+  : m.decideAnchorReanchor(input.stored, input.last, input.receipt, now);
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+class Anchor:
+    """The Durable Object's state, decided by the Worker's own module under node."""
+
+    def __init__(self) -> None:
+        self.stored: dict[str, Any] | None = None
+        self.history: dict[str, str] = {}
+        self.last: dict[str, Any] | None = None
+
+    def _decide(self, payload: dict[str, Any]) -> dict[str, Any]:
+        proc = subprocess.run(["node", "--input-type=module", "-e", _DECIDE, ANCHOR_MODULE.as_uri(),
+                               json.dumps(payload)], capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            raise RuntimeError(f"the anchor module did not run under node: {proc.stderr[-300:]}")
+        return json.loads(proc.stdout)
+
+    def advance(self, seq: int, row_hash: str, prev_hash: str | None) -> dict[str, Any]:
+        verdict = self._decide({"kind": "advance", "stored": self.stored, "history": self.history,
+                                "proposed": {"seq": seq, "row_hash": row_hash, "prev_hash": prev_hash}})
+        if verdict.get("write"):
+            self.stored = verdict["head"]
+            self.history[str(seq)] = row_hash
+        return verdict["response"]
+
+    def reanchor(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        verdict = self._decide({"kind": "reanchor", "stored": self.stored, "last": self.last,
+                                "receipt": receipt})
+        if verdict.get("write"):
+            self.stored, self.last = verdict["head"], verdict["record"]
+            self.history = {} if verdict["head"] is None else {
+                str(verdict["head"]["seq"]): verdict["head"]["row_hash"]}
+        return verdict["response"]
+
+    def view(self) -> dict[str, Any]:
+        if self.stored is None:
+            return {"state": "absent", "last_reanchor": self.last}
+        return {"state": "present", **self.stored, "last_reanchor": self.last}
+
+    def head_params(self) -> tuple[int | None, str | None]:
+        return (None, None) if self.stored is None else (self.stored["seq"], self.stored["row_hash"])
+
+    def snapshot(self) -> tuple[Any, ...]:
+        return copy.deepcopy((self.stored, self.history, self.last))
+
+    def restore(self, state: tuple[Any, ...]) -> None:
+        self.stored, self.history, self.last = copy.deepcopy(state)
+
+
+ANCHOR = Anchor()
 
 
 def become(cur: psycopg.Cursor[Any], login: str | None) -> None:
@@ -118,14 +207,23 @@ def actor(cur: psycopg.Cursor[Any], slug: str | None) -> None:
     cur.execute("select set_config('carr.acting_actor_slug', %s, true)", (slug or "",))
 
 
-def record(cur: psycopg.Cursor[Any], payload: Any = None, key: str | None = None) -> tuple[Any, ...]:
+def record(cur: psycopg.Cursor[Any], payload: Any = None, key: str | None = None, *,
+           crash: bool = False) -> tuple[Any, ...]:
+    """The Worker's write path: read the anchor, call the door with its head,
+    then (unless the Worker "crashes" between commit and advance) advance the
+    anchor to the committed row, and refuse by name if it will not advance."""
+    anchor_seq, anchor_hash = ANCHOR.head_params()
     row = cur.execute(
         "select seq, recorded_at, principal, row_hash, prev_hash, payload_sha256, replayed "
-        "from ops.record_workflow_census(%s, %s)",
-        (Jsonb(CENSUS if payload is None else payload), key or str(uuid.uuid4())),
+        "from ops.record_workflow_census(%s, %s, %s, %s)",
+        (Jsonb(CENSUS if payload is None else payload), key or str(uuid.uuid4()), anchor_seq, anchor_hash),
     ).fetchone()
     if row is None:
         raise RuntimeError("record_workflow_census returned no row")
+    if not crash:
+        answer = ANCHOR.advance(row[0], row[3], row[4])
+        if answer.get("ok") is not True:
+            raise RuntimeError(f"workflow_census_anchor_not_advanced: {answer}")
     return row
 
 
@@ -138,14 +236,44 @@ def read(cur: psycopg.Cursor[Any], max_rows: int = 20000) -> dict[str, Any]:
 
 def served(answer: dict[str, Any], anchor: dict[str, Any] | None = None) -> dict[str, Any]:
     """The verb's envelope around the read door's answer. The anchor is what the
-    Worker's Durable Object would hold: by default the head it committed."""
+    Worker's Durable Object holds (ANCHOR), unless a test passes another."""
     out = copy.deepcopy(answer)
     out["ok"] = True
-    head = out["chain"][-1] if out["chain"] else None
-    out["anchor"] = anchor if anchor is not None else (
-        {"state": "present", "seq": head["seq"], "row_hash": head["row_hash"],
-         "anchored_at": head["recorded_at"]} if head else {"state": "absent"})
+    out["anchor"] = anchor if anchor is not None else ANCHOR.view()
     return out
+
+
+def self_anchored(answer: dict[str, Any]) -> dict[str, Any]:
+    """An answer served beside an anchor at its own head (for checks about the
+    chain alone, such as the owner-written stale genesis)."""
+    head = answer["chain"][-1] if answer["chain"] else None
+    return served(answer, {"state": "present", "seq": head["seq"], "row_hash": head["row_hash"],
+                           "anchored_at": head["recorded_at"]} if head else {"state": "absent"})
+
+
+def guard_function_source(name: str) -> str:
+    """The migration's own CREATE OR REPLACE for one guard function, to restore it."""
+    start = MIGRATION.index(f"create or replace function ops.{name}()")
+    end = MIGRATION.index("$$;", MIGRATION.index("as $$", start) + 5) + 3
+    return MIGRATION[start:end]
+
+
+def verdict_of(cur: psycopg.Cursor[Any], cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    return verify_census_chain(served(read(cur)), cfg or config())
+
+
+def reanchor(cur: psycopg.Cursor[Any], accept: tuple[int, str] | None, reason: str,
+             key: str | None = None) -> tuple[Any, ...]:
+    anchor_seq, anchor_hash = ANCHOR.head_params()
+    row = cur.execute(
+        "select receipt_id::text, recorded_at, actor, verified_partner, reason, old_seq, old_row_hash, "
+        "new_seq, new_row_hash, rows_reattested, replayed "
+        "from ops.reanchor_workflow_census(%s, %s, %s, %s, %s, %s)",
+        (anchor_seq, anchor_hash, accept[0] if accept else None, accept[1] if accept else None,
+         reason, key or str(uuid.uuid4()))).fetchone()
+    if row is None:
+        raise RuntimeError("reanchor_workflow_census returned no row")
+    return row
 
 
 def expect_refusal(cur: psycopg.Cursor[Any], fn: Callable[[], object],
@@ -210,6 +338,7 @@ def main() -> int:
                 return fail(f"the disposable database already holds {prior} census rows")
             cur.execute(f"create role {WRITER_LOGIN} login in role carr_writer")
             cur.execute(f"create role {READER_LOGIN} login in role carr_reader")
+            cur.execute(f"create role {AUTHORITY_LOGIN} login in role carr_authority")
 
             # 1. Pinned vectors: the database's rule is the reader's rule.
             for vector, digest in VECTORS:
@@ -239,7 +368,7 @@ def main() -> int:
             cur.execute("savepoint stale_genesis")
             owner_insert(cur, 1, None, "clock_timestamp() - interval '27 hours'", payload=CENSUS)
             owner = cur.execute("select session_user::text").fetchone()[0]
-            verdict = verify_census_chain(served(read(cur)), config(sessions=(owner,)))
+            verdict = verify_census_chain(self_anchored(read(cur)), config(sessions=(owner,)))
             if verdict.get("reason") != "stale" or not 27 * 3600 <= verdict.get("age_seconds", 0) < 27 * 3600 + 600:
                 raise RuntimeError(f"a genesis 27h old by the database clock was not stale: {verdict}")
             cur.execute("rollback to savepoint stale_genesis")
@@ -308,6 +437,10 @@ def main() -> int:
             become(cur, None)
             if answer.get("guards") != {name: "A" for name in GUARDS}:
                 raise RuntimeError(f"the read door did not report the guards: {answer.get('guards')}")
+            # 9a. The real guard functions are the ones the checked-in config pins.
+            if answer.get("guard_functions") != PINNED_GUARD_FUNCTIONS:
+                raise RuntimeError("the read door's guard function digests are not the pinned ones: "
+                                   f"{answer.get('guard_functions')}")
             if truncated.get("truncated") is not True or len(truncated.get("chain", [])) != 1:
                 raise RuntimeError(f"max_rows 1 over a 2-row chain did not say truncated: {truncated}")
             if verify_census_chain(served(truncated), config()).get("detail") != "chain_truncated":
@@ -355,10 +488,12 @@ def main() -> int:
             cur.execute("savepoint owner_append")
             owner_insert(cur, seq + 1, prev, "clock_timestamp()")
             appended = read(cur)
-            owner_verdict = verify_census_chain(served(appended), config(WRITER, "joe-local"))
+            owner_verdict = verify_census_chain(self_anchored(appended), config(WRITER, "joe-local"))
             if (owner_verdict.get("detail") != "db_session_principal_not_listed"
                     or owner_verdict.get("at_seq") != seq + 1):
                 raise RuntimeError("an owner-appended row was not refused as an unlisted login role")
+            if verify_census_chain(served(appended), config(WRITER, "joe-local")).get("reason") != "anchor_gap":
+                raise RuntimeError("an owner-appended row the anchor never took is not an anchor gap")
             cur.execute("rollback to savepoint owner_append")
             expect_refusal(cur, lambda: cur.execute(
                 "update ops.workflow_census_record set payload = '{}'::jsonb where seq = 1"),
@@ -392,7 +527,7 @@ def main() -> int:
             for name in GUARDS:
                 cur.execute(f"alter table ops.workflow_census_record enable always trigger {name}")
             rewritten = read(cur)
-            alone = verify_census_chain(served(rewritten), config())
+            alone = verify_census_chain(self_anchored(rewritten), config())
             if alone.get("available") is not True:
                 raise RuntimeError(f"control failed: the rewritten chain should verify on its own: {alone}")
             against_anchor = verify_census_chain(served(rewritten, genuine["anchor"]), config())
@@ -400,12 +535,187 @@ def main() -> int:
                 raise RuntimeError(f"a wholesale rewrite was not refused against the anchor: {against_anchor}")
             cur.execute("rollback to savepoint rewrite")
 
+            # 7b. REWRITE, THEN WRITE: the round-2 laundering path. Same-length
+            # rewrite (2 forged rows), guards back ALWAYS, then the Worker writes.
+            saved = ANCHOR.snapshot()
+            cur.execute("savepoint rewrite_then_write")
+            cur.execute("alter table ops.workflow_census_record disable trigger user")
+            cur.execute("delete from ops.workflow_census_record")
+            owner_insert(cur, 1, None, "clock_timestamp() - interval '2 hours'",
+                         principal=WRITER, session=WRITER_LOGIN)
+            forged_head = head(cur)
+            owner_insert(cur, 2, forged_head[1], "clock_timestamp() - interval '1 hour'",
+                         principal=WRITER, session=WRITER_LOGIN)
+            forged_head = head(cur)
+            for name in GUARDS:
+                cur.execute(f"alter table ops.workflow_census_record enable always trigger {name}")
+            before = verdict_of(cur)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            expect_refusal(cur, lambda: record(cur), (psycopg.errors.RaiseException,),
+                           "workflow_census_tampered", "rewrite_then_write_door")
+            become(cur, None)
+            after = verdict_of(cur)
+            # Even a row the owner links to the forged head cannot move the anchor.
+            actor(cur, WRITER)
+            cur.execute("alter table ops.workflow_census_record disable trigger user")
+            owner_insert(cur, 3, forged_head[1], "clock_timestamp()", principal=WRITER, session=WRITER_LOGIN)
+            for name in GUARDS:
+                cur.execute(f"alter table ops.workflow_census_record enable always trigger {name}")
+            forged3 = head(cur)
+            carried = ANCHOR.advance(forged3[0], forged3[1], forged_head[1])
+            grown = verdict_of(cur)
+            cur.execute("rollback to savepoint rewrite_then_write")
+            ANCHOR.restore(saved)
+            if (before.get("reason"), after.get("reason"), grown.get("reason")) != ("tampered",) * 3:
+                raise RuntimeError("a same-length rewrite did not stay tampered through the next write: "
+                                   f"{before} / {after} / {grown}")
+            if carried.get("error") != "anchor_link_refused":
+                raise RuntimeError(f"the anchor took a row linked to a forged head: {carried}")
+
+            # 9b. GUARD REPLACED, THEN WRITE. The chain guard's body is replaced
+            # (its trigger stays ENABLE ALWAYS) and nothing else changes; then an
+            # ordinary write, which the door and the anchor both accept.
+            saved = ANCHOR.snapshot()
+            cur.execute("savepoint guard_replaced")
+            cur.execute("create or replace function ops.workflow_census_chain_guard() returns trigger "
+                        "language plpgsql as $$ begin return new; end $$")
+            replaced_only = verdict_of(cur)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            record(cur)
+            become(cur, None)
+            replaced_then_write = verdict_of(cur)
+            # The reviewer's probe H: with the permissive guard, a forged row is
+            # appended linked to the real head; the next write is refused.
+            actor(cur, WRITER)
+            real_head = head(cur)
+            owner_insert(cur, real_head[0] + 1, real_head[1], "clock_timestamp()",
+                         principal=WRITER, session=WRITER_LOGIN)
+            forged_on_top = verdict_of(cur)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            expect_refusal(cur, lambda: record(cur), (psycopg.errors.RaiseException,),
+                           "workflow_census_anchor_gap", "guard_replaced_forged_row_door")
+            become(cur, None)
+            still = verdict_of(cur)
+            # Restoring the guard's source clears the digest, not the forged row.
+            cur.execute(guard_function_source("workflow_census_chain_guard"))
+            restored = verdict_of(cur)
+            cur.execute("rollback to savepoint guard_replaced")
+            ANCHOR.restore(saved)
+            for label, got in (("replaced", replaced_only), ("replaced then written", replaced_then_write),
+                               ("forged row on top", forged_on_top), ("after a refused write", still)):
+                if got.get("reason") != "tampered" or got.get("detail") != "guard_function_replaced":
+                    raise RuntimeError(f"a replaced guard ({label}) did not read tampered: {got}")
+            if restored.get("reason") != "anchor_gap":
+                raise RuntimeError(f"a forged row linked to the anchored head, guard restored, is not an "
+                                   f"anchor gap: {restored}")
+
+            # 10. THE CRASH WINDOW: committed, never anchored; retry the SAME key.
+            saved = ANCHOR.snapshot()
+            cur.execute("savepoint crash_gap")
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            crash_key = str(uuid.uuid4())
+            crashed = record(cur, key=crash_key, crash=True)
+            become(cur, None)
+            gap = verdict_of(cur)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            expect_refusal(cur, lambda: record(cur), (psycopg.errors.RaiseException,),
+                           "workflow_census_anchor_gap", "crash_gap_other_key")
+            become(cur, None)
+            gap_after_other = verdict_of(cur)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            retried = record(cur, key=crash_key)
+            late = ANCHOR.advance(retried[0], retried[3], retried[4])
+            following = record(cur)
+            become(cur, None)
+            recovered = verdict_of(cur)
+            cur.execute("rollback to savepoint crash_gap")
+            ANCHOR.restore(saved)
+            if (gap.get("reason"), gap.get("detail")) != ("anchor_gap", "chain_one_linked_row_ahead_of_anchor"):
+                raise RuntimeError(f"a committed-but-unanchored row is not an anchor gap: {gap}")
+            if gap_after_other.get("reason") != "anchor_gap":
+                raise RuntimeError(f"the gap did not persist across a refused write: {gap_after_other}")
+            if retried[6] is not True or retried[3] != crashed[3]:
+                raise RuntimeError(f"the same-key retry did not replay the crashed row: {retried}")
+            if late.get("state") != "replayed" or following[0] != crashed[0] + 1:
+                raise RuntimeError(f"a late retry was not replayed, or the next write did not follow: {late}")
+            if recovered.get("available") is not True or recovered["attestation"]["seq"] != following[0]:
+                raise RuntimeError(f"the chain did not attest after the retry: {recovered}")
+
+            # 11. RE-ANCHOR: a crash whose key is lost, closed only by partner authority.
+            saved = ANCHOR.snapshot()
+            cur.execute("savepoint reanchor")
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            lost = record(cur, crash=True)
+            expect_refusal(cur, lambda: reanchor(cur, (lost[0], lost[3]), "writer"),
+                           (psycopg.errors.InsufficientPrivilege,), "permission denied",
+                           "writer_cannot_reanchor")
+            become(cur, AUTHORITY_LOGIN)
+            actor(cur, "joe")
+            cur.execute("select set_config('carr.verified_human_actor_slug', '', true)")
+            expect_refusal(cur, lambda: reanchor(cur, (lost[0], lost[3]), "no partner"),
+                           (psycopg.errors.RaiseException,), "workflow_census_reanchor_requires_partner",
+                           "reanchor_requires_partner")
+            cur.execute("select set_config('carr.verified_human_actor_slug', 'joe', true)")
+            expect_refusal(cur, lambda: reanchor(cur, (lost[0] - 1, lost[4]), "stale review"),
+                           (psycopg.errors.RaiseException,), "workflow_census_reanchor_head_moved",
+                           "reanchor_head_moved")
+            expect_refusal(cur, lambda: reanchor(cur, (lost[0], lost[3]), " "),
+                           (psycopg.errors.RaiseException,), "workflow_census_reanchor_reason_required",
+                           "reanchor_reason_required")
+            receipt_key = str(uuid.uuid4())
+            receipt = reanchor(cur, (lost[0], lost[3]), "writer lost the key of the last row", receipt_key)
+            again = reanchor(cur, (lost[0], lost[3]), "writer lost the key of the last row", receipt_key)
+            expect_refusal(cur, lambda: cur.execute("select count(*) from ops.workflow_census_reanchor_receipt"),
+                           (psycopg.errors.InsufficientPrivilege,), "permission denied",
+                           "authority_direct_receipt_select")
+            become(cur, None)
+            receipt_doc = {"receipt_id": receipt[0], "actor": receipt[2], "recorded_at": receipt[1],
+                           "rows_reattested": receipt[9],
+                           "old_head": {"seq": receipt[5], "row_hash": receipt[6]},
+                           "new_head": {"seq": receipt[7], "row_hash": receipt[8]}}
+            applied = ANCHOR.reanchor(receipt_doc)
+            replay_applied = ANCHOR.reanchor(receipt_doc)
+            reattested = verdict_of(cur)
+            become(cur, AUTHORITY_LOGIN)
+            actor(cur, "joe")
+            cur.execute("select set_config('carr.verified_human_actor_slug', 'joe', true)")
+            expect_refusal(cur, lambda: reanchor(cur, (lost[0], lost[3]), "again"),
+                           (psycopg.errors.RaiseException,), "workflow_census_reanchor_not_needed",
+                           "reanchor_not_needed")
+            become(cur, None)
+            receipts = cur.execute("select count(*) from ops.workflow_census_reanchor_receipt").fetchone()[0]
+            expect_refusal(cur, lambda: cur.execute(
+                "delete from ops.workflow_census_reanchor_receipt"),
+                (psycopg.errors.RaiseException,), "append-only", "receipt_delete_refused")
+            cur.execute("rollback to savepoint reanchor")
+            ANCHOR.restore(saved)
+            if (receipt[2], receipt[3], receipt[9], receipt[10]) != ("joe", "joe", 1, False) or again[10] is not True:
+                raise RuntimeError(f"the re-anchor receipt is not the one expected: {receipt} / {again}")
+            if applied.get("state") != "reanchored" or replay_applied.get("state") != "replayed":
+                raise RuntimeError(f"the anchor did not take the receipt once: {applied} / {replay_applied}")
+            if (reattested.get("available") is not True
+                    or receipt[0] not in reattested.get("claim", "")
+                    or reattested["attestation"]["last_reanchor"]["receipt_id"] != receipt[0]):
+                raise RuntimeError(f"a re-anchored chain does not attest with its receipt named: {reattested}")
+            if receipts != 1:
+                raise RuntimeError(f"expected one receipt row, found {receipts}")
+
         print("PASS: workflow-census real-PostgreSQL: pinned and real hashes agree with the reader; "
               "writer and reader run as non-owner logins; the door refuses a missing or malformed "
               "principal, key reuse, fractions, wrong shape and oversize payloads; owner inserts that "
               "forge identity, splice, back-date, future-date or forge a digest are refused with every "
-              "trigger on; guards are ENABLE ALWAYS and a flipped guard or a wholesale rewrite reads "
-              "tampered; freshness and truncation follow the database")
+              "trigger on; guards are ENABLE ALWAYS and a flipped guard, a replaced guard body or a "
+              "wholesale rewrite reads tampered and stays tampered through the next write; a crash "
+              "gap reads anchor_gap until the same-key retry, then attests; a re-anchor needs "
+              "carr_authority and a verified partner and leaves a named receipt; freshness and "
+              "truncation follow the database")
         return 0
     except Exception as exc:  # noqa: BLE001 - gate contract is a printed failure, not a traceback
         return fail(str(exc))

@@ -464,6 +464,9 @@ def health_truth_checks(live) -> None:
     # ---- a TAMPERED census store is the one census finding, and it is red -----
     from lib import workflow_census_attestation as census_att
     guards = {name: "A" for name in census_att.GUARD_TRIGGERS}
+    guard_functions = json.loads(
+        (REPO / "ops" / "config" / "workflow-census-attestation.v1.json")
+        .read_text(encoding="utf-8"))["guard_function_sha256"]
     payload = {"schema_version": "control-plane-workflow-truth.v1", "rows": [], "summary": {}}
     head = {"seq": 1, "recorded_at": "2026-09-24T04:10:00.000000Z", "principal": "joe-local",
             "db_session_principal": "carr_writer", "prev_hash": None,
@@ -472,6 +475,7 @@ def health_truth_checks(live) -> None:
     served: dict = {"ok": True, "schema_version": "workflow-census-chain.v1",
               "server_now": "2026-09-24T05:10:00.000000Z", "row_count": 1, "truncated": False,
               "chain": [head], "latest_payload": payload, "guards": guards,
+              "guard_functions": dict(guard_functions),
               "anchor": {"state": "present", "seq": 1, "row_hash": head["row_hash"],
                          "anchored_at": "2026-09-24T04:10:00.100Z"}}
     code, out = _health_surface(_carried(live), census_answer=served)
@@ -483,6 +487,12 @@ def health_truth_checks(live) -> None:
     check("a census store guard that is not ENABLE ALWAYS is a red health finding",
           code == 1 and "CANONICAL_FINDING workflow_census_guards" in out
           and "workflow_census_record_chain_guard" in out, out)
+    code, out = _health_surface(
+        _carried(live), census_answer={**served, "guard_functions": {
+            **guard_functions, "workflow_census_record_chain_guard": "0" * 64}})
+    check("a census store guard whose function body was replaced is a red health finding",
+          code == 1 and "CANONICAL_FINDING workflow_census_guards" in out
+          and "guard function(s) replaced: workflow_census_record_chain_guard" in out, out)
     code, out = _health_surface(
         _carried(live), census_answer={**served, "anchor": {**served["anchor"], "row_hash": "f" * 64}})
     check("a census chain that no longer matches its external anchor is a red health finding",

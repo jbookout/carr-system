@@ -15,9 +15,11 @@ WHAT MUST HOLD, one check each:
     equal to the external anchor, is the ONLY input that answers
     ``available: true``, and even then the labels say "attested record", never a
     health word, and the claim states its three limits;
-  * guards that are not ENABLE ALWAYS, a missing / behind / ahead / forked
-    anchor, and a wholesale rewrite that re-chains cleanly but no longer matches
-    the anchor each read ``tampered``; an unreachable anchor is unprovable;
+  * guards that are not ENABLE ALWAYS or whose function source no longer
+    matches its pinned digest, a missing / behind / ahead / forked anchor, and a
+    wholesale rewrite that re-chains cleanly but no longer matches the anchor
+    each read ``tampered``; a chain exactly one linked row past the anchor reads
+    ``anchor_gap``; an unreachable anchor is unprovable;
   * a row from an unlisted writer ANYWHERE in the chain fails the read;
   * TAMPERED payload, EDITED row (with and without a recomputed row hash),
     BACK-DATED row (edited in place, and a whole re-chained history that runs
@@ -26,8 +28,10 @@ WHAT MUST HOLD, one check each:
     missing payload, a truncated answer) and an unreachable or malformed server
     answer each fail closed with the named reason;
   * a broken chain outranks an unknown writer, which outranks staleness;
-  * the route re-reads exactly once when the chain is one commit ahead of the
-    anchor, and a mismatch that persists stays ``tampered``;
+  * the route re-reads exactly once on ``anchor_gap``, a gap that persists
+    stays ``anchor_gap``, and ``tampered`` is never re-read;
+  * the writer re-sends the SAME key on any transport failure, accepts a late
+    ``replayed``, and never retries a definitive refusal;
   * the route's answer is deep-frozen, takes no argument, and ignores anything
     written onto the reader module after it was bound;
   * the checked-in attestation config validates and carries the contract's
@@ -80,7 +84,11 @@ CONFIG = att.load_config({
     "schema_version": "workflow-census-attestation.v1",
     "writer_principals": [WRITER], "writer_db_session_principals": [SESSION, "app_writer"],
     "writer_cadence_seconds": 86400, "freshness_window_seconds": 93600,
-    "max_chain_rows": 20000})
+    "max_chain_rows": 20000,
+    "guard_function_sha256": json.loads(
+        (REPO / "ops" / "config" / "workflow-census-attestation.v1.json").read_text(encoding="utf-8")
+    )["guard_function_sha256"]})
+PINNED_GUARD_FUNCTIONS = dict(CONFIG["guard_function_sha256"])
 
 
 _VECTOR_ROW = {"seq": 7, "recorded_at": "2026-09-24T04:10:00.123456Z", "principal": "joe-local",
@@ -148,7 +156,8 @@ def chain(times: list[datetime], *, principal: str = WRITER, session: str = SESS
     return anchored({"ok": True, "schema_version": "workflow-census-chain.v1",
                      "server_now": stamp(now), "row_count": len(rows), "truncated": False,
                      "chain": rows, "latest_payload": payloads[-1] if payloads else None,
-                     "guards": dict(ENFORCED)})
+                     "guards": dict(ENFORCED),
+                     "guard_functions": dict(PINNED_GUARD_FUNCTIONS)})
 
 
 def fresh() -> dict[str, Any]:
@@ -176,10 +185,16 @@ def main() -> int:
           and good["census"]["tag"] == "c2", json.dumps(good, default=str)[:300])
     check("the attested claim names the principal and the server time and states its limits",
           good.get("claim", "").startswith(f"recorded under principal {WRITER} at server time ")
-          and "chain intact as served and matches the external anchor" in good["claim"]
+          and "chain intact as served, and its head is the head the external anchor holds, "
+              "which moves only to the next linked row;" in good["claim"]
+          and "re-anchored" not in good["claim"]
           and "not proof that the scheduled writer job wrote it" in good["claim"]
           and "not proof that the observations inside it are true" in good["claim"]
-          and "not proof against a coordinated database-owner plus anchor rewrite" in good["claim"],
+          and "not proof against a database owner who also replaces the door that serves the "
+              "chain" in good["claim"]
+          and "not proof against a coordinated database-owner plus anchor rewrite" in good["claim"]
+          and good["claim"].endswith("not proof against a partner-authority re-anchor of a "
+                                     "forged chain"),
           good.get("claim", ""))
     vocabulary = [good["reason"], good["item_disposition"],
                   good["claim"].replace(WRITER, "").replace(good["attestation"]["recorded_at"], "")]
@@ -300,6 +315,23 @@ def main() -> int:
     check("an answer with no guard report is unprovable",
           *refused({k: v for k, v in fresh().items() if k != "guards"},
                    "handle_integrity_unprovable", "server_answer_shape_refused"))
+    # The reviewer's probe H: the guard's BODY replaced while its trigger stays
+    # ENABLE ALWAYS. Only the function digest shows it.
+    for label, change in (("replaced", "0" * 64), ("missing", None)):
+        answer = fresh()
+        if change is None:
+            del answer["guard_functions"]["workflow_census_record_chain_guard"]
+        else:
+            answer["guard_functions"]["workflow_census_record_chain_guard"] = change
+        out = verdict(answer)
+        check(f"a chain guard function {label} while its trigger stays 'A' reads tampered",
+              out.get("available") is False and out.get("reason") == "tampered"
+              and out.get("detail") == "guard_function_replaced"
+              and out.get("guards") == ["workflow_census_record_chain_guard"],
+              json.dumps(out, default=str))
+    check("an answer with no guard function report is unprovable",
+          *refused({k: v for k, v in fresh().items() if k != "guard_functions"},
+                   "handle_integrity_unprovable", "server_answer_shape_refused"))
 
     # ---- THE ANCHOR OUTSIDE THE DATABASE --------------------------------------
     answer = fresh()
@@ -318,7 +350,15 @@ def main() -> int:
           *refused(answer, "handle_integrity_unprovable", "anchor_unavailable"))
     answer = fresh()
     answer["anchor"].update(seq=2, row_hash=answer["chain"][1]["row_hash"])
-    check("a chain ahead of its anchor (a row the Worker never anchored) reads tampered",
+    check("a chain one linked row past its anchor (committed, never anchored) is an anchor gap",
+          *refused(answer, "anchor_gap", "chain_one_linked_row_ahead_of_anchor"))
+    answer = fresh()
+    answer["anchor"].update(seq=1, row_hash=answer["chain"][0]["row_hash"])
+    check("a chain two rows past its anchor reads tampered (the door refuses a second append)",
+          *refused(answer, "tampered", "anchor_behind_chain"))
+    answer = fresh()
+    answer["anchor"].update(seq=2, row_hash="e" * 64)
+    check("a chain one row past an anchor whose hash it does not hold reads tampered",
           *refused(answer, "tampered", "anchor_behind_chain"))
     answer = fresh()
     del answer["chain"][-1]
@@ -346,6 +386,39 @@ def main() -> int:
           inner.get("available") is True, json.dumps(inner, default=str)[:200])
     check("a wholesale rewrite that re-chains cleanly no longer matches the anchor: tampered",
           *refused(answer, "tampered", "anchor_hash_mismatch"))
+    # ...and the next ordinary write cannot carry it forward: under strict
+    # linkage the anchor stays on the old head, so the rewritten chain plus one
+    # new row is still not the anchored chain plus one.
+    grown = copy.deepcopy(answer)
+    grown["chain"].append(rehash({"seq": 4, "recorded_at": stamp(NOW - timedelta(hours=1)),
+                                  "principal": WRITER, "db_session_principal": SESSION,
+                                  "prev_hash": grown["chain"][-1]["row_hash"],
+                                  "payload_sha256": att.sha256_hex(att.canonical_json(census("c4")))}))
+    grown["row_count"], grown["latest_payload"] = 4, census("c4")
+    check("a rewrite plus one more row, beside the anchor that never moved, reads tampered",
+          *refused(grown, "tampered", "anchor_behind_chain"))
+
+    # ---- A RE-ANCHORED CHAIN SAYS SO -----------------------------------------
+    answer = fresh()
+    answer["anchor"]["last_reanchor"] = {
+        "receipt_id": "0f0e0d0c-0b0a-4908-8706-050403020100", "actor": "joe",
+        "recorded_at": stamp(NOW - timedelta(hours=3)), "rows_reattested": 1,
+        "old_head": None, "new_head": None}
+    out = verdict(answer)
+    check("an attestation over a re-anchored chain names the receipt, actor and rows in its claim",
+          out.get("available") is True
+          and "its anchor was last re-anchored under receipt 0f0e0d0c-0b0a-4908-8706-050403020100 "
+              "by joe at " in out.get("claim", "")
+          and "over 1 rows the anchor had not vouched for" in out.get("claim", "")
+          and out["attestation"]["last_reanchor"]["receipt_id"].startswith("0f0e0d0c"),
+          json.dumps(out, default=str)[:400])
+    words = out.get("claim", "").replace(WRITER, "").replace(out["attestation"]["recorded_at"], "")
+    check("the re-anchor clause carries no word of the privileged union",
+          not [w for w in PRIVILEGED if w in words.lower()],
+          json.dumps([w for w in PRIVILEGED if w in words.lower()]))
+    answer["anchor"]["last_reanchor"] = {"receipt_id": "", "actor": "joe"}
+    check("a malformed re-anchor record is unprovable, never attested",
+          *refused(answer, "handle_integrity_unprovable", "anchor_unavailable"))
 
     # ---- AN UNLISTED WRITER ANYWHERE ------------------------------------------
     out = verdict(chain([NOW - timedelta(hours=50), NOW - timedelta(hours=26),
@@ -368,7 +441,8 @@ def main() -> int:
                              "writer_principals": [WRITER],
                              "writer_db_session_principals": [SESSION],
                              "writer_cadence_seconds": 86400, "freshness_window_seconds": 93600,
-                             "max_chain_rows": 2})
+                             "max_chain_rows": 2,
+                             "guard_function_sha256": PINNED_GUARD_FUNCTIONS})
     out = att.verify_census_chain(fresh(), small)
     check("a chain longer than max_chain_rows is refused as truncated",
           out.get("reason") == "handle_integrity_unprovable" and out.get("detail") == "chain_truncated",
@@ -451,7 +525,7 @@ def main() -> int:
     pauses: list[int] = []
     routed = reader._census_answer(lambda _m: (served_list.pop(0), None), lambda: CONFIG,
                                    pause=lambda: pauses.append(1))
-    check("a chain one commit ahead of the anchor is re-read once and then attested",
+    check("an anchor gap is re-read once and then attested",
           routed["available"] is True and pauses == [1] and not served_list, repr(routed)[:200])
     calls: list[int] = []
 
@@ -461,19 +535,26 @@ def main() -> int:
         stuck["anchor"].update(seq=2, row_hash=stuck["chain"][1]["row_hash"])
         return stuck, None
     routed = reader._census_answer(persistent, lambda: CONFIG, pause=lambda: None)
-    check("a mismatch that persists stays tampered after exactly one re-read",
-          routed["available"] is False and routed["reason"] == "tampered" and len(calls) == 2,
+    check("a gap that persists stays anchor_gap after exactly one re-read",
+          routed["available"] is False and routed["reason"] == "anchor_gap" and len(calls) == 2,
           repr(routed)[:200])
-    calls.clear()
-    tampered = fresh()
-    tampered["anchor"]["row_hash"] = "f" * 64
-    def once_tampered(_m: int) -> tuple[dict[str, Any], None]:
-        calls.append(1)
-        return copy.deepcopy(tampered), None
-    routed = reader._census_answer(once_tampered, lambda: CONFIG, pause=lambda: None)
-    check("any other anchor mismatch is not re-read",
-          routed["reason"] == "tampered" and routed["detail"] == "anchor_hash_mismatch"
-          and len(calls) == 1, repr(routed)[:200])
+    for label, mutate in (
+        ("anchor hash mismatch", lambda a: a["anchor"].update(row_hash="f" * 64)),
+        ("chain two rows past the anchor",
+         lambda a: a["anchor"].update(seq=1, row_hash=a["chain"][0]["row_hash"])),
+        ("replaced guard function",
+         lambda a: a["guard_functions"].update(workflow_census_record_append_only="0" * 64)),
+    ):
+        calls.clear()
+        tampered = fresh()
+        mutate(tampered)
+
+        def once_tampered(_m: int, _t: dict[str, Any] = tampered) -> tuple[dict[str, Any], None]:
+            calls.append(1)
+            return copy.deepcopy(_t), None
+        routed = reader._census_answer(once_tampered, lambda: CONFIG, pause=lambda: None)
+        check(f"tampered ({label}) is never re-read",
+              routed["reason"] == "tampered" and len(calls) == 1, repr(routed)[:200])
 
     offline = reader.workflow_truth_census()
     check("the production route, offline by environment, fails closed without a network call",
@@ -488,7 +569,8 @@ def main() -> int:
                    "db_session_principal_not_listed", "older_than_window", "chain_break",
                    "unknown_writer", "stale", "tampered", "guard_not_enforced", "anchor_absent",
                    "anchor_unavailable", "anchor_behind_chain", "chain_behind_anchor",
-                   "anchor_hash_mismatch", "chain_missing_behind_anchor"):
+                   "anchor_hash_mismatch", "chain_missing_behind_anchor", "anchor_gap",
+                   "chain_one_linked_row_ahead_of_anchor", "guard_function_replaced"):
         fail_closed_vocabulary.add(detail)
     hits = sorted({word for word in PRIVILEGED for text in fail_closed_vocabulary if word in text})
     check("no fail-closed reason or detail carries a word of the privileged union",
@@ -505,13 +587,42 @@ def main() -> int:
     for label, bad in (("an empty writer list", {**raw, "writer_principals": []}),
                        ("a window no longer than the cadence",
                         {**raw, "freshness_window_seconds": 86400}),
-                       ("a boolean window", {**raw, "freshness_window_seconds": True})):
+                       ("a boolean window", {**raw, "freshness_window_seconds": True}),
+                       ("no guard function pins",
+                        {k: v for k, v in raw.items() if k != "guard_function_sha256"}),
+                       ("a guard function pin missing",
+                        {**raw, "guard_function_sha256": {
+                            k: v for k, v in raw["guard_function_sha256"].items()
+                            if k != "workflow_census_record_no_truncate"}}),
+                       ("a guard function pin that is not a digest",
+                        {**raw, "guard_function_sha256": {
+                            **raw["guard_function_sha256"],
+                            "workflow_census_record_chain_guard": "not-a-digest"}})):
         try:
             att.load_config(bad)
             accepted = True
         except att.AttestationConfigError:
             accepted = False
         check(f"a config with {label} is refused", not accepted)
+
+    # The pins are the digest of each guard function's source exactly as
+    # migration 0595 writes it: "<schema>.<name>" + newline + the text between
+    # the dollar quotes (pg_proc.prosrc). The local Postgres gate checks the
+    # same pins against a real database's read door.
+    import re as _re
+    migration = (REPO / "migrations" / "0595_workflow_census_store.sql").read_text(encoding="utf-8")
+    trigger_functions = dict(_re.findall(
+        r"create trigger (workflow_census_record_\w+)\n[^;]*?execute function ops\.(\w+)\(\);",
+        migration))
+    recomputed = {}
+    for trigger, function in trigger_functions.items():
+        body = _re.search(r"create or replace function ops\." + function
+                          + r"\(\)\nreturns trigger\n.*?as \$\$(.*?)\$\$;", migration, _re.S)
+        recomputed[trigger] = (hashlib.sha256(f"ops.{function}\n{body.group(1)}".encode("utf-8"))
+                               .hexdigest() if body else None)
+    check("the pinned guard function digests are the migration's own guard sources",
+          recomputed == raw["guard_function_sha256"] and set(recomputed) == set(att.GUARD_TRIGGERS),
+          json.dumps(recomputed))
 
     # ---- THE CANONICAL FORM THE DATABASE MUST MATCH -------------------------
     vector = {"b": [1, True, None, "é ☃ 日本 \n\t\"q\" \\ \u0001  "],
@@ -546,28 +657,61 @@ def main() -> int:
 
     ok_answer = json.dumps({"ok": True, "seq": 1, "row_hash": "1" * 64, "anchor": "replayed"})
     original_run = writer.subprocess.run
+    pauses_taken: list[float] = []
+    no_wait = pauses_taken.append
+
     try:
-        keys, writer.subprocess.run = scripted(
-            _Proc(1, err="ToolError workflow_census_anchor_not_advanced anchor_unreachable"),
-            _Proc(0, ok_answer))
-        out = writer.record_census(census("w"))
-        check("a failed anchor advance is re-sent once under the SAME idempotency key",
+        for label, first in (
+            ("a failed anchor advance",
+             _Proc(1, err="ToolError workflow_census_anchor_not_advanced anchor_unreachable")),
+            ("an unreadable anchor", _Proc(1, err="ToolError workflow_census_anchor_unavailable")),
+            ("a Worker fault", _Proc(1, err="HTTP 502 upstream")),
+            ("an unparseable answer", _Proc(0, "<html>")),
+        ):
+            keys, writer.subprocess.run = scripted(first, _Proc(0, ok_answer))
+            out = writer.record_census(census("w"), pause=no_wait)
+            check(f"{label} is re-sent under the SAME idempotency key, and a late replayed "
+                  "anchor answer is accepted",
+                  out["anchor"] == "replayed" and len(keys) == 2 and keys[0] == keys[1],
+                  json.dumps(keys))
+        keys: list[str] = []
+        queue: list[Any] = [TimeoutError("slow"), _Proc(0, ok_answer)]
+
+        def flaky(argv: list[str], **_kw: Any) -> _Proc:
+            keys.append(json.loads(argv[-1])["idempotency_key"])
+            item = queue.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        writer.subprocess.run = flaky
+        out = writer.record_census(census("w"), pause=no_wait)
+        check("a subprocess that times out is re-sent under the SAME idempotency key",
               out["anchor"] == "replayed" and len(keys) == 2 and keys[0] == keys[1], json.dumps(keys))
-        keys, writer.subprocess.run = scripted(_Proc(1, err="workflow_census_key_reuse"))
+        keys, writer.subprocess.run = scripted(*[_Proc(1, err="HTTP 502 upstream")] * writer.ATTEMPTS)
         try:
-            writer.record_census(census("w"))
-            refused_once = False
+            writer.record_census(census("w"), pause=no_wait)
+            gave_up = False
         except writer.WriterRefusal:
-            refused_once = len(keys) == 1
-        check("any other write-door refusal is not retried", refused_once, json.dumps(keys))
+            gave_up = len(keys) == writer.ATTEMPTS and len(set(keys)) == 1
+        check(f"a transport failure on every one of {writer.ATTEMPTS} attempts fails the run, "
+              "all under one key", gave_up, json.dumps(keys))
+        for name in ("workflow_census_key_reuse", "workflow_census_tampered",
+                     "workflow_census_anchor_gap"):
+            keys, writer.subprocess.run = scripted(_Proc(1, err=f"ToolError {name}"))
+            try:
+                writer.record_census(census("w"), pause=no_wait)
+                refused_once = False
+            except writer.WriterRefusal:
+                refused_once = len(keys) == 1
+            check(f"a definitive refusal ({name}) is not retried", refused_once, json.dumps(keys))
         keys, writer.subprocess.run = scripted(
-            _Proc(0, json.dumps({"ok": True, "seq": 1, "row_hash": "1" * 64})))
+            *[_Proc(0, json.dumps({"ok": True, "seq": 1, "row_hash": "1" * 64}))] * writer.ATTEMPTS)
         try:
-            writer.record_census(census("w"))
+            writer.record_census(census("w"), pause=no_wait)
             unconfirmed = False
         except writer.WriterRefusal as refusal:
             unconfirmed = "anchor_unconfirmed" in str(refusal)
-        check("a write answer that does not confirm the anchor fails the run", unconfirmed)
+        check("a write answer that never confirms the anchor fails the run", unconfirmed)
     finally:
         writer.subprocess.run = original_run
 

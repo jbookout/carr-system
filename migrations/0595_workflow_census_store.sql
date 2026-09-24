@@ -43,30 +43,51 @@
 --      switched off or re-enabled as ordinary triggers.
 --   4. ONE READ DOOR. ops.read_workflow_census (SECURITY DEFINER, EXECUTE to
 --      carr_reader and carr_writer) returns the whole chain's metadata, the
---      latest row's payload, the server clock and the three triggers' enabled
---      state. It verifies NOTHING itself: the reader recomputes every hash on
+--      latest row's payload, the server clock, the three triggers' enabled
+--      state and a sha256 of each trigger's function (name and source), so a
+--      reader also refuses a guard whose body was replaced while its trigger
+--      stayed ENABLE ALWAYS. It verifies NOTHING itself: the reader recomputes every hash on
 --      its side and applies the writer allowlist and freshness window from
 --      config-as-code.
---   5. AN ANCHOR OUTSIDE THE DATABASE. After each committed census write the
---      Worker advances a Durable Object (mcp-server/src/workflow-census-anchor.js)
---      to the new head's seq and row_hash; the read verb returns that anchor
---      beside the chain, and the reader refuses a chain whose head does not
---      match it. A database owner who disables the triggers and rewrites the
---      history wholesale produces a chain that verifies on its own but no
---      longer matches the anchor.
+--   5. AN ANCHOR OUTSIDE THE DATABASE, LINKED STRICTLY. After each committed
+--      census write the Worker advances a Durable Object
+--      (mcp-server/src/workflow-census-anchor.js) to the new head. The object
+--      accepts only the next row of the chain it already holds (seq + 1 whose
+--      prev_hash is the anchored row_hash), so a rewritten history can never be
+--      carried forward by a later ordinary write. The write door is told the
+--      anchored head (p_anchor_seq, p_anchor_row_hash, read by the Worker
+--      before the call) and refuses to append unless the database head IS
+--      that head: `workflow_census_anchor_gap` when the database is exactly one
+--      linked row ahead (a write that committed but was never anchored; the
+--      writer's retry of the same idempotency key replays that row and
+--      re-advances the anchor), `workflow_census_tampered` for any other
+--      disagreement. The read verb returns the anchor beside the chain and the
+--      reader refuses a chain whose head does not match it.
+--   6. RE-ANCHOR ON THE RECORD. When the two legitimately disagree (the key of
+--      an unanchored row was lost; a database restore), the only way forward
+--      is ops.reanchor_workflow_census (EXECUTE to carr_authority only; the
+--      reanchor-workflow-census verb, partner-authority only). It appends a
+--      receipt to ops.workflow_census_reanchor_receipt naming the actor, the
+--      verified partner, the reason, the old (anchored) head, the new
+--      (database) head and how many rows the anchor never vouched for; the
+--      Worker then applies it to the anchor as a compare-and-set on the old
+--      head. No carr_writer path reaches it.
 --
 -- WHAT A VERIFIED CHAIN PROVES, AND WHAT IT DOES NOT. It proves the latest
 -- census was recorded under the named principal at the named server time, that
--- the chain is intact as served, and that its head matches the external anchor.
+-- the chain is intact as served, and that its head matches the external anchor
+-- that only ever advanced one linked row at a time.
 -- It does NOT prove the scheduler observations or acceptance rows inside the
 -- census are true. It does NOT prove the writer was the scheduled writer job:
 -- an allowlisted principal is a token, and a local token is readable by
 -- anything running as that user on that machine. And it does NOT resist a
 -- coordinated rewrite of both the database (as owner) and the anchor (by
--- deploying different Worker code). Those limits are the reason the reader's
+-- deploying different Worker code), nor an owner who also replaces the read
+-- door so that it serves a chain other than the stored one; and a partner who
+-- re-anchors a forged chain is recorded, not prevented. Those limits are the reason the reader's
 -- output is labelled as an attestation, never as a health verdict.
 --
--- ATOMIC WITH 0596. The two new SECURITY DEFINER doors carry EXECUTE grants to
+-- ATOMIC WITH 0596. The three new SECURITY DEFINER doors carry EXECUTE grants to
 -- runtime roles, which moves the live SCAC mutation catalog; applied alone this
 -- migration is refused at commit by the deferred epoch trigger. 0596 seals the
 -- catalog as the next registry version, and tools/migrate.py declares
@@ -145,7 +166,7 @@ language plpgsql
 set search_path = pg_catalog, ops
 as $$
 begin
-  raise exception 'ops.workflow_census_record is append-only (% refused)', tg_op;
+  raise exception 'ops.% is append-only (% refused)', tg_table_name, tg_op;
 end;
 $$;
 
@@ -226,7 +247,9 @@ alter table ops.workflow_census_record enable always trigger workflow_census_rec
 -- THE WRITE DOOR.
 create or replace function ops.record_workflow_census(
   p_payload jsonb,
-  p_idempotency_key text
+  p_idempotency_key text,
+  p_anchor_seq bigint,
+  p_anchor_row_hash text
 )
 returns table (
   seq bigint,
@@ -248,12 +271,17 @@ declare
   v_row ops.workflow_census_record%rowtype;
   v_payload_sha text;
   v_now timestamptz;
+  v_found boolean;
 begin
   if p_idempotency_key is null or btrim(p_idempotency_key) = '' or char_length(p_idempotency_key) > 200 then
     raise exception 'idempotency_key_required';
   end if;
   if v_principal is null or v_principal !~ '^[a-z0-9][a-z0-9._-]{0,99}$' then
     raise exception 'workflow_census_principal_unavailable';
+  end if;
+  if (p_anchor_seq is null) <> (p_anchor_row_hash is null)
+     or (p_anchor_seq is not null and (p_anchor_seq < 1 or p_anchor_row_hash !~ '^[0-9a-f]{64}$')) then
+    raise exception 'workflow_census_anchor_invalid';
   end if;
   if p_payload is null or jsonb_typeof(p_payload) <> 'object' then
     raise exception 'workflow_census_payload_invalid';
@@ -286,8 +314,29 @@ begin
   end if;
 
   select * into v_head from ops.workflow_census_record r order by r.seq desc limit 1;
+  v_found := found;
+
+  -- THE DATABASE HEAD MUST BE THE ANCHORED HEAD. Checked after the replay
+  -- branch above, so the writer's retry of a committed-but-unanchored row
+  -- still replays it (and the Worker then re-advances the anchor).
+  if p_anchor_seq is null then
+    if v_found then
+      raise exception 'workflow_census_tampered' using detail = 'anchor_absent_with_rows';
+    end if;
+  elsif not v_found then
+    raise exception 'workflow_census_tampered' using detail = 'chain_missing_behind_anchor';
+  elsif v_head.seq = p_anchor_seq and v_head.row_hash = p_anchor_row_hash then
+    null;
+  elsif v_head.seq = p_anchor_seq + 1 and v_head.prev_hash = p_anchor_row_hash
+        and exists (select 1 from ops.workflow_census_record r
+                     where r.seq = p_anchor_seq and r.row_hash = p_anchor_row_hash) then
+    raise exception 'workflow_census_anchor_gap' using detail = 'database_one_linked_row_ahead_of_anchor';
+  else
+    raise exception 'workflow_census_tampered' using detail = 'database_head_is_not_anchored_head';
+  end if;
+
   v_now := clock_timestamp();
-  if found and v_now < v_head.recorded_at then
+  if v_found and v_now < v_head.recorded_at then
     raise exception 'workflow_census_time_regression_refused';
   end if;
 
@@ -309,11 +358,11 @@ begin
 end;
 $$;
 
-comment on function ops.record_workflow_census(jsonb,text) is
-  'Write door for ops.workflow_census_record: append one V5-F09 census snapshot to the hash chain. The principal is the Worker-set carr.acting_actor_slug, never a parameter; recorded_at is the server clock; the chain fields are computed here and re-checked by the chain guard. Idempotent on p_idempotency_key.';
+comment on function ops.record_workflow_census(jsonb,text,bigint,text) is
+  'Write door for ops.workflow_census_record: append one V5-F09 census snapshot to the hash chain. The principal is the Worker-set carr.acting_actor_slug, never a parameter; recorded_at is the server clock; the chain fields are computed here and re-checked by the chain guard. Idempotent on p_idempotency_key. Refuses to append unless the database head is the anchored head the Worker passes (workflow_census_anchor_gap / workflow_census_tampered).';
 
-revoke all on function ops.record_workflow_census(jsonb,text) from public;
-grant execute on function ops.record_workflow_census(jsonb,text) to carr_writer;
+revoke all on function ops.record_workflow_census(jsonb,text,bigint,text) from public;
+grant execute on function ops.record_workflow_census(jsonb,text,bigint,text) to carr_writer;
 
 -- THE READ DOOR. Chain metadata for every row (oldest first), the latest row's
 -- payload, the server clock, and the guards' enabled state. p_max_rows bounds the answer; when the chain is
@@ -351,6 +400,18 @@ begin
       select jsonb_object_agg(t.tgname, t.tgenabled::text)
         from pg_catalog.pg_trigger t
        where t.tgrelid = 'ops.workflow_census_record'::regclass and not t.tgisinternal
+    ), '{}'::jsonb),
+    -- sha256 of "<schema>.<function name>\n<source>" for the function each
+    -- trigger calls: a guard whose body was replaced (or a trigger re-pointed
+    -- to another function) no longer matches the digest pinned in
+    -- ops/config/workflow-census-attestation.v1.json.
+    'guard_functions', coalesce((
+      select jsonb_object_agg(t.tgname, encode(public.digest(convert_to(
+               n.nspname || '.' || p.proname || chr(10) || p.prosrc, 'UTF8'), 'sha256'), 'hex'))
+        from pg_catalog.pg_trigger t
+        join pg_catalog.pg_proc p on p.oid = t.tgfoid
+        join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+       where t.tgrelid = 'ops.workflow_census_record'::regclass and not t.tgisinternal
     ), '{}'::jsonb)
   );
 end;
@@ -361,3 +422,155 @@ comment on function ops.read_workflow_census(integer) is
 
 revoke all on function ops.read_workflow_census(integer) from public;
 grant execute on function ops.read_workflow_census(integer) to carr_reader, carr_writer;
+
+-- THE RE-ANCHOR RECEIPT (contract point 6). Append-only like the chain, under
+-- the same trigger function, ENABLE ALWAYS.
+create table if not exists ops.workflow_census_reanchor_receipt (
+  receipt_id uuid primary key default gen_random_uuid(),
+  recorded_at timestamptz not null,
+  actor text not null check (actor ~ '^[a-z0-9][a-z0-9._-]{0,99}$'),
+  verified_partner text not null check (verified_partner ~ '^[a-z0-9][a-z0-9._-]{0,99}$'),
+  db_session_principal text not null,
+  reason text not null check (btrim(reason) <> '' and char_length(reason) <= 1000),
+  old_seq bigint check (old_seq >= 1),
+  old_row_hash text check (old_row_hash ~ '^[0-9a-f]{64}$'),
+  new_seq bigint check (new_seq >= 1),
+  new_row_hash text check (new_row_hash ~ '^[0-9a-f]{64}$'),
+  rows_reattested bigint not null check (rows_reattested >= 0),
+  idempotency_key text not null unique check (btrim(idempotency_key) <> '' and char_length(idempotency_key) <= 200),
+  constraint workflow_census_reanchor_old_pair check ((old_seq is null) = (old_row_hash is null)),
+  constraint workflow_census_reanchor_new_pair check ((new_seq is null) = (new_row_hash is null)),
+  constraint workflow_census_reanchor_moves
+    check (old_seq is distinct from new_seq or old_row_hash is distinct from new_row_hash)
+);
+
+comment on table ops.workflow_census_reanchor_receipt is
+  'Append-only receipts for re-anchoring the V5-F09 census anchor to the database head: who (actor and verified partner), why, the old anchored head, the new database head, and how many rows the anchor never vouched for. Written only through ops.reanchor_workflow_census (carr_authority).';
+
+revoke all on table ops.workflow_census_reanchor_receipt from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+
+drop trigger if exists workflow_census_reanchor_receipt_append_only on ops.workflow_census_reanchor_receipt;
+create trigger workflow_census_reanchor_receipt_append_only
+before update or delete on ops.workflow_census_reanchor_receipt
+for each row execute function ops.workflow_census_append_only();
+
+drop trigger if exists workflow_census_reanchor_receipt_no_truncate on ops.workflow_census_reanchor_receipt;
+create trigger workflow_census_reanchor_receipt_no_truncate
+before truncate on ops.workflow_census_reanchor_receipt
+for each statement execute function ops.workflow_census_append_only();
+
+alter table ops.workflow_census_reanchor_receipt enable always trigger workflow_census_reanchor_receipt_append_only;
+alter table ops.workflow_census_reanchor_receipt enable always trigger workflow_census_reanchor_receipt_no_truncate;
+
+-- THE RE-ANCHOR DOOR. The Worker passes the head it read from the anchor
+-- (p_anchor_*); the partner passes the database head they reviewed and accept
+-- (p_accept_*), which must still be the database head. rows_reattested counts
+-- the rows the anchor never vouched for: the rows after the anchored head when
+-- that head is still in the chain unchanged, otherwise every row.
+create or replace function ops.reanchor_workflow_census(
+  p_anchor_seq bigint,
+  p_anchor_row_hash text,
+  p_accept_seq bigint,
+  p_accept_row_hash text,
+  p_reason text,
+  p_idempotency_key text
+)
+returns table (
+  receipt_id uuid,
+  recorded_at text,
+  actor text,
+  verified_partner text,
+  reason text,
+  old_seq bigint,
+  old_row_hash text,
+  new_seq bigint,
+  new_row_hash text,
+  rows_reattested bigint,
+  replayed boolean
+)
+language plpgsql security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  v_actor text := nullif(current_setting('carr.acting_actor_slug', true), '');
+  v_partner text := nullif(current_setting('carr.verified_human_actor_slug', true), '');
+  v_existing ops.workflow_census_reanchor_receipt%rowtype;
+  v_head ops.workflow_census_record%rowtype;
+  v_found boolean;
+  v_row ops.workflow_census_reanchor_receipt%rowtype;
+begin
+  if p_idempotency_key is null or btrim(p_idempotency_key) = '' or char_length(p_idempotency_key) > 200 then
+    raise exception 'idempotency_key_required';
+  end if;
+  if v_actor is null or v_actor !~ '^[a-z0-9][a-z0-9._-]{0,99}$' then
+    raise exception 'workflow_census_principal_unavailable';
+  end if;
+  if v_partner is null or v_partner !~ '^[a-z0-9][a-z0-9._-]{0,99}$' then
+    raise exception 'workflow_census_reanchor_requires_partner';
+  end if;
+  if p_reason is null or btrim(p_reason) = '' or char_length(p_reason) > 1000 then
+    raise exception 'workflow_census_reanchor_reason_required';
+  end if;
+  if (p_anchor_seq is null) <> (p_anchor_row_hash is null)
+     or (p_anchor_seq is not null and (p_anchor_seq < 1 or p_anchor_row_hash !~ '^[0-9a-f]{64}$'))
+     or (p_accept_seq is null) <> (p_accept_row_hash is null)
+     or (p_accept_seq is not null and (p_accept_seq < 1 or p_accept_row_hash !~ '^[0-9a-f]{64}$')) then
+    raise exception 'workflow_census_anchor_invalid';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('ops.workflow_census_record', 0));
+
+  select * into v_existing from ops.workflow_census_reanchor_receipt r where r.idempotency_key = p_idempotency_key;
+  if found then
+    if v_existing.old_seq is distinct from p_anchor_seq or v_existing.old_row_hash is distinct from p_anchor_row_hash
+       or v_existing.new_seq is distinct from p_accept_seq or v_existing.new_row_hash is distinct from p_accept_row_hash
+       or v_existing.reason is distinct from p_reason or v_existing.actor is distinct from v_actor then
+      raise exception 'workflow_census_key_reuse';
+    end if;
+    return query select v_existing.receipt_id, ops.workflow_census_time_text(v_existing.recorded_at),
+      v_existing.actor, v_existing.verified_partner, v_existing.reason, v_existing.old_seq,
+      v_existing.old_row_hash, v_existing.new_seq, v_existing.new_row_hash, v_existing.rows_reattested, true;
+    return;
+  end if;
+
+  select * into v_head from ops.workflow_census_record r order by r.seq desc limit 1;
+  v_found := found;
+  if (v_found and (p_accept_seq is distinct from v_head.seq or p_accept_row_hash is distinct from v_head.row_hash))
+     or (not v_found and p_accept_seq is not null) then
+    raise exception 'workflow_census_reanchor_head_moved';
+  end if;
+  if p_anchor_seq is not distinct from p_accept_seq and p_anchor_row_hash is not distinct from p_accept_row_hash then
+    raise exception 'workflow_census_reanchor_not_needed';
+  end if;
+
+  v_row.receipt_id := gen_random_uuid();
+  v_row.recorded_at := clock_timestamp();
+  v_row.actor := v_actor;
+  v_row.verified_partner := v_partner;
+  v_row.db_session_principal := session_user::text;
+  v_row.reason := p_reason;
+  v_row.old_seq := p_anchor_seq;
+  v_row.old_row_hash := p_anchor_row_hash;
+  v_row.new_seq := p_accept_seq;
+  v_row.new_row_hash := p_accept_row_hash;
+  v_row.idempotency_key := p_idempotency_key;
+  if p_anchor_seq is not null and exists (select 1 from ops.workflow_census_record r
+       where r.seq = p_anchor_seq and r.row_hash = p_anchor_row_hash) then
+    v_row.rows_reattested := coalesce(p_accept_seq, 0) - p_anchor_seq;
+  else
+    select count(*) into v_row.rows_reattested from ops.workflow_census_record;
+  end if;
+
+  insert into ops.workflow_census_reanchor_receipt values (v_row.*);
+
+  return query select v_row.receipt_id, ops.workflow_census_time_text(v_row.recorded_at), v_row.actor,
+    v_row.verified_partner, v_row.reason, v_row.old_seq, v_row.old_row_hash, v_row.new_seq,
+    v_row.new_row_hash, v_row.rows_reattested, false;
+end;
+$$;
+
+comment on function ops.reanchor_workflow_census(bigint,text,bigint,text,text,text) is
+  'Re-anchor door for the V5-F09 census anchor (contract point 6): appends one receipt naming the actor, the verified partner, the reason, the old anchored head, the accepted database head and the rows re-attested; the Worker then applies it to the anchor as a compare-and-set. EXECUTE to carr_authority only.';
+
+revoke all on function ops.reanchor_workflow_census(bigint,text,bigint,text,text,text) from public;
+grant execute on function ops.reanchor_workflow_census(bigint,text,bigint,text,text,text) to carr_authority;

@@ -32,26 +32,32 @@ WHEN IT ANSWERS ``available: true``, and only then, all of these hold:
     DATABASE's clock (``server_now`` from the same answer), never this Mac's.
 Otherwise it fails closed: ``handle_integrity_unprovable`` (no answer, a
 malformed answer, an empty or truncated chain, an unreachable anchor, missing
-config), ``tampered`` (guards not enforced, or chain and anchor disagree),
-``chain_break``, ``unknown_writer`` or ``stale``, always with disposition
+config), ``tampered`` (guards not enforced or replaced, or chain and anchor
+disagree), ``anchor_gap`` (the chain is one linked row past the anchor: a
+committed write whose anchor advance has not landed), ``chain_break``, ``unknown_writer`` or ``stale``, always with disposition
 ``not_proven`` and a short ``detail``.  Unprovable never reads as proven.
 
 WHAT ``available: true`` CLAIMS, AND THE LABELS ARE CHOSEN SO IT CANNOT SAY
 MORE.  Reason ``census_attested``, disposition ``attested_record_only``, and a
 ``claim`` sentence: recorded under principal <X> at server time <T>; chain
-intact as served and matches the external anchor; not proof that the scheduled
-writer job wrote it (the principal is a bearer token's actor, and the local
-token on the writer's Mac is readable by anything running as that user), not
-proof that the observations inside it are true, and not proof against a
-coordinated database-owner plus anchor rewrite.  The A01 label route
+intact as served, and its head is the head the external anchor holds, which
+moves only to the next linked row (plus the last re-anchor receipt, when there
+is one); not proof that the scheduled writer job wrote it (the principal is a
+bearer token's actor, and the local token on the writer's Mac is readable by
+anything running as that user), not proof that the observations inside it are
+true, not proof against a database owner who also replaces the door that
+serves the chain, not proof against a coordinated database-owner plus anchor
+rewrite, and not proof against a partner-authority re-anchor of a forged
+chain.  The A01 label route
 (``lib/assurance_health_sources``) still derives no health label from it.
 
 ONE RE-READ, FOR ONE RACE.  The read verb reads the anchor before the chain, so
 a census write that commits between the two leaves the chain one row ahead of
-the anchor it was served beside.  On exactly that detail
-(``anchor_behind_chain``) the route pauses and asks once more; a real rewrite
-does not go away on a second read, so the re-read cannot turn tampering into
-an attestation.
+the anchor it was served beside.  On exactly that reason (``anchor_gap``) the
+route pauses and asks once more; a gap that is not that race (a write whose
+anchor advance failed, or a forged row appended to the anchored head) does not
+go away on a second read, and ``tampered`` is never re-read, so the re-read
+cannot turn tampering into an attestation.
 
 THE THREAT THIS DOES NOT CLOSE, NAMED.  A caller that rewrites this process's
 code (rebinding ``subprocess.run``, or the verifier) can still forge what this
@@ -149,7 +155,7 @@ def _census_answer(transport: _Callable[[int], tuple[_Any, str | None]],
                                            "attestation_config_unavailable")
         else:
             verdict = _one_verdict(transport, config)
-            if verdict.get("detail") == "anchor_behind_chain":
+            if verdict.get("reason") == _attestation.REASON_ANCHOR_GAP:
                 pause()
                 verdict = _one_verdict(transport, config)
     except Exception:

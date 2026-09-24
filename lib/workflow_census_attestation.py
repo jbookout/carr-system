@@ -10,9 +10,11 @@ WHAT A PASSING VERDICT MEANS, AND ONLY THIS.  The latest census row was recorded
 under the named principal at the named server time; the chain is intact as
 served, from row 1 to that row; every row in it was written under a listed
 principal and a listed database login role; the store's three guard triggers
-are ENABLE ALWAYS; and the chain's head equals the head the Worker recorded in
-the external anchor (a Durable Object, ``mcp-server/src/workflow-census-anchor.js``)
-when it committed that row.
+are ENABLE ALWAYS and each still calls the function source pinned in config;
+and the chain's head equals the head held by the external anchor (a Durable
+Object, ``mcp-server/src/workflow-census-anchor.js``), which only ever moves
+to the next linked row (seq + 1 whose prev_hash is the anchored row_hash) or,
+on the record, by a partner-authority re-anchor receipt.
 
 WHAT IT DOES NOT MEAN.
   * The census is not proven TRUE: the scheduler observations, acceptance rows
@@ -23,8 +25,12 @@ WHAT IT DOES NOT MEAN.
     there; any such process can call the write verb under the same principal.
   * It is not proof against a COORDINATED rewrite: someone holding the database
     owner role AND able to deploy Worker code that rewrites the anchor could
-    replace both consistently.  The anchor raises the bar from "database owner"
-    to "database owner plus a Worker deploy", no further.
+    replace both consistently.  Nor against an owner who also replaces the
+    database door that serves the chain, so it answers with the anchored
+    chain while the stored rows differ: every check here runs over what that
+    door serves.  Nor against a partner who re-anchors a forged chain: that act
+    leaves a receipt and the anchor then names it (``last_reanchor``), but it
+    is not prevented.
 Every output label below is chosen to say "attested record", never a health
 word, and the ``claim`` sentence says the three limits out loud.
 
@@ -43,9 +49,13 @@ for the value kinds the door admits (no fractional numbers).
 
 THE ORDER OF REFUSALS IS THE ORDER OF TRUST.  Guards that are not enforced
 make the stored chain meaningless, so ``tampered`` (guard_not_enforced) comes
-first after the answer's shape.  A chain that does not verify says nothing about
+first after the answer's shape, and a guard function whose source no longer
+matches its pinned digest is ``tampered`` (guard_function_replaced) right after.  A chain that does not verify says nothing about
 who wrote it, so ``chain_break`` is decided before the anchor and before
-``unknown_writer``; a chain that verifies but does not match the anchor is
+``unknown_writer``; a chain exactly one linked row ahead of the anchor is
+``anchor_gap`` (a committed write whose anchor advance has not landed yet: the
+writer's retry of the same key, or a re-read after a concurrent write, clears
+it); a chain that verifies but otherwise does not match the anchor is
 ``tampered``; a record whose writers are not all listed says nothing about
 freshness, so ``unknown_writer`` is decided before ``stale``.
 
@@ -75,6 +85,7 @@ REASON_CHAIN_BREAK = "chain_break"
 REASON_UNKNOWN_WRITER = "unknown_writer"
 REASON_STALE = "stale"
 REASON_TAMPERED = "tampered"
+REASON_ANCHOR_GAP = "anchor_gap"
 REASON_ATTESTED = "census_attested"
 
 # The store's triggers (migration 0595), each of which must be ENABLE ALWAYS
@@ -148,6 +159,7 @@ def load_config(raw: Any) -> dict[str, Any]:
     window = raw.get("freshness_window_seconds")
     cadence = raw.get("writer_cadence_seconds")
     max_rows = raw.get("max_chain_rows")
+    digests = raw.get("guard_function_sha256")
     if (not isinstance(writers, list) or not writers
             or not all(isinstance(w, str) and _SLUG.match(w) for w in writers)):
         raise AttestationConfigError("writer_principals must be a non-empty list of actor slugs")
@@ -161,11 +173,26 @@ def load_config(raw: Any) -> dict[str, Any]:
             raise AttestationConfigError(f"{name} must be a positive integer")
     if not isinstance(window, int) or not isinstance(cadence, int) or window <= cadence:
         raise AttestationConfigError("freshness_window_seconds must exceed writer_cadence_seconds")
+    if (not isinstance(digests, dict) or set(digests) != set(GUARD_TRIGGERS)
+            or not all(isinstance(d, str) and _HEX64.match(d) for d in digests.values())):
+        raise AttestationConfigError("guard_function_sha256 must pin one sha256 per guard trigger")
     return {"writer_principals": frozenset(writers),
             "writer_db_session_principals": frozenset(sessions),
             "freshness_window_seconds": window,
             "writer_cadence_seconds": cadence,
-            "max_chain_rows": max_rows}
+            "max_chain_rows": max_rows,
+            "guard_function_sha256": dict(digests)}
+
+
+def _reanchor_shape(value: Any) -> bool:
+    """The anchor's last re-anchor record, as the Durable Object stores it."""
+    if not isinstance(value, dict):
+        return False
+    count = value.get("rows_reattested")
+    return (isinstance(value.get("receipt_id"), str) and bool(value["receipt_id"])
+            and isinstance(value.get("actor"), str) and bool(_SLUG.match(value["actor"]))
+            and isinstance(value.get("recorded_at"), str)
+            and not isinstance(count, bool) and isinstance(count, int) and count >= 0)
 
 
 def refusal(reason: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -196,6 +223,13 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
     unenforced = sorted(name for name in GUARD_TRIGGERS if guards.get(name) != "A")
     if unenforced:
         return refusal(REASON_TAMPERED, "guard_not_enforced", guards=unenforced)
+    functions = answer.get("guard_functions")
+    if not isinstance(functions, dict):
+        return refusal(REASON_UNPROVABLE, "server_answer_shape_refused")
+    pinned = config["guard_function_sha256"]
+    replaced = sorted(name for name in GUARD_TRIGGERS if functions.get(name) != pinned[name])
+    if replaced:
+        return refusal(REASON_TAMPERED, "guard_function_replaced", guards=replaced)
     if answer["truncated"] or row_count != len(chain) or len(chain) > config["max_chain_rows"]:
         return refusal(REASON_UNPROVABLE, "chain_truncated")
     anchor_state = anchor.get("state")
@@ -263,6 +297,14 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
             or not isinstance(anchored_hash, str) or not _HEX64.match(anchored_hash)):
         return refusal(REASON_UNPROVABLE, "anchor_unavailable")
     if anchored_seq != latest["seq"] or anchored_hash != latest["row_hash"]:
+        # The one legitimate disagreement: the chain is exactly one row past the
+        # anchored head and still holds that head unchanged, so the new row
+        # links to it.  The write door refuses every further append in this
+        # state, so the chain can never be more than one such row ahead.
+        if (anchored_seq == latest["seq"] - 1 and anchored_seq >= 1
+                and chain[anchored_seq - 1]["row_hash"] == anchored_hash):
+            return refusal(REASON_ANCHOR_GAP, "chain_one_linked_row_ahead_of_anchor",
+                           chain_seq=latest["seq"], anchored_seq=anchored_seq)
         if anchored_seq < latest["seq"]:
             detail = "anchor_behind_chain"
         elif anchored_seq > latest["seq"]:
@@ -271,6 +313,9 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
             detail = "anchor_hash_mismatch"
         return refusal(REASON_TAMPERED, detail, chain_seq=latest["seq"],
                        anchored_seq=anchored_seq)
+    last_reanchor = anchor.get("last_reanchor")
+    if last_reanchor is not None and not _reanchor_shape(last_reanchor):
+        return refusal(REASON_UNPROVABLE, "anchor_unavailable")
 
     # ---- who wrote every row ---------------------------------------------------
     # Every row, not only the latest: a row from an unlisted writer anywhere in
@@ -291,15 +336,24 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
         return refusal(REASON_STALE, "older_than_window", at_seq=latest["seq"],
                        age_seconds=age, freshness_window_seconds=window)
 
+    reanchor_clause = ""
+    if last_reanchor is not None:
+        reanchor_clause = (f"; its anchor was last re-anchored under receipt "
+                           f"{last_reanchor['receipt_id']} by {last_reanchor['actor']} at "
+                           f"{last_reanchor['recorded_at']}, over "
+                           f"{last_reanchor['rows_reattested']} rows the anchor had not vouched for")
     return {
         "available": True,
         "reason": REASON_ATTESTED,
         "item_disposition": DISPOSITION_ATTESTED,
         "claim": (f"recorded under principal {latest['principal']} at server time "
-                  f"{latest['recorded_at']}; chain intact as served and matches the external "
-                  "anchor; not proof that the scheduled writer job wrote it, not proof that "
-                  "the observations inside it are true, and not proof against a coordinated "
-                  "database-owner plus anchor rewrite"),
+                  f"{latest['recorded_at']}; chain intact as served, and its head is the head "
+                  "the external anchor holds, which moves only to the next linked row"
+                  f"{reanchor_clause}; not proof that the scheduled writer job wrote it, not "
+                  "proof that the observations inside it are true, not proof against a database "
+                  "owner who also replaces the door that serves the chain, not proof against a "
+                  "coordinated database-owner plus anchor rewrite, and not proof against a "
+                  "partner-authority re-anchor of a forged chain"),
         "attestation": {
             "principal": latest["principal"],
             "db_session_principal": latest["db_session_principal"],
@@ -309,6 +363,7 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
             "payload_sha256": latest["payload_sha256"],
             "server_now": answer["server_now"],
             "anchored_at": anchor.get("anchored_at"),
+            "last_reanchor": last_reanchor,
             "age_seconds": age,
             "freshness_window_seconds": window,
         },

@@ -305,18 +305,23 @@ export const REGISTRY_V67_VERSION = "scac-mutation-registry.v67";
 // UNSEALED_INGRESS_KINDS member so it never becomes the runtime selector.
 export const REGISTRY_V68_VERSION = "scac-mutation-registry.v68";
 // v69 seals the V5-F09 workflow census store: migration 0595 installs the
-// append-only, database-hash-chained ops.workflow_census_record behind two
-// SECURITY DEFINER doors, ops.record_workflow_census (EXECUTE to carr_writer)
-// and ops.read_workflow_census (EXECUTE to carr_reader and carr_writer), and
-// mcp-server/src/workflow-census.js registers two new verbs,
-// record-workflow-census (write) and read-workflow-census (read). tools/migrate.py
+// append-only, database-hash-chained ops.workflow_census_record and the
+// append-only ops.workflow_census_reanchor_receipt behind three SECURITY
+// DEFINER doors, ops.record_workflow_census (EXECUTE to carr_writer),
+// ops.read_workflow_census (EXECUTE to carr_reader and carr_writer) and
+// ops.reanchor_workflow_census (EXECUTE to carr_authority only), and
+// mcp-server/src/workflow-census.js registers three new verbs,
+// record-workflow-census (write), read-workflow-census (read) and
+// reanchor-workflow-census (humanOnly, authorityOnly write). The census
+// anchor's Durable Object write is the worker-sidewrite row
+// workflow-census-anchor. tools/migrate.py
 // is re-digested in the same seal for its (0595, 0596) atomic group, and the
 // census writer's launchd row (com.carr.workflow-census-writer, one
 // ops.service_environment:workflow-census-writer:production ref) is admitted
-// so the sealed launchd authority refs match ops/config/services.json. Two new
-// mcp-tool rows, one external-admin row and one launchd-workflow row; no
-// sibling verb's bound fields change. The runtime selector
-// (mutation-registry.js) moves to v69 so the door admits both verbs.
+// so the sealed launchd authority refs match ops/config/services.json. Three new
+// mcp-tool rows, one worker-sidewrite row, one external-admin row and one
+// launchd-workflow row; no sibling verb's bound fields change. The runtime
+// selector (mutation-registry.js) moves to v69 so the door admits all three.
 export const REGISTRY_V69_VERSION = "scac-mutation-registry.v69";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
@@ -1414,13 +1419,14 @@ export const POST_0584_FORWARD_V68_DB_CATALOG_BASELINE = Object.freeze({
 // drift-exception readback technique (apply, read the refusal's observed
 // count/digest, bind, reapply). Installs ops.record_workflow_census (0595,
 // EXECUTE to carr_writer), ops.read_workflow_census (0595, EXECUTE to
-// carr_reader and carr_writer) and the v69 registration function with its
-// runtime EXECUTE grants. ops.workflow_census_record itself carries no
-// app-role grant.
+// carr_reader and carr_writer), ops.reanchor_workflow_census (0595, EXECUTE to
+// carr_authority) and the v69 registration function with its runtime EXECUTE
+// grants. ops.workflow_census_record and ops.workflow_census_reanchor_receipt
+// themselves carry no app-role grant.
 export const POST_0595_FORWARD_V69_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0584_FORWARD_V68_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v69",
-  secdef_execute: { count: 892, digest: "sha256:f706812e984806c3be723be8a0d629070c0fcf3a55cbc32bdf08d34df36bc771" },
+  secdef_execute: { count: 893, digest: "sha256:740db3aaf88693a565851212d01218fac1db873df240f07405c95f828984164f" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

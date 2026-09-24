@@ -41,6 +41,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,23 +133,43 @@ def build_census(rows: dict, *, now: datetime) -> dict:
     )
 
 
-def record_census(census: dict) -> dict:
+# A refusal the door or the Worker decided on the merits.  Re-sending the same
+# key cannot change it, so it ends the run at once.  Anything else -- the
+# subprocess dying, a timeout, a network or Worker fault, an unparseable answer,
+# an anchor that did not advance -- is a transport failure and the SAME key is
+# sent again: the record layer's idempotency replays a row that did commit and
+# the Worker re-advances the anchor, answering "advanced", or "replayed" when
+# an earlier attempt's advance had in fact landed.
+DEFINITIVE_REFUSALS = (
+    "workflow_census_tampered", "workflow_census_anchor_gap", "workflow_census_key_reuse",
+    "workflow_census_payload_invalid", "workflow_census_payload_shape_refused",
+    "workflow_census_payload_too_large", "workflow_census_payload_fraction_refused",
+    "workflow_census_principal_unavailable", "workflow_census_principal_forged",
+    "workflow_census_session_principal_forged", "workflow_census_chain_splice_refused",
+    "workflow_census_time_regression_refused", "workflow_census_anchor_invalid",
+    "idempotency_key_required", "not_in_profile", "actor_not_provisioned",
+)
+ATTEMPTS = 3
+RETRY_PAUSE_SECONDS = 20.0
+
+
+def record_census(census: dict, *, pause=time.sleep) -> dict:
     """Append through the one write door, and see the external anchor advanced.
 
-    The Worker advances the census anchor (a Durable Object outside the
-    database) after the row commits.  If that advance fails the verb says
-    ``workflow_census_anchor_not_advanced`` with the row already committed; the
-    SAME idempotency key is sent once more, which replays the row and
-    re-advances the anchor.  A second failure exits non-zero, so the run is
-    recorded as failed and the reader shows the mismatch until the next run.
+    One idempotency key for the whole run.  On a transport failure the same
+    key is re-sent, up to ATTEMPTS calls in all; a definitive refusal, or the
+    last attempt's failure, exits non-zero so the run is recorded as failed.
     """
     args = {"idempotency_key": f"workflow-census-writer:{uuid.uuid4()}", "census": census}
-    try:
-        return _record_once(args)
-    except WriterRefusal as refusal:
-        if "workflow_census_anchor_not_advanced" not in str(refusal):
-            raise
-    return _record_once(args)
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return _record_once(args)
+        except WriterRefusal as refusal:
+            text = str(refusal)
+            if attempt == ATTEMPTS or any(name in text for name in DEFINITIVE_REFUSALS):
+                raise
+        pause(RETRY_PAUSE_SECONDS)
+    raise WriterRefusal("write_door_unreachable: no attempt made")
 
 
 def _record_once(args: dict) -> dict:
