@@ -62,21 +62,34 @@ name: CI
 #
 # WHAT STILL CATCHES A BROKEN main, on a weekday, within minutes: the
 # pull_request event builds refs/pull/N/merge, which is the PR head merged into
-# CURRENT main. Main's content is inside every PR run. At the ~44 merges a day
-# this repo sees, a broken main turns the next PR red almost immediately — the
-# same way the one 2026-08-18 break surfaced and was fixed 88 minutes later by
-# the next merge.
+# CURRENT main. Main's content is inside every PR run. When this trigger was cut
+# (PR #379, 2026-08-20, at ~44 merges a day) that was the only weekday cover: strict mode
+# was off, so a PR tested against an older main could still merge and break it,
+# and the next PR turned red instead — the one 2026-08-18 break surfaced that way
+# and was fixed 88 minutes later by the next merge.
 #
-# THE SCHEDULE IS THE BACKSTOP FOR QUIET PERIODS ONLY — overnight and weekends,
-# when no PR is opening and nothing else would look. Weekends are not workdays
-# for either partner, so that is exactly the window with no other cover.
+# STRICT MODE IS NOW ON, and it is load-bearing rather than optional. The ruleset
+# "main: CI must be green" (id 20824501) has
+# strict_required_status_checks_policy=true; check it with
+#   gh api repos/jbookout/carr-system/rulesets/20824501
+# PR #833 (2026-09-01, governed automatic source merge) made it a precondition:
+# the merge endpoint conditionally binds only the PR head SHA, so strict mode is
+# the protected-main half of that transaction — if main moves after the checks
+# ran, GitHub marks the PR out of date and refuses the merge. The source-merge
+# controller (mcp-server/src/source-merge-policy.js) and the automerge pilot
+# (ops/automerge_pilot.py) both refuse with ruleset_strict_update_missing if it
+# is ever switched off. Do not turn it off to save CI minutes.
 #
-# WHAT WOULD REOPEN THIS: turning on strict_required_status_checks_policy (it is
-# false today, which is why a PR tested against an older main can merge and break
-# it). Strict mode would remove the breakage at its source but forces a re-run of
-# every open PR each time main moves — at 44 merges a day that costs far more
-# than it saves. The cheap ordering is this schedule now, strict mode only if the
-# break rate climbs well above one a week.
+# THE COST IT CARRIES, which PR #379 predicted correctly: every open PR has to be
+# brought up to date and re-run CI each time main moves before it can merge. That
+# is paid deliberately; a stale-base merge breaking main is now refused at the
+# source instead of discovered by the next PR.
+#
+# THE SCHEDULE IS STILL THE BACKSTOP FOR QUIET PERIODS — overnight and weekends,
+# when no PR is opening and nothing else would look. Strict mode stops a stale
+# PR from breaking main; it does not catch main going red on its own (a moved
+# dependency, a date-sensitive test) while nobody is opening PRs. Weekends are not
+# workdays for either partner, so that is exactly the window with no other cover.
 on:
   pull_request:
   schedule:
