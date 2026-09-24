@@ -295,9 +295,9 @@
         {
           "environment": "production",
           "deploy_mechanism": "ops/launchd/com.carr.fleet-sync.plist",
-          "expected_cadence_seconds": 43200,
+          "expected_cadence_seconds": 3600,
           "cadence_grace_seconds": 3600,
-          "notes": "Fires daily at 07:45, 11:45, 15:45 and 19:45 local. The longest honest gap is twelve hours overnight, so cadence is 43200s; 3600s grace covers launch delay and the local spool's next-flush delay. The plist routes through bin/run-scheduled.sh as service fleet-sync with run key fleet.sync. This declaration makes the job representable; it does not claim the LaunchAgent is installed or loaded, or that ops.service has been synced."
+          "notes": "Fires hourly (StartInterval 3600) and again at RunAtLoad (login/wake), changed 2026-09-23 from four fixed daily fires so a Mac asleep or unused for a stretch catches up immediately instead of reading up to twelve hours stale. Cadence is 3600s; 3600s grace covers launch delay and the local spool's next-flush delay, matching the grace already used by this repo's other hourly local jobs (e.g. notes-sweep). The plist routes through bin/run-scheduled.sh as service fleet-sync with run key fleet.sync, and now also fast-forwards the sibling checkouts declared in ops/config/fleet-sync-siblings.json (doctorcre-app, software-factory) under the same fail-closed contract; a sibling's own outcome is reported but never affects this service's own run status. This declaration makes the job representable; it does not claim the LaunchAgent is installed or loaded, or that ops.service has been synced."
         }
       ]
     },
