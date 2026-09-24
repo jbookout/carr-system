@@ -41,15 +41,22 @@ this policy and supersedes the narrower approval rule. It carries forward
 the product priority from decision `019146bd-15fb-4f5e-8849-ed63911469e0`.
 The full current text is STORE doctrine
 `engineering-workflow-sop#00-scope-and-provenance`, section
-`52880de2-ab90-4673-b046-b74f900aa2de@5`, content hash
-`89e180adc6ecd5b138d21c65b85bffff4aca2677edb58f4a80049329b15eaed1`.
+`52880de2-ab90-4673-b046-b74f900aa2de@6`, content hash
+`0d4fde90e98b0fab9f769e07f1b4732f8ec90cdf458834a8df2e9e1611e13626`.
 That version and hash record this observed policy's provenance. At runtime,
 fetch the current section by its stable section ID; do not use this observed
 snapshot as a current-version gate.
 
 - Continue the next unfinished DoctorCRE product task attended; preserve
   completed audits and reviews. The unattended engineering controller is not
-  its prerequisite. Unattended dispatch remains disabled.
+  its prerequisite. Joe's ruling 2026-09-24, decision
+  `b729859d-be5d-4521-ba50-d4517bc57208`: the claim that "unattended
+  dispatch remains disabled" was never his rule — a model wrote it and
+  framed it as his direction. His actual goal is maximum automation,
+  including scripted jobs starting agent sessions automatically. This does
+  not touch the real production, credential, external-send,
+  destructive-action, and merge-approve safeguards below, which remain in
+  force as technical checks, nor does it waive CI as the merge gate.
 - Do not put a new Work Request ahead of product work unless it names the
   product task it blocks. Existing substrate work may finish but
   may not spawn child Work Requests. Backlog a substrate follow-up with the
