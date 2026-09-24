@@ -36,6 +36,20 @@ The first connection from either may trigger Chrome's Local Network Access
 prompt. Allowing it gives that Deal Room origin access to the loopback
 companion; every other web origin is refused by the companion.
 
+**Accessibility permission, one-time, and it must go on the REAL interpreter.**
+Call Mode clicks Quill's Start/Stop menu item via `osascript`/System Events, so
+the agent needs Accessibility access. A LaunchAgent loaded from
+`~/Library/LaunchAgents` gets its Accessibility responsibility attributed to
+`ProgramArguments[0]`, and that cannot be `/usr/bin/python3`: that path is the
+Command Line Tools shim, and macOS will not let a human usefully grant it
+Accessibility (the click fails with `osascript is not allowed assistive access
+(-25211)` even with python3, Python.app and osascript all enabled). The tracked
+plist therefore names the real interpreter directly,
+`/Library/Developer/CommandLineTools/usr/bin/python3` (verified live on the Mac
+Studio 2026-09-23). Grant **that** path Accessibility under System Settings >
+Privacy & Security > Accessibility. A machine without the Command Line Tools
+fails visibly at load rather than silently.
+
 **Risk color: red, human initiated.** Starting a call fires the audible consent
 announcement and begins client-visible recording, so it only happens after Joe
 or Dell clicks Start. No schedule or background trigger can start a recording.
