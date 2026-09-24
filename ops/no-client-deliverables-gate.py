@@ -4,7 +4,7 @@
 
 Joe's ruling of 2026-09-03 is that the repository stays public, so the tree
 must carry no client record. PR #868 removed the tracked client deliverables
-that existed at the time (two Hughes dental pre-tour packets and the
+that existed at the time (two Ferris dental pre-tour packets and the
 Pensacola industrial pre-tour) and closed the .gitignore gap that let them
 in. This gate is the durable half of that fix: it fails the push if a path
 matching a client-deliverable shape is ever tracked again, whether it comes
