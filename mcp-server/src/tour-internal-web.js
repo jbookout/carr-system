@@ -139,8 +139,26 @@ const SEAMS = {
   "/api/tours/pdf/download": "downloadPdfFn",
 };
 
-function safeFailure(result) {
+// Server-side failure record. The browser still gets only the coarse status,
+// but an operator can now see WHY: the route (from the fixed table above), the
+// status, the caught error's class and its ToolError code. Both are admitted
+// only when they match a bare identifier shape, and the error MESSAGE is never
+// reported: a database driver's message can name hosts, users or databases,
+// and a verb's can echo input. No actor, tenant, body, token or header goes
+// out. This leaf still writes to no log itself; the production adapter
+// supplies `reportFailureFn` and owns the sink.
+const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+export function tourFailureRecord(pathname, status, error) {
+  const errorClass = error === undefined ? null
+    : ERROR_CLASS.test(error?.name || "") ? error.name
+      : ERROR_CLASS.test(error?.constructor?.name || "") ? error.constructor.name : "UnknownError";
+  const code = typeof error?.payload?.error === "string" && ERROR_CODE.test(error.payload.error) ? error.payload.error : null;
+  return { event: "tour_internal_failure", route: METHODS.has(pathname) ? pathname : null, status, error_class: errorClass, code };
+}
+function safeFailure(result, pathname, error, report) {
   const status = [403, 404, 409].includes(result?.status) ? result.status : 503;
+  if (typeof report === "function") { try { report(tourFailureRecord(pathname, status, error)); } catch {} }
   return json({ error: status === 403 ? "forbidden" : status === 404 ? "not_found" : status === 409 ? "conflict" : "tour_unavailable" }, status);
 }
 const CONFLICT_MESSAGES = new Set([
@@ -197,9 +215,9 @@ async function api(request, env, ctx, actor, session, dependencies, pathname) {
   try {
     const result = await dependencies[seamName]({ env, ctx, actor, input });
     if ((pathname === "/api/tours/pdf/preview" || pathname === "/api/tours/pdf/download") && result?.ok && result.response instanceof Response) return result.response;
-    if (!result?.ok || !plain(result.data)) return safeFailure(result);
+    if (!result?.ok || !plain(result.data)) return safeFailure(result, pathname, undefined, dependencies.reportFailureFn);
     return json({ data: result.data, csrf_token: request.method === "GET" ? session.csrfToken : undefined });
-  } catch (error) { return safeFailure(dependencyFailure(error)); }
+  } catch (error) { return safeFailure(dependencyFailure(error), pathname, error, dependencies.reportFailureFn); }
 }
 
 function withSecurityHeaders(response) {
