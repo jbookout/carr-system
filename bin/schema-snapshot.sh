@@ -753,6 +753,17 @@ if [ "$TOUR_PROPERTY_REGISTRATION_REGISTRY_APPLIED" = t ] && [ "$CI_SPLIT_REGIST
   echo "schema-snapshot: tour property registration v57 is applied without v56 predecessor" >&2
   exit 1
 fi
+TOUR_REGISTRATION_ATOMIC_PAIR_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0567_tour_registration_atomic_pair_scac_successor.sql')" \
+  2>/dev/null)"
+case "$TOUR_REGISTRATION_ATOMIC_PAIR_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read tour registration atomic pair v58 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$TOUR_REGISTRATION_ATOMIC_PAIR_REGISTRY_APPLIED" = t ] && [ "$TOUR_PROPERTY_REGISTRATION_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: tour registration atomic pair v58 is applied without v57 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2039,6 +2050,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v56'"
                                       SCAC_FULL_SET_SEAL_COUNT=56
                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v57_current()"
+                                      if [ "$TOUR_REGISTRATION_ATOMIC_PAIR_REGISTRY_APPLIED" = t ]; then
+                                        SCAC_CURRENT_NUMBER=58
+                                        SCAC_VERSION_COUNT=58
+                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v58'")"
+                                        SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v58'")"
+                                        SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v58.generated.js"
+                                        SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v58'"
+                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v57'"
+                                        SCAC_FULL_SET_SEAL_COUNT=57
+                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v58_current()"
+                                      fi
                                     fi
                                   fi
                                 fi

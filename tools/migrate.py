@@ -281,6 +281,16 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0556_meeting_mode_store.sql",
         "0557_meeting_mode_scac_successor.sql",
     ),
+    # Tour property registration: 0565 installs ops.register_tour_property
+    # with its authority EXECUTE grant; 0566 seals that catalog as v57. Applied
+    # alone, 0565 is refused at commit by the deferred epoch trigger ("live
+    # SCAC v37 mutation catalog drifted") -- production did exactly that on
+    # 2026-09-23 and rolled the batch back -- so the pair must be one
+    # transaction.
+    (
+        "0565_tour_property_registration.sql",
+        "0566_tour_property_registration_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -307,6 +317,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0556_meeting_mode_store.sql",
         "0557_meeting_mode_scac_successor.sql",
+    ),
+    (
+        "0565_tour_property_registration.sql",
+        "0566_tour_property_registration_scac_successor.sql",
     ),
 )
 
