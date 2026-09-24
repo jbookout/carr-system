@@ -807,9 +807,14 @@ PYEOF
       failures="$failures gate-replay"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
     else
       # A pass prints its invocation count, runtime and verdict totals, so the
-      # hosted log shows the replay ran and how long it took.
+      # hosted log shows the replay ran and how long it took. A skipped
+      # client-name check is passed through too: a pass that checked no names
+      # must say so in the hosted log, and its ::warning:: annotation goes to
+      # stdout so Actions shows it on the run.
       grep -E '^gate-replay: [0-9]+ invocations|^  verdicts: |^gate-replay: OK' \
         "$LOGDIR/gate-gate-replay.log" >&2
+      grep -m1 -E '^WARNING .*SKIPPED' "$LOGDIR/gate-gate-replay.log" >&2
+      grep -m1 -E '^::warning ' "$LOGDIR/gate-gate-replay.log"
     fi
   fi
 
