@@ -23,6 +23,13 @@ export const V5_J302_PRIVACY_CONFIG = Object.freeze({
   platform_small_cell_floor: 11,
   platform_small_cell_floor_basis: "cms_cell_size_suppression_policy_1_to_10",
 
+  // 1b. Minimum protection interval: with a published total, every suppressed
+  //     cell must still have at least this many possible values (primary
+  //     suppression being 1..floor-1). 1 would allow exact disclosure; the
+  //     kernel refuses any config below 2 (V5_J302_KERNEL_MINIMUM_PROTECTION_
+  //     INTERVAL_VALUES). 3 refuses cells bounded to one or two values.
+  minimum_protection_interval_values: 3,
+
   // 2. Client-visible heat-map content: none. Clients see exactly the Tour PDF
   //    fields (decision 4ab3933e, as relayed by the orchestrator), and no
   //    heat-map-derived content is on the PDF.
