@@ -16,18 +16,48 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "executor-tier-gate.py")
 PASS = 0
 
 
-def run(tool_input, stub):
+def run(tool_input, stub, transcript_path=None):
     env = {**os.environ, "CARR_EXECUTOR_TIER_JEV_STUB": stub}
-    payload = json.dumps({"tool_name": "Agent", "tool_input": tool_input})
-    out = subprocess.run([sys.executable, HOOK], input=payload, capture_output=True,
+    payload = {"tool_name": "Agent", "tool_input": tool_input}
+    if transcript_path:
+        payload["transcript_path"] = transcript_path
+    out = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), capture_output=True,
                          text=True, env=env, timeout=30).stdout.strip()
     return json.loads(out)["hookSpecificOutput"] if out else None
+
+
+def build_advisory_transcript(facets):
+    advisory = {
+        "schema": "jev-build-advisory/v1", "partner_request_sha256": "0" * 64,
+        "model": "jev-1.13.0",
+        "facets": {f: 0.9 for f in facets} or {"architecture_or_design": 0.9},
+        "guidance": {},
+        "required_actions": [{"facet": f, "instruction": f"do {f}"} for f in facets],
+        "usage": {}, "authority": "required", "deterministic_exclusions": [],
+    }
+    receipt = {
+        "schema": "jev-build-turn-receipt/v1", "client": "claude", "session_id": "s1",
+        "turn_id": None, "prompt_sha256": "0" * 64, "adviser_digest": "sha256:" + "0" * 64,
+        "configuration_digest": "sha256:" + "0" * 64, "source_digest": "sha256:" + "0" * 64,
+        "semantic_rule_delivery": "delivered", "advisory": advisory,
+    }
+    # Real Claude Code shape (verified against a live ~/.claude/projects/*.jsonl
+    # session): attachment.type == "hook_additional_context", content a list of
+    # already-decoded JSON text — no "stdout"/hookSpecificOutput wrapper.
+    record = {"attachment": {"type": "hook_additional_context",
+                             "content": [json.dumps(receipt)]}}
+    fh = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
+    fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "design it"}}) + "\n")
+    fh.write(json.dumps(record) + "\n")
+    fh.close()
+    return fh.name
 
 
 def check(label, condition, detail=""):
@@ -80,5 +110,38 @@ outs = [subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "A
                        capture_output=True, text=True, env=env, timeout=30).stdout for _ in range(2)]
 check("a fixture run makes no live judgment and is deterministic",
       outs[0] == outs[1] and "JEV'S PICK" not in outs[0], outs)
+
+# ── decision 0b11c89b: required actions must reach the subagent prompt ─────
+path = build_advisory_transcript(["architecture_or_design"])
+try:
+    r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
+    check("KNOWN-BAD: a required facet missing from the prompt is denied",
+          r and r.get("permissionDecision") == "deny"
+          and "architecture_or_design" in r["permissionDecisionReason"], r)
+
+    named_brief = {**brief, "prompt": brief["prompt"] + "\narchitecture_or_design: judge the seam with Jev."}
+    r = run({**named_brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
+    check("KNOWN-GOOD: naming the required facet in the prompt is not denied",
+          not (r and r.get("permissionDecision") == "deny"), r)
+
+    na_brief = {**brief, "prompt": brief["prompt"] +
+               "\nJev required actions: not applicable — read-only lookup."}
+    r = run({**na_brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
+    check("KNOWN-GOOD: an explicit not-applicable line is not denied",
+          not (r and r.get("permissionDecision") == "deny"), r)
+finally:
+    os.unlink(path)
+
+no_actions_path = build_advisory_transcript([])
+try:
+    r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path=no_actions_path)
+    check("an advisory with no required actions is not denied",
+          not (r and r.get("permissionDecision") == "deny"), r)
+finally:
+    os.unlink(no_actions_path)
+
+r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path="/nonexistent/path.jsonl")
+check("a missing transcript fails open (no required-actions denial)",
+      not (r and r.get("permissionDecision") == "deny"), r)
 
 print(f"executor-tier-gate-selftest: all {PASS} checks passed")

@@ -938,7 +938,7 @@ def fake_build_adviser(situation):
             }[facet] >= contract.BUILD_ACTION_THRESHOLD
         ],
         "usage": {"input_tokens": 10, "output_tokens": 6},
-        "authority": "advisory_only",
+        "authority": "required",
         "deterministic_exclusions": ["authority", "execution", "completion_proof"],
     }
 
