@@ -772,12 +772,24 @@ PYEOF
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
+  # gate-replay-coverage JOINED 2026-09-24 (defect class
+  # capability-reported-live-before-first-human-use, PR #1224 and PR #1225).
+  # Same kind again: repository content only (a changed-file diff against
+  # origin/main), no machine state, no database. It requires that any diff
+  # touching a hooks/*.py gate, a lib/ file a hook imports, or a path listed
+  # in ops/config/gate-replay-map.json ALSO change or add a selftest that
+  # references a fixture under ops/fixtures/real-replay/ and the changed
+  # gate's own module — the fix Jev picked at confidence 1.0 for the recurring
+  # defect class where a gate shipped tested only against invented data and
+  # never fired on real traffic. It is a distinct file from
+  # ops/config/gate-baseline.json (hooks/gate-integrity.py's blessed-hash
+  # baseline) and never touches it.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check; do
+             boot-budget-check core-rule-ids-check gate-replay-coverage; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
