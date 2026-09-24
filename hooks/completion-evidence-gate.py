@@ -114,7 +114,8 @@ from stop_latch import (  # noqa: E402
 
 sys.path.insert(0, REPO)
 from lib.jev_required_actions import (  # noqa: E402
-    current_turn_slice, evaluate_required_actions, jev_calls_log_mentions)
+    current_turn_slice, evaluate_required_actions, jev_calls_log_mentions,
+    unexplained_receipts)
 
 
 def _canonical_repo_root(fallback):
@@ -1208,6 +1209,15 @@ def jev_required_actions_check(session, recs):
                    "turn_key": result.get("turn_key"),
                    "write_like": any(m["write_like"] for m in mentions),
                    "mentions": mentions[:10]})
+    # PROVENANCE BACKSTOP (round 4). The mention check above misses an
+    # indirect write (`f=out/jev-calls; echo x >> $f.jsonl`, a script file).
+    # Every receipt credited to this turn must line up with a Python tool
+    # call (Bash running python, or an Agent in flight) in the transcript;
+    # one that does not is recorded, never blocked.
+    unexplained = unexplained_receipts(recs, result.get("credited_receipts") or [])
+    if unexplained:
+        jev_audit({"ts": now(), "session": session, "event": "jev_receipt_unexplained",
+                   "turn_key": result.get("turn_key"), "receipts": unexplained[:10]})
     jev_audit({"ts": now(), "session": session, **result})
     if result["status"] != "required" or not result["missing"]:
         return False, "", None

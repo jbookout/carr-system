@@ -202,8 +202,8 @@ def missing_required_actions_in_prompt(payload, prompt):
             return []
         with open(path, errors="replace") as fh:
             recs = [json.loads(line) for line in fh if line.strip()]
-        # The UNION across every advisory folded into this turn (round 3):
-        # a notification's own empty advisory must not erase the prompt's.
+        # The genuine human prompt's own advisory only (round 4): advisories
+        # carried by folded notifications are not consulted.
         required, _turn_key = turn_required_facets(recs)
     except Exception as exc:
         log(f"JEV-REQUIRED-ACTIONS(unavailable) {exc}")

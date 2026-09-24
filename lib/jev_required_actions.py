@@ -24,11 +24,12 @@ reselection.py's `_semantic_receipt()`) and the build receipt sits under its
 `build_receipt` key. This module now reads both shapes. Verified directly
 against a real ~/.claude/projects/*.jsonl session file before writing this.
 
-ONE TURN, MANY ADVISORIES (round 3). A turn is a genuine human prompt plus
-everything folded into it: Stop-hook feedback, background task
+ONE TURN, ONE BINDING ADVISORY (round 4). A turn is a genuine human prompt
+plus everything folded into it: Stop-hook feedback, background task
 notifications, cross-session messages, compaction summaries. Each may carry
-its own build advisory; the turn's required set is the UNION of them all
-(turn_required_facets), so no later advisory can remove a facet.
+its own build advisory, but only the human prompt's own advisory binds
+(prompt_advisory_receipt); the continuations' advisories are not consulted,
+so they can neither add a facet nor remove one.
 
 CURRENT TURN ONLY. The advisory is read only from `latest_user_turn_index(recs)`
 onward (with a one-record lookback for the observed off-by-one: in the sampled
@@ -364,36 +365,58 @@ def _advisory_receipts(turn_recs):
     return out
 
 
-def turn_required_facets(recs):
-    """The current turn's required facet set: the UNION of required_actions
-    over EVERY build advisory in the turn — the human prompt's, and any
-    carried by a folded task notification, Stop-hook feedback, or
-    cross-session message. Nothing can remove a facet once one advisory in
-    the turn required it.
+def prompt_advisory_receipt(recs):
+    """The genuine human prompt's own build advisory for the current turn, or
+    None: the FIRST build receipt in the turn, read only from the records
+    before the first folded continuation (a task notification, Stop-hook
+    feedback, cross-session message, or compaction summary).
 
-    Round 3 (2026-09-24): the round-2 reader kept only the LAST advisory, and
-    249 of 255 real task notifications in one session carry their own
-    advisory (usually requiring nothing), so any background task silently
-    erased the human prompt's required facets.
-
-    Returns (facets, turn_key): facets is None when no advisory in the turn
-    was readable (fail open), [] when the readable ones require nothing, or
-    the ordered, de-duplicated union. turn_key is the FIRST advisory's
-    receipt id (or prompt hash) — stable however many notifications follow.
+    Round 4 (2026-09-24, final Opus review of PR #1224): round 3 took the
+    UNION of every advisory in the turn, which made each folded notification's
+    advisory binding. Jev rates the `<task-notification>` text itself and
+    assigns facets the human never asked for; in session f4d5b78a 65 of 78
+    missing facets at Stops that already carried a refusal line came only
+    from notification advisories, and each new one re-keyed the latch and
+    reopened again. Continuation advisories are now not consulted at all, so
+    they can neither add a facet nor remove one.
     """
-    receipts = _advisory_receipts(current_turn_slice(recs))
-    union, readable, turn_key = [], False, None
-    for receipt in receipts:
-        if turn_key is None:
-            turn_key = receipt.get("receipt_id") or receipt.get("prompt_sha256")
-        facets = required_facets(receipt)
-        if facets is None:
-            continue
-        readable = True
-        for facet in facets:
-            if facet not in union:
-                union.append(facet)
-    return (union if readable else None), turn_key
+    recs = list(recs or ())
+    idx = latest_user_turn_index(recs)
+    if idx < 0:
+        return None
+    for i in range(max(0, idx - 1), len(recs)):
+        rec = recs[i]
+        if i > idx and isinstance(rec, dict) and rec.get("type") == "user" \
+                and is_synthetic_continuation(rec):
+            return None
+        receipts = _advisory_receipts([rec])
+        if receipts:
+            return receipts[0]
+    return None
+
+
+def turn_required_facets(recs):
+    """The current turn's required facets: the genuine human prompt's own
+    advisory only (prompt_advisory_receipt). Advisories carried by folded
+    continuations are ignored.
+
+    Returns (facets, turn_key): facets is None when the prompt's advisory is
+    absent or unreadable (fail open), [] when it requires nothing, else its
+    facets in order. turn_key is that advisory's receipt id (or prompt hash),
+    stable however many notifications follow.
+    """
+    receipt = prompt_advisory_receipt(recs)
+    if receipt is None:
+        return None, None
+    turn_key = receipt.get("receipt_id") or receipt.get("prompt_sha256")
+    facets = required_facets(receipt)
+    if facets is None:
+        return None, turn_key
+    ordered = []
+    for facet in facets:
+        if facet not in ordered:
+            ordered.append(facet)
+    return ordered, turn_key
 
 
 def find_build_advisory(recs):
@@ -409,7 +432,7 @@ def find_build_advisory(recs):
 
     NOT the enforcement reader any more (round 3): a single receipt cannot
     represent a turn that folds in notifications carrying their own
-    advisories. Enforcement uses turn_required_facets (the union).
+    advisories. Enforcement uses turn_required_facets (the prompt's own advisory).
     """
     found = None
     for rec in current_turn_slice(recs):
@@ -558,6 +581,104 @@ def jev_calls_log_mentions(turn_recs):
     return found
 
 
+# RECEIPT PROVENANCE BACKSTOP (round 4). jev_calls_log_mentions only sees a
+# command that NAMES the ledger; `f=out/jev-calls; echo x >> $f.jsonl` or a
+# script file that appends to it would not. So every receipt credited to a
+# turn is also checked against the session transcript: a real receipt is
+# written by ask() inside a Python process, which means a Bash command running
+# python, or an Agent whose subagent runs one, was in flight at the receipt's
+# timestamp (within RECEIPT_EXPLAIN_SECONDS after it finished). A receipt with
+# no such tool call is recorded as `jev_receipt_unexplained`. Detectable, not
+# prevented (decision d47931da): it never changes the verdict.
+RECEIPT_EXPLAIN_SECONDS = 120
+_PYTHON_CMD_RE = re.compile(r"python")
+_TOOL_USE_ID_RE = re.compile(r"<tool-use-id>([^<\s]+)</tool-use-id>")
+
+
+def _parse_ts(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _explaining_intervals(recs):
+    """(start, end) for every Bash-running-python and every Agent tool call
+    in `recs`. end is when it finished (its tool_result; for a background
+    Agent, the task notification naming its tool-use id), or None while it is
+    still running."""
+    starts, kinds, background = {}, {}, {}
+    results, notified = {}, {}
+    for rec in recs or ():
+        if not isinstance(rec, dict):
+            continue
+        when = _record_timestamp(rec)
+        msg = rec.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, str):
+            for tid in _TOOL_USE_ID_RE.findall(content):
+                notified.setdefault(tid, when)
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "tool_use":
+                name = block.get("name") or ""
+                value = block.get("input") if isinstance(block.get("input"), dict) else {}
+                tid = block.get("id")
+                if name in ("Agent", "Task"):
+                    kinds[tid] = "agent"
+                    background[tid] = value.get("run_in_background") is not False
+                elif name in ("Bash", "functions.exec") and _PYTHON_CMD_RE.search(
+                        str(value.get("command") or value.get("cmd") or "")):
+                    kinds[tid] = "python"
+                else:
+                    continue
+                starts[tid] = when
+            elif kind == "tool_result":
+                results.setdefault(block.get("tool_use_id"), when)
+            elif kind == "text":
+                for tid in _TOOL_USE_ID_RE.findall(block.get("text") or ""):
+                    notified.setdefault(tid, when)
+    out = []
+    for tid, start in starts.items():
+        if start is None:
+            continue
+        if kinds[tid] == "agent" and background.get(tid):
+            end = notified.get(tid)
+        else:
+            end = results.get(tid)
+        out.append((start, end))
+    return out
+
+
+def unexplained_receipts(recs, credited_rows):
+    """The credited receipt rows that no in-flight Python tool call in the
+    session transcript `recs` explains (see RECEIPT_EXPLAIN_SECONDS)."""
+    intervals = _explaining_intervals(recs)
+    out = []
+    for row in credited_rows or ():
+        row_dt = _parse_ts(row.get("ts"))
+        if row_dt is None:
+            out.append(row)
+            continue
+        explained = False
+        for start, end in intervals:
+            if (start - row_dt).total_seconds() > CALL_CLOCK_SKEW_SECONDS:
+                continue
+            if end is None or (row_dt - end).total_seconds() <= RECEIPT_EXPLAIN_SECONDS:
+                explained = True
+                break
+        if not explained:
+            out.append(row)
+    return out
+
+
 def load_jev_call_receipts(path):
     """Every row in out/jev-calls.jsonl, best-effort. Never raises."""
     rows = []
@@ -612,12 +733,18 @@ def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=No
     to `now` (default: the current time), whose question ids (or explicit
     facets list) name that facet. No upper duration cap — see
     CALL_CLOCK_SKEW_SECONDS."""
+    covered, _rows = credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now)
+    return covered
+
+
+def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None):
+    """(covered facets, the receipt rows that credited at least one of them)."""
     if not required or boundary_ts is None or not session_id:
-        return set()
+        return set(), []
     if now is None:
         now = datetime.now(timezone.utc)
     upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
-    covered = set()
+    covered, credited = set(), []
     for row in call_rows:
         if row.get("session") != session_id and row.get("session_id") != session_id:
             continue
@@ -635,10 +762,11 @@ def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=No
         delta = (row_dt - boundary_ts).total_seconds()
         if delta < -CALL_CLOCK_SKEW_SECONDS or delta > upper:
             continue
-        for facet in required:
-            if facet not in covered and _call_covers_facet(row, facet):
-                covered.add(facet)
-    return covered
+        hit = [f for f in required if _call_covers_facet(row, f)]
+        if hit:
+            covered.update(hit)
+            credited.append(row)
+    return covered, credited
 
 
 def prompt_names_not_applicable(prompt):
@@ -751,7 +879,8 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     refused = refused_facets_in_texts(window_texts)
     boundary_ts = turn_boundary_timestamp(recs)
     call_rows = load_jev_call_receipts(jev_calls_path)
-    called = facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=now)
+    called, credited = credited_calls_this_turn(
+        call_rows, session_id, boundary_ts, required, now=now)
     missing = set(missing_facets(required, refused, called))
     if ("semantic_creation" in required and "semantic_creation" not in refused
             and "semantic_creation" not in called
@@ -759,4 +888,7 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
         missing.add("semantic_creation")
     return {"status": "required", "required": required,
             "missing": sorted(missing), "refused": sorted(refused),
-            "turn_key": turn_key}
+            "turn_key": turn_key,
+            "credited_receipts": [
+                {k: row.get(k) for k in ("ts", "session", "facets", "question_ids")}
+                for row in credited]}

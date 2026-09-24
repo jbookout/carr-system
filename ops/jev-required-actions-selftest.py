@@ -54,6 +54,7 @@ from lib.jev_required_actions import (  # noqa: E402
     latest_user_turn_index, load_jev_call_receipts, missing_facets,
     prompt_names_facet, prompt_names_not_applicable, refused_facets_in_texts,
     required_facets, semantic_creation_receipt_missing, turn_boundary_timestamp,
+    unexplained_receipts,
 )
 
 NOW = datetime.now(timezone.utc)
@@ -760,10 +761,11 @@ def real_advisory(facets, receipt_id, when):
 
 
 def replay_notification_with_empty_advisory_cannot_erase_required():
-    """FIX 1. A human prompt requiring two facets, then a background task
-    notification carrying its OWN advisory that requires nothing (249 of 255
-    real notifications in f4d5b78a look like this). Round 2 kept the LAST
-    advisory and so read "none"; the union keeps both facets."""
+    """FIX 1 (round 4 form). A human prompt requiring two facets, then a
+    background task notification carrying its OWN advisory (249 of 255 real
+    notifications in f4d5b78a carry one). Only the prompt's advisory binds:
+    a notification's advisory can neither erase a facet (round 2's bug) nor
+    add one (round 3's bug — Jev rates the notification text itself)."""
     recs = [real_human_prompt("P1", 0),
             real_advisory(["architecture_or_design", "semantic_creation"], "r-human", 1),
             assistant("Starting.", 2),
@@ -776,13 +778,14 @@ def replay_notification_with_empty_advisory_cannot_erase_required():
           and result["required"] == ["architecture_or_design", "semantic_creation"]
           and result["missing"] == ["architecture_or_design", "semantic_creation"]
           and result["turn_key"] == "r-human")
-    # And a notification that ADDS a facet widens the set; nothing removes one.
+    # A notification advisory naming a NEW facet is not consulted either.
     recs2 = recs + [real_task_notification("N2", 400), real_advisory(["diagnosis"], "r-n2", 401)]
     result2 = evaluate_required_actions(recs2, [], "/nonexistent.jsonl", "s1", [])
-    ok = ok and result2["required"] == ["architecture_or_design", "semantic_creation", "diagnosis"]
-    print(f"{'PASS' if ok else 'FAIL'}  replay: a notification's empty advisory cannot erase the "
-          f"prompt's required facets (got {result['status']} {result['required']}; "
-          f"widened {result2['required']})")
+    ok = ok and result2["required"] == ["architecture_or_design", "semantic_creation"] \
+        and result2["turn_key"] == "r-human"
+    print(f"{'PASS' if ok else 'FAIL'}  replay: a notification's advisory neither erases nor adds "
+          f"a facet (got {result['status']} {result['required']}; after a notification naming "
+          f"diagnosis: {result2['required']})")
     return ok
 
 
@@ -848,12 +851,12 @@ def replay_cross_session_message_folds_into_turn():
         result = evaluate_required_actions(recs, [], "/nonexistent.jsonl", "s1", [])
         this_ok = (is_synthetic_continuation(recs[3])
                    and latest_user_turn_index(recs) == 0
-                   and result["required"] == ["verification_selection", "evidence_matching"])
+                   and result["required"] == ["verification_selection"])
         ok = ok and this_ok
         print(f"  {'PASS' if this_ok else 'FAIL'}  cross-session message (origin stamp="
               f"{with_origin}) folds: required={result['required']}")
-    print(f"{'PASS' if ok else 'FAIL'}  replay: a cross-session message turn is folded and its "
-          "advisory joins the union")
+    print(f"{'PASS' if ok else 'FAIL'}  replay: a cross-session message is folded into the turn "
+          "and its own advisory is not binding")
     return ok
 
 
@@ -940,6 +943,91 @@ def forge_detection_event_recorded_end_to_end():
     return ok
 
 
+def refusal_then_notification_facet_does_not_reopen_end_to_end():
+    """THE ROUND-4 BLOCKER, end to end. The prompt requires one facet and the
+    turn refuses it; a later notification's advisory names three more facets.
+    Round 3 reopened here (and re-keyed the latch per new facet set); the
+    prompt-only reader does not."""
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        records = [real_human_prompt("P1", 0),
+                   real_advisory(["next_action_priority"], "r-blocker", 1),
+                   assistant("JEV-REFUSED: next_action_priority the partner named the next step", 2),
+                   real_task_notification("N1", 60),
+                   real_advisory(["diagnosis", "evidence_matching", "semantic_creation"],
+                                 "r-blocker-n", 61),
+                   assistant("Background task done.", 62)]
+        blocked, _ = run_gate(records, "s-blocker", state,
+                              env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": "/nonexistent.jsonl"})
+    ok = blocked is False
+    print(f"{'PASS' if ok else 'FAIL'}  blocker: a refused prompt facet plus a notification advisory "
+          f"naming new facets does not reopen (blocked={blocked})")
+    return ok
+
+
+def tool_result(tool_use_id, when):
+    return {"type": "user", "timestamp": ts(when), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_use_id, "content": "ok"}]}}
+
+
+def tool_use_with_id(name, value, tool_use_id, when):
+    return {"type": "assistant", "timestamp": ts(when), "message": {"content": [
+        {"type": "tool_use", "id": tool_use_id, "name": name, "input": value}]}}
+
+
+def receipt_provenance_backstop():
+    """BACKSTOP. A credited receipt with no Python tool call in flight (Bash
+    running python, or an Agent) within RECEIPT_EXPLAIN_SECONDS is
+    unexplained. Covers the indirect forge the mention check misses."""
+    recs = [real_human_prompt("P1", 0),
+            tool_use_with_id("Bash", {"command": "./.venv/bin/python scratch/ask_jev.py"}, "b1", 10),
+            tool_result("b1", 14),
+            tool_use_with_id("Bash", {"command": "f=out/jev-calls; echo x >> $f.jsonl"}, "b2", 400),
+            tool_result("b2", 401),
+            tool_use_with_id("Agent", {"prompt": "x", "run_in_background": True}, "a1", 1000),
+            tool_result("a1", 1001),
+            {"type": "user", "timestamp": ts(2000), "message": {"role": "user", "content":
+             "<task-notification>\n<tool-use-id>a1</tool-use-id>\n</task-notification>"}}]
+    by_python = {"ts": ts(13), "facets": ["diagnosis"]}
+    just_after = {"ts": ts(120), "facets": ["diagnosis"]}           # 106 s after it finished
+    forged = {"ts": ts(401), "facets": ["diagnosis"]}               # only a shell append ran
+    by_agent = {"ts": ts(1500), "facets": ["diagnosis"]}            # background Agent in flight
+    after_agent = {"ts": ts(2300), "facets": ["diagnosis"]}         # 300 s after it finished
+    got = unexplained_receipts(recs, [by_python, just_after, forged, by_agent, after_agent])
+    ok = got == [forged, after_agent]
+    print(f"{'PASS' if ok else 'FAIL'}  backstop: receipts with no Python tool call or Agent in "
+          f"flight are unexplained (got {[r['ts'] for r in got]})")
+    return ok
+
+
+def receipt_unexplained_event_recorded_end_to_end():
+    session = f"s-unexplained-{os.getpid()}"
+    log = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        calls = write_jev_calls_file([call_row(facets=["diagnosis"], when=3, session=session)])
+        try:
+            records = [real_human_prompt("P1", 0),
+                       real_advisory(["diagnosis"], "r-unexplained", 1),
+                       bash("f=out/jev-calls; echo row >> $f.jsonl", 2),
+                       assistant("Diagnosed.", 4)]
+            blocked, _ = run_gate(records, session, state,
+                                  env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": calls})
+        finally:
+            os.unlink(calls)
+    events = []
+    try:
+        with open(log) as fh:
+            for line in fh:
+                row = json.loads(line)
+                if row.get("session") == session and row.get("event") == "jev_receipt_unexplained":
+                    events.append(row)
+    except OSError:
+        pass
+    ok = blocked is False and len(events) == 1
+    print(f"{'PASS' if ok else 'FAIL'}  backstop end-to-end: an indirect forge the mention check "
+          f"misses passes the verdict but records jev_receipt_unexplained (events={len(events)})")
+    return ok
+
+
 def main():
     outcomes = [
         lib_reads_real_shape(),
@@ -982,6 +1070,9 @@ def main():
         refusal_reason_floor_and_stoplist(),
         forge_detection_names_the_ledger(),
         forge_detection_event_recorded_end_to_end(),
+        refusal_then_notification_facet_does_not_reopen_end_to_end(),
+        receipt_provenance_backstop(),
+        receipt_unexplained_event_recorded_end_to_end(),
     ]
     print(f"jev-required-actions-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
