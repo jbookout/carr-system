@@ -116,6 +116,11 @@ from lib.jev_required_actions import evaluate_required_actions  # noqa: E402
 
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
 JEV_LOG = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
+# Same path ops/typesafe_client.py's ask() appends a receipt to on every
+# successful call (its JEV_CALLS_LOG) — kept as a literal here rather than an
+# import, so this hook has no import-time dependency on the vendor client.
+JEV_CALLS_LOG = (os.environ.get("CARR_JEV_CALLS_LOG_OVERRIDE")
+                 or os.path.join(REPO, "out", "jev-calls.jsonl"))
 # The FLOOR trigger, kept and widened with the verbs Joe named (finished,
 # landed, phase-complete, ready, live). It is no longer the only trigger: the
 # clause predicate below fires with or without any of these words.
@@ -1168,18 +1173,23 @@ def jev_required_actions_check(session, recs):
     """decision 0b11c89b's Stop-side half. Returns (block, reason, identity)
     with `block` False whenever there is nothing to enforce (no advisory this
     turn, an unavailable advisory, or a readable advisory with no required
-    actions) or when a fresh check has already been latched.
+    actions) or when this exact turn's finding has already been latched.
     """
     window = current_window(recs)
     texts = [text(rec, {"assistant"}) for rec in window]
-    commands = [command(tool(rec)[1]) for rec in window]
-    wrote_a_file = any(file_paths(*tool(rec)) for rec in window)
-    result = evaluate_required_actions(recs, window, texts, commands, wrote_a_file)
+    written_paths = sorted({p for rec in window for p in file_paths(*tool(rec))})
+    result = evaluate_required_actions(recs, texts, JEV_CALLS_LOG, session, written_paths)
     jev_audit({"ts": now(), "session": session, **result})
     if result["status"] != "required" or not result["missing"]:
         return False, "", None
-    identity = claim_identity("completion-evidence-gate", JEV_REQUIRED_REASON,
-                              result["missing"])
+    # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
+    # build-advisory receipt id (or prompt hash), which is unique per turn, so
+    # the SAME missing-facet set recurring in a LATER turn still reopens.
+    # stop_latch's own identity/latch machinery is reused unchanged — only the
+    # token set fed into it is turn-scoped now.
+    identity = claim_identity(
+        "completion-evidence-gate", JEV_REQUIRED_REASON,
+        [result.get("turn_key") or session, *result["missing"]])
     if latched(session, identity):
         return False, "", None
     missing = ", ".join(result["missing"])

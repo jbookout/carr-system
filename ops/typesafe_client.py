@@ -63,9 +63,24 @@ import os
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# WHERE A CALL BECOMES OBSERVABLE (decision 0b11c89b, 2026-09-24). A missing
+# Jev call used to be checkable only by grepping a session's Bash history for
+# the string "typesafe_client", which a bare `echo typesafe_client` also
+# satisfied. Every successful ask() now appends one best-effort row here —
+# never on failure, never the request or the answers, just enough for a
+# reader (lib/jev_required_actions.py) to bind a call to a session, a time
+# window, and the facets it named. Writing this must never turn a working
+# Jev call into a failure, so every step here is wrapped and swallowed.
+JEV_CALLS_LOG = os.path.join(REPO, "out", "jev-calls.jsonl")
+# The env vars a caller's own session id is found under, same set
+# ops/settlement-run-token.py's NATIVE_SESSION_KEYS already uses.
+SESSION_ID_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
+                       "CODEX_THREAD_ID")
 KEY_NAME = "TYPESAFE_API_KEY"
 
 # jev-latest is an alias and MOVES when a release ships, so answers can change
@@ -160,8 +175,36 @@ def score(instructions, levels):
     return {"type": "score", "instructions": instructions, "criteria": levels}
 
 
+def _session_id():
+    for key in SESSION_ID_ENV_KEYS:
+        value = os.environ.get(key)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _append_call_receipt(questions, facets, model_answered, log_path):
+    """Best-effort JSONL append, never on the request or the answers, never
+    able to turn a successful ask() into a failure. See JEV_CALLS_LOG above."""
+    try:
+        row = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "session": _session_id(),
+            "question_ids": sorted(questions),
+            "facets": sorted({str(f) for f in facets}) if facets else [],
+            "model": model_answered,
+            "ok": True,
+        }
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
-        api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None):
+        api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
+        facets=None, calls_log=JEV_CALLS_LOG):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -170,9 +213,18 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     id to a question built by noul/choice/score; the ids come back unchanged and
     are never sent to the model, so the instruction must carry its full meaning.
 
+    `facets` is optional: the names of any decision-0b11c89b required actions
+    (ops/jev_build_advisory.py's FACETS, e.g. "architecture_or_design") this
+    call is meant to satisfy. Pass it, or name the facet in a question id,
+    when the call is meant to count as this turn's Jev use for that facet —
+    lib/jev_required_actions.py's reader matches on either. Neither is
+    required for an ask() that has nothing to do with a required action.
+
     Returns the decoded response: {"model": ..., "answers": {...},
     "usage": {...}}. `opener` is for the offline selftest and is not used in
-    production.
+    production. On a successful response this also appends one best-effort
+    receipt row to `calls_log` (default out/jev-calls.jsonl) — see
+    JEV_CALLS_LOG's module-level note for what it carries and why.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
@@ -205,7 +257,10 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     while True:
         try:
             with send(request, timeout=timeout) as response:
-                return json.load(response)
+                result = json.load(response)
+            answered_model = result.get("model") if isinstance(result, dict) else None
+            _append_call_receipt(questions, facets, answered_model, calls_log)
+            return result
         except urllib.error.HTTPError as err:
             # 429 is documented as expected under load, and the service's own
             # limits "can change without notice". Honour retry-after when it is

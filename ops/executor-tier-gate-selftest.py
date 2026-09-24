@@ -43,11 +43,11 @@ def build_advisory_transcript(facets):
         "configuration_digest": "sha256:" + "0" * 64, "source_digest": "sha256:" + "0" * 64,
         "semantic_rule_delivery": "delivered", "advisory": advisory,
     }
-    record = {"attachment": {"type": "hook_success", "hookName": "UserPromptSubmit",
-                             "hookEvent": "UserPromptSubmit",
-                             "stdout": json.dumps({"hookSpecificOutput": {
-                                 "hookEventName": "UserPromptSubmit",
-                                 "additionalContext": json.dumps(receipt)}})}}
+    # Real Claude Code shape (verified against a live ~/.claude/projects/*.jsonl
+    # session): attachment.type == "hook_additional_context", content a list of
+    # already-decoded JSON text — no "stdout"/hookSpecificOutput wrapper.
+    record = {"attachment": {"type": "hook_additional_context",
+                             "content": [json.dumps(receipt)]}}
     fh = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
     fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "design it"}}) + "\n")
     fh.write(json.dumps(record) + "\n")
