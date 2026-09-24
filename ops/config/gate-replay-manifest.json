@@ -763,7 +763,6 @@
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",
-    "lib/rule_delivery_activation.py",
     "lib/rule_delivery_preuse.py",
     "lib/rule_delivery_shadow.py",
     "lib/scheduled_run.py"

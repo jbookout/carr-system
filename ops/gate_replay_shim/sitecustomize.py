@@ -1,5 +1,5 @@
 """sitecustomize for ops/gate-replay.py — pins the clock, refuses the network,
-and records which repository files a gate process opened.
+and records which repository modules a gate process executed.
 
 Python imports a module named `sitecustomize` automatically at start-up when
 one is on sys.path, and ops/gate-replay.py puts this directory first on
@@ -20,11 +20,13 @@ fresh Linux runner and on a developer Mac. Three inputs would otherwise differ:
   * THE NETWORK. socket connect and name resolution raise OSError, so a gate
     that would call a vendor or the record layer takes its offline path in the
     same way everywhere and in milliseconds.
-  * COVERAGE EVIDENCE. An audit hook records every file under the sandbox
-    checkout that the process opens, Python sources included (the import
-    system opens them through io.open_code, which raises the same audit
-    event). ops/gate-replay.py uses that to prove each helper module listed in
-    the manifest was actually executed by a replayed gate.
+  * COVERAGE EVIDENCE. An audit hook records every Python file under the
+    sandbox checkout that the process compiles, which is every module it
+    executes: the import system compiles through the builtin, and so does
+    hooks/hook-meter-run.py for the gate itself, and PYTHONDONTWRITEBYTECODE
+    plus a fresh sandbox means no cached bytecode skips the step.
+    ops/gate-replay.py uses that to prove each helper module listed in the
+    manifest was actually executed by a replayed gate.
 
 It is a library file with no entrypoint, like the modules in lib/.
 """
@@ -160,10 +162,15 @@ if _EPOCH:
         _opened: "set[str]" = set()
 
         def _audit(event, args):
-            if event != "open" or not args:
+            # "compile" fires when the import system (or hook-meter-run.py)
+            # compiles a module's source, so it names exactly the Python files
+            # the process EXECUTED. "open" would also name files a gate merely
+            # reads, such as a path quoted in the command it is judging, and
+            # that is not evidence the gate runs through a helper.
+            if event != "compile" or len(args) < 2:
                 return
-            path = args[0]
-            if not isinstance(path, str):
+            path = args[1]
+            if not isinstance(path, str) or not path.endswith(".py"):
                 return
             if path.startswith(_ROOT_SLASH):
                 rel = path[len(_ROOT_SLASH):]

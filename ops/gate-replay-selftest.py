@@ -29,7 +29,7 @@ WHAT IS PROVEN, and each is adversarial rather than a happy path:
       reopen), read from the wrapper's own telemetry line;
     * a crash, a timeout, and a write outside out/ each fail;
     * the clock is pinned and the network is refused inside the gate;
-    * helper evidence comes from files the gate process actually opened, both
+    * helper evidence comes from modules the gate process actually executed, both
       through sys.path imports and through spec_from_file_location;
     * the run never asks git about any ref beyond its own sandbox, so a runner
       checkout with no local `main` cannot turn it into a no-op.
@@ -427,8 +427,8 @@ try:
     helper_manifest["hooks"]["never_used.py"] = {"role": "helper"}
     helper_manifest["lib_helpers"] = ["lib/not_opened.py"]
     herrors = GR.helper_errors(helper_manifest, base.results)
-    check("a listed helper nothing opened fails", any("never_used.py" in e for e in herrors), herrors)
-    check("a listed lib helper nothing opened fails", any("lib/not_opened.py" in e for e in herrors), herrors)
+    check("a listed helper nothing executed fails", any("never_used.py" in e for e in herrors), herrors)
+    check("a listed lib helper nothing executed fails", any("lib/not_opened.py" in e for e in herrors), herrors)
 
     write_fixtures(fixtures_dir, ["crash now", "hang now", "scribble now"])
     old_timeout = GR.INVOCATION_TIMEOUT

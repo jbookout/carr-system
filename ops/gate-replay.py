@@ -33,12 +33,13 @@ WHAT IT DOES, EVERY RUN, WITH NOTHING COMPUTED FROM A BASE REF:
      deny_class), so this check classifies exactly as production telemetry
      does. A gate that crashes, exits outside {0, 2}, times out, or writes
      outside out/ fails CI.
-  4. HELPER EVIDENCE. Every file the gate processes open is recorded by an
-     audit hook. Each helper in hooks/ must be opened by some replayed gate,
-     and the set of lib/*.py files opened must equal the manifest's
+  4. HELPER EVIDENCE. Every Python module the gate processes execute is
+     recorded by an audit hook. Each helper in hooks/ must be executed by some replayed
+     gate, and the set of lib/*.py files executed must equal the manifest's
      lib_helpers list exactly.
-  5. SNAPSHOT. The verdicts, one TSV row per (gate, event, fixture), must
-     equal ops/fixtures/real-replay/verdict-snapshot.tsv. A change in any
+  5. SNAPSHOT. The verdicts (one TSV row per non-allow verdict, plus a counts
+     row per gate and event) must equal
+     ops/fixtures/real-replay/verdict-snapshot.tsv. A change in any
      verdict fails CI until the snapshot is regenerated in the same pull
      request, so the reviewer reads the behaviour change as a diff.
 
@@ -48,7 +49,7 @@ sandbox copy of the tracked tree (with its own single-commit git repository,
 never under a temp-directory prefix the gates treat specially, file times set
 to the pinned instant), and every invocation gets a fresh HOME, TMPDIR and
 out/. ops/gate_replay_shim/sitecustomize.py pins the clock, refuses sockets,
-and records opened files. A PATH shim turns network tools into failures.
+and records executed modules. A PATH shim turns network tools into failures.
 Reason text is normalised (sandbox paths, digits, hex, UUIDs) before it is
 compared.
 
@@ -353,7 +354,7 @@ def build_sandbox(run_root: Path, pinned: float, source: Path = REPO) -> Path:
     # sandbox, as a launcher for the interpreter running this check. It is a
     # launcher rather than a link because run-record-gate.py deletes PYTHONPATH
     # before it execs the gate, which would drop the replay shim (clock, network
-    # refusal, open-file trace) for exactly the two gates it wraps. .venv is
+    # refusal, module trace) for exactly the two gates it wraps. .venv is
     # gitignored, so none of this reads as a tree change.
     venv_bin = repo / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
@@ -830,13 +831,13 @@ def helper_errors(manifest: Dict[str, Any], results: List[Result]) -> List[str]:
     errors = []
     for name, entry in sorted(manifest["hooks"].items()):
         if entry.get("role") == "helper" and f"hooks/{name}" not in opened:
-            errors.append(f"hooks/{name} is listed as a helper, but no replayed gate opened it")
+            errors.append(f"hooks/{name} is listed as a helper, but no replayed gate executed it")
     lib_opened = {p for p in opened if p.startswith("lib/") and p.endswith(".py") and "/" not in p[4:]}
     listed = set(manifest.get("lib_helpers", []))
     for path in sorted(lib_opened - listed):
-        errors.append(f"{path} is opened by a replayed gate but is not in the manifest's lib_helpers")
+        errors.append(f"{path} is executed by a replayed gate but is not in the manifest's lib_helpers")
     for path in sorted(listed - lib_opened):
-        errors.append(f"{path} is in the manifest's lib_helpers, but no replayed gate opened it")
+        errors.append(f"{path} is in the manifest's lib_helpers, but no replayed gate executed it")
     return errors
 
 
