@@ -53,7 +53,7 @@ Given any ref, resolve to the set of records linked to it:
 Union the timelines, sort by `occurred_at` descending.
 
 **Traversal is one hop. Never chain.** A deal resolves to its client and stops — it does
-not then pick up the client's *other* deals. `C-131` (Trambadia) carries twelve deals;
+not then pick up the client's *other* deals. `C-131` (Deshmukh) carries twelve deals;
 rendering all of them on each one is noise, not context.
 
 ### 2. Attribute every row to its source
@@ -149,7 +149,7 @@ Use real records — these are the ones that failed today:
 | 5 | `find Castillo` | L-001 and C-117 shown as one person; **L-158 Jeff Castillo stays separate** |
 | 6 | `today-triage` | Castillo's row excluded once C-117's "PAUSED — inbound only" resolves across the pair |
 | 7 | `catch-me-up` on any C-131 deal | That deal + C-131's own rows. **No rows from C-131's other eleven deals** |
-| 8 | `catch-me-up C-129` (Collin Myrick, genuinely empty) | Still empty. Traversal must not invent content |
+| 8 | `catch-me-up C-129` (Colby Marsh, genuinely empty) | Still empty. Traversal must not invent content |
 
 Test 8 matters as much as the rest: the fix must make hidden content visible without
 making empty records look populated.

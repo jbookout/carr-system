@@ -386,11 +386,11 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // Answering Joe (0575) adds one human-only, authority-only write.
   // DoctorCRE V5-UX-C02/C06 (0579) adds one read and one write:
   // read-resource-dashboard and record-resource-observation.
-  // The server-side Jev call log (0587) adds one write and one read:
-  // ask-jev and read-jev-call-receipts.
-  assert.equal(rows.length, 283);
+  // The server-side Jev call log (0587) adds one write and two reads:
+  // ask-jev, read-jev-call-receipts and read-jev-call-receipt-integrity.
+  assert.equal(rows.length, 284);
   assert.equal(rows.filter(row => row.write).length, 200);
-  assert.equal(rows.filter(row => !row.write).length, 83);
+  assert.equal(rows.filter(row => !row.write).length, 84);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -989,8 +989,9 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // Meeting Mode verbs after v42-v48 registered none.
   // v57 registers register-tour-property after v50-v56 registered none.
   // v63 registers answer-work-request-for-joe after v58-v62 registered none.
-  // v65 registers the resource-observation pair; v69 registers ask-jev and
-  // read-jev-call-receipts after v66-v68 registered none.
+  // v65 registers the resource-observation pair; v69 registers ask-jev,
+  // read-jev-call-receipts and read-jev-call-receipt-integrity after v66-v68
+  // registered none.
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
   const v69SelectorDigest = generatedV69.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];

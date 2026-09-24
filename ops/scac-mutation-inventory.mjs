@@ -305,11 +305,12 @@ export const REGISTRY_V67_VERSION = "scac-mutation-registry.v67";
 // UNSEALED_INGRESS_KINDS member so it never becomes the runtime selector.
 export const REGISTRY_V68_VERSION = "scac-mutation-registry.v68";
 // v69 seals the server-side Jev call log: migration 0587 installs the
-// append-only ops.jev_call_receipt behind two SECURITY DEFINER doors,
-// ops.record_jev_call_receipt (EXECUTE to carr_writer) and
-// ops.read_jev_call_receipts (EXECUTE to carr_reader and carr_writer), and
-// mcp-server/src/jev-call-receipt.js registers two new verbs, ask-jev (write)
-// and read-jev-call-receipts (read). Two new mcp-tool rows; no sibling verb's
+// append-only ops.jev_call_receipt behind three SECURITY DEFINER doors,
+// ops.record_jev_call_receipt (EXECUTE to carr_writer),
+// ops.read_jev_call_receipts and ops.jev_call_receipt_integrity (EXECUTE to
+// carr_reader and carr_writer), and mcp-server/src/jev-call-receipt.js
+// registers three new verbs, ask-jev (write), read-jev-call-receipts and
+// read-jev-call-receipt-integrity (reads). Three new mcp-tool rows; no sibling verb's
 // bound fields change. The runtime selector (mutation-registry.js) moves to
 // v69 so the door admits both verbs.
 export const REGISTRY_V69_VERSION = "scac-mutation-registry.v69";
@@ -1414,14 +1415,15 @@ export const POST_0584_FORWARD_V68_DB_CATALOG_BASELINE = Object.freeze({
 // Measured by the disposable PostgreSQL 17 migration lane via the
 // drift-exception readback technique (apply, read the refusal's observed
 // count/digest, bind, reapply). Installs ops.record_jev_call_receipt (0587,
-// EXECUTE to carr_writer), ops.read_jev_call_receipts (0587, EXECUTE to
-// carr_reader and carr_writer) and the v69 registration function with its
+// EXECUTE to carr_writer), ops.read_jev_call_receipts and
+// ops.jev_call_receipt_integrity (0587, EXECUTE to carr_reader and
+// carr_writer) and the v69 registration function with its
 // runtime EXECUTE grants. ops.jev_call_receipt itself carries no app-role
 // grant.
 export const POST_0587_FORWARD_V69_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0584_FORWARD_V68_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v69",
-  secdef_execute: { count: 892, digest: "sha256:39b4621c0a56ac49319f670339af4458e5b4bc510cf681fdbf8f25d17b644702" },
+  secdef_execute: { count: 894, digest: "sha256:d7073324448dbcd113b16d955f92dd39a3835d88ad8fe304c70b6601a08d27d3" },
 });
 // Measured on the same lane. Source-only re-digest (tools/migrate.py's
 // atomic-group edit): only v70's own registration function and its runtime
@@ -1429,7 +1431,7 @@ export const POST_0587_FORWARD_V69_DB_CATALOG_BASELINE = Object.freeze({
 export const POST_0588_FORWARD_V70_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0587_FORWARD_V69_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v70",
-  secdef_execute: { count: 896, digest: "sha256:9b4e5e3e54144f5ebb73dfc8ef9cb077ee75eb0458027bf6d3982a24cba2743a" },
+  secdef_execute: { count: 898, digest: "sha256:b4ffd805f7e626fcff1e683972f32a1ee134f594995c8c182d33f38912cbc4bc" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -15921,7 +15923,7 @@ export function renderJevCallReceiptMigratePyResealRegistrySql(rows,
   predecessorSql = null) {
   const predecessorPath = "migrations/0588_jev_call_receipt_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
-  const predecessorDigest = "c312ef58d425ad919b19f384b71f60f10c1db202430c4346c5a2460e2bd3c963";
+  const predecessorDigest = "6c604fcb0bec2f1300e5182117faa0444a62b6c67bd661f5590e53e3a5568898";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v70 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0587_FORWARD_V69_DB_CATALOG_BASELINE;
