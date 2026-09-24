@@ -62,7 +62,7 @@ X." The benefit summary may not.
 
 ## How to build the benefit summary
 
-Format, from the real Cottis sheet:
+Format, from the real Calloway sheet:
 
 - CARR logo from `DNA/Marketing/Brand Assets/Logos/CARR_Solo_Blue_Logo.png` (shared DNA, so both partners' brains can render it).
 - Greeting by the client's first name, one congratulations line naming the transaction and the practice.
