@@ -107,7 +107,12 @@ def load_allow(path: str = ALLOW) -> set[tuple[str, str]]:
 
 
 def tracked(repo: str = REPO) -> list[str]:
-    out = subprocess.run(["git", "ls-files", "-z"], cwd=repo, capture_output=True, check=True).stdout
+    # scrubbed_env: an inherited GIT_DIR (every git hook exports one) would
+    # outrank cwd and list some other repository's files (ops/git_env.py).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from git_env import scrubbed_env
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=repo, capture_output=True, check=True,
+                         env=scrubbed_env()).stdout
     return [p for p in out.decode("utf-8", "replace").split("\0") if p]
 
 

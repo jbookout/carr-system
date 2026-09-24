@@ -19,7 +19,6 @@ import hashlib
 import importlib.util
 import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -27,6 +26,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from git_env import fixture_env  # noqa: E402
+
+ENV = fixture_env()
 spec = importlib.util.spec_from_file_location("no_client_names_gate", HERE / "no-client-names-gate.py")
 assert spec is not None and spec.loader is not None
 gate = importlib.util.module_from_spec(spec)
@@ -74,7 +77,7 @@ def run_gate(repo: Path, allow: list[dict]) -> tuple[int, str]:
 with tempfile.TemporaryDirectory(prefix="no-client-names-") as tmp:
     repo = Path(tmp) / "repo"
     repo.mkdir()
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = ENV
     subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
     (repo / "clean.md").write_text("A dentist in the panhandle, no names here.\n")
     subprocess.run(["git", "-C", str(repo), "add", "clean.md"], check=True, env=env)
