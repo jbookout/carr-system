@@ -49,6 +49,11 @@ mcp-server/smoke-reads.local.env
 # hooks/record-home-gate.py. Per machine; never tracked.
 exporters/dossier-roster.local.json
 
+# The plain client-name list ops/githooks/client-name-warn.py reads for its
+# warn-only pre-push note (WR-000049). Every line is a client name. Per machine;
+# never tracked.
+ops/config/client-names.local.txt
+
 # Python virtualenvs — never source, and they carry >100MB binaries GitHub refuses
 .venv/
 .venv-*/
