@@ -803,6 +803,38 @@ class HealthGate(Base):
         runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
 
+    def test_point2r4_a_new_doctrine_gate_finding_with_no_baseline_still_fails(self):
+        # Point 2 of round 4 of an independent review of PR #1237:
+        # doctrine_gate (and doctrine_stale) are time_rolling=True in
+        # tools/health-check.py, but that must not blanket-excuse a
+        # genuinely NEW finding just because it has no baseline entry — 40
+        # gate failures appearing where the baseline had 0 is a real
+        # regression this release introduced, not a clock crossing, and
+        # must fail the gate.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        new_gate_failures = _finding("doctrine_gate", "40 failures in 24h", count=40,
+                                     time_rolling=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[],
+                            health_findings=[new_gate_failures])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("doctrine_gate", self.fx.records()[-1].get("detail", ""))
+
+    def test_point2r4_allowlisted_keys_still_excuse_a_first_appearance(self):
+        # The other half of point 2, round 4: the allowlist is real, not a
+        # blanket revert — export_receipt (the STALE branch) and
+        # job_missing_due still get excused on a first appearance with no
+        # baseline entry, exactly as before the narrowing.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        stale_export = _finding("export_receipt", "STALE vendors.xlsx (last ok 2026-09-20)",
+                                subject="vendors.xlsx", time_rolling=True)
+        missing_due = _finding("job_missing_due", "cal MISSING DUE execution for 2026-09-24",
+                               subject="cal", time_rolling=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[],
+                            health_findings=[stale_export, missing_due])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
     def test_point1_repo_loose_work_is_excluded_from_the_gate(self):
         # Point 1 of the second round of review: even reading baseline and
         # post-promote in the same worktree, migrate-apply legitimately

@@ -1032,6 +1032,13 @@ def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, ti
     for row in _FINDINGS:
         if row["key"] == key and row["subject"] == subject:
             row["count"] += count
+            # `detail` is replaced with the LATEST call's text, not left as
+            # the first call's (point 3 of round 4 of an independent review
+            # of PR #1237): a message like "98 active rule gaps" must not
+            # stay frozen at 98 while `count` climbs to 99, 100, ... on
+            # later merged calls — a reader trusts the printed detail to
+            # match the count it sits next to.
+            row["detail"] = detail
             # hard_error merges with OR (point 4 of the THIRD round of
             # review, correcting the second round's overcorrection): a
             # (key, subject) that had EVEN ONE hard_error contributor this
@@ -1420,6 +1427,15 @@ def _canonical_health():
                         # verifiable by the AST check, where four un-elsed
                         # sibling `if`s covering this dict's guaranteed
                         # match are not.
+                        #
+                        # `rc = 1` lives HERE, as this for-loop's own direct
+                        # sibling, rather than after the whole `if _m: ...
+                        # else: ...` (point 1 of round 4 of an independent
+                        # review of PR #1237): a bare loop is only trusted to
+                        # cover a sibling statement that shares its own
+                        # accumulator, in the SAME block, not a statement
+                        # outside the branch the loop lives in — the same
+                        # reasoning the jobs section below now follows too.
                         for _count, _subject, _hard in (
                             (_failed, "failed", True),
                             (_expiring, "expiring_soon", False),
@@ -1429,9 +1445,10 @@ def _canonical_health():
                             if _count:
                                 _canonical_finding("credential_health", _detail, subject=_subject,
                                                    count=_count, hard_error=_hard)
+                        rc = 1
                     else:
                         _canonical_finding("credential_health", _detail, hard_error=True)
-                    rc = 1
+                        rc = 1
         except Exception as e:
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
             _canonical_finding("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)

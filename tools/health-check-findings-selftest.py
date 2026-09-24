@@ -138,11 +138,49 @@ def _is_return_one(stmt: ast.stmt) -> bool:
             and stmt.value.value == 1)
 
 
+def _loop_always_finds(stmt: ast.stmt) -> bool:
+    """Whether a `for`/`while` loop is GUARANTEED to make a finding call
+    every time this statement is reached, regardless of how many times (if
+    any) its body actually runs — used only by `_branch_always_finds`,
+    which decides whether an entire branch may be trusted to cover a LATER,
+    UNRELATED sibling statement outside that branch (point 1 of round 4 of
+    an independent review of PR #1237).
+
+    A bare loop body is NOT sufficient, even when it contains a finding
+    call, because the loop's iterable can be empty at runtime — the body
+    then never runs and nothing is ever recorded. Only a `for`/`else` (or
+    `while`/`else`) clause qualifies: Python runs that `else` whenever the
+    loop finishes without hitting a `break`, which includes finishing after
+    zero iterations, so a finding call placed there is unconditional.
+
+    This is deliberately STRICTER than `_propagates_finding_call`'s own
+    For/While case, which stays permissive for the different, legitimate
+    job of covering a sibling `if` in the SAME block that shares the loop's
+    own accumulator (e.g. `for job in bad: _canonical_finding(...)` then
+    `if bad: rc = 1` right after it — if the loop ran zero times, `bad` is
+    empty and that `rc = 1` can't fire either, so the loop and its sibling
+    rise and fall together). That in-block relationship does not exist for
+    a branch being judged fit to excuse code OUTSIDE itself, which is what
+    `_branch_always_finds` is for — so here the loop must prove it always
+    fires on its own, via for/else."""
+    if not isinstance(stmt, (ast.For, ast.While, ast.AsyncFor)):
+        return False
+    return bool(stmt.orelse) and _contains_finding_call(stmt.orelse)
+
+
 def _branch_always_finds(stmts: list) -> bool:
     """Whether this straight-line statement list is GUARANTEED to make a
     finding call every time it runs — used to decide whether an `if`
-    propagates to a later sibling (see `_if_always_finds`)."""
+    propagates to a later, UNRELATED sibling statement (see
+    `_if_always_finds`). A bare `for`/`while` loop is deliberately NOT
+    trusted here (see `_loop_always_finds`) even though the more permissive
+    `_propagates_finding_call` trusts one for the different, narrower job of
+    covering its own immediate in-block sibling."""
     for s in stmts:
+        if isinstance(s, (ast.For, ast.While, ast.AsyncFor)):
+            if _loop_always_finds(s):
+                return True
+            continue
         if _propagates_finding_call(s):
             return True
         if isinstance(s, ast.If) and _if_always_finds(s):
@@ -338,6 +376,17 @@ class FindingFunctions(unittest.TestCase):
         self.assertFalse(row_y["time_rolling"])
         self.assertEqual(row_y["count"], 2)
 
+    def test_merged_row_detail_reflects_the_latest_call_not_the_first(self):
+        # Point 3 of round 4 of an independent review of PR #1237: a merged
+        # row's `detail` must track the LATEST call's text, not stay frozen
+        # at the first call's — "98 active rule gaps" must not linger once a
+        # later merged call for the same (key, subject) reports 99, 100, ...
+        self.finding("rule_enforcement", "98 active rule gaps", count=98)
+        self.finding("rule_enforcement", "99 active rule gaps", count=1)
+        row = self.ns["_FINDINGS"][0]
+        self.assertEqual(row["count"], 99)
+        self.assertEqual(row["detail"], "99 active rule gaps")
+
     def test_findings_json_round_trips_the_schema(self):
         self.finding("rule_enforcement", "98 active rule gaps", count=98)
         self.finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
@@ -488,6 +537,65 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
         errors_good_ifelse: list = []
         _check_function_top_level_isolated(ast.parse(src_good_ifelse).body[0], errors_good_ifelse, "f")
         self.assertEqual(errors_good_ifelse, [])
+
+    def test_mutation_rc1_planted_after_canonical_workflow_truth_is_caught(self):
+        # Point 1 of round 4 of an independent review of PR #1237, planting
+        # the reviewer's EXACT probe against the REAL, unmutated source: an
+        # `rc = 1` inserted immediately after the real `_canonical_workflow_
+        # truth()` call in the jobs section of `_canonical_health`, with no
+        # finding call of its own. Before the round-4 fix (tightening
+        # `_branch_always_finds`/`_loop_always_finds` so a bare `for`/`while`
+        # loop is not trusted to cover an UNRELATED later sibling outside its
+        # own branch), this slipped past the checker: the jobs section's
+        # `if not isinstance(...): ... else: <bare for-loops>...` compound
+        # statement was wrongly judged to "always find something" purely
+        # because ITS orelse branch happened to contain a for-loop with a
+        # finding call buried somewhere inside it — even though that loop's
+        # iterable (`bad`, `unreceipted`, ...) could be empty at runtime, so
+        # the branch is not actually guaranteed to record anything. That
+        # false "always finds" status then wrongly propagated past the whole
+        # if/else to excuse this later, wholly unrelated `rc = 1`.
+        real = _find_function("_canonical_health")
+        mutated = copy.deepcopy(real)
+
+        target = None
+        for node in ast.walk(mutated):
+            if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "_canonical_workflow_truth"):
+                target = node
+                break
+        self.assertIsNotNone(target, "_canonical_workflow_truth() call not found in "
+                              "_canonical_health — has the jobs section moved?")
+
+        planted = ast.parse("rc = 1\n").body[0]
+        ast.fix_missing_locations(planted)
+
+        planted_into = None
+
+        def _plant(body):
+            nonlocal planted_into
+            if planted_into is not None:
+                return
+            if target in body:
+                body.insert(body.index(target) + 1, planted)
+                planted_into = body
+
+        for node in ast.walk(mutated):
+            for field in ("body", "orelse", "finalbody"):
+                nested = getattr(node, field, None)
+                if isinstance(nested, list) and all(isinstance(x, ast.stmt) for x in nested):
+                    _plant(nested)
+        self.assertIsNotNone(planted_into, "could not locate the enclosing block of the "
+                              "_canonical_workflow_truth() call to plant the mutation into")
+        ast.fix_missing_locations(mutated)
+
+        errors: list = []
+        _check_function_top_level_isolated(mutated, errors, "_canonical_health(mutated)")
+        self.assertNotEqual(errors, [],
+                            "a bare for-loop inside an unrelated earlier branch wrongly excused "
+                            "an rc=1 planted right after _canonical_workflow_truth() — the "
+                            "for/while-loop-propagation check is vacuous again")
 
     def test_business_count_keys_are_not_hard_error(self):
         # The other half of the same contract: a count that can legitimately
