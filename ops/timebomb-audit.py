@@ -81,15 +81,16 @@ USAGE:
                                           # reader to sanity-check
 
 If the LaunchAgent is missing on a machine (a fresh clone, or after the job
-has been unloaded), install just this one job with:
-
-    ./bin/install-timebomb-audit.sh
-
-It templates ops/launchd/com.carr.timebomb-audit.plist with this checkout's
-path, lints it, installs it, and proves launchd accepted it -- the same
-narrow-installer shape bin/install-notes-sweep.sh uses, deliberately not
-`ops/config-as-code.py install --apply` (the broad reconciler, which has no
-per-job filter and would also rewrite every other hook and LaunchAgent).
+has been unloaded), install it with the exact sed / plutil / launchctl
+sequence in ops/launchd/com.carr.timebomb-audit.plist's own header comment.
+There is deliberately no bin/install-timebomb-audit.sh: a bin/install-*.sh is
+an external-admin ingress that would need its own SCAC registry successor
+(see com.carr.release-pipeline.plist's header for the same reasoning), and
+installing a weekly audit job is a small enough act that the three commands
+belong inline rather than behind a script. This is deliberately not
+`ops/config-as-code.py install --apply` either (the broad reconciler, which
+has no per-job filter and would also rewrite every other hook and
+LaunchAgent).
 
 Env overrides (test isolation, same convention as CARR_REPLAY_REPO):
   CARR_TIMEBOMB_REPO           repo root to scan (default: this file's
