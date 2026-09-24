@@ -309,6 +309,17 @@ KNOWN_HOSTS = (
     # sign-in is browser OAuth against Joe's own subscription, which runs in his
     # browser rather than through a session's network calls.
     "hermes-agent.nousresearch.com",
+    # tailc8cc93.ts.net: Joe's own private Tailscale tailnet (his MagicDNS
+    # domain), reachable only from devices signed into or shared onto that
+    # tailnet — never public. Added 2026-09-23 so his Mac Studio's local model
+    # server ("flash-next", ds4-server on 127.0.0.1:8000, served tailnet-wide
+    # via `tailscale serve` at http://mac-studio.tailc8cc93.ts.net:8000) is
+    # reachable from his other devices, starting with a test from his MacBook
+    # (joes-macbook-pro.tailc8cc93.ts.net). host_allowlisted does suffix
+    # matching, so this one entry covers every device name on HIS tailnet, and
+    # SSH between his own Macs. Deliberately scoped to this one tailnet, not
+    # the broad `ts.net` suffix: someone else's tailnet must stay blocked.
+    "tailc8cc93.ts.net",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────

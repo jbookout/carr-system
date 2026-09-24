@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertCurrentSourceInventoryMatchesFixture,
+  boundInventoryRows,
+  MCP_TOOL_BOUND_FIELDS,
+  sourceInventoryFixtureDigest,
   assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
   canonicalize,
@@ -92,6 +95,7 @@ import {
   REGISTRY_V59_VERSION,
   REGISTRY_V60_VERSION,
   REGISTRY_V61_VERSION,
+  REGISTRY_V62_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -1527,12 +1531,12 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   const v33GeneratedDigest = generatedV33.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   assert.notEqual(`sha256:${v33GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v32.digest);
-  // The complete generated frontier now includes the v61 successor;
+  // The complete generated frontier now includes the v62 successor;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 67);
+    .filter(path => path.startsWith("migrations/")).length, 68);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 58);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 59);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2785,14 +2789,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V61_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V62_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 67);
+  assert.equal(migrations.length, 68);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 58);
-  assert.equal(paths.length, 125);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 59);
+  assert.equal(paths.length, 127);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
@@ -3217,4 +3221,46 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
   assert.throws(() => assertLegacyLaunchdSource(
     { ...legacySurface, canonical_program_arguments: [...legacySurface.canonical_program_arguments, "--forged"] },
     legacySurface.repo_plist_relpath, plist), /legacy source mismatch/);
+});
+
+test("only verb-contract changes and new write entrances hold a pull request to the frozen frontier", () => {
+  // Decision 05e144eb: scripts, workflows and launchd plists never reseal;
+  // worker routes reseal only when a NEW one appears; everything else is
+  // compared whole.
+  const base = [
+    { ingress_key: "mcp-tool:add-loop", source_locator: "mcp-server/src/tools.js", source_digest: "a",
+      schema_digest: "a", write: true, human_only: false, authority_only: false },
+    { ingress_key: "script-entrypoint:hooks/lint-gate.py", source_digest: "a" },
+    { ingress_key: "github-workflow:.github/workflows/ci.yml", source_digest: "a" },
+    { ingress_key: "launchd-workflow:com.carr.nightly", source_digest: "a" },
+    { ingress_key: "worker-sidewrite:tool-read-call", handler_digest: "a" },
+  ];
+  const digest = rows => sourceInventoryFixtureDigest(boundInventoryRows(rows));
+  const edit = (key, field) => base.map(row => row.ingress_key === key ? { ...row, [field]: "b" } : row);
+  assert.equal(digest(edit("script-entrypoint:hooks/lint-gate.py", "source_digest")), digest(base));
+  assert.equal(digest(edit("github-workflow:.github/workflows/ci.yml", "source_digest")), digest(base));
+  assert.equal(digest(edit("launchd-workflow:com.carr.nightly", "source_digest")), digest(base));
+  assert.equal(digest(edit("worker-sidewrite:tool-read-call", "handler_digest")), digest(base));
+  assert.equal(digest([...base, { ingress_key: "script-entrypoint:ops/new.py", source_digest: "c" }]), digest(base));
+  assert.notEqual(digest([...base, { ingress_key: "worker-route:new-write", handler_digest: "c" }]), digest(base));
+  assert.notEqual(digest(edit("mcp-tool:add-loop", "schema_digest")), digest(base));
+  // The whole-file digest of a verb's source is not what the runtime checks.
+  assert.equal(digest(edit("mcp-tool:add-loop", "source_digest")), digest(base));
+  // Every flag the runtime compares still binds.
+  for (const flag of ["write", "human_only", "authority_only"]) {
+    const flipped = base.map(row => row.ingress_key === "mcp-tool:add-loop" ? { ...row, [flag]: !row[flag] } : row);
+    assert.notEqual(digest(flipped), digest(base), `${flag} must still bind`);
+  }
+  assert.notEqual(digest(edit("mcp-tool:add-loop", "source_locator")), digest(base));
+  assert.notEqual(digest([...base, { ingress_key: "mcp-tool:new-verb", schema_digest: "c" }]), digest(base));
+});
+
+test("the bound MCP fields are exactly what the runtime admission check compares", () => {
+  // If mutation-registry.js starts comparing another field, this list must
+  // grow with it, or a change the server would refuse could merge unsealed.
+  const source = fs.readFileSync(new URL("../src/mutation-registry.js", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export async function assertRegisteredOperation"));
+  const actual = body.slice(body.indexOf("const actual = {"), body.indexOf("};"));
+  const compared = [...actual.matchAll(/^\s+([a-z_]+):/gm)].map(match => match[1]).sort();
+  assert.deepEqual(compared, MCP_TOOL_BOUND_FIELDS.filter(field => field !== "ingress_key").sort());
 });

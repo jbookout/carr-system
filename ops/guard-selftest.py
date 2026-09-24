@@ -99,6 +99,25 @@ case("gh pr create carrying the Claude Code attribution link",
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 
+# Joe's own private Tailscale tailnet (tailc8cc93.ts.net), added 2026-09-23 so
+# his Mac Studio's local model server ("flash-next") is reachable from his
+# other devices. host_allowlisted does suffix matching, so the one tailnet
+# domain entry covers every device name on it — mac-studio and
+# joes-macbook-pro alike — without opening the broad `ts.net` suffix, which
+# would admit anyone else's tailnet too.
+case("ssh from macbook curling the Studio's tailnet name is allowed",
+     bash("ssh macbook 'curl http://mac-studio.tailc8cc93.ts.net:8000/v1/models'"), ALLOW)
+case("bash curl to the Studio's tailnet name is allowed",
+     bash("curl http://mac-studio.tailc8cc93.ts.net:8000/v1/models"), ALLOW)
+case("bash curl to the macbook's own tailnet name is allowed",
+     bash("curl https://joes-macbook-pro.tailc8cc93.ts.net/x"), ALLOW)
+case("a different tailnet is still blocked",
+     bash("curl https://evil.tailffffff.ts.net/x"), DENY)
+case("the bare ts.net suffix is still blocked",
+     bash("curl https://ts.net/x"), DENY)
+case("a lookalike suffix appending the tailnet name is still blocked",
+     bash("curl https://tailc8cc93.ts.net.evil.com/x"), DENY)
+
 # ── 2. DERIVED list (the B half): client practice sites, from the record ──────
 # THESE CARRY A LONG QUERY ON PURPOSE. A derived host gets the UNCONDITIONAL
 # pass, so it must be allowed even with a query the open-read class would refuse.
