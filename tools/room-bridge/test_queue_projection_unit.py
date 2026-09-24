@@ -28,11 +28,11 @@ def test_missing_task_with_temp_sqlite():
                 assignee text, priority integer, created_at integer,
                 started_at integer, completed_at integer, model_override text, body text);
             create table task_events (id integer primary key, task_id text,
-                kind text, created_at integer);
+                kind text, payload text, created_at integer);
             insert into tasks values
                 ('t_live', 'Live task', 'running', 'desk:codex-desk', 2, 100, null, null, 'sol', null);
-            insert into task_events values (1, 't_gone', 'deleted', 200);
-            insert into task_events values (2, 't_live', 'started', 201);
+            insert into task_events (id, task_id, kind, created_at) values (1, 't_gone', 'deleted', 200);
+            insert into task_events (id, task_id, kind, created_at) values (2, 't_live', 'started', 201);
         """)
         conn.commit()
         conn.close()
@@ -59,7 +59,7 @@ def test_empty_projection_emits_health_without_advancing_cursor():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "kanban.db"
         conn = sqlite3.connect(path)
-        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer);")
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, payload text, created_at integer);")
         conn.commit(); conn.close()
         state = {"queue_event_cursor": 0, "queue_projection_digest": None}
         posted = []
@@ -80,7 +80,7 @@ def test_health_append_failure_restores_task_cursor_for_safe_replay():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "kanban.db"
         conn = sqlite3.connect(path)
-        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer); insert into task_events values (18, 't_gone', 'deleted', 200);")
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, payload text, created_at integer); insert into task_events (id, task_id, kind, created_at) values (18, 't_gone', 'deleted', 200);")
         conn.commit(); conn.close()
         state = {"queue_event_cursor": 17, "queue_projection_digest": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}
         posted = []
@@ -104,7 +104,7 @@ def test_incomplete_event_page_does_not_emit_false_green_health():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "kanban.db"
         conn = sqlite3.connect(path)
-        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer); insert into task_events values (1, 't_one', 'created', 200); insert into task_events values (2, 't_two', 'created', 201); insert into task_events values (3, 't_three', 'created', 202);")
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, payload text, created_at integer); insert into task_events (id, task_id, kind, created_at) values (1, 't_one', 'created', 200); insert into task_events (id, task_id, kind, created_at) values (2, 't_two', 'created', 201); insert into task_events (id, task_id, kind, created_at) values (3, 't_three', 'created', 202);")
         conn.commit(); conn.close()
         state = {"queue_event_cursor": 0, "queue_projection_digest": None}
         posted = []
@@ -120,7 +120,7 @@ def test_cursor_ahead_of_source_head_suppresses_health():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "kanban.db"
         conn = sqlite3.connect(path)
-        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer); insert into task_events values (1, 't_one', 'created', 200);")
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, payload text, created_at integer); insert into task_events (id, task_id, kind, created_at) values (1, 't_one', 'created', 200);")
         conn.commit(); conn.close()
         state = {"queue_event_cursor": 4, "queue_projection_digest": "not-a-real-digest"}
         posted = []
@@ -172,7 +172,7 @@ def test_health_throttle_is_persisted_and_replay_safe():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "kanban.db"
         conn = sqlite3.connect(path)
-        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, created_at integer);")
+        conn.executescript("create table tasks (id text); create table task_events (id integer primary key, task_id text, kind text, payload text, created_at integer);")
         conn.commit(); conn.close()
         state = {"queue_event_cursor": 0, "queue_projection_digest": None}
         posted = []
@@ -184,8 +184,59 @@ def test_health_throttle_is_persisted_and_replay_safe():
 
 
 
+def test_terminal_summary_carries_the_real_completion_text():
+    """`hermes kanban complete --summary "CARR-PR-VERDICT: ..."` durably
+    records that exact text in the `completed` task_events row's payload;
+    the projected queue_event's summary must carry it verbatim, not a
+    synthesized "<title> finished." sentence -- this is what lets the PR
+    pipeline read a reviewer's verdict from the locked, hermes-pilot-only
+    read-room-queue projection instead of a forgeable free room turn."""
+    event = {"id": 50, "task_id": "t_one", "kind": "completed",
+              "payload": json.dumps({"result_len": 9, "summary": "CARR-PR-VERDICT: APPROVE pr=1214 sha=abcdef01234567 reviewer=claude-desktop key=abc123"}),
+              "created_at": 200}
+    receipt = queue_projection.receipt_for(event, task(status="done"), target_catalog={"sol": {
+        "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}}, board="carr-build")
+    assert receipt["queue_event"]["summary"] == (
+        "CARR-PR-VERDICT: APPROVE pr=1214 sha=abcdef01234567 reviewer=claude-desktop key=abc123")
+
+
+def test_terminal_summary_carries_review_requested_text_too():
+    event = {"id": 51, "task_id": "t_one", "kind": "review_requested",
+              "payload": json.dumps({"summary": "CARR-PR-VERDICT: BLOCK pr=9 sha=deadbeef reviewer=claude key=zz",
+                                       "implementer": "desk:claude-desktop", "reviewer": None}),
+              "created_at": 200}
+    receipt = queue_projection.receipt_for(event, task(status="review"), target_catalog={"sol": {
+        "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}}, board="carr-build")
+    assert receipt["queue_event"]["summary"] == "CARR-PR-VERDICT: BLOCK pr=9 sha=deadbeef reviewer=claude key=zz"
+
+
+def test_terminal_summary_ignores_blocked_event_reason():
+    """A `blocked` event's payload carries `reason` (a protocol-error code
+    or a Hermes-internal note), never a dispatched session's result text --
+    it must never be read as if it were a completion summary."""
+    event = {"id": 52, "task_id": "t_one", "kind": "blocked",
+              "payload": json.dumps({"reason": "CARR-PR-VERDICT: APPROVE pr=1 sha=aaaaaaa reviewer=x key=y",
+                                       "kind": "transient"}),
+              "created_at": 200}
+    receipt = queue_projection.receipt_for(event, task(status="blocked"), target_catalog={"sol": {
+        "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}}, board="carr-build")
+    assert receipt["queue_event"]["summary"] == "Queue <title> is blocked."
+
+
+def test_terminal_summary_falls_back_when_payload_missing_or_malformed():
+    for bad_payload in (None, "not json", json.dumps({"no_summary_key": True}), json.dumps({"summary": "   "})):
+        event = {"id": 53, "task_id": "t_one", "kind": "completed", "payload": bad_payload, "created_at": 200}
+        receipt = queue_projection.receipt_for(event, task(status="done"), target_catalog={"sol": {
+            "assignee": "desk:codex-desk", "effective_model": "gpt-5.6-sol"}}, board="carr-build")
+        assert receipt["queue_event"]["summary"] == "Queue <title> finished."
+
+
 def main():
     test_missing_task_with_temp_sqlite()
+    test_terminal_summary_carries_the_real_completion_text()
+    test_terminal_summary_carries_review_requested_text_too()
+    test_terminal_summary_ignores_blocked_event_reason()
+    test_terminal_summary_falls_back_when_payload_missing_or_malformed()
     test_empty_projection_emits_health_without_advancing_cursor()
     test_health_append_failure_restores_task_cursor_for_safe_replay()
     test_incomplete_event_page_does_not_emit_false_green_health()

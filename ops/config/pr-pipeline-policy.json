@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Tracked kill-switch, scope, and required-checks config for",
+    "tools/pr-pipeline/pipeline.py.",
+    "enabled=false here stops every dispatch and every merge on the next tick,",
+    "same as the untracked out/pr-pipeline.disable override file — either gate",
+    "being off is enough, checked in tools/pr_pipeline/pipeline.kill_switch_active.",
+    "Flip enabled to true only as a reviewed change; the untracked override file",
+    "exists for a same-machine emergency stop that needs no review.",
+    "author_allowlist bounds WHO this pipeline will ever act on at all — every",
+    "real PR in these repos, agent-opened or Joe's own, is authored under his",
+    "own gh login, so this is not the Joe-vs-agent discriminator (the agent",
+    "branch-prefix check in pipeline.in_scope is).",
+    "required_checks names the EXACT required_status_checks context string each",
+    "repo's branch-protection ruleset requires — confirmed live via",
+    "`gh api repos/<repo>/rulesets/<id>`, not guessed from a job's display",
+    "name (carr-system ruleset 20824501, doctorcre-app ruleset 23935432)."
+  ],
+  "enabled": false,
+  "repos": [
+    "jbookout/carr-system",
+    "jbookout/doctorcre-app"
+  ],
+  "author_allowlist": [
+    "jbookout"
+  ],
+  "required_checks": {
+    "jbookout/carr-system": ["ops/ci.sh --strict"],
+    "jbookout/doctorcre-app": ["test"]
+  }
+}

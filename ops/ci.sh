@@ -591,7 +591,8 @@ PYEOF
   local eligible=""
   for t in ops/*-selftest.py tools/test-*.py tools/test_*.py \
            tools/room-bridge/test_*_unit.py \
-           tools/room-bridge/test_activation_reliability.py; do
+           tools/room-bridge/test_activation_reliability.py \
+           tools/pr-pipeline/test_*_unit.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
     local why; why="$(excluded_reason "$base")"

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- doctrine: pr-pipeline -->
+  <!--
+    com.carr.pr-pipeline — the scripted review-and-merge pipeline's launchd
+    wake (decisions 17ef11fa / b729859d, 2026-09-24: "CARR runs itself...
+    review, merge, and release steps can be triggered by scripts too").
+
+    One tick per wake: scan open PRs in the two configured repos for the ones
+    an agent session opened, dispatch an independent reviewer through the
+    Model Room queue, apply a parsed APPROVE/BLOCK verdict, dispatch a fixer
+    on BLOCK or a red required check, and merge exactly one fully-green,
+    APPROVE'd, exact-head-SHA candidate per tick with a squash merge bound to
+    that exact commit (gh pr merge, match-head-commit). See
+    tools/pr-pipeline/pipeline.py's module docstring for the verdict-line and
+    merge-event formats, and ops/config/pr-pipeline-policy.json plus
+    out/pr-pipeline.disable for the two independent kill switches.
+
+    THIS DEFINITION IS DELIBERATELY LEFT UNINSTALLED (DEFINITION_ONLY in
+    ops/config-as-code.py). A pipeline that can merge to main on its own is
+    exactly the kind of live-effect change this repo's own convention (see
+    com.carr.repo-hygiene-janitor.plist, com.carr.gate-zero-canary.plist) asks
+    a human to start deliberately rather than pick up as a side effect of an
+    unrelated config-as-code.py install run. Starting it is
+    bin/install-pr-pipeline.sh, run by hand once Joe removes this job from
+    DEFINITION_ONLY.
+
+    Routed through bin/run-scheduled.sh, same as room-bridge, so a stuck or
+    erroring tick becomes a durable ops.run row instead of a silent launchd
+    log line.
+  -->
+  <key>Label</key><string>com.carr.pr-pipeline</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>pr-pipeline</string>
+    <string>launchd.run</string>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/pr-pipeline-tick.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>{{REPO}}</string>
+
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><false/>
+  <key>ThrottleInterval</key><integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd does not source the user's shell profile; gh and node both
+         live outside the bare system PATH on this Mac. -->
+    <key>PATH</key><string>{{HOME}}/.local/bin:/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key><string>{{REPO}}/out/pr-pipeline-launchd.log</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/pr-pipeline-launchd.log</string>
+</dict>
+</plist>

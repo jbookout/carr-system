@@ -58,6 +58,16 @@ def read_room(after_seq: int, *, room: str = DEFAULT_ROOM, limit: int = 50,
     )
 
 
+def read_room_queue(*, room: str = DEFAULT_ROOM, call_verb_path: Path = CALL_VERB) -> dict:
+    """The current non-archived carr-build Queue projection: {events: [...],
+    projected_at, live}. Each event's card carries `source_seq` — the room
+    seq of the `@queue enqueue` turn Hermes/the bridge parsed to create that
+    task, stamped server-side and never client-suppliable — which is the
+    honest way to prove a given Hermes task was created BY a specific
+    dispatch turn this process wrote, not merely claimed to be."""
+    return _run_verb("read-room-queue", {"room": room}, call_verb_path=call_verb_path)
+
+
 def read_profiles(*, call_verb_path: Path = CALL_VERB) -> list:
     """The named-agent roster (loop 520), in the exact compact shape the
     heartbeat republishes: key, name, model, desk, status per profile. Raises
