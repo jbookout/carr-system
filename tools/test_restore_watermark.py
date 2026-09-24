@@ -37,6 +37,8 @@ REHEARSE = REPO / "bin" / "restore-rehearse.sh"
 EVALUATOR = REPO / "mcp-server" / "bin" / "recovery-matrix-evaluate.mjs"
 
 spec = importlib.util.spec_from_file_location("restore_watermark", TOOL)
+if spec is None or spec.loader is None:
+    raise ImportError(f"cannot load {TOOL}")
 rw = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rw)
 
