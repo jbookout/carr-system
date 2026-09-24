@@ -276,7 +276,22 @@ def code_review(payload):
                               cwd=os.path.dirname(paths[0]) or ".",
                               timeout=15).stdout.strip()
         if not root:
-            raise RuntimeError("git_root_unavailable")
+            # NOT an "unavailable" failure. A scratchpad write (or any path
+            # outside a git repo) has no git root by construction, every time,
+            # forever -- that is a normal, expected shape, not an outage. It
+            # was being raised and caught below as RuntimeError, which the
+            # outer handler then reported with only the exception's CLASS
+            # name, so every such write printed status "unavailable", reason
+            # "RuntimeError" with no way to tell this apart from a real
+            # failure (2026-09-24 audit).
+            receipt["status"] = "skipped"
+            receipt["reason"] = "outside_repo"
+            receipt["paths"] = [
+                {"path": os.path.basename(path), "status": "not_reviewed",
+                 "reason": "outside_repo"} for path in paths]
+            log(f"SKIP outside_repo paths={[os.path.basename(p) for p in paths]}")
+            print(_review_context(payload, receipt))
+            return
         # This hook is installed from CARR for every code home. The edited
         # repository supplies the diff; CARR supplies the Jev reviewer.
         spec = importlib.util.spec_from_file_location(
@@ -285,7 +300,7 @@ def code_review(payload):
             raise RuntimeError("review_module_unavailable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        hits, shadow = [], []
+        hits, acted = [], []
         for path in paths:
             rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
             path_receipt = {"path": rel}
@@ -329,8 +344,11 @@ def code_review(payload):
             region = {"path": rel, "line": 0,
                       "kind": "just written by this session",
                       "code": code}
-            # Shadow only: the same request also asks whether the change fits
-            # the task, records would_block beside this advisory, never blocks.
+            # The same request also asks whether the change fits the task.
+            # That answer ACTS (Joe, 2026-09-24, decision 5ec806a4): when it
+            # clears the threshold, module.review_for_edit() hands back
+            # `_would_block` and it is surfaced below as a real finding, not
+            # folded into the advisory list.
             scores = module.review_for_edit(region, payload)
             model = scores.get("_model")
             if not isinstance(model, str) or not model.strip():
@@ -341,25 +359,38 @@ def code_review(payload):
             for name, value in scores.items():
                 if not name.startswith("_") and value >= REVIEW_AT:
                     hits.append((rel, name, value))
-            if scores.get("_would_block") and not shadow:
-                shadow.append({"path": rel, "question": "task_fit_would_block",
-                               "probability": scores["_would_block"],
-                               "effect": "shadow_would_block_advisory_only"})
+            if scores.get("_would_block") and not any(
+                    item["path"] == rel for item in acted):
+                acted.append({
+                    "path": rel, "question": "task_fit_mismatch",
+                    "probability": scores["_would_block"],
+                    "effect": "must_address",
+                    "instruction": (
+                        "Jev judged this change unrequested by, or contradicting, "
+                        "or a concrete mistake against, the most recent human "
+                        "request -- confirm the change is intended before "
+                        "continuing, or fix it."),
+                })
         hits.sort(key=lambda item: -item[2])
         for rel, name, value in hits:
             receipt["findings"].append({
                 "path": rel, "question": name, "probability": value,
                 "effect": "advisory_only",
             })
-        receipt["findings"].extend(shadow)
+        receipt["findings"].extend(acted)
         if not receipt["models"]:
             receipt["status"] = "skipped"
             receipt["reason"] = "no_jev_candidate"
         print(_review_context(payload, receipt))
     except Exception as exc:
+        # The class name alone ("RuntimeError") told nobody what happened; the
+        # audit log and everyone reading this receipt need the message too.
+        detail = str(exc).strip()
+        reason = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+        log(f"UNAVAILABLE {reason}")
         print(_review_context(payload, {
             "status": "unavailable",
-            "reason": type(exc).__name__,
+            "reason": reason,
             "instruction": "The edit is saved, but no Jev review may be claimed for it.",
         }))
 

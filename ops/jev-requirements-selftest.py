@@ -140,16 +140,28 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(fake.rows[0]["kind"], "requirement_checklist")
             self.assertEqual(fake.rows[0]["note"]["source"], "split")
 
-    def test_low_score_yields_one_advisory_line(self):
+    def test_low_score_yields_an_unmet_list_worst_first(self):
         with Repo() as repo:
             repo.change()
             fake = FakeJudge(probs={"req_3": 0.05, "req_2": 0.2})
             out = req.check({"session_id": "s1"}, [user(PROMPT), edit(repo.path)],
                             judge_module=fake, llm=no_llm)
-            self.assertEqual(out.count("\n"), 0)
-            self.assertIn("requirement 3 may be unmet (p=0.05)", out)
-            self.assertIn("README", out)
-            self.assertIn("+1 more", out)
+            self.assertIsNone(out["advisory"])
+            self.assertEqual([item["index"] for item in out["unmet"]], [3, 2])
+            self.assertEqual(out["unmet"][0]["probability"], 0.05)
+            self.assertIn("README", out["unmet"][0]["text"])
+
+    def test_mid_band_score_yields_one_advisory_line_and_no_unmet(self):
+        with Repo() as repo:
+            repo.change()
+            fake = FakeJudge(probs={"req_3": 0.35, "req_2": 0.45})
+            out = req.check({"session_id": "s1"}, [user(PROMPT), edit(repo.path)],
+                            judge_module=fake, llm=no_llm)
+            self.assertEqual(out["unmet"], [])
+            self.assertEqual(out["advisory"].count("\n"), 0)
+            self.assertIn("requirement 3 may be unmet (p=0.35)", out["advisory"])
+            self.assertIn("README", out["advisory"])
+            self.assertIn("+1 more", out["advisory"])
 
     def test_outage_fails_open_and_records_an_error_row(self):
         with Repo() as repo:

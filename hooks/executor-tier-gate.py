@@ -38,16 +38,26 @@ about to happen and NOTHING has named the tier it will run on.
   · a definition file pinning `model:`    -> allow. The job description names
                                              its own tier, which is the point
                                              of pinning it there.
-  · none of the above                     -> DENY, naming what it would have
-                                             cost and how to fix it.
+  · none of the above, and Jev is
+    confident (>= ACT_AT) a cheaper
+    tier would still do the job        -> DENY, naming Jev's pick and how to
+                                           fix it (Joe, 2026-09-24, decision
+                                           5ec806a4: every Jev check acts).
+  · none of the above, but Jev is
+    unavailable or not confident       -> ADVISE with the same explanation,
+                                           never a silent affirmative pass.
 
-IT DENIES RATHER THAN WARNS, which is the opposite of its neighbour
-rule-shape-gate.py, and the difference is deliberate. That gate warns because
-blocking would make `teach` refuse a partner's own words, which it must never
-do. Here the cost of a false stop is one round trip and one extra parameter,
-while the cost of a warning is that it gets clicked past — and prose that gets
-clicked past is precisely the failure being fixed. A gate that only warns would
-be the same aspiration in a new costume.
+IT DENIES RATHER THAN WARNS ONCE JEV IS CONFIDENT, which is the opposite of
+its neighbour rule-shape-gate.py, and the difference is deliberate. That gate
+warns because blocking would make `teach` refuse a partner's own words, which
+it must never do. Here the cost of a false stop is one round trip and one
+extra parameter, while the cost of a warning is that it gets clicked past —
+and prose that gets clicked past is precisely the failure being fixed. A gate
+that only warns would be the same aspiration in a new costume. Jev's
+abstention (unavailable, erroring, or under ACT_AT) falls back to the
+advisory text rather than to a silent allow or an unconditional deny, so a
+vendor outage never reads as either "the tier is fine" or "the tier is
+refused".
 
 FAILS OPEN on any error, like every other hook here. A gate that crashes must
 never be able to stop work. Logged to out/hook-guard.log.
@@ -235,15 +245,19 @@ def main():
         if definition_pins_model(subagent_type):
             sys.exit(0)
 
+        # ACTING (Joe, 2026-09-24, decision 5ec806a4: "every jev check in the
+        # system too is not a shadow"). No model was named, so the spawn would
+        # silently inherit the parent tier -- itself "a tier more expensive
+        # than Jev's pick" whenever Jev has one. When Jev is confident
+        # (>= ACT_AT) that a cheaper tier would still do the job, that is now
+        # the deny: it names the pick and the one fix (pass `model`
+        # explicitly). The abstention path -- Jev unavailable, erroring, or
+        # simply not confident -- falls back to the advisory text this gate
+        # always showed, printed through advise() rather than deny(), because
+        # an unconfident or missing judgment is never an affirmative pass.
         pick = jev_pick(desc, prompt, subagent_type, None)
-        jev_line = ""
-        if pick:
-            confident = pick[1] >= pick[2]
-            jev_line = (f"\n\nJEV'S PICK for this task: `{pick[0]}` at {pick[1]:.2f}"
-                        + ("." if confident else
-                           " (below the acting threshold, so treat it as a hint and use the table)."))
-        log(f"DENY subagent_type={subagent_type or '(none)'} jev={pick[0] if pick else '-'} desc={desc[:80]}")
-        deny(
+        confident = bool(pick) and pick[1] >= pick[2]
+        base_text = (
             "EXECUTOR NOT NAMED. This Agent call passes no `model`, and "
             f"`{subagent_type or 'the default type'}` has no model pinned in a definition file, "
             "so it will INHERIT THE PARENT TIER. On this machine the parent is pinned to Opus, "
@@ -259,8 +273,24 @@ def main():
             "If you genuinely want the parent tier, say so by passing it explicitly. The point "
             "is that the tier is a decision someone made, not one nobody noticed. Custom CARR "
             "agents that pin a model in their own frontmatter are exempt and need no parameter."
-            + jev_line
         )
+        if confident:
+            log(f"DENY(jev-acted) subagent_type={subagent_type or '(none)'} "
+                f"jev={pick[0]}@{pick[1]:.2f} desc={desc[:80]}")
+            deny(base_text + (
+                f"\n\nJEV'S PICK for this task: `{pick[0]}` at {pick[1]:.2f}, which clears the "
+                f"acting threshold ({pick[2]:.2f}). Pass `model=\"{pick[0]}\"` to accept it, or "
+                "another model explicitly if the task needs it for a reason the brief does not "
+                "show -- an explicit pass is always accepted; this only blocks silent inheritance."
+            ))
+        else:
+            jev_line = ""
+            if pick:
+                jev_line = (f"\n\nJEV'S PICK for this task: `{pick[0]}` at {pick[1]:.2f} "
+                            "(below the acting threshold, so treat it as a hint and use the table).")
+            log(f"ADVISE(jev-abstained) subagent_type={subagent_type or '(none)'} "
+                f"jev={pick[0] if pick else '-'} desc={desc[:80]}")
+            advise(base_text + jev_line)
     except Exception as exc:
         log(f"ALLOW(internal-error) {exc}")
         sys.exit(0)
