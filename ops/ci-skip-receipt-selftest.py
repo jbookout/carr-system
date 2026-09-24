@@ -11,6 +11,14 @@ isolation; this one checks the artifact.
 
 The main-branch owner check is unrelated to what this file proves, so every
 case here pushes a feature branch, which that check ignores outright.
+
+GIT_DIR SCRUB (ops/selftest-git-isolation-check.py's rule, rule set 2026-08-14).
+git exports GIT_DIR/GIT_INDEX_FILE/GIT_CONFIG_* into every hook, and they
+OVERRIDE cwd for any child git process -- a fixture built with cwd=<tempdir>
+and no scrub can land in whatever repository GIT_DIR names instead of the
+throwaway sandbox. Every git call here, including the pre-push subprocess
+itself (which shells out to git internally), runs under ops/git_env.py's
+fixture_env(), which also refuses to inherit a real git identity.
 """
 import json
 import os
@@ -19,6 +27,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PRE_PUSH_SRC = os.path.join(REPO, "ops", "githooks", "pre-push")
@@ -32,9 +43,10 @@ def make_sandbox(ci_exit=0):
     real (slow, Postgres-needing) suite -- only the CARR_SKIP_CI decision
     logic and receipt-writing this PR added."""
     d = tempfile.mkdtemp(prefix="ci-skip-receipt-selftest-")
-    subprocess.run(["git", "init", "-q"], cwd=d, check=True)
-    subprocess.run(["git", "config", "user.email", "sandbox@example.invalid"], cwd=d, check=True)
-    subprocess.run(["git", "config", "user.name", "sandbox"], cwd=d, check=True)
+    env = fixture_env()
+    subprocess.run(["git", "init", "-q"], cwd=d, env=env, check=True)
+    subprocess.run(["git", "config", "user.email", "sandbox@example.invalid"], cwd=d, env=env, check=True)
+    subprocess.run(["git", "config", "user.name", "sandbox"], cwd=d, env=env, check=True)
     os.makedirs(os.path.join(d, "ops", "githooks"), exist_ok=True)
     dest = os.path.join(d, "ops", "githooks", "pre-push")
     shutil.copy(PRE_PUSH_SRC, dest)
@@ -46,14 +58,14 @@ def make_sandbox(ci_exit=0):
     # one commit so HEAD/branch resolve
     with open(os.path.join(d, "README.md"), "w", encoding="utf-8") as fh:
         fh.write("sandbox\n")
-    subprocess.run(["git", "add", "README.md"], cwd=d, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=d, check=True)
-    subprocess.run(["git", "checkout", "-q", "-b", "some-feature"], cwd=d, check=True)
+    subprocess.run(["git", "add", "README.md"], cwd=d, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=d, env=env, check=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "some-feature"], cwd=d, env=env, check=True)
     return d
 
 
 def run(d, env_extra):
-    env = dict(os.environ)
+    env = fixture_env()
     env.pop("CARR_SKIP_CI", None)
     env.pop("CARR_SKIP_CI_REASON", None)
     env.pop("CARR_ALLOW_MAIN_PUSH", None)
