@@ -10,6 +10,18 @@ import { authorizationClassForActor, organizationTenantForActor } from "./identi
 
 const sharing = tourSharingBrowserAccess({ ToolError });
 
+// Bounded, sanitized diagnostic text for the render-failure log below. Never
+// tour content (property names, addresses, economics), never a URL or a
+// key/token-shaped token, and never long enough to be one even if the
+// stripping above missed it.
+function sanitizedFailureMessage(error) {
+  const raw = typeof error?.message === "string" ? error.message : "";
+  const stripped = raw
+    .replace(/https?:\/\/\S+/gi, "[url]")
+    .replace(/\b[A-Za-z0-9+/_-]{32,}={0,2}\b/g, "[opaque]");
+  return stripped.slice(0, 200);
+}
+
 async function withPool(connectionString, transaction, fn) {
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
@@ -187,21 +199,50 @@ export async function runTourPdfRender(context, dependencies = {}) {
   const renderJobId = request.data.render_job_id;
   const resultIdempotencyKey = await derivedIdempotencyUuid("tour-pdf-render-result", context.input.idempotency_key);
   try {
-    const stored = await store(context.env, tenant, renderJobId, prepared);
+    let stored;
+    try {
+      stored = await store(context.env, tenant, renderJobId, prepared);
+    } catch (error) {
+      // storeAndVerifyTourPdf (tour-pdf-service.js) tags its own throws
+      // "store"/"verify"; a test double or an unanticipated throw defaults to
+      // "store", since that is the call site, not the more specific phase
+      // inside it.
+      if (error && typeof error === "object" && typeof error.phase !== "string") error.phase = "store";
+      throw error;
+    }
     const artifactRef = `artifact:tour-pdf:${renderJobId.replaceAll("-", "")}`;
-    const recorded = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
-      idempotency_key: resultIdempotencyKey, render_job_id: renderJobId,
-      status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
-      artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
-      content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,
-      blocking_finding_count: stored.qc.findings.length, qc_run_digest: stored.qcRunDigest,
-    }));
+    let recorded;
+    try {
+      recorded = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
+        idempotency_key: resultIdempotencyKey, render_job_id: renderJobId,
+        status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
+        artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
+        content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,
+        blocking_finding_count: stored.qc.findings.length, qc_run_digest: stored.qcRunDigest,
+      }));
+    } catch (error) {
+      if (error && typeof error === "object" && typeof error.phase !== "string") error.phase = "record";
+      throw error;
+    }
     return recorded.ok ? { ok: true, data: { render_job_id: renderJobId, status: recorded.data.status, qc_run_digest: stored.qcRunDigest } } : recorded;
   } catch (error) {
     // The queue row already exists. Persist one terminal, non-sensitive
     // failure receipt so operators never see an immortal "queued" job.
     const failureClass = error instanceof Error ? error.name : "UnknownError";
     const failureDigest = await sha256Bytes(new TextEncoder().encode(`tour-pdf-render-failure:v1:${failureClass}`));
+    // WHICH phase threw: "store" or "record" from the call-site defaults just
+    // above, refined to "verify" by storeAndVerifyTourPdf itself when the
+    // failure was in readback/QC rather than the initial write. "prepare"
+    // never reaches this catch -- prepare() runs before the job row exists,
+    // so a prepare failure has no render_job_id to attach a failure receipt to.
+    const phase = typeof error?.phase === "string" ? error.phase : "store";
+    const sqlstate = typeof error?.code === "string" && /^[0-9A-Za-z]{5}$/.test(error.code) ? error.code : null;
+    const report = typeof dependencies.reportFailureFn === "function"
+      ? dependencies.reportFailureFn : record => console.error(JSON.stringify(record));
+    try {
+      report({ event: "tour_pdf_render_failure", render_job_id: renderJobId, phase,
+        error_name: failureClass, error_message: sanitizedFailureMessage(error), sqlstate });
+    } catch { /* logging must never itself fail the render */ }
     const failed = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
       idempotency_key: resultIdempotencyKey, render_job_id: renderJobId, status: "failed",
       artifact_ref: null, artifact_digest: null, storage_ref: null,
@@ -209,7 +250,7 @@ export async function runTourPdfRender(context, dependencies = {}) {
       qc_run_digest: failureDigest,
     }));
     if (!failed.ok) return failed;
-    return { ok: false, status: 500, data: { render_job_id: renderJobId, status: "failed" } };
+    return { ok: false, status: 500, data: { render_job_id: renderJobId, status: "failed", phase } };
   }
 }
 
