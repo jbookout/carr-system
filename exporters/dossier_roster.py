@@ -36,16 +36,43 @@ MODES = ("flat", "chronological")
 CANONICAL = os.path.join(os.path.expanduser("~"), "carr-system", "exporters", ROSTER_BASENAME)
 
 
+def candidates():
+    """Every path roster_path() consults, in order (for an exact refusal message)."""
+    override = os.environ.get(ENV_VAR)
+    if override:
+        return [override]
+    return [os.path.join(os.path.dirname(os.path.abspath(__file__)), ROSTER_BASENAME), CANONICAL]
+
+
 def roster_path():
     """The roster file to read, or None when no candidate exists."""
     override = os.environ.get(ENV_VAR)
     if override:
         return override
-    for candidate in (os.path.join(os.path.dirname(os.path.abspath(__file__)), ROSTER_BASENAME),
-                      CANONICAL):
+    for candidate in candidates():
         if os.path.isfile(candidate):
             return candidate
     return None
+
+
+def missing_message():
+    """Why there is no roster and exactly how to get one. Never carries a name:
+    it names only file paths, the variable and the record-layer query."""
+    looked = "\n".join(f"    {p}  (missing)" for p in candidates())
+    how = (f"${ENV_VAR} is set, so only that path is read" if os.environ.get(ENV_VAR)
+           else f"set ${ENV_VAR} to read a roster from somewhere else")
+    return (
+        "no dossier roster on this machine. Looked for:\n"
+        f"{looked}\n"
+        f"({how}.)\n"
+        "The roster is gitignored per-machine data and never in the repo (WR-000049). "
+        "It is a JSON file shaped {\"dossiers\": {\"<file>.md\": \"flat\" | \"chronological\"}} whose "
+        "keys are the dossier filenames of the clients that carry notes_path in the record layer "
+        "(select count(*) from client where notes_path is not null). Get it by copying "
+        f"~/carr-system/exporters/{ROSTER_BASENAME} from Joe's machine, which is the canonical "
+        f"copy, into exporters/{ROSTER_BASENAME} here, mode 600, over a private channel, never "
+        "through git, chat or email."
+    )
 
 
 def load_roster(path=None):
@@ -76,5 +103,5 @@ def roster_status():
     """One line for logs: where the roster came from and how many entries."""
     path = roster_path()
     if not path or not os.path.isfile(path):
-        return f"no dossier roster ({ENV_VAR} unset, no {ROSTER_BASENAME} beside the exporter or in ~/carr-system)"
+        return "no dossier roster (looked for: " + ", ".join(candidates()) + ")"
     return f"dossier roster {path}"

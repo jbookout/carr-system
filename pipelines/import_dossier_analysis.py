@@ -218,9 +218,8 @@ def main():
     # "import" nothing and then fail the notes_path count below with a
     # misleading "the set moved". Say what is actually missing instead.
     if not DOSSIER_FILES:
-        from exporters.dossier_roster import roster_status
-        sys.exit(f"no dossier roster: {roster_status()}. Recreate "
-                 "exporters/dossier-roster.local.json on this machine first.")
+        from exporters.dossier_roster import missing_message
+        sys.exit(missing_message())
 
     files = [a.only] if a.only else DOSSIER_FILES
     if a.only and a.only not in DOSSIER_FILES:
