@@ -40,15 +40,15 @@ case "$payload" in
   *'"query":"CPA"'*)
     printf '%s\n' '{"result":"CPA"}'
     ;;
-  *'"query":"Jon Shaw"'*)
-    # SMOKE_GRAPH_CLIENT_SURNAME is unset here (WR-000049, no fixture file in
-    # this double — see the note above run_smoke), so smoke-reads.sh SKIPs
-    # this check rather than calling it; this case is dead but kept in case
-    # that ever changes, so a future canned run has something to match.
+  *'"query":"__smoke_graph_vendor_fixture_unset__"'*)
+    # SMOKE_GRAPH_VENDOR_QUERY is unset here (WR-000049, the double's fixture
+    # file carries only the ball-probe subject — see run_smoke), so
+    # smoke-reads.sh SKIPs this check rather than calling it; this case is
+    # dead but kept so a future canned run has something to match.
     printf '%s\n' '{"result":"\"connections\""}'
     ;;
   *'"target":"C-155"'*)
-    printf '%s\n' '{"result":"Dion Moniz \"hops\":2"}'
+    printf '%s\n' '{"result":"Synthetic Twohop \"hops\":2"}'
     ;;
   *'"target":"Nobody Smokeprobe Xyzzy"'*)
     printf '%s\n' '{"result":"No counterparty history"}'
@@ -95,6 +95,11 @@ check() {
   fi
 }
 
+# The double's own fixture file: synthetic, and only the ball-probe subject,
+# so partner mode still exercises the fixed-key completion path (WR-000049
+# moved that real deal name out of the tracked script).
+printf '%s\n' 'SMOKE_BALL_PROBE_REF="Synthetic Closed Deal"' > "$TMP_ROOT/fixtures.env"
+
 run_smoke() {
   local mode="$1" output="$2" calls="$3"
   : > "$calls"
@@ -107,14 +112,14 @@ run_smoke() {
   if [ "$mode" = probe ]; then
     env -i PATH="$TMP_ROOT:$PATH" HOME="$TMP_ROOT" \
       SMOKE_PROFILE_CALL_LOG="$calls" CARR_MCP_ENV="$TMP_ROOT/no-env" \
-      SMOKE_LOCAL_FIXTURES="$TMP_ROOT/no-such-fixtures" \
+      SMOKE_LOCAL_FIXTURES="$TMP_ROOT/fixtures.env" \
       CARR_MCP_PROBE_TOKEN=probe-token SMOKE_REPS=1 SMOKE_REP_SLEEP=0 \
       SMOKE_CALL_ATTEMPTS=1 SMOKE_CALL_RETRY_SLEEP=0 \
       bash "$SMOKE" > "$output" 2>&1
   else
     env -i PATH="$TMP_ROOT:$PATH" HOME="$TMP_ROOT" \
       SMOKE_PROFILE_CALL_LOG="$calls" CARR_MCP_ENV="$TMP_ROOT/no-env" \
-      SMOKE_LOCAL_FIXTURES="$TMP_ROOT/no-such-fixtures" \
+      SMOKE_LOCAL_FIXTURES="$TMP_ROOT/fixtures.env" \
       CARR_MCP_TOKEN_JOE=partner-token SMOKE_REPS=1 SMOKE_REP_SLEEP=0 \
       SMOKE_CALL_ATTEMPTS=1 SMOKE_CALL_RETRY_SLEEP=0 \
       bash "$SMOKE" > "$output" 2>&1
