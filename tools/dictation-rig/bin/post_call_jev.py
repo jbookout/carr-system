@@ -213,8 +213,9 @@ def _check_item(tsc: Any, ask: Callable[..., Any], kind: str, list_partner: str 
 
     deal_options: dict[str, str] = {}
     for index, deal in enumerate(candidates):
-        deal_id = deal.get("id") if isinstance(deal.get("id"), str) and deal.get("id") else f"deal-{index}"
-        deal_options[deal_id] = deal.get("name") or deal_id
+        raw_id = deal.get("id")
+        deal_id: str = raw_id if isinstance(raw_id, str) and raw_id else f"deal-{index}"
+        deal_options[deal_id] = str(deal.get("name") or deal_id)
     deal_options["none"] = "None of the candidate deals match this item."
 
     attributed = list_partner
