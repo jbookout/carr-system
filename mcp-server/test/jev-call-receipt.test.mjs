@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ToolError, executeRegisteredTool, TOOLS } from "../src/tools.js";
-import { canonicalJson, canonicalSha256, jevAskBinding, sha256Hex } from "../src/jev-call-receipt.js";
+import { callTool } from "../src/mcp.js";
+import { canonicalJson, canonicalSha256, jevAskBinding, prefetchJevAnswer, sha256Hex }
+  from "../src/jev-call-receipt.js";
 
 const AGENT = { id: "10000000-0000-0000-0000-000000000031", slug: "joe", human: true, via: "test" };
+const OTHER = { id: "10000000-0000-0000-0000-000000000032", slug: "dell", human: true, via: "test" };
 const KEY = "ts_test_key_do_not_leak_4f1c9e";
 
 async function rejected(fn) {
@@ -39,16 +42,26 @@ const QUESTIONS = {
   q1: { type: "noul", instructions: "Is the plan sound?" },
   q2: { type: "choice", instructions: "Which option?", choices: ["a", "b"] },
 };
+const ACTORS = new Map([[AGENT.slug, AGENT.id], [OTHER.slug, OTHER.id]]);
 
-// Mirrors ops.record_jev_call_receipt / ops.read_jev_call_receipts
-// (migrations/0587): append-only, server-stamped recorded_at, prompt_sha256
-// iff build_advisory, answers projected only for build_advisory.
+// Mirrors migrations/0587: ops.record_jev_call_receipt (append-only,
+// server-stamped recorded_at, server-derived actor checked against the actor
+// table, prompt_sha256 iff build_advisory), ops.read_jev_call_receipts
+// (credits only rows with a matching ask-jev tool_call row by the same actor,
+// oldest `limit` from since with a truncated flag, answers only for
+// build_advisory) and ops.jev_call_receipt_integrity.
 class JevReceiptFake {
-  constructor({ jevAsk } = {}) {
+  constructor({ prefetched } = {}) {
     this.calls = []; this.toolCalls = new Map(); this.rows = []; this.clock = 0;
-    if (jevAsk !== undefined) this.jevAsk = jevAsk;
+    this.triggers = { jev_call_receipt_append_only: "O", jev_call_receipt_no_truncate: "O" };
+    if (prefetched !== undefined) this.jevPrefetched = prefetched;
   }
   now() { this.clock += 1; return new Date(Date.UTC(2026, 8, 24, 12, 0, this.clock)).toISOString(); }
+  credited(row) {
+    const call = this.toolCalls.get(row.idempotency_key);
+    return !!call && call.verb === "ask-jev" && call.actor_id === row.actor_id &&
+      call.response?.receipt_id === row.receipt_id;
+  }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
     this.calls.push({ sql, params });
@@ -58,12 +71,14 @@ class JevReceiptFake {
       return { rows: row ? [row] : [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      this.toolCalls.set(params[0], { verb: params[1], actor_id: params[2], request_hash: params[3],
+        response: JSON.parse(params[4]) });
       return { rows: [] };
     }
     if (sql.includes("ops.record_jev_call_receipt")) {
       const [sessionId, purpose, questionIds, facets, modelRequested, modelAnswered, stateSha,
-        questionsSha, answersSha, promptSha, answers, usage, actorSlug, key] = params;
+        questionsSha, answersSha, promptSha, answers, usage, actorId, actorSlug, key] = params;
+      if (ACTORS.get(actorSlug) !== actorId) throw new Error("jev_call_receipt_actor_unresolved");
       if ((purpose === "build_advisory") !== (promptSha !== null))
         throw new Error("jev_call_receipt_prompt_sha256_iff_build_advisory");
       for (const digest of [stateSha, questionsSha, answersSha, ...(promptSha ? [promptSha] : [])])
@@ -75,24 +90,41 @@ class JevReceiptFake {
         model_requested: modelRequested, model_answered: modelAnswered, state_sha256: stateSha,
         questions_sha256: questionsSha, answers_sha256: answersSha, prompt_sha256: promptSha,
         answers: JSON.parse(answers), usage: usage ? JSON.parse(usage) : null,
-        actor_slug: actorSlug, idempotency_key: key,
+        actor_id: actorId, actor_slug: actorSlug, idempotency_key: key,
       };
       this.rows.push(row);
       return { rows: [{ receipt_id: row.receipt_id, recorded_at: row.recorded_at }] };
     }
     if (sql.startsWith("select ops.read_jev_call_receipts")) {
-      const [session, since, limit] = params;
-      const matching = this.rows.filter(row => row.session_id === session &&
-        (since === null || row.recorded_at >= new Date(since).toISOString()));
-      const recent = matching.slice(-limit);
+      const [session, since, limit, actorSlug] = params;
+      const actorId = ACTORS.get(actorSlug);
+      if (!actorId) throw new Error("jev_call_receipt_actor_unresolved");
+      const from = since === null ? "2026-09-23T12:00:00.000Z" : new Date(since).toISOString();
+      const matching = this.rows.filter(row => row.session_id === session && row.actor_id === actorId &&
+        row.recorded_at >= from && this.credited(row));
       return { rows: [{ result: {
         server_now: "2026-09-24T13:00:00+00:00",
-        receipts: recent.map(row => ({
+        since: from,
+        truncated: matching.length > limit,
+        receipts: matching.slice(0, limit).map(row => ({
           receipt_id: row.receipt_id, recorded_at: row.recorded_at, purpose: row.purpose,
           question_ids: row.question_ids, facets: row.facets, model: row.model_answered,
           state_sha256: row.state_sha256, prompt_sha256: row.prompt_sha256,
           answers: row.purpose === "build_advisory" ? row.answers : null,
         })),
+      } }] };
+    }
+    if (sql.startsWith("select ops.jev_call_receipt_integrity")) {
+      const orphans = this.rows.filter(row => !this.credited(row));
+      const triggers = Object.entries(this.triggers).map(([name, tgenabled]) =>
+        ({ name, tgenabled, enabled: ["O", "A"].includes(tgenabled) }));
+      return { rows: [{ result: {
+        receipts_total: this.rows.length,
+        receipts_without_tool_call: { count: orphans.length,
+          receipt_ids: orphans.slice(-20).reverse().map(row => row.receipt_id) },
+        trigger_enabled: triggers.every(t => t.enabled),
+        triggers,
+        checked_at: "2026-09-24T13:00:00+00:00",
       } }] };
     }
     throw new Error(`JevReceiptFake: unhandled query: ${sql}`);
@@ -104,6 +136,13 @@ function fakeJevAsk(result = { model: "jev-1.14.0", answers: ANSWERS, usage: { i
   const fn = async request => { calls.push(request); return structuredClone(result); };
   fn.calls = calls;
   return fn;
+}
+
+// What mcp.js's write path does: ask Jev (validated) before the transaction,
+// then run the verb with the prefetched answer on the client.
+async function askVia(client, actor, args, ask) {
+  if (ask) client.jevPrefetched = await prefetchJevAnswer(args, ask);
+  return executeRegisteredTool(client, actor, "ask-jev", args);
 }
 
 let keySeq = 0;
@@ -123,7 +162,7 @@ function askArgs(overrides = {}) {
 
 test("canonical JSON digest equals Python's json.dumps(sort_keys, compact, ensure_ascii=False) sha256", async () => {
   // Python-computed:
-  //   v = {"b": [1, True, None, "é ☃ 日本 \n\t\"q\" \\ \u0001 <U+2028>"],
+  //   v = {"b": [1, True, None, "é ☃ 日本 \n\t\"q\" \\ <U+0001> <U+2028>"],
   //        "a": {"z": "𝄞", "y": 0, "é": "x", "ｚ": 1, "𝄞": 2}, "A": -12}
   //   hashlib.sha256(json.dumps(v, sort_keys=True, separators=(",",":"),
   //                  ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -144,11 +183,11 @@ test("canonical JSON digest equals Python's json.dumps(sort_keys, compact, ensur
 
 // ── ask-jev happy paths ─────────────────────────────────────────────────────
 
-test("ask-jev purpose call: asks Jev through the Worker binding, records the receipt, returns answers", async () => {
+test("ask-jev purpose call: records the prefetched answer with the server-derived actor", async () => {
   const jevAsk = fakeJevAsk();
-  const client = new JevReceiptFake({ jevAsk });
+  const client = new JevReceiptFake();
   const args = askArgs({ facets: ["diagnosis"] });
-  const result = await executeRegisteredTool(client, AGENT, "ask-jev", args);
+  const result = await askVia(client, AGENT, args, jevAsk);
   assert.equal(jevAsk.calls.length, 1);
   assert.deepEqual(jevAsk.calls[0], { state: { plan: "ship it" }, model: "jev-latest", questions: QUESTIONS });
   assert.equal(result.ok, true);
@@ -168,27 +207,28 @@ test("ask-jev purpose call: asks Jev through the Worker binding, records the rec
   assert.equal(row.model_answered, "jev-1.14.0");
   assert.equal(row.questions_sha256, await canonicalSha256(QUESTIONS));
   assert.equal(row.answers_sha256, await canonicalSha256(ANSWERS));
+  assert.equal(row.actor_id, AGENT.id);
   assert.equal(row.actor_slug, "joe");
   assert.equal(row.idempotency_key, args.idempotency_key);
-  // The receipt is written before the envelope ledger row, inside the same
-  // transaction the write path opened.
+  // The receipt precedes the envelope ledger row, which names the receipt.
   const recordAt = client.calls.findIndex(call => call.sql.includes("ops.record_jev_call_receipt"));
   const ledgerAt = client.calls.findIndex(call => call.sql.startsWith("insert into tool_call"));
   assert.ok(recordAt >= 0 && ledgerAt > recordAt);
-  // Same key replays the stored response without a second Jev call or row.
-  const replay = await executeRegisteredTool(client, AGENT, "ask-jev", args);
+  assert.equal(client.toolCalls.get(args.idempotency_key).response.receipt_id, row.receipt_id);
+  // Same key: the replay's fresh answer is discarded and the stored response
+  // returned, with no second row.
+  const replay = await askVia(client, AGENT, args, fakeJevAsk({ model: "other", answers: { q1: { noul: 0 } } }));
   assert.equal(replay.replayed, true);
   assert.equal(replay.receipt_id, result.receipt_id);
-  assert.equal(jevAsk.calls.length, 1);
+  assert.deepEqual(replay.answers, ANSWERS);
   assert.equal(client.rows.length, 1);
 });
 
 test("ask-jev purpose build_advisory records prompt_sha256 of state.partner_request", async () => {
   const jevAsk = fakeJevAsk();
-  const client = new JevReceiptFake({ jevAsk });
+  const client = new JevReceiptFake();
   const state = { partner_request: "Build me a parking-ratio check — ünïcödé ok?", repo: "carr" };
-  const result = await executeRegisteredTool(client, AGENT, "ask-jev",
-    askArgs({ purpose: "build_advisory", state, model: "jev-1.14.0" }));
+  const result = await askVia(client, AGENT, askArgs({ purpose: "build_advisory", state, model: "jev-1.14.0" }), jevAsk);
   assert.equal(result.purpose, "build_advisory");
   assert.equal(result.prompt_sha256, "269e71b019a5b3a2a8bde1ecdc74ca04c8b316d6f8b6d258b7225c13c24f1368");
   assert.equal(client.rows[0].prompt_sha256, result.prompt_sha256);
@@ -197,20 +237,46 @@ test("ask-jev purpose build_advisory records prompt_sha256 of state.partner_requ
 });
 
 test("ask-jev accepts a string state and digests it as a JSON string", async () => {
-  const client = new JevReceiptFake({ jevAsk: fakeJevAsk() });
-  const result = await executeRegisteredTool(client, AGENT, "ask-jev", askArgs({ state: "plain text state" }));
+  const client = new JevReceiptFake();
+  const result = await askVia(client, AGENT, askArgs({ state: "plain text state" }), fakeJevAsk());
   assert.equal(result.state_sha256, await sha256Hex(JSON.stringify("plain text state")));
+});
+
+// ── the vendor call happens before the writer transaction ──────────────────
+
+test("callTool asks Jev before it connects the writer pool, and never for an invalid request", async () => {
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async url => {
+    seen.push(String(url));
+    return jsonResponse(200, { model: "jev-1.14.0", answers: ANSWERS });
+  };
+  try {
+    // No DATABASE_URL_WRITER: the pool cannot connect, so reaching the vendor
+    // at all proves the call came first; the connection failure follows.
+    let failure;
+    try { await callTool({ TYPESAFE_API_KEY: KEY }, { ...AGENT }, "ask-jev", askArgs(), "full"); }
+    catch (e) { failure = e; }
+    assert.ok(failure, "expected the writer connection to fail after the vendor call");
+    assert.deepEqual(seen, ["https://api.typesafe.ai/v1/systemone"]);
+    seen.length = 0;
+    const payload = await rejected(() =>
+      callTool({ TYPESAFE_API_KEY: KEY }, { ...AGENT }, "ask-jev", askArgs({ questions: {} }), "full"));
+    assert.equal(payload.error, "jev_questions_invalid");
+    assert.deepEqual(seen, []);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 // ── refusals ────────────────────────────────────────────────────────────────
 
-test("ask-jev refuses jev_proxy_unconfigured when the Worker binding is absent (no key, or break-glass)", async () => {
-  for (const client of [new JevReceiptFake(), new JevReceiptFake({ jevAsk: null })]) {
-    const payload = await rejected(() => executeRegisteredTool(client, AGENT, "ask-jev", askArgs()));
-    assert.equal(payload.error, "jev_proxy_unconfigured");
-    assert.match(payload.hint, /TYPESAFE_API_KEY/);
-    assert.equal(client.rows.length, 0);
-  }
+test("ask-jev refuses jev_proxy_unconfigured when nothing was prefetched (no key, or break-glass)", async () => {
+  const client = new JevReceiptFake();
+  const payload = await rejected(() => executeRegisteredTool(client, AGENT, "ask-jev", askArgs()));
+  assert.equal(payload.error, "jev_proxy_unconfigured");
+  assert.match(payload.hint, /TYPESAFE_API_KEY/);
+  assert.equal(client.rows.length, 0);
   assert.equal(jevAskBinding({}), null);
   assert.equal(jevAskBinding({ TYPESAFE_API_KEY: "" }), null);
   assert.equal(jevAskBinding({ TYPESAFE_API_KEY: "   " }), null);
@@ -218,10 +284,10 @@ test("ask-jev refuses jev_proxy_unconfigured when the Worker binding is absent (
   assert.equal(TOOLS["ask-jev"].jevProxy, true);
 });
 
-test("ask-jev refuses invalid inputs before calling Jev", async () => {
+test("ask-jev refuses invalid inputs, and prefetch never asks Jev for them", async () => {
   const cases = [
     // An empty required string is refused as missing by the shared chokepoint.
-    [{ session_id: "" }, "missing_required"],
+    [{ session_id: "" }, "missing_required", "jev_session_id_invalid"],
     [{ session_id: "x".repeat(201) }, "jev_session_id_invalid"],
     [{ state: ["not", "object"] }, "jev_state_invalid"],
     [{ state: 7 }, "jev_state_invalid"],
@@ -235,23 +301,27 @@ test("ask-jev refuses invalid inputs before calling Jev", async () => {
     [{ purpose: "build_advisory", state: "a string" }, "jev_build_advisory_state_invalid"],
     [{ purpose: "build_advisory", state: { partner_request: 5 } }, "jev_build_advisory_state_invalid"],
     [{ purpose: "build_advisory", state: { other: "x" } }, "jev_build_advisory_state_invalid"],
-    [{ purpose: "chat" }, "value_not_in_declared_vocabulary"],
-    [{ facets: ["vibes"] }, "value_not_in_declared_vocabulary"],
+    [{ purpose: "chat" }, "value_not_in_declared_vocabulary", "jev_purpose_invalid"],
+    [{ facets: ["vibes"] }, "value_not_in_declared_vocabulary", "jev_facets_invalid"],
     [{ model: "" }, "jev_model_invalid"],
-    [{ extra: 1 }, "unregistered_operation_fields"],
+    [{ extra: 1 }, "unregistered_operation_fields", null],
   ];
-  for (const [overrides, error] of cases) {
+  for (const [overrides, error, prefetchError = error] of cases) {
     const jevAsk = fakeJevAsk();
-    const client = new JevReceiptFake({ jevAsk });
+    if (prefetchError) {
+      const early = await rejected(() => prefetchJevAnswer(askArgs(overrides), jevAsk));
+      assert.equal(early.error, prefetchError, JSON.stringify(overrides).slice(0, 80));
+    }
+    assert.equal(jevAsk.calls.length, 0);
+    const client = new JevReceiptFake({ prefetched: { ok: true, result: { model: "m", answers: {}, usage: null } } });
     const payload = await rejected(() => executeRegisteredTool(client, AGENT, "ask-jev", askArgs(overrides)));
     assert.equal(payload.error, error, JSON.stringify(overrides).slice(0, 80));
-    assert.equal(jevAsk.calls.length, 0);
     assert.equal(client.rows.length, 0);
   }
   // The 96000 limit is on the canonical JSON, inclusive.
   const atLimit = "x".repeat(96000 - JSON.stringify("").length);
-  const client = new JevReceiptFake({ jevAsk: fakeJevAsk() });
-  await executeRegisteredTool(client, AGENT, "ask-jev", askArgs({ state: atLimit }));
+  const client = new JevReceiptFake();
+  await askVia(client, AGENT, askArgs({ state: atLimit }), fakeJevAsk());
   assert.equal(client.rows.length, 1);
 });
 
@@ -273,26 +343,39 @@ test("jevAskBinding posts {state, model, questions} with bearer auth and a user 
   assert.ok(init.signal);
 });
 
-test("jevAskBinding retries 429 at most twice, honouring retry-after capped at 5s", async () => {
+test("jevAskBinding retries 429 once inside a 10s total budget", async () => {
+  let clock = 0;
+  const now = () => clock;
   const sleeps = [];
-  const sleep = async ms => { sleeps.push(ms); };
-  const ok = jsonResponse(200, { model: "m", answers: {} });
-  let fetchImpl = fakeFetch([jsonResponse(429, "slow", { "retry-after": "2" }),
-    jsonResponse(429, "slow", { "retry-after": "60" }), ok]);
-  let out = await jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep })({ state: "s", model: "m", questions: QUESTIONS });
+  const sleep = async ms => { sleeps.push(ms); clock += ms; };
+  const ok = () => jsonResponse(200, { model: "m", answers: {} });
+  // One retry honouring retry-after (capped at 5s).
+  let fetchImpl = fakeFetch([jsonResponse(429, "slow", { "retry-after": "60" }), ok()]);
+  let out = await jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep, now })(
+    { state: "s", model: "m", questions: QUESTIONS });
   assert.equal(out.model, "m");
   assert.equal(out.usage, null);
-  assert.equal(fetchImpl.calls.length, 3);
-  assert.deepEqual(sleeps, [2000, 5000]);
+  assert.equal(fetchImpl.calls.length, 2);
+  assert.deepEqual(sleeps, [5000]);
 
-  sleeps.length = 0;
-  fetchImpl = fakeFetch([jsonResponse(429, "a"), jsonResponse(429, "b"), jsonResponse(429, "c"), ok]);
-  const payload = await rejected(() => jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep })(
+  // Never a second retry.
+  clock = 0; sleeps.length = 0;
+  fetchImpl = fakeFetch([jsonResponse(429, "a"), jsonResponse(429, "b"), ok()]);
+  let payload = await rejected(() => jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep, now })(
     { state: "s", model: "m", questions: QUESTIONS }));
   assert.equal(payload.error, "jev_upstream_failed");
   assert.equal(payload.status, 429);
-  assert.equal(fetchImpl.calls.length, 3);
-  assert.equal(sleeps.length, 2);
+  assert.equal(fetchImpl.calls.length, 2);
+  assert.equal(sleeps.length, 1);
+
+  // No retry when the wait would leave under a second of the budget.
+  clock = 0; sleeps.length = 0;
+  fetchImpl = fakeFetch([async () => { clock += 6000; return jsonResponse(429, "late", { "retry-after": "4" }); }, ok()]);
+  payload = await rejected(() => jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep, now })(
+    { state: "s", model: "m", questions: QUESTIONS }));
+  assert.equal(payload.status, 429);
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.deepEqual(sleeps, []);
 });
 
 test("upstream failures refuse jev_upstream_failed and never carry the key", async () => {
@@ -322,21 +405,23 @@ test("upstream failures refuse jev_upstream_failed and never carry the key", asy
   }
 });
 
-test("a hung upstream times out as jev_upstream_failed", async () => {
+test("a hung upstream times out as jev_upstream_failed within the budget", async () => {
   const fetchImpl = async (_url, init) => new Promise((_, reject) => {
     init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
   });
-  const payload = await rejected(() => jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { timeoutMs: 20 })(
+  const payload = await rejected(() => jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { budgetMs: 20 })(
     { state: "s", model: "m", questions: QUESTIONS }));
   assert.equal(payload.error, "jev_upstream_failed");
   assert.equal(payload.reason, "timeout");
 });
 
-test("ask-jev surfaces an upstream failure without writing a receipt", async () => {
+test("ask-jev surfaces a prefetched upstream failure without writing a receipt", async () => {
   const fetchImpl = fakeFetch([jsonResponse(503, `down ${KEY}`)]);
-  const client = new JevReceiptFake({ jevAsk: jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep: async () => {} }) });
+  const client = new JevReceiptFake();
   let thrown;
-  try { await executeRegisteredTool(client, AGENT, "ask-jev", askArgs()); } catch (e) { thrown = e; }
+  try {
+    await askVia(client, AGENT, askArgs(), jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep: async () => {} }));
+  } catch (e) { thrown = e; }
   assert.ok(thrown instanceof ToolError);
   assert.equal(thrown.payload.error, "jev_upstream_failed");
   assert.equal(thrown.payload.status, 503);
@@ -347,17 +432,24 @@ test("ask-jev surfaces an upstream failure without writing a receipt", async () 
 
 // ── read-jev-call-receipts ──────────────────────────────────────────────────
 
-test("read-jev-call-receipts returns the session's receipts, answers only for build_advisory", async () => {
-  const client = new JevReceiptFake({ jevAsk: fakeJevAsk() });
-  await executeRegisteredTool(client, AGENT, "ask-jev", askArgs());
-  await executeRegisteredTool(client, AGENT, "ask-jev", askArgs({ purpose: "build_advisory",
-    state: { partner_request: "build it" }, facets: ["architecture_or_design"] }));
-  await executeRegisteredTool(client, AGENT, "ask-jev", askArgs({ session_id: "other-session" }));
+test("read-jev-call-receipts credits only the caller's receipts that have their tool_call row", async () => {
+  const client = new JevReceiptFake();
+  await askVia(client, AGENT, askArgs(), fakeJevAsk());
+  await askVia(client, AGENT, askArgs({ purpose: "build_advisory",
+    state: { partner_request: "build it" }, facets: ["architecture_or_design"] }), fakeJevAsk());
+  await askVia(client, AGENT, askArgs({ session_id: "other-session" }), fakeJevAsk());
+  await askVia(client, OTHER, askArgs(), fakeJevAsk());
+  // A receipt forged straight into the table: no tool_call partner.
+  client.rows.push({ ...client.rows[0], receipt_id: "40000000-0000-0000-0000-00000000ffff",
+    idempotency_key: "forged-key", recorded_at: client.now() });
   const out = await executeRegisteredTool(client, AGENT, "read-jev-call-receipts", { session_id: "session-abc" });
   assert.equal(out.ok, true);
   assert.equal(out.session_id, "session-abc");
   assert.equal(typeof out.server_now, "string");
+  assert.equal(typeof out.since, "string");
+  assert.equal(out.truncated, false);
   assert.equal(out.receipts.length, 2);
+  assert.equal(out.receipts.some(r => r.receipt_id.endsWith("ffff")), false);
   const [call, advisory] = out.receipts;
   assert.deepEqual(Object.keys(call).sort(), ["answers", "facets", "model", "prompt_sha256", "purpose",
     "question_ids", "receipt_id", "recorded_at", "state_sha256"]);
@@ -370,11 +462,16 @@ test("read-jev-call-receipts returns the session's receipts, answers only for bu
   assert.match(advisory.prompt_sha256, /^[0-9a-f]{64}$/);
   assert.ok(call.recorded_at < advisory.recorded_at);
   const readCall = client.calls.find(entry => entry.sql.startsWith("select ops.read_jev_call_receipts"));
-  assert.deepEqual(readCall.params, ["session-abc", null, 200]);
+  assert.deepEqual(readCall.params, ["session-abc", null, 200, "joe"]);
+  // The OLDEST `limit` from since, with truncated=true.
   const limited = await executeRegisteredTool(client, AGENT, "read-jev-call-receipts",
     { session_id: "session-abc", limit: 1, since: "2026-09-24T00:00:00Z" });
   assert.equal(limited.receipts.length, 1);
-  assert.equal(limited.receipts[0].purpose, "build_advisory");
+  assert.equal(limited.receipts[0].purpose, "call");
+  assert.equal(limited.truncated, true);
+  // Another actor sees only its own.
+  const theirs = await executeRegisteredTool(client, OTHER, "read-jev-call-receipts", { session_id: "session-abc" });
+  assert.equal(theirs.receipts.length, 1);
   assert.equal(TOOLS["read-jev-call-receipts"].write, false);
 });
 
@@ -392,4 +489,26 @@ test("read-jev-call-receipts refuses invalid inputs", async () => {
     assert.equal(payload.error, error);
   }
   assert.equal(client.calls.length, 0);
+});
+
+// ── read-jev-call-receipt-integrity ─────────────────────────────────────────
+
+test("read-jev-call-receipt-integrity flags uncredited receipts and a disabled trigger", async () => {
+  const client = new JevReceiptFake();
+  await askVia(client, AGENT, askArgs(), fakeJevAsk());
+  let audit = await executeRegisteredTool(client, AGENT, "read-jev-call-receipt-integrity", {});
+  assert.equal(audit.ok, true);
+  assert.equal(audit.receipts_total, 1);
+  assert.deepEqual(audit.receipts_without_tool_call, { count: 0, receipt_ids: [] });
+  assert.equal(audit.trigger_enabled, true);
+  assert.equal(typeof audit.checked_at, "string");
+  client.rows.push({ ...client.rows[0], receipt_id: "forged", idempotency_key: "forged-key" });
+  client.triggers.jev_call_receipt_append_only = "D";
+  audit = await executeRegisteredTool(client, AGENT, "read-jev-call-receipt-integrity", {});
+  assert.deepEqual(audit.receipts_without_tool_call, { count: 1, receipt_ids: ["forged"] });
+  assert.equal(audit.trigger_enabled, false);
+  assert.equal(TOOLS["read-jev-call-receipt-integrity"].write, false);
+  const payload = await rejected(() =>
+    executeRegisteredTool(client, AGENT, "read-jev-call-receipt-integrity", { extra: 1 }));
+  assert.equal(payload.error, "unregistered_operation_fields");
 });

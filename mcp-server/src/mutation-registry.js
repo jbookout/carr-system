@@ -5,9 +5,10 @@ import {
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
 // v69 is the runtime selector after the server-side Jev call log (migration
-// 0587, ops.record_jev_call_receipt / ops.read_jev_call_receipts behind the
-// append-only ops.jev_call_receipt). Its sealed catalog admits the two new
-// verbs, ask-jev and read-jev-call-receipts, and preserves earlier versions as
+// 0587, ops.record_jev_call_receipt / ops.read_jev_call_receipts /
+// ops.jev_call_receipt_integrity behind the append-only ops.jev_call_receipt).
+// Its sealed catalog admits the three new verbs, ask-jev,
+// read-jev-call-receipts and read-jev-call-receipt-integrity, and preserves earlier versions as
 // history; v66-v68 registered no verb, so the selector stayed on v65 until
 // now. v70 re-digests tools/migrate.py only and registers no verb, so the
 // selector stays on v69.

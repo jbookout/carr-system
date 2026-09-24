@@ -278,6 +278,8 @@ WRITE_ACTION_EXACT = {
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
     "answer-work-request-for-joe",  # human-only needs_joe -> triaged answer; exact rather
                                       # than widening every future answer-* action
+    "ask-jev",  # the Worker makes the Jev call and appends an append-only receipt row
+                # (migration 0587) the Jev gates credit; exact rather than an ask-* prefix
     "supersede-work-request",  # Program 6 withdrawal of a request captured in error, into the
                                 # request that replaced it. Its sibling decline-work-request is
                                 # already covered by the "decline" prefix; "supersede" is in
