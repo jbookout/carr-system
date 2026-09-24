@@ -35,21 +35,40 @@ export async function prepareTourPdfArtifact(renderInput) {
   return { rendered, packetDigest, templateDigest, rendererDigest, qcRulesetVersion: DELIVERABLE_QC_RULESET_VERSION, qcRulesetDigest, markersDigest, expected };
 }
 
+// Tags a thrown error with WHICH phase of storage/verification produced it,
+// without overwriting a phase a deeper call already set. runTourPdfRender's
+// catch reads `.phase` to log something more useful than a bare error class.
+function phased(error, phase) {
+  if (error && typeof error === "object" && typeof error.phase !== "string") error.phase = phase;
+  return error;
+}
+
 export async function storeAndVerifyTourPdf(env, tenant, renderJobId, prepared) {
-  if (!env?.carr_documents?.put || !env?.carr_documents?.get) throw new Error("tour_pdf_storage_unavailable");
+  if (!env?.carr_documents?.put || !env?.carr_documents?.get) throw phased(new Error("tour_pdf_storage_unavailable"), "store");
   const safeTenant = String(tenant).replace(/[^A-Za-z0-9._-]/g, "_");
   const storageRef = `tour-pdf/${safeTenant}/${renderJobId}/${prepared.rendered.artifactDigest.slice(7)}.pdf`;
-  await env.carr_documents.put(storageRef, prepared.rendered.bytes, {
-    httpMetadata: { contentType: "application/pdf", contentDisposition: `attachment; filename="CARR-tour-${renderJobId}.pdf"` },
-    customMetadata: { artifactDigest: prepared.rendered.artifactDigest, rendererVersion: TOUR_PDF_RENDERER_VERSION, templateVersion: TOUR_PDF_TEMPLATE_VERSION },
-  });
-  const stored = await env.carr_documents.get(storageRef);
-  if (!stored) throw new Error("tour_pdf_storage_readback_missing");
-  const readback = new Uint8Array(await stored.arrayBuffer());
-  const readbackDigest = await digest(readback);
-  if (readbackDigest !== prepared.rendered.artifactDigest) throw new Error("tour_pdf_storage_readback_mismatch");
-  const observed = { ...(await inspectStoredTourPacketPdf(readback)), artifact_digest: readbackDigest, r2_readback_digest: readbackDigest };
-  const qc = inspectTourPdfProof({ expected: prepared.expected, observed });
-  const qcRunDigest = await digest(JSON.stringify({ ruleset: DELIVERABLE_QC_RULESET_VERSION, expected: prepared.expected, observed, findings: qc.findings }));
+  try {
+    await env.carr_documents.put(storageRef, prepared.rendered.bytes, {
+      httpMetadata: { contentType: "application/pdf", contentDisposition: `attachment; filename="CARR-tour-${renderJobId}.pdf"` },
+      customMetadata: { artifactDigest: prepared.rendered.artifactDigest, rendererVersion: TOUR_PDF_RENDERER_VERSION, templateVersion: TOUR_PDF_TEMPLATE_VERSION },
+    });
+  } catch (error) { throw phased(error, "store"); }
+  let stored;
+  try {
+    stored = await env.carr_documents.get(storageRef);
+  } catch (error) { throw phased(error, "store"); }
+  if (!stored) throw phased(new Error("tour_pdf_storage_readback_missing"), "store");
+  let readback, readbackDigest;
+  try {
+    readback = new Uint8Array(await stored.arrayBuffer());
+    readbackDigest = await digest(readback);
+  } catch (error) { throw phased(error, "verify"); }
+  if (readbackDigest !== prepared.rendered.artifactDigest) throw phased(new Error("tour_pdf_storage_readback_mismatch"), "verify");
+  let qc, qcRunDigest;
+  try {
+    const observed = { ...(await inspectStoredTourPacketPdf(readback)), artifact_digest: readbackDigest, r2_readback_digest: readbackDigest };
+    qc = inspectTourPdfProof({ expected: prepared.expected, observed });
+    qcRunDigest = await digest(JSON.stringify({ ruleset: DELIVERABLE_QC_RULESET_VERSION, expected: prepared.expected, observed, findings: qc.findings }));
+  } catch (error) { throw phased(error, "verify"); }
   return { storageRef, contentLength: readback.byteLength, qc, qcRunDigest };
 }

@@ -138,7 +138,10 @@ def make_copy(cwd, dest):
 
 
 def read_patch(dest):
-    _sh(["git", "add", "-A", "--", ".", ":(exclude).venv"], dest, 120)
+    # Leave out what running code generates (bytecode caches, build output): the copy never took those
+    # folders, so a change to them re-creates files the real folder already has and the patch won't apply.
+    skip = [f":(exclude,glob)**/{d}/**" for d in sorted(SKIP_DIRS - {".git"})] + [":(exclude,glob)**/*.pyc"]
+    _sh(["git", "add", "-A", "--", ".", *skip], dest, 120)
     _, patch = _sh(["git", "diff", "--cached", "--binary"], dest, 120)
     return patch
 
