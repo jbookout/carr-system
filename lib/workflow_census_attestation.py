@@ -1,0 +1,256 @@
+"""Verify a V5-F09 workflow census chain served by the record layer.
+
+WHAT THIS IS. A pure function from the server's census-chain answer (the
+``read-workflow-census`` verb, migration 0595's ``ops.read_workflow_census``)
+plus the checked-in attestation config to one verdict.  It performs no I/O.
+``lib/control_plane_workflow_truth_reader`` is its one production caller; the
+negative-path suite drives it directly with forged answers.
+
+WHAT A PASSING VERDICT MEANS, AND ONLY THIS.  The latest census row was recorded
+through the one write door by the named principal at the named server time, it
+extends an unbroken hash chain back to row 1, and none of it has been edited
+since it was recorded.  It does NOT mean the census is TRUE: the scheduler
+observations, acceptance rows and completion evidence inside it are whatever
+the writer read, and the chain is unkeyed, so someone holding the database owner
+role could rewrite history wholesale.  Every output label below is chosen to say
+"attested record", never a health word.
+
+THE CHAIN, restated from the migration so a reader of this file need not open
+it.  For each row::
+
+    payload_sha256 = sha256(canonical(latest payload))      -- latest row only
+    row_hash       = sha256(canonical({"db_session_principal", "payload_sha256",
+                                       "prev_hash", "principal", "recorded_at",
+                                       "seq"}))
+    prev_hash      = previous row's row_hash, null only at seq 1
+
+where canonical(x) is ``json.dumps(x, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False)``, byte-equal to the database's ``ops.scac_canonical_json``
+for the value kinds the door admits (no fractional numbers).
+
+THE ORDER OF REFUSALS IS THE ORDER OF TRUST.  A chain that does not verify says
+nothing about who wrote it, so ``chain_break`` is decided before
+``unknown_writer``, and a record whose writer is not listed says nothing about
+freshness, so ``unknown_writer`` is decided before ``stale``.
+
+WHY ``chain_break`` AND NOT ``chain_broken``.  The contract named the reason
+``chain_broken``.  The standing rule's closed privileged union forbids "ok" even
+as a substring of an exported string (ops/assurance-health-selftest.py
+PRIVILEGED_WORD_UNION), and "broken" carries it -- the same reason the older
+reason id stopped being spelled with "reading".  Same meaning, word-clean
+spelling.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
+from typing import Any, Mapping
+
+CHAIN_SCHEMA_VERSION = "workflow-census-chain.v1"
+CENSUS_SCHEMA_VERSION = "control-plane-workflow-truth.v1"
+CONFIG_SCHEMA_VERSION = "workflow-census-attestation.v1"
+
+# Fail-closed reasons.  The first is today's reason code, kept verbatim; the
+# other three are the contract's specific ones.
+REASON_UNPROVABLE = "handle_integrity_unprovable"
+REASON_CHAIN_BREAK = "chain_break"
+REASON_UNKNOWN_WRITER = "unknown_writer"
+REASON_STALE = "stale"
+REASON_ATTESTED = "census_attested"
+
+DISPOSITION_NOT_PROVEN = "not_proven"
+DISPOSITION_ATTESTED = "attested_record_only"
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_DB_ROLE = re.compile(r"^[a-z_][a-z0-9_$]{0,62}$")
+_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+
+
+class AttestationConfigError(ValueError):
+    """The checked-in attestation config is missing or malformed."""
+
+
+def canonical_json(value: Any) -> str:
+    """The one canonical serialization, shared with the database's."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False)
+
+
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def row_hash(row: Mapping[str, Any]) -> str:
+    """Recompute one chain row's row_hash from its own fields."""
+    return sha256_hex(canonical_json({
+        "seq": row["seq"],
+        "recorded_at": row["recorded_at"],
+        "principal": row["principal"],
+        "db_session_principal": row["db_session_principal"],
+        "prev_hash": row["prev_hash"],
+        "payload_sha256": row["payload_sha256"],
+    }))
+
+
+def _has_fraction(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, float):
+        return True
+    if isinstance(value, list):
+        return any(_has_fraction(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_fraction(item) for item in value.values())
+    return False
+
+
+def _time(text: Any) -> datetime | None:
+    if not isinstance(text, str) or not _TIME.match(text):
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def load_config(raw: Any) -> dict[str, Any]:
+    """Validate the parsed attestation config; raise rather than guess."""
+    if not isinstance(raw, dict) or raw.get("schema_version") != CONFIG_SCHEMA_VERSION:
+        raise AttestationConfigError("attestation config schema_version mismatch")
+    writers = raw.get("writer_principals")
+    sessions = raw.get("writer_db_session_principals")
+    window = raw.get("freshness_window_seconds")
+    cadence = raw.get("writer_cadence_seconds")
+    max_rows = raw.get("max_chain_rows")
+    if (not isinstance(writers, list) or not writers
+            or not all(isinstance(w, str) and _SLUG.match(w) for w in writers)):
+        raise AttestationConfigError("writer_principals must be a non-empty list of actor slugs")
+    if (not isinstance(sessions, list) or not sessions
+            or not all(isinstance(s, str) and _DB_ROLE.match(s) for s in sessions)):
+        raise AttestationConfigError("writer_db_session_principals must be a non-empty list of roles")
+    for name, value in (("freshness_window_seconds", window),
+                        ("writer_cadence_seconds", cadence),
+                        ("max_chain_rows", max_rows)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise AttestationConfigError(f"{name} must be a positive integer")
+    if not isinstance(window, int) or not isinstance(cadence, int) or window <= cadence:
+        raise AttestationConfigError("freshness_window_seconds must exceed writer_cadence_seconds")
+    return {"writer_principals": frozenset(writers),
+            "writer_db_session_principals": frozenset(sessions),
+            "freshness_window_seconds": window,
+            "writer_cadence_seconds": cadence,
+            "max_chain_rows": max_rows}
+
+
+def refusal(reason: str, detail: str, **extra: Any) -> dict[str, Any]:
+    answer: dict[str, Any] = {"available": False, "reason": reason,
+                              "item_disposition": DISPOSITION_NOT_PROVEN, "detail": detail}
+    answer.update(extra)
+    return answer
+
+
+def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any]:
+    """Decide one verdict for one server answer.  Never raises on a bad answer."""
+    # ---- the answer's shape --------------------------------------------------
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        return refusal(REASON_UNPROVABLE, "server_answer_shape_refused")
+    if answer.get("schema_version") != CHAIN_SCHEMA_VERSION:
+        return refusal(REASON_UNPROVABLE, "server_answer_shape_refused")
+    chain = answer.get("chain")
+    server_now = _time(answer.get("server_now"))
+    row_count = answer.get("row_count")
+    if (not isinstance(chain, list) or server_now is None
+            or isinstance(row_count, bool) or not isinstance(row_count, int)
+            or not isinstance(answer.get("truncated"), bool)):
+        return refusal(REASON_UNPROVABLE, "server_answer_shape_refused")
+    if answer["truncated"] or row_count != len(chain) or len(chain) > config["max_chain_rows"]:
+        return refusal(REASON_UNPROVABLE, "chain_truncated")
+    if not chain:
+        return refusal(REASON_UNPROVABLE, "census_absent")
+
+    # ---- the chain, row 1 to the latest ---------------------------------------
+    previous: dict[str, Any] | None = None
+    previous_time: datetime | None = None
+    for index, row in enumerate(chain):
+        seq = index + 1
+        if not isinstance(row, dict):
+            return refusal(REASON_CHAIN_BREAK, "field_malformed", at_seq=seq)
+        recorded = _time(row.get("recorded_at"))
+        if (isinstance(row.get("seq"), bool) or not isinstance(row.get("seq"), int)
+                or recorded is None
+                or not isinstance(row.get("principal"), str)
+                or not _SLUG.match(row["principal"])
+                or not isinstance(row.get("db_session_principal"), str)
+                or not _DB_ROLE.match(row["db_session_principal"])
+                or not isinstance(row.get("payload_sha256"), str)
+                or not _HEX64.match(row["payload_sha256"])
+                or not isinstance(row.get("row_hash"), str)
+                or not _HEX64.match(row["row_hash"])
+                or not (row.get("prev_hash") is None
+                        or (isinstance(row.get("prev_hash"), str)
+                            and _HEX64.match(row["prev_hash"])))):
+            return refusal(REASON_CHAIN_BREAK, "field_malformed", at_seq=seq)
+        if row["seq"] != seq:
+            return refusal(REASON_CHAIN_BREAK, "seq_gap", at_seq=seq)
+        expected_prev = None if previous is None else previous["row_hash"]
+        if row["prev_hash"] != expected_prev:
+            return refusal(REASON_CHAIN_BREAK, "prev_hash_mismatch", at_seq=seq)
+        if row_hash(row) != row["row_hash"]:
+            return refusal(REASON_CHAIN_BREAK, "row_hash_mismatch", at_seq=seq)
+        if previous_time is not None and recorded < previous_time:
+            return refusal(REASON_CHAIN_BREAK, "time_regression", at_seq=seq)
+        if recorded > server_now:
+            return refusal(REASON_CHAIN_BREAK, "future_time", at_seq=seq)
+        previous, previous_time = row, recorded
+
+    latest = chain[-1]
+    payload = answer.get("latest_payload")
+    if (not isinstance(payload, dict) or _has_fraction(payload)
+            or payload.get("schema_version") != CENSUS_SCHEMA_VERSION):
+        return refusal(REASON_CHAIN_BREAK, "payload_digest_mismatch", at_seq=latest["seq"])
+    try:
+        payload_digest = sha256_hex(canonical_json(payload))
+    except (TypeError, ValueError):
+        return refusal(REASON_CHAIN_BREAK, "payload_digest_mismatch", at_seq=latest["seq"])
+    if payload_digest != latest["payload_sha256"]:
+        return refusal(REASON_CHAIN_BREAK, "payload_digest_mismatch", at_seq=latest["seq"])
+
+    # ---- who wrote the latest row ---------------------------------------------
+    if latest["principal"] not in config["writer_principals"]:
+        return refusal(REASON_UNKNOWN_WRITER, "principal_not_listed", at_seq=latest["seq"])
+    if latest["db_session_principal"] not in config["writer_db_session_principals"]:
+        return refusal(REASON_UNKNOWN_WRITER, "db_session_principal_not_listed",
+                       at_seq=latest["seq"])
+
+    # ---- how old it is, on the server's clock ---------------------------------
+    latest_time = previous_time
+    assert latest_time is not None
+    age = int((server_now - latest_time).total_seconds())
+    window = config["freshness_window_seconds"]
+    if age > window:
+        return refusal(REASON_STALE, "older_than_window", at_seq=latest["seq"],
+                       age_seconds=age, freshness_window_seconds=window)
+
+    return {
+        "available": True,
+        "reason": REASON_ATTESTED,
+        "item_disposition": DISPOSITION_ATTESTED,
+        "claim": (f"recorded by {latest['principal']} at {latest['recorded_at']} through the "
+                  "one write door and unedited since; the scheduler observations and "
+                  "acceptance rows inside it are not proven true"),
+        "attestation": {
+            "principal": latest["principal"],
+            "db_session_principal": latest["db_session_principal"],
+            "recorded_at": latest["recorded_at"],
+            "seq": latest["seq"],
+            "row_hash": latest["row_hash"],
+            "payload_sha256": latest["payload_sha256"],
+            "server_now": answer["server_now"],
+            "age_seconds": age,
+            "freshness_window_seconds": window,
+        },
+        "census": payload,
+    }

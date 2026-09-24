@@ -304,6 +304,20 @@ export const REGISTRY_V67_VERSION = "scac-mutation-registry.v67";
 // (mutation-registry.js) stays on v65 -- launchd-workflow is an
 // UNSEALED_INGRESS_KINDS member so it never becomes the runtime selector.
 export const REGISTRY_V68_VERSION = "scac-mutation-registry.v68";
+// v69 seals the V5-F09 workflow census store: migration 0595 installs the
+// append-only, database-hash-chained ops.workflow_census_record behind two
+// SECURITY DEFINER doors, ops.record_workflow_census (EXECUTE to carr_writer)
+// and ops.read_workflow_census (EXECUTE to carr_reader and carr_writer), and
+// mcp-server/src/workflow-census.js registers two new verbs,
+// record-workflow-census (write) and read-workflow-census (read). tools/migrate.py
+// is re-digested in the same seal for its (0595, 0596) atomic group, and the
+// census writer's launchd row (com.carr.workflow-census-writer, one
+// ops.service_environment:workflow-census-writer:production ref) is admitted
+// so the sealed launchd authority refs match ops/config/services.json. Two new
+// mcp-tool rows, one external-admin row and one launchd-workflow row; no
+// sibling verb's bound fields change. The runtime selector
+// (mutation-registry.js) moves to v69 so the door admits both verbs.
+export const REGISTRY_V69_VERSION = "scac-mutation-registry.v69";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1396,6 +1410,19 @@ export const POST_0584_FORWARD_V68_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 885, digest: "sha256:321e5a518ca3a7af9031a96f3ae5c96d0cb38ab698307847ed4d46c5d69e5920" },
 });
 
+// Measured by the disposable PostgreSQL 17 migration lane via the
+// drift-exception readback technique (apply, read the refusal's observed
+// count/digest, bind, reapply). Installs ops.record_workflow_census (0595,
+// EXECUTE to carr_writer), ops.read_workflow_census (0595, EXECUTE to
+// carr_reader and carr_writer) and the v69 registration function with its
+// runtime EXECUTE grants. ops.workflow_census_record itself carries no
+// app-role grant.
+export const POST_0595_FORWARD_V69_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0584_FORWARD_V68_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v69",
+  secdef_execute: { count: 892, digest: "sha256:f706812e984806c3be723be8a0d629070c0fcf3a55cbc32bdf08d34df36bc771" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -2110,6 +2137,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V66_VERSION]: "v66",
   [REGISTRY_V67_VERSION]: "v67",
   [REGISTRY_V68_VERSION]: "v68",
+  [REGISTRY_V69_VERSION]: "v69",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2202,7 +2230,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V66_VERSION) {
+  version = REGISTRY_V69_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -2290,7 +2318,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
     REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
     REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION].includes(version))
+    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -15795,6 +15823,90 @@ export function renderReleasePipelineRegistrySql(rows,
 }
 
 
+export function renderWorkflowCensusRegistrySql(rows,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0585_release_pipeline_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "8cb7a59763cab90e2e6e7cde2ddd29a7fc21228e29c38705366c7edc0f70f8ea";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v69 predecessor migration pin drifted");
+  const oldCatalogBaseline = POST_0584_FORWARD_V68_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0595_FORWARD_V69_DB_CATALOG_BASELINE;
+  const oldSeal = registrySeal(REGISTRY_V68_VERSION,
+    frozenInventory(REGISTRY_V68_VERSION), oldCatalogBaseline);
+  const newSeal = registrySeal(REGISTRY_V69_VERSION, rows, newCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V68_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V69_VERSION];
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value ?? "")))
+    throw new Error("v69 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(oldCatalogBaseline);
+  const newCatalog = JSON.stringify(newCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v69 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$release_pipeline_v68", "$workflow_census_v69")
+    .replaceAll("scac-mutation-registry.v68", "scac-mutation-registry.v69")
+    .replaceAll("scac-db-catalog-projection.v68", "scac-db-catalog-projection.v69")
+    .replaceAll("_v68", "_v69")
+    .replaceAll("v67_current", "v68_current")
+    .replaceAll("v67_live_at_seal", "v68_live_at_seal")
+    .replaceAll("snapshot_v67", "snapshot_v68")
+    .replaceAll("Release pipeline", "Workflow census")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v68", "v69"), newCatalog)
+    .replaceAll(`observed_count<>${oldCatalogBaseline.secdef_execute.count}`,
+      `observed_count<>${newCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(`observed_digest<>'${oldCatalogBaseline.secdef_execute.digest}'`,
+      `observed_digest<>'${newCatalogBaseline.secdef_execute.digest}'`)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
+    .replaceAll("Workflow census v68 seed or entry-set seal drifted",
+      "Workflow census v69 seed or entry-set seal drifted");
+  const versionListMarker =
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v69'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v69 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69'");
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v69' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v68' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v69' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v69' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v68' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v69' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v69' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v68' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v69' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v67_seal_available()) then",
+      "ops.scac_mutation_registry_v67_seal_available() and ops.scac_mutation_registry_v68_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v69' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v68' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v69' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v69_seal_available()",
+      "     or not ops.scac_mutation_registry_v68_seal_available()\n     or not ops.scac_mutation_registry_v69_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v69 ${label}`);
+  const seedStart = sql.indexOf("$workflow_census_v69_source$[");
+  const seedEnd = sql.indexOf("]$workflow_census_v69_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v69 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$workflow_census_v69_source$${seed}$workflow_census_v69_source$${sql.slice(seedEnd + "]$workflow_census_v69_source$".length)}`;
+  const preflight = `do $workflow_census_v69_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'Workflow census v69 requires exact applied 0585'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V68_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'Workflow census v68 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v68('${oldSeal.digest}','mcp-tool:standing-context');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'Workflow census v68 predecessor entry drifted'; end if;\n` +
+    `end $workflow_census_v69_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
+
+
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
   // in v21 artifacts, and every input to the guard is a fixed module constant.
@@ -16544,9 +16656,19 @@ export function renderGeneratedFrontier() {
     renderReleasePipelineRegistrySql(v68Rows,
       artifacts["migrations/0584_timebomb_audit_scac_successor.sql"]);
 
+  const v69Rows = frozenInventory(REGISTRY_V69_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v69.generated.js"] =
+    renderRuntimeProjection(v69Rows, {
+      version: REGISTRY_V69_VERSION,
+      dbCatalogBaseline: POST_0595_FORWARD_V69_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0596_workflow_census_store_scac_successor.sql"] =
+    renderWorkflowCensusRegistrySql(v69Rows,
+      artifacts["migrations/0585_release_pipeline_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 74 || runtimeCount !== 65 || Object.keys(artifacts).length !== 139)
+  if (migrationCount !== 75 || runtimeCount !== 66 || Object.keys(artifacts).length !== 141)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }

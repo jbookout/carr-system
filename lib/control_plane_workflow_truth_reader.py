@@ -1,99 +1,159 @@
-"""The V5-F09 census route, DELETED, with one frozen answer left where it stood.
+"""The V5-F09 census route, rewired to the durable server-attested census store.
 
-WHAT THIS MODULE NO LONGER HAS, first, because the deletion is the change.  It
-used to perform the control-plane read (``read_workflow_truth_snapshot``), mint
-an opaque handle for it (``read_workflow_truth_reading``, ``WorkflowTruthReading``,
-``_MINT``, ``_MINTED``, ``_frozen``, ``_thawed``, ``_content_digest``) and render
-that handle's capture for a consumer (``render_reading``).  Every one of those
-names is gone from this file.  Nothing in this repository imports them; a grep
-across the tree was the check, and the acceptance suite fails if any of them
-comes back under any name.
+WHAT CHANGED, first, because the change is the point.  Until this module was
+rewired it returned one frozen ``available: false`` answer, reason
+``handle_integrity_unprovable``, owed seam ``durable_signed_census_store_seam``
+(PR #984).  That seam now exists: migration 0595 adds the append-only,
+database-hash-chained ``ops.workflow_census_record``; ``record-workflow-census``
+is its one write door and ``read-workflow-census`` its one read door
+(``mcp-server/src/workflow-census.js``); ``ops/workflow-census-writer.py`` runs
+the F09 classifier daily under launchd and records what it produced.
 
-WHY DELETION RATHER THAN A TENTH NARROWING.  Ten review rounds attacked the same
-class and won every round: whatever the handle was made of, a caller sharing the
-process could put its own census behind it -- by rebinding the module-level
-snapshot function that ``read_workflow_truth_reading`` resolved at call time, by
-writing the private mint registry, by a ``str``-subclass mapping key that ran
-caller code during the thaw, by a ``__del__`` that rebound this module's exported
-values while a consumer was between two reads of them.  The tenth review then
-showed the last of those on the consumer side: rebinding the snapshot function
-made ``tools/health-check.py`` print a caller's census as the control plane's own
-answer, through ``run.sh health``.
+WHY THE OLD ROUTE WAS DELETED, compressed.  Ten review rounds forged the census
+from inside the caller's own process -- a rebound snapshot function, a written
+mint registry, a ``__del__`` running between two reads -- because the only
+owner of "this is the census the control plane served" was a Python object in
+that process.  The owner is now OUTSIDE it: this route never reads the database
+through a local handle, never accepts a census from a caller, and takes no
+argument.  It asks the deployed Worker for the chain (``./run.sh call
+read-workflow-census``, the same credential-less door every script on this Mac
+uses) and recomputes every hash itself in ``lib/workflow_census_attestation``.
 
-None of that is closable from inside a Python module.  What is missing is not a
-better object but an OWNER for the fact "this census is the one the control plane
-served" -- a durable store that records what it served under an id and signs it,
-so a consumer re-reads the census back from the store rather than trusting object
-identity inside the caller's own process.  That store does not exist here.  The
-standing rule is explicit about this case: where the authoritative owner of a
-fact does not exist, the code reports unavailable and names the seam it is owed.
+WHEN IT ANSWERS ``available: true``, and only then, all of these hold:
+  * the chain verifies from row 1 to the latest row (seq, prev_hash, row_hash,
+    the latest payload's digest, non-decreasing server times);
+  * the latest row's principal AND its database session role are on the writer
+    lists in ``ops/config/workflow-census-attestation.v1.json`` -- config-as-code,
+    never the caller and never the server;
+  * the latest row is younger than that file's freshness window, measured on the
+    SERVER's clock from the same answer.
+Otherwise it fails closed: ``handle_integrity_unprovable`` (today's reason: no
+answer, a malformed answer, an empty or truncated chain, missing config),
+``chain_break``, ``unknown_writer`` or ``stale``, always with disposition
+``not_proven`` and a short ``detail``.  Unprovable never reads as proven.
 
-SO THE WHOLE ROUTE REPORTS UNAVAILABLE, INVARIANTLY.  ``workflow_truth_census()``
-takes no argument, reads no module global, touches no caller object, runs no
-query and has no branch.  It returns ``CENSUS_ROUTE_ANSWER``: one frozen mapping
-built from string literals at import time and closed over by the function, so
-rebinding any attribute of this module -- including ``CENSUS_ROUTE_ANSWER``
-itself -- changes nothing about what the function returns.  ``tools/health-check.py``
-prints that answer as its F09 section, which is what ``run.sh health`` shows.
+WHAT ``available: true`` CLAIMS, AND THE LABELS ARE CHOSEN SO IT CANNOT SAY
+MORE.  Reason ``census_attested``, disposition ``attested_record_only``, and a
+``claim`` sentence: recorded by <principal> at <server time> through the one
+write door and unedited since; the scheduler observations and acceptance rows
+inside it are not proven true.  The chain is unkeyed and the writer token is
+shared by every session on the writer's Mac, so this is an attestation of the
+RECORD, not of the world -- Jev scored soundness against in-process forgery at
+0.64 for exactly that reason.  The A01 label route
+(``lib/assurance_health_sources``) still derives no health label from it.
 
-THE STRINGS ARE DELIBERATELY WORD-CLEAN.  ``handle_integrity_unprovable``,
-``not_proven`` and ``durable_signed_census_store_seam`` carry no word from the
-standing rule's closed privileged union -- not even as a substring, which is why
-the reason id is not spelled with the word it used to be spelled with.  A
-surface that reports it cannot prove anything must not hand a grep, a log line or
-a later editor a privileged word to lift out of it.
+THE THREAT THIS DOES NOT CLOSE, NAMED.  A caller that rewrites this process's
+code (rebinding ``subprocess.run``, or the verifier) can still forge what this
+route returns inside that process; the 2026-09-11 amendment puts in-process code
+rewriting out of scope.  What it can no longer do is make the STORE say
+something it did not record, and any other process re-reading the store sees
+the truth.
 
-WHAT A REWIRE WOULD LOOK LIKE, the day the store exists: this module performs the
-read through that store, hands back the id the store signed, and the consumer
-re-reads it by id.  That is a new module against a new owner, not a resurrection
-of the object graph deleted here, which is why the object graph is not kept
-"for later".
+``CARR_WORKFLOW_CENSUS_OFFLINE=1`` makes the route answer fail-closed without a
+network call.  It exists for hermetic suites; it can only ever produce the
+unavailable answer, so it opens nothing.
 """
 from __future__ import annotations
 
+import json as _json
+import os as _os
+import subprocess as _subprocess
+from pathlib import Path as _Path
 from types import MappingProxyType as _MappingProxyType
-from typing import Any as _Any, Mapping as _Mapping
+from typing import Any as _Any, Callable as _Callable, Mapping as _Mapping
 
-__all__ = ["SCHEMA_VERSION", "CENSUS_ROUTE_ANSWER", "workflow_truth_census"]
+from lib import workflow_census_attestation as _attestation
 
-SCHEMA_VERSION = "control-plane-workflow-truth-census.v1"
+__all__ = ["SCHEMA_VERSION", "workflow_truth_census"]
+
+SCHEMA_VERSION = "control-plane-workflow-truth-census.v2"
+
+_REPO = _Path(__file__).resolve().parents[1]
+_CONFIG_PATH = _REPO / "ops" / "config" / "workflow-census-attestation.v1.json"
+_RUN_SH = _REPO / "run.sh"
+_OFFLINE_ENV = "CARR_WORKFLOW_CENSUS_OFFLINE"
+_TIMEOUT_SECONDS = 90
 
 
-def _bind_census_route() -> tuple[_Mapping[str, _Any], _Any]:
-    """Build the one frozen answer and the function that returns it.
+def _freeze(value: _Any) -> _Any:
+    """Deep-freeze an answer: mappings become read-only proxies, lists tuples."""
+    if isinstance(value, dict):
+        return _MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
 
-    The mapping is built here, at import time, out of string literals, and the
-    function below closes over it.  A closure rather than a module global on
-    purpose: a module global is an attribute any code in this process can rebind,
-    and the tenth review's defect was exactly a consumer reading such an
-    attribute.  Nothing this function does can be re-pointed by rebinding a name
-    on this module, and there is no argument, no ``del`` and no attribute access
-    on any caller object anywhere on the route, so no caller code can run inside
-    the call at all.
+
+def _checked_in_config() -> dict[str, _Any]:
+    return _attestation.load_config(
+        _json.loads(_CONFIG_PATH.read_text(encoding="utf-8")))
+
+
+def _server_census_answer(max_rows: int) -> tuple[_Any, str | None]:
+    """Ask the deployed Worker for the chain.  Returns (answer, failure detail).
+
+    The child gets HOME, PATH and LANG only: no DATABASE_URL, no break-glass
+    switch, so ``run.sh call`` can take nothing but its default HTTPS path to
+    the Worker, whose read connection this route never holds.
     """
-    answer: _Mapping[str, _Any] = _MappingProxyType({
-        "schema_version": "control-plane-workflow-truth-census.v1",
-        "available": False,
-        "reason": "handle_integrity_unprovable",
-        "item_disposition": "not_proven",
-        "owed_seam": "durable_signed_census_store_seam",
-    })
+    if _os.environ.get(_OFFLINE_ENV) == "1":
+        return None, "offline_by_environment"
+    child_env = {"HOME": _os.environ.get("HOME", ""), "PATH": _os.environ.get("PATH", ""),
+                 "LANG": _os.environ.get("LANG", "C")}
+    try:
+        proc = _subprocess.run(
+            [str(_RUN_SH), "call", "read-workflow-census", _json.dumps({"max_rows": max_rows})],
+            cwd=str(_REPO), env=child_env, capture_output=True, text=True,
+            timeout=_TIMEOUT_SECONDS)
+    except Exception:
+        return None, "server_route_unreachable"
+    if getattr(proc, "returncode", 1) != 0:
+        return None, "server_route_unreachable"
+    try:
+        return _json.loads(getattr(proc, "stdout", "") or ""), None
+    except ValueError:
+        return None, "server_answer_unparseable"
+
+
+def _census_answer(transport: _Callable[[int], tuple[_Any, str | None]],
+                   config_source: _Callable[[], _Mapping[str, _Any]]) -> _Mapping[str, _Any]:
+    """One answer from one transport and one config.  Never raises."""
+    try:
+        try:
+            config = config_source()
+        except Exception:
+            verdict = _attestation.refusal(_attestation.REASON_UNPROVABLE,
+                                           "attestation_config_unavailable")
+        else:
+            answer, failure = transport(config["max_chain_rows"])
+            if failure is not None:
+                verdict = _attestation.refusal(_attestation.REASON_UNPROVABLE, failure)
+            else:
+                verdict = _attestation.verify_census_chain(answer, config)
+    except Exception:
+        verdict = _attestation.refusal(_attestation.REASON_UNPROVABLE, "route_fault")
+    return _freeze({"schema_version": SCHEMA_VERSION, **verdict})
+
+
+def _bind_census_route(transport: _Callable[[int], tuple[_Any, str | None]],
+                       config_source: _Callable[[], _Mapping[str, _Any]]):
+    """Build the no-argument route over one transport and one config source.
+
+    MODULE-PRIVATE.  Production binds it once, below, to the Worker and the
+    checked-in config.  The negative-path suite binds it to forged server
+    answers.  The route closes over all three names, so rebinding any attribute
+    of this module afterwards changes nothing about what it returns.
+    """
+    answer_for = _census_answer
 
     def workflow_truth_census() -> _Mapping[str, _Any]:
-        """THE F09 CENSUS ROUTE, AND IT REPORTS THAT IT CANNOT BE PROVEN.
+        """THE F09 CENSUS ROUTE: the store's attested census, or a fail-closed answer.
 
-        No argument, no global, no query, no branch: the same frozen mapping,
-        every call, in every process, whatever else has been done to this module.
+        No argument: nothing a caller holds reaches the verdict.
         """
-        return answer
+        return answer_for(transport, config_source)
 
-    return answer, workflow_truth_census
+    return workflow_truth_census
 
 
-_CENSUS_ROUTE_BINDING = _bind_census_route()
-
-# The frozen literal itself, exported so a consumer or a sweep can read what the
-# route answers without calling it.  Rebinding THIS NAME does not change the
-# route: the function returns the object the binding above closed over.
-CENSUS_ROUTE_ANSWER = _CENSUS_ROUTE_BINDING[0]
-workflow_truth_census = _CENSUS_ROUTE_BINDING[1]
+workflow_truth_census = _bind_census_route(_server_census_answer, _checked_in_config)

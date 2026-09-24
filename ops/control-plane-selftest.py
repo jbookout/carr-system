@@ -444,7 +444,11 @@ def health_truth_checks(live) -> None:
     code, out = _health_surface(_carried(live))
     check("a caller's census cannot make the health surface print a census",
           code == 0 and "Workflow truth" in out
-          and "census route deleted" in out
+          # The section now fetches the server-attested census itself and, with
+          # every subprocess refused here, has no server answer: it must say
+          # unavailable, and the fixture's census must not reach it.
+          and "census route: server-attested store" in out
+          and "workflow census   UNAVAILABLE" in out and "ATTESTED" not in out
           and not any(token in out for token in
                       ("evidence-backed operational", "false-operational",
                        "evidence-run eligible only")),

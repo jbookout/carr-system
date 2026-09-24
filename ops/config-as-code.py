@@ -265,6 +265,10 @@ PRIMARY_ONLY = {
     "com.carr.local-briefs.plist",
     "com.carr.partner-ping.plist",
     "com.carr.cutover-watch.plist",
+    # The V5-F09 census writer records under this Mac's actor; the census
+    # reader's writer list names joe-local only, so a second machine's run
+    # would be recorded and then read back as an unknown writer.
+    "com.carr.workflow-census-writer.plist",
 }
 
 

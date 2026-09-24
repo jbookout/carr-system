@@ -4,7 +4,14 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v65 is the runtime selector after DoctorCRE V5-UX-C02/C06's resource
+// v69 is the runtime selector after the V5-F09 workflow census store
+// (migration 0595, ops.record_workflow_census / ops.read_workflow_census behind
+// the append-only, hash-chained ops.workflow_census_record). Its sealed catalog
+// admits the two new verbs, record-workflow-census and read-workflow-census,
+// and preserves earlier versions as history; v66-v68 registered no verb, so the
+// selector stayed on v65 until now.
+//
+// Superseded note (v65): v65 was the runtime selector after DoctorCRE V5-UX-C02/C06's resource
 // observation store (migration 0579, ops.record_resource_observation --
 // the collector's write door). Its sealed catalog admits the two new
 // verbs, read-resource-dashboard and record-resource-observation, and
@@ -59,7 +66,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v65.generated.js";
+} from "./scac-mutation-registry.v69.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

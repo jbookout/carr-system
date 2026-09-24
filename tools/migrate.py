@@ -310,6 +310,16 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
     ),
+    # V5-F09 workflow census store: 0595 installs ops.record_workflow_census
+    # (EXECUTE to carr_writer) and ops.read_workflow_census (EXECUTE to
+    # carr_reader and carr_writer) behind the append-only, hash-chained
+    # ops.workflow_census_record; 0596 seals that catalog. Same deferred-epoch-
+    # trigger shape as the pair above -- 0595 applied alone would be refused at
+    # commit, so the pair must be one transaction.
+    (
+        "0595_workflow_census_store.sql",
+        "0596_workflow_census_store_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -348,6 +358,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
+    ),
+    (
+        "0595_workflow_census_store.sql",
+        "0596_workflow_census_store_scac_successor.sql",
     ),
 )
 
