@@ -1340,8 +1340,19 @@ def main() -> int:
             # Every positive manifest must be admitted while the issuer runtime
             # and A2 lease are live.  0532a releases both before the terminal
             # receipt, so review-stage manifests are immutable pre-terminal facts.
+            #
+            # This window backs the fresh two-connection review race below,
+            # where the blocked racer's wait for pg_advisory_xact_lock is not
+            # bounded by anything the harness controls -- only by however long
+            # the winner's own round trip takes on whatever runner this test
+            # is on. 240s is already ample against this Mac; it is not against
+            # a contended CI runner, and this manifest also has to survive
+            # every owner-acceptance call made against it further down.  Sized
+            # generously rather than close to the metal, same principle as the
+            # EXPIRING_SNAPSHOT_WINDOW_SECONDS comment above: insert-critical
+            # windows get headroom, only the dedicated expiry tests stay tight.
             one(cur, "select pg_sleep(1.1)")
-            review_coord = make_coord(cur, lease, session, host, seconds=240)
+            review_coord = make_coord(cur, lease, session, host, seconds=600)
             review_input, review_manifest = compile_input(
                 cur, lease, plan, rules, review_coord, session, host, commit="a" * 40,
                 evidence_requirements=contract_evidence_requirements)
@@ -1349,7 +1360,7 @@ def main() -> int:
                 review_manifest, rules, review_coord, uuid.uuid4())
             review_manifest_id = manifest_id(review_row)
             one(cur, "select pg_sleep(1.1)")
-            owner_only_coord = make_coord(cur, lease, session, host, seconds=220)
+            owner_only_coord = make_coord(cur, lease, session, host, seconds=600)
             owner_only_input, owner_only_manifest = compile_input(
                 cur, lease, plan, rules, owner_only_coord, session, host,
                 evidence_requirements=contract_evidence_requirements)
@@ -1740,19 +1751,27 @@ def main() -> int:
                     reviewer_fact_id, review_manifest_id, ev_id, Jsonb(review),
                     review_digest, review_key,
                 ))
-            check("fresh review insert race is serialized",
-                  len(fresh_review_race) == 2
-                  and all(row.get("ok") is True for row in fresh_review_race)
-                  and len({row.get("review_id") for row in fresh_review_race}) == 1
-                  and sum(row.get("replayed") is False for row in fresh_review_race) == 1
-                  and sum(row.get("replayed") is True for row in fresh_review_race) == 1)
+            # This must be a check(), not a raise. Two connections are racing
+            # an identical idempotency key behind the function's own
+            # pg_advisory_xact_lock, so the blocked racer's wait is bounded
+            # only by however long the winner's own round trip takes -- and on
+            # a contended runner that wait is not bounded by anything this
+            # harness controls. A RuntimeError here used to abort the whole
+            # 200+ check suite on that one anomaly, discarding every
+            # diagnostic the rest of the file would otherwise have produced.
+            # Every sibling fresh-insert race in this file (see "owner
+            # conflicting fresh insert race is atomic" below) already reports
+            # through check() instead; this one is brought in line with that.
+            review_serialized = (
+                len(fresh_review_race) == 2
+                and all(row.get("ok") is True for row in fresh_review_race)
+                and len({row.get("review_id") for row in fresh_review_race}) == 1
+                and sum(row.get("replayed") is False for row in fresh_review_race) == 1
+                and sum(row.get("replayed") is True for row in fresh_review_race) == 1)
+            check("fresh review insert race is serialized", review_serialized,
+                  safe(fresh_review_race))
             review_result = next(
-                (row for row in fresh_review_race if row.get("replayed") is False), None)
-            if review_result is None:
-                raise RuntimeError(
-                    "fresh review race returned no inserting row: "
-                    f"{safe(fresh_review_race)}"
-                )
+                (row for row in fresh_review_race if row.get("replayed") is False), {})
             check("independent review extends existing Passport fact", review_result.get("ok") is True)
             review_replay = call(cur, "ops.record_assurance_review_extension", (
                 reviewer_fact_id, review_manifest_id, ev_id, Jsonb(review), review_digest, review_key,
