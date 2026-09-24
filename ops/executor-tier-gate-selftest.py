@@ -7,10 +7,10 @@ confident cheaper pick on it is advice; a low-confidence or equal pick on a
 named model is silent; a fork stays exempt.
 
 ACTING (Joe, 2026-09-24, decision 5ec806a4): with no model named, a confident
-Jev pick (>= ACT_AT) now DENIES, naming the pick and how to override. The
-abstention path -- unavailable or under ACT_AT -- falls back to the same
-advisory text this gate always showed, printed as advice rather than a
-refusal, never as a silent allow.
+Jev pick (>= ACT_AT) is filled in as the call's model and the spawn is allowed,
+said in the context line. The abstention path -- unavailable or under ACT_AT --
+keeps the deterministic deny this gate always gave: an abstaining judge never
+loosens it.
 """
 import json
 import os
@@ -41,23 +41,21 @@ def check(label, condition, detail=""):
 brief = {"description": "Find grants", "prompt": "grep db/schema.sql for grants", "subagent_type": "Explore"}
 
 r = run({**brief}, "sonnet:0.89")
-check("no model, confident Jev pick: now refused", r and r.get("permissionDecision") == "deny", r)
-check("the refusal names Jev's pick and the acting threshold",
-      "JEV'S PICK for this task: `sonnet` at 0.89, which clears the acting threshold (0.60)."
-      in r["permissionDecisionReason"], r)
-check("the refusal says how to override",
-      'Pass `model="sonnet"` to accept it' in r["permissionDecisionReason"], r)
+check("no model, confident Jev pick: allowed with the pick filled in",
+      r and r.get("permissionDecision") == "allow" and r.get("updatedInput", {}).get("model") == "sonnet", r)
+check("the rest of the call is passed through unchanged",
+      all(r["updatedInput"].get(k) == v for k, v in brief.items()), r)
+check("the context line says Jev named the executor",
+      "EXECUTOR NAMED BY JEV" in r.get("additionalContext", "") and "`sonnet` at 0.89" in r["additionalContext"], r)
 
 r = run({**brief}, "haiku:0.40")
-check("no model, a low-confidence pick: advises, does not refuse",
-      r and "permissionDecision" not in r, r)
-check("the advice is labelled a hint", "below the acting threshold" in r.get("additionalContext", ""), r)
+check("no model, a low-confidence pick: still refused", r and r.get("permissionDecision") == "deny", r)
+check("the refusal carries the pick as a hint", "below the acting threshold" in r["permissionDecisionReason"], r)
 
 r = run({**brief}, "none")
-check("no model, an unavailable judge: advises without refusing or a Jev line",
-      r and "permissionDecision" not in r and "JEV'S PICK" not in r.get("additionalContext", ""), r)
-check("the advice still names the fix",
-      "EXECUTOR NOT NAMED" in r.get("additionalContext", ""), r)
+check("no model, an unavailable judge: still refused, with no Jev line",
+      r and r.get("permissionDecision") == "deny" and "JEV'S PICK" not in r["permissionDecisionReason"], r)
+check("the refusal still names the fix", "EXECUTOR NOT NAMED" in r["permissionDecisionReason"], r)
 
 r = run({**brief, "model": "opus"}, "haiku:0.95")
 check("a confident cheaper pick on a named model is advice, not a refusal",
