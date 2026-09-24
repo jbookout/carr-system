@@ -101,8 +101,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry")
+    if section not in ("all", "exports", "jobs", "registry", "credentials"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, rest
@@ -1196,6 +1196,71 @@ def _canonical_health():
             if _needs_attention:
                 _canonical_finding("repo_loose_work", f"{len(_actionable)} actionable path(s)")
                 rc = 1
+
+    if CANONICAL_SECTION in ("all", "credentials"):
+        # ── credential health (added 2026-09-24) ────────────────────────────
+        # Daily liveness lane for every credential CARR needs to run
+        # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
+        # tokens, gh, the Claude and Codex CLI logins, and the Google OAuth
+        # client behind the Worker's sign-in. Joe is replacing interactive
+        # logins with long-lived scoped tokens (CLOUDFLARE_API_TOKEN, `claude
+        # setup-token`, a fine-grained gh PAT, …); this is the lane that tells
+        # him BEFORE one of them lapses rather than after a nightly chain goes
+        # dark for want of a re-auth prompt nobody was there to answer.
+        # ops/config/credential-inventory.v1.json is the data (one entry per
+        # credential — adding one later is a config edit, not a code change)
+        # and ops/credential-health.py is the runner. Same delegate pattern as
+        # rules-live and forgetting elsewhere in this file: stdlib parent,
+        # venv-or-system child, first line of the child's stdout is the
+        # summary this row prints, everything else the child printed is
+        # discarded here exactly like those rows discard theirs.
+        #
+        # PLACED INSIDE _canonical_health(), NOT the legacy Drive-projection
+        # WATCH/GATES block below this function. That block only runs under
+        # `--recovery --reason <why>` (see `if not RECOVERY_MODE: sys.exit(
+        # _canonical_health())` just below this function) — it is recovery
+        # evidence now, not the everyday surface, since the 2026-08-19 cutoff
+        # retired the Drive .md renders it was built to watch. `run.sh health`
+        # with no flags — what actually runs daily — calls only this
+        # function, so a lane that has to run daily belongs in it.
+        #
+        # The child's own contract (see its docstring) is what actually keeps
+        # this safe: every probe reads an exit status or an HTTP status code,
+        # never a command's output or a response body beyond one named,
+        # non-secret field, and out/credential-health.jsonl carries names and
+        # statuses only. On a failed or expiring_soon credential the child
+        # files exactly one deduplicated CARR loop per credential through the
+        # allowlisted `./run.sh call add-loop` Bash door (CLAUDE.md: "A
+        # capture-verb denial has a fallback door" — this call carries no
+        # credential of its own) — the loop IS the bound action a health row
+        # must name, filed by the child, not left for a human reading this
+        # line to remember to do.
+        try:
+            _chc = os.path.join(REPO_ROOT, "ops", "credential-health.py")
+            if not os.path.exists(_chc):
+                print(f"  -- {'credential health':<18} ops/credential-health.py not present; skipped")
+            else:
+                _venv = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+                _py = _venv if os.path.exists(_venv) else sys.executable
+                _p = subprocess.run([_py, _chc], capture_output=True, text=True, timeout=180)
+                _lines = (_p.stdout or "").strip().splitlines()
+                _first = _lines[0] if _lines else (
+                    f"(no output; stderr: {(_p.stderr or '').strip().splitlines()[-1]})"
+                    if (_p.stderr or "").strip() else "(no output, no stderr)")
+                if _first.startswith("SKIP"):
+                    print(f"  -- {'credential health':<18} {_first.split(': ', 1)[-1]}")
+                elif _p.returncode == 0:
+                    print(f"  OK {'credential health':<18} {_first.split('— ', 1)[-1]}")
+                else:
+                    print(f"  ⚠︎ {'credential health':<18} {_first.split('— ', 1)[-1]}  · "
+                          f"see out/credential-health.jsonl and the loop(s) filed for detail")
+                    _canonical_finding("credential_health", _first.split("— ", 1)[-1])
+                    rc = 1
+        except Exception as e:
+            print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
+            _canonical_finding("credential_health", f"check failed ({type(e).__name__}: {e})")
+            rc = 1
+
     print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
     return rc
 
