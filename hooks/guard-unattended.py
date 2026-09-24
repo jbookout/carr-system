@@ -564,6 +564,35 @@ RULES = [
     (re.compile(r"git\s+reset\s+--hard\b", re.I), "hard reset"),
     (re.compile(r"git\s+(filter-repo|filter-branch)\b", re.I), "history rewrite"),
     (re.compile(r"git\s+clean\s+-[a-zA-Z]*f", re.I), "forced clean"),
+    # 2b. git hook bypass (bypass audit C38, 2026-09-24). pre-commit calls
+    # itself an "accident-stopper, not a security control: anyone can bypass
+    # it with --no-verify" (ops/githooks/pre-commit:28) and guard-unattended
+    # had no pattern watching for that bypass at all. Three doors, three
+    # patterns: the flag on commit, the flag on push (pre-push is the CI-skip
+    # gate itself), and rerouting/disabling hooksPath entirely, which defeats
+    # every hook in one move without even naming --no-verify.
+    # `-n` is git commit's short spelling of --no-verify; it is NOT the same
+    # short flag on `git push`, where `-n` means --dry-run, so the two
+    # patterns are separate rather than one shared "commit|push" alternation.
+    (re.compile(r"git\s+commit\b[^|;&]*(--no-verify\b|\s-n\b)", re.I),
+     "no-verify (git commit)"),
+    (re.compile(r"git\s+push\b[^|;&]*--no-verify\b", re.I),
+     "no-verify (git push)"),
+    (re.compile(r"git\s+-c\s*core\.hooksPath\s*=", re.I),
+     "hooksPath override"),
+    (re.compile(r"git\s+config\b[^|;&]*\bcore\.hooksPath\b", re.I),
+     "hooksPath override"),
+    # 2c. broad add at the repo root (bypass audit C53, AGENTS.md:225). The
+    # broad-add refusal AGENTS.md still claims ("a gate refuses those") was
+    # git-writer-gate.py, retired 2026-08-27 — the claim outlived the gate.
+    # `-A`/`--all` are unambiguous; a bare `.` pathspec is only "broad" when it
+    # names the current directory as a whole argument, so the pattern requires
+    # a following separator or end-of-command rather than matching `./file.py`
+    # or `.gitignore`.
+    (re.compile(r"git\s+add\s+(?:[^|;&\n]*\s)?(?:-A\b|--all\b)", re.I),
+     "broad add (-A/--all/.)"),
+    (re.compile(r"git\s+add\s+(?:[^|;&\n]*\s)?\.(?:\s|$|[;&|])", re.I),
+     "broad add (-A/--all/.)"),
     # 3. private key material
     #
     # `\.age\b` REMOVED 2026-08-07, on Joe's ruling: "loosen the gate so the work
@@ -713,6 +742,8 @@ SQL_LABELS = frozenset({"DROP", "TRUNCATE", "unqualified DELETE", "unqualified U
 PROSE_SAFE_LABELS = frozenset({
     "force push", "hard reset", "history rewrite", "forced clean",
     "recursive/forced delete", "secure delete",
+    "no-verify (git commit)", "no-verify (git push)", "hooksPath override",
+    "broad add (-A/--all/.)",
 })
 
 
@@ -1209,6 +1240,32 @@ def main():
             sys.exit(0)
 
         reason = check(cmd)
+
+        # BYPASS AUDIT C33 (2026-09-24): CLAUDE.md's own documented fallback
+        # door, `./run.sh call <verb> '<json>'`, reaches record-defect,
+        # add-loop, teach, and activate-rule without ever passing the four
+        # client verb gates registered on those verbs' direct mcp__*__<verb>
+        # tool_name — this hook is already an enforcing gate on Bash, so it
+        # is the one to re-run them against the same JSON. See
+        # hooks/verb_gate_recheck.py's header for what this does and does
+        # not cover (it does not reach the separate mcp__*__call-verb
+        # passthrough door, which needs a different fix — reported, not
+        # made, in this PR).
+        if not reason:
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from verb_gate_recheck import parse_run_sh_call, recheck as verb_recheck
+                parsed = parse_run_sh_call(cmd)
+                if parsed:
+                    verb, vargs = parsed
+                    deny_reason, _ctx = verb_recheck(
+                        verb, vargs,
+                        session_id=payload.get("session_id") or payload.get("sessionId"),
+                        transcript_path=payload.get("transcript_path"))
+                    if deny_reason:
+                        reason = deny_reason
+            except Exception as exc:                       # fail OPEN
+                log(f"ALLOW(verb-recheck-error) {exc}")
 
         # THE SHELL HALF OF rule 76a53dfe. A record refused at the vault must not
         # simply be written somewhere the gate does not look, and a heredoc into

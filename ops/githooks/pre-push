@@ -163,9 +163,34 @@ done || exit 1
 # ---------------------------------------------------------------------------
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+
+# bypass audit item 10 (2026-09-24): CARR_SKIP_CI=1 alone used to skip the
+# floor silently, with no receipt anywhere it was used and printed by the
+# refusal text below as the obvious next move on any failure. A bare skip flag
+# with no stated reason and no trail is exactly the "quiet door" the audit
+# named. Now a skip needs a non-empty CARR_SKIP_CI_REASON, or it is not
+# honoured at all -- the checks run instead of failing closed, because a
+# pre-push hook that refuses to push on a missing env var is worse than one
+# that just does its job.
+_EFFECTIVE_SKIP_CI="$CARR_SKIP_CI"
+if [ "$CARR_SKIP_CI" = "1" ] 2>/dev/null && [ -z "$CARR_SKIP_CI_REASON" ]; then
+  echo "  pre-push: CARR_SKIP_CI=1 requires a non-empty CARR_SKIP_CI_REASON — ignoring the skip and running quality checks" >&2
+  _EFFECTIVE_SKIP_CI=""
+fi
+
 if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
-  if [ "$CARR_SKIP_CI" = "1" ] 2>/dev/null; then
-    echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command" >&2
+  if [ "$_EFFECTIVE_SKIP_CI" = "1" ] 2>/dev/null; then
+    echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command (reason: $CARR_SKIP_CI_REASON)" >&2
+    mkdir -p "$REPO_ROOT/out" 2>/dev/null
+    _SKIP_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)"
+    _SKIP_HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    _SKIP_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    python3 - "$_SKIP_TS" "$_SKIP_BRANCH" "$_SKIP_HEAD" "$CARR_SKIP_CI_REASON" \
+      >> "$REPO_ROOT/out/ci-skip-receipts.jsonl" 2>/dev/null <<'PYEOF'
+import json, sys
+ts, branch, head, reason = sys.argv[1:5]
+print(json.dumps({"ts": ts, "branch": branch, "head": head, "reason": reason}))
+PYEOF
   else
     # THE PUSHED RANGE, which is what makes the secret scan cost O(this push)
     # instead of O(repository): 1,514 files were read on every push before this.
@@ -341,9 +366,10 @@ EOF
 
   Each failing check above names its own remedy.
 
-  Fix it, or say out loud that you are pushing anyway:
-
-      CARR_SKIP_CI=1 git push
+  Fix it. A skip is not printed here on purpose (bypass audit item 10,
+  2026-09-24): CARR_SKIP_CI=1 still exists, but only with a non-empty
+  CARR_SKIP_CI_REASON, and it now leaves a receipt in
+  out/ci-skip-receipts.jsonl -- it is not the obvious next line to paste.
 
 EOF
       # WHOSE FILE IS IT? A refusal that names a path and stops there is one a

@@ -431,6 +431,65 @@ case("find -delete is refused outside a scratch zone",
 case("find without -delete is still allowed",
      bash("find /Users/booko/important -name '*.md'"), ALLOW)
 
+# ── git hook bypass (bypass audit C38, PR "close the alternate doors") ───────
+# pre-commit names itself an "accident-stopper, not a security control: anyone
+# can bypass it with --no-verify" (ops/githooks/pre-commit:28); this closes
+# that door at the shell gate instead of leaving it to good behaviour.
+case("git commit --no-verify is refused",
+     bash('git commit -m "x" --no-verify'), DENY)
+case("git commit -n (short --no-verify) is refused",
+     bash('git commit -n -m "x"'), DENY)
+case("git push --no-verify is refused",
+     bash("git push origin main --no-verify"), DENY)
+case("git push -n is a dry run, not --no-verify, and is allowed",
+     bash("git push -n origin main"), ALLOW)
+case("git -c core.hooksPath= is refused",
+     bash("git -c core.hooksPath=/tmp/evil-hooks commit -m x"), DENY)
+case("git config core.hooksPath is refused",
+     bash("git config core.hooksPath /tmp/evil-hooks"), DENY)
+case("an ordinary git commit is allowed",
+     bash('git commit -m "ordinary change"'), ALLOW)
+case("prose that only mentions --no-verify is allowed",
+     bash('git commit -m "docs: explain that --no-verify skips hooks"'), ALLOW)
+
+# ── broad add at the repo root (bypass audit C53 / AGENTS.md:225) ───────────
+# AGENTS.md still claims "a gate refuses those" for a broad add; the gate that
+# claim describes (git-writer-gate.py) was retired 2026-08-27. This restores
+# the enforcement the doc still promises.
+case("git add -A is refused", bash("git add -A"), DENY)
+case("git add --all is refused", bash("git add --all"), DENY)
+case("git add . is refused", bash("git add ."), DENY)
+case("git add with explicit paths is allowed",
+     bash("git add hooks/guard-unattended.py ops/guard-selftest.py"), ALLOW)
+case("git add of a dotted relative path is allowed (not a bare '.')",
+     bash("git add ./hooks/guard-unattended.py"), ALLOW)
+case("git add of a dotfile is allowed (not a bare '.')",
+     bash("git add .gitignore"), ALLOW)
+
+# ── verb gate recheck for the `./run.sh call <verb>` door (bypass audit C33) ─
+# CLAUDE.md's own documented fallback door for a verb the classifier denies.
+# The direct mcp__*__add-loop / mcp__*__record-defect / mcp__*__teach /
+# mcp__*__activate-rule calls are gated by escalation-gate.py,
+# blocker-decider-gate.py, drift-claim-gate.py and rule-shape-gate.py; this
+# proves the same verb, same JSON, reached through the Bash door, gets the
+# same verdict. See hooks/verb_gate_recheck.py.
+case("run.sh call add-loop, blocker=capability with no named decider, is refused",
+     bash('./run.sh call add-loop \'{"kind":"idea","blocker":"capability",'
+          '"blocker_detail":"cant do it somehow"}\''), DENY)
+case("run.sh call add-loop, blocker=capability WITH a named decider, is allowed",
+     bash('./run.sh call add-loop \'{"kind":"idea","blocker":"capability",'
+          '"blocker_detail":"needs the NEON_API_KEY only Joe holds -- Joe grants it"}\''),
+     ALLOW)
+case("break-glass flags before the verb do not defeat the recheck",
+     bash('./run.sh call --branch rehearse-0031 --reason "proving a change" add-loop '
+          '\'{"kind":"idea","blocker":"capability","blocker_detail":"cant do it"}\''),
+     DENY)
+case("run.sh call record-defect with a normal claimed/actual pair is allowed",
+     bash('./run.sh call record-defect \'{"claimed":"x works","actual":"x does not work",'
+          '"idempotency_key":"11111111-1111-1111-1111-111111111111"}\''), ALLOW)
+case("run.sh call on an unrelated verb is untouched by the recheck",
+     bash('./run.sh call read-loop \'{"id":"123"}\''), ALLOW)
+
 
 def main():
     verbose = "-v" in sys.argv[1:]
