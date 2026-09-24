@@ -68,7 +68,15 @@
     ],
     "review_logins": [],
     "canary_lookback": 50,
-    "_review_evidence": "Public repositories: only a comment from an OWNER/MEMBER/COLLABORATOR (or a login in review_logins) carries a verdict; the LATEST verdict decides and must be an APPROVE newer than the PR head commit or naming its SHA. The verifier slug comes from the merge event or default_verifier, never from comment text."
+    "_review_evidence": "Public repositories: only a comment from an OWNER/MEMBER/COLLABORATOR (or a login in review_logins) carries a verdict; the LATEST verdict decides and must be an APPROVE carrying `Reviewed-SHA: <exact PR head SHA>`. Every session posts as the OWNER account, so the verifier identity comes from the merge event (or default_verifier), never from comment text or authorship.",
+    "canary_ignored_globs": [
+      "corpus/**",
+      "audits/**",
+      "video/**",
+      "out/**",
+      "**/*.md"
+    ],
+    "_canary_ignored_globs": "Mirror of .github/workflows/main-canary.yml paths-ignore: only a commit whose every changed path matches these may be walked past without its own canary verdict."
   },
   "app": {
     "enabled": true,

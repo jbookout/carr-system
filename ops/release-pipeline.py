@@ -67,11 +67,20 @@ proven otherwise. For EVERY commit in the batch: it came from a merged PR; the
 LATEST comment carrying a verdict (first line APPROVE-marker or BLOCK-marker,
 config review_markers/block_markers) from a trusted author (author_association
 OWNER/MEMBER/COLLABORATOR, or a configured login) decides; it must be APPROVE;
-and it must postdate the PR head commit or name the head SHA. Worker lane also:
-every PR in the batch that touches a release path has a green `ops/ci.sh
---strict` (and secret-class) CI run, and the nearest main-canary verdict along
-the first parent (docs-only pushes skip the canary) is a completed success —
-none found is a hold. App lane: the named required checks (`test`) are present
+and it must carry exactly one `Reviewed-SHA: <40-hex>` line equal to the PR's
+head SHA (no dates: an exact SHA is the only freshness proof). Worker lane
+also: every PR in the batch that touches a release path has a green `ops/ci.sh
+--strict` (and secret-class) CI run, and the canary walk may pass only commits
+whose changes are entirely canary-ignored; any other commit needs its own
+completed success (none, in progress, cancelled or skipped all hold).
+
+THE TRUST BOUNDARY, stated plainly. Every CARR session posts to GitHub as
+jbookout, which GitHub reports as OWNER. Comment authorship therefore proves only
+"posted from inside CARR", NOT which agent reviewed. Maker ≠ verifier is
+enforced by (1) the reviewer identity in the merge event the local
+review-and-merge pipeline writes, which must differ from its author, and (2) the
+database, which refuses a verifier slug equal to the maker (carr_jobs). The
+comment is evidence of the verdict and the reviewed SHA, not of identity. App lane: the named required checks (`test`) are present
 and green; an empty check list is a hold.
 
 VERIFIER ≠ MAKER. The database derives the release maker from the filing login
@@ -209,12 +218,16 @@ class GitHub:
     def __init__(self, repo: str, env: dict[str, str]):
         self.repo, self.env = repo, env
 
-    def api(self, path: str) -> Any:
-        proc = subprocess.run(["gh", "api", path], env=self.env, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=120)
+    def api(self, path: str, paginate: bool = False) -> Any:
+        argv = ["gh", "api", *(["--paginate", "--slurp"] if paginate else []), path]
+        proc = subprocess.run(argv, env=self.env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
             raise Blocked("github_unreadable", f"gh api {path.split('?')[0]} exited {proc.returncode}")
-        return json.loads(proc.stdout or "null")
+        data = json.loads(proc.stdout or "null")
+        if paginate:   # --slurp yields one list per page
+            return [item for page in (data or []) for item in (page or [])]
+        return data
 
     def pr_for_commit(self, sha: str) -> dict | None:
         rows = self.api(f"repos/{self.repo}/commits/{sha}/pulls") or []
@@ -230,14 +243,10 @@ class GitHub:
         return list(data.get("jobs") or [])
 
     def comments(self, pr: int) -> list[dict]:
-        return list(self.api(f"repos/{self.repo}/issues/{pr}/comments?per_page=100") or [])
+        return list(self.api(f"repos/{self.repo}/issues/{pr}/comments?per_page=100", paginate=True) or [])
 
     def comment(self, comment_id: int) -> dict:
         return self.api(f"repos/{self.repo}/issues/comments/{comment_id}") or {}
-
-    def commit_date(self, sha: str) -> str:
-        data = self.api(f"repos/{self.repo}/commits/{sha}") or {}
-        return str(((data.get("commit") or {}).get("committer") or {}).get("date") or "")
 
     def check_runs(self, sha: str) -> list[dict]:
         data = self.api(f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100") or {}
@@ -418,21 +427,25 @@ def trusted_commenter(comment: dict, cfg: dict) -> bool:
     return assoc in allowed or (bool(login) and login in logins)
 
 
-def latest_verdict(comments: list[dict], cfg: dict, head_sha: str, head_date: str) -> dict:
+REVIEWED_SHA_RE = re.compile(r"^\s*Reviewed-SHA:\s*([0-9a-f]{40})\s*$", re.M)
+
+
+def latest_verdict(comments: list[dict], cfg: dict, head_sha: str) -> dict:
     """The LATEST trusted comment that carries a verdict decides. It must be
-    APPROVE, and it must postdate the PR's head commit or name its SHA, so an
-    approval of an earlier revision never covers a later push."""
+    APPROVE and carry a `Reviewed-SHA: <40-hex>` line equal to the PR's exact
+    head SHA. No clocks: a committer date says when a commit was made, not when
+    it was pushed, so an approval of H1 posted between H2's commit and its push
+    would otherwise cover H2 unreviewed."""
     carrying = [c for c in comments if trusted_commenter(c, cfg) and verdict(c.get("body", ""), cfg)]
     if not carrying:
         raise Blocked("no_independent_review", "no trusted comment carries a review verdict")
     last = max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
     if verdict(last.get("body", ""), cfg) != "approve":
         raise Blocked("review_blocked", f"the latest review verdict is BLOCK ({last.get('html_url')})")
-    body = str(last.get("body") or "")
-    names_head = bool(head_sha) and (head_sha in body or head_sha[:12] in body)
-    if not names_head and not (head_date and str(last.get("created_at") or "") > head_date):
-        raise Blocked("review_stale", f"the approval {last.get('html_url')} predates the PR head "
-                                      f"{head_sha[:12]} and does not name it")
+    reviewed = REVIEWED_SHA_RE.findall(str(last.get("body") or ""))
+    if not head_sha or reviewed != [head_sha]:
+        raise Blocked("review_stale", f"the approval {last.get('html_url')} does not carry exactly "
+                                      f"`Reviewed-SHA: {head_sha}` (found {reviewed or 'none'})")
     return last
 
 
@@ -452,8 +465,12 @@ def next_release_key(today: str, exists: Callable[[str], bool]) -> str:
 
 
 def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: str,
-               db_ahead_of_worker: bool = False) -> dict:
-    key = f"release-fix-{sha[:8]}"
+               db_ahead_of_worker: bool = False, *, run_id: str, attempt: int = 1) -> dict:
+    """msg_id is derived from (sha, step, run id): the room insert is `on
+    conflict (msg_id) do nothing`, so a second, different failure of the same
+    SHA must never share an id with the first. The queue key gains a suffix on
+    later attempts for the same reason at the Hermes queue."""
+    key = f"release-fix-{sha[:8]}" + (f"-{attempt}" if attempt > 1 else "")
     ahead = ("PRODUCTION MIGRATIONS WERE APPLIED in this run before it stopped "
              "(db_ahead_of_worker: true): the database is ahead of the serving Worker, so the fix "
              "must keep the new schema working with the currently deployed Worker.\n"
@@ -468,7 +485,8 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
             "the pipeline releases the next main SHA after your fix merges. Reply in the room "
             "with the PR URL.")
     return {"idempotency_key": str(uuid.uuid4()), "room": "model-room", "seat": "claude",
-            "kind": "turn", "body": body, "msg_id": str(uuid.uuid5(ROOM_NAMESPACE, key))}
+            "kind": "turn", "body": body,
+            "msg_id": str(uuid.uuid5(ROOM_NAMESPACE, f"{lane}:{sha}:{step}:{run_id}"))}
 
 
 def blocker_loop(capability: str, detail: str) -> dict:
@@ -571,7 +589,7 @@ class Pipeline:
                                   lane_cfg)
             approval: dict | None
             try:
-                approval = latest_verdict(gh.comments(number), lane_cfg, head_sha, gh.commit_date(head_sha))
+                approval = latest_verdict(gh.comments(number), lane_cfg, head_sha)
             except Blocked as b:
                 cutover = str(lane_cfg.get("review_required_after") or "")
                 if (b.reason == "no_independent_review" and commit != sha and cutover
@@ -593,26 +611,45 @@ class Pipeline:
                 "verifier": choose_verifier(lane_cfg, head["event"]),
                 "verifier_evidence": evidence_ref_from_url(head["url"])}
 
+    def canary_ignored(self, commit: str, lane_cfg: dict) -> bool:
+        """True when EVERY path this commit changed matches main-canary's
+        paths-ignore (so the canary legitimately never ran for it)."""
+        try:
+            parent = self.git("rev-parse", f"{commit}^1")
+        except StepFailed:      # a root commit: nothing to call ignored
+            return False
+        paths = [p for p in self.git("diff", "--name-only", parent, commit).splitlines() if p.strip()]
+        ignore = lane_cfg.get("canary_ignored_globs") or []
+        return bool(paths) and all(any(_glob_hit(p, g) for g in ignore) for p in paths)
+
     def canary_green(self, gh: Any, lane_cfg: dict, sha: str) -> None:
-        """main canary skips docs-only pushes, so the newest SHA may have no run.
-        Walk back along the first parent to the nearest commit that HAS a
-        canary verdict and require it to be a completed success. None found in
-        the window is a hold, never a pass."""
+        """Walk back along the first parent from the head. A commit the canary
+        IGNORES (all paths in paths-ignore) may be walked past. Any other commit
+        must itself carry a completed, successful canary: no run yet, a run in
+        progress, or a cancelled/skipped run (main-canary uses
+        cancel-in-progress) all HOLD, so an uncanaried head can never ship on
+        an older green run."""
         commits = self.git("rev-list", "--first-parent", "--max-count",
                            str(lane_cfg.get("canary_lookback", 50)), sha).split()
         for commit in commits:
             runs = [r for r in gh.runs_for(commit) if r.get("name") == lane_cfg["canary_workflow_name"]]
+            ignored = self.canary_ignored(commit, lane_cfg)
             if not runs:
-                continue
-            if any(r.get("status") != "completed" for r in runs):
+                if ignored:
+                    continue
+                raise Blocked("canary_pending", f"no main canary run yet on {commit[:12]}")
+            latest = max(runs, key=lambda r: int(r.get("id") or 0))
+            if latest.get("status") != "completed":
                 raise Blocked("canary_pending", f"main canary on {commit[:12]} has not finished")
-            decided = [r for r in runs if r.get("conclusion") not in ("skipped", "neutral", "cancelled")]
-            if not decided:
-                continue
-            latest = max(decided, key=lambda r: int(r.get("id") or 0))
-            if latest.get("conclusion") != "success":
-                raise Blocked("canary_red", f"main canary on {commit[:12]} concluded {latest.get('conclusion')}")
-            return
+            conclusion = latest.get("conclusion")
+            if conclusion == "success":
+                return
+            if conclusion in ("cancelled", "skipped", "neutral"):
+                if ignored:
+                    continue
+                raise Blocked("canary_pending", f"main canary on {commit[:12]} was {conclusion}; "
+                                                "a verdict on this commit is required")
+            raise Blocked("canary_red", f"main canary on {commit[:12]} concluded {conclusion}")
         raise Blocked("canary_missing",
                       f"no main canary verdict within {len(commits)} first-parent commits of {sha[:12]}")
 
@@ -776,6 +813,10 @@ class Pipeline:
             self.out(f"release-pipeline[{lane}]: BLOCKED {b.reason} — {b.detail}")
             if self.dry_run:
                 return 0
+            if self.mutated:
+                # Something was already created or changed (a worktree, maybe a
+                # production migration): this is no longer a clean hold.
+                return self.fail(lane, state, sha, base, f"blocked:{b.reason}", 1, "-", b.detail)
             self.remove_worktrees()
             row: dict[str, Any] = {"lane": lane, "sha": sha, "from_sha": base, "status": "blocked",
                    "reason": b.reason, "detail": b.detail, "run_id": self.run_id}
@@ -801,13 +842,31 @@ class Pipeline:
             if not self.mutated:
                 # Nothing was created or changed yet (a GitHub/HTTP/JSON read failed): record and
                 # dispatch, but do not burn the SHA — the next tick re-reads.
-                ok, _ = (False, "no SHA") if not sha else self.call_verb(
-                    "add-room-turn", queue_turn(lane, sha, "unexpected-before-any-step", 1, "-",
-                                                str(self.store.records_path)))
+                # Same SHA and same error class re-dispatch to the SAME msg_id,
+                # so a transient read error cannot enqueue a session per tick.
+                ok, _ = (False, "no SHA") if not sha else self.dispatch(
+                    state, lane, sha, queue_turn(lane, sha, "unexpected-before-any-step", 1, "-",
+                                                 str(self.store.records_path),
+                                                 run_id=type(exc).__name__), allow_dedup=True)
                 self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "error",
                                    "detail": detail, "dispatched": ok, "run_id": self.run_id})
                 return 1
             return self.fail(lane, state, sha, base, "unexpected", 1, "-", detail)
+
+    def dispatch(self, state: dict, lane: str, sha: str, turn: dict, *, allow_dedup: bool = False
+                 ) -> tuple[bool, Any]:
+        """Post the fix-session turn. A `deduplicated: true` answer means the
+        room kept an EARLIER turn and dropped this one; for a real failure that
+        is not a dispatch (its content — the step, the db_ahead warning — was
+        lost), so it is reported as not dispatched."""
+        ok, res = self.call_verb("add-room-turn", turn)
+        if ok and isinstance(res, dict) and res.get("deduplicated") and not allow_dedup:
+            return False, "the room deduplicated this turn onto an earlier one; its content was dropped"
+        if ok:
+            counts = state.setdefault(lane, {}).setdefault("dispatches", {})
+            counts[sha] = int(counts.get(sha, 0)) + 1
+            self.store.save(state)
+        return ok, res
 
     def fail(self, lane: str, state: dict, sha: str, base: str, step: str, rc: int, log: str,
              detail: str) -> int:
@@ -818,9 +877,11 @@ class Pipeline:
             "failed_sha": sha, "failed_step": step,
             "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
         self.store.save(state)
-        ok, res = (False, "no SHA") if not sha else self.call_verb(
-            "add-room-turn", queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
-                                        db_ahead_of_worker=self.db_ahead_of_worker))
+        attempt = int((state[lane].get("dispatches") or {}).get(sha, 0)) + 1
+        ok, res = (False, "no SHA") if not sha else self.dispatch(
+            state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
+                                         db_ahead_of_worker=self.db_ahead_of_worker,
+                                         run_id=self.run_id, attempt=attempt))
         self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
                            "step": step, "rc": rc, "log": log, "detail": detail,
                            "db_ahead_of_worker": self.db_ahead_of_worker,

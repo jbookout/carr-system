@@ -88,7 +88,9 @@ class FakeRunner:
 HEAD_DATE = "2026-09-29T00:00:00Z"
 
 
-def approve(pr, *, when="2026-09-30T00:00:00Z", assoc="OWNER", body="Independent review: PASS", cid=None):
+def approve(pr, *, when="2026-09-30T00:00:00Z", assoc="OWNER", body=None, cid=None, reviewed=None):
+    if body is None:
+        body = f"Independent review: PASS\n\nReviewed-SHA: {reviewed or pr_head(pr)}\n"
     return {"id": cid or 900 + pr, "body": body, "created_at": when, "author_association": assoc,
             "user": {"login": "jbookout" if assoc == "OWNER" else "stranger"},
             "html_url": f"https://github.com/o/r/pull/{pr}#issuecomment-{cid or 900 + pr}"}
@@ -385,7 +387,7 @@ class VerifierIsNotMaker(unittest.TestCase):
             fx = Fixture(Path(tmp))
             sha = fx.commit({"mcp-server/src/a.js": "1"})
             n = FakeGitHub().pr_number(sha)
-            gh = FakeGitHub(comments={n: [approve(n, body="Independent review: PASS\nVerifier: joe")]})
+            gh = FakeGitHub(comments={n: [approve(n, body=f"Independent review: PASS\nVerifier: joe\nReviewed-SHA: {pr_head(n)}")]})
             live = {"sha": fx.base}
             runner = FakeRunner(live=live)
             fx.pipeline(runner, github=gh, live=live).tick(["worker"])
@@ -450,19 +452,46 @@ class ReviewGate(Base):
             approve(n, when="2026-09-30T02:00:00Z", cid=2, body="Independent review: BLOCK"),
             approve(n, when="2026-09-30T03:00:00Z", cid=3, assoc="NONE")]), "review_blocked")
 
-    def test_an_approval_older_than_the_head_commit_is_stale(self):
-        self.assertEqual(self.blocked_reason(lambda n: [approve(n, when="2026-09-28T00:00:00Z")]),
+    def test_an_approval_of_an_earlier_head_is_stale(self):
+        # N1: approval for H1 posted after H2 was committed but before it was
+        # pushed. Dates cannot tell; the exact Reviewed-SHA can.
+        self.assertEqual(self.blocked_reason(lambda n: [approve(n, reviewed="ab" * 20,
+                                                                when="2099-01-01T00:00:00Z")]),
                          "review_stale")
 
-    def test_an_older_approval_that_names_the_head_sha_counts(self):
-        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
-        n = FakeGitHub().pr_number(sha)
-        head = pr_head(n)
-        gh = FakeGitHub(comments={n: [approve(n, when="2026-09-28T00:00:00Z",
-                                              body=f"Independent review: PASS at {head[:12]}")]})
+    def test_an_approval_without_reviewed_sha_is_stale(self):
+        self.assertEqual(self.blocked_reason(lambda n: [approve(n, body="Independent review: PASS")]),
+                         "review_stale")
+
+    def test_a_short_sha_prefix_is_not_enough(self):
+        self.assertEqual(self.blocked_reason(lambda n: [approve(
+            n, body=f"Independent review: PASS at {pr_head(n)[:12]}")]), "review_stale")
+
+    def test_the_exact_reviewed_sha_ships(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
         live = {"sha": self.fx.base}
-        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), github=gh, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"]), 0)
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+    def test_verdict_comments_are_read_across_pages(self):
+        gh = rp.GitHub("o/r", {})
+        real = rp.subprocess.run
+
+        class Done:
+            returncode = 0
+            stdout = json.dumps([[{"id": 1}], [{"id": 2}, {"id": 3}]])
+
+        seen = []
+
+        def fake(argv, **kw):
+            seen.append(argv)
+            return Done()
+        rp.subprocess.run = fake
+        try:
+            self.assertEqual([c["id"] for c in gh.comments(5)], [1, 2, 3])
+        finally:
+            rp.subprocess.run = real
+        self.assertIn("--paginate", seen[0])
 
 
 class CanaryAndCI(Base):
@@ -477,11 +506,36 @@ class CanaryAndCI(Base):
         self.assertEqual(runner.calls, [])
         self.assertEqual(self.fx.records()[-1]["reason"], "canary_red")
 
-    def test_no_canary_verdict_anywhere_is_a_hold(self):
+    def test_an_uncanaried_code_head_holds(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         runner = FakeRunner()
         self.assertEqual(self.fx.pipeline(runner, github=FakeGitHub(canary={})).tick(["worker"]), 0)
-        self.assertEqual(self.fx.records()[-1]["reason"], "canary_missing")
+        self.assertEqual(self.fx.records()[-1]["reason"], "canary_pending")
+
+    def test_a_cancelled_canary_on_a_code_head_cannot_ship_on_older_green(self):
+        # N3: main-canary cancels in progress; head A cancelled, older Z green.
+        z = self.fx.commit({"mcp-server/src/z.js": "1"})
+        a = self.fx.commit({"mcp-server/src/a.js": "1"})
+        for conclusion in ("cancelled", "skipped"):
+            runner = FakeRunner()
+            gh = FakeGitHub(canary={z: ("completed", "success"), a: ("completed", conclusion)})
+            self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0)
+            self.assertEqual(runner.calls, [])
+            self.assertEqual(self.fx.records()[-1]["reason"], "canary_pending", conclusion)
+
+    def test_an_in_progress_canary_holds(self):
+        a = self.fx.commit({"mcp-server/src/a.js": "1"})
+        gh = FakeGitHub(canary={a: ("in_progress", None)})
+        self.fx.pipeline(FakeRunner(), github=gh).tick(["worker"])
+        self.assertEqual(self.fx.records()[-1]["reason"], "canary_pending")
+
+    def test_a_cancelled_run_on_an_ignored_commit_may_be_walked_past(self):
+        code = self.fx.commit({"mcp-server/src/a.js": "1"})
+        docs = self.fx.commit({"docs/n.md": "x"})
+        live = {"sha": self.fx.base}
+        gh = FakeGitHub(canary={code: ("completed", "success"), docs: ("completed", "cancelled")})
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), github=gh, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
 
     def test_a_green_canary_below_a_docs_commit_passes(self):
         code = self.fx.commit({"mcp-server/src/a.js": "1"})
@@ -585,6 +639,46 @@ class Robustness(Base):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         self.fx.pipeline(FakeRunner(fail_at="staging-prepare")).tick(["worker"])
         self.assertIs(self.fx.records()[-1]["db_ahead_of_worker"], False)
+
+    def test_a_second_failure_of_the_same_sha_is_not_deduplicated_away(self):
+        # N2: after clear-failed the same SHA fails differently; its turn must
+        # land with its own msg_id and its own queue key.
+        sha = self.fx.commit({"migrations/0600_x.sql": "select 1;"})
+        verbs: list = []
+        self.fx.pipeline(FakeRunner(fail_at="staging-prepare"), verbs=verbs).tick(["worker"])
+        rp.clear_failed(rp.Store(self.fx.repo / "out/release-pipeline"), "worker", sha, "retry")
+        self.fx.pipeline(FakeRunner(pending=1, fail_at="upload"), verbs=verbs).tick(["worker"])
+        turns = [a for v, a in verbs if v == "add-room-turn"]
+        self.assertEqual(len(turns), 2)
+        self.assertNotEqual(turns[0]["msg_id"], turns[1]["msg_id"])
+        self.assertIn(f"key=release-fix-{sha[:8]} ", turns[0]["body"])
+        self.assertIn(f"key=release-fix-{sha[:8]}-2 ", turns[1]["body"])
+        self.assertIn("db_ahead_of_worker: true", turns[1]["body"])
+
+    def test_a_deduplicated_room_answer_is_not_a_dispatch(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        pipe = self.fx.pipeline(FakeRunner(fail_at="upload"))
+        pipe.call_verb = lambda verb, args: (True, {"ok": True, "deduplicated": True})
+        self.assertEqual(pipe.tick(["worker"]), 1)
+        self.assertIs(self.fx.records()[-1]["dispatched"], False)
+
+    def test_a_hold_after_a_mutation_is_a_failure(self):
+        sha = self.fx.commit({"migrations/0600_x.sql": "select 1;"})
+        verbs: list = []
+        runner = FakeRunner(pending=1)
+        orig = runner.run
+
+        def run(argv, **kw):
+            if "release" in argv and "show" in argv:
+                return rp.Result(0, "")          # every key exists: release_key_exhausted
+            return orig(argv, **kw)
+        runner.run = run  # type: ignore[method-assign]
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"]), ("failed", "blocked:release_key_exhausted"))
+        self.assertIs(rec["db_ahead_of_worker"], True)
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
 
     def test_clear_failed_lets_the_same_sha_run_again(self):
         sha = self.fx.commit({"mcp-server/src/a.js": "1"})
