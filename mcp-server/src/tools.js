@@ -67,6 +67,8 @@ export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 // self-naming failures too; re-exported here so existing imports keep working.
 import { ToolError } from "./tool-error.js";
 export { ToolError };
+import { parksADecision, classifyLoopText, needsDecider, loopRowText,
+         ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 
 // DEFECT 2, HALF (b) (found 2026-08-13, decision 7026246b): a write whose bad
 // input reaches the database raw (an enum this file never learned to validate,
@@ -6532,9 +6534,13 @@ export const TOOLS = {
       }
       // capability_no_decider and internal_decision_parked (bypass audit
       // C33/C34, ported from hooks/blocker-decider-gate.py and
-      // hooks/escalation-gate.py) are enforced in mcp.js's callTool(),
-      // before this handler ever runs — see the comment there for why that
-      // placement, not here, is what makes every door hit the same check.
+      // hooks/escalation-gate.py) are enforced in this module's
+      // executeRegisteredTool(), before this handler ever runs — see the
+      // comment there for why that placement (the CANONICAL one, since
+      // break-glass bypasses mcp.js's callTool() entirely) is what makes
+      // every door, including break-glass, hit the same check. callTool()
+      // also runs the same imported check earlier, purely as a fail-fast
+      // ahead of its writer-pool connect — see its comment.
 
       // ── THE OWNERSHIP GATE ──────────────────────────────────────────────
       // Refuses a jointly-owned row at the moment it is filed. See LOOP_OWNERS
@@ -7982,6 +7988,28 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
+  // ── PORTED VERB GATES (bypass audit C33/C34, 2026-09-24), MOVED HERE
+  // (Opus re-review, 2026-09-24) from mcp.js's callTool(). callTool() is NOT
+  // the one choke point: mcp-server/local-verb.mjs's BREAK-GLASS mode
+  // (a direct DATABASE_URL connection, used for local/rehearsal calls) calls
+  // executeRegisteredTool() DIRECTLY and never goes through callTool() at
+  // all, so the check placed there missed that door entirely. THIS function
+  // is the actual chokepoint: local-verb.mjs's own comment at its call site
+  // says so ("the one choke point that also applies argument type coercion
+  // and raw-DB-error translation"), and callTool()'s read AND write branches
+  // both call it too. One placement, three doors: callTool() read, callTool()
+  // write, and local-verb.mjs break-glass (both its read and write shapes).
+  // Still purely in memory, before any client.query call in this function —
+  // same testability as the callTool()-level placement had.
+  if (name === "add-loop") {
+    if (needsDecider(args))
+      throw new ToolError({ error: "capability_no_decider", hint: BLOCKER_DECIDER_REASON });
+    if (parksADecision(args)) {
+      const { allow, why } = classifyLoopText(loopRowText(args));
+      if (!allow)
+        throw new ToolError({ error: "internal_decision_parked", why, hint: ESCALATION_REASON });
+    }
+  }
   // HUMAN-ONLY MEANS PARTNER AUTHORITY, NOT A SECOND CHAT WINDOW. A verified
   // partner passes directly. A native Codex/Claude grant or local machine door
   // passes only when partner-authority.js can derive its sponsor from

@@ -1,26 +1,43 @@
 // verb-gate-checks.test.mjs — unit tests for the ported deterministic logic
 // (bypass audit C33/C34, 2026-09-24) plus door-level tests proving the check
-// fires the same way whether add-loop is called directly or through the
-// call-verb passthrough — the exact two doors the redesign was asked to make
-// indistinguishable.
+// fires the same way across THREE doors: add-loop called directly, through
+// the call-verb passthrough, and through mcp-server/local-verb.mjs's
+// BREAK-GLASS mode (simulated by calling executeRegisteredTool directly,
+// since that is exactly what break-glass does — see local-verb.mjs). A
+// second Opus re-review (2026-09-24) found DOOR 1/DOOR 2 parity insufficient:
+// break-glass bypasses mcp.js's callTool() entirely, so the canonical
+// enforcement moved to tools.js's executeRegisteredTool(), the one function
+// all three doors call.
 //
-// These run purely in memory: mcp.js's callTool() throws
-// capability_no_decider / internal_decision_parked BEFORE any DB connection
-// opens (see mcp.js's comment beside the check), so no Postgres, no fake
-// client, no env at all is needed for the deny path. That is also what makes
-// this a real "every door" test rather than a partial one: it exercises the
-// SAME code path a live server sees for every caller — direct MCP,
-// tools/call-verb.py, mcp-server/local-verb.mjs, ./run.sh call, and
-// mcp__*__call-verb — because all of them terminate in this callTool().
+// DOOR 1 and DOOR 2 still run purely in memory with no live DB: callTool()
+// runs the SAME imported gate early, as a fail-fast ahead of its writer-pool
+// connect (see mcp.js's comment beside that copy — same pattern as
+// assertNoCallerAuthorityFields a few lines above it in that file). DOOR 3
+// calls executeRegisteredTool() directly with a fake "untouchable" DB client
+// that throws if queried, proving the canonical, break-glass-covering copy of
+// the gate also runs before any DB access, with no live Postgres needed
+// either.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { callTool } from "../src/mcp.js";
+import { executeRegisteredTool } from "../src/tools.js";
 import {
   classifyLoopText, needsDecider, parksADecision, loopRowText,
 } from "../src/verb-gate-checks.js";
 
 const ACTOR = { slug: "joe", human: true, via: "oauth-google" };
+
+// A fake DB client that THROWS if queried. DOOR 3 (break-glass) must be
+// refused by the pure gate before executeRegisteredTool ever touches this —
+// exactly like local-verb.mjs's break-glass client would be a live pg Client,
+// but here any .query call is itself a test failure, proving the check runs
+// first with no DB round trip, matching DOOR 1/DOOR 2's no-live-DB shape.
+function untouchableClient() {
+  return {
+    query: async () => { throw new Error("DOOR 3 test: query() must not be reached — the gate should have thrown first"); },
+  };
+}
 
 async function addLoop(args, profile = "full") {
   try {
@@ -34,6 +51,21 @@ async function addLoop(args, profile = "full") {
 async function addLoopViaCallVerb(args, profile = "full") {
   try {
     await callTool({}, ACTOR, "call-verb", { verb: "add-loop", args }, profile);
+    return null;
+  } catch (e) {
+    return e && e.payload ? e.payload : { error: e && e.message };
+  }
+}
+
+// DOOR 3: mcp-server/local-verb.mjs's break-glass mode — it calls
+// executeRegisteredTool(client, actor, verbName, verbArgs) DIRECTLY, never
+// through callTool(). Simulated here the same way: call executeRegisteredTool
+// itself, with an actor shape matching local-verb.mjs's break-glass actor
+// (`{ slug, human: true, kind: "human", via: "break-glass/local-verb" }`).
+async function addLoopViaBreakGlass(args) {
+  const actor = { slug: "joe", human: true, kind: "human", via: "break-glass/local-verb" };
+  try {
+    await executeRegisteredTool(untouchableClient(), actor, "add-loop", args);
     return null;
   } catch (e) {
     return e && e.payload ? e.payload : { error: e && e.message };
@@ -160,6 +192,39 @@ test("DOOR 2: the SAME parked-decision row gets the SAME refusal through call-ve
     blocker: "human_only", blocker_detail: "needs Joe to rule",
   });
   assert.equal(out?.error, "internal_decision_parked");
+});
+
+test("DOOR 3 (break-glass, executeRegisteredTool called directly): the SAME capability-blocker row is refused", async () => {
+  const out = await addLoopViaBreakGlass({
+    idempotency_key: "88888888-8888-8888-8888-888888888888",
+    kind: "open_loop", owner: "Joe", blocker: "capability",
+    blocker_detail: "cant do it somehow",
+  });
+  assert.equal(out?.error, "capability_no_decider");
+});
+
+test("DOOR 3: the SAME parked-decision row gets the SAME refusal through break-glass", async () => {
+  const out = await addLoopViaBreakGlass({
+    idempotency_key: "99999999-9999-9999-9999-999999999999",
+    kind: "open_loop", owner: "Joe", marker: "decision",
+    body: "should the record layer rename this table?",
+    blocker: "human_only", blocker_detail: "needs Joe to rule",
+  });
+  assert.equal(out?.error, "internal_decision_parked");
+});
+
+test("DOOR 3: an admitted row (named decider) reaches past the check without ever calling client.query", async () => {
+  const out = await addLoopViaBreakGlass({
+    idempotency_key: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    kind: "open_loop", owner: "Joe", blocker: "capability",
+    blocker_detail: "needs the NEON_API_KEY only Joe holds — Joe grants it",
+  });
+  // The gate passed. Whatever happens next inside executeRegisteredTool DOES
+  // reach client.query (untouchableClient), so this must fail — but on the
+  // untouchable-client error, never on capability_no_decider. That asymmetry
+  // is exactly the DOOR-1-equivalent proof: the gate, and only the gate, ran
+  // before any DB access.
+  assert.notEqual(out?.error, "capability_no_decider");
 });
 
 test("a capability blocker WITH a named decider reaches past the check (not capability_no_decider)", async () => {

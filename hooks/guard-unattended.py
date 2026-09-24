@@ -1084,26 +1084,44 @@ def direct_metered_dispatch(cmd):
 # which denied `git add -A hooks/x.py` (a NAMED path alongside -A) exactly as
 # hard as a bare `git add -A` — a real false positive the replay against
 # 12,145 real commands caught. This version tokenizes the argument list and
-# denies ONLY the three bare forms AGENTS.md actually names: `-A`, `--all`,
-# or a standalone `.` with NO other pathspec token present. `git add -A
-# <paths>` is explicitly allowed; git add's own semantics make that
-# combination redundant, but redundant is not broad.
-_GIT_ADD = re.compile(r"git\s+add\b([^|;&\n]*)")
+# denies ONLY the bare broad-add forms: `-A`, `--all`, a standalone `.`, the
+# `:/` pathspec-magic form (matches from the worktree root, same reach as
+# `-A`), or a combined short-flag cluster that includes `A` (`-Av`, `-fA`,
+# …), with NO other pathspec token present. `git add -A <paths>` is
+# explicitly allowed; git add's own semantics make that combination
+# redundant, but redundant is not broad.
+#
+# Captures the segment between `git` and `add` (group 1, may hold `-C <dir>`)
+# separately from the segment after `add` (group 2, the add arguments) — a
+# second Opus re-review (2026-09-24) required resolving `git -C <dir> add`'s
+# own directory, not just the session cwd.
+_GIT_ADD = re.compile(r"\bgit\s+([^|;&\n]*?)\badd\b([^|;&\n]*)")
+
+# A combined short-flag cluster: a single dash followed by one or more
+# single-letter flags with no `=` and no second leading dash — `-Av`, `-fA`,
+# `-vfA` are all this shape; `--all` and `-A` alone are handled as exact
+# tokens above. Bare `-` and long options (`--foo`) never match.
+_SHORT_FLAG_CLUSTER = re.compile(r"^-[A-Za-z]{2,}$")
 
 
 def _bare_broad_add(argtext):
-    """True when argtext's only pathspec-shaped tokens are -A/--all/bare '.'
-    and nothing else names a path. Flags other than -A/--all are ignored
-    (git add -v -A is still bare); any other non-flag token is a real
-    pathspec and clears the call."""
+    """True when argtext's only pathspec-shaped tokens are -A/--all/bare '.'/
+    the ':/' pathspec-magic form, or a combined short-flag cluster containing
+    'A', and nothing else names a path. Flags other than -A/--all (or a
+    cluster containing A) are ignored (git add -v -A is still bare); any
+    other non-flag token is a real pathspec and clears the call."""
     try:
         tokens = shlex.split(argtext)
     except ValueError:
         return False
     broad_seen = False
     for tok in tokens:
-        if tok in ("-A", "--all", "."):
+        if tok in ("-A", "--all", ".", ":/"):
             broad_seen = True
+            continue
+        if _SHORT_FLAG_CLUSTER.match(tok):
+            if "A" in tok[1:]:
+                broad_seen = True
             continue
         if tok.startswith("-"):
             continue
@@ -1125,18 +1143,84 @@ def _in_carr_tree(cwd):
     return real_cwd == REPO or real_cwd.startswith(REPO + os.sep)
 
 
-def broad_add_reason(cmd, cwd=None):
-    """Return a reason string to deny a bare `git add -A`/`--all`/`.` with no
-    pathspec, scoped to the carr-system tree; None otherwise. Text inside
-    quotes, heredocs, or a grep/echo argument is never matched: the search
-    runs against strip_inert_text(cmd), the same inert-text stripper every
-    other quote-safe rule in this file uses, not the raw command."""
-    if not _in_carr_tree(cwd if cwd is not None else os.getcwd()):
+def _strip_matched_quotes(tok):
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("'", '"'):
+        return tok[1:-1]
+    return tok
+
+
+# A single leading `cd <dir> &&` or `cd <dir>;` — not a general shell
+# interpreter, just the one shape the reported false positives/bypasses were
+# built from (`cd /tmp/x && git add -A` from a carr cwd; `cd ~/carr-system &&
+# git add -A` from /tmp). Anything more elaborate (a second cd, a subshell,
+# `cd "$(...)"`) is out of scope, same as the other reported gaps below.
+_LEADING_CD = re.compile(r"^\s*cd\s+(\"[^\"]*\"|'[^']*'|\S+)\s*(?:&&|;)\s*")
+
+
+def _leading_cd_dir(cmd):
+    """Return the directory named by a single leading `cd <dir> &&`/`;`, or
+    None. Operates on the raw command: this is the command's own structure,
+    not prose inside a quote, so it is read before strip_inert_text runs."""
+    m = _LEADING_CD.match(cmd)
+    if not m:
         return None
+    return _strip_matched_quotes(m.group(1))
+
+
+def _git_dash_c_dir(pre_add_argtext):
+    """Return the directory named by a `-C <dir>` (or `-C<dir>`) flag found
+    before `add` in the same git invocation, or None. `git -C <dir> add ...`
+    runs against <dir>, not the process cwd — ignoring it both denies
+    legitimate use from elsewhere (`git -C /tmp/x add -A` sent from a carr
+    cwd) and misses a real bypass (`git -C ~/carr-system add -A` sent from
+    /tmp)."""
+    try:
+        tokens = shlex.split(pre_add_argtext)
+    except ValueError:
+        return None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "-C":
+            return tokens[i + 1] if i + 1 < len(tokens) else None
+        if tok.startswith("-C") and len(tok) > 2 and not tok.startswith("--"):
+            return tok[2:]
+        i += 1
+    return None
+
+
+def _resolve_dir(candidate, base):
+    """Resolve `candidate` (from a leading cd or a -C flag) against `base`,
+    the same way a shell would resolve a relative directory argument against
+    the current directory."""
+    expanded = os.path.expanduser(candidate)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(base, expanded)
+
+
+def broad_add_reason(cmd, cwd=None):
+    """Return a reason string to deny a bare `git add -A`/`--all`/`.`/`:/`
+    with no pathspec, scoped to the carr-system tree; None otherwise. Text
+    inside quotes, heredocs, or a grep/echo argument is never matched for the
+    add-arguments scan: it runs against strip_inert_text(cmd), the same
+    inert-text stripper every other quote-safe rule in this file uses, not
+    the raw command. The EFFECTIVE directory for the carr-tree scope check is
+    resolved from a leading `cd <dir> &&`/`;` and/or a `-C <dir>` flag on the
+    git invocation itself, not just the session's reported cwd — see
+    _leading_cd_dir / _git_dash_c_dir."""
+    session_cwd = cwd if cwd is not None else os.getcwd()
+    leading_cd = _leading_cd_dir(cmd)
+    base_cwd = _resolve_dir(leading_cd, session_cwd) if leading_cd else session_cwd
     scanned = strip_inert_text(cmd)
     for m in _GIT_ADD.finditer(scanned):
-        if _bare_broad_add(m.group(1)):
-            return ("broad add (-A/--all/.) — blocked by the CARR unattended guard. "
+        pre_add, post_add = m.group(1), m.group(2)
+        if not _bare_broad_add(post_add):
+            continue
+        c_dir = _git_dash_c_dir(pre_add)
+        effective_cwd = _resolve_dir(c_dir, base_cwd) if c_dir else base_cwd
+        if _in_carr_tree(effective_cwd):
+            return ("broad add (-A/--all/./:/) — blocked by the CARR unattended guard. "
                     "Add explicit paths instead: `git add <path> [<path>...]`.")
     return None
 

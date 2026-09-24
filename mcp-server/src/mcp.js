@@ -794,18 +794,23 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
-  // ── PORTED VERB GATES (bypass audit C33/C34, 2026-09-24, Opus review
-  // redesign) ── deterministic subset of hooks/escalation-gate.py's
-  // classify() and hooks/blocker-decider-gate.py's needs_decider(), moved
-  // here rather than into add-loop's own handler so every door that reaches
-  // this verb hits the SAME check, purely in memory, before any DB
-  // connection opens — same placement principle as the add-premises guard
-  // just above. That includes call-verb (which recurses into this same
-  // callTool for its inner verb, a few lines up) and every other MCP prefix;
-  // it does NOT include a Bash-side re-check (hooks/verb_gate_recheck.py was
-  // deleted in this redesign — see mcp-server/src/verb-gate-checks.js's
-  // header for the full parity note, including what is deliberately not
-  // ported).
+  // PORTED VERB GATES (bypass audit C33/C34). The CANONICAL enforcement for
+  // these moved on 2026-09-24 (second Opus re-review) into tools.js's
+  // executeRegisteredTool(): local-verb.mjs's break-glass mode calls
+  // executeRegisteredTool() directly and never reaches this function, so a
+  // check placed only here missed that door. executeRegisteredTool() is the
+  // one function every path (callTool read, callTool write, break-glass)
+  // calls — see its own comment there, and verb-gate-checks.js's header, for
+  // the full parity note.
+  //
+  // The pure gate is ALSO run here, same pattern as assertNoCallerAuthorityFields
+  // a few lines up ("executeRegisteredTool repeats this same pure gate..."):
+  // this callTool() copy is not a second implementation, it is the SAME
+  // imported function, called early so a write-verb call fails before the
+  // writer Pool connects a few lines below, instead of only after — both for
+  // production fail-fast and so this can be asserted in a test with no live
+  // DB. executeRegisteredTool()'s copy is what makes the verdict correct even
+  // when this copy is skipped, i.e. break-glass.
   if (name === "add-loop") {
     if (needsDecider(args))
       throw new ToolError({ error: "capability_no_decider", hint: BLOCKER_DECIDER_REASON });

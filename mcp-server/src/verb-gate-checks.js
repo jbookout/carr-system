@@ -6,15 +6,22 @@
 // WHY THIS EXISTS. hooks/escalation-gate.py and hooks/blocker-decider-gate.py
 // are Claude Code PreToolUse hooks, matched by tool_name regex on the DIRECT
 // mcp__*__add-loop / mcp__*__record-defect call. Every other door to the same
-// verb -- ./run.sh call, tools/call-verb.py, mcp-server/local-verb.mjs, and
-// the mcp__*__call-verb passthrough -- recurses through THIS server's
-// callTool() (see mcp.js), so a check placed in the verb HANDLER itself is
-// the one enforcement point every door hits. That is the redesign an Opus
-// review asked for after a client-side regex re-check (hooks/verb_gate_recheck.py,
-// now deleted) proved leaky against real transcript data: 62/12,145 replayed
-// commands would have been falsely denied, and several trivial bypasses
-// (shell variables, `$(cat f)`, calling tools/call-verb.py directly) were
-// never going to be closable from the Bash-command-text side at all.
+// verb -- ./run.sh call, tools/call-verb.py, mcp-server/local-verb.mjs
+// (including its BREAK-GLASS direct-DATABASE_URL mode), and the
+// mcp__*__call-verb passthrough -- ultimately calls tools.js's
+// executeRegisteredTool(), which is where the checks exported here are
+// applied (see the comment at that call site). That is the one function
+// every door funnels through, including break-glass, which bypasses mcp.js's
+// callTool() entirely and calls executeRegisteredTool() directly -- a second
+// Opus re-review (2026-09-24) found the first redesign's placement inside
+// callTool() missed exactly that door, so the check moved one layer deeper
+// to the true single choke point. That is also the redesign an Opus review
+// originally asked for after a client-side regex re-check
+// (hooks/verb_gate_recheck.py, now deleted) proved leaky against real
+// transcript data: 62/12,145 replayed commands would have been falsely
+// denied, and several trivial bypasses (shell variables, `$(cat f)`, calling
+// tools/call-verb.py directly) were never going to be closable from the
+// Bash-command-text side at all.
 //
 // WHAT IS AND IS NOT PORTED. Read the two Python files' classify()/
 // needs_decider() before touching this file.
