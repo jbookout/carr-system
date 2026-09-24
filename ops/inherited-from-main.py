@@ -229,6 +229,107 @@ def missing_replay_prerequisite(repo: str, tree: str, output: str) -> str | None
     return None
 
 
+# Directories `npm install` / `python -m venv` populate that a plain
+# `git worktree add` never brings along, because they are ignored rather than
+# tracked (see .gitignore: `.venv`, `node_modules/`). Without this, EVERY
+# node- or python-dependent check in ops/ci.sh fails at the merge base for a
+# reason that has nothing to do with main, and missing_replay_prerequisite()
+# above only catches the cases where the failing output happens to print an
+# absolute path under the tree — which a bare `require('pkg')` specifier does
+# not (Node's MODULE_NOT_FOUND names the missing package, not a path; the
+# only tree-rooted path in that message is the require-stack ENTRY, i.e.
+# where the failing require was called FROM, not what is missing). PR #1195 /
+# defect 71c7c3f2 is exactly that: ci-selftest.py's "ci.yml parses" check
+# shells out to `node -e "require('js-yaml')..."`, the merge-base worktree
+# had no mcp-server/node_modules, and the resulting MODULE_NOT_FOUND was
+# reported INHERITED FROM MAIN even though main's own gate had passed on its
+# own PR. Symlinking the caller's installed dependencies in BEFORE the replay
+# fixes the common case outright, rather than merely detecting it after the
+# fact.
+INSTALL_DIRS = (
+    ".venv",
+    "mcp-server/node_modules",
+    "control-room/node_modules",
+    "workspace/node_modules",
+)
+
+
+def link_install_dirs(repo: str, tree: str) -> None:
+    """Symlink the caller's installed runtimes into the detached merge-base tree.
+
+    Best-effort and silent on failure: a symlink that cannot be made leaves the
+    replay exactly as unreproducible as it was before this function existed,
+    and environment_class_signal() below is the backstop for whatever this
+    does not cover — it must never be the reason a verdict comes out wrong.
+    Only directories that already exist in the caller's checkout are linked,
+    and only into a destination that is not already there (a tracked
+    `mcp-server/node_modules` would never occur, but a re-run must not clobber
+    anything the worktree checkout itself materialised).
+    """
+    for rel in INSTALL_DIRS:
+        src = os.path.join(repo, rel)
+        if not os.path.isdir(src):
+            continue
+        dst = os.path.join(tree, rel)
+        if os.path.lexists(dst):
+            continue
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.symlink(os.path.realpath(src), dst)
+        except OSError:
+            continue
+
+
+# Text signatures of "the tool this check needed is not here", independent of
+# whether the message happens to spell out a tree-rooted path.
+# missing_replay_prerequisite() is the path-based, precise detector; this is
+# the pattern-based backstop for the messages that name a missing PACKAGE or
+# COMMAND instead of a missing PATH. Kept deliberately small and specific —
+# broad patterns like a bare "No such file or directory" would swallow real
+# defects (a check that legitimately asserts a file must exist), so every
+# entry here is a signature that names the runtime itself, never the
+# subject under test.
+_ENVIRONMENT_SIGNATURES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\bMODULE_NOT_FOUND\b"),
+     "a missing Node module (MODULE_NOT_FOUND)"),
+    (re.compile(r"Cannot find module '([^']+)'"),
+     "a missing Node module"),
+    (re.compile(r"ModuleNotFoundError: No module named '([^']+)'"),
+     "a missing Python module"),
+    (re.compile(r"\bcommand not found\b"),
+     "a missing command (command not found)"),
+    (re.compile(r"No such file or directory.*\.venv/bin/(python3?|pip3?)"),
+     "a missing virtualenv (.venv/bin not present)"),
+    (re.compile(r"\.venv/bin/(python3?|pip3?): No such file or directory"),
+     "a missing virtualenv (.venv/bin not present)"),
+)
+
+
+def environment_class_signal(output: str) -> str | None:
+    """Name the environment-class failure in a base replay, if the output is one.
+
+    A base re-run that fails because a dependency was never installed in the
+    detached tree is not evidence that main is broken — it is evidence that
+    `git worktree add` does not bring along ignored install directories.
+    link_install_dirs() fixes the common case before the check ever runs;
+    this is what catches what that missed, so the failure still never gets
+    read as INHERITED FROM MAIN. Matches by MESSAGE SIGNATURE rather than by
+    path, because Node's own MODULE_NOT_FOUND text names the missing package
+    ('js-yaml'), not a filesystem path under the tree — see the INSTALL_DIRS
+    comment above for the incident (PR #1195 / defect 71c7c3f2) this exists
+    to stop from recurring.
+    """
+    for pattern, label in _ENVIRONMENT_SIGNATURES:
+        m = pattern.search(output)
+        if not m:
+            continue
+        groups = [g for g in m.groups() if g]
+        if groups:
+            return f"{label}: {groups[0]}"
+        return label
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--check", default="", help="the failing check's name, for the message")
@@ -305,6 +406,7 @@ def main() -> int:
         rc, out = git(repo, "worktree", "add", "--detach", "--quiet", tree, mb)
         if rc != 0:
             return refuse(f"could not materialise the merge base: {out[:160]}")
+        link_install_dirs(repo, tree)
         try:
             p = subprocess.run(cmd, cwd=tree, capture_output=True, text=True,
                                env=_clean_env(), timeout=a.timeout)
@@ -328,6 +430,21 @@ def main() -> int:
             return refuse(
                 "runtime prerequisite is absent from the merge-base worktree "
                 f"but present only in the caller checkout: {prerequisite}"
+            )
+
+        # THE PATTERN-BASED BACKSTOP. link_install_dirs() already symlinked in
+        # whatever install directories the caller checkout had, and the guard
+        # above catches whatever still names a tree-rooted path. This is for
+        # what neither reaches: a message that names the missing PACKAGE or
+        # COMMAND rather than a path (Node's MODULE_NOT_FOUND, a Python
+        # ModuleNotFoundError, a shell "command not found", an absent
+        # .venv/bin). Attribution unavailable, never inherited and never the
+        # branch's fault — see environment_class_signal()'s docstring.
+        env_signal = environment_class_signal(replay_output)
+        if env_signal:
+            return refuse(
+                "the merge-base replay failed on an environment-class signature, "
+                f"not a code defect — attribution unavailable: {env_signal}"
             )
 
         # THE ANSWER. It fails on a tree that contains none of this branch.
