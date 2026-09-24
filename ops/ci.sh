@@ -805,6 +805,11 @@ PYEOF
     elif [ "$rrc" -ne 0 ]; then
       inherited_abort gate-replay "$PY" ops/gate-replay.py
       failures="$failures gate-replay"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
+    else
+      # A pass prints its invocation count, runtime and verdict totals, so the
+      # hosted log shows the replay ran and how long it took.
+      grep -E '^gate-replay: [0-9]+ invocations|^  verdicts: |^gate-replay: OK' \
+        "$LOGDIR/gate-gate-replay.log" >&2
     fi
   fi
 
