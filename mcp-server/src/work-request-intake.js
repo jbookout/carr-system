@@ -10,6 +10,7 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const CRITERION_ID = /^[A-Z][A-Z0-9-]{1,63}$/;
 const TRIAGE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "classification"]);
 const TRIAGE_CLASSES = new Set(["operational", "needs_judgment", "safety_review"]);
+const JOE_ANSWER_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "answer_text"]);
 const DECLINE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason"]);
 const SUPERSEDE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason", "superseded_by"]);
 const PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps","heavy_build"]);
@@ -222,6 +223,23 @@ function validateTriage(args, ToolError) {
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
       !Number.isInteger(args.base_version) || args.base_version < 1 || !TRIAGE_CLASSES.has(args.classification))
     throw new ToolError({ error: "invalid_triage" });
+}
+
+// ANSWERING JOE. state-machines.v1.json declares "needs_joe -> triaged" as the
+// sole canonical exit from needs_joe (guard: "authorized human decision and
+// evidence recorded; scope and acceptance criteria revalidated"), and nothing
+// before 0574 implemented it -- current-work-item and workspace-command-center
+// only ever read needs_joe rows for the "Needs Joe" queue. This is that
+// transition's verb, shaped after review-and-triage: it records the answer
+// text and makes the one allowed move, nothing else. 500 characters mirrors
+// the decline/supersede exit_reason bound; the database's own floor is only
+// btrim(answer_text) <> ''.
+function validateJoeAnswer(args, ToolError) {
+  if (Object.keys(args).some(key => !JOE_ANSWER_FIELDS.has(key))) throw new ToolError({ error: "invalid_answer_work_request_for_joe_fields" });
+  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
+      !Number.isInteger(args.base_version) || args.base_version < 1 ||
+      !text(args.answer_text) || text(args.answer_text).length > 500)
+    throw new ToolError({ error: "invalid_answer_work_request_for_joe" });
 }
 
 // WITHDRAWAL IS TWO VALIDATORS, not one with an optional successor. See the two
@@ -738,6 +756,37 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
             classification: row.classification, triaged_by_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at };
+        });
+      },
+    },
+    "answer-work-request-for-joe": {
+      write: true, humanOnly: true, authorityOnly: true,
+      description: "HUMAN-ONLY: record Joe's answer on one needs_joe Work Request and make its sole allowed transition, needs_joe to triaged. It never assigns, dispatches, approves, executes, or advances any later state.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+        human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
+        base_version: { type: "integer", minimum: 1 },
+        answer_text: { type: "string", minLength: 1, maxLength: 500 },
+      }, required: ["idempotency_key", "human_ref", "base_version", "answer_text"] },
+      handler: async (c, actor, args) => {
+        validateJoeAnswer(args, ToolError);
+        // Bind replays to the authenticated actor without admitting actor data
+        // into the closed client schema.
+        return withEnvelope(c, actor, "answer-work-request-for-joe", { ...args, _server_actor_id: actor.id }, async () => {
+          const result = await c.query(
+            `select * from ops.answer_work_request_for_joe($1::text, $2::integer, $3::text, $4::uuid)
+               /* work-request-intake:joe-answer */`, [args.human_ref, args.base_version, text(args.answer_text), args.idempotency_key]);
+          const row = result.rows[0];
+          if (!row) throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
+            resolution: "re-read the Work Request card; only its current needs_joe version may be answered" });
+          await writeEvent(c, actor, "answer-work-request-for-joe", "ops_work_request", row.id, {
+            field: "state", old: { state: "needs_joe", version: args.base_version },
+            new: { state: "triaged", version: Number(row.version), answer_text: row.answer_text },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
+            answer_text: row.answer_text, answered_by_actor_slug: row.answered_by_actor_slug,
+            answered_at: row.answered_at };
         });
       },
     },

@@ -4,7 +4,14 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v57 is the runtime selector after tour property registration (migration
+// v63 is the runtime selector after answering Joe (migration 0574,
+// ops.answer_work_request_for_joe -- the sole needs_joe -> triaged transition
+// state-machines.v1.json declares). Its sealed catalog admits the human-only,
+// authority-only answer-work-request-for-joe verb and preserves earlier
+// versions as history; v58-v62 registered no verb, so the selector stayed on
+// v57 until now.
+//
+// Superseded note (v57): v57 was the runtime selector after tour property registration (migration
 // 0565, ops.register_tour_property). Its sealed catalog admits the
 // authority-only register-tour-property verb and preserves earlier versions as
 // history; v50-v56 registered no verb, so the selector stayed on v49 until now.
@@ -45,7 +52,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v57.generated.js";
+} from "./scac-mutation-registry.v63.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
