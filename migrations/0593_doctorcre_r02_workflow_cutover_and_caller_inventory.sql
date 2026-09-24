@@ -1,4 +1,4 @@
--- 0590_v5_r02_workflow_cutover_and_caller_inventory.sql
+-- 0593_doctorcre_r02_workflow_cutover_and_caller_inventory.sql
 --
 -- DoctorCRE V5-R02 (Workflow cutover, caller migration and retirement
 -- readiness). Builds the READINESS AND CUTOVER MACHINERY only -- no live
@@ -56,7 +56,7 @@ create table if not exists ops.workflow_cutover_plan (
     'read_legacy', 'build_projection', 'shadow_compare', 'single_write_authority',
     'cutover', 'monitor', 'recovery_ready', 'retired'
   )),
-  status text not null default 'active' check (status in ('active', 'superseded', 'blocked')),
+  status text not null default 'active' check (status in ('active', 'superseded', 'blocked', 'retired')),
   superseded_by uuid references ops.workflow_cutover_plan(id),
   supersede_reason text,
   -- Q116: "preserve a bounded recovery path" is not an afterthought at the
@@ -172,6 +172,153 @@ revoke all on table ops.slice_completion_mark from public, carr_writer, carr_job
 grant select on table ops.slice_completion_mark to carr_reader;
 
 -- ===========================================================================
+-- ops.slice_checkable_done_registry -- P1 fix (PR #1245 review, item 4): the
+-- "registered slice plan's checkable_done list" this DB actually owns. The
+-- V5 slice catalog's decision_ids/checkable_done text lives in the doctrine
+-- store (CARR record layer), not here -- this table is the narrow, DB-side
+-- commitment of WHICH criterion strings are legitimate for a slice_id,
+-- registered once (append-only) before any completion mark can reference
+-- them. Without this, ops.mark_slice_completion previously trusted whatever
+-- criterion strings and pass booleans a caller handed it -- a caller could
+-- invent an easy criterion, claim it passed, and the function had no way to
+-- know it wasn't the real checkable_done list.
+-- ===========================================================================
+create table if not exists ops.slice_checkable_done_registry (
+  id uuid primary key default gen_random_uuid(),
+  slice_id text not null check (btrim(slice_id) <> ''),
+  criterion text not null check (btrim(criterion) <> ''),
+  registered_by_actor_slug text not null,
+  idempotency_key uuid not null unique,
+  created_at timestamptz not null default now(),
+  unique (slice_id, criterion)
+);
+
+comment on table ops.slice_checkable_done_registry is
+  'DoctorCRE V5-R02 / Q153 item 4: the exact set of checkable_done criterion strings admitted for a slice_id. ops.mark_slice_completion refuses any slice_id with zero registered rows, and refuses status=complete unless the criteria_receipt set matches this table''s set exactly (no invented, no missing criteria).';
+
+revoke all on table ops.slice_checkable_done_registry from public, carr_writer, carr_jobs, carr_authority;
+grant select on table ops.slice_checkable_done_registry to carr_reader;
+
+create or replace function ops.register_slice_checkable_done(
+  p_slice_id text,
+  p_criteria text[],
+  p_idempotency_key uuid,
+  p_actor_slug text
+) returns setof ops.slice_checkable_done_registry
+language plpgsql security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  v_authority_actor text;
+  v_criterion text;
+begin
+  -- Authority-only: defining what "done" means for a slice is exactly the
+  -- kind of doctrine-drift risk item 6 (Q153) already treats as
+  -- authority-only for plan supersession. Registering (or silently
+  -- re-registering with a looser set) is the same risk.
+  v_authority_actor := ops.authority_actor_slug();
+  if p_idempotency_key is null then
+    raise exception 'idempotency_key_required';
+  end if;
+  if exists (select 1 from ops.slice_checkable_done_registry where idempotency_key = p_idempotency_key) then
+    return query select * from ops.slice_checkable_done_registry where idempotency_key = p_idempotency_key;
+    return;
+  end if;
+  if p_slice_id is null or btrim(p_slice_id) = '' then
+    raise exception 'slice_id_required';
+  end if;
+  if p_criteria is null or array_length(p_criteria, 1) is null or array_length(p_criteria, 1) = 0 then
+    raise exception 'criteria_required_nonempty';
+  end if;
+  foreach v_criterion in array p_criteria loop
+    if btrim(v_criterion) = '' then
+      raise exception 'criterion_empty';
+    end if;
+    insert into ops.slice_checkable_done_registry (
+      slice_id, criterion, registered_by_actor_slug, idempotency_key
+    ) values (
+      p_slice_id, v_criterion, v_authority_actor,
+      -- Only the FIRST inserted row of a multi-criterion registration call
+      -- carries the caller's idempotency_key; the unique index on
+      -- idempotency_key means every other row needs its own. This repo has
+      -- no uuid-ossp extension enabled (only pgcrypto's gen_random_uuid),
+      -- so there is no deterministic per-criterion key available -- a fresh
+      -- random one is fine here because the REAL idempotency guarantee for
+      -- rows 2..N is the (slice_id, criterion) unique constraint with
+      -- on conflict do nothing just below, not this column.
+      case when v_criterion = p_criteria[1] then p_idempotency_key
+           else gen_random_uuid() end
+    )
+    on conflict (slice_id, criterion) do nothing;
+  end loop;
+  return query select * from ops.slice_checkable_done_registry where slice_id = p_slice_id;
+end;
+$$;
+
+comment on function ops.register_slice_checkable_done is
+  'DoctorCRE V5-R02 / Q153 item 4 authority write door: registers the checkable_done criterion set for a slice_id. Append-only (on conflict do nothing) -- registering never removes a previously admitted criterion.';
+
+revoke all on function ops.register_slice_checkable_done(text, text[], uuid, text) from public;
+grant execute on function ops.register_slice_checkable_done(text, text[], uuid, text) to carr_authority;
+
+-- ===========================================================================
+-- ops.workflow_cutover_retire_receipt_use -- each
+-- ops.legacy_schedule_disable_receipt may retire exactly one cutover plan.
+-- The primary key on receipt_id enforces one-use without touching the
+-- shared, already-applied 0176 table at all.
+-- ===========================================================================
+create table if not exists ops.workflow_cutover_retire_receipt_use (
+  receipt_id uuid primary key references ops.legacy_schedule_disable_receipt(id),
+  plan_id uuid not null references ops.workflow_cutover_plan(id),
+  used_at timestamptz not null default now()
+);
+
+comment on table ops.workflow_cutover_retire_receipt_use is
+  'DoctorCRE V5-R02: one row per legacy_schedule_disable_receipt ever consumed by ops.retire_workflow_cutover_plan. The receipt_id primary key is the one-use enforcement.';
+
+revoke all on table ops.workflow_cutover_retire_receipt_use from public, carr_writer, carr_jobs, carr_authority;
+grant select on table ops.workflow_cutover_retire_receipt_use to carr_reader;
+
+-- ===========================================================================
+-- ops.workflow_caller_history -- append-only ledger of every caller status
+-- change. ops.workflow_caller (above) remains the fast-lookup CURRENT state
+-- workflow-cutover-board reads; this table is what "append history instead
+-- of overwriting it" (PR #1245 review) actually means -- no update or delete
+-- ever reaches a caller's prior status.
+-- ===========================================================================
+create table if not exists ops.workflow_caller_history (
+  id uuid primary key default gen_random_uuid(),
+  workflow_key text not null,
+  workflow_version integer not null,
+  caller_locator text not null,
+  caller_kind text not null,
+  status text not null,
+  blocked_reason text,
+  evidence_ref text,
+  actor_slug text,
+  recorded_at timestamptz not null default now()
+);
+
+create index if not exists workflow_caller_history_caller_idx
+  on ops.workflow_caller_history (workflow_key, workflow_version, caller_locator, recorded_at);
+
+create or replace function ops.refuse_workflow_caller_history_rewrite()
+returns trigger language plpgsql as $$
+begin
+  raise exception 'workflow_caller_history is append-only';
+end $$;
+
+create trigger workflow_caller_history_append_only
+  before update or delete on ops.workflow_caller_history
+  for each row execute function ops.refuse_workflow_caller_history_rewrite();
+
+comment on table ops.workflow_caller_history is
+  'DoctorCRE V5-R02: append-only history of every ops.record_workflow_caller call. Never updated or deleted -- ops.workflow_caller holds only the current row per caller.';
+
+revoke all on table ops.workflow_caller_history from public, carr_writer, carr_jobs, carr_authority;
+grant select on table ops.workflow_caller_history to carr_reader;
+
+-- ===========================================================================
 -- Write doors
 -- ===========================================================================
 
@@ -215,6 +362,21 @@ begin
    where workflow_key = p_workflow_key and workflow_version = p_workflow_version and status = 'active'
    for update;
   if found then
+    -- Q153 doctrine-drift fix (PR #1245 review): silently superseding a plan
+    -- that is already mid-cutover is the exact uncontrolled-dual-write risk
+    -- Q116 exists to prevent, so a supersession requires the same human
+    -- authority disable-legacy-schedule does -- ordinary carr_writer traffic
+    -- may still OPEN a plan when none is active, it just cannot bump one
+    -- that is. ops.authority_actor_slug() raises on any session that is not
+    -- carr_authority_joe/dell, which is the refusal this needs.
+    perform ops.authority_actor_slug();
+    -- Defense in depth: after ops.retire_workflow_cutover_plan sets
+    -- status='retired' (never 'active'), a retired plan can no longer be
+    -- selected here at all -- but a plan is also refused explicitly by stage
+    -- in case some future write path ever leaves 'retired' under status='active'.
+    if v_prior.stage = 'retired' then
+      raise exception 'workflow_cutover_plan_supersede_refused_retired_plan';
+    end if;
     update ops.workflow_cutover_plan
        set status = 'superseded', supersede_reason = 'superseded by a new open (idempotency_key ' || p_idempotency_key || ')',
            updated_at = now()
@@ -307,6 +469,15 @@ begin
   if v_to_idx is null then
     raise exception 'workflow_cutover_stage_invalid';
   end if;
+  -- P1 fix (PR #1245 review): v_stages holds only read_legacy..recovery_ready
+  -- (retired is reached exclusively through ops.retire_workflow_cutover_plan),
+  -- so a plan already at stage='retired' makes array_position return NULL,
+  -- and `NULL <> v_to_idx + 1` evaluates to NULL/falsy in plpgsql -- the
+  -- sequential check below silently never fires and 'retired' was not
+  -- terminal. Raise explicitly instead of relying on the comparison.
+  if v_from_idx is null then
+    raise exception 'workflow_cutover_plan_stage_not_advanceable: %', v_plan.stage;
+  end if;
   if v_to_idx <> v_from_idx + 1 then
     raise exception 'workflow_cutover_stage_not_sequential: at % requested %', v_plan.stage, p_to_stage;
   end if;
@@ -374,7 +545,18 @@ declare
   v_plan ops.workflow_cutover_plan%rowtype;
   v_existing_transition ops.workflow_cutover_stage_transition%rowtype;
   v_receipt ops.legacy_schedule_disable_receipt%rowtype;
+  v_authority_actor text;
+  v_cutover_at timestamptz;
+  v_missing_surface_count integer;
 begin
+  -- P1 fix (PR #1245 review, item 3): the real actor is the DB connection
+  -- identity, exactly like ops.disable_legacy_schedule -- never the
+  -- caller-supplied p_actor_slug string. This raises for any session that is
+  -- not carr_authority_joe/dell, which is the SAME check the MCP layer's
+  -- authorityOnly flag intends, done again here so a misconfigured envelope
+  -- cannot bypass it.
+  v_authority_actor := ops.authority_actor_slug();
+
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -402,29 +584,81 @@ begin
     raise exception 'workflow_cutover_plan_not_recovery_ready';
   end if;
 
+  -- P1 fix (item 3): the receipt must have been approved AFTER this exact
+  -- plan actually cut over -- a receipt from before the cutover transition
+  -- proves nothing about THIS plan's dual-write window.
+  select occurred_at into v_cutover_at from ops.workflow_cutover_stage_transition
+   where plan_id = v_plan.id and to_stage = 'cutover'
+   order by occurred_at desc limit 1;
+  if v_cutover_at is null then
+    raise exception 'workflow_cutover_plan_missing_cutover_transition';
+  end if;
+
   select * into v_receipt from ops.legacy_schedule_disable_receipt where id = p_disable_receipt_id;
   if not found then
     raise exception 'legacy_schedule_disable_receipt_not_found';
   end if;
-  if v_receipt.workflow_key is distinct from v_plan.workflow_key then
+  -- P1 fix (item 3): match on BOTH workflow_key and workflow_version -- the
+  -- prior version-blind check would accept a receipt issued for a different
+  -- version of the same workflow_key.
+  if v_receipt.workflow_key is distinct from v_plan.workflow_key
+     or v_receipt.workflow_version is distinct from v_plan.workflow_version then
     raise exception 'legacy_schedule_disable_receipt_workflow_mismatch';
   end if;
+  if v_receipt.approved_at < v_cutover_at then
+    raise exception 'legacy_schedule_disable_receipt_predates_cutover_transition';
+  end if;
+  -- P1 fix (item 3): each receipt retires exactly one plan. The primary key
+  -- on ops.workflow_cutover_retire_receipt_use.receipt_id is the real
+  -- enforcement; this check exists to raise a legible error instead of a
+  -- unique_violation.
+  if exists (
+    select 1 from ops.workflow_cutover_retire_receipt_use where receipt_id = p_disable_receipt_id
+  ) then
+    raise exception 'legacy_schedule_disable_receipt_already_used';
+  end if;
+  -- P1 fix (item 3): a workflow can have more than one legacy surface
+  -- (ops.legacy_schedule_surface_registry, 0176) -- e.g. a launchd job AND a
+  -- Claude Code scheduled task for the same workflow identity. Retirement
+  -- requires a disable receipt for EVERY registered surface, not just the
+  -- one named here.
+  select count(*) into v_missing_surface_count
+    from ops.legacy_schedule_surface_registry s
+   where s.workflow_key = v_plan.workflow_key and s.workflow_version = v_plan.workflow_version
+     and not exists (
+       select 1 from ops.legacy_schedule_disable_receipt r
+        where r.workflow_key = s.workflow_key and r.workflow_version = s.workflow_version
+          and r.surface_id = s.surface_id and r.locator = s.locator
+     );
+  if v_missing_surface_count > 0 then
+    raise exception 'legacy_schedule_disable_receipt_missing_for_% legacy surface(s)', v_missing_surface_count;
+  end if;
 
-  update ops.workflow_cutover_plan set stage = 'retired', updated_at = now() where id = v_plan.id
+  update ops.workflow_cutover_plan
+     set stage = 'retired',
+         -- P1 fix (item 2): status must leave 'active' too, or the plan
+         -- keeps holding the one-active-plan slot forever and the partial
+         -- unique index refuses ANY future open for the same identity.
+         status = 'retired',
+         updated_at = now()
+   where id = v_plan.id
     returning * into v_plan;
 
   insert into ops.workflow_cutover_stage_transition (
     plan_id, from_stage, to_stage, evidence_ref, reason, actor_slug, idempotency_key
   ) values (
-    v_plan.id, 'recovery_ready', 'retired', p_disable_receipt_id::text, p_reason, p_actor_slug, p_idempotency_key
+    v_plan.id, 'recovery_ready', 'retired', p_disable_receipt_id::text, p_reason, v_authority_actor, p_idempotency_key
   );
+
+  insert into ops.workflow_cutover_retire_receipt_use (receipt_id, plan_id)
+  values (p_disable_receipt_id, v_plan.id);
 
   return v_plan;
 end;
 $$;
 
 comment on function ops.retire_workflow_cutover_plan is
-  'DoctorCRE V5-R02 authority write door (Q116 last step): the only path to stage=retired. Requires the plan already at recovery_ready and an existing ops.legacy_schedule_disable_receipt row for the same workflow_key -- it never performs a disable itself. Joe-only at the MCP layer (authorityOnly); this function additionally re-checks the receipt exists rather than trusting the caller.';
+  'DoctorCRE V5-R02 authority write door (Q116 last step): the only path to stage=retired, which also moves status to retired so the plan frees the one-active-plan slot. Requires the plan at recovery_ready; a legacy_schedule_disable_receipt matching this exact (workflow_key, workflow_version), approved at or after the cutover transition, not already used to retire another plan, and one receipt for every ops.legacy_schedule_surface_registry row of this workflow. The real actor is ops.authority_actor_slug(), never a caller-supplied string.';
 
 revoke all on function ops.retire_workflow_cutover_plan(uuid, uuid, text, uuid, text) from public;
 grant execute on function ops.retire_workflow_cutover_plan(uuid, uuid, text, uuid, text) to carr_authority;
@@ -570,6 +804,15 @@ as $$
 declare
   v_existing ops.slice_completion_mark%rowtype;
   v_row ops.slice_completion_mark%rowtype;
+  v_authority_actor text;
+  v_registered_count integer;
+  v_submitted_count integer;
+  v_matched_count integer;
+  v_el jsonb;
+  v_evidence_kind text;
+  v_evidence_ref text;
+  v_resolved boolean;
+  v_computed jsonb := '[]'::jsonb;
   v_unproven_count integer;
 begin
   if p_idempotency_key is null then
@@ -589,19 +832,86 @@ begin
     raise exception 'criteria_receipt_required_nonempty_array';
   end if;
 
-  select count(*) into v_unproven_count
+  -- P1 fix (item 4): a slice_id with nothing registered in
+  -- ops.slice_checkable_done_registry is an unknown slice -- never let one
+  -- through on the strength of caller-supplied criteria alone.
+  select count(*) into v_registered_count
+    from ops.slice_checkable_done_registry where slice_id = p_slice_id;
+  if v_registered_count = 0 then
+    raise exception 'slice_completion_unknown_slice_id: %', p_slice_id;
+  end if;
+
+  select count(*) into v_submitted_count from jsonb_array_elements(p_criteria_receipt);
+
+  -- P1 fix (item 4): the submitted criterion set must equal the registered
+  -- set exactly -- not a superset (an invented easy criterion smuggled in)
+  -- and not a subset (a hard criterion quietly dropped).
+  select count(*) into v_matched_count
     from jsonb_array_elements(p_criteria_receipt) el
-   where coalesce((el->>'pass')::boolean, false) is not true
-      or coalesce(btrim(el->>'criterion'), '') = ''
-      or coalesce(btrim(el->>'evidence'), '') = '';
+    join ops.slice_checkable_done_registry r
+      on r.slice_id = p_slice_id and r.criterion = btrim(el->>'criterion');
+  if v_matched_count <> v_registered_count or v_submitted_count <> v_registered_count then
+    raise exception 'slice_completion_criteria_set_mismatch: registered % submitted % matched %',
+      v_registered_count, v_submitted_count, v_matched_count;
+  end if;
+
+  -- P1 fix (item 4): resolve every element's evidence to a real server-side
+  -- row and RECOMPUTE pass here -- the caller's own claimed "pass" value is
+  -- never trusted or stored. evidence_kind must name which evidence table
+  -- to check, and evidence_ref must be the uuid of a row that actually
+  -- proves it: an accepted ops.workflow_acceptance row, or an
+  -- ops.workflow_cutover_stage_transition row that actually occurred.
+  for v_el in select * from jsonb_array_elements(p_criteria_receipt)
+  loop
+    if jsonb_typeof(v_el->'pass') is not null and jsonb_typeof(v_el->'pass') <> 'boolean' then
+      raise exception 'slice_completion_pass_must_be_boolean_when_present: %', v_el->>'criterion';
+    end if;
+    v_evidence_kind := v_el->>'evidence_kind';
+    v_evidence_ref := v_el->>'evidence_ref';
+    if v_evidence_kind is null or v_evidence_ref is null or btrim(v_evidence_ref) = '' then
+      v_resolved := false;
+    elsif v_evidence_kind = 'acceptance' then
+      select exists (
+        select 1 from ops.workflow_acceptance
+         where id = v_evidence_ref::uuid and status = 'accepted'
+      ) into v_resolved;
+    elsif v_evidence_kind = 'transition' then
+      select exists (
+        select 1 from ops.workflow_cutover_stage_transition where id = v_evidence_ref::uuid
+      ) into v_resolved;
+    else
+      v_resolved := false;
+    end if;
+
+    v_computed := v_computed || jsonb_build_array(jsonb_build_object(
+      'criterion', v_el->>'criterion',
+      'evidence_kind', v_evidence_kind,
+      'evidence_ref', v_evidence_ref,
+      'pass', coalesce(v_resolved, false)
+    ));
+  end loop;
+
+  select count(*) into v_unproven_count
+    from jsonb_array_elements(v_computed) el
+   where (el->>'pass')::boolean is not true;
   if p_status = 'complete' and v_unproven_count > 0 then
     raise exception 'slice_completion_complete_requires_every_criterion_proven';
+  end if;
+
+  -- P1 fix (item 4): setting status=complete is authority-only, the same
+  -- posture as retiring a cutover plan or registering the criteria set
+  -- themselves -- an ordinary carr_writer session can still record
+  -- in_progress/blocked observations, it just cannot be the one that
+  -- declares a slice DONE.
+  if p_status = 'complete' then
+    v_authority_actor := ops.authority_actor_slug();
   end if;
 
   insert into ops.slice_completion_mark (
     slice_id, status, criteria_receipt, reason, marked_by_actor_slug, idempotency_key
   ) values (
-    p_slice_id, p_status, p_criteria_receipt, p_reason, p_actor_slug, p_idempotency_key
+    p_slice_id, p_status, v_computed, p_reason,
+    coalesce(v_authority_actor, p_actor_slug), p_idempotency_key
   ) returning * into v_row;
 
   return v_row;
@@ -609,7 +919,7 @@ end;
 $$;
 
 comment on function ops.mark_slice_completion is
-  'DoctorCRE V5-R02 / Q153 write door: append one explicit completion mark for one slice_id. status=complete is refused unless every criteria_receipt element carries criterion, evidence and pass=true. Idempotent on p_idempotency_key.';
+  'DoctorCRE V5-R02 / Q153 write door: append one explicit completion mark for one slice_id. Refuses an unrecognized slice_id (nothing in ops.slice_checkable_done_registry); requires the submitted criterion set to exactly match the registered set; recomputes pass server-side from a resolved ops.workflow_acceptance or ops.workflow_cutover_stage_transition row rather than trusting the caller''s claim; status=complete requires ops.authority_actor_slug(). Idempotent on p_idempotency_key.';
 
 revoke all on function ops.mark_slice_completion(text, text, jsonb, text, uuid, text) from public;
 grant execute on function ops.mark_slice_completion(text, text, jsonb, text, uuid, text) to carr_writer;
