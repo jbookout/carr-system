@@ -1627,6 +1627,10 @@ const APPLICATION_INGRESSES = [
   ["worker-sidewrite:failure-record", "worker_sidewrite", "mcp-server/src/trace.js", "audit_side_effect"],
   ["worker-sidewrite:tool-read-call", "worker_sidewrite", "mcp-server/src/mcp.js", "audit_side_effect"],
   ["worker-sidewrite:situation-retrieval", "worker_sidewrite", "mcp-server/src/situation-retrieval.js", "audit_side_effect"],
+  // V5-F09 census anchor: after a record-workflow-census commit, mcp.js writes
+  // the new head (seq, row_hash) to the WorkflowCensusAnchor Durable Object,
+  // outside the database. Administrative: it is the tamper anchor, not a record.
+  ["worker-sidewrite:workflow-census-anchor", "worker_sidewrite", "mcp-server/src/workflow-census-anchor.js", "administrative_mutation"],
 ];
 
 function sourceDigest(path) {
