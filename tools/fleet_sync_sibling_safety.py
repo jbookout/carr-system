@@ -48,9 +48,23 @@ from typing import Tuple
 EXIT_CODES = {"ok": 0, "skip": 78, "fail": 1}
 
 
+# fleet-sync runs unattended from launchd. A git that is allowed to ask for a
+# login (expired token, revoked credential) waits for an answer nobody will
+# type, so the run stalls instead of skipping. These make every sibling git call
+# fail fast instead: no terminal prompt, no Git Credential Manager dialog, and
+# ssh refuses rather than asking for a passphrase or host-key confirmation.
+# The stored credential helper (osxkeychain) still answers non-interactively.
+NO_PROMPT_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "never",
+    "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+}
+
+
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ, **NO_PROMPT_ENV)
     return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                          text=True, check=False)
+                          text=True, check=False, env=env)
 
 
 def sync_sibling(path: str, name: str, branch: str = "main") -> Tuple[str, str]:
