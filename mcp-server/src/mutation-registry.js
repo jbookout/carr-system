@@ -4,7 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v63 is the runtime selector after answering Joe (migration 0574,
+// v63 is the runtime selector after answering Joe (migration 0575,
 // ops.answer_work_request_for_joe -- the sole needs_joe -> triaged transition
 // state-machines.v1.json declares). Its sealed catalog admits the human-only,
 // authority-only answer-work-request-for-joe verb and preserves earlier

@@ -69154,8 +69154,8 @@
           "operation": "answer-work-request-for-joe",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/work-request-intake.js",
-          "schema_digest": "ab3ee1e1d0d562158a95addf5872f450aa1912e29c73af8c1c97fa3fbce35fa7",
-          "source_digest": "4f9d4fea4d4861399ffdd63c70ba238fb84e1aafb0825deaf9e1bb082b30f31d",
+          "schema_digest": "b39c0b2fa5bf6ea17ada8e22d5d49eca980ab780e9e69e599d9296cb130001e9",
+          "source_digest": "6cc390597658e0cb62b356e86480b7667305a51513973569d4a1f327b663e26d",
           "write": true,
           "human_only": true,
           "authority_only": true,
@@ -69173,8 +69173,8 @@
         }
       ],
       "expected_count": 893,
-      "expected_sha256": "6a1e71c3289cbd4f1697db30567eaa6988eff096c170f0d62e26ae383f49305a",
-      "reason": "Answering Joe: migration 0574 installs ops.answer_work_request_for_joe, the sole needs_joe -> triaged transition state-machines.v1.json declares, and mcp-server/src/work-request-intake.js registers the human-only, authority-only answer-work-request-for-joe verb. One new mcp-tool row; no removal; every other row's bound fields (ingress_key, source_locator, schema_digest, write, human_only, authority_only) are unchanged, so this patch upserts only the new row rather than re-digesting siblings whose source_digest a later source-only edit already moved (decision 05e144eb: source_digest is not a bound field and does not reseal); 893 source rows."
+      "expected_sha256": "620879d5454ce1440a26267f48bcea87e2608ff5c813bb235a7594eee659c79e",
+      "reason": "Answering Joe: migration 0575 installs ops.answer_work_request_for_joe, the sole needs_joe -> triaged transition state-machines.v1.json declares, and mcp-server/src/work-request-intake.js registers the human-only, authority-only answer-work-request-for-joe verb. One new mcp-tool row; no removal; every other row's bound fields (ingress_key, source_locator, schema_digest, write, human_only, authority_only) are unchanged, so this patch upserts only the new row rather than re-digesting siblings whose source_digest a later source-only edit already moved (decision 05e144eb: source_digest is not a bound field and does not reseal); 893 source rows."
     }
   ],
   "current_source_review": {

@@ -10,7 +10,7 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const CRITERION_ID = /^[A-Z][A-Z0-9-]{1,63}$/;
 const TRIAGE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "classification"]);
 const TRIAGE_CLASSES = new Set(["operational", "needs_judgment", "safety_review"]);
-const JOE_ANSWER_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "answer_text"]);
+const JOE_ANSWER_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "answer_text", "scope_confirmed", "evidence_ref"]);
 const DECLINE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason"]);
 const SUPERSEDE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason", "superseded_by"]);
 const PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps","heavy_build"]);
@@ -228,17 +228,26 @@ function validateTriage(args, ToolError) {
 // ANSWERING JOE. state-machines.v1.json declares "needs_joe -> triaged" as the
 // sole canonical exit from needs_joe (guard: "authorized human decision and
 // evidence recorded; scope and acceptance criteria revalidated"), and nothing
-// before 0574 implemented it -- current-work-item and workspace-command-center
+// before 0575 implemented it -- current-work-item and workspace-command-center
 // only ever read needs_joe rows for the "Needs Joe" queue. This is that
 // transition's verb, shaped after review-and-triage: it records the answer
 // text and makes the one allowed move, nothing else. 500 characters mirrors
 // the decline/supersede exit_reason bound; the database's own floor is only
 // btrim(answer_text) <> ''.
+//
+// SCOPE_CONFIRMED MUST BE THE LITERAL true, never a truthy string or a caller
+// promise in prose: the base_version compare-and-swap already pins the exact
+// row the human read, so confirming scope AT that version is what
+// "revalidated" means -- there is nothing else for this field to encode.
+// evidence_ref is optional and unshaped on purpose: this door does not decide
+// what evidence looks like, only that a pointer to it travels with the answer.
 function validateJoeAnswer(args, ToolError) {
   if (Object.keys(args).some(key => !JOE_ANSWER_FIELDS.has(key))) throw new ToolError({ error: "invalid_answer_work_request_for_joe_fields" });
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
       !Number.isInteger(args.base_version) || args.base_version < 1 ||
-      !text(args.answer_text) || text(args.answer_text).length > 500)
+      !text(args.answer_text) || text(args.answer_text).length > 500 ||
+      args.scope_confirmed !== true ||
+      (args.evidence_ref !== undefined && (!text(args.evidence_ref) || text(args.evidence_ref).length > 500)))
     throw new ToolError({ error: "invalid_answer_work_request_for_joe" });
 }
 
@@ -761,32 +770,73 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     },
     "answer-work-request-for-joe": {
       write: true, humanOnly: true, authorityOnly: true,
-      description: "HUMAN-ONLY: record Joe's answer on one needs_joe Work Request and make its sole allowed transition, needs_joe to triaged. It never assigns, dispatches, approves, executes, or advances any later state.",
+      description: "HUMAN-ONLY, DIRECT HUMAN ONLY (no sponsored-agent route): record Joe's answer on one needs_joe Work Request and make its sole allowed transition, needs_joe to triaged. scope_confirmed must be exactly true, pinned to base_version, and the row must carry non-empty acceptance_criteria -- together these satisfy the needs_joe -> triaged guard's 'scope and acceptance criteria revalidated' half. It never assigns, dispatches, approves, executes, or advances any later state.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
         human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
         base_version: { type: "integer", minimum: 1 },
         answer_text: { type: "string", minLength: 1, maxLength: 500 },
-      }, required: ["idempotency_key", "human_ref", "base_version", "answer_text"] },
+        scope_confirmed: { type: "boolean", enum: [true],
+          description: "Must be exactly true. Confirms the human revalidated the scope and acceptance criteria carried by THIS base_version -- not scope in general." },
+        evidence_ref: { type: "string", minLength: 1, maxLength: 500,
+          description: "Optional pointer to where the 'evidence recorded' half of the guard lives (a doc conversation turn, a loop, a decision)." },
+      }, required: ["idempotency_key", "human_ref", "base_version", "answer_text", "scope_confirmed"] },
       handler: async (c, actor, args) => {
         validateJoeAnswer(args, ToolError);
+        // NO SPONSORED-AGENT ROUTE, ON PURPOSE. The generic humanOnly dispatch
+        // gate (tools.js) admits either the verified partner or a
+        // server-verified agent holding that partner's derived authority
+        // (canExercisePartnerAuthority) -- the right default for most
+        // humanOnly verbs, which record a partner's DECISION but not the
+        // partner's own words. This verb is different: it records Joe's
+        // answer AS Joe, so "authorized human decision" in the guard means
+        // the decision came from the human directly, not from an agent
+        // exercising his authority on his behalf. actor.human is
+        // server-derived (identity.js), never caller-supplied.
+        if (actor.human !== true)
+          throw new ToolError({ error: "human_only_verb_requires_direct_human_actor",
+            verb: "answer-work-request-for-joe",
+            hint: "this verb records the answering human's own decision; a sponsored or partner-authority " +
+                  "agent may not answer a Work Request as Joe or Dell" });
         // Bind replays to the authenticated actor without admitting actor data
         // into the closed client schema.
         return withEnvelope(c, actor, "answer-work-request-for-joe", { ...args, _server_actor_id: actor.id }, async () => {
-          const result = await c.query(
-            `select * from ops.answer_work_request_for_joe($1::text, $2::integer, $3::text, $4::uuid)
-               /* work-request-intake:joe-answer */`, [args.human_ref, args.base_version, text(args.answer_text), args.idempotency_key]);
+          const evidenceRef = args.evidence_ref !== undefined ? text(args.evidence_ref) : null;
+          let result;
+          try {
+            result = await c.query(
+              `select * from ops.answer_work_request_for_joe($1::text, $2::integer, $3::text, $4::boolean, $5::text, $6::uuid)
+                 /* work-request-intake:joe-answer */`,
+              [args.human_ref, args.base_version, text(args.answer_text), args.scope_confirmed === true,
+               evidenceRef, args.idempotency_key]);
+          } catch (error) {
+            // THE DATABASE RAISES, IT NEVER RETURNS AN EMPTY ROW, on every
+            // refusal branch below -- so mapping happens here, on the actual
+            // exception, rather than on a `!row` check that could never fire.
+            const message = String(error?.message || "");
+            if (message.includes("only the exact current needs_joe Work Request may be answered"))
+              throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
+                resolution: "re-read the Work Request card; only its current needs_joe version may be answered" });
+            if (message.includes("acceptance_criteria_missing"))
+              throw new ToolError({ error: "acceptance_criteria_missing", human_ref: args.human_ref,
+                resolution: "this Work Request carries no acceptance criteria to revalidate; add them before it can be answered" });
+            if (message.includes("idempotency key already names a different answer to Joe"))
+              throw new ToolError({ error: "answer_key_conflict", human_ref: args.human_ref,
+                resolution: "this idempotency key already names a different recorded answer; generate a fresh key" });
+            throw error;
+          }
           const row = result.rows[0];
-          if (!row) throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
-            resolution: "re-read the Work Request card; only its current needs_joe version may be answered" });
           await writeEvent(c, actor, "answer-work-request-for-joe", "ops_work_request", row.id, {
             field: "state", old: { state: "needs_joe", version: args.base_version },
-            new: { state: "triaged", version: Number(row.version), answer_text: row.answer_text },
+            new: { state: "triaged", version: Number(row.version), answer_text: row.answer_text,
+              scope_confirmed: row.scope_confirmed, evidence_ref: row.evidence_ref || null,
+              acceptance_criteria_digest: row.acceptance_criteria_digest },
             idempotency_key: args.idempotency_key,
           });
           return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
-            answer_text: row.answer_text, answered_by_actor_slug: row.answered_by_actor_slug,
-            answered_at: row.answered_at };
+            answer_text: row.answer_text, scope_confirmed: row.scope_confirmed,
+            evidence_ref: row.evidence_ref || null, acceptance_criteria_digest: row.acceptance_criteria_digest,
+            answered_by_actor_slug: row.answered_by_actor_slug, answered_at: row.answered_at };
         });
       },
     },

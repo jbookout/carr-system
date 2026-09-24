@@ -1304,12 +1304,12 @@ export const POST_0572_FORWARD_V62_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 859, digest: "sha256:b4b174c19e7487562ec5c440212d3ac12d17d069be19f7f070f4ec4d4746b995" },
 });
 // Measured by the disposable PostgreSQL 17 migration lane after installing
-// ops.answer_work_request_for_joe (0574, one authority EXECUTE grant) and the
+// ops.answer_work_request_for_joe (0575, one authority EXECUTE grant) and the
 // v63 registration function with its four runtime EXECUTE grants.
-export const POST_0575_FORWARD_V63_DB_CATALOG_BASELINE = Object.freeze({
+export const POST_0576_FORWARD_V63_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0572_FORWARD_V62_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v63",
-  secdef_execute: { count: 864, digest: "sha256:c9a419911820a28ab6b7720f40b2f68414ddc4ba8fa9bf7e81ff4285fba64bf0" },
+  secdef_execute: { count: 864, digest: "sha256:46283ef0afea98602baf568566a39f1c073705b9d0de8487261496e8193ec381" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -15210,7 +15210,7 @@ export function renderAnswerJoeRegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v63 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0572_FORWARD_V62_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0575_FORWARD_V63_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0576_FORWARD_V63_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V62_VERSION,
     frozenInventory(REGISTRY_V62_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V63_VERSION, rows, newCatalogBaseline);
@@ -15978,9 +15978,9 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v63.generated.js"] =
     renderRuntimeProjection(v63Rows, {
       version: REGISTRY_V63_VERSION,
-      dbCatalogBaseline: POST_0575_FORWARD_V63_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0576_FORWARD_V63_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0575_answer_needs_joe_work_request_scac_successor.sql"] =
+  artifacts["migrations/0576_answer_needs_joe_work_request_scac_successor.sql"] =
     renderAnswerJoeRegistrySql(v63Rows,
       artifacts["migrations/0572_required_args_nullable_scac_successor.sql"]);
 
