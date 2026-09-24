@@ -300,10 +300,10 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0575_answer_needs_joe_work_request.sql",
         "0576_answer_needs_joe_work_request_scac_successor.sql",
     ),
-    # DoctorCRE V5-UX-C02/C06: 0579 installs ops.record_resource_observation
+    # DoctorCRE V5-UX-C02/C06: 0580 installs ops.record_resource_observation
     # (the resource collector's write door) with its carr_writer EXECUTE
-    # grant; 0580 seals that catalog as v65. Same deferred-epoch-trigger
-    # shape as the 0575/0576 pair immediately above -- 0579 applied alone
+    # grant; 0581 seals that catalog as v65. Same deferred-epoch-trigger
+    # shape as the 0575/0576 pair immediately above -- 0580 applied alone
     # would be refused at commit ("live SCAC vNN mutation catalog drifted"),
     # so the pair must be one transaction.
     (

@@ -15508,7 +15508,7 @@ export function renderMigratePyReselRegistrySql(rows,
   predecessorSql = null) {
   const predecessorPath = "migrations/0581_resource_observation_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
-  const predecessorDigest = "e44321392a31055008e296259245f14b20c19baeea11b795877cf2509d13ca04";
+  const predecessorDigest = "19f62f516ea2f289f4c1367550dd25064f1bbce91d43645f1ec94d0d790933c6";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v66 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0580_FORWARD_V65_DB_CATALOG_BASELINE;
@@ -15574,7 +15574,7 @@ export function renderMigratePyReselRegistrySql(rows,
   sql = `${sql.slice(0, seedStart)}$migrate_py_reseal_v66_source$${seed}$migrate_py_reseal_v66_source$${sql.slice(seedEnd + "]$migrate_py_reseal_v66_source$".length)}`;
   const preflight = `do $migrate_py_reseal_v66_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
-    `    raise exception 'Migrate py reseal v66 requires exact applied 0580'; end if;\n` +
+    `    raise exception 'Migrate py reseal v66 requires exact applied 0581'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V65_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +

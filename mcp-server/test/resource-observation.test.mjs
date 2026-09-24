@@ -9,11 +9,20 @@ async function rejected(fn) {
   catch (e) { assert.ok(e instanceof ToolError, `expected ToolError, got ${e}`); return e.payload; }
 }
 
-// Mirrors ops.record_resource_observation (migration 0579): idempotent insert,
-// key reuse with different content refuses.
+// Mirrors ops.record_resource_observation (migration 0580): idempotent
+// insert, key reuse with different content refuses, only local_compute and
+// model_route are collectible (neon/github/cloudflare wait on C03-C05), and
+// observed_at may not be more than 5 minutes in the future. Mirrors
+// ops.read_resource_dashboard's staleness re-check: an observation older
+// than STALE_AFTER_MS reads back state='stale' with an age-bearing reason,
+// no matter what state was originally recorded.
+const STALE_AFTER_MS = 15 * 60 * 1000;
+const FUTURE_SKEW_MS = 5 * 60 * 1000;
+
 class ResourceObservationFake {
-  constructor() {
+  constructor(now = () => new Date("2026-09-24T12:00:00Z")) {
     this.calls = []; this.toolCalls = new Map(); this.receipts = new Map(); this.rows = [];
+    this.now = now;
   }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
@@ -24,15 +33,24 @@ class ResourceObservationFake {
     }
     if (sql.startsWith("select ops.read_resource_dashboard")) {
       const parseJsonField = (value) => (typeof value === "string" ? JSON.parse(value) : value);
+      const nowMs = this.now().getTime();
       const providers = ["neon", "github", "cloudflare", "local_compute", "model_route"].map((provider) => {
         const latest = [...this.rows].reverse().find((r) => r.provider === provider);
-        if (latest) return {
-          ...latest,
-          policy: parseJsonField(latest.policy),
-          measured_capacity: parseJsonField(latest.measured_capacity),
-          configured_capacity: parseJsonField(latest.configured_capacity),
-          model_route: parseJsonField(latest.model_route),
-        };
+        if (latest) {
+          const ageMs = nowMs - new Date(latest.observed_at).getTime();
+          const stale = ageMs > STALE_AFTER_MS;
+          return {
+            ...latest,
+            policy: parseJsonField(latest.policy),
+            measured_capacity: parseJsonField(latest.measured_capacity),
+            configured_capacity: parseJsonField(latest.configured_capacity),
+            model_route: parseJsonField(latest.model_route),
+            state: stale ? "stale" : latest.state,
+            reason: stale
+              ? `observation is ${Math.round(ageMs / 60000)} minute(s) old, past the 15 minute freshness threshold`
+              : latest.reason,
+          };
+        }
         return {
           provider, account: null, project: null, product: null, period: null, as_of: null,
           quantity: null, quantity_unit: null, allowance: null, policy: null, estimate: null, charge: null,
@@ -59,8 +77,15 @@ class ResourceObservationFake {
       }
       if (!["neon", "github", "cloudflare", "local_compute", "model_route"].includes(provider))
         throw new Error("resource_observation_provider_invalid");
-      if (!["ok", "stale", "unconfigured", "collector_absent", "host_offline"].includes(state))
+      // C03-C05 are not built: only the two local, credential-less providers
+      // have a real collector today. Refusing the other three keeps a
+      // carr_writer agent from fabricating a healthy external reading.
+      if (!["local_compute", "model_route"].includes(provider))
+        throw new Error("resource_observation_provider_not_yet_collectible");
+      if (!["ok", "partial", "stale", "unconfigured", "collector_absent", "host_offline"].includes(state))
         throw new Error("resource_observation_state_invalid");
+      if (new Date(observedAt).getTime() > this.now().getTime() + FUTURE_SKEW_MS)
+        throw new Error("resource_observation_observed_at_in_future");
       const id = `30000000-0000-0000-0000-${String(this.rows.length + 1).padStart(12, "0")}`;
       const row = { id, provider, account, project, product, period, as_of: asOf, quantity, quantity_unit: quantityUnit,
         allowance, policy, estimate, charge, measured_capacity: measuredCapacity, configured_capacity: configuredCapacity,
@@ -157,9 +182,102 @@ test("record-resource-observation host_offline observation carries a reason, nev
     state: "host_offline",
     reason: "local.ds4-flash-next did not answer GET /v1/models within 2.0s",
     source: "tools/resource-collector.py",
-    observed_at: "2026-09-24T12:10:00Z",
+    observed_at: "2026-09-24T11:59:00Z",
   };
   const result = await executeRegisteredTool(client, AGENT, "record-resource-observation", args);
   assert.equal(result.state, "host_offline");
   assert.match(result.reason, /did not answer/);
+});
+
+// C03-C05 are not built: neon, github and cloudflare pass JSON-schema
+// validation (they are members of the canonical provider list) but the write
+// door itself refuses them, so no carr_writer agent can fabricate a healthy
+// external-provider reading the read door would then serve as fact. This is
+// a plain thrown Error, not a handler-issued ToolError, mirroring the real
+// door's `raise exception` -- tools.js's choke point only rewrites class-23
+// constraint violations and passes everything else through unchanged.
+const NOT_YET_COLLECTIBLE_PROVIDERS = ["neon", "github", "cloudflare"];
+for (const [index, provider] of NOT_YET_COLLECTIBLE_PROVIDERS.entries()) {
+  test(`record-resource-observation refuses ${provider}: C03-C05 have no collector yet`, async () => {
+    const client = new ResourceObservationFake();
+    await assert.rejects(
+      () => executeRegisteredTool(client, AGENT, "record-resource-observation", {
+        idempotency_key: `40000000-0000-0000-0000-00000000001${index}`,
+        provider, state: "ok", source: "manual", observed_at: "2026-09-24T12:00:00Z",
+      }),
+      /resource_observation_provider_not_yet_collectible/,
+    );
+    // And the read door still shows it unconfigured -- the refused write
+    // left no trace for this test's own fake to leak either.
+    const dashboard = await executeRegisteredTool(client, AGENT, "read-resource-dashboard", {});
+    assert.equal(dashboard.providers.find((p) => p.provider === provider).state, "unconfigured");
+  });
+}
+
+test("read-resource-dashboard reports a dead collector as stale, not ok forever", async () => {
+  const client = new ResourceObservationFake(() => new Date("2026-09-24T12:00:00Z"));
+  await executeRegisteredTool(client, AGENT, "record-resource-observation", {
+    idempotency_key: "40000000-0000-0000-0000-000000000005",
+    provider: "model_route",
+    model_route: { launchd_label: "local.ds4-flash-next", reachable: true },
+    state: "ok",
+    source: "tools/resource-collector.py",
+    // 20 minutes before the fake's fixed "now" -- past the 15 minute
+    // freshness threshold this contract documents.
+    observed_at: "2026-09-24T11:40:00Z",
+  });
+  const dashboard = await executeRegisteredTool(client, AGENT, "read-resource-dashboard", {});
+  const modelRoute = dashboard.providers.find((p) => p.provider === "model_route");
+  assert.equal(modelRoute.state, "stale");
+  assert.match(modelRoute.reason, /20 minute\(s\) old/);
+});
+
+test("read-resource-dashboard keeps a fresh observation as its own state, not stale", async () => {
+  const client = new ResourceObservationFake(() => new Date("2026-09-24T12:00:00Z"));
+  await executeRegisteredTool(client, AGENT, "record-resource-observation", {
+    idempotency_key: "40000000-0000-0000-0000-000000000006",
+    provider: "local_compute",
+    measured_capacity: { cpu_cores: 24 },
+    configured_capacity: { cpu_cores: 24 },
+    state: "ok",
+    source: "tools/resource-collector.py",
+    // 5 minutes before "now" -- comfortably under the 15 minute threshold.
+    observed_at: "2026-09-24T11:55:00Z",
+  });
+  const dashboard = await executeRegisteredTool(client, AGENT, "read-resource-dashboard", {});
+  assert.equal(dashboard.providers.find((p) => p.provider === "local_compute").state, "ok");
+});
+
+test("record-resource-observation refuses an observed_at more than 5 minutes in the future", async () => {
+  const client = new ResourceObservationFake(() => new Date("2026-09-24T12:00:00Z"));
+  await assert.rejects(
+    () => executeRegisteredTool(client, AGENT, "record-resource-observation", {
+      idempotency_key: "40000000-0000-0000-0000-000000000007",
+      provider: "local_compute",
+      state: "ok",
+      source: "tools/resource-collector.py",
+      // One hour past the fake's fixed "now": a fabricated future timestamp
+      // must not buy this row permanent front-of-queue ordering.
+      observed_at: "2026-09-24T13:00:00Z",
+    }),
+    /resource_observation_observed_at_in_future/,
+  );
+});
+
+test("record-resource-observation accepts a local_compute observation reporting partial sensor coverage", async () => {
+  const client = new ResourceObservationFake();
+  const args = {
+    idempotency_key: "40000000-0000-0000-0000-000000000008",
+    provider: "local_compute",
+    // cpu_cores read; memory_* did not (psutil absent from this run).
+    measured_capacity: { cpu_cores: 24 },
+    configured_capacity: { host: "mac-studio", cpu_cores: 24, memory_gb: 192 },
+    state: "partial",
+    reason: "host sensors partially unavailable to this run: missing memory_total_gb, memory_available_gb",
+    source: "tools/resource-collector.py",
+    observed_at: "2026-09-24T12:00:00Z",
+  };
+  const result = await executeRegisteredTool(client, AGENT, "record-resource-observation", args);
+  assert.equal(result.state, "partial");
+  assert.match(result.reason, /memory_total_gb/);
 });

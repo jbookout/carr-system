@@ -125,14 +125,34 @@ def flash_server_available(
         return False, None
 
 
+# The sensors a fully healthy run expects to read. cpu_cores and the two
+# disk_* fields come from stdlib (os.cpu_count / shutil.disk_usage); the two
+# memory_* fields come from optional psutil. A run that reads SOME but not
+# ALL of these is not "ok" -- it is missing real evidence for part of the
+# host, and must say so rather than let a partial read pass as a clean one.
+EXPECTED_MEASURED_FIELDS = (
+    "cpu_cores", "disk_total_gb", "disk_free_gb", "memory_total_gb", "memory_available_gb",
+)
+
+
 def build_local_compute_observation() -> dict[str, Any]:
     measured = measure_host_capacity()
+    missing = [field for field in EXPECTED_MEASURED_FIELDS if field not in measured]
+    if not measured:
+        state = "collector_absent"
+        reason = "host sensors unavailable to this run"
+    elif missing:
+        state = "partial"
+        reason = f"host sensors partially unavailable to this run: missing {', '.join(missing)}"
+    else:
+        state = "ok"
+        reason = None
     return {
         "provider": "local_compute",
         "measured_capacity": measured or None,
         "configured_capacity": RESOURCE_COLLECTOR_CONFIGURED_CAPACITY,
-        "state": "ok" if measured else "collector_absent",
-        "reason": None if measured else "host sensors unavailable to this run",
+        "state": state,
+        "reason": reason,
         "source": "tools/resource-collector.py",
         "observed_at": now_iso(),
     }

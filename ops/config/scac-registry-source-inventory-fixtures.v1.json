@@ -69311,7 +69311,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/resource-observation.v5.js",
           "schema_digest": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
-          "source_digest": "e44aba3c819a19bedef3ec0c973a569fd859dad1363fbab00fd8765ae1e50feb",
+          "source_digest": "9e2a9f7006ad7dfa847c187469645295200b18a8b849899c105112ad90742c37",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -69333,8 +69333,8 @@
           "operation": "record-resource-observation",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/resource-observation.v5.js",
-          "schema_digest": "9e2ed8652bdea43a3bdf4408dc05cc9607a6885fdf742e563614e68d74758496",
-          "source_digest": "e44aba3c819a19bedef3ec0c973a569fd859dad1363fbab00fd8765ae1e50feb",
+          "schema_digest": "c1d802b085cec84897945813dce470a6ddfd7293fef788a2303ce2e0b305cab4",
+          "source_digest": "9e2a9f7006ad7dfa847c187469645295200b18a8b849899c105112ad90742c37",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -69352,7 +69352,7 @@
         }
       ],
       "expected_count": 895,
-      "expected_sha256": "80e4a75a4e330013fbb52151267467323a2a5e7d8c2fbb5a79f2afa36be3973d"
+      "expected_sha256": "5816f557dc031bfb88187342f12b4700ef336ed57a2f282abfc0c9aaf0fbf613"
     },
     {
       "version": "v66",
@@ -69364,8 +69364,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "83132a6a7654af7c54db1c270c008dc4bf2dbbaceaa4dcf55bf5d154d8a8624c",
-          "handler_digest": "83132a6a7654af7c54db1c270c008dc4bf2dbbaceaa4dcf55bf5d154d8a8624c",
+          "schema_digest": "ac3a5bb96f22d90ce973b07ff40573a6321dc5e785d325eeedd87ae0ea7c68ce",
+          "handler_digest": "ac3a5bb96f22d90ce973b07ff40573a6321dc5e785d325eeedd87ae0ea7c68ce",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -69383,7 +69383,7 @@
         }
       ],
       "expected_count": 895,
-      "expected_sha256": "265f90e704a9362201875ad6ab6be40fbdb7c72cb2dacd5345990c00b5c6d9e4"
+      "expected_sha256": "0f658b5611a928f7d62b543db05695ae530708e3810c5e7bc44ac925db736fa8"
     }
   ],
   "current_source_review": {

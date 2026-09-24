@@ -54,7 +54,7 @@ create table if not exists ops.resource_observation (
   measured_capacity jsonb,
   configured_capacity jsonb,
   model_route jsonb,
-  state text not null check (state in ('ok','stale','unconfigured','collector_absent','host_offline')),
+  state text not null check (state in ('ok','partial','stale','unconfigured','collector_absent','host_offline')),
   reason text,
   source text not null check (btrim(source) <> ''),
   observed_at timestamptz not null,
@@ -133,7 +133,16 @@ begin
   if p_provider not in ('neon','github','cloudflare','local_compute','model_route') then
     raise exception 'resource_observation_provider_invalid';
   end if;
-  if p_state not in ('ok','stale','unconfigured','collector_absent','host_offline') then
+  -- C03 (Neon), C04 (GitHub) and C05 (Cloudflare) are not built: no collector
+  -- exists for those three providers yet, so this door has no real evidence
+  -- to accept for them. Accepting a caller-supplied {provider:'neon',
+  -- state:'ok'} today would let any carr_writer agent fabricate a healthy
+  -- reading the read door then serves as fact. Refuse those three providers
+  -- outright until their own collector migrations land and lift this check.
+  if p_provider not in ('local_compute','model_route') then
+    raise exception 'resource_observation_provider_not_yet_collectible';
+  end if;
+  if p_state not in ('ok','partial','stale','unconfigured','collector_absent','host_offline') then
     raise exception 'resource_observation_state_invalid';
   end if;
   if p_source is null or btrim(p_source) = '' then
@@ -142,8 +151,19 @@ begin
   if p_observed_at is null then
     raise exception 'resource_observation_observed_at_required';
   end if;
+  -- Caller-supplied observed_at has no upper bound otherwise: a future
+  -- timestamp would win the read door's `order by observed_at desc` forever,
+  -- permanently masking every real observation behind it. RESOURCE_
+  -- OBSERVATION_FUTURE_SKEW: 5 minutes, the same clock-skew tolerance already
+  -- used for scheduled_for bounds in 0229 (calendar prebrief) -- generous
+  -- enough for ordinary clock drift between the collector host and the
+  -- database, tight enough that a fabricated future timestamp cannot buy
+  -- meaningful permanence.
+  if p_observed_at > now() + interval '5 minutes' then
+    raise exception 'resource_observation_observed_at_in_future';
+  end if;
 
-  v_digest := 'sha256:' || encode(digest(
+  v_digest := 'sha256:' || encode(public.digest(
     coalesce(p_provider,'') || '|' || coalesce(p_account,'') || '|' || coalesce(p_project,'') || '|' ||
     coalesce(p_product,'') || '|' || coalesce(p_period,'') || '|' || coalesce(p_as_of::text,'') || '|' ||
     coalesce(p_quantity::text,'') || '|' || coalesce(p_quantity_unit,'') || '|' || coalesce(p_allowance::text,'') || '|' ||
@@ -203,40 +223,73 @@ as $$
     select distinct on (o.provider) o.*
     from ops.resource_observation o
     order by o.provider, o.observed_at desc, o.created_at desc
+  ),
+  -- RESOURCE_OBSERVATION_STALE_AFTER: 15 minutes. A dead collector must not
+  -- read back its last-known state forever, and observed_at is
+  -- caller-supplied with only a small future-skew guard on the write side
+  -- (see ops.record_resource_observation), so freshness has to be
+  -- re-checked here, at read time, against the wall clock -- never trusted
+  -- from the stored state alone. 15 minutes matches this repo's existing
+  -- observation-staleness convention (migrations 0180/0182's scheduler
+  -- receipts) and comfortably exceeds the collector's intended run cadence
+  -- once ops/launchd/com.carr.resource-collector.plist is wired into
+  -- ops/config/services.json with an interval well under this threshold.
+  projected as (
+    select
+      p.provider,
+      l.account, l.project, l.product, l.period, l.as_of, l.quantity, l.quantity_unit,
+      l.allowance, l.policy, l.estimate, l.charge, l.measured_capacity, l.configured_capacity,
+      l.model_route,
+      case
+        when l.id is null then
+          case when p.provider in ('neon','github','cloudflare') then 'unconfigured' else 'collector_absent' end
+        when l.observed_at < now() - interval '15 minutes' then 'stale'
+        else l.state
+      end as state,
+      case
+        when l.id is null then
+          case when p.provider in ('neon','github','cloudflare')
+            then 'no collector configured for this provider yet (V5-UX-C03/C04/C05 not built)'
+            else 'no collector observation received yet' end
+        when l.observed_at < now() - interval '15 minutes' then
+          'observation is ' ||
+          greatest(0, round(extract(epoch from (now() - l.observed_at)) / 60))::text ||
+          ' minute(s) old, past the 15 minute freshness threshold'
+        else l.reason
+      end as reason,
+      l.source,
+      l.observed_at
+    from providers p
+    left join latest l on l.provider = p.provider
   )
   select jsonb_build_object(
     'schema', 'doctorcre-resource-dashboard.v1',
     'generated_at', now(),
     'providers', coalesce(jsonb_agg(
       jsonb_build_object(
-        'provider', p.provider,
-        'account', l.account,
-        'project', l.project,
-        'product', l.product,
-        'period', l.period,
-        'as_of', l.as_of,
-        'quantity', l.quantity,
-        'quantity_unit', l.quantity_unit,
-        'allowance', l.allowance,
-        'policy', l.policy,
-        'estimate', l.estimate,
-        'charge', l.charge,
-        'measured_capacity', l.measured_capacity,
-        'configured_capacity', l.configured_capacity,
-        'model_route', l.model_route,
-        'state', coalesce(l.state,
-          case when p.provider in ('neon','github','cloudflare') then 'unconfigured' else 'collector_absent' end),
-        'reason', coalesce(l.reason,
-          case when p.provider in ('neon','github','cloudflare')
-            then 'no collector configured for this provider yet (V5-UX-C03/C04/C05 not built)'
-            else 'no collector observation received yet' end),
-        'source', l.source,
-        'observed_at', l.observed_at
-      ) order by p.provider
+        'provider', provider,
+        'account', account,
+        'project', project,
+        'product', product,
+        'period', period,
+        'as_of', as_of,
+        'quantity', quantity,
+        'quantity_unit', quantity_unit,
+        'allowance', allowance,
+        'policy', policy,
+        'estimate', estimate,
+        'charge', charge,
+        'measured_capacity', measured_capacity,
+        'configured_capacity', configured_capacity,
+        'model_route', model_route,
+        'state', state,
+        'reason', reason,
+        'source', source,
+        'observed_at', observed_at
+      ) order by provider
     ), '[]'::jsonb)
   )
-  from providers p
-  left join latest l on l.provider = p.provider;
+  from projected;
 $$;
 
 comment on function ops.read_resource_dashboard is

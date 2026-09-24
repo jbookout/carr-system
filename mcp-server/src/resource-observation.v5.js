@@ -5,7 +5,7 @@
 // TWO VERBS, ONE STORE. `read-resource-dashboard` is the one read contract
 // the app calls: it always returns a row for every provider this contract
 // owns -- neon, github, cloudflare, local_compute, model_route -- even when
-// no collector for that provider exists yet (migrations/0579's
+// no collector for that provider exists yet (migrations/0580's
 // ops.read_resource_dashboard names the exact reason: "no collector
 // configured" for the three external providers C03-C05 have not built yet,
 // "no collector observation received yet" for the two local ones before the
@@ -27,7 +27,7 @@
 // carried as null plus `reason`, never substituted with zero.
 
 const PROVIDERS = Object.freeze(["neon", "github", "cloudflare", "local_compute", "model_route"]);
-const STATES = Object.freeze(["ok", "stale", "unconfigured", "collector_absent", "host_offline"]);
+const STATES = Object.freeze(["ok", "partial", "stale", "unconfigured", "collector_absent", "host_offline"]);
 
 const jsonOrNullSchema = { type: ["object", "null"] };
 
