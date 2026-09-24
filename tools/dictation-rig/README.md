@@ -197,6 +197,14 @@ the craft on top.
 ## No third-party voiceprints — structural
 
 Two-party attribution comes free from the channel split (mic = me, system = them).
+Within one channel, `bin/speaker_split.py` runs FluidAudio's on-device offline
+diarizer (built by `bin/build-quill.sh` as `fluidaudiocli`) so several voices get
+per-recording labels: "Other participant 1, 2…" on the system track, and on the
+mic the voice with the most talk time keeps the channel label while the rest
+become "In-room speaker 1, 2…". The labels mean nothing outside that recording.
+The diarizer's output carries voice embeddings, so it is written to the temp
+directory and deleted as soon as it is read. If the diarizer is missing or fails,
+each channel keeps its single label, as before.
 There is no speaker-enrollment feature for anyone but Joe/Dell (self-consented,
 Phase B if built at all), and no persistent voiceprint of any client or third
 party, ever.
