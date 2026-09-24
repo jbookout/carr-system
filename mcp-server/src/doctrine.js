@@ -681,16 +681,22 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         await actorId(c, actor);
         const r = await c.query(
           `select d.id, d.slug, d.title, d.content_class, d.visibility, d.updated_at,
-                  o.slug as owner_slug,
+                  d.owner_actor_id,
                   count(s.id) filter (where s.status='active') as sections,
                   bool_or(s.review_after < now()) as any_stale
              from doctrine_document d
-             left join actor o on o.id = d.owner_actor_id
              left join doctrine_section s on s.document_id = d.id
             where ($1::text[] is null or d.content_class = any($1))
-            group by d.id, o.slug order by d.content_class, d.slug`,
+            group by d.id order by d.content_class, d.slug`,
           [args.content_classes || null]);
-        return { ok: true, documents: r.rows };
+        // Personal documents are listed for both partners (decision 9c06bf1e),
+        // named by owner. Resolved separately: carr_reader reads actor (id, slug).
+        const ownerIds = [...new Set(r.rows.map(x => x.owner_actor_id).filter(Boolean))];
+        const owners = ownerIds.length ? new Map((await c.query(
+          `select id, slug from actor where id = any($1::uuid[])`, [ownerIds])).rows
+          .map(o => [o.id, o.slug])) : new Map();
+        return { ok: true, documents: r.rows.map(({ owner_actor_id, ...x }) =>
+          ({ ...x, owner_slug: owner_actor_id ? owners.get(owner_actor_id) ?? null : null })) };
       },
     },
 
