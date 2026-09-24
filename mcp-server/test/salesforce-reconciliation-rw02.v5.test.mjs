@@ -1,6 +1,7 @@
 // V5-RW02 — attended Salesforce reconciliation and per-action evaluation,
 // proved clause by clause against the reviewed catalog's `checkable_done` and
-// the eight mapped decisions.
+// the eight mapped decisions, plus every attack the independent review of
+// PR 1238 ran against the first head (its probes are reproduced here as tests).
 //
 // SYNTHETIC DATA ONLY. Every origin is under the reserved `.invalid` TLD, every
 // opportunity id is a made-up 006-prefixed id, and every case, deal and party
@@ -18,6 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import { digest } from "../src/artifact-trust.js";
 import { evaluateActorAuthority, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
@@ -31,6 +33,7 @@ import * as rw02 from "../src/salesforce-reconciliation-rw02.v5.js";
 const {
   V5RW02Error,
   V5_RW02_ACTION_KIND_KEYS,
+  V5_RW02_CREDENTIAL_PATTERNS,
   V5_RW02_DECISION_IDS,
   V5_RW02_EXCLUDED_ACTIONS,
   V5_RW02_PAGE_CHECKS,
@@ -39,6 +42,7 @@ const {
   V5_RW02_SEAMS,
   V5_RW02_SETTLED_DECISIONS,
   V5_RW02_EVALUATION_WINDOW_SEAM,
+  V5_RW02_EVIDENCE_STORE_SEAM,
   buildActionPreview,
   evaluateActionAdmission,
   evaluateActionTrustWindow,
@@ -57,8 +61,11 @@ const TOOLS = fileURLToPath(new URL("../src/tools.js", import.meta.url));
 
 const T = ORGANIZATION_TENANT_ID;
 const ORIGIN = "https://synthetic-org.invalid";
+const OTHER_ORIGIN = "https://other-org.invalid";
 const ORG = "00Dsynthetic0001";
+const OTHER_ORG = "00Dsynthetic0002";
 const SEAT = "sf-seat-synthetic-partner";
+const OTHER_SEAT = "sf-seat-synthetic-other";
 const UI = "sha256:" + "1".repeat(64);
 const OPP = "006SYNTH0000001";
 const OPP2 = "006SYNTH0000002";
@@ -70,6 +77,11 @@ const CONFIRMED = "2026-09-24T11:59:00Z";
 
 const CASE = Object.freeze({ workflow_ref: "rw02-case-synthetic-1", deal_ref: "deal-synthetic-1",
   engagement_ref: "engagement-synthetic-1" });
+const CASE2 = Object.freeze({ workflow_ref: "rw02-case-synthetic-2", deal_ref: "deal-synthetic-2" });
+const BINDING = Object.freeze({ origin: ORIGIN, org_id: ORG, account_ref: SEAT });
+
+const TARGETED = new Set(["opportunity_phase_update", "opportunity_link_record", "etl_document_prepare",
+  "commission_agreement_prepare"]);
 
 const isErr = code => e => e instanceof V5RW02Error && e.code === code;
 
@@ -86,31 +98,42 @@ const page = (obs = {}, bind = {}, mode = "attended") => ({
     challenge: "none", result_consistency: "consistent", ...obs,
   },
 });
+/** A self-consistent page on a different org, origin or seat. */
+const pageOn = ({ origin = ORIGIN, org = ORG, seat = SEAT, record = undefined } = {}) => page(
+  { origin, org_id: org, signed_in_account_ref: seat, ...(record ? { record_id: record } : {}) },
+  { expected_origin: origin, expected_org_id: org, expected_account_ref: seat,
+    ...(record ? { expected_record_id: record } : {}) });
+const pinned = (record = OPP) => pageOn({ record });
 
 const stepKey = (action_kind, intent_ordinal = 1, kase = CASE) =>
   rw02StepKey({ tenant: T, case: kase, action_kind, intent_ordinal });
 
+const field = (name, value, semantics = "ordinary", provenance = "partner_entered",
+  fact_class = "corporate_transaction_field") => ({ field: name, value, semantics, provenance, fact_class });
+
 const CREATE_FIELDS = Object.freeze([
-  { field: "Name", value: "Synthetic Clinic Lease", semantics: "ordinary", provenance: "partner_entered" },
-  { field: "StageName", value: "Research", semantics: "phase", provenance: "partner_entered" },
-  { field: "Out_of_Market_Deal__c", value: false, semantics: "out_of_market_flag", provenance: "partner_entered" },
-  { field: "Total_Commission__c", value: 1000, semantics: "commission_placeholder", provenance: "partner_entered" },
-  { field: "CloseDate", value: "2027-01-01", semantics: "close_date_placeholder", provenance: "partner_entered" },
+  field("Name", "Synthetic Clinic Lease"),
+  field("StageName", "Research", "phase"),
+  field("Out_of_Market_Deal__c", false, "out_of_market_flag"),
+  field("Total_Commission__c", 1000, "commission_placeholder"),
+  field("CloseDate", "2027-01-01", "close_date_placeholder"),
 ]);
+const DOC_FIELDS = Object.freeze([field("Template_Ref__c", "etl-template-synthetic", "ordinary", "doctorcre_record")]);
+const LINK_FIELDS = Object.freeze([field("salesforce_id", OPP, "external_id_link", "salesforce_observed", "operating_fact")]);
 
-const preview = (action_kind = "opportunity_create", over = {}) => buildActionPreview({
-  tenant: T, action_kind, case: CASE, step_key: stepKey(action_kind),
-  fields: CREATE_FIELDS.map(f => ({ ...f })), ...over,
+const defaultFields = kind => (kind === "opportunity_create" ? CREATE_FIELDS
+  : kind === "opportunity_link_record" ? LINK_FIELDS
+    : kind === "opportunity_phase_update" ? [field("StageName", "Negotiation", "phase")] : DOC_FIELDS);
+
+const req = (action_kind = "opportunity_create", over = {}) => ({
+  tenant: T, action_kind, case: CASE, intent_ordinal: 1, org_binding: { ...BINDING },
+  ...(TARGETED.has(action_kind) ? { target_opportunity_id: OPP } : {}),
+  fields: defaultFields(action_kind).map(f => ({ ...f })), ...over,
 });
+const preview = (action_kind, over) => buildActionPreview(req(action_kind, over));
 
-const docPreview = () => preview("etl_document_prepare", {
-  target_opportunity_id: OPP,
-  fields: [{ field: "Template_Ref__c", value: "etl-template-synthetic", semantics: "ordinary",
-    provenance: "doctorcre_record" }],
-});
-
-const dupSearch = (candidates = [], completeness = "complete", step = stepKey("opportunity_create")) => ({
-  tenant: T, case: CASE, step_key: step, page: page(), search: { completeness, candidates },
+const dupSearch = (candidates = [], completeness = "complete", over = {}) => ({
+  tenant: T, case: CASE, intent_ordinal: 1, page: page(), search: { completeness, candidates }, ...over,
 });
 
 const PRINCIPALS = Object.freeze({
@@ -126,12 +149,12 @@ const envelopeFor = (p, over = {}) => normalizeEffectEnvelope({
 });
 const capabilityFor = (env, over = {}) => normalizeEffectCapability({
   tenant: T, capability_id: "cap-synthetic-1", envelope_digest: env.envelope_digest, capability: CAPNAME,
-  nonce: "nonce-synthetic-1", principals: { ...PRINCIPALS }, autonomy_tier_label: "tier-attended",
+  nonce: "nonce-synthetic-1", principals: { ...env.principals }, autonomy_tier_label: "tier-attended",
   issued_at: ISSUED, expires_at: EXPIRES, ...over,
 });
 const presentationFor = (env, over = {}) => normalizeEffectPresentation({
   presentation_id: "pres-synthetic-1", envelope_digest: env.envelope_digest, capability_id: "cap-synthetic-1",
-  requested_action: ACTION, payload_digest: env.payload_digest, presented_principals: { ...PRINCIPALS },
+  requested_action: ACTION, payload_digest: env.payload_digest, presented_principals: { ...env.principals },
   presented_autonomy_tier_label: "tier-attended", nonce_state: "unconsumed", capability_state: "active",
   cap_observations: [], ...over,
 });
@@ -143,15 +166,23 @@ const authority = () => evaluateActorAuthority({
 });
 
 const confirmationFor = (p, over = {}) => ({
-  confirmation_ref: "confirm-synthetic-1", confirmed_at: CONFIRMED, preview_digest: p.preview_digest,
-  action_kind: p.preview.action_kind, step_key: p.preview.step_key, ...over,
+  confirmation_ref: "confirm-synthetic-1", confirmed_at: CONFIRMED, confirmed_by: "joe",
+  preview_digest: p.preview_digest, action_kind: p.preview.action_kind, step_key: p.preview.step_key, ...over,
 });
 
-const admission = (p = preview(), over = {}, f06over = {}) => {
+/** Admission over a preview REQUEST; the envelope is sealed over the rebuilt preview. */
+const admission = (r = req(), over = {}, f06over = {}) => {
+  // A refused preview has no digest to seal; the envelope then comes from a
+  // valid one, because admission must refuse on the preview before reading it.
+  const built = buildActionPreview(r);
+  const p = built.decision === "preview_ready" ? built : buildActionPreview(req());
   const env = f06over.envelope ?? envelopeFor(p);
+  const targeted = TARGETED.has(r.action_kind);
   return evaluateActionAdmission({
-    tenant: T, execution_mode: "attended", page: page(), preview: p.preview,
-    ...(p.preview.action_kind === "opportunity_create" ? { duplicate_search: dupSearch() } : {}),
+    tenant: T, execution_mode: "attended", page: targeted ? pinned(r.target_opportunity_id) : page(),
+    preview_request: r,
+    ...(r.action_kind === "opportunity_create" ? { duplicate_search: dupSearch() } : {}),
+    ...(targeted ? { target_readback: { opportunity_id: r.target_opportunity_id, state: "present" } } : {}),
     confirmation: confirmationFor(p),
     f06: {
       envelope: env, capability: f06over.capability ?? capabilityFor(env),
@@ -167,16 +198,18 @@ const attemptFor = (env, over = {}) => normalizeEffectAttemptObservation({
   outcome: { state: "succeeded" }, ...over,
 });
 
-const readbackOf = (p, overrides = {}, opp = OPP) => ({
-  opportunity_id: opp, completeness: "complete",
+const readbackOf = (p, overrides = {}, opp = OPP, step_marker = "present") => ({
+  opportunity_id: opp, completeness: "complete", step_marker,
   fields: [...p.preview.fields.map(f => ({ field: f.field, value: f.field in overrides ? overrides[f.field] : f.value })),
     { field: "LastModifiedDate", value: "2026-09-24T12:00:01Z" }],
 });
 
-const readback = (p = preview(), over = {}, attemptOver = {}) => {
+const readback = (r = req(), over = {}, attemptOver = {}) => {
+  const p = buildActionPreview(r);
   const env = envelopeFor(p);
   return evaluateWriteReadback({
-    tenant: T, page: page(), preview: p.preview, evidence_class: "fixture", observed_at: NOW,
+    tenant: T, page: TARGETED.has(r.action_kind) ? pinned(r.target_opportunity_id) : page(),
+    preview_request: r, evidence_class: "fixture", observed_at: NOW,
     f06: { envelope: env, capability: capabilityFor(env), attempt: attemptFor(env, attemptOver) },
     provider_readback: readbackOf(p), ...over,
   });
@@ -187,6 +220,16 @@ function assertGrantsNothing(answer) {
   assert.equal(answer.autonomy_active, false);
   assert.equal(answer.attended_activation_receipt_present, false);
   assert.deepEqual(answer.effects, V5_NO_EFFECTS);
+}
+
+/** Throws with `code`, and neither the message nor the detail carries `secret`. */
+function assertThrowsQuietly(fn, code, secret) {
+  let caught;
+  try { fn(); } catch (e) { caught = e; }
+  assert.ok(caught instanceof V5RW02Error, "expected a V5RW02Error");
+  assert.equal(caught.code, code);
+  const said = caught.message + JSON.stringify(caught.detail ?? null);
+  assert.ok(!said.includes(secret), `error echoed the caller's value: ${code}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -233,9 +276,10 @@ test("the module is pure: no filesystem, network, environment, clock or dynamic 
 // conflict stop safely (Q084.D1, Q100.D1).
 // ---------------------------------------------------------------------------
 
-test("CD1 clean page: an attended, bound, unchallenged page continues and grants nothing", () => {
+test("CD1 clean page: an attended, bound, unchallenged page continues, reports its binding, grants nothing", () => {
   const a = evaluatePageObservation(page());
   assert.equal(a.decision, "continue");
+  assert.deepEqual(a.verified_binding, { origin: ORIGIN, org_id: ORG, account_ref: SEAT, record_id: null });
   assertGrantsNothing(a);
 });
 
@@ -248,8 +292,8 @@ const STOP_CASES = [
   ["unstated challenge", page({ challenge: "unstated" }), "challenge_state_unobservable", "authentication_challenge"],
   ["look-alike origin", page({ origin: "https://synthetic-org.invalid.attacker.invalid" }), "origin_mismatch", "origin"],
   ["origin with a path", page({ origin: ORIGIN + "/x" }), "origin_mismatch", "origin"],
-  ["other org", page({ org_id: "00Dsynthetic0002" }), "org_mismatch", "org"],
-  ["other signed-in account", page({ signed_in_account_ref: "sf-seat-other" }), "signed_in_account_mismatch", "signed_in_account"],
+  ["other org", page({ org_id: OTHER_ORG }), "org_mismatch", "org"],
+  ["other signed-in account", page({ signed_in_account_ref: OTHER_SEAT }), "signed_in_account_mismatch", "signed_in_account"],
   ["other record", page({ record_id: OPP2 }, { expected_record_id: OPP }), "record_mismatch", "record"],
   ["UI drift", page({ ui_contract_digest: "sha256:" + "2".repeat(64) }), "ui_drift", "ui_contract"],
   ["unexpected recipient", page({ recipients: ["party-a", "party-z"] }, { expected_recipients: ["party-a"] }),
@@ -259,9 +303,9 @@ const STOP_CASES = [
   ["unstated consistency", page({ result_consistency: "unstated" }), "result_consistency_unobservable", "result_consistency"],
 ];
 
-for (const [name, req, reason, check] of STOP_CASES) {
+for (const [name, request, reason, check] of STOP_CASES) {
   test(`CD1 stop: ${name} stops with no bypass and no automatic retry`, () => {
-    const a = evaluatePageObservation(req);
+    const a = evaluatePageObservation(request);
     assert.equal(a.decision, "stop");
     assert.equal(a.reason_id, reason);
     assert.equal(a.blocking_check, check);
@@ -273,43 +317,90 @@ for (const [name, req, reason, check] of STOP_CASES) {
 }
 
 test("CD1 ordering: a challenge is decided before any binding is compared", () => {
-  const a = evaluatePageObservation(page({ challenge: "mfa_challenge", org_id: "00Dsynthetic0002" }));
+  const a = evaluatePageObservation(page({ challenge: "mfa_challenge", org_id: OTHER_ORG }));
   assert.equal(a.reason_id, "authentication_challenge");
   assert.deepEqual(a.checks_required, [...V5_RW02_PAGE_CHECKS]);
 });
 
-test("CD1 a stop on the page stops the duplicate search and the admission too", () => {
-  const d = evaluateDuplicateSearch({ ...dupSearch(), page: page({ challenge: "captcha" }) });
+test("CD1 a stop on the page stops the duplicate search, the admission and the readback", () => {
+  const d = evaluateDuplicateSearch(dupSearch([], "complete", { page: page({ challenge: "captcha" }) }));
   assert.equal(d.decision, "stop");
   assert.equal(d.reason_id, "authentication_challenge");
-  const a = admission(preview(), { page: page({ ui_contract_digest: "sha256:" + "3".repeat(64) }) });
+  const a = admission(req(), { page: page({ ui_contract_digest: "sha256:" + "3".repeat(64) }) });
   assert.equal(a.decision, "stop");
   assert.equal(a.reason_id, "ui_drift");
+  assert.equal(a.blocking_check, "page");
+  const r = readback(req(), { page: page({ challenge: "mfa_challenge" }) });
+  assert.equal(r.decision, "stop");
+  assert.equal(r.reason_id, "authentication_challenge");
+  assert.equal(r.evidence.outcome, "stopped");
 });
 
-test("CD1 unattended is refused at the admission door by name", () => {
-  const a = admission(preview(), { execution_mode: "unattended" });
-  assert.equal(a.decision, "stop");
-  assert.equal(a.reason_id, "unattended_execution_excluded");
+test("CD1 unattended is refused at the admission door, whether the request or the page says so", () => {
+  const byRequest = admission(req(), { execution_mode: "unattended" });
+  assert.equal(byRequest.reason_id, "unattended_execution_excluded");
+  assert.equal(byRequest.blocking_check, "execution_mode");
+  const byPage = admission(req(), { page: page({}, {}, "unattended") });
+  assert.equal(byPage.decision, "stop");
+  assert.equal(byPage.reason_id, "unattended_execution_excluded");
+  assert.equal(byPage.blocking_check, "execution_mode");
 });
 
-test("data boundary: credential-shaped values throw and are never echoed", () => {
-  const secret = "password=hunter2-synthetic";
-  let caught;
-  try {
-    evaluatePageObservation(page({ signed_in_account_ref: secret }));
-  } catch (e) { caught = e; }
-  assert.ok(caught instanceof V5RW02Error);
-  assert.ok(["credential_shaped_value", "invalid_identifier"].includes(caught.code));
-  assert.ok(!caught.message.includes("hunter2"));
+// ---------------------------------------------------------------------------
+// Data boundary: credentials never enter, and errors never echo.
+// ---------------------------------------------------------------------------
+
+const CREDENTIAL_SAMPLES = {
+  jwt_anywhere: "see eyJhbGciOiJI.eyJzdWIiOiIx.c2lnbmF0dXJl here",
+  dotted_triple: "abcdefghij.klmnopqrst.uvwxyzabcd",
+  pem_block: "note -----BEGIN KEY",
+  secret_pair: "password=hunter2-synthetic",
+  bearer: "Bearer abcdef123456",
+  salesforce_session_id: "sid 00Dxx0000001gPL!AR8AQJXg5vYzP.qhbZrs4r1D8pX0WQ",
+  api_key: "key sk-ant-api03-abcdefghijklmnopq", // synthetic, not a key; ci-secret-scan: allow
+};
+
+test("data boundary: every credential shape is registered and has a sample only it catches", () => {
+  assert.deepEqual(Object.keys(CREDENTIAL_SAMPLES).sort(), Object.keys(V5_RW02_CREDENTIAL_PATTERNS).sort());
+  for (const [name, sample] of Object.entries(CREDENTIAL_SAMPLES)) {
+    const hits = Object.entries(V5_RW02_CREDENTIAL_PATTERNS).filter(([, re]) => re.test(sample)).map(([k]) => k);
+    assert.deepEqual(hits, [name], name);
+  }
+});
+
+for (const [name, sample] of Object.entries(CREDENTIAL_SAMPLES)) {
+  test(`data boundary: a field value carrying a ${name} throws without echoing it`, () => {
+    assertThrowsQuietly(() => preview("opportunity_create", {
+      fields: [...CREATE_FIELDS.map(f => ({ ...f })), field("Note__c", sample)],
+    }), "credential_shaped_value", sample);
+  });
+}
+
+test("data boundary: invisible or control characters are refused", () => {
   assert.throws(() => preview("opportunity_create", {
-    fields: [{ field: "Name", value: "eyJhbGciOiJI.eyJzdWIiOiIx.c2lnbmF0dXJl", semantics: "ordinary",
-      provenance: "partner_entered" }],
-  }), isErr("credential_shaped_value"));
-  assert.throws(() => preview("opportunity_create", {
-    fields: [{ field: "Name", value: "Bearer abcdef123456", semantics: "ordinary", provenance: "partner_entered" }],
-  }), isErr("credential_shaped_value"));
-  assert.throws(() => evaluatePageObservation({ ...page(), session_cookie: "x" }), isErr("unknown_field"));
+    fields: [...CREATE_FIELDS.map(f => ({ ...f })), field("Note__c", "zero​width")],
+  }), isErr("unsafe_unicode"));
+});
+
+test("data boundary: unregistered values and unknown keys are refused without being echoed", () => {
+  const secret = "00Dxx0000001gPL!AR8AQJXg5vYzP.qhbZrs4r1D8pX0WQ";
+  assertThrowsQuietly(() => evaluatePageObservation(page({ challenge: secret })), "unknown_challenge_state", secret);
+  assertThrowsQuietly(() => evaluateResume({ tenant: T, action_kind: "opportunity_create", case: CASE,
+    intent_ordinal: 1, journal_hint: "Bearer abc.def", provider: { effect: "effect_absent" } }),
+  "unknown_journal_hint", "Bearer abc");
+  assertThrowsQuietly(() => evaluateResume({ tenant: T, action_kind: "sk-ant-api03-abcdef", case: CASE,
+    intent_ordinal: 1, journal_hint: "absent", provider: { effect: "effect_absent" } }),
+  "unknown_action_kind", "sk-ant");
+  assertThrowsQuietly(() => evaluateResume({ tenant: T, action_kind: "opportunity_create", case: CASE,
+    intent_ordinal: 1, journal_hint: "absent", provider: { effect: "effect_absent" }, "access_token=abc123": 1 }),
+  "unknown_field", "access_token");
+  assertThrowsQuietly(() => evaluatePageObservation({ ...page(), session_cookie: "x" }), "unknown_field",
+    "session_cookie");
+});
+
+test("a case with no DoctorCRE anchor is unreadable", () => {
+  assert.throws(() => preview("opportunity_create", { case: { workflow_ref: "rw02-case-unanchored" } }),
+    isErr("case_unanchored"));
 });
 
 // ---------------------------------------------------------------------------
@@ -321,6 +412,8 @@ const cand = (opportunity_id, over = {}) => ({ opportunity_id, step_marker: "abs
 test("CD2 duplicates: an empty complete search admits a create, pending preview and confirmation", () => {
   const d = evaluateDuplicateSearch(dupSearch([cand(OPP2)]));
   assert.equal(d.decision, "create_admissible");
+  assert.equal(d.step_key, stepKey("opportunity_create"));
+  assert.deepEqual(d.searched_on, { origin: ORIGIN, org_id: ORG, account_ref: SEAT, record_id: null });
   assertGrantsNothing(d);
 });
 
@@ -332,10 +425,14 @@ test("CD2 duplicates: this step's marker on the provider means already effected 
   assert.equal(d.create_permitted, false);
 });
 
-test("CD2 duplicates: an opportunity already linked to this deal is linked, not duplicated", () => {
-  const d = evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_deal_ref: CASE.deal_ref })]));
-  assert.equal(d.decision, "link_existing");
-  assert.equal(d.create_permitted, false);
+test("CD2 duplicates: an opportunity linked to ANY anchor of this case is linked, not duplicated", () => {
+  for (const linked_ref of [CASE.deal_ref, CASE.engagement_ref]) {
+    const d = evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_ref })]));
+    assert.equal(d.decision, "link_existing", linked_ref);
+    assert.equal(d.create_permitted, false);
+  }
+  const notOurs = evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_ref: "deal-someone-else" })]));
+  assert.equal(notOurs.decision, "create_admissible");
 });
 
 test("CD2 duplicates: a name match is a human question, never an automatic join", () => {
@@ -348,16 +445,16 @@ test("CD2 duplicates: a name match is a human question, never an automatic join"
 });
 
 test("CD2 duplicates: incomplete searches, unknown markers and double markers stop", () => {
-  for (const [req, detail] of [
+  for (const [request, detail] of [
     [dupSearch([], "truncated"), "duplicate_search_incomplete"],
     [dupSearch([], "unstated"), "duplicate_search_incomplete"],
     [dupSearch([cand(OPP, { step_marker: "unstated" })]), "step_marker_unobservable"],
     [dupSearch([cand(OPP, { step_marker: "present" }), cand(OPP2, { step_marker: "present" })]),
       "step_marker_on_multiple_opportunities"],
-    [dupSearch([cand(OPP, { linked_deal_ref: CASE.deal_ref }), cand(OPP2, { linked_deal_ref: CASE.deal_ref })]),
-      "deal_linked_to_multiple_opportunities"],
+    [dupSearch([cand(OPP, { linked_ref: CASE.deal_ref }), cand(OPP2, { linked_ref: CASE.engagement_ref })]),
+      "case_linked_to_multiple_opportunities"],
   ]) {
-    const d = evaluateDuplicateSearch(req);
+    const d = evaluateDuplicateSearch(request);
     assert.equal(d.decision, "stop", detail);
     assert.equal(d.reason_id, "inconsistent_result");
     assert.equal(d.detail_reason, detail);
@@ -365,25 +462,37 @@ test("CD2 duplicates: incomplete searches, unknown markers and double markers st
 });
 
 // ---------------------------------------------------------------------------
-// Preview rules (Q070.D1, Q097.D1, placeholder / lane / lifecycle doctrine).
+// Preview rules (Q070.D1, Q097.D1, F01 homes, placeholder / lane / lifecycle).
 // ---------------------------------------------------------------------------
 
-test("preview: sealed, placeholders labelled as not figures, and bound for confirmation", () => {
-  const p = preview();
+test("preview: sealed over org binding and derived step key; placeholders labelled as not figures", () => {
+  const p = preview("opportunity_create");
   assert.equal(p.decision, "preview_ready");
+  assert.equal(p.step_key, stepKey("opportunity_create"));
+  assert.deepEqual(p.preview.org_binding, { ...BINDING });
   assert.deepEqual(p.placeholder_fields, ["CloseDate", "Total_Commission__c"]);
   assert.equal(p.placeholders_are_figures, false);
   assert.equal(p.payload_digest_for_envelope, p.preview_digest);
   assert.equal(p.f06_action, "business.update_deal");
-  assert.deepEqual(p.confirmation_binds,
-    { preview_digest: p.preview_digest, action_kind: "opportunity_create", step_key: stepKey("opportunity_create") });
-  // Field order does not change identity; a field value does.
+  // Field order does not change identity; a value, the org or the seat does.
   const reordered = preview("opportunity_create", { fields: [...CREATE_FIELDS].reverse().map(f => ({ ...f })) });
   assert.equal(reordered.preview_digest, p.preview_digest);
-  const edited = preview("opportunity_create", {
-    fields: CREATE_FIELDS.map(f => (f.field === "StageName" ? { ...f, value: "Negotiation" } : { ...f })),
-  });
-  assert.notEqual(edited.preview_digest, p.preview_digest);
+  for (const over of [
+    { fields: CREATE_FIELDS.map(f => (f.field === "StageName" ? { ...f, value: "Negotiation" } : { ...f })) },
+    { org_binding: { ...BINDING, org_id: OTHER_ORG } },
+    { org_binding: { ...BINDING, origin: OTHER_ORIGIN } },
+    { org_binding: { ...BINDING, account_ref: OTHER_SEAT } },
+    { intent_ordinal: 2 },
+  ]) {
+    assert.notEqual(preview("opportunity_create", over).preview_digest, p.preview_digest);
+  }
+});
+
+test("preview: a caller may not supply a step key, surface or digest — those are derived", () => {
+  for (const extra of [{ step_key: "sha256:" + "a".repeat(64) }, { surface: "record_layer" },
+    { preview_digest: "sha256:" + "b".repeat(64) }]) {
+    assert.throws(() => preview("opportunity_create", extra), isErr("unknown_field"));
+  }
 });
 
 test("preview: an inferred out-of-market lane is refused", () => {
@@ -394,30 +503,71 @@ test("preview: an inferred out-of-market lane is refused", () => {
   assert.equal(p.reason_id, "lane_inferred_not_authoritative");
 });
 
-test("preview: Salesforce state never crosses into DoctorCRE lifecycle; the link carries only the external id", () => {
-  const ok = preview("opportunity_link_record", {
-    target_opportunity_id: OPP,
-    fields: [{ field: "salesforce_id", value: OPP, semantics: "external_id_link", provenance: "salesforce_observed" }],
+test("preview: placeholders must have placeholder shape and never reach the record layer", () => {
+  for (const [name, value] of [["Total_Commission__c", "1000"], ["CloseDate", "next spring"]]) {
+    const p = preview("opportunity_create", {
+      fields: CREATE_FIELDS.map(f => (f.field === name ? { ...f, value } : { ...f })),
+    });
+    assert.equal(p.reason_id, "placeholder_shape_invalid", name);
+  }
+  const toRecord = preview("opportunity_link_record", { fields: [...LINK_FIELDS.map(f => ({ ...f })),
+    field("won_value", 999999, "commission_placeholder", "salesforce_observed", "operating_fact")] });
+  assert.equal(toRecord.reason_id, "placeholder_is_not_a_figure");
+});
+
+test("preview: V5-F01 decides each field's home against the surface it is written to", () => {
+  const opFact = preview("opportunity_create", {
+    fields: [...CREATE_FIELDS.map(f => ({ ...f })), field("Deal_State__c", "pending", "ordinary",
+      "doctorcre_record", "operating_fact")],
   });
+  assert.equal(opFact.reason_id, "field_home_is_not_this_surface");
+  assert.equal(opFact.f01_reason_id, "home_mismatch");
+  assert.equal(opFact.f01_authoritative_home, "neon_record_layer");
+  const corpOnRecord = preview("opportunity_link_record", {
+    fields: [field("salesforce_id", OPP, "external_id_link", "salesforce_observed", "corporate_transaction_field")],
+  });
+  assert.equal(corpOnRecord.reason_id, "field_home_is_not_this_surface");
+  assert.equal(corpOnRecord.f01_authoritative_home, "salesforce");
+});
+
+test("preview: Salesforce state never crosses into DoctorCRE lifecycle; the link carries only the external id", () => {
+  const ok = preview("opportunity_link_record");
   assert.equal(ok.decision, "preview_ready");
   assert.equal(ok.record_layer_verb, "update-deal");
   for (const bad of [
-    { field: "phase", value: "Research", semantics: "phase", provenance: "salesforce_observed" },
-    { field: "won_value", value: 1000, semantics: "commission_placeholder", provenance: "salesforce_observed" },
-    { field: "payment_state", value: "paid", semantics: "ordinary", provenance: "salesforce_observed" },
+    field("phase", "won", "phase", "inferred", "operating_fact"),
+    field("payment_state", "paid", "ordinary", "salesforce_observed", "operating_fact"),
   ]) {
-    const p = preview("opportunity_link_record", {
-      target_opportunity_id: OPP,
-      fields: [{ field: "salesforce_id", value: OPP, semantics: "external_id_link", provenance: "salesforce_observed" }, bad],
-    });
-    assert.equal(p.decision, "refuse", bad.field);
+    const p = preview("opportunity_link_record", { fields: [...LINK_FIELDS.map(f => ({ ...f })), bad] });
     assert.equal(p.reason_id, "salesforce_state_is_not_doctorcre_lifecycle", bad.field);
   }
   const wrongId = preview("opportunity_link_record", {
-    target_opportunity_id: OPP,
-    fields: [{ field: "salesforce_id", value: OPP2, semantics: "external_id_link", provenance: "salesforce_observed" }],
+    fields: [field("salesforce_id", OPP2, "external_id_link", "salesforce_observed", "operating_fact")],
   });
   assert.equal(wrongId.reason_id, "record_layer_link_carries_only_external_id");
+  // Even an innocuous extra field is refused: the link carries the id and nothing else.
+  const extra = preview("opportunity_link_record", { fields: [...LINK_FIELDS.map(f => ({ ...f })),
+    field("notes_path", "notes/synthetic.md", "ordinary", "doctorcre_record", "operating_fact")] });
+  assert.equal(extra.reason_id, "record_layer_link_carries_only_external_id");
+  // Fields are sorted, so an extra field AFTER salesforce_id is the case only the
+  // field count can catch.
+  const trailing = preview("opportunity_link_record", { fields: [...LINK_FIELDS.map(f => ({ ...f })),
+    field("sync_note", "synthetic", "ordinary", "doctorcre_record", "operating_fact")] });
+  assert.equal(trailing.reason_id, "record_layer_link_carries_only_external_id");
+  const wrongSemantics = preview("opportunity_link_record", {
+    fields: [field("salesforce_id", OPP, "ordinary", "salesforce_observed", "operating_fact")] });
+  assert.equal(wrongSemantics.reason_id, "record_layer_link_carries_only_external_id");
+  const wrongName = preview("opportunity_link_record", {
+    fields: [field("sf_opportunity_id", OPP, "external_id_link", "salesforce_observed", "operating_fact")] });
+  assert.equal(wrongName.reason_id, "record_layer_link_carries_only_external_id");
+  const noDeal = preview("opportunity_link_record", { case: { workflow_ref: "rw02-case-3", engagement_ref: "e-3" } });
+  assert.equal(noDeal.reason_id, "record_layer_link_needs_deal");
+});
+
+test("preview: an external-id link is refused on the Salesforce surface", () => {
+  const p = preview("opportunity_create", { fields: [...CREATE_FIELDS.map(f => ({ ...f })),
+    field("Ext__c", OPP, "external_id_link", "salesforce_observed")] });
+  assert.equal(p.reason_id, "external_id_link_is_record_layer_only");
 });
 
 test("preview: the link write names a deployed record-layer verb that accepts salesforce_id", () => {
@@ -430,11 +580,11 @@ test("preview: the link write names a deployed record-layer verb that accepts sa
 });
 
 test("preview: document preparation and phase moves require a target; a create may not name one", () => {
-  assert.equal(preview("etl_document_prepare", { fields: [{ field: "Template_Ref__c", value: "t",
-    semantics: "ordinary", provenance: "doctorcre_record" }] }).reason_id, "target_opportunity_required");
+  assert.equal(preview("etl_document_prepare", { target_opportunity_id: null }).reason_id,
+    "target_opportunity_required");
   assert.equal(preview("opportunity_create", { target_opportunity_id: OPP }).reason_id,
     "create_names_an_existing_target");
-  assert.equal(preview("opportunity_phase_update", { target_opportunity_id: OPP }).reason_id,
+  assert.equal(preview("opportunity_phase_update", { fields: CREATE_FIELDS.map(f => ({ ...f })) }).reason_id,
     "phase_update_carries_exactly_one_phase_field");
 });
 
@@ -451,87 +601,153 @@ test("protected sends are RW01's and are refused by name", () => {
 // ---------------------------------------------------------------------------
 
 test("admission clean case: every RW02 check and the real F06 presentation pass, and nothing is granted", () => {
-  const a = admission();
-  assert.equal(a.decision, "admissible_pending_attended_runtime");
-  assert.equal(a.blocking_check, null);
-  assert.equal(a.consumption_must_commit_before_provider_call, true);
-  assert.deepEqual(a.runtime_inputs_missing, [...V5_RW02_RUNTIME_EVIDENCE_INPUTS]);
-  assert.equal(a.adapter_admission.admitted, false);
-  assertGrantsNothing(a);
+  for (const kind of V5_RW02_ACTION_KIND_KEYS) {
+    const a = admission(req(kind));
+    assert.equal(a.decision, "admissible_pending_attended_runtime", kind);
+    assert.equal(a.blocking_check, null);
+    assert.equal(a.consumption_must_commit_before_provider_call, true);
+    assert.deepEqual(a.runtime_inputs_missing, [...V5_RW02_RUNTIME_EVIDENCE_INPUTS]);
+    assert.equal(a.adapter_admission.admitted, false);
+    assertGrantsNothing(a);
+  }
 });
 
-test("admission: a confirmation bound to another preview, action or step refuses", () => {
-  const p = preview();
-  assert.equal(admission(p, { confirmation: confirmationFor(p, { preview_digest: "sha256:" + "9".repeat(64) }) }).reason_id,
+test("review A1-A3: admission re-runs every preview rule on the request it is given", () => {
+  const lifecycle = admission(req("opportunity_link_record", { fields: [...LINK_FIELDS.map(f => ({ ...f })),
+    field("phase", "won", "phase", "inferred", "operating_fact")] }));
+  assert.equal(lifecycle.decision, "refuse");
+  assert.equal(lifecycle.reason_id, "preview_refused");
+  assert.equal(lifecycle.preview_reason_id, "salesforce_state_is_not_doctorcre_lifecycle");
+  const lane = admission(req("opportunity_create", {
+    fields: CREATE_FIELDS.map(f => (f.semantics === "out_of_market_flag" ? { ...f, provenance: "inferred" } : { ...f })),
+  }));
+  assert.equal(lane.preview_reason_id, "lane_inferred_not_authoritative");
+  assert.throws(() => admission(req("opportunity_create", { surface: "record_layer" })), isErr("unknown_field"));
+  assert.throws(() => admission(req("opportunity_create", {
+    fields: [...CREATE_FIELDS.map(f => ({ ...f })), field("Note__c", "password=hunter2")],
+  })), isErr("credential_shaped_value"));
+  assert.throws(() => evaluateActionAdmission({ tenant: T, execution_mode: "attended", page: page(),
+    preview: {}, confirmation: {}, f06: {} }), isErr("unknown_field"));
+});
+
+test("review C1: the admission page must be the previewed origin, org and seat", () => {
+  for (const [over, reason] of [
+    [{ origin: OTHER_ORIGIN }, "binding_origin_not_previewed"],
+    [{ org: OTHER_ORG }, "binding_org_not_previewed"],
+    [{ seat: OTHER_SEAT }, "binding_account_not_previewed"],
+  ]) {
+    const a = admission(req(), { page: pageOn(over) });
+    assert.equal(a.decision, "stop", reason);
+    assert.equal(a.reason_id, reason);
+    assert.equal(a.blocking_check, "page_binding");
+  }
+});
+
+test("review C2: a targeted action's page must pin exactly the previewed record", () => {
+  const other = admission(req("etl_document_prepare"), { page: pinned(OPP2) });
+  assert.equal(other.reason_id, "record_not_pinned");
+  const unpinned = admission(req("etl_document_prepare"), { page: page() });
+  assert.equal(unpinned.reason_id, "record_not_pinned");
+  assert.equal(unpinned.blocking_check, "page_binding");
+});
+
+test("review R5: the F06 account principal must be the previewed seat", () => {
+  const r = req("etl_document_prepare", { org_binding: { ...BINDING, account_ref: OTHER_SEAT } });
+  const a = admission(r, { page: pageOn({ seat: OTHER_SEAT, record: OPP }) });
+  assert.equal(a.decision, "refuse");
+  assert.equal(a.reason_id, "capability_for_other_account");
+});
+
+test("review B1-B2: the duplicate search must be for this case, this step and this org", () => {
+  const otherCase = admission(req(), { duplicate_search: dupSearch([], "complete",
+    { case: { workflow_ref: "rw02-case-synthetic-1", prospect_ref: "p-1" } }) });
+  assert.equal(otherCase.reason_id, "duplicate_search_for_other_case");
+  const otherStep = admission(req(), { duplicate_search: dupSearch([], "complete", { intent_ordinal: 2 }) });
+  assert.equal(otherStep.reason_id, "duplicate_search_for_other_step");
+  for (const over of [{ origin: OTHER_ORIGIN }, { org: OTHER_ORG }, { seat: OTHER_SEAT }]) {
+    const onOther = admission(req(), { duplicate_search: dupSearch([], "complete", { page: pageOn(over) }) });
+    assert.equal(onOther.reason_id, "duplicate_search_on_other_org", JSON.stringify(over));
+  }
+  const stopped = admission(req(), { duplicate_search: dupSearch([], "truncated") });
+  assert.equal(stopped.decision, "stop");
+  assert.equal(stopped.blocking_check, "duplicate_clearance");
+});
+
+test("admission: a create needs a clean duplicate search; other kinds may not carry one", () => {
+  assert.equal(admission(req(), { duplicate_search: null }).reason_id, "duplicate_search_required_before_create");
+  assert.equal(admission(req(), { duplicate_search: dupSearch([cand(OPP, { name_match: "similar" })]) }).reason_id,
+    "create_not_admissible_after_duplicate_search");
+  assert.throws(() => admission(req("etl_document_prepare"), { duplicate_search: dupSearch() }),
+    isErr("unexpected_field"));
+});
+
+test("admission: a confirmation bound to another preview, action, step or actor refuses", () => {
+  const r = req();
+  const p = buildActionPreview(r);
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { preview_digest: "sha256:" + "9".repeat(64) }) }).reason_id,
     "confirmation_for_other_preview");
-  assert.equal(admission(p, { confirmation: confirmationFor(p, { action_kind: "opportunity_phase_update" }) }).reason_id,
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { action_kind: "opportunity_phase_update" }) }).reason_id,
     "confirmation_for_other_action");
-  assert.equal(admission(p, { confirmation: confirmationFor(p, { step_key: stepKey("opportunity_create", 2) }) }).reason_id,
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { step_key: stepKey("opportunity_create", 2) }) }).reason_id,
     "confirmation_for_other_step");
-  assert.equal(admission(p, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T12:00:01Z" }) }).reason_id,
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_by: "dell" }) }).reason_id,
+    "confirmation_by_other_actor");
+});
+
+test("review C3: a confirmation from the future or older than one capability lifetime refuses", () => {
+  const r = req();
+  const p = buildActionPreview(r);
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T12:00:01Z" }) }).reason_id,
     "confirmation_after_presentation");
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2025-09-24T11:59:00Z" }) }).reason_id,
+    "confirmation_stale");
+  // Exactly one lifetime (10 minutes) old is still inside the bound; one second more is not.
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T11:50:00Z" }) }).decision,
+    "admissible_pending_attended_runtime");
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T11:49:59Z" }) }).reason_id,
+    "confirmation_stale");
 });
 
 test("admission: there is no batch or session confirmation to name", () => {
-  const p = preview();
-  assert.throws(() => admission(p, { confirmation: { ...confirmationFor(p), scope: "session" } }), isErr("unknown_field"));
-  assert.throws(() => admission(p, { confirmation: { ...confirmationFor(p), covers_all_actions: true } }),
+  const r = req();
+  const p = buildActionPreview(r);
+  assert.throws(() => admission(r, { confirmation: { ...confirmationFor(p), scope: "session" } }), isErr("unknown_field"));
+  assert.throws(() => admission(r, { confirmation: { ...confirmationFor(p), covers_all_actions: true } }),
     isErr("unknown_field"));
 });
 
-test("admission: an edited preview cannot be admitted", () => {
-  const p = preview();
-  const tampered = { ...p.preview, fields: p.preview.fields.map(f => ({ ...f, value: f.field === "Name" ? "Other" : f.value })) };
-  assert.throws(() => admission(p, { preview: tampered }), isErr("preview_seal_broken"));
-});
-
-test("admission: a create needs a clean duplicate search for the same step", () => {
-  assert.equal(admission(preview(), { duplicate_search: null }).reason_id, "duplicate_search_required_before_create");
-  assert.equal(admission(preview(), { duplicate_search: dupSearch([cand(OPP, { name_match: "similar" })]) }).reason_id,
-    "create_not_admissible_after_duplicate_search");
-  assert.equal(admission(preview(), { duplicate_search: dupSearch([], "complete", stepKey("opportunity_create", 2)) }).reason_id,
-    "duplicate_search_for_other_step");
-});
-
 test("admission: document preparation requires the opportunity to read back present first", () => {
-  const p = docPreview();
-  assert.equal(admission(p).reason_id, "target_readback_required");
-  assert.equal(admission(p, { target_readback: { opportunity_id: OPP, state: "absent" } }).reason_id,
+  const r = req("etl_document_prepare");
+  assert.equal(admission(r, { target_readback: undefined }).reason_id, "target_readback_required");
+  assert.equal(admission(r, { target_readback: { opportunity_id: OPP, state: "absent" } }).reason_id,
     "target_opportunity_absent");
-  assert.equal(admission(p, { target_readback: { opportunity_id: OPP, state: "indeterminate" } }).reason_id,
+  assert.equal(admission(r, { target_readback: { opportunity_id: OPP, state: "indeterminate" } }).reason_id,
     "target_readback_indeterminate");
-  assert.equal(admission(p, { target_readback: { opportunity_id: OPP3, state: "present" } }).reason_id,
+  assert.equal(admission(r, { target_readback: { opportunity_id: OPP3, state: "present" } }).reason_id,
     "record_mismatch");
-  const ok = admission(p, { target_readback: { opportunity_id: OPP, state: "present" } });
-  assert.equal(ok.decision, "admissible_pending_attended_runtime");
 });
 
-test("admission: a capability for one action cannot be presented for another (exact-action)", () => {
-  const create = preview();
-  const doc = docPreview();
-  // An envelope + capability sealed over the CREATE preview, presented for the DOC preview.
-  const env = envelopeFor(create);
-  const a = evaluateActionAdmission({
-    tenant: T, execution_mode: "attended", page: page(), preview: doc.preview,
-    target_readback: { opportunity_id: OPP, state: "present" }, confirmation: confirmationFor(doc),
-    f06: { envelope: env, capability: capabilityFor(env), presentation: presentationFor(env), authority: authority(), now: NOW },
-  });
-  assert.equal(a.decision, "refuse");
-  assert.equal(a.reason_id, "envelope_payload_is_not_this_preview");
+test("review R1-R2: a capability for one action or case cannot be presented for another", () => {
+  const etl = buildActionPreview(req("etl_document_prepare"));
+  const env = envelopeFor(etl);
+  const f06 = { envelope: env, capability: capabilityFor(env), presentation: presentationFor(env) };
+  assert.equal(admission(req("commission_agreement_prepare"), {}, f06).reason_id, "envelope_payload_is_not_this_preview");
+  assert.equal(admission(req("etl_document_prepare", { case: CASE2 }), {}, f06).reason_id,
+    "envelope_payload_is_not_this_preview");
 });
 
 test("admission: replayed, expired or wrong-account capabilities refuse through the real F06 ladder", () => {
-  const p = preview();
-  const env = envelopeFor(p);
+  const r = req();
+  const env = envelopeFor(buildActionPreview(r));
   const cases = [
     [{ presentation: presentationFor(env, { nonce_state: "consumed" }) }, "capability_replayed"],
-    [{ capability: capabilityFor(env, { issued_at: "2026-09-24T11:40:00Z", expires_at: "2026-09-24T11:50:00Z" }) },
+    [{ capability: capabilityFor(env, { issued_at: "2026-09-24T11:40:00Z", expires_at: "2026-09-24T11:59:30Z" }) },
       "capability_expired"],
-    [{ presentation: presentationFor(env, { presented_principals: { ...PRINCIPALS, account_ref: "sf-seat-other" } }) },
+    [{ presentation: presentationFor(env, { presented_principals: { ...PRINCIPALS, account_ref: OTHER_SEAT } }) },
       "account_mismatch"],
   ];
   for (const [f06over, f06reason] of cases) {
-    const a = admission(p, {}, { envelope: env, ...f06over });
+    const a = admission(r, {}, { envelope: env, ...f06over });
     assert.equal(a.decision, "refuse", f06reason);
     assert.equal(a.reason_id, "capability_presentation_refused");
     assert.equal(a.f06_reason_id, f06reason);
@@ -539,12 +755,13 @@ test("admission: replayed, expired or wrong-account capabilities refuse through 
 });
 
 test("admission: an envelope sealed for another action, step or case refuses", () => {
-  const p = preview();
-  assert.equal(admission(p, {}, { envelope: envelopeFor(p, { step_id: "step-other" }) }).reason_id,
+  const r = req();
+  const p = buildActionPreview(r);
+  assert.equal(admission(r, {}, { envelope: envelopeFor(p, { step_id: "step-other" }) }).reason_id,
     "envelope_step_is_not_this_step");
-  assert.equal(admission(p, {}, { envelope: envelopeFor(p, { workflow_id: "wf-other" }) }).reason_id,
+  assert.equal(admission(r, {}, { envelope: envelopeFor(p, { workflow_id: "wf-other" }) }).reason_id,
     "envelope_workflow_is_not_this_case");
-  assert.equal(admission(p, {}, { envelope: envelopeFor(p, { action: "business.send_client_document" }) }).reason_id,
+  assert.equal(admission(r, {}, { envelope: envelopeFor(p, { action: "business.send_client_document" }) }).reason_id,
     "envelope_action_not_rw02");
 });
 
@@ -552,7 +769,7 @@ test("admission: an envelope sealed for another action, step or case refuses", (
 // checkable_done 2b — readback (Q084.D1 exact readback; F06 quarantine).
 // ---------------------------------------------------------------------------
 
-test("CD2 readback: an exact field-by-field match confirms and seals one evidence record", () => {
+test("CD2 readback: an exact match with this step's marker confirms and seals one evidence record", () => {
   const r = readback();
   assert.equal(r.decision, "confirmed");
   assert.equal(r.evidence.outcome, "exact_match");
@@ -561,45 +778,70 @@ test("CD2 readback: an exact field-by-field match confirms and seals one evidenc
   assertGrantsNothing(r);
 });
 
-test("CD2 readback: any differing field is an inconsistent result that stops, naming fields not values", () => {
-  const p = preview();
-  const r = readback(p, { provider_readback: readbackOf(p, { StageName: "Closing" }) });
+test("review D1: a create is not confirmed by an equal-valued opportunity without this step's marker", () => {
+  const p = buildActionPreview(req());
+  for (const marker of ["absent", "unstated"]) {
+    const r = readback(req(), { provider_readback: readbackOf(p, {}, OPP3, marker) });
+    assert.equal(r.decision, "stop", marker);
+    assert.equal(r.detail_reason, "readback_not_this_steps_opportunity");
+  }
+});
+
+test("CD2 readback: any differing field stops, naming fields not values, and types are compared strictly", () => {
+  const r0 = req();
+  const p = buildActionPreview(r0);
+  const r = readback(r0, { provider_readback: readbackOf(p, { StageName: "Closing-SECRETVALUE" }) });
   assert.equal(r.decision, "stop");
   assert.equal(r.reason_id, "inconsistent_result");
   assert.deepEqual(r.mismatched_fields, ["StageName"]);
-  assert.ok(!JSON.stringify(r).includes("Closing"));
+  assert.ok(!JSON.stringify(r).includes("SECRETVALUE"));
   assert.equal(r.evidence.outcome, "mismatch");
+  assert.deepEqual(readback(r0, { provider_readback: readbackOf(p, { Total_Commission__c: "1000" }) }).mismatched_fields,
+    ["Total_Commission__c"]);
   const missing = readbackOf(p);
   missing.fields = missing.fields.filter(f => f.field !== "CloseDate");
-  assert.deepEqual(readback(p, { provider_readback: missing }).mismatched_fields, ["CloseDate"]);
+  assert.deepEqual(readback(r0, { provider_readback: missing }).mismatched_fields, ["CloseDate"]);
+});
+
+test("CD2 readback: an incomplete field readback is not a readback", () => {
+  const p = buildActionPreview(req());
+  const r = readback(req(), { provider_readback: { ...readbackOf(p), completeness: "truncated" } });
+  assert.equal(r.decision, "readback_required");
+  assert.equal(r.reason_id, "field_readback_incomplete");
 });
 
 test("CD2 readback: a timeout is unknown and requires a readback before anything else", () => {
-  const r = readback(preview(), { provider_readback: null }, { outcome: { state: "timed_out" } });
+  const r = readback(req(), { provider_readback: null }, { outcome: { state: "timed_out" } });
   assert.equal(r.decision, "readback_required");
   assert.equal(r.reason_id, "outcome_unknown_readback_first");
   assert.equal(r.retry_permitted, false);
   // A matching field readback that is NOT joined to this effect's idempotency
   // key does not lift the quarantine: the fields could be someone else's write.
-  const unjoined = readback(preview(), {}, { outcome: { state: "timed_out" } });
+  const unjoined = readback(req(), {}, { outcome: { state: "timed_out" } });
   assert.equal(unjoined.decision, "readback_required");
   assert.equal(unjoined.reason_id, "outcome_unknown_readback_first");
   assert.equal(unjoined.evidence, undefined);
 });
 
 test("CD2 readback: a timeout resolved present by the provider confirms as unknown_resolved_by_readback", () => {
-  const p = preview();
-  const env = envelopeFor(p);
-  const r = readback(p, {}, { outcome: { state: "timed_out" },
+  const env = envelopeFor(buildActionPreview(req()));
+  const r = readback(req(), {}, { outcome: { state: "timed_out" },
     readback: { state: "effect_present", join_key: env.envelope_digest } });
   assert.equal(r.decision, "confirmed");
   assert.equal(r.evidence.outcome, "unknown_resolved_by_readback");
 });
 
+test("CD2 readback: a provider readback joined on another effect stops", () => {
+  const r = readback(req(), {}, { outcome: { state: "timed_out" },
+    readback: { state: "effect_present", join_key: "sha256:" + "e".repeat(64) } });
+  assert.equal(r.decision, "stop");
+  assert.equal(r.detail_reason, "attempt_resolution_refused");
+  assert.equal(r.f06_reason_id, "readback_joined_on_other_effect");
+});
+
 test("CD2 readback: an absent effect is a confirmed failure; the consumed capability is never reusable", () => {
-  const p = preview();
-  const env = envelopeFor(p);
-  const r = readback(p, { provider_readback: null }, { outcome: { state: "failed" },
+  const env = envelopeFor(buildActionPreview(req()));
+  const r = readback(req(), { provider_readback: null }, { outcome: { state: "failed" },
     readback: { state: "effect_absent", join_key: env.envelope_digest } });
   assert.equal(r.decision, "confirmed_failure");
   assert.equal(r.consumed_capability_reusable, false);
@@ -607,17 +849,35 @@ test("CD2 readback: an absent effect is a confirmed failure; the consumed capabi
 });
 
 test("CD2 readback: a provider call before consumption committed stops", () => {
-  const r = readback(preview(), {}, {
+  const r = readback(req(), {}, {
     consumption: { state: "committed", committed_seq: 3 }, provider_call: { state: "started", started_seq: 2 },
   });
   assert.equal(r.decision, "stop");
   assert.equal(r.detail_reason, "consumption_order_refused");
 });
 
-test("CD2 readback: a readback of another opportunity stops as a record mismatch", () => {
-  const p = docPreview();
-  const r = readback(p, { provider_readback: readbackOf(p, {}, OPP2) });
-  assert.equal(r.reason_id, "record_mismatch");
+test("CD2 readback: the attempt must be sealed over this preview and step", () => {
+  const other = buildActionPreview(req("opportunity_create", { intent_ordinal: 2 }));
+  const env = envelopeFor(other);
+  assert.throws(() => evaluateWriteReadback({
+    tenant: T, page: page(), preview_request: req(), evidence_class: "fixture", observed_at: NOW,
+    f06: { envelope: env, capability: capabilityFor(env), attempt: attemptFor(env) },
+    provider_readback: readbackOf(other),
+  }), isErr("attempt_for_other_preview"));
+});
+
+test("CD2 readback: the page must be the previewed org and, for a targeted action, pin the record", () => {
+  assert.equal(readback(req(), { page: pageOn({ org: OTHER_ORG }) }).reason_id, "binding_org_not_previewed");
+  assert.equal(readback(req("etl_document_prepare"), { page: page() }).reason_id, "record_not_pinned");
+  const p = buildActionPreview(req("etl_document_prepare"));
+  assert.equal(readback(req("etl_document_prepare"), { provider_readback: readbackOf(p, {}, OPP2) }).reason_id,
+    "record_mismatch");
+});
+
+test("CD2 readback: a refused preview request is refused before anything is read", () => {
+  const r = readback(req(), { preview_request: req("opportunity_create", { target_opportunity_id: OPP }) });
+  assert.equal(r.decision, "refuse");
+  assert.equal(r.preview_reason_id, "create_names_an_existing_target");
 });
 
 // ---------------------------------------------------------------------------
@@ -625,7 +885,7 @@ test("CD2 readback: a readback of another opportunity stops as a record mismatch
 // ---------------------------------------------------------------------------
 
 const resume = (effect, journal_hint, opportunity_id) => evaluateResume({
-  tenant: T, action_kind: "opportunity_create", step_key: stepKey("opportunity_create"), journal_hint,
+  tenant: T, action_kind: "opportunity_create", case: CASE, intent_ordinal: 1, journal_hint,
   provider: opportunity_id ? { effect, opportunity_id } : { effect },
 });
 
@@ -633,6 +893,7 @@ test("CD2 resume: the provider decides; the journal is only ever a hint", () => 
   const behind = resume("effect_present", "not_started", OPP);
   assert.equal(behind.decision, "skip_already_effected");
   assert.equal(behind.reason_id, "journal_behind_provider");
+  assert.equal(behind.step_key, stepKey("opportunity_create"));
   assert.equal(behind.repeat_write_permitted, false);
   assert.equal(behind.journal_is_authority, false);
   assert.equal(resume("effect_present", "effected", OPP).reason_id, "provider_confirms_journal");
@@ -655,12 +916,15 @@ test("CD2 resume: the provider decides; the journal is only ever a hint", () => 
   }
 });
 
+test("review G1: a present effect must name the opportunity it is on", () => {
+  assert.throws(() => resume("effect_present", "not_started"), isErr("missing_field"));
+});
+
 test("CD2 resume: the same intent always folds to the same step key; distinct intents do not", () => {
   assert.equal(stepKey("opportunity_create"), stepKey("opportunity_create"));
   assert.notEqual(stepKey("opportunity_phase_update", 1), stepKey("opportunity_phase_update", 2));
   assert.notEqual(stepKey("opportunity_create"), stepKey("etl_document_prepare"));
-  assert.notEqual(stepKey("opportunity_create"),
-    stepKey("opportunity_create", 1, { ...CASE, deal_ref: "deal-synthetic-2" }));
+  assert.notEqual(stepKey("opportunity_create"), stepKey("opportunity_create", 1, CASE2));
 });
 
 // ---------------------------------------------------------------------------
@@ -669,23 +933,25 @@ test("CD2 resume: the same intent always folds to the same step key; distinct in
 // ---------------------------------------------------------------------------
 
 function evidenceFor(action_kind, { cls = "fixture", ordinal = 1, observed_at = NOW, mismatch = false } = {}) {
-  const fields = action_kind === "opportunity_create"
-    ? CREATE_FIELDS.map(f => ({ ...f }))
-    : action_kind === "opportunity_phase_update"
-      ? [{ field: "StageName", value: `Phase-${ordinal}`, semantics: "phase", provenance: "partner_entered" }]
-      : [{ field: "Template_Ref__c", value: `tpl-${ordinal}`, semantics: "ordinary", provenance: "doctorcre_record" }];
-  const p = buildActionPreview({
-    tenant: T, action_kind, case: CASE, step_key: stepKey(action_kind, ordinal), fields,
-    ...(action_kind === "opportunity_create" ? {} : { target_opportunity_id: OPP }),
-  });
+  const fields = action_kind === "opportunity_phase_update"
+    ? [field("StageName", `Phase-${ordinal}`, "phase")]
+    : defaultFields(action_kind).map(f => ({ ...f }));
+  const r = req(action_kind, { intent_ordinal: ordinal, fields });
+  const p = buildActionPreview(r);
   const env = envelopeFor(p);
-  const r = evaluateWriteReadback({
-    tenant: T, page: page(), preview: p.preview, evidence_class: cls, observed_at,
+  const out = evaluateWriteReadback({
+    tenant: T, page: TARGETED.has(action_kind) ? pinned(OPP) : page(), preview_request: r,
+    evidence_class: cls, observed_at,
     f06: { envelope: env, capability: capabilityFor(env), attempt: attemptFor(env) },
     provider_readback: readbackOf(p, mismatch ? { [fields[0].field]: "drifted" } : {}),
   });
-  return r.evidence;
+  return out.evidence;
 }
+
+const reseal = (record, over) => {
+  const { evidence_digest, ...rest } = { ...record, ...over };
+  return { ...rest, evidence_digest: digest({ kind: "rw02-evidence.v1", ...rest }) };
+};
 
 test("CD3 evidence records are distinct per action kind and per step", () => {
   const a = evidenceFor("opportunity_create");
@@ -711,16 +977,32 @@ test("CD3 global trust is refused by name", () => {
   assert.equal(w.reason_id, "global_trust_excluded");
 });
 
-test("CD3 a sample counted twice, or an edited record, is refused", () => {
+test("CD3 a sample counted twice, an edited record or a foreign tenant is refused", () => {
   const e = evidenceFor("opportunity_create");
   assert.equal(evaluateActionTrustWindow({ tenant: T, action_kind: "opportunity_create", evidence: [e, e] }).reason_id,
     "evidence_counted_twice");
   const reobserved = evidenceFor("opportunity_create", { observed_at: "2026-09-24T12:30:00Z" });
   assert.equal(evaluateActionTrustWindow({ tenant: T, action_kind: "opportunity_create",
     evidence: [e, reobserved] }).reason_id, "evidence_counted_twice");
+  const failure = evidenceFor("opportunity_create", { mismatch: true });
+  assert.equal(failure.outcome, "mismatch");
+  assert.equal(evaluateActionTrustWindow({ tenant: T, action_kind: "opportunity_create",
+    evidence: [failure, failure] }).reason_id, "evidence_counted_twice");
   assert.throws(() => evaluateActionTrustWindow({ tenant: T, action_kind: "opportunity_create",
-    evidence: [{ ...e, outcome: "exact_match", evidence_class: "supervised_production_sample" }] }),
-  isErr("evidence_seal_broken"));
+    evidence: [{ ...e, evidence_class: "supervised_production_sample" }] }), isErr("evidence_seal_broken"));
+  assert.throws(() => evaluateActionTrustWindow({ tenant: T, action_kind: "opportunity_create",
+    evidence: [reseal(e, { tenant: "another-tenant" })] }), isErr("tenant_mismatch"));
+});
+
+test("review F1: a window of self-sealed records is a reading, never authenticated or eligible", () => {
+  const forged = Array.from({ length: 50 }, (_, i) => reseal(evidenceFor("opportunity_create"),
+    { step_key: "sha256:" + String(i).padStart(64, "0"), evidence_class: "supervised_production_sample" }));
+  const w = evaluateActionTrustWindow({ tenant: T, action_kind: "opportunity_create", evidence: forged });
+  assert.equal(w.window_since_last_failure.records, 50);
+  assert.equal(w.evidence_authenticated, false);
+  assert.equal(w.evidence_store_seam, V5_RW02_EVIDENCE_STORE_SEAM);
+  assert.equal(w.activation_review_eligibility, "unavailable");
+  assertGrantsNothing(w);
 });
 
 test("CD3 the window restarts after a failure, counts per class, and never activates autonomy", () => {

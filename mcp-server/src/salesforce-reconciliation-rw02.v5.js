@@ -32,6 +32,21 @@
 // every RW02 rule passed on the facts as reported, and the runtime inputs the
 // catalog names for activation are still missing and are listed by name.
 //
+// NOTHING A CALLER BUILT IS TRUSTED AS BUILT. A public hash proves only that
+// somebody hashed something, so no door in this file accepts a finished preview,
+// a step key or a duplicate verdict. Admission, readback and resume each take
+// the REQUEST and re-derive: the preview is rebuilt through buildActionPreview
+// (so every preview rule and every credential check runs again), the step key is
+// derived from case, action kind and intent ordinal, and the duplicate search is
+// re-evaluated and must be about the same case, the same step and the same org.
+//
+// ONE ACTION, ONE ORG, ONE SEAT, ONE RECORD. The preview preimage carries the
+// org binding — origin, org id and the signed-in Salesforce seat — and the
+// target record. The page an action is taken on must be bound to exactly that
+// org and seat, a targeted action's page must pin exactly that record, and the
+// F06 envelope's `account` principal must be exactly that seat. A capability for
+// one org, seat or record therefore cannot admit an action on another.
+//
 // ATTENDED IS STRUCTURAL. Q084.D1 and Q100.D1 say Salesforce browser work is
 // launched attended and stays attended while reliability is established; the
 // catalog excludes unattended execution and MFA/CAPTCHA bypass. So
@@ -41,27 +56,29 @@
 //
 // PER-ACTION CONFIRMATION IS STRUCTURAL. No write reaches Salesforce or the
 // record layer without a partner confirmation bound to the EXACT preview digest,
-// the exact action kind and the exact step key of that one action. There is no
-// batch, session or "all" confirmation to name: the closed key set has no field
-// for one. The confirming identity is not read from a caller string — it is the
-// real V5-F06 capability presentation, whose first check is the
-// global-boundaries actor authority answer, computed here rather than trusted.
+// action kind and step key of that one action, given by the SAME actor the F06
+// envelope names, and no older than one capability lifetime. There is no batch,
+// session or "all" confirmation to name. The actor's authority is the real F06
+// capability presentation, whose first check is the global-boundaries actor
+// authority answer, computed here rather than trusted.
 //
 // SALESFORCE STATE IS NOT DOCTORCRE LIFECYCLE. The catalog excludes it and
 // Q097.D1 settles the opportunity as a PARALLEL corporate case. The one
 // record-layer write this slice may propose is the external-id link
 // (`salesforce_id`) on the deal; a preview that would carry a Salesforce phase,
-// outcome, value or any V5-J102 lifecycle axis into DoctorCRE is refused.
+// outcome, value, placeholder or any V5-J102 lifecycle axis into DoctorCRE is
+// refused.
 //
 // THE BUSINESS RULES THIS KERNEL READS FROM DOCTRINE, not invented here:
-//   * The corporate transaction field's authoritative home is Salesforce
-//     (V5-F01 `corporate_transaction_field`), so every Salesforce-side field in
-//     a preview carries Salesforce provenance.
+//   * Every field names its fact class and V5-F01's projectRecordHome decides
+//     whether that class's home is the surface the field is written to. A
+//     corporate transaction field's home is Salesforce; a DoctorCRE operating
+//     fact written into Salesforce as if Salesforce owned it is refused.
 //   * Never auto-merge on a name (salesforce-read-sop): a name-similar
 //     candidate is a human disambiguation, never a silent join.
 //   * Commission and close date are PLACEHOLDERS, never figures or forecasts
-//     (pipeline-coo-doctrine): they are labelled so in every preview and may
-//     never feed a DoctorCRE value field.
+//     (pipeline-coo-doctrine): they are labelled in every preview, must have
+//     placeholder shape, and may never be written to the record layer.
 //   * The lane comes from the Out of Market checkbox, never inferred from a
 //     city (salesforce-read-sop): an inferred lane is refused.
 //   * The Salesforce deal exists before any signature document is generated
@@ -77,15 +94,16 @@
 // authority: the decision to skip, re-read or re-preview is made from the
 // provider readback, and a hint that disagrees with the provider is itself a
 // stop (inconsistent result), never a tie-break. A consumed capability is never
-// reused; a re-attempt needs a fresh preview, confirmation and capability.
+// reused. A create's readback must carry THIS step's idempotency marker, so an
+// equal-valued opportunity that already existed cannot confirm it.
 //
 // TRUST IS PER ACTION AND NEVER ACTIVE HERE. Q099.D1: autonomy is earned
 // separately for each Salesforce action, never through global trust. Evidence
 // records are sealed per action kind and a window refuses any record of another
-// kind. The window thresholds (how many clean samples, over what period) are
-// policy nobody has written down, so eligibility for activation review answers
-// `unavailable` naming that seam, and `autonomy_active` is false on every
-// answer. Activation is a separate gate (`system.autonomy_tier_activation`).
+// kind. The seal is a public digest: it proves a record was not EDITED, not that
+// this kernel produced it. Authenticating evidence is the durable evidence store
+// (V5_RW02_EVIDENCE_STORE_SEAM), which is why the window can only be READ here
+// and activation-review eligibility answers `unavailable`.
 //
 // TWO KINDS OF NO, following the sibling v5 modules:
 //   * A POLICY ANSWER is returned — a frozen result with a `decision` from this
@@ -94,11 +112,13 @@
 //     vocabulary, malformed digests, credential-shaped values and unreadable
 //     instants are not policy questions; the module fails closed.
 //
-// THE DATA BOUNDARY. No field in any closed key set can hold a credential, and
-// any string value shaped like one (a JWT-like dotted triple, a PEM block, a
-// `password=`/`token=`/`secret=` pair, a bearer header) throws
-// `credential_shaped_value` rather than being carried. Readback mismatches
-// report field NAMES only, never values.
+// THE DATA BOUNDARY. No field in any closed key set can hold a credential. Any
+// string that CONTAINS something shaped like one — a JWT anywhere in the text, a
+// dotted triple, a PEM block, a `password=`/`token=`/`secret=` pair, a bearer
+// header, a Salesforce session id, an API key — throws `credential_shaped_value`.
+// No error in this file echoes a caller's value, unknown key or unregistered
+// vocabulary word; errors name the PATH only. Readback mismatches report field
+// NAMES only, never values.
 //
 // The module is pure: no filesystem, network, database, environment or clock.
 // Every time-dependent evaluation takes `now` from its caller.
@@ -118,9 +138,9 @@ import { V5_J102_ASSIGNMENT_PHASES, V5_J102_DEAL_AXES } from "./cre-lifecycle.v5
 export { V5_NO_EFFECTS };
 
 export const V5_RW02_SCHEMA_VERSION = "doctorcre-v5-salesforce-reconciliation.v1";
-export const V5_RW02_POLICY_VERSION = 1;
+export const V5_RW02_POLICY_VERSION = 2;
 export const V5_RW02_EVIDENCE_SCHEMA_VERSION = "doctorcre-v5-rw02-action-evidence.v1";
-export const V5_RW02_PREVIEW_SCHEMA_VERSION = "doctorcre-v5-rw02-action-preview.v1";
+export const V5_RW02_PREVIEW_SCHEMA_VERSION = "doctorcre-v5-rw02-action-preview.v2";
 
 /** The effect class the catalog records on this item. */
 export const V5_RW02_EFFECT_CLASS = "attended_external_provider_mutation";
@@ -131,8 +151,7 @@ export const V5_RW02_EFFECT_CLASS = "attended_external_provider_mutation";
  * shared policy digest outside this slice's lease; a Salesforce opportunity
  * write is a deal update under deal-owner, account, policy and capability
  * controls. The RW02 action kind is bound into the payload digest, so a
- * capability issued for one kind refuses against another at F06's
- * payload_binding check.
+ * capability issued for one kind refuses against another.
  */
 export const V5_RW02_F06_ACTION = "business.update_deal";
 
@@ -147,17 +166,24 @@ const HTTPS_ORIGIN = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-
 // A Salesforce Opportunity record id: key prefix 006, then 12 characters, with
 // the optional 3-character case-safe suffix.
 const OPPORTUNITY_ID = /^006[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UNSAFE_TEXT =
   /[\u0000-\u001F\u007F-\u009F​-‏‪-‮⁠-⁤⁦-⁩﻿]/u;
 const ISO_INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 
-// Credential shapes. None of these is a policy question: a value that looks like
-// one means the data boundary has already been crossed.
-const JWT_SHAPED = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;
-const PEM_SHAPED = /-----BEGIN /;
-const SECRET_PAIR = /\b(?:password|passwd|pwd|token|secret|api[_-]?key|session[_-]?id|sid)\s*[=:]/i;
-const BEARER = /\bbearer\s+[A-Za-z0-9._~+/-]+=*/i;
+// Credential shapes, searched ANYWHERE in a string. None of these is a policy
+// question: a value that carries one means the data boundary has been crossed.
+export const V5_RW02_CREDENTIAL_PATTERNS = Object.freeze({
+  jwt_anywhere: /eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/,
+  dotted_triple: /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/,
+  pem_block: /-----BEGIN /,
+  secret_pair: /(?:password|passwd|pwd|passcode|token|secret|api[_-]?key|session[_-]?id|client[_-]?secret)\s*[=:]/i,
+  bearer: /\bbearer\s+\S+/i,
+  salesforce_session_id: /00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]{16,}/,
+  api_key: /\bsk-[A-Za-z0-9_-]{16,}/,
+});
+const CREDENTIAL_PATTERN_LIST = Object.freeze(Object.values(V5_RW02_CREDENTIAL_PATTERNS));
 
 export class V5RW02Error extends Error {
   constructor(code, message, detail) {
@@ -189,10 +215,11 @@ function assertObject(value, path) {
   return value;
 }
 
+/** An unknown key is refused WITHOUT naming it: a key can itself carry a secret. */
 function assertClosedKeys(object, allowed, path) {
   for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) {
-      fail("unknown_field", `unknown field "${key}" at ${path}`, { path: `${path}.${key}`, key });
+      fail("unknown_field", `unknown field at ${path}`, { path, allowed: [...allowed] });
     }
   }
 }
@@ -210,6 +237,10 @@ function assertArray(value, path, { min = 0, max = 256 } = {}) {
   return value;
 }
 
+function containsCredential(value) {
+  return CREDENTIAL_PATTERN_LIST.some(pattern => pattern.test(value));
+}
+
 /** Every string that enters this module passes through here. */
 function assertSafeText(value, path, { maxLength = 512 } = {}) {
   if (typeof value !== "string" || value.length === 0) {
@@ -222,7 +253,7 @@ function assertSafeText(value, path, { maxLength = 512 } = {}) {
   if (UNSAFE_TEXT.test(value)) {
     fail("unsafe_unicode", `${path} contains a control, bidirectional or invisible character`, { path });
   }
-  if (JWT_SHAPED.test(value) || PEM_SHAPED.test(value) || SECRET_PAIR.test(value) || BEARER.test(value)) {
+  if (containsCredential(value)) {
     // The value itself is deliberately NOT echoed into the error.
     fail("credential_shaped_value",
       `${path} is shaped like credential material; no credential may enter this module`, { path });
@@ -249,6 +280,11 @@ function assertOpportunityId(value, path) {
   return value;
 }
 
+function assertOptionalOpportunityId(value, path) {
+  if (value === undefined || value === null) return null;
+  return assertOpportunityId(value, path);
+}
+
 function assertOrigin(value, path) {
   assertSafeText(value, path, { maxLength: 253 });
   if (!HTTPS_ORIGIN.test(value)) {
@@ -264,16 +300,11 @@ function assertDigestRef(value, path) {
   return value;
 }
 
+/** An unregistered value is refused WITHOUT echoing it. */
 function assertEnum(value, registered, path, code) {
   if (typeof value !== "string" || !registered.includes(value)) {
-    fail(code, `"${String(value)}" is not registered at ${path}`,
-      { path, registered: [...registered] });
+    fail(code, `the value at ${path} is not registered`, { path, registered: [...registered] });
   }
-  return value;
-}
-
-function assertBoolean(value, path) {
-  if (typeof value !== "boolean") fail("invalid_shape", `${path} must be a boolean`, { path });
   return value;
 }
 
@@ -482,6 +513,17 @@ export const V5_RW02_EXCLUDED_ACTIONS = deepFreeze({
   delivery_verification: "owned_by_v5_rw01",
 });
 
+/** The V5-F01 home each surface writes into; projectRecordHome is asked against it. */
+export const V5_RW02_SURFACE_HOMES = deepFreeze({
+  salesforce: "salesforce",
+  record_layer: "neon_record_layer",
+});
+
+/** The V5-F01 fact classes a preview field may declare. */
+export const V5_RW02_FIELD_FACT_CLASSES = deepFreeze([
+  "corporate_transaction_field", "operating_fact",
+]);
+
 /** What a field in a preview MEANS. The field names themselves are the owed field map. */
 export const V5_RW02_FIELD_SEMANTICS = deepFreeze([
   "ordinary",
@@ -547,12 +589,16 @@ export const V5_RW02_EXECUTION_MODES = deepFreeze(["attended", "unattended"]);
 
 export const V5_RW02_STOP_REASON_IDS = deepFreeze([
   "authentication_challenge",
+  "binding_account_not_previewed",
+  "binding_org_not_previewed",
+  "binding_origin_not_previewed",
   "challenge_state_unobservable",
   "inconsistent_result",
   "org_mismatch",
   "origin_mismatch",
   "policy_conflict",
   "record_mismatch",
+  "record_not_pinned",
   "result_consistency_unobservable",
   "signed_in_account_mismatch",
   "ui_drift",
@@ -592,12 +638,13 @@ function stopAnswer(answer_kind, reason_id, detail) {
 }
 
 // ---------------------------------------------------------------------------
-// Case identity and the step key.
+// Case identity, org binding and the step key.
 // ---------------------------------------------------------------------------
 
 const CASE_KEYS = Object.freeze([
   "assignment_ref", "deal_ref", "engagement_ref", "prospect_ref", "workflow_ref",
 ]);
+const ANCHOR_KEYS = Object.freeze(["assignment_ref", "deal_ref", "engagement_ref", "prospect_ref"]);
 
 /**
  * Q097.D1: the opportunity is a parallel corporate case linked across prospect,
@@ -622,6 +669,30 @@ function normalizeCase(value, path) {
   return out;
 }
 
+function caseAnchors(kase) {
+  return ANCHOR_KEYS.map(k => kase[k]).filter(v => v !== null);
+}
+
+const ORG_BINDING_KEYS = Object.freeze(["account_ref", "org_id", "origin"]);
+
+/** The Salesforce org, origin and signed-in seat ONE action is bound to. */
+function normalizeOrgBinding(value, path) {
+  const raw = assertObject(value, path);
+  assertClosedKeys(raw, ORG_BINDING_KEYS, path);
+  assertRequiredKeys(raw, ORG_BINDING_KEYS, path);
+  return {
+    origin: assertOrigin(raw.origin, `${path}.origin`),
+    org_id: assertStableId(raw.org_id, `${path}.org_id`),
+    account_ref: assertStableId(raw.account_ref, `${path}.account_ref`),
+  };
+}
+
+function stepKeyOf(kase, action_kind, intent_ordinal) {
+  return digest({
+    kind: "rw02-step-key.v1", tenant: ORGANIZATION_TENANT_ID, action_kind, case: kase, intent_ordinal,
+  });
+}
+
 const STEP_KEY_REQUEST_KEYS = Object.freeze(["action_kind", "case", "intent_ordinal", "tenant"]);
 
 /**
@@ -629,7 +700,8 @@ const STEP_KEY_REQUEST_KEYS = Object.freeze(["action_kind", "case", "intent_ordi
  * before anything happens. It is the idempotency marker a provider readback is
  * searched for, and the F06 envelope's step_id. `intent_ordinal` separates two
  * genuinely distinct intents of one kind (a second phase move), and replaying
- * the same intent folds to the same key.
+ * the same intent folds to the same key. No door in this module accepts a step
+ * key from a caller; each derives it with this function.
  */
 export function rw02StepKey(request) {
   const raw = assertObject(request, "request");
@@ -639,9 +711,7 @@ export function rw02StepKey(request) {
   const action_kind = assertActionKind(raw.action_kind, "request.action_kind");
   const kase = normalizeCase(raw.case, "request.case");
   const intent_ordinal = assertPositiveInteger(raw.intent_ordinal, "request.intent_ordinal");
-  return digest({
-    kind: "rw02-step-key.v1", tenant: ORGANIZATION_TENANT_ID, action_kind, case: kase, intent_ordinal,
-  });
+  return stepKeyOf(kase, action_kind, intent_ordinal);
 }
 
 /** The F06 envelope workflow_id for one case. */
@@ -651,10 +721,10 @@ export function rw02WorkflowId(caseValue) {
 }
 
 function assertActionKind(value, path) {
-  if (typeof value === "string" && value in V5_RW02_EXCLUDED_ACTIONS) {
+  if (typeof value === "string" && Object.hasOwn(V5_RW02_EXCLUDED_ACTIONS, value)) {
     fail("action_excluded_from_rw02",
-      `"${value}" is an outward send; the catalog assigns it to V5-RW01, which depends on this slice`,
-      { path, action: value, owner: "V5-RW01" });
+      `the action at ${path} is an outward send; the catalog assigns it to V5-RW01, which depends on this slice`,
+      { path, owner: "V5-RW01" });
   }
   return assertEnum(value, V5_RW02_ACTION_KIND_KEYS, path, "unknown_action_kind");
 }
@@ -730,7 +800,8 @@ function normalizePage(request) {
  * Every stop is immediate, carries `bypass_permitted: false` and
  * `automatic_retry_permitted: false`, and its only resolution is the partner at
  * the browser. An unstated challenge or consistency state STOPS: silence is
- * never a clear page.
+ * never a clear page. A continuing answer reports the org binding it verified,
+ * so a consuming door can compare it with what the action was previewed on.
  */
 export function evaluatePageObservation(request) {
   const { execution_mode, binding, observation } = normalizePage(request);
@@ -787,8 +858,28 @@ export function evaluatePageObservation(request) {
     reason_id: "page_verified_attended",
     blocking_check: null,
     checks_required: [...V5_RW02_PAGE_CHECKS],
+    verified_binding: {
+      origin: binding.expected_origin,
+      org_id: binding.expected_org_id,
+      account_ref: binding.expected_account_ref,
+      record_id: binding.expected_record_id,
+    },
     org_binding_seam: V5_RW02_ORG_BINDING_SEAM,
   }));
+}
+
+/**
+ * A continuing page must be the org, origin and seat the action was previewed
+ * on, and a targeted action's page must PIN the previewed record. Returns the
+ * stop reason, or null.
+ */
+function pageBindingStop(page, preview, { requireRecordPin }) {
+  const vb = page.verified_binding;
+  if (vb.origin !== preview.org_binding.origin) return "binding_origin_not_previewed";
+  if (vb.org_id !== preview.org_binding.org_id) return "binding_org_not_previewed";
+  if (vb.account_ref !== preview.org_binding.account_ref) return "binding_account_not_previewed";
+  if (requireRecordPin && vb.record_id !== preview.target_opportunity_id) return "record_not_pinned";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -807,11 +898,9 @@ export const V5_RW02_DUPLICATE_OUTCOMES = deepFreeze([
   "stop",
 ]);
 
-const DUPLICATE_REQUEST_KEYS = Object.freeze(["case", "page", "search", "step_key", "tenant"]);
+const DUPLICATE_REQUEST_KEYS = Object.freeze(["case", "intent_ordinal", "page", "search", "tenant"]);
 const SEARCH_KEYS = Object.freeze(["candidates", "completeness"]);
-const CANDIDATE_KEYS = Object.freeze([
-  "linked_deal_ref", "name_match", "opportunity_id", "step_marker",
-]);
+const CANDIDATE_KEYS = Object.freeze(["linked_ref", "name_match", "opportunity_id", "step_marker"]);
 
 function normalizeSearch(value, path) {
   const raw = assertObject(value, path);
@@ -831,7 +920,7 @@ function normalizeSearch(value, path) {
     return {
       opportunity_id,
       step_marker: assertEnum(c.step_marker, V5_RW02_MARKER_STATES, `${p}.step_marker`, "unknown_marker_state"),
-      linked_deal_ref: assertOptionalStableId(c.linked_deal_ref, `${p}.linked_deal_ref`),
+      linked_ref: assertOptionalStableId(c.linked_ref, `${p}.linked_ref`),
       name_match: assertEnum(c.name_match, V5_RW02_NAME_MATCH_STATES, `${p}.name_match`, "unknown_name_match"),
     };
   });
@@ -842,12 +931,16 @@ function normalizeSearch(value, path) {
 /**
  * Classify one provider duplicate search for one intended create.
  *
- * The step marker is the idempotency key written with the opportunity (the
- * provider field that carries it is V5_RW02_IDEMPOTENCY_MARKER_SEAM). A
+ * The step key is derived here for `opportunity_create` from the case and the
+ * intent ordinal. The step marker is that key as written with the opportunity
+ * (the provider field that carries it is V5_RW02_IDEMPOTENCY_MARKER_SEAM). A
  * candidate carrying THIS step's marker means the create already happened — the
  * resume answer is to read it back, never to create again. A candidate already
- * linked to this deal means link, not create. A name-similar candidate is a
- * human question: never auto-merge on a name.
+ * linked to ANY of this case's DoctorCRE anchors means link, not create. A
+ * name-similar candidate is a human question: never auto-merge on a name.
+ *
+ * The answer reports the case, step key and verified org binding it was about,
+ * so admission can refuse a search that was run for something else.
  */
 export function evaluateDuplicateSearch(request) {
   const raw = assertObject(request, "request");
@@ -855,47 +948,50 @@ export function evaluateDuplicateSearch(request) {
   assertRequiredKeys(raw, DUPLICATE_REQUEST_KEYS, "request");
   assertTenant(raw.tenant, "request.tenant");
   const kase = normalizeCase(raw.case, "request.case");
-  const step_key = assertDigestRef(raw.step_key, "request.step_key");
+  const intent_ordinal = assertPositiveInteger(raw.intent_ordinal, "request.intent_ordinal");
+  const step_key = stepKeyOf(kase, "opportunity_create", intent_ordinal);
   const search = normalizeSearch(raw.search, "request.search");
   const page = evaluatePageObservation(raw.page);
   const kind = "rw02-duplicate-search.v1";
-  const base = { step_key, idempotency_marker_seam: V5_RW02_IDEMPOTENCY_MARKER_SEAM };
+  const base = { step_key, case: kase, idempotency_marker_seam: V5_RW02_IDEMPOTENCY_MARKER_SEAM };
 
   if (page.decision !== "continue") {
     return stopAnswer(kind, page.reason_id, { ...base, page_reason_id: page.reason_id });
   }
+  const scoped = { ...base, searched_on: page.verified_binding };
   if (search.completeness !== "complete") {
     return stopAnswer(kind, "inconsistent_result",
-      { ...base, detail_reason: "duplicate_search_incomplete", completeness: search.completeness });
+      { ...scoped, detail_reason: "duplicate_search_incomplete", completeness: search.completeness });
   }
   if (search.candidates.some(c => c.step_marker === "unstated")) {
-    return stopAnswer(kind, "inconsistent_result", { ...base, detail_reason: "step_marker_unobservable" });
+    return stopAnswer(kind, "inconsistent_result", { ...scoped, detail_reason: "step_marker_unobservable" });
   }
   const marked = search.candidates.filter(c => c.step_marker === "present");
   if (marked.length > 1) {
     return stopAnswer(kind, "inconsistent_result", {
-      ...base, detail_reason: "step_marker_on_multiple_opportunities",
+      ...scoped, detail_reason: "step_marker_on_multiple_opportunities",
       opportunity_ids: marked.map(c => c.opportunity_id),
     });
   }
   if (marked.length === 1) {
     return deepFreeze(answerBase({
       answer_kind: kind, decision: "already_effected", reason_id: "step_marker_found_on_provider",
-      ...base, opportunity_id: marked[0].opportunity_id, required_next_step: "readback",
+      ...scoped, opportunity_id: marked[0].opportunity_id, required_next_step: "readback",
       create_permitted: false,
     }));
   }
-  const linked = kase.deal_ref === null ? [] : search.candidates.filter(c => c.linked_deal_ref === kase.deal_ref);
+  const anchors = caseAnchors(kase);
+  const linked = search.candidates.filter(c => c.linked_ref !== null && anchors.includes(c.linked_ref));
   if (linked.length > 1) {
     return stopAnswer(kind, "inconsistent_result", {
-      ...base, detail_reason: "deal_linked_to_multiple_opportunities",
+      ...scoped, detail_reason: "case_linked_to_multiple_opportunities",
       opportunity_ids: linked.map(c => c.opportunity_id),
     });
   }
   if (linked.length === 1) {
     return deepFreeze(answerBase({
-      answer_kind: kind, decision: "link_existing", reason_id: "opportunity_already_linked_to_deal",
-      ...base, opportunity_id: linked[0].opportunity_id, create_permitted: false,
+      answer_kind: kind, decision: "link_existing", reason_id: "opportunity_already_linked_to_case",
+      ...scoped, opportunity_id: linked[0].opportunity_id, create_permitted: false,
     }));
   }
   const named = search.candidates.filter(c => c.name_match !== "none");
@@ -903,12 +999,12 @@ export function evaluateDuplicateSearch(request) {
     return deepFreeze(answerBase({
       answer_kind: kind, decision: "human_disambiguation_required",
       reason_id: "name_match_is_never_an_automatic_join",
-      ...base, candidate_opportunity_ids: named.map(c => c.opportunity_id), create_permitted: false,
+      ...scoped, candidate_opportunity_ids: named.map(c => c.opportunity_id), create_permitted: false,
     }));
   }
   return deepFreeze(answerBase({
     answer_kind: kind, decision: "create_admissible", reason_id: "no_duplicate_on_complete_search",
-    ...base, create_permitted_after_preview_and_confirmation: true,
+    ...scoped, create_permitted_after_preview_and_confirmation: true,
   }));
 }
 
@@ -917,45 +1013,57 @@ export function evaluateDuplicateSearch(request) {
 // ---------------------------------------------------------------------------
 
 const PREVIEW_REQUEST_KEYS = Object.freeze([
-  "action_kind", "case", "fields", "step_key", "target_opportunity_id", "tenant",
+  "action_kind", "case", "fields", "intent_ordinal", "org_binding", "target_opportunity_id", "tenant",
 ]);
-const PREVIEW_FIELD_KEYS = Object.freeze(["field", "provenance", "semantics", "value"]);
+const PREVIEW_FIELD_KEYS = Object.freeze(["fact_class", "field", "provenance", "semantics", "value"]);
 
 function previewPreimage(p) {
   return {
-    kind: "rw02-action-preview.v1",
+    kind: "rw02-action-preview.v2",
     schema_version: V5_RW02_PREVIEW_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     action_kind: p.action_kind,
     surface: p.surface,
     step_key: p.step_key,
     case: p.case,
+    org_binding: p.org_binding,
     target_opportunity_id: p.target_opportunity_id,
     fields: p.fields,
   };
 }
 
+/** A placeholder has placeholder shape: a number or a calendar date, or nothing. */
+function placeholderShapeOk(f) {
+  if (f.value === null) return true;
+  if (f.semantics === "commission_placeholder") return typeof f.value === "number";
+  return typeof f.value === "string" && CALENDAR_DATE.test(f.value);
+}
+
 /**
  * Build the exact preview a partner confirms. Its digest is the payload digest
  * the F06 envelope seals, so the capability, the confirmation and the preview
- * are one thing and a substitution anywhere refuses.
+ * are one thing and a substitution anywhere refuses. The step key is DERIVED
+ * here from case, action kind and intent ordinal; the org binding and target
+ * record are part of the preimage.
  *
- * Refusals here are policy answers: an inferred lane, a placeholder routed to
- * a real value, a lifecycle field crossing into DoctorCRE, or a record-layer
- * link that carries anything but the external id.
+ * Every consuming door calls this function again on the caller's request rather
+ * than accepting its output, so every rule below runs on every use.
  */
 export function buildActionPreview(request) {
   const raw = assertObject(request, "request");
   assertClosedKeys(raw, PREVIEW_REQUEST_KEYS, "request");
-  assertRequiredKeys(raw, ["action_kind", "case", "fields", "step_key", "tenant"], "request");
+  assertRequiredKeys(raw, ["action_kind", "case", "fields", "intent_ordinal", "org_binding", "tenant"],
+    "request");
   assertTenant(raw.tenant, "request.tenant");
   const action_kind = assertActionKind(raw.action_kind, "request.action_kind");
   const spec = V5_RW02_ACTION_KINDS[action_kind];
   const kase = normalizeCase(raw.case, "request.case");
-  const step_key = assertDigestRef(raw.step_key, "request.step_key");
-  const target_opportunity_id = raw.target_opportunity_id === undefined || raw.target_opportunity_id === null
-    ? null : assertOpportunityId(raw.target_opportunity_id, "request.target_opportunity_id");
-  const kind = "rw02-action-preview.v1";
+  const intent_ordinal = assertPositiveInteger(raw.intent_ordinal, "request.intent_ordinal");
+  const step_key = stepKeyOf(kase, action_kind, intent_ordinal);
+  const org_binding = normalizeOrgBinding(raw.org_binding, "request.org_binding");
+  const target_opportunity_id = assertOptionalOpportunityId(raw.target_opportunity_id,
+    "request.target_opportunity_id");
+  const kind = "rw02-action-preview.v2";
   const refuse = (reason_id, detail) => deepFreeze(answerBase({
     answer_kind: kind, decision: "refuse", reason_id, action_kind, step_key, ...detail,
   }));
@@ -968,11 +1076,12 @@ export function buildActionPreview(request) {
     assertRequiredKeys(f, PREVIEW_FIELD_KEYS, p);
     const field = assertSafeText(f.field, `${p}.field`, { maxLength: 80 });
     if (!FIELD_NAME.test(field)) fail("invalid_field_name", `${p}.field is not a field name`, { path: p });
-    if (seenFields.has(field)) fail("duplicate_field", `${p}.field repeats "${field}"`, { path: p });
+    if (seenFields.has(field)) fail("duplicate_field", `${p}.field repeats an earlier field`, { path: p });
     seenFields.add(field);
     return {
       field,
       value: assertFieldValue(f.value, `${p}.value`),
+      fact_class: assertEnum(f.fact_class, V5_RW02_FIELD_FACT_CLASSES, `${p}.fact_class`, "unknown_fact_class"),
       semantics: assertEnum(f.semantics, V5_RW02_FIELD_SEMANTICS, `${p}.semantics`, "unknown_field_semantics"),
       provenance: assertEnum(f.provenance, V5_RW02_FIELD_PROVENANCE, `${p}.provenance`, "unknown_provenance"),
     };
@@ -989,29 +1098,30 @@ export function buildActionPreview(request) {
       return refuse("lane_inferred_not_authoritative", { field: f.field });
     }
   }
+  const placeholders = fields.filter(f => V5_RW02_PLACEHOLDER_SEMANTICS.includes(f.semantics));
+  for (const f of placeholders) {
+    if (!placeholderShapeOk(f)) return refuse("placeholder_shape_invalid", { field: f.field });
+  }
 
   if (spec.surface === "record_layer") {
-    // The ONE record-layer write: the external-id link, nothing else.
+    // A placeholder is never a figure, so it never becomes a DoctorCRE value.
+    if (placeholders.length > 0) {
+      return refuse("placeholder_is_not_a_figure", { fields: placeholders.map(f => f.field) });
+    }
     if (kase.deal_ref === null) {
       return refuse("record_layer_link_needs_deal", { seam: V5_RW02_ENGAGEMENT_LINK_SEAM });
     }
+    const crossing = fields.filter(f => V5_RW02_DOCTORCRE_LIFECYCLE_FIELDS.includes(f.field) ||
+      f.semantics === "phase");
+    if (crossing.length > 0) {
+      return refuse("salesforce_state_is_not_doctorcre_lifecycle", { fields: crossing.map(f => f.field) });
+    }
+    // The ONE record-layer write: the external-id link, nothing else.
     if (fields.length !== 1 || fields[0].field !== V5_RW02_LINK_FIELD ||
         fields[0].semantics !== "external_id_link" || fields[0].value !== target_opportunity_id) {
-      const crossing = fields.filter(f => V5_RW02_DOCTORCRE_LIFECYCLE_FIELDS.includes(f.field) ||
-        f.semantics === "phase" || V5_RW02_PLACEHOLDER_SEMANTICS.includes(f.semantics));
-      return refuse(crossing.length > 0
-        ? "salesforce_state_is_not_doctorcre_lifecycle"
-        : "record_layer_link_carries_only_external_id",
-      { fields: fields.map(f => f.field) });
+      return refuse("record_layer_link_carries_only_external_id", { fields: fields.map(f => f.field) });
     }
   } else {
-    // Salesforce-side fields: the corporate transaction field's home is
-    // Salesforce (V5-F01). The kernel asks F01 rather than restating it.
-    const home = projectRecordHome({
-      tenant: ORGANIZATION_TENANT_ID, fact_class: "corporate_transaction_field",
-      claimed_home: "salesforce", claimed_authoritative: true,
-    });
-    if (home.decision !== "allow") return refuse("corporate_field_home_not_salesforce", {});
     if (fields.some(f => f.semantics === "external_id_link")) {
       return refuse("external_id_link_is_record_layer_only", {});
     }
@@ -1021,12 +1131,25 @@ export function buildActionPreview(request) {
     }
   }
 
+  // V5-F01 decides, per field, whether the field's fact class lives on the
+  // surface it is being written to. Nothing here restates F01's table.
+  for (const f of fields) {
+    const home = projectRecordHome({
+      tenant: ORGANIZATION_TENANT_ID, fact_class: f.fact_class,
+      claimed_home: V5_RW02_SURFACE_HOMES[spec.surface], claimed_authoritative: true,
+    });
+    if (home.decision !== "allow") {
+      return refuse("field_home_is_not_this_surface", {
+        field: f.field, fact_class: f.fact_class, f01_reason_id: home.reason_id,
+        f01_authoritative_home: home.authoritative_home,
+      });
+    }
+  }
+
   const sealed = {
-    action_kind, surface: spec.surface, step_key, case: kase, target_opportunity_id, fields,
+    action_kind, surface: spec.surface, step_key, case: kase, org_binding, target_opportunity_id, fields,
   };
   const preview_digest = digest(previewPreimage(sealed));
-  const placeholder_fields = fields.filter(f => V5_RW02_PLACEHOLDER_SEMANTICS.includes(f.semantics))
-    .map(f => f.field);
   return deepFreeze(answerBase({
     answer_kind: kind,
     decision: "preview_ready",
@@ -1034,12 +1157,14 @@ export function buildActionPreview(request) {
     preview: {
       schema_version: V5_RW02_PREVIEW_SCHEMA_VERSION,
       ...sealed,
+      intent_ordinal,
       preview_digest,
     },
     preview_digest,
+    step_key,
     payload_digest_for_envelope: preview_digest,
     f06_action: V5_RW02_F06_ACTION,
-    placeholder_fields,
+    placeholder_fields: placeholders.map(f => f.field),
     placeholders_are_figures: false,
     record_layer_verb: spec.record_layer_verb,
     requires_partner_confirmation: true,
@@ -1048,30 +1173,17 @@ export function buildActionPreview(request) {
   }));
 }
 
-/** Re-seal a preview carried back in: an edited copy no longer matches its digest. */
-function assertSealedPreview(value, path) {
-  const p = assertObject(value, path);
-  assertClosedKeys(p, ["action_kind", "case", "fields", "preview_digest", "schema_version", "step_key",
-    "surface", "target_opportunity_id"], path);
-  if (p.schema_version !== V5_RW02_PREVIEW_SCHEMA_VERSION) {
-    fail("unnormalized_preview", `${path} is not an RW02 preview`, { path });
-  }
-  assertActionKind(p.action_kind, `${path}.action_kind`);
-  const recomputed = digest(previewPreimage(p));
-  if (recomputed !== p.preview_digest) {
-    fail("preview_seal_broken", `${path} does not hash to its own preview_digest; it was edited`, { path });
-  }
-  return p;
-}
-
 // ---------------------------------------------------------------------------
-// 2c. Per-action admission: page, duplicate clearance, target, confirmation,
-//     the F06 envelope binding and the real F06 capability presentation.
+// 2c. Per-action admission: the rebuilt preview, the page and its binding,
+//     duplicate clearance, target, confirmation, the F06 envelope binding and
+//     the real F06 capability presentation.
 // ---------------------------------------------------------------------------
 
 export const V5_RW02_ADMISSION_CHECKS = deepFreeze([
   "execution_mode",
+  "preview",
   "page",
+  "page_binding",
   "duplicate_clearance",
   "target_present",
   "partner_confirmation",
@@ -1080,11 +1192,11 @@ export const V5_RW02_ADMISSION_CHECKS = deepFreeze([
 ]);
 
 const ADMISSION_REQUEST_KEYS = Object.freeze([
-  "confirmation", "duplicate_search", "execution_mode", "f06", "page", "preview",
+  "confirmation", "duplicate_search", "execution_mode", "f06", "page", "preview_request",
   "target_readback", "tenant",
 ]);
 const CONFIRMATION_KEYS = Object.freeze([
-  "action_kind", "confirmation_ref", "confirmed_at", "preview_digest", "step_key",
+  "action_kind", "confirmation_ref", "confirmed_at", "confirmed_by", "preview_digest", "step_key",
 ]);
 const TARGET_READBACK_KEYS = Object.freeze(["opportunity_id", "state"]);
 export const V5_RW02_TARGET_READBACK_STATES = deepFreeze([
@@ -1099,17 +1211,35 @@ const F06_PRESENTATION_KEYS = Object.freeze(["authority", "capability", "envelop
  * check passed on the facts as reported AND the real F06 capability
  * presentation allowed — and the catalog's runtime evidence inputs are still
  * absent, so nothing is granted. They are listed in `runtime_inputs_missing`.
+ *
+ * CONFIRMATION FRESHNESS. The confirmation must not postdate the presentation
+ * and must be no older than ONE CAPABILITY LIFETIME (the capability's own
+ * expires_at minus issued_at). That is an existing bound, not an invented
+ * number: a confirmation cannot outlive the authority window it was given for.
  */
 export function evaluateActionAdmission(request) {
   const raw = assertObject(request, "request");
   assertClosedKeys(raw, ADMISSION_REQUEST_KEYS, "request");
-  assertRequiredKeys(raw, ["confirmation", "execution_mode", "f06", "page", "preview", "tenant"], "request");
+  assertRequiredKeys(raw, ["confirmation", "execution_mode", "f06", "page", "preview_request", "tenant"],
+    "request");
   assertTenant(raw.tenant, "request.tenant");
   const execution_mode = assertEnum(raw.execution_mode, V5_RW02_EXECUTION_MODES,
     "request.execution_mode", "unknown_execution_mode");
-  const preview = assertSealedPreview(raw.preview, "request.preview");
-  const spec = V5_RW02_ACTION_KINDS[preview.action_kind];
   const kind = "rw02-action-admission.v1";
+
+  if (execution_mode !== "attended" || raw.page?.execution_mode !== "attended") {
+    return stopAnswer(kind, "unattended_execution_excluded", { blocking_check: "execution_mode" });
+  }
+
+  const built = buildActionPreview(raw.preview_request);
+  if (built.decision !== "preview_ready") {
+    return deepFreeze(answerBase({
+      answer_kind: kind, decision: "refuse", reason_id: "preview_refused", blocking_check: "preview",
+      preview_reason_id: built.reason_id, checks_required: [...V5_RW02_ADMISSION_CHECKS],
+    }));
+  }
+  const preview = built.preview;
+  const spec = V5_RW02_ACTION_KINDS[preview.action_kind];
   const base = {
     action_kind: preview.action_kind, step_key: preview.step_key, preview_digest: preview.preview_digest,
     checks_required: [...V5_RW02_ADMISSION_CHECKS],
@@ -1118,13 +1248,13 @@ export function evaluateActionAdmission(request) {
     answer_kind: kind, decision: "refuse", reason_id, blocking_check: check, ...base, ...detail,
   }));
 
-  if (execution_mode !== "attended" || raw.page?.execution_mode !== "attended") {
-    return stopAnswer(kind, "unattended_execution_excluded", { ...base, blocking_check: "execution_mode" });
-  }
-
   const page = evaluatePageObservation(raw.page);
   if (page.decision !== "continue") {
     return stopAnswer(kind, page.reason_id, { ...base, blocking_check: "page" });
+  }
+  const bindingStop = pageBindingStop(page, preview, { requireRecordPin: spec.requires_target_present });
+  if (bindingStop !== null) {
+    return stopAnswer(kind, bindingStop, { ...base, blocking_check: "page_binding" });
   }
 
   if (spec.requires_duplicate_clearance) {
@@ -1132,18 +1262,26 @@ export function evaluateActionAdmission(request) {
       return refuse("duplicate_clearance", "duplicate_search_required_before_create", {});
     }
     const dup = evaluateDuplicateSearch(raw.duplicate_search);
+    if (canonicalJson(dup.case) !== canonicalJson(preview.case)) {
+      return refuse("duplicate_clearance", "duplicate_search_for_other_case", {});
+    }
     if (dup.step_key !== preview.step_key) {
       return refuse("duplicate_clearance", "duplicate_search_for_other_step", {});
     }
     if (dup.decision === "stop") {
       return stopAnswer(kind, dup.reason_id, { ...base, blocking_check: "duplicate_clearance" });
     }
+    const on = dup.searched_on;
+    if (on.origin !== preview.org_binding.origin || on.org_id !== preview.org_binding.org_id ||
+        on.account_ref !== preview.org_binding.account_ref) {
+      return refuse("duplicate_clearance", "duplicate_search_on_other_org", {});
+    }
     if (dup.decision !== "create_admissible") {
       return refuse("duplicate_clearance", "create_not_admissible_after_duplicate_search",
         { duplicate_decision: dup.decision });
     }
   } else if (raw.duplicate_search !== undefined && raw.duplicate_search !== null) {
-    fail("unexpected_field", `request.duplicate_search applies only to opportunity_create`,
+    fail("unexpected_field", "request.duplicate_search applies only to opportunity_create",
       { path: "request.duplicate_search" });
   }
 
@@ -1173,6 +1311,7 @@ export function evaluateActionAdmission(request) {
   assertClosedKeys(c, CONFIRMATION_KEYS, "request.confirmation");
   assertRequiredKeys(c, CONFIRMATION_KEYS, "request.confirmation");
   assertStableId(c.confirmation_ref, "request.confirmation.confirmation_ref");
+  assertStableId(c.confirmed_by, "request.confirmation.confirmed_by");
   const confirmedAt = assertInstant(c.confirmed_at, "request.confirmation.confirmed_at");
   assertDigestRef(c.preview_digest, "request.confirmation.preview_digest");
   assertDigestRef(c.step_key, "request.confirmation.step_key");
@@ -1190,10 +1329,20 @@ export function evaluateActionAdmission(request) {
   assertClosedKeys(f, F06_PRESENTATION_KEYS, "request.f06");
   assertRequiredKeys(f, ["capability", "envelope", "now", "presentation"], "request.f06");
   const now = assertInstant(f.now, "request.f06.now");
+  const envelope = assertObject(f.envelope, "request.f06.envelope");
+  const capability = assertObject(f.capability, "request.f06.capability");
+  if (c.confirmed_by !== envelope.principals?.actor_slug) {
+    return refuse("partner_confirmation", "confirmation_by_other_actor", {});
+  }
   if (confirmedAt > now) {
     return refuse("partner_confirmation", "confirmation_after_presentation", {});
   }
-  const envelope = assertObject(f.envelope, "request.f06.envelope");
+  const lifetime = assertInstant(capability.expires_at, "request.f06.capability.expires_at") -
+    assertInstant(capability.issued_at, "request.f06.capability.issued_at");
+  if (now - confirmedAt > lifetime) {
+    return refuse("partner_confirmation", "confirmation_stale", {});
+  }
+
   if (envelope.action !== V5_RW02_F06_ACTION) {
     return refuse("envelope_binding", "envelope_action_not_rw02", {});
   }
@@ -1205,6 +1354,9 @@ export function evaluateActionAdmission(request) {
   }
   if (envelope.workflow_id !== rw02WorkflowId(preview.case)) {
     return refuse("envelope_binding", "envelope_workflow_is_not_this_case", {});
+  }
+  if (envelope.principals?.account_ref !== preview.org_binding.account_ref) {
+    return refuse("envelope_binding", "capability_for_other_account", {});
   }
 
   // The real F06 evaluator, run here — never a caller's copy of its answer.
@@ -1224,7 +1376,8 @@ export function evaluateActionAdmission(request) {
     reason_id: "all_rw02_checks_passed_nothing_granted",
     blocking_check: null,
     ...base,
-    envelope_digest: presentation.envelope_digest ?? envelope.envelope_digest,
+    org_binding: preview.org_binding,
+    envelope_digest: presentation.idempotency_key,
     idempotency_key: presentation.idempotency_key,
     consumption_must_commit_before_provider_call: true,
     record_layer_verb: spec.record_layer_verb,
@@ -1247,10 +1400,10 @@ export const V5_RW02_EVIDENCE_OUTCOMES = deepFreeze([
 ]);
 
 const READBACK_REQUEST_KEYS = Object.freeze([
-  "evidence_class", "f06", "observed_at", "page", "preview", "provider_readback", "tenant",
+  "evidence_class", "f06", "observed_at", "page", "preview_request", "provider_readback", "tenant",
 ]);
 const F06_ATTEMPT_KEYS = Object.freeze(["attempt", "capability", "envelope"]);
-const PROVIDER_READBACK_KEYS = Object.freeze(["completeness", "fields", "opportunity_id"]);
+const PROVIDER_READBACK_KEYS = Object.freeze(["completeness", "fields", "opportunity_id", "step_marker"]);
 const READBACK_FIELD_KEYS = Object.freeze(["field", "value"]);
 
 function sealEvidence(record) {
@@ -1260,25 +1413,36 @@ function sealEvidence(record) {
 /**
  * Resolve one attempted write against the provider readback.
  *
- * The F06 ordering proof and quarantine run first, for real. While the outcome
- * is unknown the only answer is `readback_required`: no retry, no settlement.
- * Once the effect is confirmed present, every preview field must read back with
- * the IDENTICAL value — a difference in any field is an inconsistent result and
- * a stop. Only an exact match produces the per-action evidence record.
+ * The preview is rebuilt from its request, the page must be the previewed org
+ * and seat (and pin the previewed record for a targeted action), and the F06
+ * ordering proof and quarantine run first, for real. While the outcome is
+ * unknown the only answer is `readback_required`. Once the effect is confirmed
+ * present, every preview field must read back with the IDENTICAL value and type,
+ * and a create's readback must carry THIS step's marker — an equal-valued
+ * opportunity that already existed is not this write. Only an exact match
+ * produces the per-action evidence record.
  */
 export function evaluateWriteReadback(request) {
   const raw = assertObject(request, "request");
   assertClosedKeys(raw, READBACK_REQUEST_KEYS, "request");
-  assertRequiredKeys(raw, ["evidence_class", "f06", "observed_at", "page", "preview", "tenant"], "request");
+  assertRequiredKeys(raw, ["evidence_class", "f06", "observed_at", "page", "preview_request", "tenant"],
+    "request");
   assertTenant(raw.tenant, "request.tenant");
-  const preview = assertSealedPreview(raw.preview, "request.preview");
   const evidence_class = assertEnum(raw.evidence_class, V5_RW02_EVIDENCE_CLASSES,
     "request.evidence_class", "unknown_evidence_class");
   assertInstant(raw.observed_at, "request.observed_at");
   const kind = "rw02-write-readback.v1";
+
+  const built = buildActionPreview(raw.preview_request);
+  if (built.decision !== "preview_ready") {
+    return deepFreeze(answerBase({
+      answer_kind: kind, decision: "refuse", reason_id: "preview_refused", preview_reason_id: built.reason_id,
+    }));
+  }
+  const preview = built.preview;
+  const spec = V5_RW02_ACTION_KINDS[preview.action_kind];
   const base = { action_kind: preview.action_kind, step_key: preview.step_key, preview_digest: preview.preview_digest };
 
-  const page = evaluatePageObservation(raw.page);
   const f = assertObject(raw.f06, "request.f06");
   assertClosedKeys(f, F06_ATTEMPT_KEYS, "request.f06");
   assertRequiredKeys(f, F06_ATTEMPT_KEYS, "request.f06");
@@ -1287,6 +1451,7 @@ export function evaluateWriteReadback(request) {
       { path: "request.f06.envelope" });
   }
 
+  const page = evaluatePageObservation(raw.page);
   const order = evaluateConsumptionOrder({ envelope: f.envelope, capability: f.capability, attempt: f.attempt });
   const resolution = evaluateAttemptResolution({
     envelope: f.envelope, capability: f.capability, attempt: f.attempt,
@@ -1302,18 +1467,20 @@ export function evaluateWriteReadback(request) {
     evidence_class,
     observed_at: raw.observed_at,
   };
+  const stopped = () => sealEvidence({ ...evidenceBase, outcome: "stopped", readback_digest: null });
 
   if (order.decision !== "allow") {
     // A provider call that preceded consumption is a broken attempt, not a result.
     return stopAnswer(kind, "inconsistent_result", {
-      ...base, detail_reason: "consumption_order_refused", f06_reason_id: order.reason_id,
-      evidence: sealEvidence({ ...evidenceBase, outcome: "stopped", readback_digest: null }),
+      ...base, detail_reason: "consumption_order_refused", f06_reason_id: order.reason_id, evidence: stopped(),
     });
   }
   if (page.decision !== "continue") {
-    return stopAnswer(kind, page.reason_id, {
-      ...base, evidence: sealEvidence({ ...evidenceBase, outcome: "stopped", readback_digest: null }),
-    });
+    return stopAnswer(kind, page.reason_id, { ...base, evidence: stopped() });
+  }
+  const bindingStop = pageBindingStop(page, preview, { requireRecordPin: spec.requires_target_present });
+  if (bindingStop !== null) {
+    return stopAnswer(kind, bindingStop, { ...base, evidence: stopped() });
   }
   // A readback joined on some other effect is not a readback of this one. A
   // reported outcome that disagrees with its readback resolves to unknown and is
@@ -1321,7 +1488,7 @@ export function evaluateWriteReadback(request) {
   if (resolution.decision !== "allow" && resolution.reason_id !== "outcome_readback_conflict") {
     return stopAnswer(kind, "inconsistent_result", {
       ...base, detail_reason: "attempt_resolution_refused", f06_reason_id: resolution.reason_id,
-      evidence: sealEvidence({ ...evidenceBase, outcome: "stopped", readback_digest: null }),
+      evidence: stopped(),
     });
   }
   if (resolution.resolution === "unknown") {
@@ -1351,6 +1518,8 @@ export function evaluateWriteReadback(request) {
   assertRequiredKeys(rb, PROVIDER_READBACK_KEYS, "request.provider_readback");
   const completeness = assertEnum(rb.completeness, V5_RW02_SEARCH_COMPLETENESS,
     "request.provider_readback.completeness", "unknown_search_completeness");
+  const step_marker = assertEnum(rb.step_marker, V5_RW02_MARKER_STATES,
+    "request.provider_readback.step_marker", "unknown_marker_state");
   const rbOpp = assertOpportunityId(rb.opportunity_id, "request.provider_readback.opportunity_id");
   const readFields = new Map();
   assertArray(rb.fields, "request.provider_readback.fields", { max: 256 }).forEach((x, i) => {
@@ -1359,11 +1528,11 @@ export function evaluateWriteReadback(request) {
     assertClosedKeys(x, READBACK_FIELD_KEYS, p);
     assertRequiredKeys(x, READBACK_FIELD_KEYS, p);
     const name = assertSafeText(x.field, `${p}.field`, { maxLength: 80 });
-    if (readFields.has(name)) fail("duplicate_field", `${p}.field repeats "${name}"`, { path: p });
+    if (readFields.has(name)) fail("duplicate_field", `${p}.field repeats an earlier field`, { path: p });
     readFields.set(name, assertFieldValue(x.value, `${p}.value`));
   });
   const readback_digest = digest({
-    kind: "rw02-readback.v1", opportunity_id: rbOpp,
+    kind: "rw02-readback.v1", opportunity_id: rbOpp, step_marker,
     fields: [...readFields.entries()].sort(([a], [b]) => (a < b ? -1 : 1)),
   });
 
@@ -1376,6 +1545,14 @@ export function evaluateWriteReadback(request) {
   if (preview.target_opportunity_id !== null && rbOpp !== preview.target_opportunity_id) {
     return stopAnswer(kind, "record_mismatch", {
       ...base, evidence: sealEvidence({ ...evidenceBase, outcome: "stopped", readback_digest }),
+    });
+  }
+  if (spec.requires_duplicate_clearance && step_marker !== "present") {
+    // A create is proved by ITS marker, never by an opportunity that merely
+    // holds the same values.
+    return stopAnswer(kind, "inconsistent_result", {
+      ...base, detail_reason: "readback_not_this_steps_opportunity",
+      evidence: sealEvidence({ ...evidenceBase, outcome: "stopped", readback_digest }),
     });
   }
   const mismatched = preview.fields
@@ -1405,7 +1582,9 @@ export const V5_RW02_RESUME_OUTCOMES = deepFreeze([
   "proceed_to_preview", "readback_required", "skip_already_effected", "stop",
 ]);
 
-const RESUME_REQUEST_KEYS = Object.freeze(["action_kind", "journal_hint", "provider", "step_key", "tenant"]);
+const RESUME_REQUEST_KEYS = Object.freeze([
+  "action_kind", "case", "intent_ordinal", "journal_hint", "provider", "tenant",
+]);
 const PROVIDER_EFFECT_KEYS = Object.freeze(["effect", "opportunity_id"]);
 export const V5_RW02_PROVIDER_EFFECT_STATES = deepFreeze([
   "effect_present", "effect_absent", "indeterminate", "unstated",
@@ -1413,7 +1592,8 @@ export const V5_RW02_PROVIDER_EFFECT_STATES = deepFreeze([
 
 /**
  * Where does one interrupted action resume? The PROVIDER decides; the caller's
- * journal is a hint that may only raise a stop when it disagrees.
+ * journal is a hint that may only raise a stop when it disagrees. The step key
+ * is derived here, and a present effect must name the opportunity it is on.
  *
  *   provider present  + hint anything but "effected" -> skip (journal behind)
  *   provider present  + hint "effected"              -> skip
@@ -1428,15 +1608,16 @@ export function evaluateResume(request) {
   assertRequiredKeys(raw, RESUME_REQUEST_KEYS, "request");
   assertTenant(raw.tenant, "request.tenant");
   const action_kind = assertActionKind(raw.action_kind, "request.action_kind");
-  const step_key = assertDigestRef(raw.step_key, "request.step_key");
+  const kase = normalizeCase(raw.case, "request.case");
+  const intent_ordinal = assertPositiveInteger(raw.intent_ordinal, "request.intent_ordinal");
+  const step_key = stepKeyOf(kase, action_kind, intent_ordinal);
   const hint = assertEnum(raw.journal_hint, V5_RW02_JOURNAL_HINTS, "request.journal_hint", "unknown_journal_hint");
   const pr = assertObject(raw.provider, "request.provider");
   assertClosedKeys(pr, PROVIDER_EFFECT_KEYS, "request.provider");
   assertRequiredKeys(pr, ["effect"], "request.provider");
   const effect = assertEnum(pr.effect, V5_RW02_PROVIDER_EFFECT_STATES, "request.provider.effect",
     "unknown_effect_state");
-  const opportunity_id = pr.opportunity_id === undefined || pr.opportunity_id === null
-    ? null : assertOpportunityId(pr.opportunity_id, "request.provider.opportunity_id");
+  const opportunity_id = assertOptionalOpportunityId(pr.opportunity_id, "request.provider.opportunity_id");
   const kind = "rw02-resume.v1";
   const base = { action_kind, step_key, journal_hint: hint, provider_effect: effect,
     authority: "provider_readback", journal_is_authority: false };
@@ -1448,6 +1629,10 @@ export function evaluateResume(request) {
     }));
   }
   if (effect === "effect_present") {
+    if (opportunity_id === null) {
+      fail("missing_field", "request.provider.opportunity_id is required when the effect is present",
+        { path: "request.provider.opportunity_id" });
+    }
     return deepFreeze(answerBase({
       answer_kind: kind, decision: "skip_already_effected",
       reason_id: hint === "effected" ? "provider_confirms_journal" : "journal_behind_provider",
@@ -1484,9 +1669,11 @@ const SUCCESS_OUTCOMES = Object.freeze(["exact_match", "unknown_resolved_by_read
  * Every record must be a sealed RW02 evidence record OF THIS ACTION KIND; a
  * record of another kind is refused rather than counted, which is what "cannot
  * inherit trust" means structurally. A `global` scope is refused by name. The
- * window is the records since the last mismatch or stop; whether it is long
- * enough to review for activation is V5_RW02_EVALUATION_WINDOW_SEAM, so that
- * answer is `unavailable`. `autonomy_active` is false on every answer.
+ * window is the records since the last mismatch or stop. The seal proves a
+ * record was not edited, not who produced it, so the window is a READING only:
+ * activation-review eligibility answers `unavailable` naming the threshold seam,
+ * the evidence store seam is named beside it, and `autonomy_active` is false on
+ * every answer.
  */
 export function evaluateActionTrustWindow(request) {
   const raw = assertObject(request, "request");
@@ -1566,6 +1753,8 @@ export function evaluateActionTrustWindow(request) {
       window_digest: digest({ kind: "rw02-window.v1", action_kind,
         evidence: window.map(r => r.record.evidence_digest) }),
     },
+    evidence_authenticated: false,
+    evidence_store_seam: V5_RW02_EVIDENCE_STORE_SEAM,
     activation_review_eligibility: "unavailable",
     activation_review_eligibility_seam: V5_RW02_EVALUATION_WINDOW_SEAM,
     activation_gate: "system.autonomy_tier_activation",
@@ -1579,7 +1768,7 @@ export function evaluateActionTrustWindow(request) {
 
 export function v5Rw02PolicyPreimage() {
   return {
-    kind: "doctorcre-v5-rw02-policy.v1",
+    kind: "doctorcre-v5-rw02-policy.v2",
     schema_version: V5_RW02_SCHEMA_VERSION,
     policy_version: V5_RW02_POLICY_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -1593,11 +1782,15 @@ export function v5Rw02PolicyPreimage() {
     workflow_stages: V5_RW02_WORKFLOW_STAGES,
     action_kinds: V5_RW02_ACTION_KINDS,
     excluded_actions: V5_RW02_EXCLUDED_ACTIONS,
+    surface_homes: V5_RW02_SURFACE_HOMES,
+    field_fact_classes: V5_RW02_FIELD_FACT_CLASSES,
     field_semantics: V5_RW02_FIELD_SEMANTICS,
     placeholder_semantics: V5_RW02_PLACEHOLDER_SEMANTICS,
     field_provenance: V5_RW02_FIELD_PROVENANCE,
     lifecycle_fields: V5_RW02_DOCTORCRE_LIFECYCLE_FIELDS,
     link_field: V5_RW02_LINK_FIELD,
+    credential_patterns: Object.fromEntries(
+      Object.entries(V5_RW02_CREDENTIAL_PATTERNS).map(([k, re]) => [k, re.source])),
     page_checks: V5_RW02_PAGE_CHECKS,
     challenge_states: V5_RW02_CHALLENGE_STATES,
     stop_reason_ids: V5_RW02_STOP_REASON_IDS,
@@ -1640,6 +1833,7 @@ export const V5_RW02_PUBLIC_SURFACE = deepFreeze([
   "V5_RW02_ADMISSION_CHECKS",
   "V5_RW02_CHALLENGE_STATES",
   "V5_RW02_CONSISTENCY_STATES",
+  "V5_RW02_CREDENTIAL_PATTERNS",
   "V5_RW02_DECISION_IDS",
   "V5_RW02_DOCTORCRE_LIFECYCLE_FIELDS",
   "V5_RW02_DUPLICATE_OUTCOMES",
@@ -1653,6 +1847,7 @@ export const V5_RW02_PUBLIC_SURFACE = deepFreeze([
   "V5_RW02_EXCLUDED_ACTIONS",
   "V5_RW02_EXECUTION_MODES",
   "V5_RW02_F06_ACTION",
+  "V5_RW02_FIELD_FACT_CLASSES",
   "V5_RW02_FIELD_MAP_SEAM",
   "V5_RW02_FIELD_PROVENANCE",
   "V5_RW02_FIELD_SEMANTICS",
@@ -1677,6 +1872,7 @@ export const V5_RW02_PUBLIC_SURFACE = deepFreeze([
   "V5_RW02_SETTLED_DECISIONS",
   "V5_RW02_SOURCE_BINDING",
   "V5_RW02_STOP_REASON_IDS",
+  "V5_RW02_SURFACE_HOMES",
   "V5_RW02_TARGET_READBACK_STATES",
   "V5_RW02_TRUST_SCOPES",
   "V5_RW02_WORKFLOW_STAGES",
