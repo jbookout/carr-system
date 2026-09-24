@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 import ipaddress
 import os
 import re
+import shlex
 import sys
 from urllib.parse import urlsplit
 
@@ -564,35 +565,16 @@ RULES = [
     (re.compile(r"git\s+reset\s+--hard\b", re.I), "hard reset"),
     (re.compile(r"git\s+(filter-repo|filter-branch)\b", re.I), "history rewrite"),
     (re.compile(r"git\s+clean\s+-[a-zA-Z]*f", re.I), "forced clean"),
-    # 2b. git hook bypass (bypass audit C38, 2026-09-24). pre-commit calls
-    # itself an "accident-stopper, not a security control: anyone can bypass
-    # it with --no-verify" (ops/githooks/pre-commit:28) and guard-unattended
-    # had no pattern watching for that bypass at all. Three doors, three
-    # patterns: the flag on commit, the flag on push (pre-push is the CI-skip
-    # gate itself), and rerouting/disabling hooksPath entirely, which defeats
-    # every hook in one move without even naming --no-verify.
-    # `-n` is git commit's short spelling of --no-verify; it is NOT the same
-    # short flag on `git push`, where `-n` means --dry-run, so the two
-    # patterns are separate rather than one shared "commit|push" alternation.
-    (re.compile(r"git\s+commit\b[^|;&]*(--no-verify\b|\s-n\b)", re.I),
-     "no-verify (git commit)"),
-    (re.compile(r"git\s+push\b[^|;&]*--no-verify\b", re.I),
-     "no-verify (git push)"),
-    (re.compile(r"git\s+-c\s*core\.hooksPath\s*=", re.I),
-     "hooksPath override"),
-    (re.compile(r"git\s+config\b[^|;&]*\bcore\.hooksPath\b", re.I),
-     "hooksPath override"),
-    # 2c. broad add at the repo root (bypass audit C53, AGENTS.md:225). The
-    # broad-add refusal AGENTS.md still claims ("a gate refuses those") was
-    # git-writer-gate.py, retired 2026-08-27 — the claim outlived the gate.
-    # `-A`/`--all` are unambiguous; a bare `.` pathspec is only "broad" when it
-    # names the current directory as a whole argument, so the pattern requires
-    # a following separator or end-of-command rather than matching `./file.py`
-    # or `.gitignore`.
-    (re.compile(r"git\s+add\s+(?:[^|;&\n]*\s)?(?:-A\b|--all\b)", re.I),
-     "broad add (-A/--all/.)"),
-    (re.compile(r"git\s+add\s+(?:[^|;&\n]*\s)?\.(?:\s|$|[;&|])", re.I),
-     "broad add (-A/--all/.)"),
+    # 2b. `--no-verify` / core.hooksPath REDESIGNED OUT (2026-09-24, Opus
+    # review, bypass audit C38). These were shell-text regexes over a
+    # locally-run accident-stopper hook (ops/githooks/pre-commit itself says
+    # so: "not a security control: anyone can bypass it with --no-verify").
+    # Jev agreed (0.94) that hosted CI, not this local hook, is what actually
+    # stops a bypass from reaching main — so this file no longer chases every
+    # spelling of a local-only escape hatch. Broad add is different: it is
+    # covered below as a dedicated, argument-aware function rather than a
+    # regex, because AGENTS.md makes a specific, checkable promise about it
+    # (see broad_add_reason()).
     # 3. private key material
     #
     # `\.age\b` REMOVED 2026-08-07, on Joe's ruling: "loosen the gate so the work
@@ -742,8 +724,6 @@ SQL_LABELS = frozenset({"DROP", "TRUNCATE", "unqualified DELETE", "unqualified U
 PROSE_SAFE_LABELS = frozenset({
     "force push", "hard reset", "history rewrite", "forced clean",
     "recursive/forced delete", "secure delete",
-    "no-verify (git commit)", "no-verify (git push)", "hooksPath override",
-    "broad add (-A/--all/.)",
 })
 
 
@@ -1099,10 +1079,76 @@ def direct_metered_dispatch(cmd):
     return None
 
 
-def check(cmd):
+# bypass audit C53 / AGENTS.md:225, REDESIGNED (2026-09-24, Opus review). The
+# original version was a single regex over the whole `git add` argument list,
+# which denied `git add -A hooks/x.py` (a NAMED path alongside -A) exactly as
+# hard as a bare `git add -A` — a real false positive the replay against
+# 12,145 real commands caught. This version tokenizes the argument list and
+# denies ONLY the three bare forms AGENTS.md actually names: `-A`, `--all`,
+# or a standalone `.` with NO other pathspec token present. `git add -A
+# <paths>` is explicitly allowed; git add's own semantics make that
+# combination redundant, but redundant is not broad.
+_GIT_ADD = re.compile(r"git\s+add\b([^|;&\n]*)")
+
+
+def _bare_broad_add(argtext):
+    """True when argtext's only pathspec-shaped tokens are -A/--all/bare '.'
+    and nothing else names a path. Flags other than -A/--all are ignored
+    (git add -v -A is still bare); any other non-flag token is a real
+    pathspec and clears the call."""
+    try:
+        tokens = shlex.split(argtext)
+    except ValueError:
+        return False
+    broad_seen = False
+    for tok in tokens:
+        if tok in ("-A", "--all", "."):
+            broad_seen = True
+            continue
+        if tok.startswith("-"):
+            continue
+        return False       # any other bare token is a real pathspec
+    return broad_seen
+
+
+def _in_carr_tree(cwd):
+    """cwd is the canonical carr-system checkout or a path under it (which is
+    where this repo's worktrees live, per bin/worktree.sh convention) —
+    same shape as the functions.exec cwd scoping a few lines below in
+    main()."""
+    if not cwd:
+        return False
+    try:
+        real_cwd = os.path.realpath(os.path.expanduser(cwd))
+    except Exception:
+        return False
+    return real_cwd == REPO or real_cwd.startswith(REPO + os.sep)
+
+
+def broad_add_reason(cmd, cwd=None):
+    """Return a reason string to deny a bare `git add -A`/`--all`/`.` with no
+    pathspec, scoped to the carr-system tree; None otherwise. Text inside
+    quotes, heredocs, or a grep/echo argument is never matched: the search
+    runs against strip_inert_text(cmd), the same inert-text stripper every
+    other quote-safe rule in this file uses, not the raw command."""
+    if not _in_carr_tree(cwd if cwd is not None else os.getcwd()):
+        return None
+    scanned = strip_inert_text(cmd)
+    for m in _GIT_ADD.finditer(scanned):
+        if _bare_broad_add(m.group(1)):
+            return ("broad add (-A/--all/.) — blocked by the CARR unattended guard. "
+                    "Add explicit paths instead: `git add <path> [<path>...]`.")
+    return None
+
+
+def check(cmd, cwd=None):
     """Return a reason string to block, or None to allow."""
     if cmd.strip() in ALLOW_EXACT:
         return None
+
+    reason = broad_add_reason(cmd, cwd)
+    if reason:
+        return reason
 
     reason = delegation_control_plane_write(cmd)
     if reason:
@@ -1239,33 +1285,33 @@ def main():
         if not cmd:
             sys.exit(0)
 
-        reason = check(cmd)
+        # Effective cwd for the broad-add repo scope: the tool_input's own
+        # workdir (Codex), else the payload's cwd (Claude Code sends this for
+        # every Bash call), else this process's own cwd as a last resort.
+        effective_cwd = (
+            (ti.get("workdir") if isinstance(ti, dict) else None)
+            or payload.get("cwd") or os.getcwd())
 
-        # BYPASS AUDIT C33 (2026-09-24): CLAUDE.md's own documented fallback
-        # door, `./run.sh call <verb> '<json>'`, reaches record-defect,
-        # add-loop, teach, and activate-rule without ever passing the four
-        # client verb gates registered on those verbs' direct mcp__*__<verb>
-        # tool_name — this hook is already an enforcing gate on Bash, so it
-        # is the one to re-run them against the same JSON. See
-        # hooks/verb_gate_recheck.py's header for what this does and does
-        # not cover (it does not reach the separate mcp__*__call-verb
-        # passthrough door, which needs a different fix — reported, not
-        # made, in this PR).
-        if not reason:
-            try:
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from verb_gate_recheck import parse_run_sh_call, recheck as verb_recheck
-                parsed = parse_run_sh_call(cmd)
-                if parsed:
-                    verb, vargs = parsed
-                    deny_reason, _ctx = verb_recheck(
-                        verb, vargs,
-                        session_id=payload.get("session_id") or payload.get("sessionId"),
-                        transcript_path=payload.get("transcript_path"))
-                    if deny_reason:
-                        reason = deny_reason
-            except Exception as exc:                       # fail OPEN
-                log(f"ALLOW(verb-recheck-error) {exc}")
+        reason = check(cmd, effective_cwd)
+
+        # BYPASS AUDIT C33/C34 (2026-09-24), REDESIGNED (2026-09-24, Opus
+        # review). This hook used to re-run the four client verb gates
+        # client-side against a parsed `./run.sh call <verb> '<json>'`
+        # command (hooks/verb_gate_recheck.py, now deleted). A replay of
+        # 12,145 real Bash commands found the shell-text side of that
+        # approach fundamentally leaky (Jev: 0.93) — 62 legitimate commands
+        # would have been falsely denied (`git add -A <paths>`, a grep for
+        # the pattern text, fixture repos in /tmp…), and several trivial
+        # bypasses (a shell variable holding the verb, `$(cat f)` JSON,
+        # calling tools/call-verb.py or mcp-server/local-verb.mjs directly)
+        # could never be closed from Bash-command-text at all — every one of
+        # those doors recurses through the SAME server-side callTool(), so
+        # the checks now live in the verb handlers themselves
+        # (mcp-server/src/verb-gate-checks.js, wired into add-loop's handler
+        # in tools.js) and this hook no longer duplicates them. Jev agreed
+        # (0.94) that hosted CI is what actually stops a local-hook bypass
+        # from reaching main, which is the other reason a client-side
+        # regex recheck was the wrong enforcement point.
 
         # THE SHELL HALF OF rule 76a53dfe. A record refused at the vault must not
         # simply be written somewhere the gate does not look, and a heredoc into

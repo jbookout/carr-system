@@ -96,10 +96,43 @@ def skip_without_reason_is_ignored_and_checks_run():
     d = make_sandbox(ci_exit=0)
     try:
         p = run(d, {"CARR_SKIP_CI": "1"})
-        assert "requires a non-empty CARR_SKIP_CI_REASON" in p.stderr, p.stderr
+        assert "requires a non-empty" in p.stderr, p.stderr
         assert "quality checks skipped" not in p.stderr, p.stderr
         assert not receipts(d), "no receipt should be written when the skip is refused"
         assert p.returncode == 0, p.stderr  # stub ci.sh exits 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@case
+def skip_with_whitespace_only_reason_is_rejected():
+    """Redesign item 3 (Opus review, 2026-09-24): a reason of only spaces or
+    tabs is not a reason."""
+    d = make_sandbox(ci_exit=0)
+    try:
+        p = run(d, {"CARR_SKIP_CI": "1", "CARR_SKIP_CI_REASON": "   \t  "})
+        assert "requires a non-empty" in p.stderr, p.stderr
+        assert "quality checks skipped" not in p.stderr, p.stderr
+        assert not receipts(d)
+        assert p.returncode == 0, p.stderr
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@case
+def skip_fails_closed_when_the_receipt_cannot_be_written():
+    """Redesign item 3: no receipt, no skip. Simulated by pre-creating
+    out/ci-skip-receipts.jsonl as a DIRECTORY, so the append (`>>`) fails."""
+    d = make_sandbox(ci_exit=0)
+    try:
+        out_dir = os.path.join(d, "out")
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(os.path.join(out_dir, "ci-skip-receipts.jsonl"), exist_ok=True)
+        p = run(d, {"CARR_SKIP_CI": "1", "CARR_SKIP_CI_REASON": "should be refused"})
+        assert "could not write the skip receipt" in p.stderr, p.stderr
+        assert "quality checks skipped" not in p.stderr, p.stderr
+        # ci_exit=0 here, so the fallback run of the real checks passes.
+        assert p.returncode == 0, p.stderr
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

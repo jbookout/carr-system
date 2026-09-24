@@ -6530,6 +6530,11 @@ export const TOOLS = {
           throw new ToolError({ error: "blocker_detail_vague", matched: vague[0],
             hint: `"${vague[0]}" names a feeling about time, not a blocker. Say who or what has to happen first — and if nothing has to, do the work now instead of filing this.` });
       }
+      // capability_no_decider and internal_decision_parked (bypass audit
+      // C33/C34, ported from hooks/blocker-decider-gate.py and
+      // hooks/escalation-gate.py) are enforced in mcp.js's callTool(),
+      // before this handler ever runs — see the comment there for why that
+      // placement, not here, is what makes every door hit the same check.
 
       // ── THE OWNERSHIP GATE ──────────────────────────────────────────────
       // Refuses a jointly-owned row at the moment it is filed. See LOOP_OWNERS

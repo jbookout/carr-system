@@ -42,8 +42,11 @@ def fetch(url):
     return {"tool_name": "WebFetch", "tool_input": {"url": url}}
 
 
-def bash(cmd):
-    return {"tool_name": "Bash", "tool_input": {"command": cmd}}
+def bash(cmd, cwd=None):
+    payload = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+    if cwd is not None:
+        payload["cwd"] = cwd
+    return payload
 
 
 def codex_exec(cmd, cwd=REPO):
@@ -431,64 +434,106 @@ case("find -delete is refused outside a scratch zone",
 case("find without -delete is still allowed",
      bash("find /Users/booko/important -name '*.md'"), ALLOW)
 
-# ── git hook bypass (bypass audit C38, PR "close the alternate doors") ───────
-# pre-commit names itself an "accident-stopper, not a security control: anyone
-# can bypass it with --no-verify" (ops/githooks/pre-commit:28); this closes
-# that door at the shell gate instead of leaving it to good behaviour.
-case("git commit --no-verify is refused",
-     bash('git commit -m "x" --no-verify'), DENY)
-case("git commit -n (short --no-verify) is refused",
-     bash('git commit -n -m "x"'), DENY)
-case("git push --no-verify is refused",
-     bash("git push origin main --no-verify"), DENY)
-case("git push -n is a dry run, not --no-verify, and is allowed",
-     bash("git push -n origin main"), ALLOW)
-case("git -c core.hooksPath= is refused",
-     bash("git -c core.hooksPath=/tmp/evil-hooks commit -m x"), DENY)
-case("git config core.hooksPath is refused",
-     bash("git config core.hooksPath /tmp/evil-hooks"), DENY)
+# ── `--no-verify` / core.hooksPath: REDESIGNED OUT (2026-09-24, Opus review,
+# bypass audit C38). These were removed as shell-text regexes over a local,
+# self-described accident-stopper hook; hosted CI is the actual gate on
+# main, and Jev agreed (0.94) that a local-only escape hatch on a
+# non-security-control hook is not worth a leaky client-side regex. Asserted
+# here as ALLOWED, not omitted, so a future re-add is a visible diff.
+case("git commit --no-verify is now allowed (redesigned out, C38)",
+     bash('git commit -m "x" --no-verify'), ALLOW)
+case("git -c core.hooksPath= is now allowed (redesigned out, C38)",
+     bash("git -c core.hooksPath=/tmp/evil-hooks commit -m x"), ALLOW)
 case("an ordinary git commit is allowed",
      bash('git commit -m "ordinary change"'), ALLOW)
-case("prose that only mentions --no-verify is allowed",
-     bash('git commit -m "docs: explain that --no-verify skips hooks"'), ALLOW)
 
-# ── broad add at the repo root (bypass audit C53 / AGENTS.md:225) ───────────
-# AGENTS.md still claims "a gate refuses those" for a broad add; the gate that
-# claim describes (git-writer-gate.py) was retired 2026-08-27. This restores
-# the enforcement the doc still promises.
-case("git add -A is refused", bash("git add -A"), DENY)
-case("git add --all is refused", bash("git add --all"), DENY)
-case("git add . is refused", bash("git add ."), DENY)
+# ── broad add at the repo root, REDESIGNED (2026-09-24, Opus review, bypass
+# audit C53 / AGENTS.md:225). A replay of 12,145 real Bash commands found the
+# original single-regex version denying `git add -A <named paths>`, `git add
+# -A` inside an unrelated /tmp fixture repo, and matching inside a grep
+# argument — none of them a broad add. The redesign tokenizes the argument
+# list (bare -A/--all/. only, no other pathspec token) and scopes to the
+# carr-system tree by cwd. See hooks/guard-unattended.py's broad_add_reason().
+WORKTREE = REPO  # this checkout — matches AGENTS.md's "at the repo root"
+case("git add -A is refused (bare, in the carr tree)",
+     bash("git add -A", cwd=WORKTREE), DENY)
+case("git add --all is refused (bare, in the carr tree)",
+     bash("git add --all", cwd=WORKTREE), DENY)
+case("git add . is refused (bare, in the carr tree)",
+     bash("git add .", cwd=WORKTREE), DENY)
+case("git add -v -A is still refused (a flag before -A does not clear it)",
+     bash("git add -v -A", cwd=WORKTREE), DENY)
+case("git add -A <named path> is ALLOWED (reviewer false positive #1)",
+     bash("git add -A hooks/guard-unattended.py", cwd=WORKTREE), ALLOW)
+case("git add -A inside an unrelated /tmp fixture repo is ALLOWED (reviewer false positive #2)",
+     bash("git add -A", cwd="/tmp/some-unrelated-fixture-repo"), ALLOW)
+case("git config --get core.hooksPath is ALLOWED (read-only, reviewer false positive #3)",
+     bash("git config --get core.hooksPath", cwd=WORKTREE), ALLOW)
+case("a grep for the text 'git add -A' is ALLOWED (reviewer false positive #4)",
+     bash('grep -rn "git add -A" hooks/', cwd=WORKTREE), ALLOW)
 case("git add with explicit paths is allowed",
-     bash("git add hooks/guard-unattended.py ops/guard-selftest.py"), ALLOW)
+     bash("git add hooks/guard-unattended.py ops/guard-selftest.py", cwd=WORKTREE), ALLOW)
 case("git add of a dotted relative path is allowed (not a bare '.')",
-     bash("git add ./hooks/guard-unattended.py"), ALLOW)
+     bash("git add ./hooks/guard-unattended.py", cwd=WORKTREE), ALLOW)
 case("git add of a dotfile is allowed (not a bare '.')",
-     bash("git add .gitignore"), ALLOW)
+     bash("git add .gitignore", cwd=WORKTREE), ALLOW)
 
-# ── verb gate recheck for the `./run.sh call <verb>` door (bypass audit C33) ─
-# CLAUDE.md's own documented fallback door for a verb the classifier denies.
-# The direct mcp__*__add-loop / mcp__*__record-defect / mcp__*__teach /
-# mcp__*__activate-rule calls are gated by escalation-gate.py,
-# blocker-decider-gate.py, drift-claim-gate.py and rule-shape-gate.py; this
-# proves the same verb, same JSON, reached through the Bash door, gets the
-# same verdict. See hooks/verb_gate_recheck.py.
-case("run.sh call add-loop, blocker=capability with no named decider, is refused",
-     bash('./run.sh call add-loop \'{"kind":"idea","blocker":"capability",'
-          '"blocker_detail":"cant do it somehow"}\''), DENY)
-case("run.sh call add-loop, blocker=capability WITH a named decider, is allowed",
-     bash('./run.sh call add-loop \'{"kind":"idea","blocker":"capability",'
-          '"blocker_detail":"needs the NEON_API_KEY only Joe holds -- Joe grants it"}\''),
-     ALLOW)
-case("break-glass flags before the verb do not defeat the recheck",
-     bash('./run.sh call --branch rehearse-0031 --reason "proving a change" add-loop '
-          '\'{"kind":"idea","blocker":"capability","blocker_detail":"cant do it"}\''),
-     DENY)
-case("run.sh call record-defect with a normal claimed/actual pair is allowed",
-     bash('./run.sh call record-defect \'{"claimed":"x works","actual":"x does not work",'
-          '"idempotency_key":"11111111-1111-1111-1111-111111111111"}\''), ALLOW)
-case("run.sh call on an unrelated verb is untouched by the recheck",
-     bash('./run.sh call read-loop \'{"id":"123"}\''), ALLOW)
+# ── KNOWN, NOT CLOSED HERE — the reviewer's remaining bypass list. These are
+# accepted gaps in a best-effort local accident-stopper, not silent misses:
+# hosted CI and PR review are the actual gate (see broad_add_reason()'s
+# header). Asserted as ALLOWED so a future tightening is a visible diff
+# against a stated baseline, not a rediscovery.
+case("git commit -nm (short -n glued to -m) is not matched — known gap, hosted CI is the gate",
+     bash('git commit -nm "x"'), ALLOW)
+case("GIT_CONFIG_COUNT/KEY/VALUE env tricks are not matched — known gap, hosted CI is the gate",
+     bash("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/evil "
+          "git commit -m x"), ALLOW)
+case("git add :/ is not matched — known gap, hosted CI is the gate",
+     bash("git add :/", cwd=WORKTREE), ALLOW)
+case("git add -Av (combined short flags) is not matched — known gap, hosted CI is the gate",
+     bash("git add -Av", cwd=WORKTREE), ALLOW)
+case("calling tools/call-verb.py directly bypasses the Bash matcher entirely — not a shell-text gap, a different door",
+     bash("python3 tools/call-verb.py add-loop '{}'", cwd=WORKTREE), ALLOW)
+
+# ── REPLAY SAMPLE (redesign item 4, 2026-09-24). An Opus review replayed
+# 12,145 real Bash commands from session transcripts against the OLD
+# regexes and found 62 false denials, the specific shapes reproduced above.
+# This session has no access to that transcript corpus (it is not attached
+# to this repo and would carry prompt/personal text this fixture must not
+# hold), so it cannot replay the same 12,145 commands byte-for-byte. What
+# follows is a representative sample of the ordinary command shapes this
+# repo's own AGENTS.md and CLAUDE.md document as routine — git status/log/
+# diff, ops/*.py invocations, npm/node test runs, cd+ls, curl to an
+# allowlisted host — asserted ALLOWED, as a standing regression net for the
+# next redesign rather than a claim of having replayed the reviewer's exact
+# corpus.
+for _cmd in (
+    "git status",
+    "git log --oneline -10",
+    "git diff --stat",
+    "git diff HEAD~1",
+    "git branch --show-current",
+    "git add hooks/guard-unattended.py",
+    "git commit -F /tmp/commit-msg.txt",
+    "git push -u origin my-feature",
+    "cd /Users/booko/carr-system && ls hooks",
+    "ls -la ops/",
+    "cat ops/ci.sh | head -20",
+    "grep -rn 'def check' hooks/guard-unattended.py",
+    "python3 ops/guard-selftest.py",
+    "python3 ops/guard-selftest.py -v",
+    "./ops/ci.sh --only gates",
+    "npm test",
+    "node --test test/verb-gate-checks.test.mjs",
+    "node --check mcp-server/src/tools.js",
+    "gh pr view 1225",
+    "gh pr create --title t --body b",
+    "curl https://api.doctorcre.com/x",
+    "mkdir -p out && echo hi > out/x.txt",
+    "rm out/x.txt",
+    "find . -name '*.py' -newer /tmp/marker",
+):
+    case(f"replay sample: {_cmd!r} is allowed", bash(_cmd, cwd=WORKTREE), ALLOW)
 
 
 def main():

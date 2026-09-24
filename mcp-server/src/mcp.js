@@ -25,6 +25,8 @@ import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
+import { parksADecision, classifyLoopText, needsDecider, loopRowText,
+         ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
   opaqueControllerResult, operationIdempotencyKey, ENGINEERING_CONTROLLER_EXECUTOR,
   ENGINEERING_CONTROLLER_WORKER } from "./authenticated-canonical-ownership.js";
@@ -792,6 +794,27 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+  // ── PORTED VERB GATES (bypass audit C33/C34, 2026-09-24, Opus review
+  // redesign) ── deterministic subset of hooks/escalation-gate.py's
+  // classify() and hooks/blocker-decider-gate.py's needs_decider(), moved
+  // here rather than into add-loop's own handler so every door that reaches
+  // this verb hits the SAME check, purely in memory, before any DB
+  // connection opens — same placement principle as the add-premises guard
+  // just above. That includes call-verb (which recurses into this same
+  // callTool for its inner verb, a few lines up) and every other MCP prefix;
+  // it does NOT include a Bash-side re-check (hooks/verb_gate_recheck.py was
+  // deleted in this redesign — see mcp-server/src/verb-gate-checks.js's
+  // header for the full parity note, including what is deliberately not
+  // ported).
+  if (name === "add-loop") {
+    if (needsDecider(args))
+      throw new ToolError({ error: "capability_no_decider", hint: BLOCKER_DECIDER_REASON });
+    if (parksADecision(args)) {
+      const { allow, why } = classifyLoopText(loopRowText(args));
+      if (!allow)
+        throw new ToolError({ error: "internal_decision_parked", why, hint: ESCALATION_REASON });
+    }
+  }
   if (hermesCosPremisesRefusal(profile, name, args))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "the Hermes CoS door may capture premises against existing party refs only; a human session must create a new party first" });

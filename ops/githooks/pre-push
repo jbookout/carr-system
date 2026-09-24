@@ -164,33 +164,44 @@ done || exit 1
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 
-# bypass audit item 10 (2026-09-24): CARR_SKIP_CI=1 alone used to skip the
-# floor silently, with no receipt anywhere it was used and printed by the
-# refusal text below as the obvious next move on any failure. A bare skip flag
-# with no stated reason and no trail is exactly the "quiet door" the audit
-# named. Now a skip needs a non-empty CARR_SKIP_CI_REASON, or it is not
-# honoured at all -- the checks run instead of failing closed, because a
-# pre-push hook that refuses to push on a missing env var is worse than one
-# that just does its job.
+# bypass audit item 10 (2026-09-24), REDESIGNED 2026-09-24 (Opus review):
+# CARR_SKIP_CI=1 alone used to skip the floor silently, with no receipt
+# anywhere it was used and printed by the refusal text below as the obvious
+# next move on any failure. A bare skip flag with no stated reason and no
+# trail is exactly the "quiet door" the audit named. A skip now needs a
+# non-empty, non-whitespace-only CARR_SKIP_CI_REASON, AND a receipt that
+# actually lands on disk — a reason of "   " is not a reason, and a skip
+# whose receipt could not be written is not honoured at all: no receipt, no
+# skip, the checks run instead. Fail CLOSED on the receipt write, same
+# direction as everything else in this file that would rather run the checks
+# than silently let one through.
+_SKIP_REASON_TRIMMED="$(printf '%s' "$CARR_SKIP_CI_REASON" | tr -d '[:space:]')"
 _EFFECTIVE_SKIP_CI="$CARR_SKIP_CI"
-if [ "$CARR_SKIP_CI" = "1" ] 2>/dev/null && [ -z "$CARR_SKIP_CI_REASON" ]; then
-  echo "  pre-push: CARR_SKIP_CI=1 requires a non-empty CARR_SKIP_CI_REASON — ignoring the skip and running quality checks" >&2
+if [ "$CARR_SKIP_CI" = "1" ] 2>/dev/null && [ -z "$_SKIP_REASON_TRIMMED" ]; then
+  echo "  pre-push: CARR_SKIP_CI=1 requires a non-empty, non-whitespace CARR_SKIP_CI_REASON — ignoring the skip and running quality checks" >&2
   _EFFECTIVE_SKIP_CI=""
 fi
 
 if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/ops/ci.sh" ]; then
   if [ "$_EFFECTIVE_SKIP_CI" = "1" ] 2>/dev/null; then
-    echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command (reason: $CARR_SKIP_CI_REASON)" >&2
     mkdir -p "$REPO_ROOT/out" 2>/dev/null
     _SKIP_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)"
     _SKIP_HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
     _SKIP_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    python3 - "$_SKIP_TS" "$_SKIP_BRANCH" "$_SKIP_HEAD" "$CARR_SKIP_CI_REASON" \
+    if ! python3 - "$_SKIP_TS" "$_SKIP_BRANCH" "$_SKIP_HEAD" "$CARR_SKIP_CI_REASON" \
       >> "$REPO_ROOT/out/ci-skip-receipts.jsonl" 2>/dev/null <<'PYEOF'
 import json, sys
 ts, branch, head, reason = sys.argv[1:5]
 print(json.dumps({"ts": ts, "branch": branch, "head": head, "reason": reason}))
 PYEOF
+    then
+      echo "  pre-push: could not write the skip receipt to out/ci-skip-receipts.jsonl — refusing the skip and running quality checks instead (fail closed, bypass audit item 10)" >&2
+      _EFFECTIVE_SKIP_CI=""
+    fi
+  fi
+
+  if [ "$_EFFECTIVE_SKIP_CI" = "1" ] 2>/dev/null; then
+    echo "  pre-push: CARR_SKIP_CI=1 — quality checks skipped for this command (reason: $CARR_SKIP_CI_REASON)" >&2
   else
     # THE PUSHED RANGE, which is what makes the secret scan cost O(this push)
     # instead of O(repository): 1,514 files were read on every push before this.
