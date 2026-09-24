@@ -606,13 +606,13 @@ class PostCallTests(unittest.TestCase):
         import inspect
         self.assertNotIn("popen", inspect.signature(post_call.resident_flash_distiller).parameters)
 
-    def test_default_distiller_falls_back_to_llama_only_when_the_resident_server_is_unreachable(self) -> None:
+    def test_default_distiller_reports_an_unreachable_resident_server_and_never_uses_llama(self) -> None:
         with patch.object(post_call, "resident_flash_distiller", side_effect=post_call.DistillerUnavailable("down")) as resident, \
-             patch.object(post_call, "llama_distiller", return_value=self.output()) as llama:
-            result = post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+             patch.object(post_call, "llama_distiller") as llama:
+            with self.assertRaisesRegex(post_call.DistillerUnavailable, "Flash Next"):
+                post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
         resident.assert_called_once()
-        llama.assert_called_once()
-        self.assertEqual(result["joe_tasks"][0]["title"], "Call vendor")
+        llama.assert_not_called()
 
     def test_default_distiller_prefers_the_resident_server_and_never_falls_back_on_a_content_failure(self) -> None:
         with patch.object(post_call, "resident_flash_distiller", return_value=self.output()) as resident, \

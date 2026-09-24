@@ -32,9 +32,10 @@ confirms it.
    model is the resident Flash Next server (Qwen3.8 Flash Next, already
    running on loopback for the Model Room flash desk; this workflow only ever
    calls it and never starts, stops, or restarts it). When that server is
-   unreachable, processing falls back to a bundled local Qwen2.5 1.5B model
-   served by a private, bounded `llama-server` child this workflow does start
-   and stop itself.
+   unreachable, the session is marked blocked with a plain reason ("Flash
+   Next ... is not running") and can be retried; there is no fallback to the
+   bundled Qwen2.5 1.5B model, which looped and never produced a pack
+   (2026-09-23).
 5. A deterministic validator rejects invented IDs, recipients not attached to
    the deal, unsupported phase values, oversized evidence, and malformed tasks
    or drafts.

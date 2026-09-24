@@ -635,25 +635,26 @@ def resident_flash_distiller(request: dict[str, Any], opener: Callable[..., Any]
 def default_distiller(request: dict[str, Any]) -> dict[str, Any]:
     """CARR_POST_CALL_DISTILLER_COMMAND still wins outright (test/ops override).
 
-    Otherwise prefer the resident Flash Next server -- a much stronger model
-    that (unlike the bundled 1.5B llama.cpp model) reliably produces a valid
-    review pack. Falling back to the llama path when the resident server is
-    simply unreachable, rather than leaving every call blocked whenever that
-    shared desk process happens to be stopped, is judged worth it: the llama
-    path already fails closed into a visible ``blocked`` status with a clear
-    reason when its own output is unusable, so this fallback can only ever
-    trade one already-visible failure mode for another, never hide one. A
-    content-quality failure from the resident model (bad JSON, schema
-    violations) is NOT treated as unavailability and is surfaced directly
-    instead of being papered over by a worse model.
+    Otherwise the resident Flash Next server is the only default. There is NO
+    fallback to the bundled 1.5B llama.cpp model: on 2026-09-23 that model
+    looped ("Joe says: 'I will do this.'") until it hit its token limit on
+    both a real session and a realistic synthetic one, so falling back to it
+    would only replace "Flash Next is not running" with a misleading
+    "no JSON object" reason. Unreachability is reported as itself, in words a
+    partner can act on, and the session stays blocked until it is retried.
+    llama_distiller is kept for an explicit CARR_POST_CALL_DISTILLER_COMMAND-
+    style override only.
     """
     command = os.environ.get("CARR_POST_CALL_DISTILLER_COMMAND")
     if command:
         return command_distiller(request, command=command)
     try:
         return resident_flash_distiller(request)
-    except DistillerUnavailable:
-        return llama_distiller(request)
+    except DistillerUnavailable as exc:
+        raise DistillerUnavailable(
+            "Flash Next, the local model that writes the review pack, is not running; "
+            "start it and retry this call"
+        ) from exc
 
 
 def process_session(session_dir: Path, distiller: Callable[[dict[str, Any]], dict[str, Any]] = default_distiller) -> dict[str, Any]:
