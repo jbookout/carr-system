@@ -333,20 +333,29 @@ def findings(results, floor=REPORT_AT):
     return rows
 
 
-# --- task fit, in shadow ----------------------------------------------------
+# --- task fit, acting -------------------------------------------------------
 #
 # JOE, 2026-09-23 (decision a98c2832, Jev supervision checks): the per-edit
 # review judged the code against nothing but itself, so a change that was well
 # written and not what was asked for went through unremarked. The two
 # questions below read the change against the most recent human request. They
-# ride in the SAME request as the questions above, and they only ever RECORD
-# what they would have done: the Jev System One doctrine requires shadow
-# before any use that affects control, and SHADOW_BLOCK_AT is a placeholder
-# until the shadow rows (kind TASK_FIT_KIND in out/jev-judge.jsonl) say what
-# it should be.
+# ride in the SAME request as the questions above.
+#
+# JOE, 2026-09-24 (decision 5ec806a4, "every jev check in the system too is
+# not a shadow"): this check now ACTS on its judgment. When the top task-fit
+# probability clears TASK_FIT_ACT_AT, review_for_edit() returns `_would_block`
+# and hooks/lint-gate.py surfaces it as a real finding the session must
+# address, through the same findings channel the hook already uses -- not
+# folded into the advisory-only list. What stays, per the ruling: the
+# threshold keeps its shadow-era value as the starting point rather than
+# being re-guessed; a judgment failure is recorded as an error row and
+# RE-RAISED, so the hook falls back to its existing "unavailable" receipt
+# (the abstention path) instead of an affirmative pass or fail; and every
+# judgment, acted on or not, is still recorded to out/jev-judge.jsonl under
+# TASK_FIT_KIND so the log stays the audit trail.
 
-TASK_FIT_KIND = "post_write_task_fit_shadow"
-SHADOW_BLOCK_AT = 0.85            # placeholder; calibrate from the shadow log
+TASK_FIT_KIND = "post_write_task_fit"
+TASK_FIT_ACT_AT = 0.85            # starting point carried over from the shadow era
 ADVISORY_AT = 0.85                # the hook's REVIEW_AT, for the comparison row
 TASK_TAIL_CHARS = 2000
 TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
@@ -431,15 +440,17 @@ def _judge_module():
 
 
 def review_for_edit(region, payload, client=None, api_key=None, log_path=None):
-    """review_one for the post-write hook, plus the task-fit shadow.
+    """review_one for the post-write hook, plus the acting task-fit check.
 
     Returns what review_one returns, plus `_would_block` (the highest task-fit
-    probability) only when it clears SHADOW_BLOCK_AT. The task-fit answers are
-    removed from the scores, and underscored keys never become advisory
-    findings, so the hook's advisory output is unchanged. A judgment failure
-    is recorded as an error row and re-raised, so the hook's existing
-    "unavailable" receipt is unchanged too. With no transcript, only the
-    existing questions are asked and nothing is recorded.
+    probability) only when it clears TASK_FIT_ACT_AT -- the caller (lint-gate)
+    treats that as a real finding, not an advisory one. The task-fit answers
+    are removed from the scores, and underscored keys never become advisory
+    findings, so the hook's advisory-only output is unchanged apart from that
+    one signal. A judgment failure is recorded as an error row and RE-RAISED
+    -- the abstention path -- so the hook falls back to its existing
+    "unavailable" receipt instead of any affirmative verdict. With no
+    transcript, only the existing questions are asked and nothing is recorded.
     """
     payload = payload if isinstance(payload, dict) else {}
     task = latest_task(payload.get("transcript_path"))
@@ -468,11 +479,11 @@ def review_for_edit(region, payload, client=None, api_key=None, log_path=None):
         record(subject, {}, None, error="task_fit_answers_missing")
         return scores
     top = max(task_scores.values())
-    would_block = top >= SHADOW_BLOCK_AT
+    would_block = top >= TASK_FIT_ACT_AT
     advisory = sorted(name for name, value in scores.items()
                       if not name.startswith("_")
                       and isinstance(value, (int, float)) and value >= ADVISORY_AT)
-    record(dict(subject, would_block=would_block, threshold=SHADOW_BLOCK_AT,
+    record(dict(subject, would_block=would_block, threshold=TASK_FIT_ACT_AT,
                 task_scores=task_scores),
            answer, {"advisory_findings": advisory, "effect": "required"},
            note="agreed" if would_block == bool(advisory) else "disagreed")

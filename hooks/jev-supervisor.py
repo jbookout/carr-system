@@ -17,16 +17,14 @@ ops/jev_judge.py: the answer is recorded to out/jev-judge.jsonl beside what the
 session actually did, so a threshold can be measured before anything acts.
 
 TWO MODES, chosen by the CARR_JEV_SUPERVISOR environment variable:
-  shadow            — record only; the session sees nothing.
-  advise (default)  — also hand the session a short advisory line (the likely
-                     buggy line, the real path it probably meant, the tests
-                     worth running, "you are looping"). Decision 0b11c89b
-                     (2026-09-24, Joe: "Jev is not advisory only. It's in our
-                     hard rules or it is supposed to be.") moved this hook's
-                     default off shadow, so its failure_triage/bug_locator
-                     answers reach the session by default on every client,
-                     not only the flash ones. `shadow` is still available for
-                     a caller that deliberately wants recording only.
+  advise (default) — hand the session a short advisory line (the likely buggy
+                     line, the real path it probably meant, the tests worth
+                     running, "you are looping"). Joe, 2026-09-24 (decision
+                     5ec806a4, "every jev check in the system too is not a
+                     shadow"): every session gets this, Claude included, not
+                     just the flash sessions it was written for.
+  shadow           — record only; the session sees nothing. Set
+                     CARR_JEV_SUPERVISOR=shadow explicitly to go back to this.
 
 EVENTS
   PostToolUse (any tool):
@@ -52,6 +50,10 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUDGET_SECONDS = 20.0
+# JOE, 2026-09-24 (decision 5ec806a4): "every jev check in the system too is
+# not a shadow". advise is now the default for every session, Claude included;
+# CARR_JEV_SUPERVISOR still overrides it explicitly (e.g. back to "shadow" or
+# "off") when a session wants that.
 MODE = os.environ.get("CARR_JEV_SUPERVISOR", "advise").strip().lower()
 MAX_OUTPUT_CHARS = 12000
 

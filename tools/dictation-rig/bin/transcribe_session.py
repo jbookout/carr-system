@@ -226,8 +226,20 @@ def resolve_model(log: LogFunc) -> Path:
 
 
 def load_prompt() -> str:
+    # vocab-prompt.txt is tracked and carries only generic industry terms and
+    # place names (WR-000049: this repo is public, so no client roster in the
+    # tracked tree). vocab-local.txt, gitignored, is the per-machine layer
+    # with real client/practice/person names — same directory, loaded and
+    # appended when present so dictation quality is unchanged; absent when
+    # missing rather than an error, since a fresh clone has no local vocab yet.
     prompt_path = Path(__file__).resolve().parent.parent / "vocab-prompt.txt"
-    return prompt_path.read_text(encoding="utf-8").strip()
+    text = prompt_path.read_text(encoding="utf-8").strip()
+    local_path = prompt_path.with_name("vocab-local.txt")
+    if local_path.exists():
+        local_text = local_path.read_text(encoding="utf-8").strip()
+        if local_text:
+            text = f"{text} {local_text}" if text else local_text
+    return text
 
 
 # --- audio pipeline ------------------------------------------------------

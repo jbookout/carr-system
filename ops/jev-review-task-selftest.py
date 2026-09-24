@@ -241,7 +241,7 @@ class HookOutputTests(unittest.TestCase):
         self.assertEqual(high["findings"][:len(baseline["findings"])],
                          baseline["findings"])
         self.assertEqual(len(extra), 1)
-        self.assertEqual(extra[0]["effect"], "required")
+        self.assertEqual(extra[0]["effect"], "must_address")
         kinds = [row["kind"] for row in rows(self.log)]
         self.assertEqual(kinds, [review.TASK_FIT_KIND] * 2)
 
