@@ -984,6 +984,17 @@ def _stuck_live_jobs(snap):
     return findings
 
 
+# The completion marker _canonical_health() prints on EVERY path out of it,
+# clean or already-broken (see both call sites below). It must be printed
+# character-for-character identically from both places — a caller
+# (ops/release-pipeline.py's HEALTH_COMPLETE_MARKER) compares against this
+# EXACT string as the last non-empty stdout line to decide whether a read
+# is trustworthy at all (point 3 of the third round of an independent
+# review of PR #1237: this string and that constant drifted apart for
+# three rounds, silently making `complete=False` on every real run).
+_HEALTH_COMPLETION_MARKER = ("Projection freshness/tamper checks are recovery evidence; "
+                             "use --recovery --reason <why>.")
+
 _FINDINGS: list = []
 # The machine-readable form of every CANONICAL_FINDING line the run prints,
 # built alongside the text so both stay in lockstep. Schema decided against
@@ -1063,6 +1074,15 @@ def _canonical_health():
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _canonical_finding("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
+        # The completion marker must still print here (point 3 of the third
+        # round of an independent review of PR #1237): this branch already
+        # recorded a real, fully-explained hard_error finding — a read that
+        # caught its own failure and named it is COMPLETE, not unavailable.
+        # Without the marker, ops/release-pipeline.py's read_health_findings
+        # would read this as an INCOMPLETE baseline (marker missing) and
+        # hold forever waiting for a "clean" read that is never coming,
+        # instead of treating the hard_error as the decisive answer it is.
+        print(_HEALTH_COMPLETION_MARKER)
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
@@ -1432,7 +1452,7 @@ def _canonical_health():
                            "rc=1 was set but no finding was recorded anywhere to explain it",
                            hard_error=True)
 
-    print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
+    print(_HEALTH_COMPLETION_MARKER)
     return rc
 
 

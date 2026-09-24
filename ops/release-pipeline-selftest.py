@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -454,6 +455,41 @@ RULE_GAPS_98 = _finding("rule_enforcement", "98 active rule gaps", count=98)
 RULE_GAPS_97 = _finding("rule_enforcement", "97 active rule gaps", count=97)
 
 
+class HealthCompleteMarkerDoesNotDrift(unittest.TestCase):
+    """Point 3 of the third round of an independent review of PR #1237: a
+    REAL run of health-preflight showed `complete=False` on every single
+    read, baseline and live alike, even though tools/health-check.py had
+    printed its completion marker as the true last line of stdout and
+    written a well-formed findings.json. The cause: ops/release-pipeline.py's
+    HEALTH_COMPLETE_MARKER constant was a truncated PREFIX of the actual
+    `print(...)` call in tools/health-check.py — missing "; use --recovery
+    --reason <why>." — so the exact-string-equality check in
+    read_health_findings() never matched, no matter how clean the read.
+    Every FakeRunner-based selftest passed anyway because FakeRunner builds
+    its own fake marker text FROM ops/release-pipeline.py's constant, so
+    both sides of the (wrong) comparison always agreed with each other, just
+    never with the real file. This test reads tools/health-check.py's
+    SOURCE TEXT directly (it cannot be imported — see tools/health-check-
+    findings-selftest.py's module docstring) and proves the two literal
+    strings are identical, so this specific drift can never come back
+    silently."""
+
+    def test_pipeline_marker_matches_health_checks_own_print_exactly(self):
+        health_check_src = (HERE / "../tools/health-check.py").resolve().read_text(encoding="utf-8")
+        m = re.search(r'_HEALTH_COMPLETION_MARKER = \(\s*"([^"]*)"\s*\n\s*"([^"]*)"\s*\)',
+                      health_check_src)
+        self.assertIsNotNone(m, "could not find _HEALTH_COMPLETION_MARKER in tools/health-check.py "
+                                "— has it been renamed or reshaped?")
+        health_check_marker = m.group(1) + m.group(2)
+        self.assertEqual(rp.HEALTH_COMPLETE_MARKER, health_check_marker)
+        # And both print call sites in tools/health-check.py actually use
+        # the constant, not a re-typed literal that could drift from it on
+        # its own.
+        self.assertEqual(health_check_src.count("print(_HEALTH_COMPLETION_MARKER)"), 2,
+                         "tools/health-check.py should print the marker constant, by name, "
+                         "from exactly two places (the REFUSED early-return and the normal end)")
+
+
 class HealthGate(Base):
     """The post-release health gate judges the release, not standing debt: it
     diffs by (key, subject) against a baseline taken before any mutation, and
@@ -543,7 +579,8 @@ class HealthGate(Base):
         for later in ("staging-prepare", "staging-app-writer", "migrate-plan",
                       "migrate-apply", "upload", "staging", "promote", "health"):
             self.assertNotIn(later, runner.names())
-        self.assertEqual(runner.names(), ["wrangler-auth", "worktree", "venv-link", "health-baseline"])
+        self.assertEqual(runner.names(),
+                         ["wrangler-auth", "worktree", "venv-link", "npm-ci", "health-baseline"])
 
     def test_B_baseline_runs_in_the_worktree_before_every_apply_step(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
@@ -1198,6 +1235,33 @@ class Robustness(Base):
         self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
 
     def test_unexpected_error_after_a_mutation_is_a_failure(self):
+        # Crashing at staging-prepare, which only runs AFTER the health
+        # baseline has already succeeded and self.mutated is already True
+        # (point 1 of the third round of review moved venv-link AND npm-ci
+        # to run BEFORE the baseline, and neither of those sets
+        # self.mutated on its own — see the next test). staging-prepare is
+        # the first step downstream of a successful baseline, so a crash
+        # here is unambiguously "after a mutation."
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        orig = runner.run
+
+        def run(argv, **kw):
+            if any("staging-project-replacement.py" in a for a in argv) and "prepare" in argv:
+                raise OSError("disk full")
+            return orig(argv, **kw)
+        runner.run = run  # type: ignore[method-assign]
+        self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 1)
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        self.assertEqual(self.fx.records()[-1]["step"], "unexpected")
+
+    def test_unexpected_error_during_npm_ci_is_not_yet_a_mutation(self):
+        # Point 1 of the third round of review: venv-link and npm-ci now
+        # run BEFORE the health baseline, and neither sets self.mutated —
+        # "neither touches production state, so the SHA isn't consumed"
+        # (the coordinator's own framing). An npm-ci crash is therefore
+        # still a clean, pre-mutation error: retried next tick, no
+        # failed_sha, same as a crash before the worktree even existed.
         sha = self.fx.commit({"mcp-server/src/a.js": "1"})
         runner = FakeRunner()
         orig = runner.run
@@ -1208,8 +1272,8 @@ class Robustness(Base):
             return orig(argv, **kw)
         runner.run = run  # type: ignore[method-assign]
         self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 1)
-        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
-        self.assertEqual(self.fx.records()[-1]["step"], "unexpected")
+        self.assertNotIn("failed_sha", self.fx.state().get("worker", {}))
+        self.assertEqual(self.fx.records()[-1]["status"], "error")
 
     def test_failure_after_migrations_says_db_is_ahead(self):
         self.fx.commit({"migrations/0600_x.sql": "select 1;"})

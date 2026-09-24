@@ -506,5 +506,70 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
 
 
+class CompletionMarkerAlwaysPrints(unittest.TestCase):
+    """Point 3 of the third round of an independent review of PR #1237: an
+    EARLY return out of `_canonical_health` (the `except Exception:` branch
+    at its top, when `_canonical_snapshot()` itself raises) used to skip the
+    completion-marker print entirely, even though it had already recorded a
+    real, fully-explained `canonical_health_refused` hard_error finding. A
+    read that catches and names its own failure is COMPLETE, not
+    unavailable — without the marker, ops/release-pipeline.py's
+    read_health_findings() would read it as an incomplete baseline and hold
+    forever, never reaching the hard_error verdict it already has. This
+    proves, statically, that every `return` out of `_canonical_health`
+    OTHER than its final statement is preceded, in the same enclosing
+    block, by a `print(_HEALTH_COMPLETION_MARKER)` call."""
+
+    @staticmethod
+    def _is_marker_print(stmt: ast.stmt) -> bool:
+        return (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name) and stmt.value.func.id == "print"
+                and len(stmt.value.args) == 1 and isinstance(stmt.value.args[0], ast.Name)
+                and stmt.value.args[0].id == "_HEALTH_COMPLETION_MARKER")
+
+    def _check_marker_before_early_returns(self, body: list, errors: list, where: str,
+                                           seen_marker: bool, is_final_block: bool) -> None:
+        n = len(body)
+        for i, stmt in enumerate(body):
+            is_last_top_level = is_final_block and i == n - 1
+            if isinstance(stmt, ast.Return) and not is_last_top_level:
+                if not seen_marker:
+                    errors.append(f"{where}:{stmt.lineno}: early return with no preceding "
+                                  f"print(_HEALTH_COMPLETION_MARKER) call in the same or an "
+                                  f"enclosing block")
+            if self._is_marker_print(stmt):
+                seen_marker = True
+            for field in ("body", "orelse", "finalbody"):
+                nested = getattr(stmt, field, None)
+                if isinstance(nested, list) and nested and all(isinstance(x, ast.stmt) for x in nested):
+                    self._check_marker_before_early_returns(nested, errors, where, seen_marker, False)
+            for handler in getattr(stmt, "handlers", []) or []:
+                self._check_marker_before_early_returns(handler.body, errors, where, seen_marker, False)
+
+    def test_every_early_return_prints_the_completion_marker_first(self):
+        fn = _find_function("_canonical_health")
+        errors: list = []
+        self._check_marker_before_early_returns(fn.body, errors, "_canonical_health",
+                                                seen_marker=False, is_final_block=True)
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_mutation_an_early_return_with_no_marker_print_is_caught(self):
+        bad_src = (
+            "def f():\n"
+            "    try:\n"
+            "        snap = risky()\n"
+            "    except Exception:\n"
+            "        _canonical_finding('x', 'x', hard_error=True)\n"
+            "        return 1\n"
+            "    print(_HEALTH_COMPLETION_MARKER)\n"
+            "    return 0\n"
+        )
+        fn_bad = ast.parse(bad_src).body[0]
+        errors_bad: list = []
+        self._check_marker_before_early_returns(fn_bad.body, errors_bad, "f",
+                                                seen_marker=False, is_final_block=True)
+        self.assertNotEqual(errors_bad, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

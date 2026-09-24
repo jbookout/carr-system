@@ -799,25 +799,50 @@ class Pipeline:
                               "new canonical finding(s) since the pre-promote baseline: "
                               + "; ".join(new))
 
+    def _release_worktree_ready(self, name: str, wt: Path, mcp: Path, sha: str, *,
+                                mark_mutated: bool) -> None:
+        """The exact prefix that must run before ANY health read against a
+        release worktree: checkout, link the venv, `npm ci`. Called from
+        BOTH release_worker and health_preflight (point 2 of the third
+        round of an independent review of PR #1237: the two must call the
+        SAME step list, not two hand-copies of it, so they cannot drift
+        apart again the way they already did once).
+
+        `npm ci` is required BEFORE the health read, not merely BEFORE
+        staging — a real health-preflight run (point 1, BLOCKER, of the
+        third round) showed the baseline still failing with only venv-link
+        done first: tools/db-tap.py's `dsn()` shells out to
+        `mcp-server/node_modules/.bin/neonctl`, which does not exist until
+        `npm ci` has installed it, so a fresh worktree with venv-link alone
+        still hard-errors on `source_unreadable`/`job_ledger`/
+        `control_state` for every DB-backed section. Neither venv-link nor
+        `npm ci` writes any production state, so running them ahead of the
+        baseline does not widen what a clean Blocked hold is allowed to be.
+        """
+        self.add_worktree(name, self.repo, wt, sha, mark_mutated=mark_mutated)
+        self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
+        self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
+
     def health_preflight(self, sha: str) -> int:
         """Real evidence for point 1 (BLOCKER) of the third round of an
         independent review of PR #1237: a fake-runner selftest cannot prove
-        `./run.sh health` actually succeeds against the linked venv, because
-        the fake runner never executes anything. This checks out a REAL,
-        throwaway release worktree at `sha` (no --apply, no promote — the
-        exact same "checkout, venv-link, health read" prefix release_worker
-        runs before it ever mutates anything), runs the REAL `./run.sh
-        health --findings-json` subprocess twice (mirroring the baseline and
-        the post-promote read, both against the same folder, per point 1 of
-        the SECOND round of review), prints what each one found, and always
-        removes the worktree before returning — this command mutates nothing
-        beyond that throwaway checkout, so it is safe to run against
-        production data as a preflight.
+        `./run.sh health` actually succeeds against the linked venv and
+        installed node_modules, because the fake runner never executes
+        anything. This checks out a REAL, throwaway release worktree at
+        `sha` (no --apply, no promote — the exact same
+        `_release_worktree_ready` prefix release_worker runs before it ever
+        mutates anything), runs the REAL `./run.sh health --findings-json`
+        subprocess twice (mirroring the baseline and the post-promote read,
+        both against the same folder, per point 1 of the SECOND round of
+        review), prints what each one found, and always removes the
+        worktree before returning — this command mutates nothing beyond
+        that throwaway checkout, so it is safe to run against production
+        data as a preflight.
         """
         wt = self.store.root / "worktrees" / f"preflight-{sha[:12]}"
-        self.add_worktree("preflight", self.repo, wt, sha, mark_mutated=False)
+        mcp = wt / "mcp-server"
         try:
-            self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
+            self._release_worktree_ready("preflight", wt, mcp, sha, mark_mutated=False)
             baseline_res, baseline_findings, baseline_complete = self.health_read("health-baseline", wt)
             self.out(f"  health-baseline: rc={baseline_res.rc} complete={baseline_complete} "
                      f"findings={len(baseline_findings)} "
@@ -1305,30 +1330,25 @@ class Pipeline:
         # `runner.calls == []` for it).
         self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
 
-        # 1. the release worktree at exactly S — a checkout only, no --apply
-        # yet (`mark_mutated=False`), created BEFORE the health baseline so
-        # the baseline and the later post-promote read run in the exact same
-        # code AND folder — see add_worktree's docstring and point 1 of the
-        # second round of an independent review of PR #1237. An incomplete
-        # or already-broken baseline is still a clean Blocked hold here: the
-        # worktree is a trivially re-creatable checkout, and remove_worktrees()
-        # (called from run_lane's `except Blocked` path) cleans it up, so it
-        # does not by itself burn the SHA the way a real --apply step would.
-        self.add_worktree("worktree", self.repo, wt, sha, mark_mutated=False)
+        # 1. the release worktree at exactly S, venv-linked, `npm ci`'d — a
+        # checkout and install only, no --apply yet, created BEFORE the
+        # health baseline so the baseline and the later post-promote read
+        # run in the exact same code AND folder, with the exact same
+        # dependencies available to them (add_worktree's docstring; points
+        # 1 of the second round and 1/2 of the third round of an
+        # independent review of PR #1237). Shared with health_preflight via
+        # `_release_worktree_ready` so the two step lists cannot drift
+        # apart. An incomplete or already-broken baseline is still a clean
+        # Blocked hold here: the worktree is a trivially re-creatable
+        # checkout, and remove_worktrees() (called from run_lane's `except
+        # Blocked` path) cleans it up, so it does not by itself burn the
+        # SHA the way a real --apply step would.
+        self._release_worktree_ready("worktree", wt, mcp, sha, mark_mutated=False)
 
-        # venv-link BEFORE the baseline (point 1, BLOCKER, of the third
-        # round of an independent review of PR #1237): it is a symlink only
-        # — no production state, no network, nothing that widens what a
-        # clean Blocked hold is allowed to be — but without it `./run.sh
-        # health` in the worktree falls back to the bare Homebrew python3,
-        # which has neither psycopg nor openpyxl, so EVERY baseline read a
-        # source_unreadable hard_error and every worker release blocked
-        # before promote. Linking the venv first gives the baseline read
-        # the same interpreter the rest of this lane already relies on.
-        self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
-
-        # Health baseline, read INSIDE that same worktree (points B/E of the
-        # first review round: before staging-prepare/staging-app-writer/
+        # Health baseline, read INSIDE that same worktree — now with the
+        # venv linked and node_modules installed, so it has exactly what
+        # every DB-backed and neonctl-backed section needs (points B/E of
+        # the first review round: before staging-prepare/staging-app-writer/
         # migrate-apply — every --apply step — so a release's OWN migration
         # damage can never hide inside its own "baseline" and forgive
         # itself; point 1 of the second round: in the SAME folder the
@@ -1344,8 +1364,6 @@ class Pipeline:
             # from it. From here on a hold is no longer "nothing happened
             # yet"; treat it like every other real failure.
             self.mutated = True
-
-        self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
 
         # 2-3. staging replacement and app writer
         op = str(uuid.uuid4())
@@ -1495,7 +1513,18 @@ class Pipeline:
 # anywhere in the output — a marker printed early followed by a traceback
 # (the process crashed on its way out, after the happy-path print but before
 # actually exiting clean) must not read as complete.
-HEALTH_COMPLETE_MARKER = "Projection freshness/tamper checks are recovery evidence"
+#
+# MUST match tools/health-check.py's actual `print(...)` call EXACTLY — this
+# was truncated (missing "; use --recovery --reason <why>.") from round 1
+# through round 3, so `lines[-1].strip() == HEALTH_COMPLETE_MARKER` was
+# FALSE on every real run, no matter how clean, and every real baseline and
+# every real post-promote read came back `complete=False`. Every selftest
+# passed anyway because FakeRunner builds its marker text FROM this same
+# (wrong) constant, so the mismatch was invisible until a real run (point 3
+# of the third round of review) exposed it. A change to health-check.py's
+# printed line must update this constant in the SAME commit.
+HEALTH_COMPLETE_MARKER = ("Projection freshness/tamper checks are recovery evidence; "
+                          "use --recovery --reason <why>.")
 
 # The finding fields ops/release-pipeline.py's health gate relies on out of
 # tools/health-check.py's `--findings-json` payload (schema decided against
