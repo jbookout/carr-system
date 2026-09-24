@@ -646,6 +646,50 @@ class Pipeline:
         res.log = str(log)
         return res
 
+    def health_read(self, name: str, wt: Path) -> tuple[Result, frozenset[str], bool]:
+        """Run `./run.sh health` once, logged like a normal step but never
+        raising on its own — the caller decides what the findings mean."""
+        if self.dry_run:
+            self.out(f"  [dry-run] (cd {wt}) ./run.sh health  # {name}")
+            return Result(0, ""), frozenset(), True
+        n = len(self.executed) + 1
+        log = self.run_dir / f"{n:02d}-{name}.log"
+        self.out(f"  -> {name}: ./run.sh health")
+        self.executed.append(name)
+        res = self.runner.run(["./run.sh", "health"], cwd=wt, log=log, env=self.env, timeout=900)
+        res.log = str(log)
+        findings, complete = parse_canonical_findings(res.out)
+        return res, findings, complete
+
+    def health_gate(self, wt: Path, baseline: tuple[frozenset[str], bool]) -> None:
+        """Fail the release on a NEW canonical finding, not on standing debt
+        that already existed before this promote.
+
+        `./run.sh health` reads canonical database state — export receipts,
+        active-rule gaps, loose-work, credentials — almost none of which is
+        about any one release; failing every release on every pre-existing
+        gap (98 active rule gaps, 6 stuck export receipts, one loose path, on
+        a normal day) trains nobody to read the gate, because it is never
+        green. This compares the post-promote read against a baseline taken
+        moments before promotion (same worktree, same production database,
+        see release_worker) and fails only on what changed.
+
+        An unavailable read is never a pass, on either side: a baseline that
+        did not complete excuses nothing (every current finding counts as
+        new), and a live read that did not complete fails the gate outright
+        regardless of what it printed.
+        """
+        baseline_findings, baseline_complete = baseline
+        res, findings, complete = self.health_read("health", wt)
+        if not complete:
+            raise StepFailed("health", res.rc or 1, res.log,
+                              "health read did not complete — an unavailable read is never a pass")
+        new = findings if not baseline_complete else (findings - baseline_findings)
+        if new:
+            raise StepFailed("health", res.rc or 1, res.log,
+                              "new canonical finding(s) since the pre-promote baseline: "
+                              + "; ".join(sorted(new)))
+
     # -- evidence -----------------------------------------------------------
     def batch_commits(self, repo_dir: Path, base: str, sha: str) -> list[str]:
         return self.git("rev-list", "--first-parent", f"{base}..{sha}", cwd=repo_dir).split()
@@ -1137,6 +1181,12 @@ class Pipeline:
                                   *budget], wt, env=self.deploy_env())
         version = "<provider version from upload>" if self.dry_run else parse_provider_version(up)
 
+        # health baseline, taken just before promotion (staging still runs
+        # immediately before promote below) so the post-promote read further
+        # down can be judged against standing debt as of THIS release rather
+        # than failing on gaps this release did nothing to create.
+        health_baseline = self.health_read("health-baseline", wt)[1:]
+
         # 6. staging forward-fix rehearsal; promotion is unreachable unless it returned 0
         staging_ok = False
         self.step("staging", ["bin/deploy-worker.sh", "--env", "staging", "--recovery-step", "forward_fix",
@@ -1157,7 +1207,7 @@ class Pipeline:
             live = self.http(lane_cfg["live_release_url"])
             if (live.get("git_sha") or {}).get("value") != sha:
                 raise StepFailed("verify-live", 1, "", "production /release does not serve the released SHA")
-        self.step("health", ["./run.sh", "health"], wt, timeout=900)
+        self.health_gate(wt, health_baseline)
 
         # 9. the schema snapshot goes back to main through its own PR
         schema_pr = None
@@ -1240,6 +1290,34 @@ class Pipeline:
                 "reviews": rev.get("reviews", []), "review_rule": head.get("rule"),
                 "reviewed_sha": head.get("reviewed_sha"), "pr_head_sha": head.get("head_sha"),
                 "review_evidence": rev["verifier_evidence"]}
+
+
+# The line tools/health-check.py's _canonical_health() prints last, on every
+# completed pass regardless of rc. Its presence is what tells the release
+# gate the read is trustworthy; its absence (a crash, REFUSED, a timeout) means
+# the read is unavailable and must never be treated as clean — see
+# ReleasePipeline.health_read below.
+HEALTH_COMPLETE_MARKER = "Projection freshness/tamper checks are recovery evidence"
+
+
+def parse_canonical_findings(output: str) -> tuple[frozenset[str], bool]:
+    """(findings, complete) out of one `./run.sh health` run's stdout.
+
+    `findings` is the set of CANONICAL_FINDING lines (`key — detail`, exactly
+    as printed), which is what the release health gate diffs against a
+    baseline. `complete` is False whenever the check did not run to its own
+    end — a crashed read, `canonical health: REFUSED (...)`, a subprocess
+    timeout — and a caller must never treat an incomplete read as a pass, nor
+    diff it as a baseline: standing debt cannot be excused by a read that
+    never actually looked for it.
+    """
+    findings = frozenset(
+        line.split("CANONICAL_FINDING", 1)[1].strip()
+        for line in (output or "").splitlines()
+        if "CANONICAL_FINDING" in line
+    )
+    complete = HEALTH_COMPLETE_MARKER in (output or "")
+    return findings, complete
 
 
 def parse_json_field(text: str, field: str, step: str) -> str:

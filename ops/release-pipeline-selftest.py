@@ -58,9 +58,19 @@ class FakeRunner:
     """Answers by step name (the log file's name), records everything."""
 
     def __init__(self, fail_at: str | None = None, pending: int = 0, live: dict | None = None,
-                 wrangler_out: str = "You are logged in with an OAuth Token"):
+                 wrangler_out: str = "You are logged in with an OAuth Token",
+                 health_baseline_out: str | None = None, health_out: str | None = None):
         self.fail_at, self.pending, self.live = fail_at, pending, live
         self.wrangler_out = wrangler_out
+        # Default: a clean, COMPLETE health read with no findings, on both the
+        # pre-promote baseline and the post-promote read — every scenario
+        # above the HealthGate tests just wants the lane to finish. A test
+        # that cares about the health gate's own diffing overrides one or
+        # both with CANONICAL_FINDING lines, or drops the completion marker
+        # to simulate an unavailable read.
+        self.health_baseline_out = (health_baseline_out if health_baseline_out is not None
+                                    else rp.HEALTH_COMPLETE_MARKER + "\n")
+        self.health_out = health_out if health_out is not None else rp.HEALTH_COMPLETE_MARKER + "\n"
         self.calls: list[tuple[str, list[str]]] = []
         self.envs: dict[str, dict[str, str]] = {}
 
@@ -84,6 +94,8 @@ class FakeRunner:
             "migrate-plan": f"applied: 10   pending: {self.pending}",
             "upload": f"uploaded only\n  provider version: {VERSION}\n",
             "wrangler-auth": self.wrangler_out,
+            "health-baseline": self.health_baseline_out,
+            "health": self.health_out,
         }.get(name, "ok")
         if name == "promote" and self.live is not None:
             upload = next(a for n, a in self.calls if n == "upload")
@@ -392,6 +404,59 @@ class StagingGuard(Base):
         self.assertIn("upload", runner.names())
         self.assertNotIn("promote", runner.names())
         self.assertEqual(self.fx.records()[-1]["step"], "staging")
+
+
+STANDING = "  CANONICAL_FINDING rule_enforcement — 98 active rule gaps"
+
+
+class HealthGate(Base):
+    """The post-release health gate judges the release, not standing debt:
+    it fails only on a CANONICAL_FINDING that is new since a baseline read
+    taken just before promotion, and an unavailable read is never a pass."""
+
+    def test_standing_finding_present_before_and_after_does_not_fail(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        marker = rp.HEALTH_COMPLETE_MARKER
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_out=f"{STANDING}\n{marker}\n",
+                            health_out=f"{STANDING}\n{marker}\n")
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertIn("health-baseline", runner.names())
+        self.assertIn("health", runner.names())
+
+    def test_new_finding_since_baseline_fails_the_release(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        marker = rp.HEALTH_COMPLETE_MARKER
+        new_finding = "  CANONICAL_FINDING export_receipt — LATEST FAILED vendors.xlsx (latest status failed)"
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_out=f"{STANDING}\n{marker}\n",
+                            health_out=f"{STANDING}\n{new_finding}\n{marker}\n")
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["step"], "health")
+        self.assertIn("export_receipt", rec.get("detail", ""))
+        # promotion already happened; the gate judges what promotion did, it
+        # does not (and cannot) un-promote.
+        self.assertIn("promote", runner.names())
+
+    def test_an_unavailable_live_read_is_never_a_pass_even_with_no_findings(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_out=f"{rp.HEALTH_COMPLETE_MARKER}\n",
+                            health_out="canonical health: REFUSED (OperationalError: could not connect)\n")
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertEqual(self.fx.records()[-1]["step"], "health")
+
+    def test_an_unavailable_baseline_excuses_nothing(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        # baseline read itself unavailable (no completion marker); the live
+        # read below is otherwise a normal standing finding, but with no
+        # trustworthy baseline nothing can be excused as pre-existing.
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_out="canonical health: REFUSED (boom)\n",
+                            health_out=f"{STANDING}\n{rp.HEALTH_COMPLETE_MARKER}\n")
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertEqual(self.fx.records()[-1]["step"], "health")
 
 
 class KillSwitch(Base):
