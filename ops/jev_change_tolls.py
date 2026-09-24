@@ -45,53 +45,31 @@ WARN_AT = 0.55
 # output is about to push and needs the command, not the lesson.
 TOLLS = {
     "inventory_reseal": (
-        "The changed files are in `change.files`. Does this change edit a file "
-        "that the sealed source inventory tracks as a script entrypoint -- "
-        "anything under hooks/, bin/, tools/, pipelines/, ops/ that carries a "
-        "shebang or a main guard, any file under mcp-server/src/, or a GitHub "
-        "workflow under .github/workflows/ (workflows are inventoried too, "
-        "comment edits included)? Editing one changes its digest and the "
-        "seal must be re-derived.",
-        "a re-digest is a forward-only registry successor, not an overlay "
-        "edit. Do NOT union rows into current_source_review.upsert: "
-        "assertCurrentSourceInventoryMatchesFixture only reads that overlay "
-        "when the frontier is REGISTRY_V37_VERSION, so at today's frontier it "
-        "changes nothing. Instead: (1) append a patches[] entry for the NEXT "
-        "version in ops/config/scac-registry-source-inventory-fixtures.v1.json "
-        "carrying the re-digested rows as `upsert` (`remove` only for a "
-        "retired ingress), a reason naming them, and the expected_count and "
-        "expected_sha256 the ASSERTION reports; (2) cut the successor the "
-        "patch belongs to -- the new REGISTRY_V<n> version in "
-        "ops/scac-mutation-inventory.mjs, the generated runtime "
-        "mcp-server/src/scac-mutation-registry.v<n>.generated.js, its "
-        "forward-only migration, the entry-set seal in ops/config/"
-        "scac-registry-full-entry-set-seals.json, and the catalog baseline "
-        "measured on the disposable local PostgreSQL lane, never production; "
-        "(3) advance the snapshot selector, the siep11/siep18 local-pg gates "
-        "and mcp-server/test/siep-11-mutation-registry.test.mjs to the new "
-        "frontier. Copy the most recent successor as the template: `git log "
-        "--oneline -1 -i --grep='as SCAC v[0-9]'` (v53 was c3ab541f, #1146). "
-        "Read the digest back from the assertion, not the generator: node "
-        "--input-type=module -e \"import "
-        "{assertCurrentSourceInventoryMatchesFixture} from "
+        "The changed files are in `change.files`. Does this change edit an MCP "
+        "verb -- its definition, input schema or write/human-only/authority "
+        "flags under mcp-server/src/ -- or a scheduled job definition? Those "
+        "rows are still sealed, because the server refuses a verb whose "
+        "contract drifts from the generated registry. Script entrypoints "
+        "(hooks/, bin/, tools/, pipelines/, ops/ scripts), GitHub workflows "
+        "and launchd plists are NOT sealed any more (decision 05e144eb, "
+        "2026-09-24): editing or adding one needs no registry successor.",
+        "only for a verb or job-definition change: cut a registry successor "
+        "by copying the most recent one (`git log --oneline -1 -i "
+        "--grep='as SCAC v[0-9]'`) and read the digest back from the "
+        "assertion, AFTER your last edit: node --input-type=module -e "
+        "\"import {assertCurrentSourceInventoryMatchesFixture} from "
         "'./ops/scac-mutation-inventory.mjs'; import {TOOLS} from "
         "'./mcp-server/src/tools.js'; "
-        "assertCurrentSourceInventoryMatchesFixture(TOOLS)\" -- and run it "
-        "AFTER your last edit, never before"),
+        "assertCurrentSourceInventoryMatchesFixture(TOOLS)\". A script, "
+        "workflow or plist edit needs nothing"),
 
     "new_ingress_admitted": (
-        "Does this change ADD a new file that carries a shebang line or an "
-        "`if __name__ == \"__main__\"` guard, under hooks/, ops/, bin/, tools/ "
-        "or pipelines/? A new file with either of those is a new sealed "
-        "ingress, which moves the frontier and costs a registry successor "
-        "rather than a re-digest. A new module with neither is a library and "
-        "costs nothing. TWO EXCEPTIONS THAT ARE NOT INGRESSES no matter what "
-        "they contain, because the generator excludes them by name: any file "
-        "whose name contains `selftest`, and anything under a `test/` "
-        "directory. A new selftest carrying a main guard costs nothing.",
-        "make it a library -- no shebang, no main guard -- and host the "
-        "dispatch inside an entrypoint that is already inventoried, or open a "
-        "registry successor for it"),
+        "Does this change ADD a new MCP verb or a new scheduled job "
+        "definition? A new verb is a new sealed row and costs a registry "
+        "successor. A new script, workflow or plist costs nothing any more "
+        "(decision 05e144eb, 2026-09-24).",
+        "for a new verb, cut a registry successor; for anything else, "
+        "nothing is owed"),
 
     "gate_rebless": (
         "Does this change edit a file under hooks/ that is one of the gates the "
