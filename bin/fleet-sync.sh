@@ -28,8 +28,22 @@
 #     means most sessions run somewhere else entirely; syncing from there would
 #     move a branch somebody is mid-edit on.
 #
+# SIBLING REPOS (2026-09-23). Joe wants EVERY GitHub checkout on a Mac to stay
+# current, not just this one: "if im on my macbook working or my studio or
+# whatever, i dont want to have to remember to do that." The sibling list
+# (currently doctorcre-app, software-factory) lives in ONE place,
+# ops/config/fleet-sync-siblings.json, and each sibling is synced through
+# tools/fleet_sync_sibling_safety.py under the exact same fail-closed contract
+# as this checkout: absent -> skip, off-main -> skip, dirty -> skip and name
+# the paths, diverged -> skip, otherwise fetch + `merge --ff-only`. A sibling's
+# own skip or failure is INTENTIONALLY ignored below — see sync_siblings() —
+# so it can never prevent this checkout's own sync, the wiring re-render, or
+# change this job's own exit code.
+#
 # Exit codes follow bin/run-scheduled.sh's convention: 0 did something or was
 # already current, 78 deliberately skipped and said why, anything else failed.
+# This convention is about the CANONICAL checkout only; the sibling repos are
+# reported (one line each) but never participate in it.
 
 set -u
 EX_CONFIG=78
@@ -40,7 +54,9 @@ PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 
 # Canonical checkout only. --git-common-dir differs from --git-dir inside a
-# worktree, which is the cheapest reliable test.
+# worktree, which is the cheapest reliable test. A worktree invocation is
+# anomalous enough (this job's REPO-relative sibling paths would not even be
+# trustworthy) that it skips everything, siblings included.
 common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
 gitdir="$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)"
 if [ "$common" != "$gitdir" ]; then
@@ -48,42 +64,88 @@ if [ "$common" != "$gitdir" ]; then
   exit $EX_CONFIG
 fi
 
+# sync_siblings — fast-forward every sibling checkout named in
+# ops/config/fleet-sync-siblings.json (the single source of truth for the
+# list). Exit statuses are printed but deliberately never inspected: a
+# sibling's outcome must never affect $canonical_status or stop the wiring
+# re-render below.
+sync_siblings() {
+  local siblings_json="$REPO/ops/config/fleet-sync-siblings.json"
+  [ -f "$siblings_json" ] || return 0
+  local siblings
+  siblings="$("$PY" -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    for name in data.get("siblings", []):
+        print(name)
+except Exception:
+    pass
+' "$siblings_json" 2>/dev/null)"
+  [ -n "$siblings" ] || return 0
+
+  print -r -- "fleet-sync: sibling repos —"
+  local name
+  for name in ${(f)siblings}; do
+    "$PY" "$REPO/tools/fleet_sync_sibling_safety.py" "${REPO:h}/$name" "$name" main
+    # Intentionally ignore $? here. See the header note: a sibling's skip or
+    # failure is never allowed to change this job's own exit code.
+  done
+}
+
+canonical_status=0
+canonical_skip=0
+
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 if [ "$branch" != "main" ]; then
   print -r -- "fleet-sync: SKIP — checkout is on '$branch', not main; leaving it alone"
-  exit $EX_CONFIG
+  canonical_status=$EX_CONFIG
+  canonical_skip=1
 fi
 
-if ! git fetch --quiet origin main 2>/dev/null; then
+if [ "$canonical_skip" -eq 0 ] && ! git fetch --quiet origin main 2>/dev/null; then
   print -ru2 -- "fleet-sync: fetch of origin/main failed (offline, or no credential)"
-  exit $EX_CONFIG
+  canonical_status=$EX_CONFIG
+  canonical_skip=1
 fi
 
-local_sha="$(git rev-parse HEAD)"
-remote_sha="$(git rev-parse origin/main)"
+if [ "$canonical_skip" -eq 0 ]; then
+  local_sha="$(git rev-parse HEAD)"
+  remote_sha="$(git rev-parse origin/main)"
 
-if [ "$local_sha" = "$remote_sha" ]; then
-  print -r -- "fleet-sync: checkout already current at ${local_sha:0:8}"
-else
-  # Tracked changes only. Untracked scratch is a session's business, not this
-  # job's, and refusing on it would mean this never runs on a working machine.
-  if ! dirt_reason="$("$PY" "$REPO/tools/fleet_sync_safety.py" "$REPO" origin/main)"; then
-    print -r -- "fleet-sync: SKIP — local changes present, refusing to fast-forward over them:"
-    print -r -- "    $dirt_reason"
-    exit $EX_CONFIG
+  if [ "$local_sha" = "$remote_sha" ]; then
+    print -r -- "fleet-sync: checkout already current at ${local_sha:0:8}"
+  else
+    # Tracked changes only. Untracked scratch is a session's business, not this
+    # job's, and refusing on it would mean this never runs on a working machine.
+    if ! dirt_reason="$("$PY" "$REPO/tools/fleet_sync_safety.py" "$REPO" origin/main)"; then
+      print -r -- "fleet-sync: SKIP — local changes present, refusing to fast-forward over them:"
+      print -r -- "    $dirt_reason"
+      canonical_status=$EX_CONFIG
+      canonical_skip=1
+    elif ! git merge-base --is-ancestor HEAD origin/main; then
+      # Fast-forward only: HEAD must already be an ancestor of origin/main.
+      print -r -- "fleet-sync: SKIP — main has diverged from origin/main; a human decides this one"
+      canonical_status=$EX_CONFIG
+      canonical_skip=1
+    elif ! git merge --ff-only origin/main >/dev/null 2>&1; then
+      print -ru2 -- "fleet-sync: fast-forward failed unexpectedly"
+      canonical_status=1
+      canonical_skip=1
+    else
+      print -r -- "fleet-sync: fast-forwarded ${local_sha:0:8} -> ${remote_sha:0:8}"
+    fi
   fi
+fi
 
-  # Fast-forward only: HEAD must already be an ancestor of origin/main.
-  if ! git merge-base --is-ancestor HEAD origin/main; then
-    print -r -- "fleet-sync: SKIP — main has diverged from origin/main; a human decides this one"
-    exit $EX_CONFIG
-  fi
+# Siblings sync regardless of the canonical outcome above (short of the
+# worktree check, which already exited). A dirty or off-main carr-system
+# checkout says nothing about whether doctorcre-app or software-factory are
+# safe to fast-forward.
+sync_siblings
 
-  if ! git merge --ff-only origin/main >/dev/null 2>&1; then
-    print -ru2 -- "fleet-sync: fast-forward failed unexpectedly"
-    exit 1
-  fi
-  print -r -- "fleet-sync: fast-forwarded ${local_sha:0:8} -> ${remote_sha:0:8}"
+if [ "$canonical_skip" -eq 1 ]; then
+  exit $canonical_status
 fi
 
 # Re-render the installed wiring from whatever the checkout now holds. Idempotent

@@ -56,9 +56,9 @@ def main() -> int:
     check("fleet-sync deployment door is its canonical LaunchAgent plist",
           environment.get("deploy_mechanism") ==
           "ops/launchd/com.carr.fleet-sync.plist", repr(environment))
-    check("cadence covers the twelve-hour overnight gap plus one-hour grace",
+    check("cadence is hourly with a one-hour grace",
           (environment.get("expected_cadence_seconds"),
-           environment.get("cadence_grace_seconds")) == (43200, 3600),
+           environment.get("cadence_grace_seconds")) == (3600, 3600),
           repr(environment))
 
     with PLIST.open("rb") as handle:
@@ -70,13 +70,12 @@ def main() -> int:
     check("LaunchAgent records through run-scheduled under fleet-sync/fleet.sync",
           launchd.get("ProgramArguments") == expected_arguments,
           repr(launchd.get("ProgramArguments")))
-    observed_schedule = {
-        (entry.get("Hour"), entry.get("Minute"))
-        for entry in launchd.get("StartCalendarInterval", [])
-    }
-    check("LaunchAgent schedule is the declared four daily local fires",
-          observed_schedule == {(7, 45), (11, 45), (15, 45), (19, 45)},
-          repr(observed_schedule))
+    check("LaunchAgent fires hourly",
+          launchd.get("StartInterval") == 3600,
+          repr(launchd.get("StartInterval")))
+    check("LaunchAgent also fires at load (login/wake catch-up)",
+          launchd.get("RunAtLoad") is True,
+          repr(launchd.get("RunAtLoad")))
 
     spec = importlib.util.spec_from_file_location("scheduler_truth_under_test",
                                                   SCHEDULER_TRUTH)
@@ -116,7 +115,7 @@ def main() -> int:
           not any("fleet-sync" in str(finding.get("entry", ""))
                   for finding in findings), repr(findings))
 
-    print(f"\n{13 - len(FAILED)} passed, {len(FAILED)} failed")
+    print(f"\n{14 - len(FAILED)} passed, {len(FAILED)} failed")
     if FAILED:
         print("failed: " + ", ".join(FAILED), file=sys.stderr)
         return 1
