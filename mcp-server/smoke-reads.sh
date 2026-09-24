@@ -158,8 +158,8 @@ _id=0
 #
 # THE COST, measured: the 2026-08-14 nightly chain reported FAIL on the golden
 # workflow suite (out/nightly.log, run 13:03-13:08) for two checks —
-# retired_aliases-reads-0 at rep 3 of 3 and Musicologie-role_refs at rep 1 of 3.
-# Both detail lines were empty. The same suite passed 33/33 twice in the two
+# retired_aliases-reads-0 at rep 3 of 3 and the merged-org fixture's
+# role_refs check at rep 1 of 3. Both detail lines were empty. The same suite passed 33/33 twice in the two
 # chain runs that followed, 13 and 35 minutes later. Nothing was wrong with the
 # answers; two HTTP calls came back with no body, and the chain went red under a
 # heading that says "answer correctness".
@@ -201,6 +201,41 @@ call() {
 REPS="${SMOKE_REPS:-3}"
 REP_SLEEP="${SMOKE_REP_SLEEP:-3}"
 
+# ---------------------------------------------------------------------------
+# CLIENT-IDENTIFYING FIXTURE VALUES, EXTERNALIZED (WR-000049, 2026-09-24).
+#
+# This script used to hardcode real client names as smoke-test fixtures
+# (Joe's own real clients: a dental practice and a merged-alias client org).
+# That worked, but it put a client roster in a repository Joe ruled public.
+# The plumbing checks ("does `find` return a non-error result for a name that
+# exists") never needed a REAL client — any live record does, so those now
+# default to a vendor: `V-CPA-006` and a `CPA` search both match real,
+# non-client organizations already in production (accounting firms CARR pays,
+# not practices CARR represents).
+#
+# The MERGE/TOMBSTONE regression checks further down are different: they
+# assert exact historical counts (N aliases retired into one survivor) that
+# only exist for the specific real clients that were actually merged, and
+# faking an equivalent scenario would mean fabricating production data change
+# for a repo-hygiene goal — worse than the problem it solves. Renaming the
+# production records was considered and rejected the same way: it would touch
+# real deal history to satisfy a rule about what the TRACKED TREE carries,
+# not what the database holds. So those checks stay real-data checks, and the
+# real names move to `mcp-server/smoke-reads.local.env` (gitignored, sourced
+# below if present) instead of living in this tracked file. Missing the file
+# is not an error — the merge/tombstone checks SKIP, same convention as the
+# capability-gate SKIPs elsewhere in this script, so a clone with no local
+# fixture still runs every check that does not need one.
+SMOKE_FIND_QUERY="${SMOKE_FIND_QUERY:-CPA}"
+SMOKE_FIND_PATTERN="${SMOKE_FIND_PATTERN:-CPA}"
+SMOKE_CATCHUP_REF="${SMOKE_CATCHUP_REF:-V-CPA-006}"
+
+LOCAL_FIXTURES="${SMOKE_LOCAL_FIXTURES:-$(dirname "$0")/smoke-reads.local.env}"
+if [ -f "$LOCAL_FIXTURES" ]; then
+  # shellcheck disable=SC1090
+  . "$LOCAL_FIXTURES"
+fi
+
 # check <label> <verb> <args> [grep-pattern] [second-grep-pattern]
 # Passes when every rep is non-error, not isError, and (if given) matches the
 # pattern(s). A verb returning an empty-but-valid result still passes: this is a
@@ -229,8 +264,10 @@ echo "read-verb smoke test -> $API"
 echo
 
 # --- the seven read verbs, all must be non-error -------------------------------
-check "find (real name: Hughes)"      find             '{"query":"Hughes"}'   'Hughes'
-check "catch-me-up (real record C-112)" catch-me-up    '{"ref":"C-112","limit":5}' '"'
+check "find (non-client vendor: $SMOKE_FIND_QUERY)" find \
+      "{\"query\":\"$SMOKE_FIND_QUERY\"}"   "$SMOKE_FIND_PATTERN"
+check "catch-me-up (non-client vendor: $SMOKE_CATCHUP_REF)" catch-me-up \
+      "{\"ref\":\"$SMOKE_CATCHUP_REF\",\"limit\":5}" '"'
 check "today-triage"                  today-triage     '{}'
 check "deal-board"                    deal-board       '{}'
 check "lead-hot"                      lead-hot         '{}'
@@ -253,24 +290,40 @@ else
 fi
 
 # --- ORDER 18: the intro graph is reachable under the READER role ---------------
-# 'Jon Shaw' is a real vendor (V-BNK-013) who introduced C-155 Dr. James Allen
-# Tyrer. The name 'Tyrer' cannot appear in the parties block (that block matches
-# the query name) nor in the deals block (no deal is named Jon Shaw), so a
-# response to query 'Jon Shaw' that contains Tyrer can only have come from the
-# connections block reading v_party_graph. The chain is the probe.
+# 'Jon Shaw' is a real vendor (V-BNK-013) who introduced C-155, a real client.
+# WR-000049: the client's surname is externalized (SMOKE_GRAPH_CLIENT_SURNAME
+# in smoke-reads.local.env, see the fixture note near the top) — the vendor
+# name and the C-155 ref stay, since a vendor is not a client record and a ref
+# is opaque. The surname cannot appear in the parties block (that block
+# matches the query name) nor in the deals block (no deal is named Jon Shaw),
+# so a response to query 'Jon Shaw' that contains it can only have come from
+# the connections block reading v_party_graph. The chain is the probe.
 echo
 # (the result arrives as a JSON string inside the MCP envelope, so the keys are
 #  backslash-escaped on the wire — match them that way, not as bare quotes)
-check "graph probe: find surfaces the Shaw -> Tyrer intro" \
-      find '{"query":"Jon Shaw"}' '\\"connections\\"' 'Tyrer'
+if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ]; then
+  check "graph probe: find surfaces the Shaw -> client intro" \
+        find '{"query":"Jon Shaw"}' '\\"connections\\"' "$SMOKE_GRAPH_CLIENT_SURNAME"
+else
+  echo
+  echo "  SKIP  graph probe (find) — no smoke-reads.local.env (or"
+  echo "        SMOKE_GRAPH_CLIENT_SURNAME); needs a real client's surname."
+fi
 
 # --- ORDER 32: the multi-hop half, and the probe is a REAL two-hop chain --------
 # V-ATT-009 Dion Moniz's Links names Jon Shaw; V-BNK-013 Jon Shaw's Links names
-# C-155 Dr. James Allen Tyrer. Neither row names the other end, so a response to
-# target C-155 containing 'Dion Moniz' can only have come from the recursive walk
-# joining two separate edges. If the traversal ever breaks, this goes red.
-check "who-do-we-know: the two-hop Moniz -> Shaw -> Tyrer path" \
-      who-do-we-know '{"target":"C-155"}' 'Dion Moniz' '\\"hops\\":2'
+# C-155, the same real client as above. Neither row names the other end, so a
+# response to target C-155 containing 'Dion Moniz' can only have come from the
+# recursive walk joining two separate edges. If the traversal ever breaks,
+# this goes red. (Vendor names and the C-155 ref stay tracked; see above.)
+if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ]; then
+  check "who-do-we-know: the two-hop Moniz -> Shaw -> client path" \
+        who-do-we-know '{"target":"C-155"}' 'Dion Moniz' '\\"hops\\":2'
+else
+  echo
+  echo "  SKIP  graph probe (who-do-we-know two-hop) — no smoke-reads.local.env"
+  echo "        (or SMOKE_GRAPH_CLIENT_SURNAME); needs a real client's surname."
+fi
 # The refuse-to-guess half. 'Ric' matches more than one graph node (V-BNK-030 Ric
 # McClanahan and V-BNK-034 Ric Nickelsen), and the verb must hand back candidates
 # rather than pick one (amendment 7). needs_disambiguation travels as isError by
@@ -503,9 +556,11 @@ fi
 # FIXTURE DURABILITY. Nothing here depends on a count that grows, a date, a
 # stage, or a row anybody edits in the normal course of work:
 #   · 'Henry Schein' — the reported defect itself, a supplier org nobody owns.
-#   · 'Mia Arafa' C-036/C-046 — a completed merge. A merge is permanent and the
-#     tombstone is kept on purpose (the 0016 posture, so a search for a merged
-#     name learns where it went), so this pair cannot rot back.
+#   · the merged-client fixture (SMOKE_MERGED_* in smoke-reads.local.env,
+#     WR-000049 — real name/refs are not tracked) — a completed merge. A merge
+#     is permanent and the tombstone is kept on purpose (the 0016 posture, so a
+#     search for a merged name learns where it went), so this pair cannot rot
+#     back.
 #   · 'Qwertzuiop Vraxmandel' — deliberate nonsense that will never be a record.
 # If a fixture ever does rot, MOVE THE FIXTURE. Do not delete the probe.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -594,17 +649,27 @@ check "who-do-we-know DOES claim absence for a name nobody carries" \
 check "find returns EMPTY for a name nobody carries (no trigram near-miss)" \
       find '{"query":"Qwertzuiop Vraxmandel"}' '\\"parties\\":\[\]' '\\"organizations\\":\[\]'
 
-# MERGED RECORDS SURFACE AS TOMBSTONES RATHER THAN VANISHING. C-036 and C-046
-# are both 'Mia Arafa'; C-046 is the completed merge. Both must come back, and
-# the merged flag must be present — a merge that removes the old ref from `find`
-# silently breaks every note, email and document that still cites C-046, and it
-# does it in the same "the record simply isn't there" way the Henry Schein bug
-# did. Asserting BOTH refs is the point: the survivor alone would pass a lookup
-# while the pointer that makes the merge navigable had been lost.
-check "merged record C-046 surfaces as a tombstone, not a disappearance" \
-      find '{"query":"Mia Arafa"}' 'C-046' '\\"merged\\":true'
-check "…and the surviving record C-036 comes back with it" \
-      find '{"query":"Mia Arafa"}' 'C-036'
+# MERGED RECORDS SURFACE AS TOMBSTONES RATHER THAN VANISHING, asserted against
+# a real merged client (WR-000049: the name and both refs live only in
+# smoke-reads.local.env, gitignored — see the fixture-externalization note
+# near the top of this file). Both the survivor and the tombstone must come
+# back, and the merged flag must be present — a merge that removes the old ref
+# from `find` silently breaks every note, email and document that still cites
+# it, and it does it in the same "the record simply isn't there" way the Henry
+# Schein bug did. Asserting BOTH refs is the point: the survivor alone would
+# pass a lookup while the pointer that makes the merge navigable had been lost.
+if [ -n "${SMOKE_MERGED_CLIENT_QUERY:-}" ] && [ -n "${SMOKE_MERGED_TOMBSTONE_REF:-}" ] \
+    && [ -n "${SMOKE_MERGED_SURVIVOR_REF:-}" ]; then
+  check "merged record surfaces as a tombstone, not a disappearance" \
+        find "{\"query\":\"$SMOKE_MERGED_CLIENT_QUERY\"}" "$SMOKE_MERGED_TOMBSTONE_REF" '\\"merged\\":true'
+  check "…and the surviving record comes back with it" \
+        find "{\"query\":\"$SMOKE_MERGED_CLIENT_QUERY\"}" "$SMOKE_MERGED_SURVIVOR_REF"
+else
+  echo
+  echo "  SKIP  merged-client tombstone pair — no smoke-reads.local.env (or the"
+  echo "        SMOKE_MERGED_* vars); this check needs a real merged client's"
+  echo "        name and refs. Not a failure: see the fixture note near the top."
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOOP #132 — A TOMBSTONE IS NOT A DUPLICATE, AND IT IS NEVER A TARGET
@@ -618,9 +683,11 @@ check "…and the surviving record C-036 comes back with it" \
 # survivors and 109 tombstones — and `find` went on reporting
 # `duplicate_rows: 17` for a company that now has exactly ONE live row, because
 # the grouping query (b0fda91) landed before 0059 and was never taught about
-# merged_into. The same for Musicologie: 13 reported, 1 live, 12 retired.
-# `who-do-we-know "Musicologie"` was worse — it offered five tombstones as
-# selectable records and never mentioned the survivor at all.
+# merged_into. The same for the merged-org fixture (WR-000049: its real name
+# lives only in smoke-reads.local.env, not this tracked file — see the
+# fixture-externalization note near the top): 13 reported, 1 live, 12
+# retired. `who-do-we-know` on the same name was worse — it offered five
+# tombstones as selectable records and never mentioned the survivor at all.
 #
 # So the probes below assert counts after all, and the difference is that these
 # counts are INVARIANTS rather than inventory. `party_org_identity_uniq` (0059)
@@ -674,36 +741,53 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
   check  "…and retired_aliases really reads 0 for an org that has no tombstones" \
          find '{"query":"1st Med Transitions"}' '\\"retired_aliases\\":0' '1st Med Transitions'
 
-  # Musicologie: 13 party rows, 12 retired, and the survivor NO LONGER HAS A PARTY
-  # REF. This fixture was rewritten 2026-08-02 and the reason is the whole lesson.
-  # 0061 gave org party P-0111 a client record, and v_ref_index indexes SUBJECTS
-  # rather than roles (0056), so P-0111 stopped appearing as a party and started
-  # appearing as client C-161. The verb still filtered its org branch to
-  # subject_type='party', saw only tombstones, reported live_rows:0, and emitted a
-  # note swearing the survivor "carries a DIFFERENT name and is not in this result"
-  # while the survivor sat in the SAME payload under the SAME name. The old fixture
-  # asserted refs:["P-0111"], which is now the WRONG answer — asserting it would
-  # have pinned the verb to a shape the database had already left behind. A fixture
-  # that outlives its data is how a probe starts defending a defect.
-  refute "find 'Musicologie': survivor promoted to a role ref, not a lost merge" \
-         find '{"query":"Musicologie"}' '\\"all_retired\\":true' '\\"role_refs\\":\[\\"C-161\\"\]'
-  # The pair: the tombstones must still be COUNTED, not quietly dropped, or the fix
-  # above could pass by simply forgetting they exist.
-  check  "…and its 12 tombstones are still counted, not dropped" \
-         find '{"query":"Musicologie"}' '\\"retired_aliases\\":12'
+  # The merged-org fixture: 13 party rows, 12 retired, and the survivor NO
+  # LONGER HAS A PARTY REF. WR-000049: real name/refs live only in
+  # smoke-reads.local.env — see the fixture-externalization note near the
+  # top. This fixture was rewritten 2026-08-02 and the reason is the whole
+  # lesson. 0061 gave the org party a client record, and v_ref_index indexes
+  # SUBJECTS rather than roles (0056), so the party stopped appearing as a
+  # party and started appearing as a client. The verb still filtered its org
+  # branch to subject_type='party', saw only tombstones, reported
+  # live_rows:0, and emitted a note swearing the survivor "carries a
+  # DIFFERENT name and is not in this result" while the survivor sat in the
+  # SAME payload under the SAME name. The old fixture asserted the retired
+  # party ref, which is now the WRONG answer — asserting it would have
+  # pinned the verb to a shape the database had already left behind. A
+  # fixture that outlives its data is how a probe starts defending a defect.
+  if [ -n "${SMOKE_ORG_MERGE_NAME:-}" ] && [ -n "${SMOKE_ORG_MERGE_SURVIVOR_REF:-}" ] \
+      && [ -n "${SMOKE_ORG_MERGE_TOMBSTONE_COUNT:-}" ] && [ -n "${SMOKE_ORG_MERGE_TOMBSTONE_SAMPLE_REF:-}" ]; then
+    refute "find merged-org fixture: survivor promoted to a role ref, not a lost merge" \
+           find "{\"query\":\"$SMOKE_ORG_MERGE_NAME\"}" '\\"all_retired\\":true' \
+           '\\"role_refs\\":\[\\"'"$SMOKE_ORG_MERGE_SURVIVOR_REF"'\\"\]'
+    # The pair: the tombstones must still be COUNTED, not quietly dropped, or the
+    # fix above could pass by simply forgetting they exist.
+    check  "…and its tombstones are still counted, not dropped" \
+           find "{\"query\":\"$SMOKE_ORG_MERGE_NAME\"}" \
+           '\\"retired_aliases\\":'"$SMOKE_ORG_MERGE_TOMBSTONE_COUNT"
 
-  # who-do-we-know handed P-0840, P-1044, P-0909 and P-0796 back as candidates and
-  # never named the survivor. A caller that links or writes to one of those defeats
-  # the merge, so a tombstone ref must not appear in this verb's answer AT ALL —
-  # find is where tombstones stay navigable, with their refs; this verb resolves.
-  # It names C-161 now for the same reason as above: that is where the survivor is.
-  refute "who-do-we-know 'Musicologie' names the survivor and never a tombstone" \
-         who-do-we-know '{"target":"Musicologie"}' 'P-0840' 'C-161'
+    # who-do-we-know handed several tombstones back as candidates and never
+    # named the survivor. A caller that links or writes to one of those defeats
+    # the merge, so a tombstone ref must not appear in this verb's answer AT
+    # ALL — find is where tombstones stay navigable, with their refs; this verb
+    # resolves. It names the survivor now for the same reason as above.
+    refute "who-do-we-know merged-org fixture names the survivor and never a tombstone" \
+           who-do-we-know "{\"target\":\"$SMOKE_ORG_MERGE_NAME\"}" \
+           "$SMOKE_ORG_MERGE_TOMBSTONE_SAMPLE_REF" "$SMOKE_ORG_MERGE_SURVIVOR_REF"
+  else
+    echo
+    echo "  SKIP  merged-org fixture (find + who-do-we-know) — no smoke-reads.local.env"
+    echo "        (or the SMOKE_ORG_MERGE_* vars); needs a real merged org's name and"
+    echo "        refs. Not a failure: see the fixture note near the top."
+  fi
   refute "who-do-we-know 'Henry Schein' names the survivor and never a tombstone" \
          who-do-we-know '{"target":"Henry Schein"}' 'P-0099' 'P-0055'
   # Refusing to OFFER a tombstone must not mean pretending it is not there.
-  check  "…and it still says how many retired aliases it declined to offer" \
-         who-do-we-know '{"target":"Musicologie"}' '\\"retired_alias_count\\":12'
+  if [ -n "${SMOKE_ORG_MERGE_NAME:-}" ] && [ -n "${SMOKE_ORG_MERGE_TOMBSTONE_COUNT:-}" ]; then
+    check  "…and it still says how many retired aliases it declined to offer" \
+           who-do-we-know "{\"target\":\"$SMOKE_ORG_MERGE_NAME\"}" \
+           '\\"retired_alias_count\\":'"$SMOKE_ORG_MERGE_TOMBSTONE_COUNT"
+  fi
   # The pair, same shape as the absence-claim pair above: a count that is always
   # nonzero would pass the probe above while telling the caller nothing.
   check  "…and that count reads 0 for a name nobody carries" \
@@ -746,7 +830,7 @@ if [ "$CAP_UNWALK" -eq 1 ]; then
   # genuinely has nothing blocked.
   #
   # FIXTURE MOVED C-155 -> V-BNK-013, 2026-08-14 (Program 3 triage). C-155 stopped
-  # being a valid zero-side the moment the ternary Joe->Tyrer 'introduced' edge
+  # being a valid zero-side the moment the ternary Joe->client 'introduced' edge
   # was recorded (the shape migration 0051 defined, from = us): Joe is party
   # P-1084 with no business ref, so that edge has from_ref null and lands in
   # C-155's unwalkable_edges. The verb REPORTING it is loop #133 working exactly

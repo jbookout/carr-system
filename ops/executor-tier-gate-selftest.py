@@ -2,10 +2,15 @@
 """Selftest for hooks/executor-tier-gate.py, including Jev's tier pick (loop 615).
 
 Runs the real hook as a subprocess with a stubbed Jev answer, so it is offline
-and deterministic. Cases: the pre-existing refusal and exemptions still hold;
-Jev's pick rides on the refusal; a confident cheaper pick on a named model is
-advice, never a refusal; a low-confidence or equal pick is silent; an
-unavailable judge changes nothing.
+and deterministic. Cases: a named model is never denied, only advised, and a
+confident cheaper pick on it is advice; a low-confidence or equal pick on a
+named model is silent; a fork stays exempt.
+
+ACTING (Joe, 2026-09-24, decision 5ec806a4): with no model named, a confident
+Jev pick (>= ACT_AT) is filled in as the call's model and the spawn is allowed,
+said in the context line. The abstention path -- unavailable or under ACT_AT --
+keeps the deterministic deny this gate always gave: an abstaining judge never
+loosens it.
 """
 import json
 import os
@@ -36,15 +41,21 @@ def check(label, condition, detail=""):
 brief = {"description": "Find grants", "prompt": "grep db/schema.sql for grants", "subagent_type": "Explore"}
 
 r = run({**brief}, "sonnet:0.89")
-check("no model is still refused", r and r.get("permissionDecision") == "deny", r)
-check("the refusal carries Jev's pick", "JEV'S PICK for this task: `sonnet` at 0.89." in r["permissionDecisionReason"], r)
+check("no model, confident Jev pick: allowed with the pick filled in",
+      r and r.get("permissionDecision") == "allow" and r.get("updatedInput", {}).get("model") == "sonnet", r)
+check("the rest of the call is passed through unchanged",
+      all(r["updatedInput"].get(k) == v for k, v in brief.items()), r)
+check("the context line says Jev named the executor",
+      "EXECUTOR NAMED BY JEV" in r.get("additionalContext", "") and "`sonnet` at 0.89" in r["additionalContext"], r)
 
 r = run({**brief}, "haiku:0.40")
-check("a low-confidence pick is labelled a hint", "below the acting threshold" in r["permissionDecisionReason"], r)
+check("no model, a low-confidence pick: still refused", r and r.get("permissionDecision") == "deny", r)
+check("the refusal carries the pick as a hint", "below the acting threshold" in r["permissionDecisionReason"], r)
 
 r = run({**brief}, "none")
-check("an unavailable judge still refuses, without a Jev line",
+check("no model, an unavailable judge: still refused, with no Jev line",
       r and r.get("permissionDecision") == "deny" and "JEV'S PICK" not in r["permissionDecisionReason"], r)
+check("the refusal still names the fix", "EXECUTOR NOT NAMED" in r["permissionDecisionReason"], r)
 
 r = run({**brief, "model": "opus"}, "haiku:0.95")
 check("a confident cheaper pick on a named model is advice, not a refusal",

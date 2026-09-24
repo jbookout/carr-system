@@ -69431,6 +69431,53 @@
       ],
       "expected_count": 896,
       "expected_sha256": "943f3c4480e617a4c2e0b9583bccd38fc5bece3a4c4bdc1ad8da95043203d7e4"
+    },
+    {
+      "version": "v68",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "launchd-workflow:com.carr.release-pipeline",
+          "ingress_kind": "workflow_entrypoint",
+          "operation": "ops/launchd/com.carr.release-pipeline.plist",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/launchd/com.carr.release-pipeline.plist",
+          "schema_digest": "842f3dc131aee55bd6cbc4e61236b84042361ef007f98265941763dba6636e7d",
+          "handler_digest": "842f3dc131aee55bd6cbc4e61236b84042361ef007f98265941763dba6636e7d",
+          "launchd_label": "com.carr.release-pipeline",
+          "trigger_contract_digest": "556663f29580a9d1e5e8996fd83a57adf3d12537034791ce30c02f481006a65a",
+          "environment_contract_digest": "f339d8b6ea998d49d5740d3f358f60550f3c567110159719e4a810c1c1818f36",
+          "program_arguments_digest": "005db388a979f5ac139449da75babfbca4dee7e5c15fa09dad016fa805209278",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "launchd_user_session_and_declared_environment",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [
+            "argument:{{REPO}}/.venv/bin/python",
+            "executable:/bin/zsh",
+            "script:bin/run-scheduled.sh",
+            "script:ops/release-pipeline.py"
+          ],
+          "request_shape": "launchd_trigger_arguments_environment_source_bound",
+          "idempotency_mode": "delegated_entrypoint_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "physical_authority_refs": [
+            "ops.service_environment:release-pipeline:production"
+          ],
+          "physical_authority_catalog_digests": {
+            "services": "sha256:bb1b49c3c42f3d6a6e55569ed46e658f80da23343d73b72d2ad1b64c4244b631",
+            "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+          },
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 897,
+      "expected_sha256": "75b3f7c0505cf466d68795801a405b879282e36dfaab7166812ac0e048292cb7"
     }
   ],
   "current_source_review": {
