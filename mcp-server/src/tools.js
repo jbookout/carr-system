@@ -27,6 +27,7 @@ import { codexContinuityTools } from "./codex-continuity.js";
 import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
+import { resourceObservationTools } from "./resource-observation.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { tourRightsProjectionTools } from "./tour-rights-projection.js";
 import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
@@ -8118,6 +8119,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "agent-profile": "mcp-server/src/agent-profiles.js",
   "bot-brief": "mcp-server/src/bot-brief.js",
   "evidence-activation": "mcp-server/src/evidence-activation.js",
+  "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
   "claude-continuity": "mcp-server/src/claude-continuity.js",
@@ -9204,6 +9206,10 @@ registerTools(partnerRoomTools({ withEnvelope, ToolError }), "partner-room");
 registerTools(agentProfileTools({ withEnvelope, writeEvent, ToolError }), "agent-profile");
 registerTools(botBriefTools({ ToolError, assertNoCallerAuthorityFields }), "bot-brief");
 registerTools(evidenceActivationTools({ withEnvelope, ToolError }), "evidence-activation");
+// DoctorCRE v5 V5-UX-C02/C06: the resource-metering read contract and the
+// one write door the local, credential-less collector uses. See
+// src/resource-observation.v5.js.
+registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-observation");
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.
