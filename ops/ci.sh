@@ -1730,6 +1730,27 @@ check_binding() {
       if(/DATABASE_URL\s*=/.test(t)){console.error("wrangler.toml declares a DATABASE_URL inline; it belongs in a secret");process.exit(1);}
     ' || { problems="$problems wrangler.toml"; cat "$LOGDIR/binding-wrangler.log" >&2; }
   fi
+  # A NEW DEFECT CLASS (DoctorCRE V5-R02 review, PR #1245, 2026-09-24): code
+  # that bundles clean and passes every Node-side test, but throws at MODULE
+  # LOAD in workerd because it called a Node-only API (fileURLToPath,
+  # execFileSync) at top level. Nothing above this line ever runs the Worker
+  # in a Worker runtime, so nothing above catches it. bin/worker-boot-check.sh
+  # boots the real Worker in local workerd (same wrangler binary
+  # bin/deploy-worker.sh ships with) and asks the dependency-free /healthz
+  # route for a 200 -- proof the module graph finished loading, not proof of
+  # correctness (mcp-server's own test suite owns that). Skipped, not failed,
+  # when wrangler's npm install has not happened here: this is the SAME
+  # posture as the mypy skip below for a machine that has not installed a
+  # pinned dependency, and a hard failure here would refuse every push on a
+  # machine that has simply never run `npm install` in mcp-server/.
+  if [ -x mcp-server/node_modules/.bin/wrangler ]; then
+    if ! run_quiet "$LOGDIR/binding-worker-boot.log" ./bin/worker-boot-check.sh; then
+      problems="$problems worker-boot"
+      tail -40 "$LOGDIR/binding-worker-boot.log" >&2
+    fi
+  else
+    printf '        \033[33mskip\033[0m  worker-boot-check — wrangler not installed (run npm install in mcp-server/)\n' >&2
+  fi
   # CONFIG-AS-CODE IS SCOPED TO BRANCHES THAT ARE ACTUALLY IN THAT BUSINESS.
   #
   # This check compares the LIVE MACHINE — ~/.claude/settings.json and the

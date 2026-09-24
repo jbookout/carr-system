@@ -37,12 +37,6 @@
 // plan` requires concrete already-existing evidence rows; this slice adds no
 // script and no call that manufactures that evidence for any live workflow.
 
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
 const CUTOVER_STAGES = Object.freeze([
   "read_legacy", "build_projection", "shadow_compare", "single_write_authority",
   "cutover", "monitor", "recovery_ready", "retired",
@@ -51,34 +45,27 @@ const CALLER_KINDS = Object.freeze(["script", "verb", "worker_route", "job_defin
 const CALLER_STATUSES = Object.freeze(["remaining", "done", "blocked", "superseded", "retired"]);
 const SLICE_STATUSES = Object.freeze(["in_progress", "complete", "blocked"]);
 
-// Reads the V5-F09/A01 workflow-truth census route exactly as
-// `tools/health-check.py` does, out of process, so this module never
-// imports Python state into the Node process and a spawn failure of any
-// kind (missing interpreter, import error, timeout) fails closed to the
-// SAME unavailable shape the module itself returns deterministically today.
-// This is a read of an existing, already-reviewed module; it grants no new
-// authority and performs no write.
+// The verb handlers run in TWO runtimes: the Node MCP server (a real
+// filesystem, node:child_process, a repo checkout) AND the deployed
+// Cloudflare Worker (workerd -- no filesystem, no child_process, no
+// import.meta.url-relative repo path; those APIs either do not exist or
+// throw at MODULE LOAD, not at call time, which is what made the previous
+// version of this file crash the Worker's boot on every deploy: top-level
+// `fileURLToPath(import.meta.url)` ran before any verb was ever invoked).
+//
+// The V5-F09/A01 workflow-truth census reader
+// (lib/control_plane_workflow_truth_reader.py) is a Python module reachable
+// only from the Node process, and only ever answers `available: false`
+// today regardless of runtime (a separate, not-yet-landed durable
+// signed-census-store PR is what would ever flip it to true). So this
+// module never spawns a subprocess at all: a Worker-safe constant read gets
+// the exact same fail-closed answer the Node-side subprocess call would
+// have returned, without any Node-only API existing anywhere in this file's
+// module scope or call graph. When the census store lands, this becomes a
+// real read again (over HTTP/fetch, which workerd supports) -- Q157 still
+// requires it to fail closed until then, in EITHER runtime.
 function readWorkflowTruthCensus() {
-  const pythonBin = resolve(REPO_ROOT, ".venv", "bin", "python3");
-  try {
-    const out = execFileSync(
-      pythonBin,
-      ["-c",
-        "import json,sys; " +
-        "sys.path.insert(0, sys.argv[1]); " +
-        "from lib.control_plane_workflow_truth_reader import workflow_truth_census as w; " +
-        "print(json.dumps(dict(w())))",
-        REPO_ROOT],
-      { cwd: REPO_ROOT, timeout: 5000, encoding: "utf8" },
-    );
-    const parsed = JSON.parse(out);
-    if (parsed && typeof parsed === "object" && parsed.available === true) return parsed;
-    return { available: false, reason: (parsed && parsed.reason) || "workflow_truth_census_unavailable" };
-  } catch {
-    // Fail closed: any spawn/parse failure reads exactly like the module's
-    // own documented unavailable answer, never as "done" or "operational".
-    return { available: false, reason: "workflow_truth_census_route_unreadable" };
-  }
+  return { available: false, reason: "census_route_not_in_worker" };
 }
 
 export function workflowCutoverTools({ withEnvelope, ToolError }) {
