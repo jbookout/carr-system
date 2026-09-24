@@ -276,21 +276,20 @@ def code_review(payload):
                               cwd=os.path.dirname(paths[0]) or ".",
                               timeout=15).stdout.strip()
         if not root:
-            # NOT an "unavailable" failure. A scratchpad write (or any path
-            # outside a git repo) has no git root by construction, every time,
-            # forever -- that is a normal, expected shape, not an outage. It
-            # was being raised and caught below as RuntimeError, which the
-            # outer handler then reported with only the exception's CLASS
-            # name, so every such write printed status "unavailable", reason
-            # "RuntimeError" with no way to tell this apart from a real
-            # failure (2026-09-24 audit).
-            receipt["status"] = "skipped"
-            receipt["reason"] = "outside_repo"
-            receipt["paths"] = [
-                {"path": os.path.basename(path), "status": "not_reviewed",
-                 "reason": "outside_repo"} for path in paths]
-            log(f"SKIP outside_repo paths={[os.path.basename(p) for p in paths]}")
-            print(_review_context(payload, receipt))
+            # A path outside any git repo (a scratchpad write) has no diff to
+            # review. It stays "unavailable" -- supported code went unreviewed,
+            # and #1123 made these receipts truthful so no review is ever
+            # claimed for it -- but it now says WHY. It used to be raised as a
+            # bare RuntimeError and reported by class name only, so every
+            # scratchpad write read "unavailable: RuntimeError", which looked
+            # like an outage (2026-09-24 audit).
+            log(f"UNAVAILABLE outside_repo paths={[os.path.basename(p) for p in paths]}")
+            print(_review_context(payload, {
+                "status": "unavailable",
+                "reason": "outside_repo",
+                "instruction": "The edit is saved outside any git repository, so there is no diff "
+                               "to review and no Jev review may be claimed for it.",
+            }))
             return
         # This hook is installed from CARR for every code home. The edited
         # repository supplies the diff; CARR supplies the Jev reviewer.
