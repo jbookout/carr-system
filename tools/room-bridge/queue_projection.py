@@ -155,7 +155,40 @@ def card_for(task: dict, *, target_catalog: dict, updated_at: object) -> dict:
     }
 
 
+def _terminal_summary(event: dict) -> str | None:
+    """The real completion/review-request summary text Hermes recorded for
+    this event, when the event itself carried one.
+
+    `queue_dispatch.py`'s ``finish_pending`` calls ``adapter.complete(task_id,
+    summary, metadata)`` for a done-finish task and ``adapter.request_review``
+    for a review-finish task, both passing the dispatched session's own
+    CARR_QUEUE_RESULT summary text (e.g. this pipeline's `CARR-PR-VERDICT`
+    line) straight through to the ``hermes`` CLI's ``--summary`` flag. Hermes
+    durably records that text in the ``completed``/``review_requested``
+    task_events row's JSON payload under the key ``summary`` (confirmed via a
+    live, read-only query against ``kanban.db``). A ``blocked`` event's
+    payload carries ``reason``, never a dispatched session's result text, so
+    it is deliberately excluded here — a room caller that had forged a fake
+    'summary' onto some OTHER event kind's payload could otherwise smuggle
+    text through a channel a reader might trust.
+    """
+    if event.get("kind") not in {"completed", "review_requested"}:
+        return None
+    raw = event.get("payload")
+    if not isinstance(raw, str):
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    return summary.strip() if isinstance(summary, str) and summary.strip() else None
+
+
 def _summary(event: dict, task: dict) -> str:
+    real = _terminal_summary(event)
+    if real is not None:
+        return real
     title = str(task.get("title") or "this task")[:200]
     status = str(task.get("status") or "updated")
     kind = str(event.get("kind") or "updated")
@@ -174,7 +207,11 @@ def receipt_for(event: dict, task: dict, *, target_catalog: dict, board: str = B
         "v": 1, "board": board, "event_id": event_id,
         "event": str(event.get("kind") or "updated")[:48],
         "task_id": str(task["id"]), "card": card,
-        "summary": _summary(event, task)[:300],
+        # 500, not 300: a real terminal summary can be the dispatched
+        # session's full CARR_QUEUE_RESULT text, bounded to exactly 500 chars
+        # by queue_dispatch.parse_terminal_result -- truncating tighter here
+        # would silently cut a reader's own upstream contract short.
+        "summary": _summary(event, task)[:500],
         "projected_at": _iso(event.get("created_at") or task.get("created_at")),
     }}
 
@@ -234,7 +271,7 @@ def project_once(*, state: dict, add_room_turn, target_catalog: dict,
             source_head = int(conn.execute(
                 "select coalesce(max(id), 0) as head from task_events").fetchone()["head"] or 0)
             events = conn.execute(
-                "select id, task_id, kind, created_at from task_events where id > ? order by id asc limit ?",
+                "select id, task_id, kind, payload, created_at from task_events where id > ? order by id asc limit ?",
                 (cursor, limit + 1)).fetchall()
             complete = len(events) <= limit and cursor <= source_head
             for event_row in events[:limit]:

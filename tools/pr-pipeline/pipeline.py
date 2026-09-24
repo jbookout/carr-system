@@ -64,7 +64,7 @@ wrong key, a wrong reviewer, or two conflicting verdict lines in the same
 reply all return `None` — never a verdict, and never treated as approval by
 default.
 
-WHERE THE VERDICT ACTUALLY COMES FROM, and why an earlier version of this
+WHERE THE VERDICT ACTUALLY COMES FROM, and why TWO earlier versions of this
 file got it wrong. `@queue enqueue ... cap=read` does NOT make the dispatched
 session reply with ordinary prose in the partner-line room — read
 `tools/room-bridge/queue_dispatch.py`'s own docstring: it "never republishes
@@ -72,31 +72,60 @@ raw model output into the partner room." A desk/queue-dispatched session's
 real output is captured ONLY as a single `CARR_QUEUE_RESULT
 {"v":1,"task_id":...,"outcome":"success"|"blocked","summary":"<=500 chars, one
 line>"}` line, which `queue_dispatch.parse_terminal_result` is the only reader
-of, and the summary text is the ONLY part of that protocol carried back into
-the room — as the `summary` field of a `{"queue_completion": {...}}` JSON
-turn the bridge itself posts (`bridge.py`, around the `finish_pending` call
-site) once the task reaches a terminal state. An earlier version of this file
-told the reviewer to reply with free prose ending in a `CARR-PR-VERDICT` line
-and then scanned ordinary room turns for it — a request that either goes
-unanswered (queue_dispatch never republishes it) or, worse, was scanned for
-using only `origin_channel == "mcp"` plus a hand-picked `origin_actor` this
-codebase does not actually use: live partner-line traffic only ever carries
-`hermes-pilot`, `joe-local`, and `codex` as `origin_actor` (confirmed via a
-live, read-only `read-room-queue` call), never `claude` or `claude-desktop`,
-and `joe-local` covers every local Claude Code session indiscriminately
-(including whichever session is fixing this very PR) — so that check could
-never distinguish a real reviewer from anyone else, and no real reviewer
-reply could ever have qualified in the first place. This version instead
-tells the reviewer to put the verdict line INTO its `summary` field, keeping
-`outcome` always `"success"` (an APPROVE/BLOCK verdict is a code-review
-judgment, not the "I lack authority" meaning `outcome=blocked` carries in
-this protocol — using it for that would corrupt Hermes's own task semantics
-and, per `parse_terminal_result`, requires a `code` this pipeline has no
-business setting).
+of. This pipeline tells the reviewer to put the verdict line INTO that
+`summary` field, keeping `outcome` always `"success"` (an APPROVE/BLOCK
+verdict is a code-review judgment, not the "I lack authority" meaning
+`outcome=blocked` carries in this protocol).
+
+The FIRST earlier version told the reviewer to reply with free prose ending
+in a `CARR-PR-VERDICT` line and scanned ordinary room turns for it using only
+`origin_channel == "mcp"` plus a hand-picked `origin_actor` this codebase does
+not actually use — no real reviewer reply could ever have qualified.
+
+The SECOND earlier version fixed that by reading the verdict out of the
+bridge's own `{"queue_completion": {...}}` turn — the JSON receipt
+`bridge.py`'s `finish_pending` posts once a queue task reaches a terminal
+state, at the DETERMINISTIC msg_id `uuid5(NAMESPACE_URL,
+f"carr:queue-completion:{task_id}")` — reasoning that `add-room-turn`'s
+`on conflict (msg_id) do nothing` dedup made that turn unforgeable. It is
+not: `add-room-turn` (`partner-room.js`) lets ANY mcp-authenticated caller
+choose its own `msg_id` and `kind`, and a task's `task_id` is public the
+moment `read_room_queue()` (or the queue's own `queue_accepted` receipt)
+names it — well before the task reaches a terminal state. A forger who reads
+`task_id` off `read_room_queue()`, precomputes the same deterministic
+msg_id, and posts a turn under it with a fabricated `queue_completion.summary`
+containing an APPROVE line BEFORE the bridge's genuine completion turn lands
+wins the dedup race permanently: the bridge's later, real post becomes a
+silent no-op (`appended.deduplicated == True`), and this pipeline would have
+read the forger's verdict as gospel. Worse, `bridge.py` posts that turn
+attributed to `joe-local` — the SAME `origin_actor` every local Claude Code
+session's turn carries — so the turn's origin alone could never even prove
+authorship, forged or genuine.
+
+THIS version reads the verdict from the task's own TERMINAL QUEUE EVENT
+instead — the `queue_event` receipt `tools/room-bridge/queue_projection.py`
+projects from Hermes's own `task_events` row once a queue task actually
+completes or is sent to review, returned as one entry of
+`read_room_queue()`'s `events` list. That receipt's `summary` field now
+carries the dispatched session's own CARR_QUEUE_RESULT summary text verbatim
+(see `queue_projection._terminal_summary` — a minimal projector-side change
+this round: `finish_pending`'s `adapter.complete`/`adapter.request_review`
+calls already pass that summary straight into Hermes's `hermes kanban
+complete/request-review --summary ...`, and Hermes durably records it in the
+`completed`/`review_requested` task_events row's JSON payload; the projector
+previously discarded it and synthesized a generic "<title> finished."
+sentence instead). This channel cannot be forged the way a room turn can:
+`partner-room.js`'s `readRoomQueue` only ever turns a room turn into a
+`queue_event` when that turn's own `origin_actor == "hermes-pilot"` AND
+`seat == "hermes"` AND `sponsor == "joe"` AND `origin_channel == "mcp"`
+(`queueProjectionEventFromTurn`) — a server-side check on the CALLER'S
+verified credential, not on turn content, and no ordinary mcp-authenticated
+session (however legitimately authenticated) holds the `hermes-pilot`
+identity. Forging a `queue_event` therefore requires forging the
+`hermes-pilot` credential itself, not merely winning a msg_id race.
 
 `scan_room_for_verdicts` binds acceptance to the exact dispatch it created,
-never a free-floating room turn, via `tools/room-bridge/queue_projection.py`'s
-own server-authoritative linkage:
+never a free-floating room turn:
 
   1. `read_room_queue()` returns the live carr-build Queue projection: one
      event per task, each with a `card.source_seq` — the room seq of the
@@ -109,26 +138,27 @@ own server-authoritative linkage:
   2. That task's `card.status` must be terminal (`done`, `review`, or
      `blocked` — queue_dispatch.py's TERMINAL_STATES minus `archived`, which
      read-room-queue filters out entirely; see the known limitation below).
-  3. The bridge's own completion turn for that task carries a DETERMINISTIC
-     msg_id, `uuid5(NAMESPACE_URL, f"carr:queue-completion:{task_id}")`
-     (`bridge.py`) — computed here as `_completion_msg_id(task_id)` from the
-     task_id `read_room_queue()` returned in (1), never trusted from turn
-     text. Because `add-room-turn` deduplicates on `msg_id`
-     (`on conflict (msg_id) do nothing`, `partner-room.js`), and `task_id` is
-     Hermes-assigned (unpredictable ahead of a genuine task's creation), no
-     other session — not even the PR's own fixer, however legitimately
-     mcp-authenticated — can ever write a competing turn under that exact
-     msg_id: the first (genuine) write wins, permanently.
-  4. `origin_channel == "mcp"` on that turn, as a cheap additional sanity
-     check (still true and still real, just no longer load-bearing on its own
-     the way an earlier version treated it).
-  5. The verdict text is parsed from `queue_completion.summary` (never the
-     turn's raw body as a whole) via `parse_verdict`, still checking
-     `expected_key`/`expected_reviewer` as text-level belt-and-suspenders.
+  3. The verdict text is parsed from that SAME event's `summary` field (never
+     a room turn's body) via `parse_verdict`, still checking
+     `expected_key`/`expected_reviewer` as text-level belt-and-suspenders —
+     belt-and-suspenders now on top of a channel that is unforgeable by
+     construction, not the load-bearing check it had to be against a room
+     turn.
+
+As a secondary, defense-in-depth check — not load-bearing for the verdict
+itself, which no longer reads this turn at all — `scan_room_for_verdicts`
+also looks for a room turn at the OLD `_completion_msg_id(task_id)` location
+described above. If one exists and its seq is at or before this entry's own
+`dispatch_seq`, or strictly before the genuine `queue_event` turn's own seq
+(computed from `queue_projection.event_msg_id(BOARD, event_id)`, when that
+turn is within the current read window), that is exactly the forged-early-
+completion pattern described above, and this pipeline escalates it as a loop
+rather than silently ignoring it — a forgery attempt against this pipeline is
+something Joe needs to see even though it can no longer succeed.
 
 Because a fix round and a review round are always separate `@queue enqueue`
-turns with distinct `dispatch_seq`/task_id/msg_id, this ALSO answers "maker
-!= reviewer" structurally rather than by comparing identities: a fixer's
+turns with distinct `dispatch_seq`/task_id, this ALSO answers "maker !=
+reviewer" structurally rather than by comparing identities: a fixer's
 completion is bound only to the fixer's own dispatch_seq and can never be
 mistaken for, or substituted as, the review round's completion, whichever
 actor happens to be running either session.
@@ -232,6 +262,7 @@ from typing import Any, Callable, Optional
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools" / "room-bridge"))
 import verb_io  # noqa: E402  (the sanctioned, server-derived-origin path to add-room-turn)
+import queue_projection  # noqa: E402  (event_msg_id: the deterministic id of a task's own terminal queue_event turn)
 
 STATE_PATH = REPO / "out" / "pr-pipeline-state.json"
 MERGE_EVENTS_PATH = REPO / "out" / "pr-pipeline-merge-events.jsonl"
@@ -901,6 +932,44 @@ def escalate_loop(repo: str, pr_number: int, head_sha: str, reason: str,
     return loop_id
 
 
+def escalate_forged_completion(repo: str, pr_number: int, task_id: str, msg_id: str, seq: int,
+                                call_verb: Callable[[str, dict], dict] = verb_io._run_verb) -> str:
+    """File a CARR loop for a room turn caught squatting a Hermes task's
+    deterministic completion msg_id ahead of that task's genuine terminal
+    event — see the module docstring's "WHERE THE VERDICT ACTUALLY COMES
+    FROM" section. This pipeline no longer trusts that turn for a verdict
+    either way, so this is a security signal for Joe, not a blocker for the
+    tick: it does not raise on `call_verb` failure the way `escalate_loop`
+    does, because a missed forgery alert must never itself stall review or
+    merge for a PR whose real verdict is unaffected.
+
+    The idempotency key is keyed on the exact (task_id, msg_id, seq) triple
+    so a repeat sighting of the SAME forged turn across ticks dedupes, while
+    a genuinely different forgery attempt (a different seq, or a retry under
+    a fresh msg_id) still files its own loop.
+    """
+    try:
+        result = call_verb("add-loop", {
+            "idempotency_key": str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                              f"carr-pr-pipeline-forged-completion:{repo}:{pr_number}:{task_id}:{msg_id}:{seq}")),
+            "kind": "blocker",
+            "title": f"PR pipeline: possible forged completion turn on {repo} #{pr_number}",
+            "body": (f"A room turn at seq {seq} claims the deterministic completion msg_id "
+                     f"{msg_id} for Hermes task {task_id}, but its seq comes at or before this "
+                     f"dispatch's own room turn (or before that task's genuine terminal queue "
+                     f"event, when visible) — the exact pattern of an attacker reading task_id "
+                     f"off read-room-queue and precomputing the bridge's completion msg_id to "
+                     f"win the add-room-turn dedup race ahead of the real completion. This "
+                     f"pipeline no longer reads a verdict from that turn (see pipeline.py's "
+                     f"module docstring), so no forged verdict was accepted here -- this is "
+                     f"reported for investigation, not because {repo} #{pr_number} is blocked "
+                     f"by it."),
+        })
+        return str(result.get("id") or result.get("loop_id") or "")
+    except Exception as exc:  # a missed alert must never stall review/merge for this PR
+        return f"escalation_failed: {exc}"[:500]
+
+
 # ───────────────────────── the tick ─────────────────────────
 
 @dataclass
@@ -1198,6 +1267,7 @@ QUEUE_COMPLETION_TERMINAL_STATUSES = {"done", "review", "blocked"}
 def scan_room_for_verdicts(state: dict, *, room: str = DEFAULT_ROOM,
                             read_room: Callable[..., dict] = verb_io.read_room,
                             read_room_queue: Callable[..., dict] = verb_io.read_room_queue,
+                            call_verb: Callable[[str, dict], dict] = verb_io._run_verb,
                             cursor_path: Path = REPO / "out" / "pr-pipeline-room-cursor.json") -> dict:
     """Attaches, to each relevant state entry, the verdict this pipeline can
     PROVE is the terminal result of THIS entry's own review dispatch — never
@@ -1214,31 +1284,37 @@ def scan_room_for_verdicts(state: dict, *, room: str = DEFAULT_ROOM,
          turn (source_seq is stamped server-side when the grammar admits a
          genuine enqueue command; never something a caller can inject).
       2. That task's `card.status` is terminal (done/review/blocked).
-      3. The room contains a turn whose `msg_id` equals
-         `_completion_msg_id(task_id)` — the exact, deterministic id
-         `bridge.py` uses for that task's completion turn. Because
-         `add-room-turn` dedupes on `msg_id`, no other session can ever
-         write a DIFFERENT turn under that id once the genuine one exists.
-      4. That turn's `origin_channel == "mcp"` and its `seq` is strictly
-         greater than `dispatch_seq` (still checked, cheaply, though (1)-(3)
-         already do the real work).
-      5. Its body parses as `{"queue_completion": {"task_id": <matching>,
-         "summary": <str>, ...}}`, and `parse_verdict` on that `summary`
-         (never on the raw body) succeeds, with `expected_key`/
-         `expected_reviewer` as additional text-level checks.
+      3. That SAME event's `summary` field — projected by
+         `queue_projection.py` from the task's own `completed`/
+         `review_requested` task_events row, and returned only inside a
+         `queue_event` `partner-room.js` accepted from the verified
+         `hermes-pilot` credential — parses as a verdict via `parse_verdict`,
+         with `expected_key`/`expected_reviewer` as additional text-level
+         checks. No room turn (forgeable by any mcp-authenticated caller,
+         per the module docstring) is ever consulted for the verdict text.
 
     Because a fix round and a review round are always separate `@queue
-    enqueue` dispatches with distinct source_seq/task_id/completion msg_id,
-    this structurally answers "the fixer's own session can't also grade its
-    fix" — there is no shared identity check to defeat, because a fixer's
-    completion can never satisfy (1) for a review round's dispatch_seq.
+    enqueue` dispatches with distinct source_seq/task_id, this structurally
+    answers "the fixer's own session can't also grade its fix" — there is no
+    shared identity check to defeat, because a fixer's completion can never
+    satisfy (1) for a review round's dispatch_seq.
+
+    SEPARATELY, as a security signal rather than a verdict-path check: for
+    each live entry whose task_id is known, this also looks for a room turn
+    at the OLD bridge completion msg_id (`_completion_msg_id(task_id)`) that
+    arrived suspiciously early — at or before this entry's own dispatch_seq,
+    or before the genuine `queue_event` turn's own seq when that turn is
+    within the current read window. Finding one means somebody attempted the
+    forged-early-completion attack the module docstring describes; it can no
+    longer produce a false verdict, but `escalate_forged_completion` still
+    files a loop so Joe sees the attempt.
 
     The room cursor only ever advances up to the SMALLEST dispatch_seq among
     still-unresolved live entries (never past it) — advancing further would
-    risk permanently losing visibility of a completion turn that arrives, or
-    that read_room_queue's projection catches up to reflect as terminal,
-    later than this particular scan. A single `read_room(limit=200)` call may
-    still not reach a completion turn that is far ahead of an old,
+    risk permanently losing visibility of a completion this scan has not yet
+    read, or that read_room_queue's projection catches up to reflect as
+    terminal, later than this particular scan. A single `read_room(limit=200)`
+    call may still not reach the forged-turn detection window for an old,
     long-outstanding dispatch; this is a bounded, documented limitation, not
     silently swallowed — the PR simply stays `reviewing`/`approved`/`blocked`
     until a later tick's window reaches it.
@@ -1271,15 +1347,16 @@ def scan_room_for_verdicts(state: dict, *, room: str = DEFAULT_ROOM,
     if live:
         queue_result = read_room_queue(room=room)
         events = queue_result.get("events", []) if isinstance(queue_result, dict) else []
-        # dispatch_seq -> (task_id, status): the honest, server-authoritative
-        # linkage from a room seq to the Hermes task it created.
-        by_source_seq: dict[int, tuple[str, str]] = {}
+        # dispatch_seq -> the full queue_event: the honest, server-
+        # authoritative linkage from a room seq to the Hermes task it
+        # created, carrying that task's own terminal summary text.
+        by_source_seq: dict[int, dict] = {}
         for event in events:
             card = event.get("card") or {}
             source_seq = card.get("source_seq")
             task_id = event.get("task_id")
             if isinstance(source_seq, int) and isinstance(task_id, str):
-                by_source_seq[source_seq] = (task_id, str(card.get("status") or ""))
+                by_source_seq[source_seq] = event
 
         pending_dispatch_seqs: list[int] = []
         for key, entry in live.items():
@@ -1289,32 +1366,38 @@ def scan_room_for_verdicts(state: dict, *, room: str = DEFAULT_ROOM,
             dispatch_seq = entry.get("dispatch_seq")
             if dispatch_seq is None:
                 continue
-            found_task = by_source_seq.get(dispatch_seq)
-            if found_task is None:
+            event = by_source_seq.get(dispatch_seq)
+            if event is None:
                 pending_dispatch_seqs.append(dispatch_seq)
                 continue
-            task_id, status = found_task
+            task_id = event.get("task_id")
+            card = event.get("card") or {}
+            status = str(card.get("status") or "")
+            event_id = event.get("event_id")
+
+            # Secondary, non-blocking check: a room turn squatting the OLD
+            # bridge completion msg_id ahead of this task's genuine terminal
+            # event is a forgery attempt, not a verdict source — it is never
+            # read for `summary` below, only reported.
+            if isinstance(task_id, str):
+                forged = turns_by_msg_id.get(_completion_msg_id(task_id))
+                if forged is not None:
+                    forged_seq, forged_turn = forged
+                    genuine_seq = None
+                    if isinstance(event_id, int):
+                        genuine_turn = turns_by_msg_id.get(
+                            queue_projection.event_msg_id("carr-build", event_id))
+                        if genuine_turn is not None:
+                            genuine_seq = genuine_turn[0]
+                    if forged_seq <= dispatch_seq or (genuine_seq is not None and forged_seq < genuine_seq):
+                        escalate_forged_completion(repo, pr_number, task_id,
+                                                    str(forged_turn.get("msg_id") or _completion_msg_id(task_id)),
+                                                    forged_seq, call_verb=call_verb)
+
             if status not in QUEUE_COMPLETION_TERMINAL_STATUSES:
                 pending_dispatch_seqs.append(dispatch_seq)
                 continue
-            found_turn = turns_by_msg_id.get(_completion_msg_id(task_id))
-            if found_turn is None:
-                pending_dispatch_seqs.append(dispatch_seq)
-                continue
-            seq, turn = found_turn
-            if turn.get("origin_channel") != "mcp" or seq <= dispatch_seq:
-                pending_dispatch_seqs.append(dispatch_seq)
-                continue
-            try:
-                payload = json.loads(turn.get("body") or "")
-            except (TypeError, ValueError):
-                pending_dispatch_seqs.append(dispatch_seq)
-                continue
-            completion = payload.get("queue_completion") if isinstance(payload, dict) else None
-            if not isinstance(completion, dict) or completion.get("task_id") != task_id:
-                pending_dispatch_seqs.append(dispatch_seq)
-                continue
-            summary = completion.get("summary")
+            summary = event.get("summary")
             if not isinstance(summary, str):
                 pending_dispatch_seqs.append(dispatch_seq)
                 continue
@@ -1323,7 +1406,13 @@ def scan_room_for_verdicts(state: dict, *, room: str = DEFAULT_ROOM,
             if verdict is None:
                 pending_dispatch_seqs.append(dispatch_seq)
                 continue
-            entry["_pending_verdict"] = dict(verdict, seq=seq)
+            # `event_id` (Hermes's own monotonic per-board task_events
+            # counter) substitutes for a room-turn seq here: the verdict now
+            # comes from a projected queue_event, not a room turn, but
+            # `decide`'s latest-verdict-wins comparison only needs SOME
+            # value that is monotonic and stable across repeat ticks for the
+            # same genuine completion, which event_id already is.
+            entry["_pending_verdict"] = dict(verdict, seq=event_id if isinstance(event_id, int) else dispatch_seq)
             # The Hermes completion protocol carries no separate findings
             # prose — its summary IS the verdict line, bounded to 500 chars
             # (see build_review_task) — so there is nothing further to
