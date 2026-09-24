@@ -42,6 +42,7 @@ LIVE HEALTH CHECK:
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import tempfile
 import unittest
@@ -168,6 +169,33 @@ def _check_block(body: list, errors: list, where: str, seen_finding: bool = Fals
     return seen_finding
 
 
+def _check_function_top_level_isolated(func: ast.FunctionDef, errors: list, where: str) -> None:
+    """Drives `_check_block` once per TOP-LEVEL statement of `func`, each
+    with a FRESH `seen_finding=False`, instead of one single pass across the
+    whole function body sharing one running `seen_finding`.
+
+    The single-pass form was vacuous (point 3 of the second round of an
+    independent review of PR #1237, proven with a mutation test below): a
+    finding call recorded ANYWHERE in one top-level section (e.g. the
+    exports section's `for` loop) set `seen_finding = True` for the rest of
+    the SAME `for stmt in body` walk over the function's top-level
+    statements — so it silently covered every later, wholly unrelated
+    top-level section (e.g. a later `if CANONICAL_SECTION in ("all",
+    "jobs"):` block) too, even one that recorded no finding at all before
+    its own `rc = 1`.
+
+    `_check_block`'s OWN within-block threading (an accumulating for-loop
+    finding covering a later sibling `if: rc = 1` inside the SAME compound
+    statement) is still exactly what a legitimate pattern in this file
+    needs and is preserved here — those siblings live inside one top-level
+    statement's own nested body, so a single `_check_block` call over that
+    one top-level statement still sees them in order. Only the CROSS-
+    top-level-statement leak is cut, by giving each top-level statement its
+    own isolated `_check_block` call."""
+    for stmt in func.body:
+        _check_block([stmt], errors, where, seen_finding=False)
+
+
 class FindingFunctions(unittest.TestCase):
     """The real _canonical_finding/_write_findings_json, execed in isolation."""
 
@@ -200,13 +228,26 @@ class FindingFunctions(unittest.TestCase):
         subjects = {row["subject"] for row in self.ns["_FINDINGS"]}
         self.assertEqual(subjects, {"a.xlsx", "b.xlsx"})
 
-    def test_hard_error_and_time_rolling_or_accumulate_across_merges(self):
-        self.finding("x", "first", subject="s", hard_error=False, time_rolling=True)
-        self.finding("x", "second", subject="s", hard_error=True, time_rolling=False)
+    def test_hard_error_and_time_rolling_require_consensus_across_merges(self):
+        # AND, not OR (point 4 of the second round of review of PR #1237): a
+        # merged (key, subject) only keeps a flag when EVERY contributing
+        # call agreed on it. Two calls that both agree stay flagged; one
+        # dissenting call clears it for the whole merged row, rather than
+        # one hard_error=True call permanently painting every later, calmer
+        # call for the same pair within the same run.
+        self.finding("x", "first", subject="s", hard_error=True, time_rolling=True)
+        self.finding("x", "second", subject="s", hard_error=True, time_rolling=True)
         row = self.ns["_FINDINGS"][0]
         self.assertTrue(row["hard_error"])
         self.assertTrue(row["time_rolling"])
         self.assertEqual(row["count"], 2)
+
+        self.finding("y", "first", subject="s", hard_error=False, time_rolling=True)
+        self.finding("y", "second", subject="s", hard_error=True, time_rolling=False)
+        row_y = next(r for r in self.ns["_FINDINGS"] if r["key"] == "y")
+        self.assertFalse(row_y["hard_error"])
+        self.assertFalse(row_y["time_rolling"])
+        self.assertEqual(row_y["count"], 2)
 
     def test_findings_json_round_trips_the_schema(self):
         self.finding("rule_enforcement", "98 active rule gaps", count=98)
@@ -234,9 +275,10 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
 
     def test_every_rc1_path_has_a_preceding_finding_call(self):
         errors: list = []
-        _check_block(_find_function("_canonical_health").body, errors, "_canonical_health")
-        _check_block(_find_function("_canonical_contradiction_alarm").body, errors,
-                     "_canonical_contradiction_alarm")
+        _check_function_top_level_isolated(_find_function("_canonical_health"), errors,
+                                           "_canonical_health")
+        _check_function_top_level_isolated(_find_function("_canonical_contradiction_alarm"), errors,
+                                           "_canonical_contradiction_alarm")
         self.assertEqual(errors, [], "\n".join(errors))
 
     def test_every_structural_key_is_hard_error(self):
@@ -247,6 +289,55 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
         missing = STRUCTURAL_KEYS - hard_error_keys
         self.assertEqual(missing, set(),
                          f"structural key(s) not recorded with hard_error=True: {missing}")
+
+    def test_mutation_an_unrecorded_new_top_level_red_is_caught(self):
+        # Non-vacuousness proof for the check above, using the SAME mutation
+        # an independent reviewer used to prove the old single-pass check
+        # was vacuous (scratchpad/mut/tools/health-check.py, point 3 of the
+        # second round of review): a brand-new top-level section, appended
+        # AFTER real sections that already call _canonical_finding, that
+        # sets rc=1 with no finding call of its own. The old check passed
+        # this because an EARLIER section's finding call had already set
+        # `seen_finding = True` and it never reset across top-level
+        # siblings; the isolated-per-top-level-statement check must catch
+        # it, and must NOT flag the same mutation once it DOES call a
+        # finding function.
+        real = _find_function("_canonical_health")
+
+        bad_src = (
+            "if True:\n"
+            "    if os.environ.get('NEW_UNRECORDED_RED'):\n"
+            "        print('  \\u26a0\\ufe0e some new section UNREADABLE')\n"
+            "        rc = 1\n"
+        )
+        bad_stmt = ast.parse(bad_src).body[0]
+        mutated_bad = copy.deepcopy(real)
+        mutated_bad.body.append(bad_stmt)
+        ast.fix_missing_locations(mutated_bad)
+        errors_bad: list = []
+        _check_function_top_level_isolated(mutated_bad, errors_bad, "_canonical_health(mutated)")
+        self.assertNotEqual(errors_bad, [],
+                            "the isolated top-level check did not catch an unrecorded new red — "
+                            "it is vacuous again")
+
+        good_src = (
+            "if True:\n"
+            "    if os.environ.get('NEW_UNRECORDED_RED'):\n"
+            "        _canonical_finding('new_unrecorded_red', 'some new section UNREADABLE', "
+            "hard_error=True)\n"
+            "        print('  \\u26a0\\ufe0e some new section UNREADABLE')\n"
+            "        rc = 1\n"
+        )
+        good_stmt = ast.parse(good_src).body[0]
+        mutated_good = copy.deepcopy(real)
+        mutated_good.body.append(good_stmt)
+        ast.fix_missing_locations(mutated_good)
+        errors_good: list = []
+        _check_function_top_level_isolated(mutated_good, errors_good, "_canonical_health(mutated)")
+        self.assertEqual(errors_good, [],
+                         "\n".join(errors_good) or
+                         "a new top-level section that DOES call _canonical_finding before its "
+                         "rc=1 was wrongly flagged")
 
     def test_business_count_keys_are_not_hard_error(self):
         # The other half of the same contract: a count that can legitimately

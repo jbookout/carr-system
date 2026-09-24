@@ -84,6 +84,13 @@ class FakeRunner:
         self.health_write_json = health_write_json
         self.calls: list[tuple[str, list[str]]] = []
         self.envs: dict[str, dict[str, str]] = {}
+        # Which folder each named step ran in — added for point 1 of the
+        # second round of review of PR #1237: the health baseline and the
+        # post-promote health read must run in the SAME folder (the release
+        # worktree, not the pipeline's own checkout), or a `db/schema.sql`
+        # rewritten by this release's own migrate-apply spuriously diffs
+        # against a baseline read from a different checkout.
+        self.cwds: dict[str, str] = {}
 
     def _health_output(self, name, argv):
         """Write the --findings-json file (unless suppressed) and build the
@@ -110,6 +117,7 @@ class FakeRunner:
         name = stem.split("-", 1)[1] if stem[:2].isdigit() else stem
         self.calls.append((name, list(argv)))
         self.envs[name] = dict(env)
+        self.cwds[name] = str(cwd)
         assert "DATABASE_URL" not in env and not any(k.startswith("CARR_DB_") for k in env), \
             "a credential leaked into a step's environment"
         assert not any(CF_TOKEN in a for a in argv), "the deploy token reached argv"
@@ -507,13 +515,18 @@ class HealthGate(Base):
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         rec = self.fx.records()[-1]
         self.assertEqual(rec["step"], "health")
-        self.assertIn("no finding at all", rec.get("detail", ""))
+        self.assertIn("no new finding to explain it", rec.get("detail", ""))
 
     def test_B_and_E_an_unavailable_baseline_is_a_pre_promote_block_not_a_failure(self):
         # B: the baseline must be taken before any --apply step; E: an
         # incomplete baseline is a BLOCKED hold, so the SHA is never consumed
         # (no failed_sha, no diagnosis dispatch, retried next tick) — not a
-        # StepFailed after promotion already ran.
+        # StepFailed after promotion already ran. Point 1 of the second round
+        # of review: the baseline is read IN the release worktree (a checkout
+        # only, no --apply), so "worktree" now runs before "health-baseline"
+        # — that checkout is still trivially re-creatable and cleaned up by
+        # remove_worktrees() on this Blocked path, so it does not turn an
+        # incomplete baseline into a real failure.
         self.fx.commit({"mcp-server/src/a.js": "1"})
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_marker=False,
@@ -530,19 +543,40 @@ class HealthGate(Base):
         for later in ("staging-prepare", "staging-app-writer", "migrate-plan",
                       "migrate-apply", "upload", "staging", "promote", "health"):
             self.assertNotIn(later, runner.names())
-        self.assertEqual(runner.names(), ["wrangler-auth", "health-baseline"])
+        self.assertEqual(runner.names(), ["wrangler-auth", "worktree", "health-baseline"])
 
-    def test_B_baseline_runs_before_the_worktree_and_every_apply_step(self):
+    def test_B_baseline_runs_in_the_worktree_before_every_apply_step(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live)
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
         names = runner.names()
+        # "worktree" (a checkout, no --apply) still comes before the
+        # baseline — see point 1 of the second round of review — but every
+        # REAL --apply step must still come after the baseline read.
+        self.assertLess(names.index("worktree"), names.index("health-baseline"))
         baseline_i = names.index("health-baseline")
-        for apply_step in ("staging-prepare", "staging-app-writer", "migrate-plan", "worktree"):
+        for apply_step in ("staging-prepare", "staging-app-writer", "migrate-plan"):
             if apply_step in names:
                 self.assertLess(baseline_i, names.index(apply_step),
                                 f"health-baseline must run before {apply_step}")
+
+    def test_point1_baseline_and_post_read_run_in_the_same_folder(self):
+        # Point 1 of the second round of review: the baseline and the
+        # post-promote read must use the SAME cwd (the release worktree),
+        # not two different checkouts — otherwise migrate-apply rewriting
+        # db/schema.sql in the worktree spuriously "changes" repo_loose_work
+        # against a baseline read from the pipeline's own checkout.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertIn("health-baseline", runner.cwds)
+        self.assertIn("health", runner.cwds)
+        self.assertEqual(runner.cwds["health-baseline"], runner.cwds["health"])
+        # and neither one is the pipeline's own repo checkout — it is a
+        # dedicated release worktree.
+        self.assertNotEqual(runner.cwds["health-baseline"], str(self.fx.repo))
 
     def test_B_baseline_runs_before_migrate_apply_when_a_migration_is_pending(self):
         # The probe's original concern named migrate-apply specifically ("the
@@ -595,15 +629,56 @@ class HealthGate(Base):
 
     def test_D_any_hard_error_fails_even_when_identical_to_the_baseline(self):
         # Point A/D together: hard_error is unconditional and is never
-        # excused by a matching baseline entry — a structural read failure
-        # that was ALSO broken yesterday must still fail every release until
-        # it is actually fixed, not just the first time it appears.
+        # excused by a matching baseline entry — a LIVE structural read
+        # failure that is not the SAME hard_error the baseline had (so it
+        # does not trip point 2's earlier pre-promote block below) must
+        # still fail on its own terms, not be waved through as "unchanged."
+        # Modeled here as a baseline entry that reports the same (key,
+        # subject) and count WITHOUT hard_error, and a live read that adds
+        # hard_error=True to it — count-unchanged would normally read as a
+        # pass, but hard_error overrides that.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        baseline_row = _finding("export_unreadable", "export receipts flaky", hard_error=False)
+        live_row = _finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[baseline_row],
+                            health_findings=[live_row])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("hard_error", self.fx.records()[-1].get("detail", ""))
+
+    def test_point2_a_hard_error_already_in_the_baseline_blocks_before_promote(self):
+        # Point 2 of the second round of review: a baseline that ALREADY
+        # shows a hard_error finding must block before any --apply step,
+        # not ship and then predictably fail its own post-promote
+        # comparison. This is a Blocked hold with a capability (files a
+        # loop), so it returns 3, not a StepFailed.
         self.fx.commit({"mcp-server/src/a.js": "1"})
         broken = _finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[broken], health_findings=[broken])
-        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
-        self.assertIn("hard_error", self.fx.records()[-1].get("detail", ""))
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 3)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["status"], "blocked")
+        self.assertEqual(rec["reason"], "health_baseline_hard_error")
+        self.assertTrue(rec.get("loop_filed"))
+        for later in ("staging-prepare", "migrate-plan", "upload", "staging", "promote", "health"):
+            self.assertNotIn(later, runner.names())
+
+    def test_point2_credential_expiring_soon_alone_is_not_hard_error(self):
+        # The other half of point 2: expiring_soon (and registry-audit data
+        # errors) are counted findings, not hard_error — health-check.py's
+        # own logic is the source of truth for that distinction and is
+        # proven directly in tools/health-check-findings-selftest.py; this
+        # only proves the pipeline's OWN gate does not treat a non-hard_error
+        # baseline finding as a pre-promote block.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        expiring = _finding("credential_health", "1 of 4 credential(s) need attention "
+                            "(failed=0 expiring_soon=1 unverifiable=0 unconfigured=0 ok=3)",
+                            count=1, hard_error=False)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[expiring],
+                            health_findings=[expiring])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
 
     def test_F_marker_present_but_not_the_last_line_is_incomplete(self):
         # A crash on the way out after the happy-path print (e.g. a
@@ -634,6 +709,80 @@ class HealthGate(Base):
         # `./run.sh health` stdout capture (…-health.log).
         self.assertTrue(rec["log"].endswith("health-new-findings.log"))
         self.assertFalse(rec["log"].endswith("-health.log"))
+
+    def test_point4_a_rolling_finding_still_fails_when_its_count_rises(self):
+        # Point 4 of the second round of review: time_rolling excuses a
+        # (key, subject) pair FIRST appearing purely because the clock moved
+        # (see test_D_time_rolling_findings_are_reported_but_never_diffed),
+        # but it must NOT excuse a rising count within that same rolling
+        # finding — only a fall (or no change) is clock noise.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        yesterday = _finding("doctrine_stale", "3 stale sections", count=3, time_rolling=True)
+        today = _finding("doctrine_stale", "5 stale sections", count=5, time_rolling=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("time_rolling count 3 -> 5", self.fx.records()[-1].get("detail", ""))
+
+    def test_point4_a_rolling_finding_falling_still_passes(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        yesterday = _finding("doctrine_stale", "5 stale sections", count=5, time_rolling=True)
+        today = _finding("doctrine_stale", "3 stale sections", count=3, time_rolling=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_point1_repo_loose_work_is_excluded_from_the_gate(self):
+        # Point 1 of the second round of review: even reading baseline and
+        # post-promote in the same worktree, migrate-apply legitimately
+        # rewrites db/schema.sql as part of a normal migration release, so
+        # repo_loose_work must never fail the gate on its own.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        loose_before = _finding("repo_loose_work", "0 actionable path(s)", count=0)
+        loose_after = _finding("repo_loose_work", "1 actionable path(s)", count=1)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[loose_before],
+                            health_findings=[loose_after])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_point5_an_incomplete_baseline_escalates_after_n_ticks(self):
+        # Point 5 of the second round of review: an incomplete baseline must
+        # not hold silently forever. The first HEALTH_BASELINE_ESCALATE_AFTER
+        # - 1 ticks on the SAME sha are ordinary clean holds (capability=None,
+        # tick returns 0, no loop filed); the Nth tick escalates to a filed
+        # loop (capability set, tick returns 3).
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        n = rp.Pipeline.HEALTH_BASELINE_ESCALATE_AFTER
+        verbs: list = []
+        for attempt in range(1, n):
+            runner = FakeRunner(live=live, health_baseline_marker=False)
+            rc = self.fx.pipeline(runner, live=live, verbs=verbs).tick(["worker"])
+            self.assertEqual(rc, 0, f"attempt {attempt} should still be a clean, silent hold")
+            self.assertEqual(self.fx.records()[-1]["reason"], "health_baseline_unavailable")
+            self.assertEqual(verbs, [], f"no loop should be filed before attempt {n}")
+        runner = FakeRunner(live=live, health_baseline_marker=False)
+        rc = self.fx.pipeline(runner, live=live, verbs=verbs).tick(["worker"])
+        self.assertEqual(rc, 3, "the Nth consecutive incomplete baseline must escalate")
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["reason"], "health_baseline_stalled")
+        self.assertTrue(rec.get("loop_filed"))
+        self.assertEqual(len(verbs), 1)
+
+    def test_point5_a_completed_baseline_resets_the_incomplete_counter(self):
+        # A baseline that eventually DOES complete clears the per-sha
+        # counter, so a later transient blip does not inherit an escalation
+        # that is already most of the way to firing.
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        n = rp.Pipeline.HEALTH_BASELINE_ESCALATE_AFTER
+        for _ in range(n - 1):
+            runner = FakeRunner(live=live, health_baseline_marker=False)
+            self.fx.pipeline(runner, live=live).tick(["worker"])
+        good_runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(good_runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.state()["worker"].get("health_baseline_incomplete", {}).get(sha),
+                         None)
 
 
 class KillSwitch(Base):

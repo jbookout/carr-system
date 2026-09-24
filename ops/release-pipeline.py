@@ -668,19 +668,64 @@ class Pipeline:
         findings, complete = read_health_findings(res.out, findings_path)
         return res, findings, complete
 
-    def _health_baseline_or_block(self) -> tuple[list[dict], bool]:
-        """The pre-promote health baseline, or a Blocked hold when it did not
-        complete. Called before anything mutates (see release_worker), so an
-        incomplete baseline never burns the SHA — see health_gate and point E
-        of an independent review of PR #1237."""
-        _res, findings, complete = self.health_read("health-baseline", self.repo)
-        if not complete:
-            raise Blocked("health_baseline_unavailable",
-                          "the pre-promote health baseline did not complete; retrying next tick "
-                          "rather than releasing without one to compare against")
-        return findings, complete
+    HEALTH_BASELINE_ESCALATE_AFTER = 3
 
-    def health_gate(self, cwd: Path, baseline: tuple[list[dict], bool]) -> None:
+    def _health_baseline_or_block(self, wt: Path, state: dict, lane: str, sha: str
+                                  ) -> tuple[list[dict], bool, int]:
+        """The pre-promote health baseline, read in the release worktree
+        `wt` (a checkout only, no --apply yet — see add_worktree's
+        `mark_mutated=False` and release_worker) so the baseline and the
+        later post-promote read run against the exact same code AND folder.
+        The previous design read the baseline from the pipeline's own
+        checkout and the post-promote health from the release worktree —
+        two different `db/schema.sql` states after migrate-apply, so
+        repo_loose_work spuriously "changed" on every migration release
+        (point 1 of the second round of an independent review of PR #1237).
+
+        An incomplete baseline is a clean Blocked hold (capability=None:
+        retried next tick, no loop filed, the SHA never burned) UNLESS it
+        has now failed to complete for HEALTH_BASELINE_ESCALATE_AFTER
+        consecutive ticks on this SAME sha, in which case it escalates to a
+        filed loop instead of holding silently forever (point 5) — the
+        per-sha counter lives in `state[lane]["health_baseline_incomplete"]`
+        and is cleared the moment a baseline for that sha completes.
+
+        A baseline that DID complete but already carries a hard_error
+        finding blocks too, before promote: every rc=1 path in
+        tools/health-check.py records one (source-verified by
+        tools/health-check-findings-selftest.py), so promoting on top of an
+        already-broken read can only ever fail its own post-promote
+        comparison — better to block here, before any --apply step, than to
+        burn the SHA on a predictable post-promote failure (point 2).
+        """
+        baseline_res, findings, complete = self.health_read("health-baseline", wt)
+        counters = state.setdefault(lane, {}).setdefault("health_baseline_incomplete", {})
+        if not complete:
+            n = int(counters.get(sha, 0)) + 1
+            counters[sha] = n
+            self.store.save(state)
+            if n < self.HEALTH_BASELINE_ESCALATE_AFTER:
+                raise Blocked("health_baseline_unavailable",
+                              f"the pre-promote health baseline did not complete (attempt {n}/"
+                              f"{self.HEALTH_BASELINE_ESCALATE_AFTER}); retrying next tick rather "
+                              "than releasing without one to compare against")
+            raise Blocked("health_baseline_stalled",
+                          f"the pre-promote health baseline has not completed for {n} consecutive "
+                          f"ticks on {sha[:12]}; escalating instead of holding silently forever",
+                          capability="health_baseline_stalled")
+        if counters.pop(sha, None) is not None:
+            self.store.save(state)
+        hard = sorted({row["key"] for row in findings if row.get("hard_error")})
+        if hard:
+            raise Blocked("health_baseline_hard_error",
+                          "the pre-promote health baseline already shows a hard_error finding "
+                          f"({', '.join(hard)}); promoting on top of an already-broken read can "
+                          "only fail its own post-promote comparison, so this blocks before any "
+                          "--apply step rather than burning the SHA on a predictable failure",
+                          capability="health_baseline_hard_error")
+        return findings, complete, baseline_res.rc
+
+    def health_gate(self, cwd: Path, baseline: tuple[list[dict], bool, int]) -> None:
         """Fail the release on a NEW canonical finding, not on standing debt
         that already existed before this promote.
 
@@ -707,25 +752,32 @@ class Pipeline:
         98 unrelated standing rule gaps to find the two lines that are its
         actual job (point G).
         """
-        baseline_findings, baseline_complete = baseline
+        baseline_findings, baseline_complete, baseline_rc = baseline
         res, findings, complete = self.health_read("health", cwd)
         if not complete:
             raise StepFailed("health", res.rc or 1, res.log,
                               "health read did not complete — an unavailable read is never a pass")
         new = health_regression([] if not baseline_complete else baseline_findings, findings)
         # Belt-and-suspenders for point A ("a nonzero health exit with no new
-        # finding line now passes... any rc != 0 must fail"): tools/health-
-        # check.py is now source-verified (tools/health-check-findings-
-        # selftest.py) to record a finding on every rc=1 path it takes, so
-        # this should never fire in practice. It stays as a hard backstop
-        # against a FUTURE rc=1 path in that file shipping without one —
-        # scoped to "recorded nothing at all," not "nothing NEW," so it can
-        # never re-fail pure standing debt (the same count, same subjects,
-        # baseline and live both rc=1) that the whole redesign exists to let
-        # pass.
-        if not new and res.rc != 0 and not findings:
-            new = [f"./run.sh health exited {res.rc} but recorded no finding at all "
-                  f"to explain it — treated as unavailable, never a pass"]
+        # finding line now passes... any rc != 0 must fail") and point 3 of
+        # the second round of review (the AST check that was supposed to
+        # guarantee every rc=1 path records a finding was vacuous — a single
+        # earlier finding call anywhere in the function satisfied it for
+        # every later, unrelated section too; tools/health-check-findings-
+        # selftest.py now checks each top-level section on its own and a
+        # mutation test proves it catches a planted unrecorded red). This
+        # backstop stays as a hard runtime guard against a FUTURE rc=1 path
+        # shipping without a finding call regardless: a CLEAN baseline
+        # (rc=0) followed by a DIRTY live read (rc!=0) that health_regression
+        # found no new finding for is never a pass, even if OTHER, unrelated
+        # findings were recorded during the same run — scoped to "baseline
+        # was clean," not "live recorded nothing at all," so it can still
+        # never re-fail pure standing debt (baseline and live both rc=1 on
+        # the same findings) that the whole redesign exists to let pass.
+        if not new and baseline_rc == 0 and res.rc != 0:
+            new = [f"./run.sh health exited {res.rc} against a clean (rc=0) baseline but "
+                  f"health_regression found no new finding to explain it — treated as "
+                  f"unavailable, never a pass"]
         if new:
             n = len(self.executed) + 1
             findings_log = self.run_dir / f"{n:02d}-health-new-findings.log"
@@ -958,12 +1010,26 @@ class Pipeline:
             raise StepFailed("credential-missing", 1, who.log,
                              f"credential rejected: wrangler whoami does not accept {CLOUDFLARE_TOKEN_NAME}")
 
-    def add_worktree(self, name: str, repo_dir: Path, wt: Path, sha: str) -> None:
+    def add_worktree(self, name: str, repo_dir: Path, wt: Path, sha: str, *, mark_mutated: bool = True) -> None:
+        """`mark_mutated=False` is for the worker lane's health baseline: the
+        release worktree is created (a checkout only, no --apply) BEFORE the
+        baseline read so the baseline and the post-promote read run against
+        the exact same code and folder (point 1 of the second round of an
+        independent review of PR #1237 — the previous design read the
+        baseline from the pipeline's own checkout and the post-promote
+        health from the release worktree, two different `db/schema.sql`
+        states after migrate-apply, so repo_loose_work spuriously "changed"
+        on every migration release). Deferring self.mutated keeps an
+        incomplete baseline a clean Blocked hold (see release_worker): a
+        plain checkout is trivially re-creatable and remove_worktrees()
+        still cleans it up on that path, so it should not by itself burn
+        the SHA the way a real --apply step's failure does."""
         if wt.exists():
             raise StepFailed(name, 1, "", f"{wt} already exists; a prior run left it for diagnosis")
         self.step(name, ["git", "-C", str(repo_dir), "worktree", "add", "--detach", str(wt), sha], repo_dir)
         self.worktrees.append((repo_dir, wt))
-        self.mutated = True
+        if mark_mutated:
+            self.mutated = True
 
     def remove_worktrees(self) -> None:
         """Called on success and on a hold. A failure keeps its worktree for
@@ -1063,7 +1129,7 @@ class Pipeline:
                                        "status": "no_release_needed", "run_id": self.run_id})
                 return 0
             if lane == "worker":
-                result = self.release_worker(lane_cfg, base, sha)
+                result = self.release_worker(lane_cfg, base, sha, state, lane)
             else:
                 result = self.release_app(lane_cfg, repo_dir, base, sha)
             if self.dry_run:
@@ -1169,7 +1235,7 @@ class Pipeline:
             self.out(f"  [dry-run] a real run would STOP here ({what}): {b.reason} — {b.detail}")
             return placeholder
 
-    def release_worker(self, lane_cfg: dict, base: str, sha: str) -> dict:
+    def release_worker(self, lane_cfg: dict, base: str, sha: str, state: dict, lane: str) -> dict:
         ev = self.dry_tolerant("evidence", lambda: self.worker_evidence(lane_cfg, base, sha), {
             "pr": "<PR>", "prs": [], "verifier": "<independent reviewer slug>",
             "verifier_evidence": "github:<repo>/pull/<N>#issuecomment-<X>",
@@ -1179,21 +1245,6 @@ class Pipeline:
                  f"({ev['verifier_evidence']}); test={ev['test_evidence']}")
         self.dry_tolerant("unattended credentials", lambda: self.unattended_preflight(lane_cfg), None)
 
-        # Health baseline — after the pure-read evidence/credential checks
-        # above (so a release already held for a missing review, red CI, or a
-        # missing credential still runs NOTHING, exactly as before: those
-        # tests pin `runner.calls == []`), but before the release worktree
-        # exists and before staging-prepare/staging-app-writer/migrate-apply
-        # (every --apply step). Points B and E of an independent review of
-        # PR #1237: taking the baseline after any of those would let a
-        # release's OWN migration damage hide inside its "baseline," and
-        # forgive itself; taking it here, against self.repo (this reads
-        # canonical DATABASE state, not the candidate's code, so no worktree
-        # is needed), means an incomplete baseline is caught before
-        # self.mutated is ever set — a pre-promote BLOCKED hold (see
-        # run_lane's `except Blocked`), not a StepFailed, so the SHA is never
-        # marked failed and is retried next tick rather than burned on a
-        # diagnosis dispatch for a problem that isn't the release's.
         wt = self.store.root / "worktrees" / f"worker-{sha[:12]}"
         mcp = wt / "mcp-server"
         py = str(wt / ".venv/bin/python")
@@ -1206,32 +1257,40 @@ class Pipeline:
         # 0. the unattended Cloudflare login, before anything is created. A
         # missing/rejected token raises StepFailed from deploy_env() itself,
         # before any subprocess ever runs — so this still needs to come
-        # before the health baseline for that failure to stay a clean,
+        # before the release worktree for that failure to stay a clean,
         # zero-subprocess failure (existing DeployCredential selftests pin
         # `runner.calls == []` for it).
         self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
 
-        # Health baseline — after every pure-read check above (evidence,
-        # unattended credentials, the wrangler auth probe) and their own
-        # zero/near-zero-subprocess failure contracts, but before the release
-        # worktree exists and before staging-prepare/staging-app-writer/
-        # migrate-apply (every --apply step). Points B and E of an
-        # independent review of PR #1237: taking the baseline after any of
-        # those would let a release's OWN migration damage hide inside its
-        # "baseline," and forgive itself; taking it here, against self.repo
-        # (this reads canonical DATABASE state, not the candidate's code, so
-        # no worktree is needed), means an incomplete baseline is caught
-        # before self.mutated is ever set — a pre-promote BLOCKED hold (see
-        # run_lane's `except Blocked`), not a StepFailed, so the SHA is never
-        # marked failed and is retried next tick rather than burned on a
-        # diagnosis dispatch for a problem that isn't the release's.
+        # 1. the release worktree at exactly S — a checkout only, no --apply
+        # yet (`mark_mutated=False`), created BEFORE the health baseline so
+        # the baseline and the later post-promote read run in the exact same
+        # code AND folder — see add_worktree's docstring and point 1 of the
+        # second round of an independent review of PR #1237. An incomplete
+        # or already-broken baseline is still a clean Blocked hold here: the
+        # worktree is a trivially re-creatable checkout, and remove_worktrees()
+        # (called from run_lane's `except Blocked` path) cleans it up, so it
+        # does not by itself burn the SHA the way a real --apply step would.
+        self.add_worktree("worktree", self.repo, wt, sha, mark_mutated=False)
+
+        # Health baseline, read INSIDE that same worktree (points B/E of the
+        # first review round: before staging-prepare/staging-app-writer/
+        # migrate-apply — every --apply step — so a release's OWN migration
+        # damage can never hide inside its own "baseline" and forgive
+        # itself; point 1 of the second round: in the SAME folder the
+        # post-promote read will use, so a `db/schema.sql` rewritten by this
+        # release's own migrate-apply does not spuriously diff against a
+        # baseline read from a different checkout).
         health_baseline = self.dry_tolerant(
             "health baseline",
-            lambda: self._health_baseline_or_block(),
-            ([], True))
+            lambda: self._health_baseline_or_block(wt, state, lane, sha),
+            ([], True, 0))
+        if not self.dry_run:
+            # The checkout is now confirmed useful — a baseline was read
+            # from it. From here on a hold is no longer "nothing happened
+            # yet"; treat it like every other real failure.
+            self.mutated = True
 
-        # 1. the release worktree at exactly S
-        self.add_worktree("worktree", self.repo, wt, sha)
         self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
         self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
 
@@ -1431,6 +1490,17 @@ def read_health_findings(output: str, findings_path: Path) -> tuple[list[dict], 
     return findings, (marker_ok and json_ok)
 
 
+# repo_loose_work is excluded from the regression diff entirely (point 1 of
+# the second round of an independent review of PR #1237): even reading the
+# baseline and the post-promote check in the same worktree (see
+# release_worker), migrate-apply legitimately rewrites db/schema.sql as
+# part of a normal migration release, so this key can "change" on every
+# migration release for a reason that is the release's own intended work,
+# not a regression. It still prints in the health log for a human to read;
+# it just never fails the gate.
+HEALTH_REGRESSION_EXCLUDED_KEYS = frozenset({"repo_loose_work"})
+
+
 def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
     """The live finding(s) that should fail THIS release: a (key, subject)
     pair absent from the baseline, a count that rose since the baseline, or
@@ -1441,27 +1511,45 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
     always fail, every release, until it is fixed). A count that FELL, or is
     unchanged, is not a regression — improvement and no-op are both allowed
     to pass, which is the whole point of diffing against a baseline instead
-    of failing on any standing finding. `time_rolling` findings (a job's
-    MISSING DUE date, an export crossing the 26h STALE clock, a rolling 24h
-    gate-block window) are reported by the caller but never compared here —
-    they change on the clock alone, not because of anything this release did.
+    of failing on any standing finding.
+
+    `time_rolling` findings (a job's MISSING DUE date, an export crossing
+    the 26h STALE clock, a rolling 24h gate-block window) are excused from
+    the "new pair" check — a (key, subject) can legitimately first appear
+    purely because wall-clock time passed, not because of anything this
+    release did — but they are NOT excused from a rising count: point 4 of
+    the second round of review found that a rolling finding whose count
+    climbed was being waved through entirely. Only a FALL (or no change) in
+    a rolling finding's count is treated as clock noise; a rise still fails,
+    the same as any other finding.
+
+    Note for a reader of a failing gate: `count` accumulates by (key,
+    subject) within one run (see tools/health-check.py's `_canonical_
+    finding`), so two findings that individually rose and fell inside a
+    wider aggregate subject can cancel out in the total and never surface
+    here (point 6) — a caller who needs finer resolution than that should
+    split the subject by rule id rather than read the aggregate as exact.
     """
-    baseline_by_key_subject = {
-        (row["key"], row["subject"]): row for row in baseline if not row.get("time_rolling")
-    }
+    baseline_by_key_subject = {(row["key"], row["subject"]): row for row in baseline}
     bad = []
     for row in live:
-        if row.get("time_rolling"):
+        if row["key"] in HEALTH_REGRESSION_EXCLUDED_KEYS:
             continue
         detail = row.get("detail", "")
         if row.get("hard_error"):
             bad.append(f"{row['key']}[{row['subject']}]: hard_error — {detail}")
             continue
         prior = baseline_by_key_subject.get((row["key"], row["subject"]))
+        prior_count = prior.get("count", 0) if prior else 0
+        if row.get("time_rolling"):
+            if row.get("count", 0) > prior_count:
+                bad.append(f"{row['key']}[{row['subject']}]: time_rolling count {prior_count} -> "
+                           f"{row.get('count')} — {detail}")
+            continue
         if prior is None:
             bad.append(f"{row['key']}[{row['subject']}]: new — {detail}")
-        elif row.get("count", 0) > prior.get("count", 0):
-            bad.append(f"{row['key']}[{row['subject']}]: count {prior.get('count')} -> "
+        elif row.get("count", 0) > prior_count:
+            bad.append(f"{row['key']}[{row['subject']}]: count {prior_count} -> "
                        f"{row.get('count')} — {detail}")
     return bad
 

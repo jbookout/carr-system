@@ -1021,8 +1021,14 @@ def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, ti
     for row in _FINDINGS:
         if row["key"] == key and row["subject"] == subject:
             row["count"] += count
-            row["hard_error"] = row["hard_error"] or bool(hard_error)
-            row["time_rolling"] = row["time_rolling"] or bool(time_rolling)
+            # AND, not OR (point 4 of the second round of review): a merged
+            # occurrence only keeps a flag when EVERY call that contributed
+            # to this (key, subject) agreed on it. An OR let one hard_error
+            # or time_rolling call permanently paint the whole accumulated
+            # row that way even after a later, calmer call for the same
+            # pair disagreed within the same run — AND requires consensus.
+            row["hard_error"] = row["hard_error"] and bool(hard_error)
+            row["time_rolling"] = row["time_rolling"] and bool(time_rolling)
             return
     _FINDINGS.append({"key": key, "subject": subject, "detail": detail, "count": count,
                       "hard_error": bool(hard_error), "time_rolling": bool(time_rolling)})
@@ -1156,13 +1162,20 @@ def _canonical_health():
                 # job accumulates onto one finding instead of minting a new
                 # one per date.
                 if " NON-SUCCESS execution" in window:
+                    # NOT time_rolling (point 4 of the second round of
+                    # review): a NON-SUCCESS execution is a specific past
+                    # run that failed — it does not become "current" again
+                    # purely because a day passed the way a MISSING DUE
+                    # window or a STALE clock does, so a rising count here
+                    # must still fail the release gate on its own terms.
                     detail = f"{key} {window}"
                     finding = "job_due_non_success"
+                    _canonical_finding(finding, detail, subject=str(key))
                 else:
                     detail = f"{key} MISSING DUE execution for {window}"
                     finding = "job_missing_due"
+                    _canonical_finding(finding, detail, subject=str(key), time_rolling=True)
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding(finding, detail, subject=str(key), time_rolling=True)
             for job, why in stuck:
                 detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
                 print(f"  ⚠︎ {detail}")
@@ -1209,8 +1222,21 @@ def _canonical_health():
         if p.stdout:
             print(p.stdout.rstrip())
         if p.returncode:
-            print("  ⚠︎ canonical registry audit failed")
-            _canonical_finding("registry_integrity", "canonical registry audit failed", hard_error=True)
+            # registry-audit.py exits 1 whenever it counted N > 0 data
+            # errors in its own summary line ("registry-audit: N error(s),
+            # M warning(s)") — that is a counted finding, not a broken
+            # check (point 2 of the second round of review: registry-audit
+            # data errors should not be hard_error). Only a nonzero exit
+            # WITHOUT that summary line (the process crashed or never
+            # reached its own end) is treated as a hard structural failure.
+            m = re.search(r"registry-audit:\s*(\d+)\s*error\(s\)", p.stdout or "")
+            if m:
+                n = int(m.group(1))
+                print(f"  ⚠︎ canonical registry audit found {n} data error(s)")
+                _canonical_finding("registry_integrity", f"{n} data error(s)", count=n)
+            else:
+                print("  ⚠︎ canonical registry audit failed")
+                _canonical_finding("registry_integrity", "canonical registry audit failed", hard_error=True)
             rc = 1
     if CANONICAL_SECTION == "all":
         print("Doctrine and rule controls — canonical database state")
@@ -1326,9 +1352,25 @@ def _canonical_health():
                 elif _p.returncode == 0:
                     print(f"  OK {'credential health':<18} {_first.split('— ', 1)[-1]}")
                 else:
-                    print(f"  ⚠︎ {'credential health':<18} {_first.split('— ', 1)[-1]}  · "
+                    _detail = _first.split("— ", 1)[-1]
+                    print(f"  ⚠︎ {'credential health':<18} {_detail}  · "
                           f"see out/credential-health.jsonl and the loop(s) filed for detail")
-                    _canonical_finding("credential_health", _first.split("— ", 1)[-1], hard_error=True)
+                    # ops/credential-health.py's first line, when it needs
+                    # attention, is "N of M credential(s) need attention
+                    # (failed=F expiring_soon=E unverifiable=U
+                    # unconfigured=C ok=O)". A credential that only expires
+                    # soon is not a structural check failure — it is a
+                    # counted finding, same as any other standing-debt count
+                    # (point 2 of the second round of review). An actual
+                    # `failed` probe, or a line that does not match this
+                    # module's own summary shape at all (a crash, a format
+                    # this file has never seen), stays hard_error — this can
+                    # never let a REAL failure through as a mere count.
+                    _m = re.search(r"failed=(\d+)\s+expiring_soon=(\d+)", _detail)
+                    if _m and int(_m.group(1)) == 0 and int(_m.group(2)) > 0:
+                        _canonical_finding("credential_health", _detail, count=int(_m.group(2)))
+                    else:
+                        _canonical_finding("credential_health", _detail, hard_error=True)
                     rc = 1
         except Exception as e:
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
