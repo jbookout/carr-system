@@ -2057,13 +2057,28 @@ export function ingressKind(row) {
   return row.ingress_key.split(":")[0];
 }
 
+// An MCP verb row is held to exactly the fields the runtime compares before it
+// admits the verb (mcp-server/src/mutation-registry.js assertRegisteredOperation):
+// its source file name, input-schema digest, and write, human-only and
+// authority flags. The whole-file source digest is not among them, so a
+// comment, a helper or a flag like writerConnection in a verb's file no longer
+// reseals every verb that file holds; a changed schema or flag still does.
+export const MCP_TOOL_BOUND_FIELDS = Object.freeze(
+  ["ingress_key", "source_locator", "schema_digest", "write", "human_only", "authority_only"]);
+
 // The part of an inventory a pull request is held to: script, workflow and
-// launchd rows drop out, worker rows keep only their key, every other row
-// kind is compared whole.
+// launchd rows drop out, worker rows keep only their key, MCP verb rows keep
+// the runtime-enforced contract, every other row kind is compared whole.
 export function boundInventoryRows(rows) {
   return rows
     .filter(row => !UNSEALED_INGRESS_KINDS.has(ingressKind(row)))
-    .map(row => KEY_BOUND_INGRESS_KINDS.has(ingressKind(row)) ? { ingress_key: row.ingress_key } : row);
+    .map(row => {
+      const kind = ingressKind(row);
+      if (KEY_BOUND_INGRESS_KINDS.has(kind)) return { ingress_key: row.ingress_key };
+      if (kind === "mcp-tool")
+        return Object.fromEntries(MCP_TOOL_BOUND_FIELDS.map(field => [field, row[field]]));
+      return row;
+    });
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
