@@ -48,6 +48,15 @@
 set -u
 EX_CONFIG=78
 
+# Never wait on a login prompt. This runs unattended from launchd; if GitHub
+# ever wants credentials again (expired token, revoked login), a git allowed to
+# prompt sits waiting for an answer nobody types and the run stalls instead of
+# skipping. With these, the fetch fails fast and the existing "fetch failed"
+# skip path reports it. The keychain credential helper still answers silently.
+export GIT_TERMINAL_PROMPT=0
+export GCM_INTERACTIVE=never
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
+
 REPO="${0:A:h:h}"
 cd "$REPO" || { print -ru2 -- "fleet-sync: cannot enter $REPO"; exit 1 }
 PY="$REPO/.venv/bin/python"

@@ -533,8 +533,10 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       handler: async (c, actor, args) => {
         await actorId(c, actor);
         const doc = await resolveDoc(c, args.document);
-        if (doc.visibility === "personal" && doc.owner_actor_id !== actor.id)
-          throw new ToolError({ error: "personal_doc_not_owner" });
+        // Personal doctrine is readable by both partners (decision logged
+        // 2026-09-24): "personal" scopes where a rule APPLIES, not who may
+        // see it. Writes stay owner-only; search-doctrine and
+        // resolve-doctrine-rules still apply only the caller's own set.
         const snap = await c.query(
           `select generation, snapshot_json, content_hash, built_at
              from doctrine_snapshot where document_id = $1`, [doc.id]);
@@ -645,13 +647,14 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         const r = await c.query(
           `select s.id, s.section_key, s.title, s.ordinal, s.status, s.current_version,
                   s.review_after, d.slug as doc_slug, d.content_class, d.visibility,
-                  d.owner_actor_id, rev.body, rev.content_hash
+                  d.owner_actor_id, o.slug as owner_slug, rev.body, rev.content_hash
              from doctrine_section s
              join doctrine_document d on d.id = s.document_id
              left join doctrine_revision rev on rev.id = s.current_revision_id
+            left join actor o on o.id = d.owner_actor_id
             where s.id = any($1::uuid[])`, [args.section_ids]);
-        const visible = r.rows.filter(x =>
-          x.visibility !== "personal" || x.owner_actor_id === actor.id);
+        // Both partners may read personal sections; owner_slug says whose.
+        const visible = r.rows;
         const found = new Set(visible.map(x => x.id));
         return { ok: true, sections: visible.map(({ owner_actor_id, ...x }) => x),
                  missing: args.section_ids.filter(id => !found.has(id)) };
@@ -678,15 +681,22 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         await actorId(c, actor);
         const r = await c.query(
           `select d.id, d.slug, d.title, d.content_class, d.visibility, d.updated_at,
+                  d.owner_actor_id,
                   count(s.id) filter (where s.status='active') as sections,
                   bool_or(s.review_after < now()) as any_stale
              from doctrine_document d
              left join doctrine_section s on s.document_id = d.id
-            where (d.visibility <> 'personal' or d.owner_actor_id = $1)
-              and ($2::text[] is null or d.content_class = any($2))
+            where ($1::text[] is null or d.content_class = any($1))
             group by d.id order by d.content_class, d.slug`,
-          [actor.id, args.content_classes || null]);
-        return { ok: true, documents: r.rows };
+          [args.content_classes || null]);
+        // Personal documents are listed for both partners (decision 9c06bf1e),
+        // named by owner. Resolved separately: carr_reader reads actor (id, slug).
+        const ownerIds = [...new Set(r.rows.map(x => x.owner_actor_id).filter(Boolean))];
+        const owners = ownerIds.length ? new Map((await c.query(
+          `select id, slug from actor where id = any($1::uuid[])`, [ownerIds])).rows
+          .map(o => [o.id, o.slug])) : new Map();
+        return { ok: true, documents: r.rows.map(({ owner_actor_id, ...x }) =>
+          ({ ...x, owner_slug: owner_actor_id ? owners.get(owner_actor_id) ?? null : null })) };
       },
     },
 
