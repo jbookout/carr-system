@@ -171,7 +171,7 @@ def monthly_note(s, r):
 # these renderers run instead of the rate ones.
 #
 # ADDITIVE BY DESIGN. Nothing fires unless a record carries "sale", so every
-# existing lease search still renders byte for byte. Verified against Hughes.
+# existing lease search still renders byte for byte. Verified against Ferris.
 # ---------------------------------------------------------------------------
 
 def price_line(x):
@@ -377,7 +377,7 @@ def build_tour_card(p, photos, minis=None, photo_px=None):
     inlined as a data URI, so there is no network request to defer and lazy loading buys nothing.
     What it DID cost: 11 of 16 images stayed blank until a human scrolled them into view, so every
     screenshot, thumbnail and print-to-PDF captured empty photo frames and an empty map. Dell's
-    side read the Hughes report as having no photos and no map. Do not add it back.
+    side read the Ferris report as having no photos and no map. Do not add it back.
     """
     img = ""
     if p.get("photo") and p["photo"] in photos:
