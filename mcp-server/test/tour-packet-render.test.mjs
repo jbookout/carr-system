@@ -25,7 +25,7 @@ test("Tour packet rendering is deterministic in immutable route order with publi
   assert.equal((first.html.match(/data-property-ref=/g) || []).length, 2);
   assert.ok(first.html.indexOf("Alpha Health Center") < first.html.indexOf("Zeta Medical Plaza"));
   assert.match(first.html, /data-route-sequence="10"/);
-  assert.match(first.html, /data-template-version="1\.0\.0"/);
+  assert.match(first.html, /data-template-version="1\.1\.0"/);
   assert.match(first.html, /#002F6C/);
   assert.match(first.html, /#F57F29/);
   assert.equal((first.html.match(/<main\b/g) || []).length, 1);
@@ -49,6 +49,20 @@ test("Tour packet preserves allowlisted structured metrics with deterministic fo
 test("Tour packet treats a null optional property caveat as absent", () => {
   const result = renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], caveat: null }] });
   assert.equal(result.facts.properties[0].caveat, packet.caveat);
+});
+
+test("Tour packet prints no caveat line at all when none is supplied anywhere", () => {
+  // Regression for the removed hard-coded "Facts only; verify current
+  // availability and economics." boilerplate (migrations/0585): a packet
+  // with no top-level caveat and no per-property caveat must render with no
+  // caveat text anywhere, not fall back to any default line.
+  const noCaveat = { ...packet, caveat: undefined, properties: packet.properties.map(property => ({ ...property, caveat: undefined })) };
+  const result = renderTourPacket(noCaveat);
+  assert.equal(result.facts.caveat, null);
+  for (const property of result.facts.properties) assert.equal("caveat" in property, false);
+  assert.doesNotMatch(result.html, /Facts only; verify current availability and economics\./);
+  assert.doesNotMatch(result.html, />null</);
+  assert.doesNotMatch(result.html, /undefined/);
 });
 
 test("Tour packet refuses unsafe facts, duplicate public identity/route order, and overflow", () => {

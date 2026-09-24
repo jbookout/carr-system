@@ -50,7 +50,7 @@ values
 
 set local carr.verified_human_actor_slug='joe';
 do $map_promotion$
-declare v_actor_id text; v_digest text; v_share uuid; v_packet jsonb;
+declare v_actor_id text; v_digest text; v_share uuid; v_packet jsonb; v_render_packet jsonb;
 begin
   select id::text into strict v_actor_id from public.actor where slug='joe' and active and kind='human';
   perform ops.append_tour_entrance_verification_receipt(jsonb_build_object(
@@ -101,6 +101,24 @@ begin
   v_packet:=ops.read_tour_share_packet('sha256:'||repeat('2',64));
   if v_packet is null or v_packet ? 'tour_name' or v_packet::text like '%Delivery proof%' then
     raise exception 'internal tour name crossed the sealed public share boundary';
+  end if;
+  -- migration 0585: the packet-level caveat is never the removed hard-coded
+  -- "Facts only; verify current availability and economics." line -- it must
+  -- be present as an explicit null (kept key, dropped default), not the
+  -- literal, and not silently omitted either.
+  if not (v_packet ? 'caveat') or v_packet->'caveat' is distinct from 'null'::jsonb then
+    raise exception 'read_tour_share_packet must carry caveat as an explicit null, not a hard-coded default';
+  end if;
+  if v_packet::text like '%Facts only%' then
+    raise exception 'read_tour_share_packet leaked the removed hard-coded caveat line';
+  end if;
+  v_render_packet:=ops.read_tour_packet_for_render('tour-delivery-proof','ac000000-0000-4000-8000-000000000001',v_actor_id);
+  if v_render_packet is null or not (v_render_packet->'packet' ? 'caveat')
+     or v_render_packet->'packet'->'caveat' is distinct from 'null'::jsonb then
+    raise exception 'read_tour_packet_for_render must carry caveat as an explicit null, not a hard-coded default';
+  end if;
+  if v_render_packet::text like '%Facts only%' then
+    raise exception 'read_tour_packet_for_render leaked the removed hard-coded caveat line';
   end if;
   perform ops.record_tour_map_promotion_receipt('tour-delivery-proof','ac000000-0000-4000-8000-000000000001',jsonb_build_object(
     'decision','rejected','reviewed_at',to_char(now()-interval '1 year','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
