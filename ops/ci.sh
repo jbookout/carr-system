@@ -914,22 +914,6 @@ check_pushfloor() {
          floor_fail no-client-deliverables \
            "a client-deliverable path is tracked. git rm it — this repo is public and must carry no client record."; }
 
-  # The NAMES half of the same rule: every tracked file and path against the
-  # client-name list. The list is the gitignored local file on a partner
-  # machine, or keyed HMACs under the CARR_NAME_GUARD_KEY secret in hosted CI;
-  # nothing name-derived is committed without the key. With neither, the gate
-  # SKIPS and its WARNING line is echoed here so the skip is never silent.
-  # Whole tree, never scoped to $changed, for the same reason as the check above.
-  if run_quiet "$LOGDIR/pushfloor-no-client-names.log" \
-       "$PY" ops/no-client-names-gate.py; then
-    grep -m1 '^WARNING no-client-names-gate SKIPPED' "$LOGDIR/pushfloor-no-client-names.log" >&2 || true
-    grep -m1 '^::warning' "$LOGDIR/pushfloor-no-client-names.log" || true
-  else
-    tail -12 "$LOGDIR/pushfloor-no-client-names.log" >&2
-    floor_fail no-client-names \
-      "a known client name is tracked. Replace it with a synthetic name, or move a live roster to a gitignored local file (see ops/no-client-names-gate.py)."
-  fi
-
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"

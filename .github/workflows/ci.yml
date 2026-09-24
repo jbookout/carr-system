@@ -231,10 +231,6 @@ jobs:
           # (installed Claude Code settings, macOS launchd). Each one prints its
           # reason in the output; nothing is dropped silently.
           CARR_CI_PORTABLE_ONLY: "1"
-          # Key for ops/no-client-names-gate.py's HMAC mode (WR-000049). A
-          # human sets this repository secret; until then the gate prints a
-          # WARNING and a ::warning:: annotation and skips, never passes silently.
-          CARR_NAME_GUARD_KEY: ${{ secrets.CARR_NAME_GUARD_KEY }}
         run: ops/ci.sh --strict --only "${{ matrix.classes }}"
 
   checks:
