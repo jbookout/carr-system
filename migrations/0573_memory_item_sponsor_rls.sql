@@ -1,4 +1,4 @@
--- 0572: personal memories are readable and writable only by the partner they
+-- 0573: personal memories are readable and writable only by the partner they
 -- belong to, enforced by the database rather than by one WHERE clause.
 --
 -- WHY (audit ruling 5, decisions 04101316 and 443fe82a, 2026-09-24).

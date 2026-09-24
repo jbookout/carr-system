@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TOOLS } from "../src/tools.js";
 
-// Migration 0572 fences personal memories with row security keyed to
+// Migration 0573 fences personal memories with row security keyed to
 // carr.sponsoring_human_slug, which only the writer transaction sets
 // (mcp.js setWriterActorContext). A memory verb on the stateless reader
 // connection would silently lose its owner's personal rows.

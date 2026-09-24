@@ -125,7 +125,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
 
     "recall-memory": {
       // A read-only transaction on the writer connection, not the stateless
-      // reader connection: memory_item's row security (migration 0572) shows
+      // reader connection: memory_item's row security (migration 0573) shows
       // personal rows only when carr.sponsoring_human_slug is set, and only
       // the writer transaction sets it. On the reader path the partner who
       // owns a personal memory could no longer recall it.
@@ -156,7 +156,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
 
     "review-memory": {
       // A read-only transaction on the writer connection, not the stateless
-      // reader connection: memory_item's row security (migration 0572) shows
+      // reader connection: memory_item's row security (migration 0573) shows
       // personal rows only when carr.sponsoring_human_slug is set, and only
       // the writer transaction sets it. On the reader path the partner who
       // owns a personal memory could no longer recall it.

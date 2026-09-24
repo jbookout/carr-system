@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ci: db-gate
 # doctrine: runbook
-"""Personal rows are fenced by the database, per partner (migration 0572).
+"""Personal rows are fenced by the database, per partner (migration 0573).
 
 Decisions 04101316 and 443fe82a (audit ruling 5, 2026-09-24). Two proofs, one
 rolled-back transaction on the disposable migration-lane database:

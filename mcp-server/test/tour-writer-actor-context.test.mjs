@@ -21,7 +21,7 @@ test("writer transactions set server-derived actor context before Tour mutations
   assert.match(human.calls[0].sql, /carr\.execution_host_id/);
   assert.match(human.calls[0].sql, /carr\.sponsoring_human_slug/);
   // The fifth value is whose personal rows row security shows (migration
-  // 0572): the same server-derived sponsor memory.js filters by.
+  // 0573): the same server-derived sponsor memory.js filters by.
   assert.deepEqual(human.calls[0].params, ["joe", "joe", "carr-internal", "", "joe"]);
 
   const sponsored = client();

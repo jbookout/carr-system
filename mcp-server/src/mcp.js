@@ -218,7 +218,7 @@ export async function setWriterActorContext(client, actor, { partnerAuthorityAct
     ? `session:${actor.correlation_id.toLowerCase()}` : null;
   const tenant = organizationTenantForActor(actor);
   const executionHost = typeof actor?.execution_host_id === "string" ? actor.execution_host_id : "";
-  // WHOSE PERSONAL ROWS THIS TRANSACTION MAY SEE (migration 0572). The same
+  // WHOSE PERSONAL ROWS THIS TRANSACTION MAY SEE (migration 0573). The same
   // server-derived sponsor memory.js already filters by: the verified human
   // partner, or the verified sponsor of an agent session. Empty for shared-only
   // machine tokens and on a sponsor error, so row security then shows shared
