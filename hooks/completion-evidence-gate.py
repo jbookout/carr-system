@@ -1129,6 +1129,22 @@ def evaluate(recs, ledger=None):
     return True, "terminal completion claim has no fresh verification"
 
 
+def jev_requirements_advisory(payload, recs):
+    """SHADOW ONLY: ops/jev_requirements.py asks Jev whether each requirement
+    of the last human request is met by this turn's diff, records the answer
+    in out/jev-judge.jsonl and returns at most one advisory line. It never
+    decides `blocked`; every failure returns None."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jev_requirements", os.path.join(REPO, "ops", "jev_requirements.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.check(payload, recs)
+    except Exception:
+        return None
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -1144,6 +1160,7 @@ def main():
         session = payload.get("session_id") or payload.get("sessionId")
         ledger = {}
         blocked, reason = evaluate(recs, ledger)
+        advisory = jev_requirements_advisory(payload, recs)
 
         # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
         #
@@ -1171,6 +1188,8 @@ def main():
                 "completion-evidence-gate", reason_class, tokens))
 
         if not blocked:
+            if advisory:
+                print(json.dumps({"systemMessage": advisory}))
             return 0
 
         # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
