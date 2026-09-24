@@ -284,18 +284,18 @@
 ["Raghu Kakarala","Startup","Legal","dell","","Exclusivity clause",null],
 ["Shaughn Shields","Startup","Legal","dell","","Awaiting landlord counsel",null],
 ["Blair Stiles","Startup","Negotiation","dell","","Counter on TI",null],
-["Dr. Erik Petersen, DO","Negotiation","Negotiation","joe","2026-08-05","LOI out — follow up Wed","2026-08-12"],
-["Dr. James Allen Tyrer","Startup","Negotiation","","2026-07-29","Assign owner","2026-08-05"],
+["Dr. Marcus Whitfield, DO","Negotiation","Negotiation","joe","2026-08-05","LOI out — follow up Wed","2026-08-12"],
+["Dr. James Allen Okafor","Startup","Negotiation","","2026-07-29","Assign owner","2026-08-05"],
 ["Dusty Huggins","Startup","Negotiation","dell","","Second-site LOI",null],
 ["Jonathan Tubbs","2nd Office","Negotiation","dell","","Rate push",null],
 ["Kapil Modi","Startup","Negotiation","dell","","Term sheet compare",null],
 ["Rick Pomplas","Startup","Negotiation","dell","","Free-rent ask",null],
 ["Sham Lal","Startup","Negotiation","dell","","Waiting on counter",null],
-["Troy Bell","Other","Negotiation","dell","","Site B backup",null],
+["Derek Lam","Other","Negotiation","dell","","Site B backup",null],
 ["Anthony Le","2nd Office","Research","dell","","Space search running",null],
 ["Ashley Kilby","Startup","Research","dell","","Market survey",null],
 ["Daniel Garabadian","Startup","Research","dell","","Demographics pull",null],
-["Dr. Elizabeth Hughes, DMD","Startup","Research","dell","2026-07-22","SRB parcel research",null],
+["Dr. Priya Ferris, DMD","Startup","Research","dell","2026-07-22","SRB parcel research",null],
 ["Edwin Witcher","Other","Research","dell","","Needs discovery call",null],
 ["John Kasper","Startup","Research","dell","","Tour list v1",null],
 ["Joseph Finelli","Startup","Research","dell","","Budget model",null],
@@ -306,11 +306,11 @@
 ["Ryan Lehmann","Startup","Research","dell","","Intro call recap",null],
 ["Ryan Tobias","Startup","Research","dell","","Financing pre-check",null],
 ["Collin Myrick","2nd Office","On Deck","dell","","Kickoff pending",null],
-["Drew Knight","Startup","On Deck","joe","","Discovery call to set",null],
+["Adrian Voss","Startup","On Deck","joe","","Discovery call to set",null],
 ["Shawn Callahan","Startup","On Deck","dell","","Waiting on timeline",null],
 ["Stephen Gross","Other","On Deck","dell","","Re-engage Sept",null],
-["Terence Cooper","Startup","On Deck","joe","","Intake interview",null],
-["Tyler Gregory","Startup","On Deck","dell","","Gym buildout scope",null]]
+["Marcus Deane","Startup","On Deck","joe","","Intake interview",null],
+["Owen Pratt","Startup","On Deck","dell","","Gym buildout scope",null]]
 </script>
 
 <script>
@@ -322,7 +322,7 @@ const data = JSON.parse(document.getElementById('board-data').textContent)
   .map((r,i)=>({id:i, deal:r[0], type:r[1], phase:r[2], own:r[3], touch:r[4],
                 next:r[5], due:r[6], attn:false, changed:false,
                 notes:[], history:[]}));
-data[20].attn = true;                       // Tyrer — Joe's example
+data[20].attn = true;                       // Okafor — Joe's example
 data[13].notes = [["Joe","Lease commences Sep 1 — confirmed with landlord counsel"],
                   ["Dell","Kevin wants the benefit summary two weeks after move-in"]];
 data[4].notes  = [["Dell","Landlord verbally agreed — signature chasing"]];
@@ -497,7 +497,7 @@ const S=[
     say(`<b>Dell</b> updated Nikki Cottis — landlord signed`);}],
   [5000,()=>{const r=data[19]; r.changed=true; const tr=[...rowsEl.children].find(t=>t.dataset.id==='19');
     if(tr) tr.querySelector('.nextcell').classList.add('dellcell');
-    say('<b>Dell</b> is on Petersen — his name rides the cell, Excel-style');}],
+    say('<b>Dell</b> is on Whitfield — his name rides the cell, Excel-style');}],
   [7200,()=>{document.getElementById('confirms').classList.add('show');
     say('Call ended — the distiller heard three things · nothing writes without a tap');}],
   [12500,()=>{dellAv.classList.remove('here');

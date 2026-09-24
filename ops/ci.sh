@@ -903,6 +903,17 @@ check_pushfloor() {
          floor_fail gate-integrity \
            "a gate moved without its baseline. Re-bless what you changed and stage it in the SAME commit: python3 hooks/gate-integrity.py --bless <gate> && git add ops/config/gate-baseline.json"; }
 
+  # A single `git ls-files` + pattern match against the whole tracked tree —
+  # cheaper than anything else in this class, and the one check that must
+  # never be skippable by scoping to $changed: a client deliverable that came
+  # back through a revert or a rebase is a violation whether or not THIS push
+  # touched deliverables/ (WR-000049, Joe's 2026-09-03 public-repo ruling).
+  run_quiet "$LOGDIR/pushfloor-no-client-deliverables.log" \
+    "$PY" ops/no-client-deliverables-gate.py \
+    || { tail -12 "$LOGDIR/pushfloor-no-client-deliverables.log" >&2
+         floor_fail no-client-deliverables \
+           "a client-deliverable path is tracked. git rm it — this repo is public and must carry no client record."; }
+
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"

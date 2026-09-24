@@ -67,6 +67,8 @@ export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 // self-naming failures too; re-exported here so existing imports keep working.
 import { ToolError } from "./tool-error.js";
 export { ToolError };
+import { parksADecision, classifyLoopText, needsDecider, loopRowText,
+         ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 
 // DEFECT 2, HALF (b) (found 2026-08-13, decision 7026246b): a write whose bad
 // input reaches the database raw (an enum this file never learned to validate,
@@ -2243,7 +2245,7 @@ export const TOOLS = {
       // LIVE AND RETIRED ARE COUNTED SEPARATELY, AND THE BLEND WAS THE BUG (loop
       // #132, 2026-08-02). This grouping shipped in b0fda91, BEFORE 0059 consolidated
       // the orgs, and it was never taught about merged_into. Afterwards it kept
-      // reporting `duplicate_rows: 17` for Henry Schein and `13` for Musicologie —
+      // reporting `duplicate_rows: 17` for Henry Schein and `13` for Cadence Studio —
       // both of which are ONE live row plus sixteen and twelve tombstones. That
       // number then read as "the book is still full of duplicates", which is the
       // opposite of what 0059 did, and every ref in the list read as a live target.
@@ -2256,7 +2258,7 @@ export const TOOLS = {
         // ONTO each aggregate. It has to, because v_ref_index indexes SUBJECTS rather
         // than roles (0056): the moment an org party gains a client, lead or vendor
         // record it stops appearing as a party row and starts appearing under that
-        // role's ref. 0061 did exactly that to Musicologie — P-0111 is live and
+        // role's ref. 0061 did exactly that to Cadence Studio — P-0111 is live and
         // unmerged, but it now indexes as client C-161, so a party-only query saw its
         // twelve tombstones, reported live_rows:0, and fired the all_retired note
         // claiming the survivor "carries a DIFFERENT name and is not in this result"
@@ -2336,7 +2338,7 @@ export const TOOLS = {
       // EXACT KEYS ONLY, NEVER A NAME. v_lead_client_best ranks three uuid equalities
       // (conversion pointer, shared party, shared org) and hands back one row per lead;
       // this verb does no matching of its own. That constraint is in the loop's own
-      // body for a reason: this system once welded Jenna Beasley to Jeff Beasley DMD —
+      // body for a reason: this system once welded Jenna Castillo to Jeff Castillo, DMD —
       // two different people — through an import that matched on a surname.
       const matchedRefs = [
         ...parties.rows.map(r => r.ref).filter(Boolean),
@@ -2520,7 +2522,7 @@ export const TOOLS = {
         // existence check has no reason to be narrower than the record.
         // MATCHING_RECORDS IS LIVE-ONLY, AND THE COUNT OF TOMBSTONES TRAVELS BESIDE
         // IT (loop #132). Unordered and capped at five, this block handed back five
-        // tombstones for "Musicologie" — P-0840, P-1044, P-0909, P-0796 — as
+        // tombstones for "Cadence Studio" — P-0840, P-1044, P-0909, P-0796 — as
         // selectable records while the survivor P-0111 never appeared. A caller that
         // links or writes to one of those defeats the merge. So: survivors in
         // matching_records, tombstones as a COUNT only (find lists them with their
@@ -2670,7 +2672,7 @@ export const TOOLS = {
       if (/^[LCVT]-/i.test(args.target)) {
         // [ORDER 34 review, fix 3] Ref -> party_id via 0027's v_ref_index
         // column, then filter the view by party_id — never by name, which
-        // silently welds duplicate-name humans (the Tyrer condition).
+        // silently welds duplicate-name humans (the Okafor condition).
         const r = await c.query(
           "select party_id, display_name from v_ref_index where ref ilike $1", [args.target]);
         if (!r.rows.length)
@@ -3374,7 +3376,7 @@ export const TOOLS = {
 
   "stamp-touch": {
     write: true,
-    description: "Truck shorthand for log-activity: one-line call/text stamp. 'Called Hughes, going well' and done. Sets last_touch. Contact kinds only — a note is annotation, not a touch (it would not move Last Touch since 0017); use log-activity kind:note or an event for annotation.",
+    description: "Truck shorthand for log-activity: one-line call/text stamp. 'Called Ferris, going well' and done. Sets last_touch. Contact kinds only — a note is annotation, not a touch (it would not move Last Touch since 0017); use log-activity kind:note or an event for annotation.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
       kind: { type: "string", enum: ["call","text"], default: "call" },
@@ -3747,7 +3749,7 @@ export const TOOLS = {
 
   "reassign-deal": {
     write: true,
-    description: "Move a deal onto the client it actually belongs to. THIS IS THE ONLY VERB THAT CHANGES deal.client_id — update-deal refuses that field on purpose, because re-pointing a deal changes whose book it sits in and is structural, not a field edit (the same reason set-lead owns the owner). Built 2026-08-02 for the Musicologie finding: an import filed THIRTEEN deals under C-131, twelve of them belonging to other franchisees who each had their own client record, so nine clients rendered as 'Active deal – no deal on file' while their deals sat under someone else's name. Requires base_version from a fresh read. Refuses a no-op, refuses a merged-away target, and records the old and new client on the event so the move is auditable. It does NOT touch the client rows themselves: a parent/sub-client structure (a national account over its franchisees) is expressed by party.org_id, not by moving deals up to the parent.",
+    description: "Move a deal onto the client it actually belongs to. THIS IS THE ONLY VERB THAT CHANGES deal.client_id — update-deal refuses that field on purpose, because re-pointing a deal changes whose book it sits in and is structural, not a field edit (the same reason set-lead owns the owner). Built 2026-08-02 for the Cadence Studio finding: an import filed THIRTEEN deals under C-131, twelve of them belonging to other franchisees who each had their own client record, so nine clients rendered as 'Active deal – no deal on file' while their deals sat under someone else's name. Requires base_version from a fresh read. Refuses a no-op, refuses a merged-away target, and records the old and new client on the event so the move is auditable. It does NOT touch the client rows themselves: a parent/sub-client structure (a national account over its franchisees) is expressed by party.org_id, not by moving deals up to the parent.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
@@ -5155,7 +5157,7 @@ export const TOOLS = {
          union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
          union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
 
-      // JOE'S RULING, in his words: "Tyrer is a client now duh. everyone starts
+      // JOE'S RULING, in his words: "Okafor is a client now duh. everyone starts
       // as a lead." A lead record and a client record for the same person are
       // NOT a duplicate — every party enters as a lead and converts, and both
       // refs coexist by design.
@@ -5166,7 +5168,7 @@ export const TOOLS = {
       // to be repointed by hand.
       //
       // WHY IT IS NOT A FLAT NO. The opposite case is real and this verb's own
-      // history records it: Petersen was two party rows for one human, one
+      // history records it: Whitfield was two party rows for one human, one
       // carrying the lead and one the client, and merging them was correct. So
       // the gate refuses the merge whose only basis is that the names match, and
       // takes `same_person_because` as the evidence that it is that shape.
@@ -5192,11 +5194,11 @@ export const TOOLS = {
         const stated = String(args.same_person_because ?? "").trim();
         if (stated.length < 20)
           throw new ToolError({ error: "lead_client_pair",
-            ruling: "Joe, on the Tyrer record: \"Tyrer is a client now duh. everyone starts as a lead.\"",
+            ruling: "Joe, on the Okafor record: \"Okafor is a client now duh. everyone starts as a lead.\"",
             why: "A lead record and a client record for the same person are not a duplicate. Every party " +
                  "enters as a lead and converts to a client; both refs coexist by design. Merging them " +
                  "retires one ref permanently, and a lost ref is never reissued.",
-            hint: "If these really are TWO party rows for ONE human — the Petersen shape — pass " +
+            hint: "If these really are TWO party rows for ONE human — the Whitfield shape — pass " +
                   "same_person_because with what establishes it (matching NPI, address, the intake " +
                   "record). Not that the names match." });
       }
@@ -5204,7 +5206,7 @@ export const TOOLS = {
       // THE ROLE ROWS MOVE WITH THE PERSON. Until 2026-08-02 this verb set merged_into and
       // nothing else, so the loser's lead/client/vendor rows were left pointing at a party
       // that no longer resolves — they vanished from every party-based view while still
-      // existing. Three such orphans predated the fix, and merging Petersen produced a
+      // existing. Three such orphans predated the fix, and merging Whitfield produced a
       // fourth: his lead L-201 disappeared and he read as "Client" only, when the entire
       // point of the merge was one person holding BOTH roles.
       const moved = {};
@@ -5220,7 +5222,7 @@ export const TOOLS = {
 
       // A survivor holding two rows of the SAME role is a second duplicate hiding behind
       // the first. Reported, never auto-resolved: which of two lead records is authoritative
-      // is a human call, and guessing is how the wrong Beasley got merged.
+      // is a human call, and guessing is how the wrong Castillo got merged.
       const dup = await c.query(
         `select 'lead' k, count(*) n from lead where party_id=$1 having count(*)>1
          union all select 'client', count(*) from client where party_id=$1 and merged_into is null having count(*)>1
@@ -5491,7 +5493,7 @@ export const TOOLS = {
 
   "teach": {
     write: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
@@ -6530,6 +6532,15 @@ export const TOOLS = {
           throw new ToolError({ error: "blocker_detail_vague", matched: vague[0],
             hint: `"${vague[0]}" names a feeling about time, not a blocker. Say who or what has to happen first — and if nothing has to, do the work now instead of filing this.` });
       }
+      // capability_no_decider and internal_decision_parked (bypass audit
+      // C33/C34, ported from hooks/blocker-decider-gate.py and
+      // hooks/escalation-gate.py) are enforced in this module's
+      // executeRegisteredTool(), before this handler ever runs — see the
+      // comment there for why that placement (the CANONICAL one, since
+      // break-glass bypasses mcp.js's callTool() entirely) is what makes
+      // every door, including break-glass, hit the same check. callTool()
+      // also runs the same imported check earlier, purely as a fail-fast
+      // ahead of its writer-pool connect — see its comment.
 
       // ── THE OWNERSHIP GATE ──────────────────────────────────────────────
       // Refuses a jointly-owned row at the moment it is filed. See LOOP_OWNERS
@@ -7977,6 +7988,28 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
+  // ── PORTED VERB GATES (bypass audit C33/C34, 2026-09-24), MOVED HERE
+  // (Opus re-review, 2026-09-24) from mcp.js's callTool(). callTool() is NOT
+  // the one choke point: mcp-server/local-verb.mjs's BREAK-GLASS mode
+  // (a direct DATABASE_URL connection, used for local/rehearsal calls) calls
+  // executeRegisteredTool() DIRECTLY and never goes through callTool() at
+  // all, so the check placed there missed that door entirely. THIS function
+  // is the actual chokepoint: local-verb.mjs's own comment at its call site
+  // says so ("the one choke point that also applies argument type coercion
+  // and raw-DB-error translation"), and callTool()'s read AND write branches
+  // both call it too. One placement, three doors: callTool() read, callTool()
+  // write, and local-verb.mjs break-glass (both its read and write shapes).
+  // Still purely in memory, before any client.query call in this function —
+  // same testability as the callTool()-level placement had.
+  if (name === "add-loop") {
+    if (needsDecider(args))
+      throw new ToolError({ error: "capability_no_decider", hint: BLOCKER_DECIDER_REASON });
+    if (parksADecision(args)) {
+      const { allow, why } = classifyLoopText(loopRowText(args));
+      if (!allow)
+        throw new ToolError({ error: "internal_decision_parked", why, hint: ESCALATION_REASON });
+    }
+  }
   // HUMAN-ONLY MEANS PARTNER AUTHORITY, NOT A SECOND CHAT WINDOW. A verified
   // partner passes directly. A native Codex/Claude grant or local machine door
   // passes only when partner-authority.js can derive its sponsor from
