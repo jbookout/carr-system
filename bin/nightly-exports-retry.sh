@@ -44,6 +44,42 @@ say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  RETRY  $*" >> "$LOG"; }
 TODAY_UTC="$(date -u '+%Y%m%d')"
 MARKER="$REPO/out/.nightly-exports-retry-$TODAY_UTC.done"
 
+# ── LOAD THE LEDGER CREDENTIAL EARLY, BEFORE ANY SKIP BRANCH ─────────────────
+# CARR_DB_EXPORTER_URL (loaded further down, gating the retry attempt itself)
+# is a different credential from the one tools/ops-record.py's `run` needs —
+# that write authenticates as carr_jobs, via CARR_DB_JOBS_URL (see its own
+# CREDENTIALS note). Loading it here, unconditionally and non-fatally, is what
+# lets EVERY exit path below record a heartbeat, including the common ones
+# that return before the exporter credential is ever touched. An absent
+# CARR_DB_JOBS_URL does not gate anything here: record() below already never
+# fails its caller (same contract as bin/nightly.sh's own record_run()).
+source "$REPO/bin/routine-credential-env.sh"
+carr_clear_routine_db_env
+carr_load_routine_db_env CARR_DB_JOBS_URL || true
+
+# ── THE LEDGER HEARTBEAT, ON EVERY EXIT PATH ─────────────────────────────────
+# ops/config/services.json registers THIS job — "nightly-exports-daytime-retry",
+# its own service key, not nightly-record-layer's — with a cadence of one fire
+# a day. launchd DOES fire this script daily even on the (common) night the
+# retry turns out to be unnecessary, but a job that only writes ops.run when it
+# actually retries would go quiet on every healthy night and read permanently
+# STALE/unknown against that cadence — the exact "an alarm nobody reads because
+# it fires when nothing is wrong" shape this codebase has already relearned
+# more than once (see the ORDER 2 addendum in bin/nightly.sh). So every exit
+# path below records a row, `skipped` for the SKIP branches and
+# `succeeded`/`failed` for an actual attempt, all under this job's OWN service
+# key so its cadence fields describe something that is really being observed.
+# record <state> <rc> <detail> [--started-at TS] [--failure-class X ...]
+record() {
+  local state="$1" rc="$2" detail="$3"; shift 3
+  local started="$(date -u +%FT%TZ)"
+  if [ "${1:-}" = "--started-at" ]; then started="$2"; shift 2; fi
+  ./.venv/bin/python "$REPO/tools/ops-record.py" run \
+      --service nightly-exports-daytime-retry --key nightly.exports-daytime-retry \
+      --state "$state" --exit-code "$rc" --started-at "$started" \
+      --source-ref bin/nightly-exports-retry.sh --detail "$detail" "$@" >> "$LOG" 2>&1
+}
+
 # ── ONE RETRY A DAY, ON PURPOSE ──────────────────────────────────────────────
 # The plist fires this at one fixed daytime hour. The marker keeps a second,
 # hand-run invocation the same day from spending a second publish for no
@@ -51,6 +87,7 @@ MARKER="$REPO/out/.nightly-exports-retry-$TODAY_UTC.done"
 # that already failed is a fact for a human to read, not a reason to spin).
 if [ -f "$MARKER" ]; then
   say "SKIP  already attempted the daytime retry today ($MARKER exists)"
+  record skipped 0 "already attempted today"
   exit 0
 fi
 
@@ -85,11 +122,13 @@ fi
 
 if [ "$latest_is_today" -eq 0 ]; then
   say "SKIP  no nightly run archived for today ($TODAY_UTC UTC) yet — nothing to retry against"
+  record skipped 0 "no nightly run archived for today yet"
   exit 0
 fi
 
 if print -r -- "$exports_line" | grep -qE '^\S+[[:space:]]+OK[[:space:]]+exports '; then
   say "SKIP  tonight's exports step already landed OK ($latest) — no retry needed"
+  record skipped 0 "tonight's exports step already landed OK"
   exit 0
 fi
 
@@ -118,17 +157,22 @@ trap 'carr_retry_exit $?' EXIT
 source "$REPO/bin/run-lock.sh"
 if ! carr_take_lock nightly >> "$LOG" 2>&1; then
   say "SKIP  nightly lock held elsewhere — this retry is a no-op (see the LOCKED line above)"
+  record skipped 0 "nightly lock held elsewhere"
   exit 0
 fi
 LOCK_HELD=1
 
-source "$REPO/bin/routine-credential-env.sh"
-carr_clear_routine_db_env
-carr_load_routine_db_env CARR_DB_EXPORTER_URL || {
-  rc=$?
-  say "SKIP  no exporter credential provisioned on this machine (exit $rc)"
+# NOT carr_clear_routine_db_env here: that would unset the CARR_DB_JOBS_URL
+# already loaded above for record(), and this call only ADDS a name to load,
+# it does not need a clean slate. carr_load_routine_db_env's own contract is
+# "export whatever of these names the file has"; a name already exported by
+# an earlier call is simply exported again with the same value.
+carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL || true
+if [ -z "${CARR_DB_EXPORTER_URL:-}" ]; then
+  say "SKIP  no exporter credential provisioned on this machine"
+  record skipped 0 "no exporter credential provisioned on this machine"
   exit 0
-}
+fi
 
 source "$REPO/bin/step-timeout.zsh"
 # carr_step_timeout_prefix returns WORDS (CARR_STEP_TIMEOUT_ARGV), never a
@@ -149,20 +193,16 @@ else
 fi
 
 # THE TRUTH LIVES IN THE SAME LEDGER THE NIGHTLY CHAIN WRITES TO (rule
-# 1f3a7372), under its own run key so a retry is never mistaken for the
-# night's own run, and record-run's own honesty rules apply unchanged: this
-# reports exactly the exit code ./run.sh export returned, which is itself
-# driven by exporters/common.py's real publish + read-back verification, not
-# by anything decided here.
+# 1f3a7372), under its own service+run key so a retry is never mistaken for
+# the night's own run, and record-run's own honesty rules apply unchanged:
+# this reports exactly the exit code ./run.sh export returned, which is
+# itself driven by exporters/common.py's real publish + read-back
+# verification, not by anything decided here.
 state="succeeded"; fclass=()
 if [ "$rc" -ne 0 ]; then
   state="failed"; fclass=(--failure-class "exit_$rc")
 fi
-./.venv/bin/python "$REPO/tools/ops-record.py" run \
-    --service nightly-record-layer --key nightly.exports-daytime-retry \
-    --state "$state" --exit-code "$rc" --started-at "$t0" \
-    --source-ref bin/nightly-exports-retry.sh \
-    --detail "daytime retry of the nightly exports step" "${fclass[@]}" >> "$LOG" 2>&1
+record "$state" "$rc" "daytime retry of the nightly exports step" --started-at "$t0" "${fclass[@]}"
 
 touch "$MARKER"
 exit "$rc"

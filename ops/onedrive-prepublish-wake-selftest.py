@@ -24,6 +24,7 @@ Covers, cheaply and without a database or a live OneDrive mount:
 Run: python3 ops/onedrive-prepublish-wake-selftest.py
 """
 
+import json
 import plistlib
 import re
 import subprocess
@@ -110,6 +111,34 @@ def main() -> int:
        and 'carr_routine_exec "${CARR_STEP_TIMEOUT_ARGV[@]}"' in retry_src,
        "it uses carr_step_timeout_prefix's ARGV words instead, the same shape step() uses")
     ok("caffeinate -i -s" in retry_src, "the daytime retry also runs the export under caffeinate")
+
+    # ── the ops.service catalog entry and the script agree on ONE key ───────
+    # (post-#1241-review fix: the script used to record every attempt under
+    # nightly-record-layer's service key while services.json registered a
+    # separate "nightly-exports-daytime-retry" key — a mismatch that would
+    # leave the new catalog entry's cadence fields describing a service that
+    # never actually receives an ops.run row.)
+    services = json.loads((REPO / "ops" / "config" / "services.json").read_text())
+    entry = next((s for s in services.get("services", [])
+                  if s.get("key") == "nightly-exports-daytime-retry"), None)
+    ok(entry is not None, "services.json registers a 'nightly-exports-daytime-retry' service")
+    if entry:
+        prod = next((e for e in entry.get("environments", [])
+                     if e.get("environment") == "production"), {})
+        ok(prod.get("deploy_mechanism") == "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
+           "its production deploy_mechanism names the actual plist")
+    ok(retry_src.count("--service nightly-exports-daytime-retry") >= 1,
+       "the retry script's record() writes under that SAME service key")
+    ok("--service nightly-record-layer" not in retry_src,
+       "not under nightly-record-layer's key (that mismatch was the original bug)")
+    # Every early-return branch must call record(), or the job goes quiet on
+    # every healthy night and reads permanently stale against its own
+    # registered cadence.
+    exit_paths = retry_src.count("exit 0") + retry_src.count('exit "$rc"')
+    record_calls = retry_src.count("record ")
+    ok(record_calls >= exit_paths,
+       f"every exit path ({exit_paths}) has a matching record() call ({record_calls}) "
+       "— a SKIP branch with no heartbeat would starve this service's own cadence")
 
     # ── the new plist ─────────────────────────────────────────────────────
     plist_path = REPO / "ops" / "launchd" / "com.carr.nightly-exports-daytime-retry.plist"
