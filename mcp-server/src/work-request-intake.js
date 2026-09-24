@@ -10,6 +10,7 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const CRITERION_ID = /^[A-Z][A-Z0-9-]{1,63}$/;
 const TRIAGE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "classification"]);
 const TRIAGE_CLASSES = new Set(["operational", "needs_judgment", "safety_review"]);
+const JOE_ANSWER_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "answer_text", "scope_confirmed", "evidence_ref"]);
 const DECLINE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason"]);
 const SUPERSEDE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason", "superseded_by"]);
 const PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps","heavy_build"]);
@@ -188,6 +189,16 @@ function validate(args, ToolError) {
   }
 }
 
+// The exact subset of control-room/contracts/work-request-projection.v1.json's
+// crosswalk that ops.work_request_card can ever return a row for. Never
+// invents a mapping: every value here is copied from that contract's
+// "crosswalk" array, not derived or guessed.
+const CARD_PROJECTION_STATE = Object.freeze({
+  captured: "queued", triaged: "queued", ready: "queued",
+  needs_joe: "needs_answer",
+  declined: "declined", superseded: "declined",
+});
+
 function sourceProjection(row) {
   return { label: row.doctrine_source_label || row.source_ref || null,
     freshness: row.source_current === false ? "stale" : "current",
@@ -222,6 +233,32 @@ function validateTriage(args, ToolError) {
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
       !Number.isInteger(args.base_version) || args.base_version < 1 || !TRIAGE_CLASSES.has(args.classification))
     throw new ToolError({ error: "invalid_triage" });
+}
+
+// ANSWERING JOE. state-machines.v1.json declares "needs_joe -> triaged" as the
+// sole canonical exit from needs_joe (guard: "authorized human decision and
+// evidence recorded; scope and acceptance criteria revalidated"), and nothing
+// before 0575 implemented it -- current-work-item and workspace-command-center
+// only ever read needs_joe rows for the "Needs Joe" queue. This is that
+// transition's verb, shaped after review-and-triage: it records the answer
+// text and makes the one allowed move, nothing else. 500 characters mirrors
+// the decline/supersede exit_reason bound; the database's own floor is only
+// btrim(answer_text) <> ''.
+//
+// SCOPE_CONFIRMED MUST BE THE LITERAL true, never a truthy string or a caller
+// promise in prose: the base_version compare-and-swap already pins the exact
+// row the human read, so confirming scope AT that version is what
+// "revalidated" means -- there is nothing else for this field to encode.
+// evidence_ref is optional and unshaped on purpose: this door does not decide
+// what evidence looks like, only that a pointer to it travels with the answer.
+function validateJoeAnswer(args, ToolError) {
+  if (Object.keys(args).some(key => !JOE_ANSWER_FIELDS.has(key))) throw new ToolError({ error: "invalid_answer_work_request_for_joe_fields" });
+  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
+      !Number.isInteger(args.base_version) || args.base_version < 1 ||
+      !text(args.answer_text) || text(args.answer_text).length > 500 ||
+      args.scope_confirmed !== true ||
+      (args.evidence_ref !== undefined && (!text(args.evidence_ref) || text(args.evidence_ref).length > 500)))
+    throw new ToolError({ error: "invalid_answer_work_request_for_joe" });
 }
 
 // WITHDRAWAL IS TWO VALIDATORS, not one with an optional successor. See the two
@@ -631,7 +668,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     },
     "work-request-card": {
       write: false,
-      description: "Read one same-tenant safe Work Request card, live or withdrawn. The card names the current or stale source, one human review label, and — for a request withdrawn in error — why it was withdrawn, when it closed, and the request that replaced it. It offers no executable actions.",
+      description: "Read one same-tenant safe Work Request card, live, waiting on Joe, or withdrawn. The card names the current or stale source, one human review label, and — for a request withdrawn in error — why it was withdrawn, when it closed, and the request that replaced it. A needs_joe card carries the same base_version and acceptance_criteria answer-work-request-for-joe requires. It offers no executable actions.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
       }, required: ["work_request"] },
@@ -645,9 +682,9 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         // work_request_not_found would make the withdrawal capability erase the
         // one thing it exists to write, and it would say "not found" about a row
         // the database returned. ops.work_request_card admits the two terminal
-        // states as of 0426, so this list has to as well or the SQL widening is
-        // dead code.
-        if (!row || !["captured", "triaged", "ready", "declined", "superseded"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
+        // states as of 0426 and needs_joe as of 0577, so this list has to admit
+        // exactly those or the SQL widening is dead code.
+        if (!row || !["captured", "triaged", "ready", "needs_joe", "declined", "superseded"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
         const triaged = ["triaged", "ready"].includes(row.state);
         // Withdrawal is CAPTURED-ONLY: branch 3 of work_request_sourced_capture_
         // shape requires triage_classification, triaged_by_actor_id and
@@ -671,13 +708,22 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           acting_identity: acting,
           acceptance_criteria: row.acceptance_criteria, state: row.state, version: Number(row.version),
           // DERIVED FROM THE CROSSWALK, not hardcoded. work-request-projection
-          // .v1.json maps captured/triaged/ready to queued and BOTH terminals to
-          // declined — superseded-projects-as-declined is that contract's
-          // declared judgment call, made because doctrine grants the projection
-          // seven states and superseded is not one of them. A withdrawn card that
-          // still read "queued" would tell a requester their closed record is
-          // waiting in line.
-          projection_state: withdrawn ? "declined" : "queued", source: sourceProjection(row),
+          // .v1.json's crosswalk (control-room/contracts) maps every state this
+          // card can return: captured/triaged/ready to queued, needs_joe to
+          // needs_answer ("a named human decision is outstanding"), and BOTH
+          // terminals to declined — superseded-projects-as-declined is that
+          // contract's declared judgment call, made because doctrine grants the
+          // projection seven states and superseded is not one of them. A
+          // withdrawn card that still read "queued" would tell a requester their
+          // closed record is waiting in line; a needs_joe card that read
+          // "queued" would hide that someone is actively waiting on a decision.
+          projection_state: CARD_PROJECTION_STATE[row.state],
+          // A general (needs_joe) row never had a doctrine source to begin with
+          // (work_request_sourced_capture_shape's general branch requires
+          // doctrine_section_id null), so sourceProjection's "stale" reading
+          // would misreport absence as staleness. Same null-when-absent shape
+          // as plan/shape below.
+          source: row.doctrine_section_id ? sourceProjection(row) : null,
           triage: triaged ? { classification: row.triage_classification, human_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at } : null,
           plan: row.plan_hash ? { plan_ref: row.plan_ref || null, plan_hash: row.plan_hash, runbook_ref: row.runbook_ref || null,
@@ -705,8 +751,11 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           // of a human as work, which is the queue-pollution the withdrawal verbs
           // exist to end. The two terminals keep separate labels because the
           // canonical record keeps them separate even where the projection does
-          // not.
-          next_human_action: withdrawn ? { label: row.state === "superseded" ? "Superseded" : "Declined", effect: "none" } : row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
+          // not. needs_joe gets its own label rather than falling to the
+          // captured/triaged default below: it was never captured-and-untriaged,
+          // it is the one state answer-work-request-for-joe (0575) exists to
+          // resolve, and "Review and triage" would misname the actual next step.
+          next_human_action: withdrawn ? { label: row.state === "superseded" ? "Superseded" : "Declined", effect: "none" } : row.state === "needs_joe" ? { label: "Answer for Joe", effect: "none" } : row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
           actions: [] };
       },
     },
@@ -738,6 +787,78 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
             classification: row.classification, triaged_by_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at };
+        });
+      },
+    },
+    "answer-work-request-for-joe": {
+      write: true, humanOnly: true, authorityOnly: true,
+      description: "HUMAN-ONLY, DIRECT HUMAN ONLY (no sponsored-agent route): record Joe's answer on one needs_joe Work Request and make its sole allowed transition, needs_joe to triaged. scope_confirmed must be exactly true, pinned to base_version, and the row must carry non-empty acceptance_criteria -- together these satisfy the needs_joe -> triaged guard's 'scope and acceptance criteria revalidated' half. It never assigns, dispatches, approves, executes, or advances any later state.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+        human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
+        base_version: { type: "integer", minimum: 1 },
+        answer_text: { type: "string", minLength: 1, maxLength: 500 },
+        scope_confirmed: { type: "boolean", enum: [true],
+          description: "Must be exactly true. Confirms the human revalidated the scope and acceptance criteria carried by THIS base_version -- not scope in general." },
+        evidence_ref: { type: "string", minLength: 1, maxLength: 500,
+          description: "Optional pointer to where the 'evidence recorded' half of the guard lives (a doc conversation turn, a loop, a decision)." },
+      }, required: ["idempotency_key", "human_ref", "base_version", "answer_text", "scope_confirmed"] },
+      handler: async (c, actor, args) => {
+        validateJoeAnswer(args, ToolError);
+        // NO SPONSORED-AGENT ROUTE, ON PURPOSE. The generic humanOnly dispatch
+        // gate (tools.js) admits either the verified partner or a
+        // server-verified agent holding that partner's derived authority
+        // (canExercisePartnerAuthority) -- the right default for most
+        // humanOnly verbs, which record a partner's DECISION but not the
+        // partner's own words. This verb is different: it records Joe's
+        // answer AS Joe, so "authorized human decision" in the guard means
+        // the decision came from the human directly, not from an agent
+        // exercising his authority on his behalf. actor.human is
+        // server-derived (identity.js), never caller-supplied.
+        if (actor.human !== true)
+          throw new ToolError({ error: "human_only_verb_requires_direct_human_actor",
+            verb: "answer-work-request-for-joe",
+            hint: "this verb records the answering human's own decision; a sponsored or partner-authority " +
+                  "agent may not answer a Work Request as Joe or Dell" });
+        // Bind replays to the authenticated actor without admitting actor data
+        // into the closed client schema.
+        return withEnvelope(c, actor, "answer-work-request-for-joe", { ...args, _server_actor_id: actor.id }, async () => {
+          const evidenceRef = args.evidence_ref !== undefined ? text(args.evidence_ref) : null;
+          let result;
+          try {
+            result = await c.query(
+              `select * from ops.answer_work_request_for_joe($1::text, $2::integer, $3::text, $4::boolean, $5::text, $6::uuid)
+                 /* work-request-intake:joe-answer */`,
+              [args.human_ref, args.base_version, text(args.answer_text), args.scope_confirmed === true,
+               evidenceRef, args.idempotency_key]);
+          } catch (error) {
+            // THE DATABASE RAISES, IT NEVER RETURNS AN EMPTY ROW, on every
+            // refusal branch below -- so mapping happens here, on the actual
+            // exception, rather than on a `!row` check that could never fire.
+            const message = String(error?.message || "");
+            if (message.includes("only the exact current needs_joe Work Request may be answered"))
+              throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
+                resolution: "re-read the Work Request card; only its current needs_joe version may be answered" });
+            if (message.includes("acceptance_criteria_missing"))
+              throw new ToolError({ error: "acceptance_criteria_missing", human_ref: args.human_ref,
+                resolution: "this Work Request carries no acceptance criteria to revalidate; add them before it can be answered" });
+            if (message.includes("idempotency key already names a different answer to Joe"))
+              throw new ToolError({ error: "answer_key_conflict", human_ref: args.human_ref,
+                resolution: "this idempotency key already names a different recorded answer; generate a fresh key" });
+            throw error;
+          }
+          const row = result.rows[0];
+          await writeEvent(c, actor, "answer-work-request-for-joe", "ops_work_request", row.id, {
+            field: "state", old: { state: "needs_joe", version: args.base_version },
+            new: { state: "triaged", version: Number(row.version), answer_text: row.answer_text,
+              scope_confirmed: row.scope_confirmed, evidence_ref: row.evidence_ref || null,
+              acceptance_criteria_digest: row.acceptance_criteria_digest },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
+            answer_text: row.answer_text, scope_confirmed: row.scope_confirmed,
+            evidence_ref: row.evidence_ref || null, acceptance_criteria_digest: row.acceptance_criteria_digest,
+            answered_by_actor_slug: row.answered_by_actor_slug, answered_at: row.answered_at };
         });
       },
     },

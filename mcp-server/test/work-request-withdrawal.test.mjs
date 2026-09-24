@@ -215,3 +215,51 @@ test("a state the card function cannot return is still not found", async () => {
     assert.equal(out.error, "work_request_not_found");
   }
 });
+
+// A needs_joe row is a GENERAL row (ops.work_request_sourced_capture_shape's
+// general branch requires doctrine_section_id, doctrine_revision_id and
+// organization_tenant_id all null), never a sourced one -- see 0575's own
+// header. So its fixture, unlike BASE above, carries no doctrine linkage.
+const NEEDS_JOE = { ref: "WR-000067", title: "Decide the routing", desired_outcome: "A named human decision",
+  acceptance_criteria: [{ id: "JOE-ANSWER", text: "A human decision is recorded" }],
+  version: 3, state: "needs_joe", source_current: null, doctrine_source_label: null,
+  doctrine_section_id: null, doctrine_revision_id: null,
+  exit_reason: null, closed_at: null, superseded_by_ref: null };
+
+test("a needs_joe request is readable and carries exactly what answer-work-request-for-joe needs to revalidate", async () => {
+  const db = new CardFake({ ...NEEDS_JOE });
+  const card = await executeRegisteredTool(db, JOE, "work-request-card", { work_request: "WR-000067" });
+  assert.equal(card.state, "needs_joe");
+  // The 0575 verb's base_version compare-and-swap and its acceptance_criteria
+  // digest are both taken from exactly these two fields.
+  assert.equal(card.version, 3);
+  assert.deepEqual(card.acceptance_criteria, NEEDS_JOE.acceptance_criteria);
+  // work-request-projection.v1.json's crosswalk, not invented: needs_joe maps
+  // to needs_answer ("a named human decision is outstanding").
+  assert.equal(card.projection_state, "needs_answer");
+  assert.deepEqual(card.next_human_action, { label: "Answer for Joe", effect: "none" });
+  assert.deepEqual(card.actions, []);
+  // A general row was never sourced, triaged, planned, or shaped, and it is
+  // not a withdrawal -- every one of those blocks must read null rather than
+  // invent a value or leak a sourced-row's INNER-JOIN assumption.
+  assert.equal(card.triage, null);
+  assert.equal(card.plan, null);
+  assert.equal(card.shape, null);
+  assert.equal(card.withdrawal, null);
+  assert.equal(card.source, null);
+  assert.equal(card.pending_outcome_feedback, null);
+});
+
+test("the other card states this function returns are unchanged by admitting needs_joe", async () => {
+  // captured/triaged/ready/declined/superseded keep exactly the projections
+  // asserted above and in the earlier tests in this file; this is a targeted
+  // re-check that adding needs_joe touched none of them.
+  const captured = await executeRegisteredTool(new CardFake({ ...BASE, state: "captured", version: 1,
+    exit_reason: null, closed_at: null }), JOE, "work-request-card", { work_request: "WR-000032" });
+  assert.equal(captured.projection_state, "queued");
+  assert.deepEqual(captured.next_human_action, { label: "Review and triage", effect: "none" });
+  const declined = await executeRegisteredTool(new CardFake({ ...BASE, state: "declined", superseded_by_ref: null }),
+    JOE, "work-request-card", { work_request: "WR-000032" });
+  assert.equal(declined.projection_state, "declined");
+  assert.deepEqual(declined.next_human_action, { label: "Declined", effect: "none" });
+});

@@ -259,6 +259,14 @@ export const REGISTRY_V61_VERSION = "scac-mutation-registry.v61";
 // no verb definition, input schema or authority flag changes, and no new
 // ingress or grant.
 export const REGISTRY_V62_VERSION = "scac-mutation-registry.v62";
+// v63 seals answering Joe (Model Room "Answer Waiting for Joe"): migration
+// 0574 installs ops.answer_work_request_for_joe, the sole needs_joe -> triaged
+// transition state-machines.v1.json declares, and
+// mcp-server/src/work-request-intake.js gains the human-only, authority-only
+// answer-work-request-for-joe verb. One new definer grant, one new write
+// ingress; sibling verbs sourced from tools.js and work-request-intake.js are
+// unchanged in their bound fields.
+export const REGISTRY_V63_VERSION = "scac-mutation-registry.v63";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1295,6 +1303,14 @@ export const POST_0572_FORWARD_V62_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v62",
   secdef_execute: { count: 859, digest: "sha256:b4b174c19e7487562ec5c440212d3ac12d17d069be19f7f070f4ec4d4746b995" },
 });
+// Measured by the disposable PostgreSQL 17 migration lane after installing
+// ops.answer_work_request_for_joe (0575, one authority EXECUTE grant) and the
+// v63 registration function with its four runtime EXECUTE grants.
+export const POST_0576_FORWARD_V63_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0572_FORWARD_V62_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v63",
+  secdef_execute: { count: 864, digest: "sha256:46283ef0afea98602baf568566a39f1c073705b9d0de8487261496e8193ec381" },
+});
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -2004,6 +2020,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V60_VERSION]: "v60",
   [REGISTRY_V61_VERSION]: "v61",
   [REGISTRY_V62_VERSION]: "v62",
+  [REGISTRY_V63_VERSION]: "v63",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2096,7 +2113,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V62_VERSION) {
+  version = REGISTRY_V63_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -2184,7 +2201,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
     REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
     REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION].includes(version))
+    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -15185,6 +15202,89 @@ export function renderRequiredArgsNullableRegistrySql(rows,
 
 
 
+export function renderAnswerJoeRegistrySql(rows,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0572_required_args_nullable_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "be40cf47d5e04687dd7bbaba8344859c25be8cc7e50411240762068d0802d3d3";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v63 predecessor migration pin drifted");
+  const oldCatalogBaseline = POST_0572_FORWARD_V62_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0576_FORWARD_V63_DB_CATALOG_BASELINE;
+  const oldSeal = registrySeal(REGISTRY_V62_VERSION,
+    frozenInventory(REGISTRY_V62_VERSION), oldCatalogBaseline);
+  const newSeal = registrySeal(REGISTRY_V63_VERSION, rows, newCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V62_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V63_VERSION];
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value ?? "")))
+    throw new Error("v63 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(oldCatalogBaseline);
+  const newCatalog = JSON.stringify(newCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v63 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$required_args_nullable_v62", "$answer_joe_v63")
+    .replaceAll("scac-mutation-registry.v62", "scac-mutation-registry.v63")
+    .replaceAll("scac-db-catalog-projection.v62", "scac-db-catalog-projection.v63")
+    .replaceAll("_v62", "_v63")
+    .replaceAll("v61_current", "v62_current")
+    .replaceAll("v61_live_at_seal", "v62_live_at_seal")
+    .replaceAll("snapshot_v61", "snapshot_v62")
+    .replaceAll("Required args nullable", "Answering Joe")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v62", "v63"), newCatalog)
+    .replaceAll(`observed_count<>${oldCatalogBaseline.secdef_execute.count}`,
+      `observed_count<>${newCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(`observed_digest<>'${oldCatalogBaseline.secdef_execute.digest}'`,
+      `observed_digest<>'${newCatalogBaseline.secdef_execute.digest}'`)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
+    .replaceAll("Answering Joe v62 seed or entry-set seal drifted",
+      "Answering Joe v63 seed or entry-set seal drifted");
+  const versionListMarker =
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v63'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v63 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63'");
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v63' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v62' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v63' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v63' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v62' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v63' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v63' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v62' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v63' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v61_seal_available()) then",
+      "ops.scac_mutation_registry_v61_seal_available() and ops.scac_mutation_registry_v62_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v63' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v62' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v63' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v63_seal_available()",
+      "     or not ops.scac_mutation_registry_v62_seal_available()\n     or not ops.scac_mutation_registry_v63_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v63 ${label}`);
+  const seedStart = sql.indexOf("$answer_joe_v63_source$[");
+  const seedEnd = sql.indexOf("]$answer_joe_v63_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v63 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$answer_joe_v63_source$${seed}$answer_joe_v63_source$${sql.slice(seedEnd + "]$answer_joe_v63_source$".length)}`;
+  const preflight = `do $answer_joe_v63_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'Answering Joe v63 requires exact applied 0572'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V62_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'Answering Joe v62 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v62('${oldSeal.digest}','mcp-tool:standing-context');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'Answering Joe v62 predecessor entry drifted'; end if;\n` +
+    `end $answer_joe_v63_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
+
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
   // in v21 artifacts, and every input to the guard is a fixed module constant.
@@ -15874,9 +15974,19 @@ export function renderGeneratedFrontier() {
     renderRequiredArgsNullableRegistrySql(v62Rows,
       artifacts["migrations/0570_quill_speaker_labels_scac_successor.sql"]);
 
+  const v63Rows = frozenInventory(REGISTRY_V63_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v63.generated.js"] =
+    renderRuntimeProjection(v63Rows, {
+      version: REGISTRY_V63_VERSION,
+      dbCatalogBaseline: POST_0576_FORWARD_V63_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0576_answer_needs_joe_work_request_scac_successor.sql"] =
+    renderAnswerJoeRegistrySql(v63Rows,
+      artifacts["migrations/0572_required_args_nullable_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 68 || runtimeCount !== 59 || Object.keys(artifacts).length !== 127)
+  if (migrationCount !== 69 || runtimeCount !== 60 || Object.keys(artifacts).length !== 129)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
