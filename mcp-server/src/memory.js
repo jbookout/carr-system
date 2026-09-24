@@ -124,11 +124,10 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "recall-memory": {
-      // A read-only transaction on the writer connection, not the stateless
-      // reader connection: memory_item's row security (migration 0573) shows
-      // personal rows only when carr.sponsoring_human_slug is set, and only
-      // the writer transaction sets it. On the reader path the partner who
-      // owns a personal memory could no longer recall it.
+      // Runs on the writer connection so the sponsor setting is present. Both
+      // partners may READ every memory (0579), but recall is where memory is
+      // APPLIED, so the query below keeps it to shared rows and the caller's
+      // own personal rows.
       writerConnection: true,
       description: "Recall promoted memories relevant to a context, combining shared memories with the authenticated partner's personal scope. Candidates require review and are never returned by autonomous recall; memory is context only and never authority.",
       inputSchema: { type: "object", properties: {
@@ -155,24 +154,22 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "review-memory": {
-      // A read-only transaction on the writer connection, not the stateless
-      // reader connection: memory_item's row security (migration 0573) shows
-      // personal rows only when carr.sponsoring_human_slug is set, and only
-      // the writer transaction sets it. On the reader path the partner who
-      // owns a personal memory could no longer recall it.
+      // Both partners may review any memory (Joe, 2026-09-24, migration 0579);
+      // owner_actor_id says whose a personal memory is. Changing one stays
+      // owner-only in promote/correct/forget and in the database.
       writerConnection: true,
-      description: "Review one candidate memory and its complete evidence/provenance before promotion. Personal candidates are visible only to their verified sponsor; shared candidates remain tenant-scoped.",
+      description: "Review one memory and its complete evidence/provenance before promotion. Either partner may review the other's personal memories (owner_actor_id names whose); only the owner can promote, correct or forget them. Tenant-scoped.",
       inputSchema: { type: "object", properties: { memory_id: { type: "string" } }, required: ["memory_id"] },
       handler: async (c, actor, args) => {
         guard(args);
         requireUuid(args.memory_id, "memory_id", ToolError);
-        const scope = sponsorFor(actor, ToolError);
+        sponsorFor(actor, ToolError); // still refuses an unidentified caller
         const r = await c.query(
-          `select m.*, coalesce(jsonb_agg(to_jsonb(e) order by e.observed_at desc) filter (where e.id is not null),'[]'::jsonb) as evidence
+          `select m.*,
+                  coalesce(jsonb_agg(to_jsonb(e) order by e.observed_at desc) filter (where e.id is not null),'[]'::jsonb) as evidence
              from memory_item m left join memory_evidence e on e.memory_id=m.id
             where m.id=$1 and m.organization_tenant_id=$2
-              and (m.scope='shared' or (m.scope='personal' and m.owner_actor_id=public.retrieval_visibility_actor_id($3)))
-            group by m.id`, [args.memory_id, organizationTenantForActor(actor), scope.sponsor]);
+            group by m.id`, [args.memory_id, organizationTenantForActor(actor)]);
         if (!r.rows.length) throw new ToolError({ error: "memory_not_found_or_forbidden" });
         const memory = r.rows[0]; const evidence = memory.evidence || []; delete memory.evidence;
         return { ok: true, memory, evidence, count: evidence.length };
