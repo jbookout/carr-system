@@ -53,7 +53,7 @@ test("Tour packet treats a null optional property caveat as absent", () => {
 
 test("Tour packet prints no caveat line at all when none is supplied anywhere", () => {
   // Regression for the removed hard-coded "Facts only; verify current
-  // availability and economics." boilerplate (migrations/0585): a packet
+  // availability and economics." boilerplate (migrations/0586): a packet
   // with no top-level caveat and no per-property caveat must render with no
   // caveat text anywhere, not fall back to any default line.
   const noCaveat = { ...packet, caveat: undefined, properties: packet.properties.map(property => ({ ...property, caveat: undefined })) };

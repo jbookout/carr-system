@@ -1,4 +1,4 @@
--- 0585: stop printing the hard-coded "Facts only; verify current availability
+-- 0586: stop printing the hard-coded "Facts only; verify current availability
 -- and economics." line on client-facing Tour packets.
 --
 -- Joe's proposed no-caveats rule for client material (rule cbb267fb) rejects

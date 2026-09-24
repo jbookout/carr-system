@@ -102,7 +102,7 @@ begin
   if v_packet is null or v_packet ? 'tour_name' or v_packet::text like '%Delivery proof%' then
     raise exception 'internal tour name crossed the sealed public share boundary';
   end if;
-  -- migration 0585: the packet-level caveat is never the removed hard-coded
+  -- migration 0586: the packet-level caveat is never the removed hard-coded
   -- "Facts only; verify current availability and economics." line -- it must
   -- be present as an explicit null (kept key, dropped default), not the
   -- literal, and not silently omitted either.
