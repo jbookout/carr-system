@@ -181,7 +181,46 @@ def think_for(mode, effort, attempt):
     return not (effort == "low" and attempt == 1)
 
 
-def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True):
+MAX_TASK_RULES = 5
+RULE_STATEMENT_CHARS = 600
+# Said to the rule picker, not to Flash. Measured 2026-09-24: describing the task only as
+# "coding in carr-system" made Jev pick session rules (worktree-per-session, own the merge)
+# for a disposable copy that must not touch git; naming the real boundary drops them, and
+# a gate-building task still gets write-the-test-first.
+RULE_SITUATION = ("A local coding model (Flash) is about to write code for ONE scoped task inside a "
+                  "disposable copy of the files. It does no git, branching, worktrees, pushes, "
+                  "merges or delivery (the flash-run harness owns all of that, and tests and "
+                  "applies the patch). It only reads, edits and runs tests. The task: ")
+
+
+def pick_rules(task, selector=None):
+    """Jev's pick of the taught rules that bind to this one task: (rules, error_note).
+
+    Fails open: a Jev outage or a partially judged roster costs the attempt its rules,
+    never the attempt itself, and the note lands in the run log so the gap is visible."""
+    try:
+        selector = selector or _lib("jev_rule_select")
+        rules = selector.advise(RULE_SITUATION + task)
+        return list(rules)[:MAX_TASK_RULES], None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"[:300]
+
+
+def rules_block(rules):
+    """The system-prompt addition for the picked rules, or None when nothing binds."""
+    if not rules:
+        return None
+    lines = ["RULES FOR THIS TASK (picked from the practice's taught rules for this task alone; "
+             "follow them):"]
+    for rule in rules[:MAX_TASK_RULES]:
+        text = (rule.get("statement") or rule.get("gist") or "").strip()
+        if len(text) > RULE_STATEMENT_CHARS:
+            text = text[:RULE_STATEMENT_CHARS].rsplit(" ", 1)[0] + " ..."
+        lines.append(f"- [{rule.get('id')}] {rule.get('gist', '').strip()}: {text}")
+    return "\n".join(lines)
+
+
+def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_text=None):
     dest = os.path.join(workdir, f"attempt-{n}")
     os.makedirs(dest)
     make_copy(cwd, dest)
@@ -197,9 +236,12 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True):
     # --tools limits the tool DEFINITIONS sent, not just permissions: measured 2026-09-24 the
     # start-up prompt drops 14,863 -> 4,320 tokens (cold read 14.4 s -> 4.3 s). A scoped fix
     # needs nothing beyond these six; the interactive `flash` command keeps the full set.
+    # Appended, not replacing: the base prompt stays byte-identical across tasks so the
+    # server's prompt cache still covers it; only the rules tail is read fresh.
+    extra = ["--append-system-prompt", rules_text] if rules_text else []
     code, transcript = _sh([FLASH, "-p", prompt, "--effort", effort or "low",
                             "--permission-mode", "acceptEdits",
-                            "--tools", *ATTEMPT_TOOLS,
+                            "--tools", *ATTEMPT_TOOLS, *extra,
                             "--allowedTools", *allowed], dest, ATTEMPT_TIMEOUT, env=env)
     elapsed = round(time.monotonic() - started, 1)
     test_code, test_out = (None, "")
@@ -286,6 +328,14 @@ def cmd_run(a):
             if ex.get("id") == chosen:
                 example_text = f"{ex.get('title')}\n{ex.get('summary')}"
     row.update(effort=effort, context=context_files[:10], recalled=len(recalled))
+    rules, rules_error = ([], "skipped (--no-rules)") if a.no_rules else pick_rules(task)
+    rules_text = rules_block(rules)
+    row["rules"] = [r.get("id") for r in rules]
+    if rules_error:
+        row["rules_error"] = rules_error
+    if rules:
+        _say("rules for this task: " + ", ".join(f"{r.get('id')} {r.get('gist', '')[:50]}"
+                                                  for r in rules))
 
     attempts = a.attempts or (3 if a.test else 1)
     prompt = build_prompt(task, a.test, context_files[:8], recalled[:3], example_text)
@@ -296,7 +346,7 @@ def cmd_run(a):
             think = think_for(a.think, effort, n)
             _say(f"attempt {n}/{attempts} (effort {effort}, thinking {'on' if think else 'off'})")
             cand = run_attempt(n, cwd, retry_prompt(prompt, candidates[-1] if candidates else None),
-                               a.test, effort, workdir, think=think)
+                               a.test, effort, workdir, think=think, rules_text=rules_text)
             candidates.append(cand)
             status = "no test" if cand["test_exit_code"] is None else (
                 "tests pass" if cand["test_exit_code"] == 0 else f"tests fail ({cand['test_exit_code']})")
@@ -446,6 +496,8 @@ def main(argv):
     r.add_argument("--think", choices=["auto", "on", "off"], default="auto",
                    help="model thinking: auto = off on the first attempt of low-effort work, on for retries")
     r.add_argument("--force", action="store_true", help="run despite an ambiguity or routing stop")
+    r.add_argument("--no-rules", action="store_true",
+                   help="skip Jev's per-task rule pick (attempts get no RULES FOR THIS TASK block)")
     r.add_argument("--dry-run", action="store_true", help="print the chosen patch, do not apply")
     r.add_argument("--keep", action="store_true", help="keep the attempt copies")
     pl = sub.add_parser("plan")
