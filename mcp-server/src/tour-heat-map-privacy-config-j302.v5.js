@@ -34,7 +34,13 @@ export const V5_J302_PRIVACY_CONFIG = Object.freeze({
   //     revision (a refresh, a late record). Every cross-release check is run
   //     at each residual difference within +/- this many patients, and a pair
   //     that disagrees by more is refused as inconsistent, never skipped. The
-  //     kernel refuses a negative value.
+  //     kernel refuses any value below 2 (V5_J302_KERNEL_MINIMUM_REVISION_
+  //     TOLERANCE_PATIENTS).
+  //     Consequence: a revision LARGER than this to the same suppressed cells
+  //     locks that recipient's series — every later release of those cells is
+  //     refused against the prior, permanently, because release history is
+  //     never dropped. Recovery is a new series or new period keys, not a
+  //     retry.
   revision_tolerance_patients: 2,
 
   // 2. Client-visible heat-map content: none. Clients see exactly the Tour PDF

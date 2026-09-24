@@ -1754,17 +1754,15 @@ test("P1: partially overlapping suppressed sets narrow a cell below the interval
   assert.equal(jointView(countyAggregate({ cells: b.cells, published_total: 105 }), a).decision, "within_budget");
   // attack5 P2 (X + Y = 18 and X + W = 12): with no revision every cell keeps
   // three values; within the band a revision of 2 would pin Y = 10 and W = 2,
-  // so the default (tolerance 2) refuses and a tolerance of 0 clears.
+  // so the default (tolerance 2) refuses; with no band (tolerance 0, which no
+  // bound config may carry) the joint check alone would clear it.
   const p2a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 68 });
   const p2b = countyAggregate({ cells: [q1("56001", 50), q1("56003", 20), q1("56005", null), q1("56009", null)],
     published_total: 82 });
   const p2 = jointView(p2b, p2a);
   refuses(p2, "suppressed_cell_bounded_across_releases");
   assert.notDeepEqual(p2.revision_offsets, [0, 0]);
-  const exact = pinnedKernel(POPULATION, { revision_tolerance_patients: 0 });
-  assert.equal(exact.evaluateAggregateOperation(opRequest("view_native_precision", { aggregate: p2b,
-    ledger: ledgerFor(p2b), history: [secondArtifact(p2a.cells, { published_total: 68 })] })).decision,
-  "within_budget");
+  assert.equal(J302.jointSuppressionExposure(p2b, p2a, 11, 3, 0), null);
   // Identical releases combine to nothing new.
   assert.equal(jointView(a, a).decision, "within_budget");
 });
@@ -1984,10 +1982,9 @@ test("R2 (attack6): a revision of +1 cannot lift a refused group over the floor"
   }
   // 13 is three past the floor's edge: every variant (11..15) clears.
   assert.equal(sixView(withGroup(13), a).decision, "within_budget");
-  // With the tolerance set to 0, 11 clears — the band is what closes R2.
-  const exact = pinnedKernel(POPULATION, { revision_tolerance_patients: 0, county_fips_codes: { status: "pinned",
-    codes: ["56001", "56003", "56005", "56007", "56009", "56011"] } });
-  assert.equal(sixView(withGroup(11), a, exact).decision, "within_budget");
+  // With no band (tolerance 0, which no bound config may carry) the joint
+  // check alone clears 11 — the band is what closes R2.
+  assert.equal(J302.jointSuppressionExposure(withGroup(11), a, 11, 3, 0), null);
 });
 
 test("R2: the revision band also covers a residual after substituting shown cells", () => {
@@ -2037,6 +2034,13 @@ test("R2: the revision tolerance is config, defaulted to 2, and never negative",
   assert.equal(V5_J302_PRIVACY_CONFIG.revision_tolerance_patients, 2);
   throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG, revision_tolerance_patients: -1 }),
     "invalid_shape");
+  // T0: a kernel minimum of 2, as the floor has 11. 0 and 1 are refused.
+  assert.equal(J302.V5_J302_KERNEL_MINIMUM_REVISION_TOLERANCE_PATIENTS, 2);
+  assert.equal(J302.v5J302PolicyPreimage().kernel_minimum_revision_tolerance_patients, 2);
+  for (const low of [0, 1]) {
+    throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG, revision_tolerance_patients: low }),
+      "invalid_shape");
+  }
   throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG, revision_tolerance_patients: 11 }),
     "invalid_shape");
   const { revision_tolerance_patients: _drop, ...missing } = V5_J302_PRIVACY_CONFIG;
@@ -2166,4 +2170,17 @@ test("R1: jointSuppressionExposure's positivity bounds, called directly (non-nes
     { exposure: "releases_inconsistent_beyond_revision_tolerance" });
   // Wide on both sides: nothing to refuse.
   assert.equal(jointSuppressionExposure(...pair(40, 30), 11, 3, 2), null);
+});
+
+test("T0: at the kernel-minimum tolerance, the round-5 case (true group 10, +1 drift) is refused", () => {
+  const minimum = pinnedKernel(POPULATION, {
+    revision_tolerance_patients: J302.V5_J302_KERNEL_MINIMUM_REVISION_TOLERANCE_PATIENTS,
+    county_fips_codes: { status: "pinned", codes: ["56001", "56003", "56005", "56007", "56009", "56011"] } });
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 63 });
+  // X + Y = 13 in A; B adds Z and W whose true sum is 10, shown after a +1 drift as 11.
+  const drifted = countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null),
+    q1("56007", null), q1("56009", null), q1("56011", null)], published_total: 93 + 11 });
+  const r = sixView(drifted, a, minimum);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.exposure, "complementary_suppression_residual_below_floor");
 });

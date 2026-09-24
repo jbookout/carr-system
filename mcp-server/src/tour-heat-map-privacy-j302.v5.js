@@ -477,6 +477,10 @@ export const V5_J302_COUNTY_BEARING_UNITS = deepFreeze(["census_block_group", "c
  */
 export const V5_J302_KERNEL_MINIMUM_SMALL_CELL_FLOOR = 11;
 export const V5_J302_KERNEL_MINIMUM_PROTECTION_INTERVAL_VALUES = 2;
+// A bound config may widen the revision band, never narrow it below 2: a
+// narrower band lets a one- or two-patient drift lift a refused group over
+// the floor (round-5 R2).
+export const V5_J302_KERNEL_MINIMUM_REVISION_TOLERANCE_PATIENTS = 2;
 
 const UNIT_ID_FORMAT = deepFreeze({
   state: /^[A-Z]{2}$/,
@@ -913,7 +917,8 @@ export function readHeatMapPrivacyConfig(raw) {
       "config.minimum_protection_interval_values",
       { min: V5_J302_KERNEL_MINIMUM_PROTECTION_INTERVAL_VALUES, max: 10 }),
     revision_tolerance_patients: assertInteger(raw.revision_tolerance_patients,
-      "config.revision_tolerance_patients", { min: 0, max: 10 }),
+      "config.revision_tolerance_patients",
+      { min: V5_J302_KERNEL_MINIMUM_REVISION_TOLERANCE_PATIENTS, max: 10 }),
     client_visible_heat_map_content: [],
     client_visibility_decision_ref: assertIdent(raw.client_visibility_decision_ref,
       "config.client_visibility_decision_ref"),
@@ -2229,6 +2234,7 @@ export function v5J302PolicyPreimage() {
     release_history_store_contract: { ...V5_J302_RELEASE_HISTORY_STORE_CONTRACT,
       spans: [...V5_J302_RELEASE_HISTORY_STORE_CONTRACT.spans] },
     kernel_minimum_protection_interval_values: V5_J302_KERNEL_MINIMUM_PROTECTION_INTERVAL_VALUES,
+    kernel_minimum_revision_tolerance_patients: V5_J302_KERNEL_MINIMUM_REVISION_TOLERANCE_PATIENTS,
     export_blocked_until: V5_J302_EXPORT_BLOCKED_UNTIL,
     recipient_classes: [...V5_J302_RECIPIENT_CLASSES],
     permitted_recipient_classes: [...V5_J302_PERMITTED_RECIPIENT_CLASSES],
