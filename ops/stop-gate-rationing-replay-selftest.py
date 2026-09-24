@@ -154,11 +154,44 @@ def replay_catches(tmp):
               f"{verdict}: {text[:120]}")
 
     # 2. "executor-tier gate refused an Agent spawn with no model named".
-    verdict, text = fire("executor-tier-gate.py", {
-        "tool_name": "Agent", "session_id": "selftest",
-        "tool_input": {"description": "sweep the logs", "prompt": "count the DENY lines"}})
-    check("executor-tier still refuses an Agent spawn naming no model",
-          verdict == "DENY" and "model" in text.lower(), f"{verdict}: {text[:120]}")
+    # Since #1228 (ruling 5ec806a4) the catch is no longer "always deny": a
+    # no-model spawn is DENIED when Jev cannot pick a tier at or above the
+    # acting threshold, and ALLOWED WITH JEV'S TIER FILLED IN when it can. Either
+    # way the spawn never runs on an unnamed, inherited tier, which is what the
+    # 2026-08-23 catch was for. Jev is pinned through the gate's own
+    # CARR_EXECUTOR_TIER_JEV_STUB seam, so this asserts the same thing whether
+    # or not the live judge is reachable, and makes no network call.
+    spawn = {"description": "sweep the logs", "prompt": "count the DENY lines"}
+    gate = os.path.join(REPO, "hooks", "executor-tier-gate.py")
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("CARR_EXECUTOR_TIER_JEV_STUB", "CARR_HOOK_FIXTURE")}
+
+    def tier_gate(stub):
+        p = subprocess.run([PY, gate], capture_output=True, text=True, timeout=60,
+                           input=json.dumps({"tool_name": "Agent", "session_id": "selftest",
+                                             "tool_input": spawn}),
+                           env={**base, "CARR_EXECUTOR_TIER_JEV_STUB": stub})
+        try:
+            hso = json.loads(p.stdout.strip().splitlines()[-1]).get("hookSpecificOutput", {})
+        except (ValueError, IndexError):
+            hso = {}
+        return p.returncode, hso
+
+    for stub, why in (("none", "Jev unavailable"),
+                      ("sonnet:0.30", "Jev below the acting threshold")):
+        rc, hso = tier_gate(stub)
+        check(f"executor-tier still refuses an Agent spawn naming no model ({why})",
+              rc == 0 and hso.get("permissionDecision") == "deny"
+              and "updatedInput" not in hso
+              and "model" in (hso.get("permissionDecisionReason") or "").lower(),
+              f"rc={rc} {json.dumps(hso)[:160]}")
+    rc, hso = tier_gate("haiku:0.90")
+    updated = hso.get("updatedInput") or {}
+    check("executor-tier names the tier itself when Jev is confident (allow, model filled in)",
+          rc == 0 and hso.get("permissionDecision") == "allow"
+          and updated.get("model") == "haiku"
+          and all(updated.get(k) == v for k, v in spawn.items()),
+          f"rc={rc} {json.dumps(hso)[:160]}")
 
     # 3a. conduct: "a shell command handed to Joe instead of run".
     verdict, _ = fire("conduct-stop-gate.py", {
