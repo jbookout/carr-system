@@ -57,6 +57,7 @@ from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+from lib.transcript_read import load_transcript  # noqa:E402
 from lib.rule_delivery_preuse import (  # noqa:E402
     contains_receipt_marker, has_background_tool_call, preuse_delivery,
 )
@@ -882,8 +883,15 @@ def main():
         path = payload.get("transcript_path") or payload.get("transcriptPath")
         if not path or not os.path.exists(path):
             return 0
-        with open(path, errors="replace") as handle:
-            records = [json.loads(line) for line in handle if line.strip()]
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        # Logged beside the other gates' tamper events rather than into this
+        # gate's own schema-bound rule-delivery-shadow.jsonl.
+        records = load_transcript(
+            path, hook="rule-pack-drift-gate",
+            session=payload.get("session_id") or payload.get("sessionId"),
+            log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
         triggers, members, local_map_digest = load_packs()
         result = evaluate(records, triggers, members)
         raw_session = payload.get("session_id") or payload.get("sessionId")

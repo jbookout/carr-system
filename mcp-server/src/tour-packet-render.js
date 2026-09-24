@@ -4,8 +4,8 @@
  * routing, or map capability.
  */
 
-export const TOUR_PACKET_RENDER_VERSION = "1.1.0";
-export const TOUR_PACKET_TEMPLATE_VERSION = "1.0.0";
+export const TOUR_PACKET_RENDER_VERSION = "1.2.0";
+export const TOUR_PACKET_TEMPLATE_VERSION = "1.1.0";
 export const TOUR_PACKET_BRAND = "CARR";
 
 const TOP_LEVEL_FIELDS = new Set(["as_of", "caveat", "properties"]);
@@ -130,9 +130,13 @@ function canonicalProperty(property, index, packetAsOf, packetCaveat) {
     if (property[field] !== undefined && property[field] !== null) output[field] = approvedMetric(property[field], `properties[${index}].${field}`);
   }
   output.as_of = property.as_of === undefined ? packetAsOf : timestamp(property.as_of, `properties[${index}].as_of`);
-  output.caveat = property.caveat == null ? packetCaveat : plainText(property.caveat, `properties[${index}].caveat`, 500);
+  // A caveat is optional client-facing content, never a boilerplate default:
+  // a property with no caveat of its own falls back to the packet-wide value
+  // only when one was genuinely supplied, and otherwise carries none at all.
+  const propertyCaveat = property.caveat == null ? packetCaveat : plainText(property.caveat, `properties[${index}].caveat`, 500);
+  if (propertyCaveat != null) output.caveat = propertyCaveat;
 
-  const displayValues = Object.values(output).map(value => typeof value === "object" ? formatApprovedMetric(value) : String(value));
+  const displayValues = Object.values(output).filter(value => value != null).map(value => typeof value === "object" ? formatApprovedMetric(value) : String(value));
   const totalChars = displayValues.reduce((total, item) => total + item.length, 0);
   const estimatedLines = 8 + displayValues.reduce((total, item) => total + Math.ceil(item.length / 68), 0);
   if (totalChars > MAX_PROPERTY_CHARS || estimatedLines > MAX_ESTIMATED_LINES)
@@ -149,7 +153,7 @@ function markerFor(property) { return `property-${property.route_sequence}-${pro
 
 function page(property, marker) {
   const title = escapeHtml(property.name);
-  return `<section class="tour-property-page" data-deliverable-page="property" data-property-marker="${marker}" data-property-ref="${escapeHtml(property.property_ref)}" data-route-sequence="${property.route_sequence}" aria-labelledby="${marker}-title">\n<!-- property-marker:${marker} -->\n<header class="property-header" data-brand="CARR"><p class="brand">CARR</p><p class="page-index">${escapeHtml(property.route_label)}</p></header>\n<h1 id="${marker}-title">${title}</h1><p class="address">${escapeHtml(property.address)}${property.suite ? ` · ${escapeHtml(property.suite)}` : ""}</p><dl class="facts">${row("Property type", property.property_type)}${row("Size", property.size && formatApprovedMetric(property.size))}${row("Asking economics", property.asking_economics && formatApprovedMetric(property.asking_economics))}${row("Availability", property.availability)}${row("Parking", property.parking)}</dl><aside class="facts-caveat"><p><strong>As of:</strong> ${escapeHtml(property.as_of)}</p><p>${escapeHtml(property.caveat)}</p></aside>\n</section>`;
+  return `<section class="tour-property-page" data-deliverable-page="property" data-property-marker="${marker}" data-property-ref="${escapeHtml(property.property_ref)}" data-route-sequence="${property.route_sequence}" aria-labelledby="${marker}-title">\n<!-- property-marker:${marker} -->\n<header class="property-header" data-brand="CARR"><p class="brand">CARR</p><p class="page-index">${escapeHtml(property.route_label)}</p></header>\n<h1 id="${marker}-title">${title}</h1><p class="address">${escapeHtml(property.address)}${property.suite ? ` · ${escapeHtml(property.suite)}` : ""}</p><dl class="facts">${row("Property type", property.property_type)}${row("Size", property.size && formatApprovedMetric(property.size))}${row("Asking economics", property.asking_economics && formatApprovedMetric(property.asking_economics))}${row("Availability", property.availability)}${row("Parking", property.parking)}</dl><aside class="facts-caveat"><p><strong>As of:</strong> ${escapeHtml(property.as_of)}</p>${property.caveat ? `<p>${escapeHtml(property.caveat)}</p>` : ""}</aside>\n</section>`;
 }
 
 const STYLE = `<style>
@@ -178,7 +182,10 @@ dt { color: #002F6C; font-size: 9pt; font-weight: 700; text-transform: uppercase
 export function renderTourPacket(input) {
   assertExactObject(input, TOP_LEVEL_FIELDS, "packet");
   const asOf = timestamp(input.as_of, "as_of");
-  const caveat = plainText(input.caveat, "caveat", 500);
+  // caveat is optional client-facing content, never a boilerplate default:
+  // null/absent means the packet carries none, not that one was omitted by
+  // mistake.
+  const caveat = input.caveat == null ? null : plainText(input.caveat, "caveat", 500);
   if (!Array.isArray(input.properties) || input.properties.length === 0 || input.properties.length > MAX_PROPERTIES)
     reject("tour_packet_property_count_invalid", { count: Array.isArray(input.properties) ? input.properties.length : null, maximum: MAX_PROPERTIES });
   const properties = input.properties.map((property, index) => canonicalProperty(property, index, asOf, caveat));

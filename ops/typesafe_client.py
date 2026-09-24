@@ -60,12 +60,62 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 
 import json
 import os
+import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _canonical_repo_root(fallback):
+    """The ONE repo root every worktree of this repository shares, so a call
+    made from any worktree's copy of this file and a hook reading from the
+    canonical checkout resolve to the SAME physical out/jev-calls.jsonl.
+
+    Round-2 fix (2026-09-24): `ask()` used to write next to whichever copy of
+    this file was executing (`REPO`, worktree-relative) while
+    hooks/completion-evidence-gate.py read from the canonical checkout's
+    out/ — two different physical files, so a real call from a worktree was
+    invisible to the gate. `git rev-parse --path-format=absolute
+    --git-common-dir` resolves to the shared `.git` directory across every
+    worktree of one repository (verified: an absolute path, git 2.54.0);
+    its parent is the canonical repo root regardless of which worktree is
+    running. Falls back to `fallback` (this file's own on-disk REPO) on any
+    failure — never raises, matching this module's fail-open posture.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=fallback, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if out:
+            return os.path.dirname(out)
+    except Exception:
+        pass
+    return fallback
+
+
+CANONICAL_REPO = _canonical_repo_root(REPO)
+# WHERE A CALL BECOMES OBSERVABLE (decision 0b11c89b, 2026-09-24). A missing
+# Jev call used to be checkable only by grepping a session's Bash history for
+# the string "typesafe_client", which a bare `echo typesafe_client` also
+# satisfied. Every successful ask() now appends one best-effort row here —
+# never on failure, never the request or the answers, just enough for a
+# reader (lib/jev_required_actions.py) to bind a call to a session, a time
+# window, and the facets it named. Writing this must never turn a working
+# Jev call into a failure, so every step here is wrapped and swallowed.
+# Uses CANONICAL_REPO (not the possibly-worktree-local REPO) so every
+# worktree's ask() and the canonical checkout's Stop-hook reader agree on one
+# physical file — see _canonical_repo_root above.
+JEV_CALLS_LOG = os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl")
+# The env vars a caller's own session id is found under, same set
+# ops/settlement-run-token.py's NATIVE_SESSION_KEYS already uses.
+SESSION_ID_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
+                       "CODEX_THREAD_ID")
 KEY_NAME = "TYPESAFE_API_KEY"
 
 # jev-latest is an alias and MOVES when a release ships, so answers can change
@@ -160,8 +210,50 @@ def score(instructions, levels):
     return {"type": "score", "instructions": instructions, "criteria": levels}
 
 
+def _session_id():
+    for key in SESSION_ID_ENV_KEYS:
+        value = os.environ.get(key)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _append_call_receipt(questions, facets, result, log_path):
+    """Best-effort, APPEND-ONLY JSONL row, never on the request or the
+    answers, never able to turn a successful ask() into a failure. See
+    JEV_CALLS_LOG above.
+
+    The row carries the response's "model" and "usage" token counts. It
+    deliberately carries NO response id (round 3, 2026-09-24): the vendor
+    returns none (null in all 63 real receipts at the time of writing) and
+    exposes no usage/audit endpoint, so an id field could never be reconciled
+    and was a claim this file cannot back. Forgery of a row is DETECTED, not
+    prevented (decision d47931da): hooks/bash-write-gate.py warns on any
+    shell write naming this file, and hooks/completion-evidence-gate.py
+    records a detection event for any turn whose tool calls name it — this
+    function, reached only through ask(), is the one legitimate writer.
+    """
+    try:
+        answered = result if isinstance(result, dict) else {}
+        row = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "session": _session_id(),
+            "question_ids": sorted(questions),
+            "facets": sorted({str(f) for f in facets}) if facets else [],
+            "model": answered.get("model"),
+            "usage": answered.get("usage") if isinstance(answered.get("usage"), dict) else None,
+            "ok": True,
+        }
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
-        api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None):
+        api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
+        facets=None, calls_log=JEV_CALLS_LOG):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -170,9 +262,18 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     id to a question built by noul/choice/score; the ids come back unchanged and
     are never sent to the model, so the instruction must carry its full meaning.
 
+    `facets` is optional: the names of any decision-0b11c89b required actions
+    (ops/jev_build_advisory.py's FACETS, e.g. "architecture_or_design") this
+    call is meant to satisfy. Pass it, or name the facet in a question id,
+    when the call is meant to count as this turn's Jev use for that facet —
+    lib/jev_required_actions.py's reader matches on either. Neither is
+    required for an ask() that has nothing to do with a required action.
+
     Returns the decoded response: {"model": ..., "answers": {...},
     "usage": {...}}. `opener` is for the offline selftest and is not used in
-    production.
+    production. On a successful response this also appends one best-effort
+    receipt row to `calls_log` (default out/jev-calls.jsonl) — see
+    JEV_CALLS_LOG's module-level note for what it carries and why.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
@@ -205,7 +306,15 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     while True:
         try:
             with send(request, timeout=timeout) as response:
-                return json.load(response)
+                result = json.load(response)
+            # Round-2 fix: only a REAL production call (no opener) writes a
+            # receipt. `opener` is the offline selftest/mock path (see the
+            # docstring above) — a mock response was never actually seen by
+            # the vendor, so a receipt for it would let a selftest run count
+            # as this turn's real Jev evidence.
+            if opener is None:
+                _append_call_receipt(questions, facets, result, calls_log)
+            return result
         except urllib.error.HTTPError as err:
             # 429 is documented as expected under load, and the service's own
             # limits "can change without notice". Honour retry-after when it is

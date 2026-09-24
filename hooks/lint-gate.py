@@ -374,7 +374,7 @@ def code_review(payload):
         for rel, name, value in hits:
             receipt["findings"].append({
                 "path": rel, "question": name, "probability": value,
-                "effect": "advisory_only",
+                "effect": "required",
             })
         receipt["findings"].extend(acted)
         if not receipt["models"]:
