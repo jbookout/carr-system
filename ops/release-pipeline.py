@@ -646,22 +646,41 @@ class Pipeline:
         res.log = str(log)
         return res
 
-    def health_read(self, name: str, wt: Path) -> tuple[Result, frozenset[str], bool]:
-        """Run `./run.sh health` once, logged like a normal step but never
-        raising on its own — the caller decides what the findings mean."""
+    def health_read(self, name: str, cwd: Path) -> tuple[Result, list[dict], bool]:
+        """Run `./run.sh health --findings-json PATH` once, logged like a
+        normal step but never raising on its own — the caller decides what
+        the findings mean. `cwd` need not be a release worktree: this reads
+        canonical production database state, not the candidate's own code, so
+        the pipeline's own repo checkout works and lets the baseline run
+        BEFORE any worktree (or any --apply step) exists — see release_worker
+        and points B/E of an independent review of PR #1237."""
         if self.dry_run:
-            self.out(f"  [dry-run] (cd {wt}) ./run.sh health  # {name}")
-            return Result(0, ""), frozenset(), True
+            self.out(f"  [dry-run] (cd {cwd}) ./run.sh health --findings-json <path>  # {name}")
+            return Result(0, ""), [], True
         n = len(self.executed) + 1
         log = self.run_dir / f"{n:02d}-{name}.log"
-        self.out(f"  -> {name}: ./run.sh health")
+        findings_path = self.run_dir / f"{n:02d}-{name}-findings.json"
+        self.out(f"  -> {name}: ./run.sh health --findings-json {findings_path}")
         self.executed.append(name)
-        res = self.runner.run(["./run.sh", "health"], cwd=wt, log=log, env=self.env, timeout=900)
+        res = self.runner.run(["./run.sh", "health", "--findings-json", str(findings_path)],
+                              cwd=cwd, log=log, env=self.env, timeout=900)
         res.log = str(log)
-        findings, complete = parse_canonical_findings(res.out)
+        findings, complete = read_health_findings(res.out, findings_path)
         return res, findings, complete
 
-    def health_gate(self, wt: Path, baseline: tuple[frozenset[str], bool]) -> None:
+    def _health_baseline_or_block(self) -> tuple[list[dict], bool]:
+        """The pre-promote health baseline, or a Blocked hold when it did not
+        complete. Called before anything mutates (see release_worker), so an
+        incomplete baseline never burns the SHA — see health_gate and point E
+        of an independent review of PR #1237."""
+        _res, findings, complete = self.health_read("health-baseline", self.repo)
+        if not complete:
+            raise Blocked("health_baseline_unavailable",
+                          "the pre-promote health baseline did not complete; retrying next tick "
+                          "rather than releasing without one to compare against")
+        return findings, complete
+
+    def health_gate(self, cwd: Path, baseline: tuple[list[dict], bool]) -> None:
         """Fail the release on a NEW canonical finding, not on standing debt
         that already existed before this promote.
 
@@ -671,24 +690,53 @@ class Pipeline:
         gap (98 active rule gaps, 6 stuck export receipts, one loose path, on
         a normal day) trains nobody to read the gate, because it is never
         green. This compares the post-promote read against a baseline taken
-        moments before promotion (same worktree, same production database,
-        see release_worker) and fails only on what changed.
+        before any mutation (same production database, see release_worker)
+        and fails only on health_regression()'s verdict: a new (key,subject),
+        a risen count, or any live hard_error — the last of those unconditional,
+        so a structural read failure (export receipts UNREADABLE) can never
+        hide behind a baseline that had the same problem yesterday (point A).
 
         An unavailable read is never a pass, on either side: a baseline that
         did not complete excuses nothing (every current finding counts as
         new), and a live read that did not complete fails the gate outright
         regardless of what it printed.
+
+        The fix-session dispatch (see Pipeline.fail/queue_turn) is pointed at
+        a small file holding ONLY the new findings below, not the full
+        `./run.sh health` output — a fix session should not have to read past
+        98 unrelated standing rule gaps to find the two lines that are its
+        actual job (point G).
         """
         baseline_findings, baseline_complete = baseline
-        res, findings, complete = self.health_read("health", wt)
+        res, findings, complete = self.health_read("health", cwd)
         if not complete:
             raise StepFailed("health", res.rc or 1, res.log,
                               "health read did not complete — an unavailable read is never a pass")
-        new = findings if not baseline_complete else (findings - baseline_findings)
+        new = health_regression([] if not baseline_complete else baseline_findings, findings)
+        # Belt-and-suspenders for point A ("a nonzero health exit with no new
+        # finding line now passes... any rc != 0 must fail"): tools/health-
+        # check.py is now source-verified (tools/health-check-findings-
+        # selftest.py) to record a finding on every rc=1 path it takes, so
+        # this should never fire in practice. It stays as a hard backstop
+        # against a FUTURE rc=1 path in that file shipping without one —
+        # scoped to "recorded nothing at all," not "nothing NEW," so it can
+        # never re-fail pure standing debt (the same count, same subjects,
+        # baseline and live both rc=1) that the whole redesign exists to let
+        # pass.
+        if not new and res.rc != 0 and not findings:
+            new = [f"./run.sh health exited {res.rc} but recorded no finding at all "
+                  f"to explain it — treated as unavailable, never a pass"]
         if new:
-            raise StepFailed("health", res.rc or 1, res.log,
+            n = len(self.executed) + 1
+            findings_log = self.run_dir / f"{n:02d}-health-new-findings.log"
+            findings_log.write_text(
+                "New canonical finding(s) since the pre-promote baseline "
+                "(ops/release-pipeline.py health_gate; full health output is in the "
+                "health-baseline/health run logs alongside this file, not repeated here):\n"
+                + "\n".join(f"- {line}" for line in new) + "\n", encoding="utf-8")
+            raise StepFailed("health", res.rc or 1, str(findings_log),
                               "new canonical finding(s) since the pre-promote baseline: "
-                              + "; ".join(sorted(new)))
+                              + "; ".join(new))
 
     # -- evidence -----------------------------------------------------------
     def batch_commits(self, repo_dir: Path, base: str, sha: str) -> list[str]:
@@ -1130,6 +1178,22 @@ class Pipeline:
         self.out(f"  evidence: PR #{ev['pr']} verifier={ev['verifier']} "
                  f"({ev['verifier_evidence']}); test={ev['test_evidence']}")
         self.dry_tolerant("unattended credentials", lambda: self.unattended_preflight(lane_cfg), None)
+
+        # Health baseline — after the pure-read evidence/credential checks
+        # above (so a release already held for a missing review, red CI, or a
+        # missing credential still runs NOTHING, exactly as before: those
+        # tests pin `runner.calls == []`), but before the release worktree
+        # exists and before staging-prepare/staging-app-writer/migrate-apply
+        # (every --apply step). Points B and E of an independent review of
+        # PR #1237: taking the baseline after any of those would let a
+        # release's OWN migration damage hide inside its "baseline," and
+        # forgive itself; taking it here, against self.repo (this reads
+        # canonical DATABASE state, not the candidate's code, so no worktree
+        # is needed), means an incomplete baseline is caught before
+        # self.mutated is ever set — a pre-promote BLOCKED hold (see
+        # run_lane's `except Blocked`), not a StepFailed, so the SHA is never
+        # marked failed and is retried next tick rather than burned on a
+        # diagnosis dispatch for a problem that isn't the release's.
         wt = self.store.root / "worktrees" / f"worker-{sha[:12]}"
         mcp = wt / "mcp-server"
         py = str(wt / ".venv/bin/python")
@@ -1139,8 +1203,32 @@ class Pipeline:
                   "--rollback-plan-ref", lane_cfg["rollback_plan_ref"]]
         cand = lane_cfg["staging_candidate_operation_id"]
 
-        # 0. the unattended Cloudflare login, before anything is created
+        # 0. the unattended Cloudflare login, before anything is created. A
+        # missing/rejected token raises StepFailed from deploy_env() itself,
+        # before any subprocess ever runs — so this still needs to come
+        # before the health baseline for that failure to stay a clean,
+        # zero-subprocess failure (existing DeployCredential selftests pin
+        # `runner.calls == []` for it).
         self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
+
+        # Health baseline — after every pure-read check above (evidence,
+        # unattended credentials, the wrangler auth probe) and their own
+        # zero/near-zero-subprocess failure contracts, but before the release
+        # worktree exists and before staging-prepare/staging-app-writer/
+        # migrate-apply (every --apply step). Points B and E of an
+        # independent review of PR #1237: taking the baseline after any of
+        # those would let a release's OWN migration damage hide inside its
+        # "baseline," and forgive itself; taking it here, against self.repo
+        # (this reads canonical DATABASE state, not the candidate's code, so
+        # no worktree is needed), means an incomplete baseline is caught
+        # before self.mutated is ever set — a pre-promote BLOCKED hold (see
+        # run_lane's `except Blocked`), not a StepFailed, so the SHA is never
+        # marked failed and is retried next tick rather than burned on a
+        # diagnosis dispatch for a problem that isn't the release's.
+        health_baseline = self.dry_tolerant(
+            "health baseline",
+            lambda: self._health_baseline_or_block(),
+            ([], True))
 
         # 1. the release worktree at exactly S
         self.add_worktree("worktree", self.repo, wt, sha)
@@ -1180,12 +1268,6 @@ class Pipeline:
                                   "--verifier", ev["verifier"], "--verifier-evidence", ev["verifier_evidence"],
                                   *budget], wt, env=self.deploy_env())
         version = "<provider version from upload>" if self.dry_run else parse_provider_version(up)
-
-        # health baseline, taken just before promotion (staging still runs
-        # immediately before promote below) so the post-promote read further
-        # down can be judged against standing debt as of THIS release rather
-        # than failing on gaps this release did nothing to create.
-        health_baseline = self.health_read("health-baseline", wt)[1:]
 
         # 6. staging forward-fix rehearsal; promotion is unreachable unless it returned 0
         staging_ok = False
@@ -1296,28 +1378,92 @@ class Pipeline:
 # completed pass regardless of rc. Its presence is what tells the release
 # gate the read is trustworthy; its absence (a crash, REFUSED, a timeout) means
 # the read is unavailable and must never be treated as clean — see
-# ReleasePipeline.health_read below.
+# ReleasePipeline.health_read below. Point F of an independent review of
+# PR #1237: the marker must be the LAST NON-EMPTY LINE, not merely present
+# anywhere in the output — a marker printed early followed by a traceback
+# (the process crashed on its way out, after the happy-path print but before
+# actually exiting clean) must not read as complete.
 HEALTH_COMPLETE_MARKER = "Projection freshness/tamper checks are recovery evidence"
 
+# The finding fields ops/release-pipeline.py's health gate relies on out of
+# tools/health-check.py's `--findings-json` payload (schema decided against
+# Jev, architecture_or_design, 2026-09-24 — see that file's own
+# `_canonical_finding` docstring for the reasoning): `key` is the finding
+# category, `subject` scopes it to a specific target/job/gate (or "" for a
+# whole-section-unreadable finding), `count` accumulates repeated occurrences
+# of the same (key, subject) within one run, `hard_error` marks a finding
+# that must always fail the release gate regardless of any baseline, and
+# `time_rolling` marks one whose (key, subject) changes purely because
+# wall-clock time passed (excluded from the regression diff entirely).
+FINDING_FIELDS = ("key", "subject", "count", "hard_error", "time_rolling")
 
-def parse_canonical_findings(output: str) -> tuple[frozenset[str], bool]:
-    """(findings, complete) out of one `./run.sh health` run's stdout.
 
-    `findings` is the set of CANONICAL_FINDING lines (`key — detail`, exactly
-    as printed), which is what the release health gate diffs against a
-    baseline. `complete` is False whenever the check did not run to its own
-    end — a crashed read, `canonical health: REFUSED (...)`, a subprocess
-    timeout — and a caller must never treat an incomplete read as a pass, nor
-    diff it as a baseline: standing debt cannot be excused by a read that
-    never actually looked for it.
+def read_health_findings(output: str, findings_path: Path) -> tuple[list[dict], bool]:
+    """(findings, complete) out of one `./run.sh health --findings-json PATH`
+    run's stdout and the JSON file it wrote.
+
+    `complete` requires BOTH signals to agree the read reached its own end:
+    the completion marker is the LAST NON-EMPTY line of stdout (point F), and
+    `findings_path` holds a valid, schema-shaped payload — written by
+    tools/health-check.py only after `_canonical_health()` returns without
+    raising, so its mere presence is a second, independent proof the run
+    finished. Either one being false means the read is unavailable and must
+    never be treated as clean, nor diffed as a baseline: standing debt cannot
+    be excused by a read that never actually looked for it.
     """
-    findings = frozenset(
-        line.split("CANONICAL_FINDING", 1)[1].strip()
-        for line in (output or "").splitlines()
-        if "CANONICAL_FINDING" in line
-    )
-    complete = HEALTH_COMPLETE_MARKER in (output or "")
-    return findings, complete
+    lines = [ln for ln in (output or "").splitlines() if ln.strip()]
+    marker_ok = bool(lines) and lines[-1].strip() == HEALTH_COMPLETE_MARKER
+    findings: list[dict] = []
+    json_ok = False
+    try:
+        payload = json.loads(findings_path.read_text(encoding="utf-8"))
+        rows = payload["findings"]
+        if not isinstance(rows, list):
+            raise ValueError("findings is not a list")
+        for row in rows:
+            if not all(field in row for field in FINDING_FIELDS):
+                raise ValueError(f"finding row missing a required field: {row!r}")
+        findings = rows
+        json_ok = True
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        findings = []
+        json_ok = False
+    return findings, (marker_ok and json_ok)
+
+
+def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
+    """The live finding(s) that should fail THIS release: a (key, subject)
+    pair absent from the baseline, a count that rose since the baseline, or
+    any live finding whose hard_error flag is set — unconditionally, never
+    excused by a matching baseline entry, because a structural
+    whole-section-unreadable read is never acceptable standing debt (point A
+    of an independent review of PR #1237: "export receipts UNREADABLE" must
+    always fail, every release, until it is fixed). A count that FELL, or is
+    unchanged, is not a regression — improvement and no-op are both allowed
+    to pass, which is the whole point of diffing against a baseline instead
+    of failing on any standing finding. `time_rolling` findings (a job's
+    MISSING DUE date, an export crossing the 26h STALE clock, a rolling 24h
+    gate-block window) are reported by the caller but never compared here —
+    they change on the clock alone, not because of anything this release did.
+    """
+    baseline_by_key_subject = {
+        (row["key"], row["subject"]): row for row in baseline if not row.get("time_rolling")
+    }
+    bad = []
+    for row in live:
+        if row.get("time_rolling"):
+            continue
+        detail = row.get("detail", "")
+        if row.get("hard_error"):
+            bad.append(f"{row['key']}[{row['subject']}]: hard_error — {detail}")
+            continue
+        prior = baseline_by_key_subject.get((row["key"], row["subject"]))
+        if prior is None:
+            bad.append(f"{row['key']}[{row['subject']}]: new — {detail}")
+        elif row.get("count", 0) > prior.get("count", 0):
+            bad.append(f"{row['key']}[{row['subject']}]: count {prior.get('count')} -> "
+                       f"{row.get('count')} — {detail}")
+    return bad
 
 
 def parse_json_field(text: str, field: str, step: str) -> str:

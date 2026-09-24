@@ -68,13 +68,14 @@ def _reader_args(argv):
     vault = None
     section = "all"
     fixture = None
+    findings_json = None
     rest = []
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == "--recovery":
             recovery = True
-        elif arg in ("--reason", "--vault", "--section", "--fixture"):
+        elif arg in ("--reason", "--vault", "--section", "--fixture", "--findings-json"):
             if i + 1 >= len(argv):
                 raise SystemExit(f"health-check: {arg} requires a value")
             value = argv[i + 1]
@@ -85,6 +86,8 @@ def _reader_args(argv):
                 vault = value
             elif arg == "--section":
                 section = value
+            elif arg == "--findings-json":
+                findings_json = value
             else:
                 fixture = value
         else:
@@ -105,11 +108,11 @@ def _reader_args(argv):
         raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
-    return recovery, reason, vault, section, fixture, rest
+    return recovery, reason, vault, section, fixture, findings_json, rest
 
 
-RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, _READER_REST = \
-    _reader_args(sys.argv[1:])
+RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
+    _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
@@ -537,7 +540,7 @@ def _canonical_contradiction_alarm():
         detail = (f"{answer['groups']} self-contradicting group(s) in the control "
                   f"plane's own rows: " + ", ".join(answer["group_names"]))
         print(f"  \u26a0\ufe0e workflow contradiction alarm   RED \u2014 {detail}")
-        _canonical_finding("workflow_truth_conflict", detail)
+        _canonical_finding("workflow_truth_conflict", detail, count=int(answer["groups"]))
         return 1
     if verdict == _ALARM_NOT_RED:
         print(f"  -- workflow contradiction alarm   NOT RED \u2014 {answer['groups']} "
@@ -981,23 +984,80 @@ def _stuck_live_jobs(snap):
     return findings
 
 
-def _canonical_finding(key, detail):
+_FINDINGS: list = []
+# The machine-readable form of every CANONICAL_FINDING line the run prints,
+# built alongside the text so both stay in lockstep. Schema decided against
+# Jev (architecture_or_design, 2026-09-24, full confidence on subject
+# granularity): `subject` is the specific target/job/gate name wherever one
+# exists (export_receipt: the target file; job_terminal_failure/job_stuck/
+# job_completion_receipt/job_missing_due/job_due_non_success: the
+# definition_key), because an AGGREGATE subject per key hides a target that
+# newly broke while another recovered — the exact masking bug an independent
+# review of PR #1237 flagged (point C: "duplicates collapse, counts cancel,
+# and the same text can carry a worse state"). A structural "this whole
+# section of run.sh health could not be read" finding (source_unreadable,
+# job_ledger, control_state, repo_status, registry_integrity,
+# credential_health) has no natural per-target subject, so it keeps an empty
+# `subject` (Jev noul 0.84) and is always `hard_error=True` instead — see
+# point A of the same review: a completely unreadable section must always
+# fail the release gate regardless of any count.
+#
+# `count` defaults to 1 and ACCUMULATES when the same (key, subject) is
+# reported more than once in a single run, so two failures of the same job in
+# one run show count=2 rather than two identical lines that a downstream
+# exact-string diff would collapse into "no change" (review point C again).
+# `hard_error` marks a finding that must always fail the release gate,
+# independent of any baseline comparison (an unreadable section, never a
+# business count that could legitimately improve). `time_rolling` marks a
+# finding whose (key, subject) changes purely because wall-clock time passed
+# — a job's MISSING DUE date rolling forward one day at a time, an export
+# crossing the 26h STALE clock, a rolling 24h gate-block window — none of
+# which is caused by any particular release, so the pipeline reports these
+# but excludes them from its regression diff (review point D).
+
+
+def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
     print(f"  CANONICAL_FINDING {key} — {detail}")
+    for row in _FINDINGS:
+        if row["key"] == key and row["subject"] == subject:
+            row["count"] += count
+            row["hard_error"] = row["hard_error"] or bool(hard_error)
+            row["time_rolling"] = row["time_rolling"] or bool(time_rolling)
+            return
+    _FINDINGS.append({"key": key, "subject": subject, "detail": detail, "count": count,
+                      "hard_error": bool(hard_error), "time_rolling": bool(time_rolling)})
+
+
+def _write_findings_json(path):
+    """Machine-readable sibling of the CANONICAL_FINDING text lines — added so
+    ops/release-pipeline.py's health gate can diff by (key, subject) instead
+    of scraping exact finding strings (Jev-favored design over regex parsing;
+    independent review of PR #1237)."""
+    payload = {"findings": list(_FINDINGS),
+               "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
 
 
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
+    _FINDINGS.clear()
     rc = 0
     try:
         snap = _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
+        _canonical_finding("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
     for error in snap.get("errors", []):
         print(f"  ⚠︎ canonical source UNREADABLE — {error}")
-        _canonical_finding("source_unreadable", str(error))
+        _canonical_finding("source_unreadable", str(error), hard_error=True)
         rc = 1
 
     if CANONICAL_SECTION in ("all", "exports"):
@@ -1005,6 +1065,7 @@ def _canonical_health():
         print("Export register — canonical export_run receipts")
         if not isinstance(exports, dict):
             print("  ⚠︎ export receipts UNREADABLE")
+            _canonical_finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
             rc = 1
         else:
             registered = set(exports.get("registered") or [])
@@ -1014,29 +1075,33 @@ def _canonical_health():
             retired = set(exports.get("retired") or [])
             registered -= retired
             rows = {r.get("target"): r for r in exports.get("rows") or [] if isinstance(r, dict)}
+            # (target, text, time_rolling) — STALE is purely a clock crossing
+            # (26h since last_ok), so it is reported but excluded from the
+            # release gate's regression diff; the other three reasons are
+            # genuine state and always count.
             bad = []
             for target in sorted(registered):
                 row = rows.get(target)
                 if not row:
-                    bad.append(f"NEVER RAN {target}")
+                    bad.append((target, f"NEVER RAN {target}", False))
                     continue
                 if row.get("latest_status") != "ok":
-                    bad.append(f"LATEST FAILED {target} (latest status {row.get('latest_status')})")
+                    bad.append((target, f"LATEST FAILED {target} (latest status {row.get('latest_status')})", False))
                     continue
                 last_ok = row.get("last_ok")
                 if not last_ok:
-                    bad.append(f"NEVER OK {target}")
+                    bad.append((target, f"NEVER OK {target}", False))
                     continue
                 try:
                     stamp = datetime.fromisoformat(str(last_ok).replace("Z", "+00:00"))
                     now = datetime.now(stamp.tzinfo) if stamp.tzinfo else datetime.now()
                     if now - stamp > timedelta(hours=26):
-                        bad.append(f"STALE {target} (last ok {str(last_ok)[:16]})")
+                        bad.append((target, f"STALE {target} (last ok {str(last_ok)[:16]})", True))
                 except ValueError:
-                    bad.append(f"UNPARSEABLE {target} last_ok={last_ok}")
-            for finding in bad:
+                    bad.append((target, f"UNPARSEABLE {target} last_ok={last_ok}", False))
+            for target, finding, rolling in bad:
                 print(f"  ⚠︎ {finding}")
-                _canonical_finding("export_receipt", finding)
+                _canonical_finding("export_receipt", finding, subject=target, time_rolling=rolling)
             # THE RETIRED COUNT RIDES ON THE LINE EITHER WAY. Rule bd4a6d22 asks
             # for a chosen state to stay visible rather than become silence, so
             # the reader is told how many targets are carried and why they have
@@ -1057,7 +1122,7 @@ def _canonical_health():
         definitions = snap.get("job_definitions")
         if not isinstance(jobs, list) or not isinstance(definitions, list):
             print("  ⚠︎ job ledger UNREADABLE")
-            _canonical_finding("job_ledger", "jobs or enabled definitions missing")
+            _canonical_finding("job_ledger", "jobs or enabled definitions missing", hard_error=True)
             rc = 1
         else:
             live_jobs = _live_jobs(snap)
@@ -1074,13 +1139,22 @@ def _canonical_health():
                 print(f"  ⚠︎ {job.get('definition_key')} {job.get('state')} "
                       f"attempt {job.get('attempt')}/{job.get('max_attempts')}")
                 _canonical_finding("job_terminal_failure",
-                                   f"{job.get('definition_key')} {job.get('state')}")
+                                   f"{job.get('definition_key')} {job.get('state')}",
+                                   subject=str(job.get("definition_key")))
             for job in unreceipted:
                 detail = (f"{job.get('definition_key')} job={job.get('id')} "
                           f"attempt={job.get('attempt')} succeeded without exact completion receipt")
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding("job_completion_receipt", detail)
+                _canonical_finding("job_completion_receipt", detail,
+                                   subject=str(job.get("definition_key")))
             for key, window in missing:
+                # The window is a specific calendar date/time (or a rolling
+                # NON-SUCCESS lookback), so it is reported but never diffed:
+                # a job due again tomorrow is expected drift, not a release
+                # regression. Subject is the definition key alone (not the
+                # date), so every day's occurrence of the same still-missing
+                # job accumulates onto one finding instead of minting a new
+                # one per date.
                 if " NON-SUCCESS execution" in window:
                     detail = f"{key} {window}"
                     finding = "job_due_non_success"
@@ -1088,11 +1162,11 @@ def _canonical_health():
                     detail = f"{key} MISSING DUE execution for {window}"
                     finding = "job_missing_due"
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding(finding, detail)
+                _canonical_finding(finding, detail, subject=str(key), time_rolling=True)
             for job, why in stuck:
                 detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding("job_stuck", detail)
+                _canonical_finding("job_stuck", detail, subject=str(job.get("definition_key")))
             # THE CARRIED COUNT RIDES ON THE LINE EITHER WAY, same contract the
             # exports section uses for retired targets: a chosen state stays
             # visible rather than becoming silence (rule bd4a6d22).
@@ -1136,14 +1210,14 @@ def _canonical_health():
             print(p.stdout.rstrip())
         if p.returncode:
             print("  ⚠︎ canonical registry audit failed")
-            _canonical_finding("registry_integrity", "canonical registry audit failed")
+            _canonical_finding("registry_integrity", "canonical registry audit failed", hard_error=True)
             rc = 1
     if CANONICAL_SECTION == "all":
         print("Doctrine and rule controls — canonical database state")
         controls = snap.get("controls")
         if not isinstance(controls, dict):
             print("  ⚠︎ doctrine/rule controls UNREADABLE")
-            _canonical_finding("control_state", "doctrine/rule controls unreadable")
+            _canonical_finding("control_state", "doctrine/rule controls unreadable", hard_error=True)
             rc = 1
         else:
             gate_failures = int(controls.get("doctrine_gate_failures_24h", 0))
@@ -1168,20 +1242,20 @@ def _canonical_health():
                   f"{rule_gaps} active admitted rules unenforced{_carried}")
             if gate_failures or never_reviewed or stale or rule_gaps:
                 if gate_failures:
-                    _canonical_finding("doctrine_gate", f"{gate_failures} failures in 24h")
+                    _canonical_finding("doctrine_gate", f"{gate_failures} failures in 24h", count=gate_failures, time_rolling=True)
                 if never_reviewed:
-                    _canonical_finding("doctrine_review", f"{never_reviewed} never reviewed")
+                    _canonical_finding("doctrine_review", f"{never_reviewed} never reviewed", count=never_reviewed)
                 if stale:
-                    _canonical_finding("doctrine_stale", f"{stale} stale sections")
+                    _canonical_finding("doctrine_stale", f"{stale} stale sections", count=stale, time_rolling=True)
                 if rule_gaps:
-                    _canonical_finding("rule_enforcement", f"{rule_gaps} active rule gaps")
+                    _canonical_finding("rule_enforcement", f"{rule_gaps} active rule gaps", count=rule_gaps)
                 rc = 1
 
         p = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
                            text=True, capture_output=True, timeout=30)
         if p.returncode:
             print("  ⚠︎ repository worktree status UNREADABLE")
-            _canonical_finding("repo_status", "git status unreadable")
+            _canonical_finding("repo_status", "git status unreadable", hard_error=True)
             rc = 1
         else:
             _loose = _health_sub.classify_loose_status(REPO_ROOT, p.stdout.splitlines())
@@ -1194,7 +1268,7 @@ def _canonical_health():
                   f" · {len(_loose['expected_patched_submodules'])} expected patched submodule(s)"
                   f" · {len(_loose['managed_artifacts'])} managed artifact(s)")
             if _needs_attention:
-                _canonical_finding("repo_loose_work", f"{len(_actionable)} actionable path(s)")
+                _canonical_finding("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
                 rc = 1
 
     if CANONICAL_SECTION in ("all", "credentials"):
@@ -1254,11 +1328,11 @@ def _canonical_health():
                 else:
                     print(f"  ⚠︎ {'credential health':<18} {_first.split('— ', 1)[-1]}  · "
                           f"see out/credential-health.jsonl and the loop(s) filed for detail")
-                    _canonical_finding("credential_health", _first.split("— ", 1)[-1])
+                    _canonical_finding("credential_health", _first.split("— ", 1)[-1], hard_error=True)
                     rc = 1
         except Exception as e:
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
-            _canonical_finding("credential_health", f"check failed ({type(e).__name__}: {e})")
+            _canonical_finding("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
             rc = 1
 
     print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
@@ -1266,7 +1340,10 @@ def _canonical_health():
 
 
 if not RECOVERY_MODE:
-    sys.exit(_canonical_health())
+    _rc = _canonical_health()
+    if FINDINGS_JSON_PATH:
+        _write_findings_json(FINDINGS_JSON_PATH)
+    sys.exit(_rc)
 
 print(f"HEALTH RECOVERY MODE — NONCANONICAL Drive projections — reason: {RECOVERY_REASON}", file=sys.stderr)
 print(f"HEALTH RECOVERY MODE — vault: {VAULT}", file=sys.stderr)

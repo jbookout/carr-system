@@ -59,20 +59,51 @@ class FakeRunner:
 
     def __init__(self, fail_at: str | None = None, pending: int = 0, live: dict | None = None,
                  wrangler_out: str = "You are logged in with an OAuth Token",
-                 health_baseline_out: str | None = None, health_out: str | None = None):
+                 health_baseline_marker: bool = True, health_marker: bool = True,
+                 health_baseline_findings: list | None = None, health_findings: list | None = None,
+                 health_baseline_out_extra: str = "", health_out_extra: str = "",
+                 health_baseline_write_json: bool = True, health_write_json: bool = True):
         self.fail_at, self.pending, self.live = fail_at, pending, live
         self.wrangler_out = wrangler_out
-        # Default: a clean, COMPLETE health read with no findings, on both the
-        # pre-promote baseline and the post-promote read — every scenario
-        # above the HealthGate tests just wants the lane to finish. A test
-        # that cares about the health gate's own diffing overrides one or
-        # both with CANONICAL_FINDING lines, or drops the completion marker
-        # to simulate an unavailable read.
-        self.health_baseline_out = (health_baseline_out if health_baseline_out is not None
-                                    else rp.HEALTH_COMPLETE_MARKER + "\n")
-        self.health_out = health_out if health_out is not None else rp.HEALTH_COMPLETE_MARKER + "\n"
+        # Defaults: a clean, COMPLETE health read with no findings, on both
+        # the pre-promote baseline and the post-promote read — every scenario
+        # above the HealthGate tests just wants the lane to finish. The
+        # *_marker flags control whether tools/health-check.py's completion
+        # line is the LAST NON-EMPTY line of stdout (point F); the
+        # *_findings lists are what a real `--findings-json PATH` run would
+        # have written (point C/D's schema: key/subject/count/hard_error/
+        # time_rolling dicts); *_write_json=False simulates the file never
+        # landing at all (a crash before _write_findings_json runs).
+        self.health_baseline_marker = health_baseline_marker
+        self.health_marker = health_marker
+        self.health_baseline_findings = health_baseline_findings if health_baseline_findings is not None else []
+        self.health_findings = health_findings if health_findings is not None else []
+        self.health_baseline_out_extra = health_baseline_out_extra
+        self.health_out_extra = health_out_extra
+        self.health_baseline_write_json = health_baseline_write_json
+        self.health_write_json = health_write_json
         self.calls: list[tuple[str, list[str]]] = []
         self.envs: dict[str, dict[str, str]] = {}
+
+    def _health_output(self, name, argv):
+        """Write the --findings-json file (unless suppressed) and build the
+        stdout text a real `./run.sh health` would print: any extra text the
+        test asked for, then the completion marker last (unless suppressed)
+        — mirroring tools/health-check.py's own contract exactly."""
+        if name == "health-baseline":
+            findings, extra, marker, write = (self.health_baseline_findings, self.health_baseline_out_extra,
+                                              self.health_baseline_marker, self.health_baseline_write_json)
+        else:
+            findings, extra, marker, write = (self.health_findings, self.health_out_extra,
+                                              self.health_marker, self.health_write_json)
+        if "--findings-json" in argv and write:
+            path = Path(argv[argv.index("--findings-json") + 1])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"findings": findings, "generated_at": "2026-09-30T00:00:00Z"}))
+        lines = [ln for ln in extra.splitlines() if ln]
+        if marker:
+            lines.append(rp.HEALTH_COMPLETE_MARKER)
+        return "\n".join(lines) + ("\n" if lines else "")
 
     def run(self, argv, *, cwd, log, env, timeout=3600):
         stem = log.stem
@@ -84,6 +115,8 @@ class FakeRunner:
         assert not any(CF_TOKEN in a for a in argv), "the deploy token reached argv"
         if name not in DEPLOY_STEPS:
             assert "CLOUDFLARE_API_TOKEN" not in env, f"the deploy token reached non-deploy step {name}"
+        if name in ("health-baseline", "health"):
+            return rp.Result(0 if name != self.fail_at else 7, self._health_output(name, argv))
         if name == self.fail_at:
             return rp.Result(7, "boom")
         if name == "release-key":
@@ -94,8 +127,6 @@ class FakeRunner:
             "migrate-plan": f"applied: 10   pending: {self.pending}",
             "upload": f"uploaded only\n  provider version: {VERSION}\n",
             "wrangler-auth": self.wrangler_out,
-            "health-baseline": self.health_baseline_out,
-            "health": self.health_out,
         }.get(name, "ok")
         if name == "promote" and self.live is not None:
             upload = next(a for n, a in self.calls if n == "upload")
@@ -406,31 +437,42 @@ class StagingGuard(Base):
         self.assertEqual(self.fx.records()[-1]["step"], "staging")
 
 
-STANDING = "  CANONICAL_FINDING rule_enforcement — 98 active rule gaps"
+def _finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
+    return {"key": key, "subject": subject, "detail": detail, "count": count,
+            "hard_error": hard_error, "time_rolling": time_rolling}
+
+
+RULE_GAPS_98 = _finding("rule_enforcement", "98 active rule gaps", count=98)
+RULE_GAPS_97 = _finding("rule_enforcement", "97 active rule gaps", count=97)
 
 
 class HealthGate(Base):
-    """The post-release health gate judges the release, not standing debt:
-    it fails only on a CANONICAL_FINDING that is new since a baseline read
-    taken just before promotion, and an unavailable read is never a pass."""
+    """The post-release health gate judges the release, not standing debt: it
+    diffs by (key, subject) against a baseline taken before any mutation, and
+    fails on a new pair, a risen count, or any hard_error — never on a
+    standing finding unchanged since the baseline. Findings A-G below track
+    the points of an independent review of PR #1237 by letter."""
 
     def test_standing_finding_present_before_and_after_does_not_fail(self):
+        # D: "98 becoming 97 rule gaps" must not fail — and neither may an
+        # UNCHANGED 98 -> 98, even though health-check.py's own rc stays 1
+        # for as long as any rule gap exists (see test_D below for the
+        # improving case; this is the unchanged case).
         self.fx.commit({"mcp-server/src/a.js": "1"})
-        marker = rp.HEALTH_COMPLETE_MARKER
         live = {"sha": self.fx.base}
-        runner = FakeRunner(live=live, health_baseline_out=f"{STANDING}\n{marker}\n",
-                            health_out=f"{STANDING}\n{marker}\n")
+        runner = FakeRunner(live=live, health_baseline_findings=[RULE_GAPS_98],
+                            health_findings=[RULE_GAPS_98])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
         self.assertIn("health-baseline", runner.names())
         self.assertIn("health", runner.names())
 
     def test_new_finding_since_baseline_fails_the_release(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
-        marker = rp.HEALTH_COMPLETE_MARKER
-        new_finding = "  CANONICAL_FINDING export_receipt — LATEST FAILED vendors.xlsx (latest status failed)"
+        new_finding = _finding("export_receipt", "LATEST FAILED vendors.xlsx (latest status failed)",
+                               subject="vendors.xlsx")
         live = {"sha": self.fx.base}
-        runner = FakeRunner(live=live, health_baseline_out=f"{STANDING}\n{marker}\n",
-                            health_out=f"{STANDING}\n{new_finding}\n{marker}\n")
+        runner = FakeRunner(live=live, health_baseline_findings=[RULE_GAPS_98],
+                            health_findings=[RULE_GAPS_98, new_finding])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         rec = self.fx.records()[-1]
         self.assertEqual(rec["step"], "health")
@@ -438,25 +480,160 @@ class HealthGate(Base):
         # promotion already happened; the gate judges what promotion did, it
         # does not (and cannot) un-promote.
         self.assertIn("promote", runner.names())
+        # G: the fix session is pointed at a small new-findings-only file,
+        # not the full health output.
+        findings_log = Path(rec["log"])
+        self.assertTrue(findings_log.name.endswith("health-new-findings.log"))
+        text = findings_log.read_text()
+        self.assertIn("export_receipt", text)
+        self.assertNotIn("rule_enforcement", text)  # the unchanged standing finding is NOT dumped in
 
     def test_an_unavailable_live_read_is_never_a_pass_even_with_no_findings(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         live = {"sha": self.fx.base}
-        runner = FakeRunner(live=live, health_baseline_out=f"{rp.HEALTH_COMPLETE_MARKER}\n",
-                            health_out="canonical health: REFUSED (OperationalError: could not connect)\n")
+        runner = FakeRunner(live=live, health_marker=False, health_findings=[])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         self.assertEqual(self.fx.records()[-1]["step"], "health")
 
-    def test_an_unavailable_baseline_excuses_nothing(self):
+    def test_A_nonzero_exit_with_no_finding_at_all_always_fails(self):
+        # Point A's literal example: health exits nonzero but recorded no
+        # finding to explain it (the historical "export receipts UNREADABLE"
+        # bug, now fixed at the source in tools/health-check.py, but this is
+        # the pipeline-side backstop against a future regression of that).
         self.fx.commit({"mcp-server/src/a.js": "1"})
-        # baseline read itself unavailable (no completion marker); the live
-        # read below is otherwise a normal standing finding, but with no
-        # trustworthy baseline nothing can be excused as pre-existing.
         live = {"sha": self.fx.base}
-        runner = FakeRunner(live=live, health_baseline_out="canonical health: REFUSED (boom)\n",
-                            health_out=f"{STANDING}\n{rp.HEALTH_COMPLETE_MARKER}\n")
+        runner = FakeRunner(live=live, fail_at="health",
+                            health_baseline_findings=[], health_findings=[])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["step"], "health")
+        self.assertIn("no finding at all", rec.get("detail", ""))
+
+    def test_B_and_E_an_unavailable_baseline_is_a_pre_promote_block_not_a_failure(self):
+        # B: the baseline must be taken before any --apply step; E: an
+        # incomplete baseline is a BLOCKED hold, so the SHA is never consumed
+        # (no failed_sha, no diagnosis dispatch, retried next tick) — not a
+        # StepFailed after promotion already ran.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_marker=False,
+                            health_findings=[RULE_GAPS_98])
+        # A clean Blocked hold with no capability to file returns 0 — "nothing
+        # failed", per Blocked's own docstring; that is what "the SHA isn't
+        # consumed" means in practice, not a nonzero pipeline exit.
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "blocked")
+        self.assertEqual(self.fx.records()[-1]["reason"], "health_baseline_unavailable")
+        self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
+        # nothing after the baseline read ever ran: not staging-prepare, not
+        # migrate-apply, not upload, not promote.
+        for later in ("staging-prepare", "staging-app-writer", "migrate-plan",
+                      "migrate-apply", "upload", "staging", "promote", "health"):
+            self.assertNotIn(later, runner.names())
+        self.assertEqual(runner.names(), ["wrangler-auth", "health-baseline"])
+
+    def test_B_baseline_runs_before_the_worktree_and_every_apply_step(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        names = runner.names()
+        baseline_i = names.index("health-baseline")
+        for apply_step in ("staging-prepare", "staging-app-writer", "migrate-plan", "worktree"):
+            if apply_step in names:
+                self.assertLess(baseline_i, names.index(apply_step),
+                                f"health-baseline must run before {apply_step}")
+
+    def test_B_baseline_runs_before_migrate_apply_when_a_migration_is_pending(self):
+        # The probe's original concern named migrate-apply specifically ("the
+        # baseline is taken after migrate-apply and the staging --apply
+        # steps, so a release's own migration damage is forgiven"). Checked
+        # with --only migrate-apply's precondition (pending > 0) actually
+        # true, isolated from the unrelated schema-followup PR path that a
+        # full green run with pending migrations also exercises.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, fail_at="migrate-apply", pending=1)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        names = runner.names()
+        self.assertIn("health-baseline", names)
+        self.assertIn("migrate-apply", names)
+        self.assertLess(names.index("health-baseline"), names.index("migrate-apply"))
+
+    def test_C_two_identical_failures_in_one_run_are_not_hidden_as_one_unchanged_line(self):
+        # The exact-string scheme's blind spot: baseline has ONE occurrence
+        # of a job's terminal-failure finding, live has TWO (same key and
+        # subject, so a naive text diff sees "no new line" — this scheme
+        # instead compares the accumulated COUNT and must catch the rise).
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        one = _finding("job_terminal_failure", "nightly-export failed", subject="nightly-export", count=1)
+        two = _finding("job_terminal_failure", "nightly-export failed", subject="nightly-export", count=2)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[one], health_findings=[two])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("count 1 -> 2", self.fx.records()[-1].get("detail", ""))
+
+    def test_D_a_falling_count_is_an_improvement_and_passes(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[RULE_GAPS_98],
+                            health_findings=[RULE_GAPS_97])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_D_time_rolling_findings_are_reported_but_never_diffed(self):
+        # A job's MISSING DUE date rolls forward daily; the SUBJECT text
+        # differs from yesterday's baseline by construction, which would read
+        # as "new" under a naive diff. time_rolling=True excludes it.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        yesterday = _finding("job_missing_due", "cal MISSING DUE execution for 2026-09-23",
+                             subject="cal", time_rolling=True)
+        today = _finding("job_missing_due", "cal MISSING DUE execution for 2026-09-24",
+                         subject="cal", time_rolling=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_D_any_hard_error_fails_even_when_identical_to_the_baseline(self):
+        # Point A/D together: hard_error is unconditional and is never
+        # excused by a matching baseline entry — a structural read failure
+        # that was ALSO broken yesterday must still fail every release until
+        # it is actually fixed, not just the first time it appears.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        broken = _finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[broken], health_findings=[broken])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("hard_error", self.fx.records()[-1].get("detail", ""))
+
+    def test_F_marker_present_but_not_the_last_line_is_incomplete(self):
+        # A crash on the way out after the happy-path print (e.g. a
+        # traceback appended to the same stdout) must not read as complete:
+        # the marker printed, then something else printed after it, so it is
+        # not the LAST non-empty line any more. FakeRunner's own
+        # health_marker flag always puts the marker last when True, so this
+        # is built directly as extra text with health_marker=False (the
+        # marker text is embedded in the "extra" text itself, followed by
+        # a traceback — exactly what a real crash-on-the-way-out looks like).
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(
+            live=live, health_marker=False,
+            health_out_extra=f"{rp.HEALTH_COMPLETE_MARKER}\nTraceback (most recent call last):\n  boom")
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         self.assertEqual(self.fx.records()[-1]["step"], "health")
+
+    def test_G_new_findings_file_never_contains_the_full_health_log_path(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        new_finding = _finding("export_receipt", "LATEST FAILED vendors.xlsx", subject="vendors.xlsx")
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[], health_findings=[new_finding])
+        self.fx.pipeline(runner, live=live).tick(["worker"])
+        rec = self.fx.records()[-1]
+        # "log" is what queue_turn's dispatched turn tells the fix session to
+        # read; it must be the small new-findings file, not the raw
+        # `./run.sh health` stdout capture (…-health.log).
+        self.assertTrue(rec["log"].endswith("health-new-findings.log"))
+        self.assertFalse(rec["log"].endswith("-health.log"))
 
 
 class KillSwitch(Base):
