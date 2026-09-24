@@ -69299,6 +69299,91 @@
       "expected_count": 893,
       "expected_sha256": "7d2de5071cfb5b3fb09d26fc1b258ffe3a37999720d29babf617fdb1f0e3ea0c",
       "reason": "Answering Joe atomic pair: tools/migrate.py declares migrations 0575 and 0576 as one reviewed transaction group (production refused 0575 alone at the deferred epoch boundary on 2026-09-24), plus the self-referential re-digest of ops/scac-mutation-inventory.mjs, bin/schema-snapshot.sh, ops/siep11-mutation-registry-local-pg-gate.py, and ops/siep18-reference-monitor-local-pg-gate.py after their v64 edits."
+    },
+    {
+      "version": "v65",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:read-resource-dashboard",
+          "ingress_kind": "mcp_tool",
+          "operation": "read-resource-dashboard",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/resource-observation.v5.js",
+          "schema_digest": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+          "source_digest": "e44aba3c819a19bedef3ec0c973a569fd859dad1363fbab00fd8765ae1e50feb",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:record-resource-observation",
+          "ingress_kind": "mcp_tool",
+          "operation": "record-resource-observation",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/resource-observation.v5.js",
+          "schema_digest": "9e2ed8652bdea43a3bdf4408dc05cc9607a6885fdf742e563614e68d74758496",
+          "source_digest": "e44aba3c819a19bedef3ec0c973a569fd859dad1363fbab00fd8765ae1e50feb",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 895,
+      "expected_sha256": "80e4a75a4e330013fbb52151267467323a2a5e7d8c2fbb5a79f2afa36be3973d"
+    },
+    {
+      "version": "v66",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "8901b80a43df262a6101002bac7878a99dc6a9a28dbb4f91aaa1336dcf87edd9",
+          "handler_digest": "8901b80a43df262a6101002bac7878a99dc6a9a28dbb4f91aaa1336dcf87edd9",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 895,
+      "expected_sha256": "cd96b6481b29074e5ebf2cffb0574e45d0f12e4fe80897993c8a3dd8c550584b"
     }
   ],
   "current_source_review": {
