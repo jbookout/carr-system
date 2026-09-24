@@ -126,6 +126,7 @@ KEEP_BRANCH=0
 VERIFY_ONLY=0
 WANT_DATE=""
 WANT_DUMP=""
+COPY_JSON=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --preflight)   PREFLIGHT_ONLY=1; shift ;;
@@ -155,6 +156,14 @@ while [ $# -gt 0 ]; do
                    WANT_DUMP="$2"; shift 2 ;;
     --identity)    [ $# -ge 2 ] || { echo "FAIL: --identity needs a path" >&2; exit 2; }
                    IDENTITY="$2"; shift 2 ;;
+    # --copy-json ADDED 2026-09-24 (V5-F08 item 4). Facts about the copy this
+    # machine cannot derive — who produced it, which custody domain holds it, and
+    # the sha256 the producer recorded. With it, phase 5 writes a typed
+    # restore-exercise-receipt.v1 that mcp-server/bin/recovery-matrix-evaluate.mjs
+    # evaluates. Without it the exact watermark still gates; only the receipt is
+    # skipped.
+    --copy-json)   [ $# -ge 2 ] || { echo "FAIL: --copy-json needs a path" >&2; exit 2; }
+                   COPY_JSON="$2"; shift 2 ;;
     -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
     *)             echo "FAIL: unknown argument '$1'" >&2; exit 2 ;;
   esac
@@ -894,6 +903,65 @@ FAILS="$(sed -n 's/^AWKFAILS=//p' "$WORKDIR/compare.txt")"
 # everything in it) before record_rehearsal runs.
 REHEARSE_SUMMARY="$(sed -n 's/^REHEARSE_SUMMARY //p' "$WORKDIR/compare.txt")"
 parse_rehearse_summary
+
+# ── PHASE 5 (V5-F08 item 4): EXACT watermark and hash, against the ARTIFACT.
+# Phase 4 compares against live production, which moves after the dump, so it
+# can only ever be approximate. This compares the restored database against the
+# rows the artifact itself carries — read from its own COPY blocks by a second
+# streamed decrypt (plaintext never touches disk) — and requires equality,
+# table for table. Every public/ops base table is counted, schema-qualified,
+# except extension-owned tables, whose rows CREATE EXTENSION makes rather than
+# the dump. Read-only against the throwaway branch; production is not touched.
+step "phase 5: exact watermark vs the artifact itself"
+WM_COUNT_SQL="select n.nspname || '.' || c.relname || '|' || (xpath('/row/c/text()',
+             query_to_xml(format('select count(*) as c from %I.%I', n.nspname, c.relname),
+                          false, true, '')))[1]::text
+           from pg_class c join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname in ('public', 'ops') and c.relkind = 'r'
+            and not exists (select 1 from pg_depend d
+                             where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
+          order by 1"
+ARTIFACT_DIGEST="$("$PY" "$REPO/tools/restore-watermark.py" digest "$DUMP")" \
+  || die "could not hash the artifact that was restored"
+say "  ok    artifact sha256: ${ARTIFACT_DIGEST#sha256:}"
+set -o pipefail
+if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/wm.err" \
+     | "$PY" "$REPO/tools/restore-watermark.py" count > "$WORKDIR/artifact-watermark.json" 2>>"$WORKDIR/wm.err"; then
+  set +o pipefail
+  tail -5 "$WORKDIR/wm.err" >&2
+  die "could not read the artifact's own watermark"
+fi
+set +o pipefail
+if ! psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -At -c "$WM_COUNT_SQL" > "$WORKDIR/restored-watermark.txt" 2>"$WORKDIR/wm-rest.err"; then
+  say "$(cat "$WORKDIR/wm-rest.err")" >&2
+  die "could not read the restored watermark"
+fi
+RESTORE_FINISHED_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"$PY" "$REPO/tools/restore-watermark.py" compare \
+    --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.txt"
+case $? in
+  0) say "  ok    restored database equals the artifact exactly, table for table" ;;
+  1) say "  FAIL  restored database does not equal the artifact (see MISMATCH lines)" >&2
+     FAILS=$((FAILS + 1)) ;;
+  *) die "the exact watermark comparison could not be read" ;;
+esac
+if [ -n "$COPY_JSON" ]; then
+  mkdir -p "$REPO/out"
+  RECEIPT_PATH="$REPO/out/restore-exercise-receipt.json"
+  if "$PY" "$REPO/tools/restore-watermark.py" receipt --copy-json "$COPY_JSON" \
+       --target-kind disposable_branch --oracle-id restore-rehearse \
+       --observed-digest "$ARTIFACT_DIGEST" \
+       --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.txt" \
+       --started-at "$RESTORE_START_ISO" --finished-at "$RESTORE_FINISHED_ISO" > "$RECEIPT_PATH"; then
+    say "  ok    restore-exercise receipt: $RECEIPT_PATH"
+    say "        evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH"
+  else
+    say "  FAIL  could not build the restore-exercise receipt from --copy-json" >&2
+    FAILS=$((FAILS + 1))
+  fi
+else
+  say "  note  no --copy-json: exact watermark gated, no receipt written"
+fi
 
 say ""
 if [ "$FAILS" -eq 0 ]; then
