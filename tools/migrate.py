@@ -307,8 +307,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     # would be refused at commit ("live SCAC vNN mutation catalog drifted"),
     # so the pair must be one transaction.
     (
-        "0579_resource_observation.sql",
-        "0580_resource_observation_scac_successor.sql",
+        "0580_resource_observation.sql",
+        "0581_resource_observation_scac_successor.sql",
     ),
 )
 
@@ -346,8 +346,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0576_answer_needs_joe_work_request_scac_successor.sql",
     ),
     (
-        "0579_resource_observation.sql",
-        "0580_resource_observation_scac_successor.sql",
+        "0580_resource_observation.sql",
+        "0581_resource_observation_scac_successor.sql",
     ),
 )
 

@@ -7,7 +7,7 @@ ds4 Flash Next server (127.0.0.1:8000, launchd label local.ds4-flash-next,
 shared with the Model Room flash desk and tools/dictation-rig/bin/post_call.py)
 for model-route availability, then writes ONE observation per provider
 (local_compute, model_route) through the record-resource-observation MCP verb
-(migrations/0579_resource_observation.sql).
+(migrations/0580_resource_observation.sql).
 
 NO CREDENTIAL. This script never opens a database connection, never reads a
 DB credential file, and never holds an API key. It shells out to

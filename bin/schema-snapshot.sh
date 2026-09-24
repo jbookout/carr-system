@@ -831,7 +831,7 @@ if [ "$ANSWER_JOE_ATOMIC_PAIR_REGISTRY_APPLIED" = t ] && [ "$ANSWER_JOE_REGISTRY
   exit 1
 fi
 RESOURCE_OBSERVATION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0580_resource_observation_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0581_resource_observation_scac_successor.sql')" \
   2>/dev/null)"
 case "$RESOURCE_OBSERVATION_REGISTRY_APPLIED" in
   t|f) ;;
@@ -842,7 +842,7 @@ if [ "$RESOURCE_OBSERVATION_REGISTRY_APPLIED" = t ] && [ "$ANSWER_JOE_ATOMIC_PAI
   exit 1
 fi
 RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0581_resource_observation_migrate_py_reseal.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0582_resource_observation_migrate_py_reseal.sql')" \
   2>/dev/null)"
 case "$RESOURCE_OBSERVATION_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" in
   t|f) ;;

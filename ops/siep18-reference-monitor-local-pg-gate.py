@@ -38,10 +38,10 @@ SEALED_PREDECESSOR_DIGEST = (
 )
 SEALED_PREDECESSOR_ENTRY_COUNTS = (2080, 895)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0580_resource_observation_scac_successor.sql"
+    "migrations/0581_resource_observation_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0581_resource_observation_migrate_py_reseal.sql"
+    "migrations/0582_resource_observation_migrate_py_reseal.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

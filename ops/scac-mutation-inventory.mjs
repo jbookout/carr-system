@@ -2165,7 +2165,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V64_VERSION) {
+  version = REGISTRY_V66_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -15506,7 +15506,7 @@ export function renderResourceObservationRegistrySql(rows,
 
 export function renderMigratePyReselRegistrySql(rows,
   predecessorSql = null) {
-  const predecessorPath = "migrations/0580_resource_observation_scac_successor.sql";
+  const predecessorPath = "migrations/0581_resource_observation_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
   const predecessorDigest = "e44321392a31055008e296259245f14b20c19baeea11b795877cf2509d13ca04";
   if (sha256(predecessor) !== predecessorDigest)
@@ -16304,7 +16304,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V65_VERSION,
       dbCatalogBaseline: POST_0580_FORWARD_V65_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0580_resource_observation_scac_successor.sql"] =
+  artifacts["migrations/0581_resource_observation_scac_successor.sql"] =
     renderResourceObservationRegistrySql(v65Rows,
       artifacts["migrations/0578_answer_joe_atomic_pair_scac_successor.sql"]);
 
@@ -16314,9 +16314,9 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V66_VERSION,
       dbCatalogBaseline: POST_0581_FORWARD_V66_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0581_resource_observation_migrate_py_reseal.sql"] =
+  artifacts["migrations/0582_resource_observation_migrate_py_reseal.sql"] =
     renderMigratePyReselRegistrySql(v66Rows,
-      artifacts["migrations/0580_resource_observation_scac_successor.sql"]);
+      artifacts["migrations/0581_resource_observation_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;

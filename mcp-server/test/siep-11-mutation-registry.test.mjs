@@ -2814,7 +2814,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 72);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0580", "0581"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 63);
   assert.equal(paths.length, 135);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
@@ -3094,7 +3094,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 35);
+  assert.equal(workflows.length, 36);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -3106,7 +3106,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  assert.equal(launchd.length, 28);
+  assert.equal(launchd.length, 29);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -3116,7 +3116,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     row.classification_authorizing === false), true);
   const deployedLaunchd = launchd.filter(row =>
     !row.physical_authority_refs.includes("ops.definition_only_launchd:not_deployed"));
-  assert.equal(deployedLaunchd.length, launchd.length - 1);
+  assert.equal(deployedLaunchd.length, launchd.length - 2);
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
@@ -3128,7 +3128,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // not inflate the deployed-environment total above.
   assert.deepEqual(launchd.filter(row =>
     row.physical_authority_refs.includes("ops.definition_only_launchd:not_deployed"))
-    .map(row => row.launchd_label), ["com.carr.repo-hygiene-janitor"]);
+    .map(row => row.launchd_label), ["com.carr.repo-hygiene-janitor", "com.carr.resource-collector"]);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.repo-hygiene-janitor")
     .physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")), false);
   // The three agents the v25 registry successor admitted. THE CANARY IS NOT

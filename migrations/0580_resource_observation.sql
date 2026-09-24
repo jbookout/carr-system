@@ -1,4 +1,4 @@
--- 0579_resource_observation.sql
+-- 0580_resource_observation.sql
 --
 -- DoctorCRE V5-UX-C02 (Resource dashboard and metering read contract) and
 -- V5-UX-C06 (Local compute capacity and model-route visibility): the store
