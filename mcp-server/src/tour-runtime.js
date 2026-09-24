@@ -99,7 +99,19 @@ async function invoke({ env, ctx, actor }, verb, args) {
     authorization_class: actor?.authorization_class || authorizationClassForActor(actor),
     organization_tenant_id: actor?.organization_tenant_id || organizationTenantForActor(actor),
   });
-  return toolData(await callTool({ ...env, ctx }, runtimeActor, verb, args));
+  return toolData(await callTool(toolEnvironment(env, ctx), runtimeActor, verb, args));
+}
+
+// The tool dispatcher needs the Worker's bindings plus this request's ctx. It
+// must NOT be built with a spread: Deal Room hands this leaf a host-scoped env
+// made with Object.create(env) (dealroom-web.js envForDealroomOrigin), whose
+// secrets and bindings live on the PROTOTYPE. An object spread of env copies
+// own properties only, so every browser-session verb reached callTool with no
+// database DSN and failed before its first query (defect 049f269e) while the
+// direct reads in this file, which read env in place, kept working. Inherit
+// from env instead, so lookups still walk to the real bindings.
+export function toolEnvironment(env, ctx) {
+  return Object.assign(Object.create(env ?? null), { ctx });
 }
 
 async function internalRead({ env, actor }, sql, params) {
@@ -201,7 +213,10 @@ export async function runTourPdfRender(context, dependencies = {}) {
   }
 }
 
-export function createTourRuntimeAdapters() {
+// `renderDependencies` exists for tests that drive the real browser chain
+// without a database read or a PDF render (and may capture failure records);
+// production passes nothing.
+export function createTourRuntimeAdapters(renderDependencies = {}) {
   return {
     listToursFn: async context => ({ ok: true, data: projectTourLibrary(await internalRead(context,
       "select ops.list_tour_library($1::text,$2::text) as data", [organizationTenantForActor(context.actor)])) }),
@@ -250,11 +265,15 @@ export function createTourRuntimeAdapters() {
     issueShareGrantFn: context => invoke(context, "issue-tour-share-grant", context.input),
     rotateShareGrantFn: context => invoke(context, "rotate-tour-share-grant", context.input),
     revokeShareGrantFn: context => invoke(context, "revoke-tour-share-grant", context.input),
-    renderPdfFn: context => runTourPdfRender(context),
+    renderPdfFn: context => runTourPdfRender(context, renderDependencies),
     readPdfRenderFn: async context => invoke(context, "read-tour-pdf-render", context.input),
     reviewPdfFn: async context => invoke(context, "record-tour-pdf-human-review", context.input),
     previewPdfFn: context => pdfArtifactResponse(context, "review"),
     downloadPdfFn: context => pdfArtifactResponse(context, "download"),
+    // The leaf hands over an already-sanitised record (route, status, error
+    // class, ToolError code; never a message). Workers Logs / tail pick it up.
+    reportFailureFn: renderDependencies.reportFailureFn ||
+      (record => console.error(JSON.stringify(record))),
   };
 }
 
