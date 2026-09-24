@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertCurrentSourceInventoryMatchesFixture,
+  boundInventoryRows,
+  sourceInventoryFixtureDigest,
   assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
   canonicalize,
@@ -3217,4 +3219,26 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
   assert.throws(() => assertLegacyLaunchdSource(
     { ...legacySurface, canonical_program_arguments: [...legacySurface.canonical_program_arguments, "--forged"] },
     legacySurface.repo_plist_relpath, plist), /legacy source mismatch/);
+});
+
+test("only verb-contract changes and new write entrances hold a pull request to the frozen frontier", () => {
+  // Decision 05e144eb: scripts, workflows and launchd plists never reseal;
+  // worker routes reseal only when a NEW one appears; everything else is
+  // compared whole.
+  const base = [
+    { ingress_key: "mcp-tool:add-loop", schema_digest: "a", handler_digest: "a" },
+    { ingress_key: "script-entrypoint:hooks/lint-gate.py", source_digest: "a" },
+    { ingress_key: "github-workflow:.github/workflows/ci.yml", source_digest: "a" },
+    { ingress_key: "launchd-workflow:com.carr.nightly", source_digest: "a" },
+    { ingress_key: "worker-sidewrite:tool-read-call", handler_digest: "a" },
+  ];
+  const digest = rows => sourceInventoryFixtureDigest(boundInventoryRows(rows));
+  const edit = (key, field) => base.map(row => row.ingress_key === key ? { ...row, [field]: "b" } : row);
+  assert.equal(digest(edit("script-entrypoint:hooks/lint-gate.py", "source_digest")), digest(base));
+  assert.equal(digest(edit("github-workflow:.github/workflows/ci.yml", "source_digest")), digest(base));
+  assert.equal(digest(edit("launchd-workflow:com.carr.nightly", "source_digest")), digest(base));
+  assert.equal(digest(edit("worker-sidewrite:tool-read-call", "handler_digest")), digest(base));
+  assert.equal(digest([...base, { ingress_key: "script-entrypoint:ops/new.py", source_digest: "c" }]), digest(base));
+  assert.notEqual(digest([...base, { ingress_key: "worker-route:new-write", handler_digest: "c" }]), digest(base));
+  assert.notEqual(digest(edit("mcp-tool:add-loop", "schema_digest")), digest(base));
 });

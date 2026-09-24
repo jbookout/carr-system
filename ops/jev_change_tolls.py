@@ -47,9 +47,11 @@ TOLLS = {
     "inventory_reseal": (
         "The changed files are in `change.files`. Does this change edit an MCP "
         "verb -- its definition, input schema or write/human-only/authority "
-        "flags under mcp-server/src/ -- or a scheduled job definition? Those "
-        "rows are still sealed, because the server refuses a verb whose "
-        "contract drifts from the generated registry. Script entrypoints "
+        "flags under mcp-server/src/ -- a NEW worker route or side-write, or a "
+        "scheduled job definition? Those rows are still sealed, because the "
+        "server refuses a verb whose contract drifts from the generated "
+        "registry. Editing server files such as mcp.js or index.js without "
+        "changing a verb contract needs no seal. Script entrypoints "
         "(hooks/, bin/, tools/, pipelines/, ops/ scripts), GitHub workflows "
         "and launchd plists are NOT sealed any more (decision 05e144eb, "
         "2026-09-24): editing or adding one needs no registry successor.",

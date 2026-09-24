@@ -218,13 +218,23 @@ export async function setWriterActorContext(client, actor, { partnerAuthorityAct
     ? `session:${actor.correlation_id.toLowerCase()}` : null;
   const tenant = organizationTenantForActor(actor);
   const executionHost = typeof actor?.execution_host_id === "string" ? actor.execution_host_id : "";
+  // WHOSE PERSONAL ROWS THIS TRANSACTION MAY SEE (migration 0572). The same
+  // server-derived sponsor memory.js already filters by: the verified human
+  // partner, or the verified sponsor of an agent session. Empty for shared-only
+  // machine tokens and on a sponsor error, so row security then shows shared
+  // rows only. Never read from a caller argument. Unlike the verified-human
+  // setting above it is set for every verb, read or write, because reads are
+  // what the memory_item policies fence.
+  const personalScope = personalScopeForActor(actor);
+  const sponsoringHumanSlug = personalScope.status === "personal" ? personalScope.sponsor : "";
   if (receiptSessionRef === null) {
     await client.query(
       "select set_config('carr.acting_actor_slug',$1::text,true), " +
       "set_config('carr.verified_human_actor_slug',$2::text,true), " +
       "set_config('carr.organization_tenant_id',$3::text,true), " +
-      "set_config('carr.execution_host_id',$4::text,true) /* writer-actor-context */",
-      [actor.slug, verifiedHumanSlug, tenant, executionHost],
+      "set_config('carr.execution_host_id',$4::text,true), " +
+      "set_config('carr.sponsoring_human_slug',$5::text,true) /* writer-actor-context */",
+      [actor.slug, verifiedHumanSlug, tenant, executionHost, sponsoringHumanSlug],
     );
     return;
   }
@@ -233,8 +243,9 @@ export async function setWriterActorContext(client, actor, { partnerAuthorityAct
     "set_config('carr.verified_human_actor_slug',$2::text,true), " +
     "set_config('carr.receipt_session_ref',$3::text,true), " +
     "set_config('carr.organization_tenant_id',$4::text,true), " +
-    "set_config('carr.execution_host_id',$5::text,true) /* writer-actor-context */",
-    [actor.slug, verifiedHumanSlug, receiptSessionRef, tenant, executionHost],
+    "set_config('carr.execution_host_id',$5::text,true), " +
+    "set_config('carr.sponsoring_human_slug',$6::text,true) /* writer-actor-context */",
+    [actor.slug, verifiedHumanSlug, receiptSessionRef, tenant, executionHost, sponsoringHumanSlug],
   );
 }
 

@@ -19,26 +19,37 @@ test("writer transactions set server-derived actor context before Tour mutations
   assert.match(human.calls[0].sql, /carr\.verified_human_actor_slug/);
   assert.match(human.calls[0].sql, /carr\.organization_tenant_id/);
   assert.match(human.calls[0].sql, /carr\.execution_host_id/);
-  assert.deepEqual(human.calls[0].params, ["joe", "joe", "carr-internal", ""]);
+  assert.match(human.calls[0].sql, /carr\.sponsoring_human_slug/);
+  // The fifth value is whose personal rows row security shows (migration
+  // 0572): the same server-derived sponsor memory.js filters by.
+  assert.deepEqual(human.calls[0].params, ["joe", "joe", "carr-internal", "", "joe"]);
 
   const sponsored = client();
   await setWriterActorContext(sponsored, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
     sponsoring_human_slug: "joe", native_agent_verified: true,
   });
-  assert.deepEqual(sponsored.calls[0].params, ["codex", "", "carr-internal", ""]);
+  assert.deepEqual(sponsored.calls[0].params, ["codex", "", "carr-internal", "", "joe"]);
 
   const delegated = client();
   await setWriterActorContext(delegated, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
     sponsoring_human_slug: "joe", native_agent_verified: true,
   }, { partnerAuthorityAct: true });
-  assert.deepEqual(delegated.calls[0].params, ["codex", "joe", "carr-internal", ""]);
+  assert.deepEqual(delegated.calls[0].params, ["codex", "joe", "carr-internal", "", "joe"]);
 
   const unverified = client();
   await setWriterActorContext(unverified, {
     slug: "codex", human: false, authorization_class: "sponsored_agent",
     sponsoring_human_slug: "joe", native_agent_verified: false,
   }, { partnerAuthorityAct: true });
-  assert.deepEqual(unverified.calls[0].params, ["codex", "", "carr-internal", ""]);
+  // An unverified native agent still acts for its server-written grant
+  // sponsor when reading, exactly as memory.js scopes it today; what it loses
+  // is partner authority (the second value), not its sponsor's memories.
+  assert.deepEqual(unverified.calls[0].params, ["codex", "", "carr-internal", "", "joe"]);
+
+  // A token with no sponsor sees shared rows only.
+  const machine = client();
+  await setWriterActorContext(machine, { slug: "nightly", human: false, authorization_class: "machine" });
+  assert.equal(machine.calls[0].params.at(-1), "");
 });
