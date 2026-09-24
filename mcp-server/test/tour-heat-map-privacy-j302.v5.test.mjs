@@ -14,6 +14,9 @@ import {
   V5J302PrivacyError,
   admitAggregateHeatMapArtifact,
   aggregateDescriptorDigest,
+  bindHeatMapPrivacyKernel,
+  evaluateHeatMapAudienceProjection,
+  readHeatMapPrivacyConfig,
   datasetRecipientEnvironmentDigest,
   emptyPrivacyBudgetLedger,
   evaluateAggregateOperation,
@@ -33,6 +36,7 @@ import {
   V5_J302_SETTLED_DECISIONS,
 } from "../src/tour-heat-map-privacy-j302.v5.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
+import { V5_J302_PRIVACY_CONFIG } from "../src/tour-heat-map-privacy-config-j302.v5.js";
 import { V5_SETTLED_DECISIONS } from "../src/global-boundaries.v5.js";
 import { V5_F01_SETTLED_DECISIONS } from "../src/record-source-authority.v5.js";
 
@@ -113,6 +117,19 @@ function artifactOf(aggregate = zip3Aggregate(), corp = corporate(), dataset = D
 
 const POPULATION = Object.freeze({ "480": 250000, "481": 48000, "482": 20000 });
 
+// The shipped config leaves the 2020 Census ZIP3 slot unknown, so Safe Harbor
+// ZIP3 cells deny through the default exports. Positive Safe Harbor paths run
+// through the SAME code bound to a config that pins a synthetic 2020 table.
+function pinnedKernel(population = POPULATION, overrides = {}) {
+  return bindHeatMapPrivacyKernel({
+    ...V5_J302_PRIVACY_CONFIG,
+    census_2020_zip3_population: { vintage: "2020", status: "pinned",
+      table_digest: zip3PopulationTableDigest(population) },
+    ...overrides,
+  });
+}
+const PINNED = pinnedKernel();
+
 function commonReceipt(aggregate, overrides = {}) {
   return {
     receipt_id: "route-receipt-synthetic-1",
@@ -139,7 +156,7 @@ function safeHarbor(aggregate = zip3Aggregate(), overrides = {}, population = PO
     hhs_rule_ref: "45 CFR 164.514(b)(2)",
     identifier_categories_removed: [...V5_J302_HHS_IDENTIFIER_CATEGORIES],
     census_population: {
-      source_ref: "synthetic-census-table", vintage: "synthetic-vintage",
+      source_ref: "synthetic-census-table", vintage: "2020",
       table_digest: zip3PopulationTableDigest(population), zip3_population: { ...population },
     },
     no_actual_knowledge_attestation: true,
@@ -164,10 +181,10 @@ function expert(aggregate = countyAggregate(), overrides = {}) {
 }
 
 function conform({ artifact = artifactOf(), receipts = [safeHarbor()], context = CONTEXT, now = NOW,
-  prior_artifact } = {}) {
+  prior_artifact, kernel = PINNED } = {}) {
   const request = { tenant: ORGANIZATION_TENANT_ID, artifact, context, route_receipts: receipts, now };
   if (prior_artifact !== undefined) request.prior_artifact = prior_artifact;
-  return evaluatePrivacyRouteConformance(request);
+  return kernel.evaluatePrivacyRouteConformance(request);
 }
 
 function conformExpert(aggregate = countyAggregate(), overrides = {}, context = CONTEXT) {
@@ -250,7 +267,8 @@ test("AC2: a ZIP3 survives only above 20,000 people; at 20,000 it must be 000", 
   assert.equal(J302.V5_J302_SAFE_HARBOR_ZIP3_POPULATION_FLOOR, 20000);
 
   const above = { ...POPULATION, "482": 20001 };
-  const ok = conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg, {}, above)] });
+  const ok = conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg, {}, above)],
+    kernel: pinnedKernel(above) });
   assert.equal(ok.decision, "conforms");
 });
 
@@ -264,7 +282,8 @@ test("AC2: an HHS-restricted ZIP3 refuses even when the receipt claims a large p
   for (const zip3 of V5_J302_HHS_RESTRICTED_ZIP3) {
     const agg = zip3Aggregate({ cells: [{ unit_id: zip3, period: "2025", patient_count: 30, suppressed: false }] });
     const inflated = { ...POPULATION, [zip3]: 9_999_999 };
-    refuses(conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg, {}, inflated)] }),
+    refuses(conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg, {}, inflated)],
+      kernel: pinnedKernel(inflated) }),
       "restricted_zip3_must_be_000");
   }
 });
@@ -642,7 +661,7 @@ test("REID: a published total that does not add up refuses", () => {
 test("REID: a small cell under the source threshold refuses under Safe Harbor", () => {
   const agg = zip3Aggregate({ cells: [{ unit_id: "480", period: "2025", patient_count: 3, suppressed: false }] });
   const r = conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg)] });
-  refuses(r, "source_privacy_threshold_breached");
+  refuses(r, "small_cell_below_effective_floor");
   assert.equal(r.minimum_cell_count, 11);
 });
 
@@ -699,11 +718,12 @@ test("SEAM: settled decisions are the reviewed text, sharing evidence with S01 a
     V5_F01_SETTLED_DECISIONS["Q071.D1"].source_evidence_digest);
 });
 
-test("SEAM: the policy binds the map contract, owns no platform small-cell floor, and hashes stably", () => {
+test("SEAM: the policy binds the map contract and the config floor, and hashes stably", () => {
   const p = v5J302PolicyPreimage();
   assert.deepEqual(p.map_contract, { id: "carr-map-tour-v1", version: "1.2.0",
     gate: "tour-map-contract-1.2.0-accepted" });
-  assert.equal(p.platform_small_cell_floor, null);
+  assert.equal(p.platform_small_cell_floor, 11);
+  assert.equal(p.config.provenance, "default_set_by_orchestrator_reversible");
   assert.equal(v5J302PolicyDigest(), v5J302PolicyDigest());
   assert.match(v5J302PolicyDigest(), /^sha256:[0-9a-f]{64}$/);
 });
@@ -712,4 +732,95 @@ test("SEAM: fixtures carry no real-looking personal identifiers", () => {
   const text = JSON.stringify([artifactOf(), safeHarbor(), expert(), CONTEXT]);
   assert.doesNotMatch(text, /\b\d{3}-\d{2}-\d{4}\b/); // no SSN shapes
   assert.doesNotMatch(text, /@[a-z]+\.[a-z]+/i);      // no e-mail addresses
+});
+
+// ===========================================================================
+// Orchestrator defaults (reversible), each exercised through the real code.
+// ===========================================================================
+
+test("DEFAULT 1: a platform floor of 11 binds under both routes; the source replaces it only when stricter", () => {
+  assert.equal(V5_J302_PRIVACY_CONFIG.platform_small_cell_floor, 11);
+  // Source says 5, cell is 8: the platform floor refuses it under Safe Harbor...
+  const loose = zip3Aggregate({ source_privacy_threshold: { minimum_cell_count: 5, declared_by: "src" },
+    cells: [{ unit_id: "480", period: "2025", patient_count: 8, suppressed: false }] });
+  const sh = conform({ artifact: artifactOf(loose), receipts: [safeHarbor(loose)] });
+  refuses(sh, "small_cell_below_effective_floor");
+  assert.equal(sh.minimum_cell_count, 11);
+  // ...and under Expert Determination, even with an expert minimum of 5.
+  const looseCounty = countyAggregate({ source_privacy_threshold: { minimum_cell_count: 5, declared_by: "src" },
+    cells: [{ unit_id: "99001", period: "2025-Q1", patient_count: 8, suppressed: false }], published_total: null });
+  const ed = conformExpert(looseCounty, { small_cell: { minimum_cell_count: 5, complementary_suppression_required: true } });
+  refuses(ed, "small_cell_below_determination_threshold");
+  assert.equal(ed.minimum_cell_count, 11);
+  // A stricter source (20) replaces the floor.
+  const strict = zip3Aggregate({ source_privacy_threshold: { minimum_cell_count: 20, declared_by: "src" },
+    cells: [{ unit_id: "480", period: "2025", patient_count: 15, suppressed: false }] });
+  const r = conform({ artifact: artifactOf(strict), receipts: [safeHarbor(strict)] });
+  refuses(r, "small_cell_below_effective_floor");
+  assert.equal(r.minimum_cell_count, 20);
+  // A cell at exactly 11 under a looser source conforms, and says which floor bound it.
+  const at = zip3Aggregate({ source_privacy_threshold: { minimum_cell_count: 5, declared_by: "src" },
+    cells: [{ unit_id: "480", period: "2025", patient_count: 11, suppressed: false }] });
+  const ok = conform({ artifact: artifactOf(at), receipts: [safeHarbor(at)] });
+  assert.equal(ok.decision, "conforms");
+  assert.equal(ok.effective_small_cell_floor, 11);
+});
+
+test("DEFAULT 2: no heat-map-derived content reaches a client audience", () => {
+  for (const content_kind of J302.V5_J302_HEAT_MAP_CONTENT_KINDS) {
+    const r = evaluateHeatMapAudienceProjection({ tenant: ORGANIZATION_TENANT_ID, audience: "client", content_kind });
+    refuses(r, "heat_map_content_not_client_visible");
+    assert.equal(r.client_visibility_decision_ref, "decision:4ab3933e");
+    const internal = evaluateHeatMapAudienceProjection({ tenant: ORGANIZATION_TENANT_ID, audience: "internal",
+      content_kind });
+    assert.equal(internal.decision, "internal_only");
+    assert.equal(internal.admission, "unavailable");
+  }
+  assert.deepEqual(V5_J302_PRIVACY_CONFIG.client_visible_heat_map_content, []);
+  throwsCode(() => evaluateHeatMapAudienceProjection({ tenant: ORGANIZATION_TENANT_ID, audience: "public",
+    content_kind: "heat_map_render" }), "unknown_audience");
+});
+
+test("DEFAULT 3: Safe Harbor differencing and export stay refused, and the config cannot say otherwise", () => {
+  assert.equal(V5_J302_PRIVACY_CONFIG.safe_harbor_unbudgeted_operations, "refuse");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, safe_harbor_unbudgeted_operations: "allow" }),
+    "invalid_config");
+});
+
+test("DEFAULT 4: with the 2020 Census slot unknown, every Safe Harbor ZIP3 is denied; 000 and state survive", () => {
+  assert.equal(V5_J302_PRIVACY_CONFIG.census_2020_zip3_population.table_digest, null);
+  const r = conform({ kernel: { evaluatePrivacyRouteConformance } });
+  refuses(r, "zip3_census_2020_population_unknown_denied");
+  assert.equal(r.census_2020_status, "unavailable_offline");
+  const onlySuppressed = zip3Aggregate({ cells: [{ unit_id: "000", period: "2025", patient_count: 40, suppressed: false }] });
+  assert.equal(conform({ kernel: { evaluatePrivacyRouteConformance }, artifact: artifactOf(onlySuppressed),
+    receipts: [safeHarbor(onlySuppressed)] }).decision, "conforms");
+});
+
+test("DEFAULT 4: once pinned, the 2020 table must be exactly the pinned one, and either census reading can refuse", () => {
+  // A receipt carrying some other table (or another vintage) is refused.
+  const other = { ...POPULATION, "480": 260000 };
+  refuses(conform({ receipts: [safeHarbor(undefined, {}, other)] }), "census_2020_table_not_the_pinned_table");
+  const oldVintage = safeHarbor();
+  oldVintage.census_population.vintage = "2010";
+  refuses(conform({ receipts: [oldVintage] }), "census_2020_table_not_the_pinned_table");
+  // 2020 says 20,000 or fewer -> refused even though HHS's 2000 list is silent.
+  const agg = zip3Aggregate({ cells: [{ unit_id: "482", period: "2025", patient_count: 30, suppressed: false }] });
+  refuses(conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg)] }), "zip3_population_not_above_floor");
+  // 2000 list restricts -> refused even though 2020 puts it high.
+  const restricted = V5_J302_HHS_RESTRICTED_ZIP3[0];
+  const high = { ...POPULATION, [restricted]: 500000 };
+  const r = zip3Aggregate({ cells: [{ unit_id: restricted, period: "2025", patient_count: 30, suppressed: false }] });
+  refuses(conform({ artifact: artifactOf(r), receipts: [safeHarbor(r, {}, high)], kernel: pinnedKernel(high) }),
+    "restricted_zip3_must_be_000");
+});
+
+test("CONFIG: a malformed config is a contract violation, never a looser setting", () => {
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, platform_small_cell_floor: 0 }), "invalid_shape");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, census_2020_zip3_population:
+    { vintage: "2020", status: "pinned", table_digest: null } }), "invalid_config");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, client_visible_heat_map_content:
+    ["raw_rows"] }), "invalid_config");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, extra: 1 }), "unknown_field");
+  throwsCode(() => bindHeatMapPrivacyKernel({}), "missing_field");
 });

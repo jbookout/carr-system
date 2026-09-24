@@ -44,12 +44,15 @@
 // THE THRESHOLDS ARE NOT INVENTED HERE. The only numbers this file owns are the
 // ones the slice contract states: the 20,000 Census-derived population floor for
 // a three-digit ZIP under Safe Harbor, and HHS's published list of ZIP3 prefixes
-// that fall below it. Every small-cell threshold is BOUND FROM EVIDENCE: the
-// source's own declared threshold (Q048.D1: preserve source privacy thresholds),
-// which the route receipt must acknowledge, and under Expert Determination the
-// expert's numeric minimum. The effective floor is the stricter of the two. No
-// platform-wide floor exists in this file, and none should be added without a
-// Joe decision.
+// that fall below it. Every other parameter lives in
+// tour-heat-map-privacy-config-j302.v5.js, where each is marked as a default set
+// by the orchestrator, reversible: the platform small-cell floor (11, under both
+// routes), the empty client-visible content list, Safe Harbor's refusal of
+// unbudgeted operations, and the 2020 Census ZIP3 table slot, which is unknown
+// and therefore denies. The effective small-cell floor is the strictest of the
+// platform floor, the source's declared threshold (Q048.D1: preserve source
+// privacy thresholds, acknowledged exactly by the route) and, under Expert
+// Determination, the expert's minimum.
 //
 // BUDGETS ARE A KERNEL CONTRACT, NOT A STORE. Expert Determination binds
 // repeated-query, differencing and export budgets. This module computes the next
@@ -68,6 +71,7 @@ import {
   V5_NO_EFFECTS,
 } from "./global-boundaries.v5.js";
 import { admitCorporateArtifact } from "./record-source-authority.v5.js";
+import { V5_J302_PRIVACY_CONFIG } from "./tour-heat-map-privacy-config-j302.v5.js";
 import {
   V5_J301_MAP_CONTRACT,
   V5_J301_MAP_CONTRACT_GATE,
@@ -709,6 +713,68 @@ function judgeArtifact(rawArtifact, context, now, base, priorRaw) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The parameter config: validated at load, never trusted by shape alone.
+// ---------------------------------------------------------------------------
+
+const CONFIG_KEYS = Object.freeze([
+  "schema_version", "provenance", "set_on", "platform_small_cell_floor",
+  "platform_small_cell_floor_basis", "client_visible_heat_map_content",
+  "client_visibility_decision_ref", "safe_harbor_unbudgeted_operations",
+  "census_2020_zip3_population",
+]);
+export const V5_J302_CONFIG_SCHEMA_VERSION = "doctorcre-v5-j302-privacy-config.v1";
+export const V5_J302_AUDIENCES = deepFreeze(["client", "internal"]);
+export const V5_J302_HEAT_MAP_CONTENT_KINDS = deepFreeze([
+  "aggregate_artifact", "derived_strategy_proposal", "heat_map_render", "heat_map_statistic",
+]);
+
+/**
+ * Validate a parameter config and return a frozen copy. Every field is closed
+ * and required; an unknown safe-harbor disposition, a floor below one, or a
+ * pinned 2020 table without a digest is a contract violation, not a setting.
+ */
+export function readHeatMapPrivacyConfig(raw) {
+  assertObject(raw, "config");
+  assertClosedKeys(raw, CONFIG_KEYS, "config");
+  assertRequiredKeys(raw, CONFIG_KEYS, "config");
+  if (raw.schema_version !== V5_J302_CONFIG_SCHEMA_VERSION) {
+    fail("unknown_config_schema", `config.schema_version is not ${V5_J302_CONFIG_SCHEMA_VERSION}`);
+  }
+  const census = assertObject(raw.census_2020_zip3_population, "config.census_2020_zip3_population");
+  assertClosedKeys(census, ["vintage", "status", "table_digest"], "config.census_2020_zip3_population");
+  assertRequiredKeys(census, ["vintage", "status", "table_digest"], "config.census_2020_zip3_population");
+  if (census.vintage !== "2020") fail("invalid_config", "config.census_2020_zip3_population.vintage must be 2020");
+  assertEnum(census.status, ["pinned", "unavailable_offline"], "config.census_2020_zip3_population.status",
+    "invalid_config");
+  if ((census.status === "pinned") !== (census.table_digest !== null)) {
+    fail("invalid_config", "a pinned 2020 table carries a digest and an unavailable one carries null");
+  }
+  if (census.table_digest !== null) assertDigestRef(census.table_digest, "config.census_2020_zip3_population.table_digest");
+  const visible = assertArray(raw.client_visible_heat_map_content, "config.client_visible_heat_map_content",
+    { min: 0, max: V5_J302_HEAT_MAP_CONTENT_KINDS.length })
+    .map((k, i) => assertEnum(k, V5_J302_HEAT_MAP_CONTENT_KINDS, `config.client_visible_heat_map_content[${i}]`,
+      "invalid_config"));
+  return deepFreeze({
+    schema_version: raw.schema_version,
+    provenance: assertIdent(raw.provenance, "config.provenance"),
+    set_on: assertIdent(raw.set_on, "config.set_on"),
+    platform_small_cell_floor: assertInteger(raw.platform_small_cell_floor, "config.platform_small_cell_floor",
+      { min: 1 }),
+    platform_small_cell_floor_basis: assertIdent(raw.platform_small_cell_floor_basis,
+      "config.platform_small_cell_floor_basis"),
+    client_visible_heat_map_content: [...visible].sort(),
+    client_visibility_decision_ref: assertIdent(raw.client_visibility_decision_ref,
+      "config.client_visibility_decision_ref"),
+    safe_harbor_unbudgeted_operations: assertEnum(raw.safe_harbor_unbudgeted_operations, ["refuse"],
+      "config.safe_harbor_unbudgeted_operations", "invalid_config"),
+    census_2020_zip3_population: { vintage: "2020", status: census.status, table_digest: census.table_digest },
+  });
+}
+
+/** The config the default exports are bound to, validated when the module loads. */
+export const V5_J302_ACTIVE_CONFIG = readHeatMapPrivacyConfig(V5_J302_PRIVACY_CONFIG);
+
 /** The threshold every unsuppressed, non-zero cell must meet under the chosen route. */
 function smallCellBreach(aggregate, minimum) {
   const index = aggregate.cells.findIndex(c => !c.suppressed && c.patient_count > 0 &&
@@ -895,7 +961,7 @@ function judgeReceiptCommon(receipt, facts, context, now, base) {
   return null;
 }
 
-function judgeSafeHarbor(receipt, facts, base) {
+function judgeSafeHarbor(receipt, facts, base, cfg) {
   if (receipt.hhs_rule_ref !== V5_J302_HHS_SAFE_HARBOR_RULE_REF) {
     return refusal("safe_harbor_rule_ref_mismatch", base);
   }
@@ -924,10 +990,23 @@ function judgeSafeHarbor(receipt, facts, base) {
   }
   if (aggregate.geography_unit === "zip3") {
     const table = receipt.census_population.zip3_population;
+    const pinned2020 = cfg.census_2020_zip3_population;
     for (const [i, cell] of aggregate.cells.entries()) {
       if (cell.unit_id === V5_J302_SAFE_HARBOR_SUPPRESSED_ZIP3) continue;
+      // 2000 Census reading: HHS's restricted list, a floor no receipt lifts.
       if (V5_J302_HHS_RESTRICTED_ZIP3.includes(cell.unit_id)) {
         return refusal("restricted_zip3_must_be_000", base, { cell_index: i });
+      }
+      // 2020 Census reading. The stricter of the two wins, so a ZIP3 needs BOTH
+      // to clear it; with no reviewed 2020 table pinned, the 2020 reading is
+      // unknown and unknown denies.
+      if (pinned2020.table_digest === null) {
+        return refusal("zip3_census_2020_population_unknown_denied", base, {
+          cell_index: i, census_2020_status: pinned2020.status });
+      }
+      if (receipt.census_population.vintage !== "2020" ||
+          receipt.census_population.table_digest !== pinned2020.table_digest) {
+        return refusal("census_2020_table_not_the_pinned_table", base, { cell_index: i });
       }
       if (!Object.prototype.hasOwnProperty.call(table, cell.unit_id)) {
         return refusal("zip3_population_unknown_denied", base, { cell_index: i });
@@ -937,15 +1016,18 @@ function judgeSafeHarbor(receipt, facts, base) {
       }
     }
   }
-  const minimum = aggregate.source_privacy_threshold.minimum_cell_count;
+  // The platform floor binds under Safe Harbor too; the source's threshold
+  // replaces it only when stricter.
+  const minimum = Math.max(cfg.platform_small_cell_floor,
+    aggregate.source_privacy_threshold.minimum_cell_count);
   const breach = smallCellBreach(aggregate, minimum);
   if (breach >= 0) {
-    return refusal("source_privacy_threshold_breached", base, { cell_index: breach, minimum_cell_count: minimum });
+    return refusal("small_cell_below_effective_floor", base, { cell_index: breach, minimum_cell_count: minimum });
   }
   return null;
 }
 
-function judgeExpertDetermination(receipt, facts, context, now, base) {
+function judgeExpertDetermination(receipt, facts, context, now, base, cfg) {
   if (receipt.expert.identity === context.requesting_actor ||
       receipt.expert.identity === context.recipient_id) {
     return refusal("expert_not_independent_of_requester", base);
@@ -971,7 +1053,7 @@ function judgeExpertDetermination(receipt, facts, context, now, base) {
   // Q048.D1: the source threshold is preserved even when the expert would
   // accept a smaller cell. The stricter of the two governs.
   const minimum = Math.max(receipt.small_cell.minimum_cell_count,
-    aggregate.source_privacy_threshold.minimum_cell_count);
+    aggregate.source_privacy_threshold.minimum_cell_count, cfg.platform_small_cell_floor);
   const breach = smallCellBreach(aggregate, minimum);
   if (breach >= 0) {
     return refusal("small_cell_below_determination_threshold", base,
@@ -1015,6 +1097,10 @@ const CONFORMANCE_KEYS = Object.freeze([
  * receipt here came from the caller — and every result says so.
  */
 export function evaluatePrivacyRouteConformance(request) {
+  return conformanceWith(request, V5_J302_ACTIVE_CONFIG);
+}
+
+function conformanceWith(request, cfg) {
   assertObject(request, "request");
   assertClosedKeys(request, CONFORMANCE_KEYS, "request");
   assertRequiredKeys(request, ["tenant", "artifact", "context", "route_receipts", "now"], "request");
@@ -1040,8 +1126,8 @@ export function evaluatePrivacyRouteConformance(request) {
   const common = judgeReceiptCommon(receipt, facts, context, now, routed);
   if (common) return common;
   const specific = receipt.route === "safe_harbor"
-    ? judgeSafeHarbor(receipt, facts, routed)
-    : judgeExpertDetermination(receipt, facts, context, now, routed);
+    ? judgeSafeHarbor(receipt, facts, routed, cfg)
+    : judgeExpertDetermination(receipt, facts, context, now, routed, cfg);
   if (specific) return specific;
 
   return outcome({
@@ -1052,6 +1138,11 @@ export function evaluatePrivacyRouteConformance(request) {
     retain_until: receipt.route === "expert_determination"
       ? new Date(receipt.retention.retain_until).toISOString() : null,
     budgets: receipt.route === "expert_determination" ? { ...receipt.budgets } : null,
+    effective_small_cell_floor: receipt.route === "safe_harbor"
+      ? Math.max(cfg.platform_small_cell_floor, facts.aggregate.source_privacy_threshold.minimum_cell_count)
+      : Math.max(cfg.platform_small_cell_floor, facts.aggregate.source_privacy_threshold.minimum_cell_count,
+        receipt.small_cell.minimum_cell_count),
+    config_digest: digest(cfg),
     required_runtime_evidence: [...V5_J302_REQUIRED_RUNTIME_EVIDENCE],
   });
 }
@@ -1134,6 +1225,10 @@ export function emptyPrivacyBudgetLedger(receipt_id) {
  * refused there rather than left unmetered.
  */
 export function evaluateAggregateOperation(request) {
+  return operationWith(request, V5_J302_ACTIVE_CONFIG);
+}
+
+function operationWith(request, cfg) {
   assertObject(request, "request");
   assertClosedKeys(request, OPERATION_REQUEST_KEYS, "request");
   assertRequiredKeys(request, ["tenant", "route_receipt", "operation", "now"], "request");
@@ -1158,7 +1253,7 @@ export function evaluateAggregateOperation(request) {
   const budgetClass = V5_J302_OPERATIONS[kind];
 
   if (receipt.route === "safe_harbor") {
-    if (budgetClass !== "query") {
+    if (budgetClass !== "query" && cfg.safe_harbor_unbudgeted_operations === "refuse") {
       return refusal("operation_budget_not_bound_by_route", base, { budget_class: budgetClass });
     }
     return outcome({ decision: "within_route", reason_id: "safe_harbor_native_precision_query",
@@ -1319,6 +1414,51 @@ export function evaluateDerivedStrategyProposal(request) {
 }
 
 // ---------------------------------------------------------------------------
+// Public: who may see heat-map output. Clients see exactly the Tour PDF fields,
+// and no heat-map-derived content is one of them (Q136.D1 as settled by the
+// config's client-visibility reference). Internal projection is answered as
+// internal-only, and is still no admission.
+// ---------------------------------------------------------------------------
+
+const AUDIENCE_KEYS = Object.freeze(["tenant", "audience", "content_kind"]);
+
+export function evaluateHeatMapAudienceProjection(request) {
+  return audienceWith(request, V5_J302_ACTIVE_CONFIG);
+}
+
+function audienceWith(request, cfg) {
+  assertObject(request, "request");
+  assertClosedKeys(request, AUDIENCE_KEYS, "request");
+  assertRequiredKeys(request, AUDIENCE_KEYS, "request");
+  assertTenant(request.tenant, "request.tenant");
+  const audience = assertEnum(request.audience, V5_J302_AUDIENCES, "request.audience", "unknown_audience");
+  const content_kind = assertEnum(request.content_kind, V5_J302_HEAT_MAP_CONTENT_KINDS,
+    "request.content_kind", "unknown_content_kind");
+  const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null, audience, content_kind,
+    client_visibility_decision_ref: cfg.client_visibility_decision_ref };
+  if (audience === "client" && !cfg.client_visible_heat_map_content.includes(content_kind)) {
+    return refusal("heat_map_content_not_client_visible", base);
+  }
+  return outcome({ decision: "internal_only", reason_id: "heat_map_content_internal_projection", ...base });
+}
+
+/**
+ * The same public functions bound to another validated config. Production
+ * imports the default-bound exports; this exists so a reviewed config change
+ * (for example a pinned 2020 Census table) is exercised through the real code
+ * rather than a copy. A config that does not validate throws.
+ */
+export function bindHeatMapPrivacyKernel(config) {
+  const cfg = readHeatMapPrivacyConfig(config);
+  return Object.freeze({
+    config: cfg,
+    evaluatePrivacyRouteConformance: request => conformanceWith(request, cfg),
+    evaluateAggregateOperation: request => operationWith(request, cfg),
+    evaluateHeatMapAudienceProjection: request => audienceWith(request, cfg),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The closed, versioned policy and its digest.
 // ---------------------------------------------------------------------------
 
@@ -1355,7 +1495,9 @@ export function v5J302PolicyPreimage() {
     identifier_columns: [...V5_J302_IDENTIFIER_COLUMNS],
     operations: { ...V5_J302_OPERATIONS },
     reidentifying_operations: [...V5_J302_REIDENTIFYING_OPERATIONS],
-    platform_small_cell_floor: null,
+    platform_small_cell_floor: V5_J302_ACTIVE_CONFIG.platform_small_cell_floor,
+    config: V5_J302_ACTIVE_CONFIG,
+    config_digest: digest(V5_J302_ACTIVE_CONFIG),
     seams: [V5_J302_BUDGET_LEDGER_STORE_SEAM, V5_J302_PROPOSAL_REVIEW_SEAM,
       V5_J302_RECEIPT_RETRIEVAL_SEAM].sort(),
   };
