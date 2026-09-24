@@ -53,6 +53,11 @@ import codex_wire  # noqa: E402  — Codex worked out this protocol, see the mod
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 import verb_io  # noqa: E402 — the ONE path to the record layer; see that module
 
+TOOLS_ROOT = HERE.parent
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+import credential_env  # noqa: E402 — shared long-lived-token loader
+
 DEFAULT_RESULTS = Path(
     os.environ.get(
         "CARR_HERMES_RESULTS",
@@ -249,8 +254,13 @@ def dispatch(
     env: dict | None = None,
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
+    cwd: str | None = None,
 ) -> dict:
-    """Send one task to one desk. Raises DeskError when the desk is not usable."""
+    """Send one task to one desk. Raises DeskError when the desk is not usable.
+
+    `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
+    thread and leaves the desk's standing thread untouched: flash-run's escalation gives
+    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
@@ -283,6 +293,10 @@ def dispatch(
         )
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
+    elif cwd:
+        outcome = _to_codex(
+            {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+        )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
@@ -404,6 +418,7 @@ def desk_start(
     sock_dir: Path | None = None,
     env: dict | None = None,
     seed: str | None = None,
+    token_path: "Path | str | None" = None,
 ) -> dict:
     """Start a Claude session that STAYS, and register it under `name`.
 
@@ -459,9 +474,19 @@ def desk_start(
         f"-p --input-format stream-json --output-format stream-json --verbose "
         f"<&3 >>{shlex.quote(str(log))} 2>&1"
     )
+    # This is the ONE unattended launch of `claude -p` a room-bridge poll cycle
+    # can make (see bridge.py's own header: launchd fires the cycle, no human
+    # is present). The child gets the long-lived login merged into ITS OWN
+    # env only — os.environ itself is never touched — so a keychain entry
+    # that has expired between launchd wakes does not take this desk down.
+    # Absent-safe: with no token configured, this is exactly the env the
+    # caller already passed (or a plain copy of the current environment).
+    child_env, warning = credential_env.claude_child_env(env or None, path=token_path)
+    if warning:
+        print(f"desk_start {name}: {warning}", flush=True)
     proc = subprocess.Popen(
         ["/bin/sh", "-c", shell],
-        env=env or os.environ.copy(),
+        env=child_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

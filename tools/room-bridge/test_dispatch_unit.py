@@ -308,6 +308,29 @@ def main() -> int:
 
     check("a task reaches codex headless at the desk's model and directory", dispatch_to_codex)
 
+    def per_task_cwd_starts_fresh_and_keeps_the_desk_thread():
+        """flash-run escalation (2026-09-24): Sol works in a throwaway copy per task.
+        A per-task cwd must start a fresh thread there and must not re-pin the desk."""
+        reg.register("sol-fixer", "codex-session", model="gpt-5.1-codex-mini", effort="low",
+                     cwd=str(root), sandbox="workspace-write")
+        reg.remember_thread("sol-fixer", "standing-thread")
+        task_dir = root / "task-copy"
+        task_dir.mkdir(exist_ok=True)
+        before = len(argv_log.read_text().splitlines())
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        out = dispatch.dispatch("sol-fixer", "fix it", registry=reg,
+                                results_path=root / "sol-fixer-results.ndjson",
+                                env=env, cwd=str(task_dir))
+        assert out["status"] == "completed", out
+        argv = json.loads(argv_log.read_text().splitlines()[before])
+        assert "resume" not in argv, argv
+        assert argv[argv.index("-C") + 1] == str(task_dir), argv
+        assert argv[argv.index("-s") + 1] == "workspace-write", argv
+        assert reg.entries()["sol-fixer"].get("thread_id") == "standing-thread"
+
+    check("a per-task cwd starts fresh there and keeps the desk's thread",
+          per_task_cwd_starts_fresh_and_keeps_the_desk_thread)
+
     def codex_out_of_credit_is_its_own_status():
         """Codex prints the limit on stdout and exits 0, so the exit code lies."""
         broke = fake_bin / "codex-broke"

@@ -67,3 +67,18 @@ test("HTML escaping preserves facts as text and cannot become markup", () => {
   assert.match(result.html, /Clinic &lt;North&gt; &amp; East/);
   assert.doesNotMatch(result.html, /<North>/);
 });
+
+test("Tour packet accepts the database's timestamptz JSON shape and normalizes it to UTC", () => {
+  // ops.read_tour_packet_for_render emits timestamptz through jsonb, which is
+  // "+00:00", not "Z". Rejecting it failed every production tour PDF render.
+  const plain = renderTourPacket({ ...packet, as_of: "2026-09-24T04:40:00+00:00" });
+  assert.equal(plain.facts.as_of, "2026-09-24T04:40:00.000Z");
+  const micro = renderTourPacket({ ...packet, as_of: "2026-09-24T04:35:41.571502+00:00" });
+  assert.equal(micro.facts.as_of, "2026-09-24T04:35:41.571Z");
+  const central = renderTourPacket({ ...packet, as_of: "2026-09-23T23:40:00-05:00" });
+  assert.equal(central.facts.as_of, "2026-09-24T04:40:00.000Z");
+  assert.equal(renderTourPacket(packet).facts.as_of, "2026-08-27T12:00:00Z");
+  for (const bad of ["2026-02-30T12:00:00+00:00", "2026-09-24T04:40:00+24:00", "2026-09-24T04:40:00+0000", "2026-09-24 04:40:00+00:00", "2026-09-24T04:40:00"]) {
+    assert.throws(() => renderTourPacket({ ...packet, as_of: bad }), error => error instanceof TourPacketRenderError && error.code === "tour_packet_invalid_as_of", bad);
+  }
+});
