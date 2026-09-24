@@ -243,6 +243,55 @@ class Classification(unittest.TestCase):
         self.assertTrue(rp.classify(["src/worker.js"], a)[0])
 
 
+    def test_globs_use_github_path_filter_semantics(self):
+        hit = rp._glob_hit
+        self.assertTrue(hit("README.md", "**/*.md"))            # ** matches zero dirs
+        self.assertTrue(hit("a/b/c.md", "**/*.md"))
+        self.assertTrue(hit("mcp-server/README.md", "mcp-server/**/*.md"))
+        self.assertTrue(hit("mcp-server/x/y/z.md", "mcp-server/**/*.md"))
+        self.assertTrue(hit("out/a/b.json", "out/**"))
+        self.assertFalse(hit("docs/deep/x.md", "docs/*.md"))     # * never crosses /
+        self.assertTrue(hit("docs/x.md", "docs/*.md"))
+        self.assertFalse(hit("src/ab.js", "src/?.js"))
+        self.assertFalse(hit("layout/x", "out/**"))
+        self.assertFalse(hit("README.mdx", "**/*.md"))
+
+
+def _workflow_paths_ignore(text: str) -> list[str]:
+    """The push trigger's paths-ignore list, read without a YAML dependency:
+    the block list directly under the `paths-ignore:` key."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "paths-ignore:":
+            indent = len(line) - len(line.lstrip())
+            out = []
+            for item in lines[i + 1:]:
+                if not item.strip() or item.lstrip().startswith("#"):
+                    continue
+                if len(item) - len(item.lstrip()) <= indent or not item.lstrip().startswith("- "):
+                    break
+                out.append(item.lstrip()[2:].strip().strip("\"'"))
+            return out
+    raise AssertionError("no paths-ignore block found")
+
+
+class CanaryGlobDrift(unittest.TestCase):
+    """canary_ignored_globs must be exactly the canary workflow's paths-ignore:
+    if they drift, the pipeline either waits forever on a canary that will
+    never run or walks past a commit the canary would have judged."""
+
+    def test_config_mirrors_main_canary_paths_ignore(self):
+        cfg = json.loads((HERE / "config" / "release-pipeline.v1.json").read_text())
+        wf = (HERE.parent / ".github" / "workflows" / "main-canary.yml").read_text()
+        self.assertEqual(sorted(_workflow_paths_ignore(wf)),
+                         sorted(cfg["worker"]["canary_ignored_globs"]))
+
+    def test_parser_reads_a_block_list(self):
+        text = ("on:\n  push:\n    paths-ignore:\n      - \"a/**\"\n"
+                "      # c\n      - '**/*.md'\n  workflow_dispatch:\n")
+        self.assertEqual(_workflow_paths_ignore(text), ["a/**", "**/*.md"])
+
+
 class Batching(Base):
     def test_many_merges_ship_once_at_the_latest_sha(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})

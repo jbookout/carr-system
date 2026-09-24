@@ -118,7 +118,6 @@ import contextlib
 import dataclasses
 import datetime as dt
 import fcntl
-import fnmatch
 import json
 import os
 import re
@@ -357,13 +356,37 @@ def read_merge_events(path: Path) -> dict[str, dict]:
 
 # ── pure decisions (the selftest's main surface) ─────────────────────────────
 
+def _glob_regex(glob: str) -> "re.Pattern[str]":
+    """GitHub Actions path-filter semantics, so a glob means the same thing
+    here as it does in a workflow's paths/paths-ignore: `*` and `?` never
+    cross `/`, `**` crosses any number of directories, and `**/` also matches
+    zero directories (`**/*.md` covers a top-level `README.md`, `a/**/*.md`
+    covers `a/README.md`). fnmatch is NOT safe here: its `*` crosses `/`, so
+    `docs/*.md` would silently swallow `docs/deep/x.md` and diverge from the
+    canary's own filter."""
+    out, i, n = ["^"], 0, len(glob)
+    while i < n:
+        if glob.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif glob.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    out.append("$")
+    return re.compile("".join(out))
+
+
 def _glob_hit(path: str, glob: str) -> bool:
-    """fnmatch, plus `**/` matching zero directories (so `a/**/*.md` covers
-    `a/README.md` and `**/*.md` covers a top-level `README.md`)."""
-    candidates = {glob, glob.replace("/**/", "/")}
-    if glob.startswith("**/"):
-        candidates.add(glob[3:])
-    return any(fnmatch.fnmatchcase(path, g) for g in candidates)
+    return bool(_glob_regex(glob).match(path))
 
 
 def classify(paths: Iterable[str], lane_cfg: dict) -> tuple[bool, list[str]]:
