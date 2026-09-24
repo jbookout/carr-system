@@ -16,13 +16,20 @@ or any other failure, never raised past the check).
 """
 
 import importlib.util
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 OPS = Path(__file__).resolve().parent
 MODULE_PATH = OPS / "jev_intake.py"
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
+ENV = fixture_env()
 SPEC = importlib.util.spec_from_file_location("jev_intake", MODULE_PATH)
 assert SPEC and SPEC.loader
 intake = importlib.util.module_from_spec(SPEC)
@@ -86,14 +93,14 @@ class _TempRepo:
     def __enter__(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, env=ENV)
         (self.root / "ops").mkdir()
         (self.root / "ops" / "widget_loader.py").write_text(
             '"""Loads a widget from disk."""\ndef load_widget():\n    pass\n')
         (self.root / "ops" / "unrelated_thing.py").write_text(
             '"""Does something else entirely."""\n')
         (self.root / "README.md").write_text("# repo\n")
-        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True, env=ENV)
         return self.root
 
     def __exit__(self, *exc):

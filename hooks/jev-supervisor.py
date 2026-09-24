@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# doctrine: engineering-workflow-sop
 """jev-supervisor.py — the in-session Jev checks from open loop #629, one hook.
 
 WHAT IT IS. Loop #629 listed twenty-five Jev checks for supervising a coding

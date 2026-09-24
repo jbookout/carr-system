@@ -229,7 +229,7 @@ def pick_context(task_text, repo_root, *, max_files=8, client=None):
         return _skip(check_id, "picked",
                      {"reason": "task text already names a file path; the "
                                 "deterministic reference is used as-is",
-                      "paths": FILE_TOKEN.findall(task_text)[:max_files]})
+                      "paths": list(dict.fromkeys(FILE_TOKEN.findall(task_text)))[:max_files]})
     paths = _tracked_files(repo_root)
     if not paths:
         return _skip(check_id, "none_found",
