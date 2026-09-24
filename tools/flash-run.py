@@ -13,9 +13,14 @@ THE FLOW for `flash-run "<task>" --test "<command>"`:
   1. intake (ops/jev_intake.py): the ambiguity stop (#3), the escalation router
      (#5), the effort picker (#2), the context picker (#1), the worked-example
      picker (#23), and the mistake notebook's recall (#15).
-  2. N attempts (default 3 with a test command, else 1), each in its own copy of
-     the working tree, by the `flash` launcher. The in-session checks ride along
-     through hooks/jev-supervisor.py in advise mode (~/.claude-local settings).
+  2. up to N attempts (default 3 with a test command, else 1), each in its own
+     copy of the working tree, by the `flash` launcher. The in-session checks ride
+     along through hooks/jev-supervisor.py in advise mode (~/.claude-local
+     settings). SPEED TUNING (2026-09-24, measured on the 16-task scorecard):
+     the first attempt of low-effort work runs without model thinking; the run
+     stops at the first attempt whose tests pass (--all-attempts for full
+     best-of-N); each retry gets the previous attempt's failing test output;
+     and an attempt is cut off at ten minutes.
   3. the tests run in every copy; ops/jev_best_of.py picks one candidate or
      "none". A single passing candidate is taken without asking Jev.
   4. the chosen patch is applied to the real tree and the tests run again there.
@@ -55,7 +60,10 @@ EXAMPLES_LOG = os.path.join(OUT, "flash-examples.jsonl")
 HANDOFF_DIR = os.path.join(OUT, "flash-handoffs")
 FLASH = os.environ.get("FLASH_BIN") or shutil.which("flash") or os.path.expanduser("~/.local/bin/flash")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", "out", "dist", "build"}
-ATTEMPT_TIMEOUT = 1500
+# Runaway cutoff. A scoped slice that has not finished in ten minutes is thinking in circles
+# (the run-length benchmark task spent 214 s on its first try and still failed), and the
+# next attempt, which starts with that attempt's failure in its prompt, is the better bet.
+ATTEMPT_TIMEOUT = 600
 TEST_TIMEOUT = 600
 
 
@@ -85,10 +93,10 @@ def _say(msg):
     print(f"flash-run: {msg}", flush=True)
 
 
-def _sh(cmd, cwd, timeout):
+def _sh(cmd, cwd, timeout, env=None):
     try:
         done = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, timeout=timeout, env=env)
         return done.returncode, (done.stdout + done.stderr)
     except subprocess.TimeoutExpired as exc:
         partial = (exc.stdout or b"") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -146,7 +154,33 @@ def build_prompt(task, test_cmd, context_files, recalled, example):
     return "\n\n".join(parts)
 
 
-def run_attempt(n, cwd, prompt, test_cmd, effort, workdir):
+def retry_prompt(prompt, previous):
+    """The next attempt's prompt: the task plus what the last attempt's tests said.
+
+    A blind retry spends a full attempt to find the same mistake. Handing over the
+    failing output makes the retry a fix, which is how a person uses a red test.
+    """
+    if not previous or previous.get("test_exit_code") in (None, 0):
+        return prompt
+    return (prompt + "\n\nA previous attempt at this task failed its tests with this output. "
+            "Avoid the same mistake:\n" + (previous.get("test_output") or "")[-2500:])
+
+
+def think_for(mode, effort, attempt):
+    """Whether this attempt runs with model thinking.
+
+    auto: the first attempt of low-effort work runs without thinking, which is where the time
+    went (a few thousand thinking tokens at ~70/s before any code). A retry, or anything
+    the effort picker rated above low, thinks: a failure is evidence the problem needs it.
+    """
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    return not (effort == "low" and attempt == 1)
+
+
+def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True):
     dest = os.path.join(workdir, f"attempt-{n}")
     os.makedirs(dest)
     make_copy(cwd, dest)
@@ -156,9 +190,12 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir):
     if test_cmd:
         allowed.append(f"Bash({test_cmd})")
     started = time.monotonic()
+    # MAX_THINKING_TOKENS=0 makes the harness send no thinking budget, which the ds4 server
+    # serves in non-thinking mode (verified 2026-09-24 from its log: no THINKING marker).
+    env = None if think else dict(os.environ, MAX_THINKING_TOKENS="0")
     code, transcript = _sh([FLASH, "-p", prompt, "--effort", effort or "low",
                             "--permission-mode", "acceptEdits",
-                            "--allowedTools", *allowed], dest, ATTEMPT_TIMEOUT)
+                            "--allowedTools", *allowed], dest, ATTEMPT_TIMEOUT, env=env)
     elapsed = round(time.monotonic() - started, 1)
     test_code, test_out = (None, "")
     if test_cmd:
@@ -251,14 +288,18 @@ def cmd_run(a):
     candidates = []
     try:
         for n in range(1, attempts + 1):
-            _say(f"attempt {n}/{attempts} (effort {effort})")
-            cand = run_attempt(n, cwd, prompt, a.test, effort, workdir)
+            think = think_for(a.think, effort, n)
+            _say(f"attempt {n}/{attempts} (effort {effort}, thinking {'on' if think else 'off'})")
+            cand = run_attempt(n, cwd, retry_prompt(prompt, candidates[-1] if candidates else None),
+                               a.test, effort, workdir, think=think)
             candidates.append(cand)
             status = "no test" if cand["test_exit_code"] is None else (
                 "tests pass" if cand["test_exit_code"] == 0 else f"tests fail ({cand['test_exit_code']})")
             _say(f"  attempt {n}: {status}, {cand['probe_results']['patch_lines']} patch lines, "
                  f"{cand['elapsed_s']}s")
-            if a.stop_on_pass and cand["test_exit_code"] == 0:
+            # Early stop: a real test passing is the proof the extra attempts were buying.
+            # --all-attempts keeps the full best-of-N when the tests are known to be thin.
+            if not a.all_attempts and cand["test_exit_code"] == 0:
                 break
         best = _lib("jev_best_of").select_candidate(
             task, [{k: c[k] for k in ("id", "code_or_diff", "probe_results", "test_output",
@@ -395,8 +436,10 @@ def main(argv):
     r.add_argument("--attempts", type=int, default=None)
     r.add_argument("--effort", choices=["low", "medium", "high"], default=None)
     r.add_argument("--escalate", choices=["suggest", "auto"], default="suggest")
-    r.add_argument("--stop-on-pass", action="store_true",
-                   help="stop at the first attempt whose tests pass (faster, less choice)")
+    r.add_argument("--all-attempts", action="store_true",
+                   help="run every attempt even after one passes (slower, full best-of-N choice)")
+    r.add_argument("--think", choices=["auto", "on", "off"], default="auto",
+                   help="model thinking: auto = off on the first attempt of low-effort work, on for retries")
     r.add_argument("--force", action="store_true", help="run despite an ambiguity or routing stop")
     r.add_argument("--dry-run", action="store_true", help="print the chosen patch, do not apply")
     r.add_argument("--keep", action="store_true", help="keep the attempt copies")
