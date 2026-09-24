@@ -113,7 +113,8 @@ from stop_latch import (  # noqa: E402
     claim_identity, latched, record_fire, record_satisfied)
 
 sys.path.insert(0, REPO)
-from lib.jev_required_actions import evaluate_required_actions  # noqa: E402
+from lib.jev_required_actions import (  # noqa: E402
+    current_turn_slice, evaluate_required_actions, jev_calls_log_mentions)
 
 
 def _canonical_repo_root(fallback):
@@ -1172,18 +1173,6 @@ def evaluate(recs, ledger=None):
     return True, "terminal completion claim has no fresh verification"
 
 
-def current_window(recs):
-    """This turn's transcript slice: everything after the last human message.
-
-    Same slicing evaluate() uses internally, exposed here so main() can look
-    at the current turn's Jev evidence without evaluate() needing to hand it
-    out through the ledger out-param.
-    """
-    turns = human_turns(recs)
-    start = (turns[-1] + 1) if turns else 0
-    return recs[start:]
-
-
 def jev_audit(row):
     if row.get("session") == "selftest":
         return
@@ -1201,10 +1190,24 @@ def jev_required_actions_check(session, recs):
     turn, an unavailable advisory, or a readable advisory with no required
     actions) or when this exact turn's finding has already been latched.
     """
-    window = current_window(recs)
+    # The Jev turn is the LIBRARY's turn (a human prompt plus every folded
+    # notification, Stop feedback and cross-session message), not this hook's
+    # own human_turns() window — that one restarts at a task notification,
+    # which would drop a JEV-REFUSED line written before it (round 3).
+    window = current_turn_slice(recs)
     texts = [text(rec, {"assistant"}) for rec in window]
     written_paths = sorted({p for rec in window for p in file_paths(*tool(rec))})
     result = evaluate_required_actions(recs, texts, JEV_CALLS_LOG, session, written_paths)
+    # FORGERY DETECTION ("detectable, not prevented", decision d47931da).
+    # ask() is the only legitimate writer of out/jev-calls.jsonl and never
+    # names it in a tool command, so any tool call in this turn that does is
+    # recorded as a detection event beside the verdict, with the command.
+    mentions = jev_calls_log_mentions(window)
+    if mentions:
+        jev_audit({"ts": now(), "session": session, "event": "jev_calls_log_named",
+                   "turn_key": result.get("turn_key"),
+                   "write_like": any(m["write_like"] for m in mentions),
+                   "mentions": mentions[:10]})
     jev_audit({"ts": now(), "session": session, **result})
     if result["status"] != "required" or not result["missing"]:
         return False, "", None

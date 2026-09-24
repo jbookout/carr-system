@@ -24,6 +24,12 @@ reselection.py's `_semantic_receipt()`) and the build receipt sits under its
 `build_receipt` key. This module now reads both shapes. Verified directly
 against a real ~/.claude/projects/*.jsonl session file before writing this.
 
+ONE TURN, MANY ADVISORIES (round 3). A turn is a genuine human prompt plus
+everything folded into it: Stop-hook feedback, background task
+notifications, cross-session messages, compaction summaries. Each may carry
+its own build advisory; the turn's required set is the UNION of them all
+(turn_required_facets), so no later advisory can remove a facet.
+
 CURRENT TURN ONLY. The advisory is read only from `latest_user_turn_index(recs)`
 onward (with a one-record lookback for the observed off-by-one: in the sampled
 transcript the `hook_additional_context` attachment for a turn's advisory was
@@ -36,7 +42,7 @@ typesafe_client` or `grep ask ops/typesafe_client.py` satisfies without ever
 reaching the vendor. ops/typesafe_client.py's `ask()` now appends a receipt
 (session, ts, question ids, model, ok) to out/jev-calls.jsonl on every
 SUCCESSFUL response, and this module matches a required facet against that
-file: same session, a timestamp inside this turn's time window, and a
+file: same session, a timestamp from this turn's start to now, and a
 question id (or an explicit `facets` list on the call) naming the facet. One
 batched `ask()` still evaluates several facets at once (ops/typesafe_client.py's
 own "ASK TOGETHER" rule) — attribution is per named facet, not automatically
@@ -66,13 +72,14 @@ BUILD_ADVISORY_UNAVAILABLE_SCHEMA = "jev-build-advisory-unavailable/v1"
 MESSAGE_DELIVERY_SCHEMA = "rule-jev-message-delivery/v2"
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 
-# A call this turn is a receipt in out/jev-calls.jsonl within this many
-# seconds of the turn's own boundary timestamp (a real ask() carries its own
-# short timeout — see ops/typesafe_client.py's TIMEOUT_SECONDS — so a call
-# genuinely made "this turn" lands well inside a generous multi-minute band;
-# this is deliberately wide rather than tight, because the turn boundary
-# timestamp is the PROMPT's, and the call may happen minutes into a long turn).
-CALL_WINDOW_SECONDS = 3600
+# A call counts for this turn when its receipt in out/jev-calls.jsonl is bound
+# to this session id and its timestamp falls between the turn's own boundary
+# (less CALL_CLOCK_SKEW_SECONDS) and NOW (plus the same skew). There is no
+# upper duration cap any more: round 3 (2026-09-24) found 26 of 327 folded
+# real turns ran past 60 minutes, and a real call at minute 90 was rejected by
+# the old fixed 3600-second window. The session id is the binding; the turn
+# boundary is the lower edge; "now" (the Stop time) is the upper edge.
+CALL_CLOCK_SKEW_SECONDS = 5
 
 # Known facet keys (ops/jev_build_advisory.py's FACETS) — used both to parse
 # a batched JEV-REFUSED list ("semantic_creation, evidence_matching — reason")
@@ -102,18 +109,39 @@ FENCE_RE = re.compile(r"```.*?```", re.S)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 DQUOTE_RE = re.compile(r'"[^"\n]*"')
 SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S | re.I)
+# Role-"user" records that CONTINUE the current turn instead of starting one.
+# Round 3 (2026-09-24) added the cross-session message wrappers: a real one
+# reads "Another Claude session sent a message:\n<cross-session-message ...>"
+# (origin kind "peer"), and was being treated as a fresh, unenforced turn.
+CONTINUATION_PREFIXES = (
+    "Stop hook feedback:",
+    "<task-notification>",
+    "[SYSTEM NOTIFICATION",
+    "[MESSAGE FROM NON-USER SOURCE",
+    "Another Claude session sent a message",
+    "<cross-session-message",
+    "[Cross-session delivery",
+    "This session is being continued from a previous conversation",
+)
+CONTINUATION_ORIGIN_KINDS = ("task-notification", "peer")
 SYNTHETIC_USER_PREFIXES = (
     "The following is the Codex agent history",
     "<environment_context>",
     "<app-context>",
 )
-# The reviewer's own literal examples use the placeholder reason word
-# "reason" (6 chars) after every facet token is stripped out — e.g. form 1
-# ("semantic_creation, evidence_matching — reason") and form 3
-# ("next_action_priority. reason") both leave exactly "reason" as residual.
-# Lowered from 8 (round-1 value) so those real forms still pass while still
-# rejecting an empty or single-character residual.
-MIN_REFUSAL_REASON_CHARS = 4
+# The residual reason (the line with every facet token and connective
+# stripped) must be at least this long. Round 2 had lowered it to 4, which let
+# "none" through; round 3 (2026-09-24) raises it to 12. All 27 real
+# JEV-REFUSED lines in session f4d5b78a carry reasons well past this floor.
+MIN_REFUSAL_REASON_CHARS = 12
+# Round 3 (2026-09-24): a reason must also not be one of these placeholder
+# phrases, compared after lower-casing and stripping punctuation. (The
+# 12-character floor already rejects most of them; the list is the explicit
+# statement of intent and catches padded variants such as "not needed here".)
+REFUSAL_REASON_STOPLIST = frozenset((
+    "none", "n/a", "na", "skip", "skipped", "not needed", "not needed here",
+    "not applicable", "no reason", "reason", "tbd", "n a",
+))
 MIN_NOT_APPLICABLE_REASON_CHARS = 12
 FACET_PROXIMITY_CHARS = 80
 
@@ -217,8 +245,16 @@ def is_synthetic_continuation(rec):
     if not isinstance(first, str):
         return False
     stripped = first.lstrip()
-    if stripped.startswith(("Stop hook feedback:", "<task-notification>",
-                            "[SYSTEM NOTIFICATION", "[MESSAGE FROM NON-USER SOURCE")):
+    if stripped.startswith(CONTINUATION_PREFIXES):
+        return True
+    # Claude's own origin stamp, when present, is authoritative: a genuine
+    # prompt is kind "human"; a background task's notification is
+    # "task-notification" and a cross-session message is "peer" (both seen
+    # directly in a real session, round 3).
+    origin = rec.get("origin") if isinstance(rec, dict) else None
+    if isinstance(origin, dict) and origin.get("kind") in CONTINUATION_ORIGIN_KINDS:
+        return True
+    if isinstance(rec, dict) and rec.get("isCompactSummary"):
         return True
     without_reminders = SYSTEM_REMINDER_RE.sub("", first).strip()
     return bool(first.strip()) and not without_reminders
@@ -312,6 +348,54 @@ def turn_boundary_timestamp(recs):
     return _record_timestamp((recs or ())[idx])
 
 
+def _advisory_receipts(turn_recs):
+    """Every build-turn receipt in `turn_recs`, in transcript order (direct,
+    or nested under a rule-jev-message-delivery/v2 build_receipt key)."""
+    out = []
+    for rec in turn_recs or ():
+        for obj in _hook_context_objects(rec):
+            schema = obj.get("schema")
+            if schema == BUILD_RECEIPT_SCHEMA:
+                out.append(obj)
+            elif schema == MESSAGE_DELIVERY_SCHEMA:
+                nested = obj.get("build_receipt")
+                if isinstance(nested, dict) and nested.get("schema") == BUILD_RECEIPT_SCHEMA:
+                    out.append(nested)
+    return out
+
+
+def turn_required_facets(recs):
+    """The current turn's required facet set: the UNION of required_actions
+    over EVERY build advisory in the turn — the human prompt's, and any
+    carried by a folded task notification, Stop-hook feedback, or
+    cross-session message. Nothing can remove a facet once one advisory in
+    the turn required it.
+
+    Round 3 (2026-09-24): the round-2 reader kept only the LAST advisory, and
+    249 of 255 real task notifications in one session carry their own
+    advisory (usually requiring nothing), so any background task silently
+    erased the human prompt's required facets.
+
+    Returns (facets, turn_key): facets is None when no advisory in the turn
+    was readable (fail open), [] when the readable ones require nothing, or
+    the ordered, de-duplicated union. turn_key is the FIRST advisory's
+    receipt id (or prompt hash) — stable however many notifications follow.
+    """
+    receipts = _advisory_receipts(current_turn_slice(recs))
+    union, readable, turn_key = [], False, None
+    for receipt in receipts:
+        if turn_key is None:
+            turn_key = receipt.get("receipt_id") or receipt.get("prompt_sha256")
+        facets = required_facets(receipt)
+        if facets is None:
+            continue
+        readable = True
+        for facet in facets:
+            if facet not in union:
+                union.append(facet)
+    return (union if readable else None), turn_key
+
+
 def find_build_advisory(recs):
     """The current turn's build-turn receipt, or None.
 
@@ -322,6 +406,10 @@ def find_build_advisory(recs):
     build_receipt key (hooks/rule-pack-preuse-reselection.py's
     `_semantic_receipt()` — this is the more common shape in real sessions).
     The LAST match in the slice wins.
+
+    NOT the enforcement reader any more (round 3): a single receipt cannot
+    represent a turn that folds in notifications carrying their own
+    advisories. Enforcement uses turn_required_facets (the union).
     """
     found = None
     for rec in current_turn_slice(recs):
@@ -374,6 +462,16 @@ def required_facets(receipt):
     return facets
 
 
+def refusal_reason_is_real(residual):
+    """A refusal reason is at least MIN_REFUSAL_REASON_CHARS characters and is
+    not a stoplisted placeholder ("none", "n/a", "skip", "not needed", ...)."""
+    residual = " ".join((residual or "").split())
+    if len(residual) < MIN_REFUSAL_REASON_CHARS:
+        return False
+    normalized = " ".join(re.sub(r"[^\w/ ]+", " ", residual.lower()).split())
+    return normalized not in REFUSAL_REASON_STOPLIST
+
+
 def refused_facets_in_texts(texts):
     """Lower-cased facet names named by a real `JEV-REFUSED: ...` line:
     outside a fenced/inline-code/quoted span, on a non-blockquoted line, with
@@ -408,11 +506,56 @@ def refused_facets_in_texts(texts):
             residual = FACET_TOKEN_RE.sub(" ", rest)
             residual = re.sub(r"[,:;.\-—]+", " ", residual)
             residual = re.sub(r"\b(and|or)\b", " ", residual, flags=re.I)
-            residual = residual.strip()
-            if len(residual) < MIN_REFUSAL_REASON_CHARS:
+            if not refusal_reason_is_real(residual):
                 continue
             out.update(facets_here)
     return out
+
+
+JEV_CALLS_BASENAME = "jev-calls.jsonl"
+# A command that plausibly WRITES rather than reads: a redirect, tee, sed -i,
+# cp/mv/install onto it, or an interpreter write call. Deliberately loose —
+# this only classifies a detection event, it never decides a verdict.
+_WRITE_HINT_RE = re.compile(
+    r"((?<![0-9&>])>{1,2}(?![&>])|\btee\b|\bsed\s+-i|\b(cp|mv|install|rsync|truncate|touch|dd)\b|"
+    r"\.write\(|write_text|writeFileSync|appendFileSync|open\([^)]*['\"][awx])")
+
+
+def jev_calls_log_mentions(turn_recs):
+    """FORGERY DETECTION (round 3, "detectable, not prevented" — decision
+    d47931da). ops/typesafe_client.py's ask() is the ONLY legitimate writer of
+    out/jev-calls.jsonl, and it writes from inside Python, so a legitimate
+    call's own tool command never names the file. Every tool call in the turn
+    whose command or file path names it is returned, so the Stop gate can
+    record a detection event:
+
+        [{"tool": <name>, "write_like": bool, "excerpt": <first 200 chars>}]
+
+    A read (tail, grep, wc) is still returned, with write_like False: the
+    event is a record for a human to look at, not a verdict.
+    """
+    found = []
+    for rec in turn_recs or ():
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            value = block.get("input")
+            if not isinstance(value, dict):
+                continue
+            surface = " ".join(str(value.get(k) or "") for k in (
+                "command", "file_path", "path", "notebook_path"))
+            if JEV_CALLS_BASENAME not in surface:
+                continue
+            name = block.get("name") or ""
+            write_like = (name in ("Write", "Edit", "MultiEdit", "NotebookEdit")
+                          or bool(_WRITE_HINT_RE.search(surface)))
+            found.append({"tool": name, "write_like": write_like,
+                          "excerpt": surface.strip()[:200]})
+    return found
 
 
 def load_jev_call_receipts(path):
@@ -463,12 +606,17 @@ def _call_covers_facet(row, facet):
     return False
 
 
-def facets_called_this_turn(call_rows, session_id, boundary_ts, required):
+def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=None):
     """The subset of `required` for which out/jev-calls.jsonl shows a
-    successful call bound to this session and inside this turn's time window,
-    whose question ids (or explicit facets list) name that facet."""
+    successful call bound to this session, timestamped from this turn's start
+    to `now` (default: the current time), whose question ids (or explicit
+    facets list) name that facet. No upper duration cap — see
+    CALL_CLOCK_SKEW_SECONDS."""
     if not required or boundary_ts is None or not session_id:
         return set()
+    if now is None:
+        now = datetime.now(timezone.utc)
+    upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
     covered = set()
     for row in call_rows:
         if row.get("session") != session_id and row.get("session_id") != session_id:
@@ -485,7 +633,7 @@ def facets_called_this_turn(call_rows, session_id, boundary_ts, required):
         if row_dt is None:
             continue
         delta = (row_dt - boundary_ts).total_seconds()
-        if delta < -5 or delta > CALL_WINDOW_SECONDS:
+        if delta < -CALL_CLOCK_SKEW_SECONDS or delta > upper:
             continue
         for facet in required:
             if facet not in covered and _call_covers_facet(row, facet):
@@ -568,7 +716,8 @@ def semantic_creation_receipt_missing(turn_recs, written_paths):
     return any_unavailable or bool(uncovered)
 
 
-def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, written_paths):
+def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, written_paths,
+                              now=None):
     """One-call summary for a Stop-time caller.
 
     `recs` is the WHOLE transcript (this module scopes to the current turn
@@ -592,12 +741,7 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     than a per-session one.
     """
     turn_slice = current_turn_slice(recs)
-    receipt = find_build_advisory(recs)
-    if receipt is None:
-        return {"status": "unavailable", "required": [], "missing": [],
-                "refused": [], "turn_key": None}
-    required = required_facets(receipt)
-    turn_key = receipt.get("receipt_id") or receipt.get("prompt_sha256")
+    required, turn_key = turn_required_facets(recs)
     if required is None:
         return {"status": "unavailable", "required": [], "missing": [],
                 "refused": [], "turn_key": turn_key}
@@ -607,7 +751,7 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     refused = refused_facets_in_texts(window_texts)
     boundary_ts = turn_boundary_timestamp(recs)
     call_rows = load_jev_call_receipts(jev_calls_path)
-    called = facets_called_this_turn(call_rows, session_id, boundary_ts, required)
+    called = facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=now)
     missing = set(missing_facets(required, refused, called))
     if ("semantic_creation" in required and "semantic_creation" not in refused
             and "semantic_creation" not in called

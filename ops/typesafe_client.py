@@ -223,13 +223,15 @@ def _append_call_receipt(questions, facets, result, log_path):
     answers, never able to turn a successful ask() into a failure. See
     JEV_CALLS_LOG above.
 
-    Round-2 hardening (2026-09-24): `result` is now the full decoded
-    response (not just its "model" field), so a real API-assigned "id" and
-    the "usage" token counts — when the response carries them — land in the
-    receipt too, giving a nightly reconciliation job something to match
-    against if TypeSafe ever exposes an audit/usage endpoint (as of this
-    writing it does not — see ops/typesafe_client.py's module docstring /
-    the PR that added this comment for that research).
+    The row carries the response's "model" and "usage" token counts. It
+    deliberately carries NO response id (round 3, 2026-09-24): the vendor
+    returns none (null in all 63 real receipts at the time of writing) and
+    exposes no usage/audit endpoint, so an id field could never be reconciled
+    and was a claim this file cannot back. Forgery of a row is DETECTED, not
+    prevented (decision d47931da): hooks/bash-write-gate.py warns on any
+    shell write naming this file, and hooks/completion-evidence-gate.py
+    records a detection event for any turn whose tool calls name it — this
+    function, reached only through ask(), is the one legitimate writer.
     """
     try:
         answered = result if isinstance(result, dict) else {}
@@ -239,7 +241,6 @@ def _append_call_receipt(questions, facets, result, log_path):
             "question_ids": sorted(questions),
             "facets": sorted({str(f) for f in facets}) if facets else [],
             "model": answered.get("model"),
-            "response_id": answered.get("id"),
             "usage": answered.get("usage") if isinstance(answered.get("usage"), dict) else None,
             "ok": True,
         }

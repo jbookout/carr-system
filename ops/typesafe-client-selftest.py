@@ -242,9 +242,10 @@ class DecideTests(unittest.TestCase):
 class CallReceiptTests(unittest.TestCase):
     """Round-2 hardening (2026-09-24, PR #1224 second review): a receipt must
     only be written for a REAL production call, must be append-only, and
-    must carry the response's id/usage when present."""
+    must carry the response's usage when present, and (round 3) must carry
+    no response id the vendor never supplies."""
 
-    def test_real_call_receipt_includes_response_id_and_usage(self):
+    def test_real_call_receipt_includes_usage_and_no_response_id(self):
         # This exercises _append_call_receipt directly with a real-shaped
         # response (the function ask() calls only when opener is None, i.e.
         # a genuine production call — see test_mock_opener_path_writes_no_
@@ -257,7 +258,7 @@ class CallReceiptTests(unittest.TestCase):
             client._append_call_receipt({"q": 1}, ["semantic_creation"], answer, log)
             rows = [json.loads(line) for line in Path(log).read_text().splitlines()]
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["response_id"], "resp-abc123")
+        self.assertNotIn("response_id", rows[0])
         self.assertEqual(rows[0]["usage"], {"input_tokens": 11, "output_tokens": 3})
         self.assertEqual(rows[0]["facets"], ["semantic_creation"])
 

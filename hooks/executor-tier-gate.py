@@ -68,14 +68,12 @@ except Exception:                       # a missing meter must not change a verd
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
-find_build_advisory = None  # type: Optional[Callable[[Any], Any]]
-required_facets = None  # type: Optional[Callable[[Any], Any]]
+turn_required_facets = None  # type: Optional[Callable[[Any], Any]]
 prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
 prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
 try:                                    # same fail-open posture as jev_pick below
     from lib.jev_required_actions import (
-        find_build_advisory, prompt_names_facet, prompt_names_not_applicable,
-        required_facets)
+        prompt_names_facet, prompt_names_not_applicable, turn_required_facets)
 except Exception:
     pass
 
@@ -193,7 +191,8 @@ def missing_required_actions_in_prompt(payload, prompt):
     prompt with the turn's advisory, so a required action stopped at the
     parent and never reached the subagent that would actually do the work.
     """
-    if find_build_advisory is None or required_facets is None:
+    if (turn_required_facets is None or prompt_names_not_applicable is None
+            or prompt_names_facet is None):
         return []
     if prompt_names_not_applicable(prompt):
         return []
@@ -203,8 +202,9 @@ def missing_required_actions_in_prompt(payload, prompt):
             return []
         with open(path, errors="replace") as fh:
             recs = [json.loads(line) for line in fh if line.strip()]
-        receipt = find_build_advisory(recs)
-        required = required_facets(receipt)
+        # The UNION across every advisory folded into this turn (round 3):
+        # a notification's own empty advisory must not erase the prompt's.
+        required, _turn_key = turn_required_facets(recs)
     except Exception as exc:
         log(f"JEV-REQUIRED-ACTIONS(unavailable) {exc}")
         return []

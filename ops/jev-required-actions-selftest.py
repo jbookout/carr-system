@@ -50,7 +50,7 @@ sys.path.insert(0, REPO)
 
 from lib.jev_required_actions import (  # noqa: E402
     current_turn_slice, evaluate_required_actions, facets_called_this_turn,
-    find_build_advisory, is_real_user_turn, is_synthetic_continuation,
+    find_build_advisory, is_real_user_turn, is_synthetic_continuation, jev_calls_log_mentions,
     latest_user_turn_index, load_jev_call_receipts, missing_facets,
     prompt_names_facet, prompt_names_not_applicable, refused_facets_in_texts,
     required_facets, semantic_creation_receipt_missing, turn_boundary_timestamp,
@@ -440,12 +440,15 @@ def lib_is_synthetic_continuation_covers_task_notifications_and_reminders():
 
 def lib_refused_facets_handles_each_batched_form():
     """Fix #2's four literal example forms from the review, verbatim."""
+    # Round 3: the placeholder word "reason" no longer passes (12-char floor),
+    # so each form carries a real reason of the kind the 28 real refusal lines
+    # in session f4d5b78a use.
     forms_and_expected = [
-        ("JEV-REFUSED: semantic_creation, evidence_matching — reason",
+        ("JEV-REFUSED: semantic_creation, evidence_matching — TypeSafe returned HTTP 402",
          {"semantic_creation", "evidence_matching"}),
-        ("JEV-REFUSED: semantic_creation and evidence_matching. reason",
+        ("JEV-REFUSED: semantic_creation and evidence_matching. Jev unreachable this turn",
          {"semantic_creation", "evidence_matching"}),
-        ("JEV-REFUSED: next_action_priority. reason",
+        ("JEV-REFUSED: next_action_priority. the partner named the next step",
          {"next_action_priority"}),
         ("JEV-REFUSED: I made no separate Jev calls for semantic_creation, "
          "diagnosis, verification_selection or evidence_matching this turn "
@@ -697,6 +700,246 @@ def latch_does_not_reopen_twice_for_the_same_turn():
         return ok
 
 
+# ---------------------------------------------------------------------------
+# round 3 (2026-09-24, third Opus review of PR #1224): real-data replay
+#
+# Every record below is a REDACTED copy of a real record from a local
+# transcript (session f4d5b78a): the keys, nesting, origin stamps, isMeta
+# flags and message prefixes are verbatim; ids, paths, bodies and hashes are
+# replaced. Timestamps are relative to NOW so the call-window arithmetic is
+# exercised the way a live Stop would see it.
+# ---------------------------------------------------------------------------
+
+def real_human_prompt(prompt_id, when=0, content="REDACTED human prompt"):
+    return {"parentUuid": "p-0", "isSidechain": False, "promptId": prompt_id, "type": "user",
+            "message": {"role": "user", "content": content}, "uuid": f"u-{prompt_id}",
+            "timestamp": ts(when), "permissionMode": "auto", "origin": {"kind": "human"},
+            "promptSource": "user", "turnOrigin": "user", "userType": "external",
+            "entrypoint": "claude-desktop", "cwd": "/REDACTED", "sessionId": "s1",
+            "version": "2.1.280", "gitBranch": "main"}
+
+
+def real_task_notification(prompt_id, when):
+    return {"parentUuid": "p-1", "isSidechain": False, "promptId": prompt_id, "type": "user",
+            "message": {"role": "user", "content":
+                        "<task-notification>\n<task-id>REDACTED</task-id>\n"
+                        "<tool-use-id>REDACTED</tool-use-id>\n<status>completed</status>\n"
+                        "</task-notification>"},
+            "uuid": f"u-{prompt_id}", "timestamp": ts(when), "permissionMode": "auto",
+            "origin": {"kind": "task-notification"}, "promptSource": "system",
+            "turnOrigin": "task_notification", "queueSkipAttachments": True,
+            "userType": "external", "entrypoint": "claude-desktop", "cwd": "/REDACTED",
+            "sessionId": "s1", "version": "2.1.280", "gitBranch": "main"}
+
+
+def real_cross_session_message(prompt_id, when, with_origin=True):
+    rec = {"parentUuid": "p-2", "isSidechain": False, "promptId": prompt_id, "type": "user",
+           "message": {"role": "user", "content":
+                       "Another Claude session sent a message:\n<cross-session-message "
+                       "from=\"uds:REDACTED\" from-session=\"local_REDACTED\" "
+                       "from-name=\"REDACTED\" from-mode=\"prompting\">\nREDACTED body\n"
+                       "</cross-session-message>"},
+           "isMeta": True, "uuid": f"u-{prompt_id}", "timestamp": ts(when),
+           "permissionMode": "auto", "promptSource": "system", "turnOrigin": "peer",
+           "queueSkipAttachments": True, "userType": "external",
+           "entrypoint": "claude-desktop", "cwd": "/REDACTED", "sessionId": "s1",
+           "version": "2.1.280", "gitBranch": "main"}
+    if with_origin:
+        rec["origin"] = {"kind": "peer", "from": "uds:REDACTED", "name": "REDACTED"}
+    return rec
+
+
+def real_advisory(facets, receipt_id, when):
+    """The real UserPromptSubmit attachment: nested message-delivery shape,
+    plus the hookName/hookEvent keys a real one carries."""
+    rec = build_advisory_nested_in_message_delivery(facets, receipt_id=receipt_id, when=when)
+    rec["attachment"].update({"hookName": "UserPromptSubmit", "hookEvent": "UserPromptSubmit",
+                              "toolUseID": "hook-REDACTED"})
+    rec.update({"type": "attachment", "isSidechain": False, "uuid": f"a-{receipt_id}"})
+    return rec
+
+
+def replay_notification_with_empty_advisory_cannot_erase_required():
+    """FIX 1. A human prompt requiring two facets, then a background task
+    notification carrying its OWN advisory that requires nothing (249 of 255
+    real notifications in f4d5b78a look like this). Round 2 kept the LAST
+    advisory and so read "none"; the union keeps both facets."""
+    recs = [real_human_prompt("P1", 0),
+            real_advisory(["architecture_or_design", "semantic_creation"], "r-human", 1),
+            assistant("Starting.", 2),
+            real_task_notification("N1", 300),
+            real_advisory([], "r-notification", 301),
+            assistant("Background task finished.", 302)]
+    result = evaluate_required_actions(recs, [], "/nonexistent.jsonl", "s1", [])
+    ok = (latest_user_turn_index(recs) == 0
+          and result["status"] == "required"
+          and result["required"] == ["architecture_or_design", "semantic_creation"]
+          and result["missing"] == ["architecture_or_design", "semantic_creation"]
+          and result["turn_key"] == "r-human")
+    # And a notification that ADDS a facet widens the set; nothing removes one.
+    recs2 = recs + [real_task_notification("N2", 400), real_advisory(["diagnosis"], "r-n2", 401)]
+    result2 = evaluate_required_actions(recs2, [], "/nonexistent.jsonl", "s1", [])
+    ok = ok and result2["required"] == ["architecture_or_design", "semantic_creation", "diagnosis"]
+    print(f"{'PASS' if ok else 'FAIL'}  replay: a notification's empty advisory cannot erase the "
+          f"prompt's required facets (got {result['status']} {result['required']}; "
+          f"widened {result2['required']})")
+    return ok
+
+
+def replay_notification_with_empty_advisory_reopens_end_to_end():
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        records = [real_human_prompt("P1", 0),
+                   real_advisory(["architecture_or_design"], "r-e2e-union", 1),
+                   assistant("Plan drafted.", 2),
+                   real_task_notification("N1", 60),
+                   real_advisory([], "r-e2e-notification", 61),
+                   assistant("All done here.", 62)]
+        blocked, _ = run_gate(records, "s-union", state,
+                              env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": "/nonexistent.jsonl"})
+    ok = blocked is True
+    print(f"{'PASS' if ok else 'FAIL'}  replay end-to-end: prompt advisory + notification with an "
+          f"empty advisory, no evidence -> reopens (blocked={blocked})")
+    return ok
+
+
+def replay_ninety_minute_turn_call_counts():
+    """FIX 2. A real call at minute 90 of a turn counts; the window is turn
+    start to now, bound to the session id, with no duration cap."""
+    boundary = datetime.fromisoformat(ts(-5700).replace("Z", "+00:00"))
+    now = datetime.fromisoformat(ts(0).replace("Z", "+00:00"))
+    rows = [call_row(facets=["architecture_or_design"], when=-300)]            # minute 90
+    late = facets_called_this_turn(rows, "s1", boundary, ["architecture_or_design"], now=now)
+    other_session = facets_called_this_turn(
+        [call_row(facets=["architecture_or_design"], when=-300, session="s2")],
+        "s1", boundary, ["architecture_or_design"], now=now)
+    before_turn = facets_called_this_turn(
+        [call_row(facets=["architecture_or_design"], when=-5800)],
+        "s1", boundary, ["architecture_or_design"], now=now)
+    after_now = facets_called_this_turn(
+        [call_row(facets=["architecture_or_design"], when=600)],
+        "s1", boundary, ["architecture_or_design"], now=now)
+    recs = [real_human_prompt("P1", -5700),
+            real_advisory(["architecture_or_design"], "r-long", -5699),
+            assistant("long work", -3000)]
+    path = write_jev_calls_file(rows)
+    try:
+        result = evaluate_required_actions(recs, [], path, "s1", [], now=now)
+    finally:
+        os.unlink(path)
+    ok = (late == {"architecture_or_design"} and other_session == set()
+          and before_turn == set() and after_now == set() and result["missing"] == [])
+    print(f"{'PASS' if ok else 'FAIL'}  replay: a call at minute 90 of a 95-minute turn counts; "
+          "another session's, a pre-turn, and a future receipt do not")
+    return ok
+
+
+def replay_cross_session_message_folds_into_turn():
+    """FIX 3. A real cross-session message ("Another Claude session sent a
+    message") is folded into the running turn — with or without the origin
+    stamp — and its advisory joins the union."""
+    ok = True
+    for with_origin in (True, False):
+        recs = [real_human_prompt("P1", 0),
+                real_advisory(["verification_selection"], "r-p", 1),
+                assistant("working", 2),
+                real_cross_session_message("X1", 120, with_origin=with_origin),
+                real_advisory(["evidence_matching"], "r-x", 121),
+                assistant("Ack.", 122)]
+        result = evaluate_required_actions(recs, [], "/nonexistent.jsonl", "s1", [])
+        this_ok = (is_synthetic_continuation(recs[3])
+                   and latest_user_turn_index(recs) == 0
+                   and result["required"] == ["verification_selection", "evidence_matching"])
+        ok = ok and this_ok
+        print(f"  {'PASS' if this_ok else 'FAIL'}  cross-session message (origin stamp="
+              f"{with_origin}) folds: required={result['required']}")
+    print(f"{'PASS' if ok else 'FAIL'}  replay: a cross-session message turn is folded and its "
+          "advisory joins the union")
+    return ok
+
+
+def replay_refusal_before_notification_still_counts_end_to_end():
+    """A JEV-REFUSED line written BEFORE a folded notification must still
+    satisfy the turn (the gate reads the library's folded turn, not its own
+    human_turns window, which restarts at a notification)."""
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        records = [real_human_prompt("P1", 0),
+                   real_advisory(["diagnosis"], "r-refuse-early", 1),
+                   assistant("JEV-REFUSED: diagnosis TypeSafe returned HTTP 402, no credits", 2),
+                   real_task_notification("N1", 60),
+                   real_advisory([], "r-refuse-early-n", 61),
+                   assistant("Background task done.", 62)]
+        blocked, reason = run_gate(records, "s-refuse-early", state,
+                                   env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": "/nonexistent.jsonl"})
+    ok = blocked is False
+    print(f"{'PASS' if ok else 'FAIL'}  replay end-to-end: a refusal written before a folded "
+          f"notification still satisfies the turn (blocked={blocked})")
+    return ok
+
+
+def refusal_reason_floor_and_stoplist():
+    """FIX 4. At least 12 characters, and not a stoplisted placeholder."""
+    rejected = ["JEV-REFUSED: diagnosis none", "JEV-REFUSED: diagnosis n/a",
+                "JEV-REFUSED: diagnosis na", "JEV-REFUSED: diagnosis skip",
+                "JEV-REFUSED: diagnosis not needed", "JEV-REFUSED: diagnosis — not needed here",
+                "JEV-REFUSED: diagnosis not applicable", "JEV-REFUSED: diagnosis reason",
+                "JEV-REFUSED: diagnosis too short"]
+    accepted = ["JEV-REFUSED: diagnosis TypeSafe HTTP 402 billing error",
+                "JEV-REFUSED: diagnosis — the partner already diagnosed it"]
+    bad = [t for t in rejected if refused_facets_in_texts([t])]
+    missed = [t for t in accepted if refused_facets_in_texts([t]) != {"diagnosis"}]
+    ok = not bad and not missed
+    print(f"{'PASS' if ok else 'FAIL'}  refusal reason needs >=12 chars and no stoplisted "
+          f"placeholder (wrongly accepted={bad}, wrongly rejected={missed})")
+    return ok
+
+
+def forge_detection_names_the_ledger():
+    """FIX 5b. Any tool call in the turn naming out/jev-calls.jsonl is
+    returned for a detection event; a real ask() run never names it."""
+    turn = [real_human_prompt("P1", 0),
+            bash("echo '{\"session\": \"s1\", \"facets\": [\"diagnosis\"], \"ok\": true}' "
+                 ">> out/jev-calls.jsonl", 1),
+            bash("tail -3 out/jev-calls.jsonl 2>&1", 2),
+            tool_use("Edit", {"file_path": "/repo/out/jev-calls.jsonl"}, 3),
+            bash("./.venv/bin/python scratch/ask_jev.py", 4)]
+    found = jev_calls_log_mentions(turn)
+    ok = ([m["write_like"] for m in found] == [True, False, True]
+          and [m["tool"] for m in found] == ["Bash", "Bash", "Edit"])
+    print(f"{'PASS' if ok else 'FAIL'}  forge detection: a shell append and an Edit on the ledger "
+          f"are write-like, a tail is a read, an ask() script is not named ({found})")
+    return ok
+
+
+def forge_detection_event_recorded_end_to_end():
+    session = f"s-forge-{os.getpid()}"
+    log = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        calls = write_jev_calls_file([call_row(facets=["diagnosis"], when=1, session=session)])
+        try:
+            records = [real_human_prompt("P1", 0),
+                       real_advisory(["diagnosis"], "r-forge", 1),
+                       bash(f"echo '{{\"session\": \"{session}\", \"facets\": [\"diagnosis\"], "
+                            f"\"ok\": true}}' >> out/jev-calls.jsonl", 2),
+                       assistant("Diagnosed.", 3)]
+            blocked, _ = run_gate(records, session, state,
+                                  env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": calls})
+        finally:
+            os.unlink(calls)
+    events = []
+    try:
+        with open(log) as fh:
+            for line in fh:
+                row = json.loads(line)
+                if row.get("session") == session and row.get("event") == "jev_calls_log_named":
+                    events.append(row)
+    except OSError:
+        pass
+    ok = blocked is False and len(events) == 1 and events[0]["write_like"] is True
+    print(f"{'PASS' if ok else 'FAIL'}  forge detection end-to-end: the forged receipt passes the "
+          f"verdict but a write-like detection event is recorded (events={len(events)})")
+    return ok
+
+
 def main():
     outcomes = [
         lib_reads_real_shape(),
@@ -731,6 +974,14 @@ def main():
         latch_does_not_reopen_twice_for_the_same_turn(),
         post_reopen_turn_still_enforced_end_to_end(),
         post_reopen_turn_with_refusal_after_the_reopen_passes(),
+        replay_notification_with_empty_advisory_cannot_erase_required(),
+        replay_notification_with_empty_advisory_reopens_end_to_end(),
+        replay_ninety_minute_turn_call_counts(),
+        replay_cross_session_message_folds_into_turn(),
+        replay_refusal_before_notification_still_counts_end_to_end(),
+        refusal_reason_floor_and_stoplist(),
+        forge_detection_names_the_ledger(),
+        forge_detection_event_recorded_end_to_end(),
     ]
     print(f"jev-required-actions-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
