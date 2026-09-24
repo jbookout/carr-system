@@ -69586,6 +69586,37 @@
       ],
       "expected_count": 900,
       "expected_sha256": "e10d7ad3f4ff45515d420fbdf6baeeb0329fa802a7f0fcd103ec8d5e5d27bb10"
+    },
+    {
+      "version": "v71",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:bin/deploy-worker.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/deploy-worker.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/deploy-worker.sh",
+          "schema_digest": "3fe0c40df56ed69f55a0631b31c7b15cf04df0fb336cfe23a93d98e25d08ce71",
+          "handler_digest": "3fe0c40df56ed69f55a0631b31c7b15cf04df0fb336cfe23a93d98e25d08ce71",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 900,
+      "expected_sha256": "d2cdb708366d2c04d8e575de6acf5ddaf6e141cd2f8f17936ed54e213f533c69"
     }
   ],
   "current_source_review": {
