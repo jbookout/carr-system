@@ -17,8 +17,8 @@ import {
   isClientTourFieldKey,
 } from "../src/tour-operations-contract.js";
 import {
-  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_DIGIT_JOIN, CLIENT_TEXT_MAX_CHARS, CLIENT_TEXT_RULES, CLIENT_TEXT_SUITE_RANGE,
-  clientSafeMetric, clientTextViolation, isClientRouteLabel, isClientSafeText,
+  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_DIGIT_JOIN, CLIENT_TEXT_MAX_CHARS, CLIENT_TEXT_RULES, CLIENT_TEXT_SPACE_RUN, CLIENT_TEXT_SUITE_RANGE,
+  clientSafeMetric, clientTextViolation, isClientRouteLabel, isClientSafeText, normalizeClientText,
 } from "../src/tour-client-value-safety.js";
 import { renderTourPacket, TourPacketRenderError } from "../src/tour-packet-render.js";
 import { tourRightsProjectionTools } from "../src/tour-rights-projection.js";
@@ -314,17 +314,40 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   // Counted in code points, as PostgreSQL char_length() counts.
   assert.equal(clientTextViolation("\u{1F3E5}".repeat(CLIENT_TEXT_MAX_CHARS)), null);
   assert.equal(clientTextViolation("Available\nnow"), "control_character");
-  for (const [value, rule] of [[null, "not_text"], [undefined, "not_text"], [4, "not_text"], [{}, "not_text"], ["", "empty"], ["   ", "empty"]])
-    assert.equal(clientTextViolation(value), rule, String(value));
+  for (const [value, rule] of [[null, "not_text"], [undefined, "not_text"], [4, "not_text"], [{}, "not_text"], ["", "empty"], ["   ", "empty"],
+    ["   ", "empty"], ["　", "empty"]])
+    assert.equal(clientTextViolation(value), rule, JSON.stringify(value));
+  // Unicode spaces are read as spaces, and space runs as one space -- the text
+  // a browser shows and the PDF prints.
+  assert.equal(normalizeClientText("  Suite  210  "), "Suite 210");
+  assert.equal(normalizeClientText("251   555    0100"), "251 555 0100");
+  // The cap is measured on that text: a padded 120-character value passes.
+  assert.equal(clientTextViolation(` ${"A".repeat(CLIENT_TEXT_MAX_CHARS)} `), null);
+  assert.equal(clientTextViolation(`A${" ".repeat(10)}${"A".repeat(CLIENT_TEXT_MAX_CHARS - 2)}`), null);
   for (const value of SMUGGLED) assert.equal(isClientSafeText(value), false, JSON.stringify(value));
   for (const label of ["A", "B", "12", "A1"]) assert.equal(isClientRouteLabel(label), true, label);
   for (const label of ["Stop 1", "ABCD", "", " A", "A-", "Stop A: Owner Bob 251-555-0100", null])
     assert.equal(isClientRouteLabel(label), false, String(label));
 });
 
+// How the proof spells a corpus string: a plain literal, or a U&'' literal
+// with \XXXX escapes when it holds anything beyond printable ASCII (the
+// no-break and thin spaces, en dashes and ± of the corpus).
+function sqlLiteral(value) {
+  if (/^[\x20-\x7e]*$/.test(value)) return `'${value.replaceAll("'", "''")}'`;
+  const body = Array.from(value).map(ch => {
+    if (ch === "'") return "''";
+    if (ch === "\\") return "\\\\";
+    const code = ch.codePointAt(0);
+    if (code >= 0x20 && code <= 0x7e) return ch;
+    return code <= 0xffff ? `\\${code.toString(16).padStart(4, "0")}` : `\\+${code.toString(16).padStart(6, "0")}`;
+  }).join("");
+  return `U&'${body}'`;
+}
+
 test("the Postgres proof runs the same corpus through the database rule", () => {
   const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");
-  const literal = value => `'${value.replaceAll("'", "''")}'`;
+  const literal = sqlLiteral;
   for (const value of ORDINARY) assert.ok(proof.includes(literal(value)), `proof lacks ordinary ${value}`);
   for (const [value, rule] of CORPUS.refused)
     assert.ok(proof.includes(`(${literal(value)},${literal(rule)})`), `proof lacks refused ${value} -> ${rule}`);
@@ -364,6 +387,10 @@ test("the JavaScript value rule and the database value rule are the same text", 
   assert.deepEqual(sqlRules.map(({ rule, target, pattern }) => ({ rule, target, pattern })), CLIENT_TEXT_RULES.map(entry => ({ ...entry })));
   assert.ok(migration.includes(`select '${CLIENT_TEXT_DIGIT_JOIN.pattern}'::text`), "digit join pattern parity");
   assert.ok(migration.includes(`select '${CLIENT_TEXT_SUITE_RANGE.pattern}'::text`), "suite range pattern parity");
+  assert.ok(migration.includes(`select '${CLIENT_TEXT_SPACE_RUN}'::text`), "space run pattern parity");
+  assert.ok(sqlBody(migration, "tour_client_text_normalize").includes(
+    "regexp_replace(regexp_replace(p_text, ops.tour_client_text_space_run_pattern(), ' ', 'g'), '^ | $', '', 'g')"), "normalize parity");
+  assert.match(sqlBody(migration, "tour_client_text_violation"), /from \(select ops\.tour_client_text_normalize\(p_text\) t\) n/);
   const violation = sqlBody(migration, "tour_client_text_violation");
   assert.ok(violation.includes(`ops.tour_client_text_digit_join_pattern(), '${CLIENT_TEXT_DIGIT_JOIN.replacement.replace("$1", "\\1")}', 'g')`));
   assert.ok(violation.includes(`ops.tour_client_text_suite_range_pattern(), '${CLIENT_TEXT_SUITE_RANGE.replacement.replace("$1", "\\1")}', 'gi')`));
@@ -402,6 +429,10 @@ test("one unsafe value anywhere refuses the whole browser packet, never a trimme
         `${column}.${key}: ${smuggled}`);
   }
   assert.equal(projectTourClientPacket({ stops: [cleanStop, { ...secondStop, route_label: "Stop B: Owner Bob 251-555-0100" }] }), null);
+  // What the client receives is the text the rule judged: Unicode spaces and
+  // space runs come out as one ASCII space.
+  assert.equal(projectTourClientPacket({ stops: [{ ...cleanStop, parking: " 4/1,000   surface " }] }).stops[0].parking,
+    "4/1,000 surface");
   // A stop the client could not identify (no name or no address) is refused too.
   for (const column of ["name", "address"]) {
     const { [column]: _dropped, ...unnamed } = secondStop;
@@ -440,6 +471,12 @@ test("the PDF renderer admits exactly the client allowlist and refuses the same 
     assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, size: { value: 4200, unit: "SF", label: smuggled } }] }),
       refused("tour_packet_forbidden_contact"), `size.label: ${smuggled}`);
   }
+  // A line break the PDF would print as a space is still the stored value's
+  // control character: refused, as the database and the share refuse it.
+  assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: "Available\nnow" }] }),
+    refused("tour_packet_forbidden_contact"));
+  assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: "Call 251      555      0100" }] }),
+    refused("tour_packet_forbidden_contact"));
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: "P".repeat(CLIENT_TEXT_MAX_CHARS + 1) }] }), refused("tour_packet_overflow"));
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, route_label: "Stop 1" }] }), refused("tour_packet_invalid_route_label"));
 });

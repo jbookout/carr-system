@@ -38,10 +38,15 @@
 --      fire.
 --   5. Client VALUE safety. ops.tour_client_text_violation() is the one value
 --      rule for the eight client fields and returns the name of the first
---      rule a text breaks: email, url, phone (ten digits however they are
---      grouped: 251 555 01 00, (251)5550100, 251-5550100), local_phone
---      (555-0100, after suite ranges such as "Suites 100-1200" are set
---      aside), international_phone, access_code (gate/door/key/entry/alarm/
+--      rule a text breaks. It first collapses every run of ASCII or Unicode
+--      spaces (no-break, thin, narrow no-break, zero-width ...) to one space
+--      and trims -- the text a browser shows and the PDF prints -- then:
+--      email, url, phone (ten digits however grouped: 251 555 01 00,
+--      251 - 555 - 0100, (251)5550100), local_phone (555-0100, 555 - 0100;
+--      a dash range after a suite word whose second number has no leading
+--      zero, such as "Suites 100-1200", is set aside; "Unit 555-0100" is
+--      not), international_phone (+44 ..., + 44 ..., 011 44 ...),
+--      access_code (gate/door/key/entry/alarm/
 --      keypad/lock + code/combo/PIN/password, as whole words), lockbox,
 --      internal_note, too_long (120), control_character, empty. The rules
 --      are whole-word and number-aware so ordinary listing text ("Westgate
@@ -78,32 +83,48 @@ returns integer language sql immutable parallel safe as $$ select 120 $$;
 create or replace function ops.tour_client_route_label_pattern()
 returns text language sql immutable parallel safe as $$ select '^[A-Za-z0-9]{1,3}$'::text $$;
 
--- Digits separated by one or two of space ( ) . - are joined before the phone
--- rule reads a value. A slash or comma does not join (dates, 4,200 SF).
-create or replace function ops.tour_client_text_digit_join_pattern()
-returns text language sql immutable parallel safe as $$ select '([0-9])[ ().-]{1,2}(?=[0-9])'::text $$;
+-- Every run of spaces -- ASCII and the Unicode spaces (no-break, thin, narrow
+-- no-break, zero-width, ideographic, line/paragraph separators) -- becomes
+-- ONE ASCII space and the ends are trimmed before any rule reads a value:
+-- the text a browser shows and the PDF prints.
+create or replace function ops.tour_client_text_space_run_pattern()
+returns text language sql immutable parallel safe as $$ select '[ \u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]+'::text $$;
 
--- A suite/unit range is set aside before the seven-digit local-number rule.
+-- Digits separated by up to five of space ( ) . - and en/em dash are joined
+-- before the phone rules read a value. A slash or comma does not join
+-- (dates, 4,200 SF).
+create or replace function ops.tour_client_text_digit_join_pattern()
+returns text language sql immutable parallel safe as $$ select '([0-9])[ ().\u2013\u2014-]{1,5}(?=[0-9])'::text $$;
+
+-- A suite/unit/room RANGE is set aside before the seven-digit local-number
+-- rule: two numbers of 1-4 digits joined by a dash, the second without a
+-- leading zero. A dot or a leading-zero second number is not a range, so
+-- "Unit 555-0100" and "Ste #555.0100" are still read as phones.
 create or replace function ops.tour_client_text_suite_range_pattern()
 returns text language sql immutable parallel safe as $$
-  select '(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]*#?[0-9]{1,4}[ ]*[-.][ ]*[0-9]{1,4}(?![0-9])'::text
+  select '(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]?#?[0-9]{1,4}[ ]?[\u2013\u2014-][ ]?[1-9][0-9]{0,3}(?![0-9])'::text
 $$;
 
 -- Case-insensitive, checked in ordinal order; the first match names the
--- refusal. target: raw (trimmed value), digits (digit groups joined),
+-- refusal. target: raw (normalized value), digits (digit groups joined),
 -- nosuite (suite ranges set aside).
 create or replace function ops.tour_client_text_rules()
 returns table(ordinal integer, rule text, target text, pattern text)
 language sql immutable parallel safe as $$
   values
-    (1, 'email', 'raw', '[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9-]+([.][A-Za-z0-9-]+)*[.][A-Za-z]{2,}'),
-    (2, 'url', 'raw', 'https?://|www[.]|[A-Za-z0-9-]{2,}[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)'),
+    (1, 'email', 'raw', '[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}'),
+    (2, 'url', 'raw', 'https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)'),
     (3, 'phone', 'digits', '(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)'),
-    (4, 'local_phone', 'nosuite', '(^|[^0-9])[2-9][0-9]{2}[-.][0-9]{4}([^0-9]|$)'),
-    (5, 'international_phone', 'raw', '[+][0-9][0-9 ().-]{7,}[0-9]'),
+    (4, 'local_phone', 'nosuite', '(^|[^0-9])[2-9][0-9]{2} ?[.\u2013\u2014-] ?[0-9]{4}([^0-9]|$)'),
+    (5, 'international_phone', 'digits', '[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)'),
     (6, 'access_code', 'raw', '(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)'),
     (7, 'lockbox', 'raw', '(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)'),
     (8, 'internal_note', 'raw', '(^|[^A-Za-z])(internal[ -]?(notes?|only|use)|confidential|do not (share|disclose)|broker[ -]only|not for (the )?clients?)([^A-Za-z]|$)')
+$$;
+
+create or replace function ops.tour_client_text_normalize(p_text text)
+returns text language sql immutable parallel safe as $$
+  select regexp_replace(regexp_replace(p_text, ops.tour_client_text_space_run_pattern(), ' ', 'g'), '^ | $', '', 'g')
 $$;
 
 create or replace function ops.tour_client_text_violation(p_text text)
@@ -111,18 +132,22 @@ returns text language sql immutable parallel safe as $$
   select case
     when p_text is null then 'not_text'
     when p_text ~ '[[:cntrl:]]' then 'control_character'
-    when btrim(p_text) = '' then 'empty'
-    when char_length(btrim(p_text)) > ops.tour_client_text_max_chars() then 'too_long'
     else (
-      select r.rule
-        from ops.tour_client_text_rules() r
-       where (case r.target
-                when 'digits' then regexp_replace(btrim(p_text), ops.tour_client_text_digit_join_pattern(), '\1', 'g')
-                when 'nosuite' then regexp_replace(btrim(p_text), ops.tour_client_text_suite_range_pattern(), '\1 ', 'gi')
-                else btrim(p_text)
-              end) ~* r.pattern
-       order by r.ordinal
-       limit 1)
+      select case
+        when n.t = '' then 'empty'
+        when char_length(n.t) > ops.tour_client_text_max_chars() then 'too_long'
+        else (
+          select r.rule
+            from ops.tour_client_text_rules() r
+           where (case r.target
+                    when 'digits' then regexp_replace(n.t, ops.tour_client_text_digit_join_pattern(), '\1', 'g')
+                    when 'nosuite' then regexp_replace(n.t, ops.tour_client_text_suite_range_pattern(), '\1 ', 'gi')
+                    else n.t
+                  end) ~* r.pattern
+           order by r.ordinal
+           limit 1)
+      end
+      from (select ops.tour_client_text_normalize(p_text) t) n)
   end
 $$;
 
@@ -256,6 +281,7 @@ returns boolean language sql stable set search_path=pg_catalog,ops,public,pg_tem
 $$;
 
 revoke all on function ops.tour_client_text_max_chars(), ops.tour_client_route_label_pattern(),
+  ops.tour_client_text_space_run_pattern(), ops.tour_client_text_normalize(text),
   ops.tour_client_text_digit_join_pattern(), ops.tour_client_text_suite_range_pattern(),
   ops.tour_client_text_rules(), ops.tour_client_text_violation(text), ops.tour_client_text_safe(text),
   ops.tour_client_field_keys(), ops.tour_client_field_allowed(text), ops.tour_client_value_violation(text,jsonb),

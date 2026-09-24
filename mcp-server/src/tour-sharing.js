@@ -1,6 +1,6 @@
 import { organizationTenantForActor } from "./identity.js";
 import { CLIENT_TOUR_FIELD_KEYS, CLIENT_TOUR_PACKET_COLUMNS, requiredTimestamp, PUBLIC_ASSET_REFERENCE_RE } from "./tour-operations-contract.js";
-import { clientSafeMetric, isClientRouteLabel, isClientSafeText } from "./tour-client-value-safety.js";
+import { clientSafeMetric, isClientRouteLabel, isClientSafeText, normalizeClientText } from "./tour-client-value-safety.js";
 
 const PROPERTY_REF=v=>typeof v==="string"&&/^property:public:[A-Za-z0-9_-]{16,128}$/.test(v);
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,DIGEST=/^sha256:[0-9a-f]{64}$/;
@@ -31,7 +31,7 @@ const schema=(properties,required)=>({type:"object",additionalProperties:false,p
 // notes, caveats, photos, appointment times and internal ids never leave,
 // whether as their own key or typed inside an allowed one.
 const CLIENT_STRUCTURED_COLUMNS=new Set(["size","asking_economics"]);
-function clientStop(v){if(!v||typeof v!=="object"||Array.isArray(v)||!PROPERTY_REF(v.property_ref)||!Number.isInteger(v.route_sequence)||v.route_sequence<1||!isClientRouteLabel(v.route_label)||!isClientSafeText(v.name)||!isClientSafeText(v.address))return undefined;const out={property_ref:v.property_ref,route_sequence:v.route_sequence,route_label:v.route_label};for(const field of CLIENT_TOUR_FIELD_KEYS){const column=CLIENT_TOUR_PACKET_COLUMNS[field];if(!Object.hasOwn(v,column)||v[column]===null)continue;if(CLIENT_STRUCTURED_COLUMNS.has(column)){const x=clientSafeMetric(v[column]);if(x===undefined)return undefined;out[column]=x;}else{if(!isClientSafeText(v[column]))return undefined;out[column]=v[column].trim();}}return out;}
+function clientStop(v){if(!v||typeof v!=="object"||Array.isArray(v)||!PROPERTY_REF(v.property_ref)||!Number.isInteger(v.route_sequence)||v.route_sequence<1||!isClientRouteLabel(v.route_label)||!isClientSafeText(v.name)||!isClientSafeText(v.address))return undefined;const out={property_ref:v.property_ref,route_sequence:v.route_sequence,route_label:v.route_label};for(const field of CLIENT_TOUR_FIELD_KEYS){const column=CLIENT_TOUR_PACKET_COLUMNS[field];if(!Object.hasOwn(v,column)||v[column]===null)continue;if(CLIENT_STRUCTURED_COLUMNS.has(column)){const x=clientSafeMetric(v[column]);if(x===undefined)return undefined;out[column]=x;}else{if(!isClientSafeText(v[column]))return undefined;out[column]=normalizeClientText(v[column]);}}return out;}
 function clientPoint(p){if(!p||typeof p!=="object"||Array.isArray(p)||!PROPERTY_REF(p.property_ref)||!Number.isInteger(p.route_sequence)||p.route_sequence<1||!isClientRouteLabel(p.route_label)||!Number.isFinite(p.latitude)||p.latitude< -90||p.latitude>90||!Number.isFinite(p.longitude)||p.longitude< -180||p.longitude>180)return undefined;return{latitude:p.latitude,longitude:p.longitude,property_ref:p.property_ref,route_sequence:p.route_sequence,route_label:p.route_label};}
 function allOrNothing(items,project){if(!Array.isArray(items))return null;const out=items.map(project);return out.every(Boolean)?out:null;}
 export function projectTourClientPacket(v){if(!v||typeof v!=="object"||Array.isArray(v))return null;const stops=allOrNothing(v.stops,clientStop);if(!stops)return null;const out={};if(typeof v.as_of==="string")out.as_of=v.as_of;out.stops=stops;return out;}

@@ -56,13 +56,15 @@ function plainText(value, path, maximum = MAX_FIELD_CHARS, contactScreen = true)
 
 /**
  * A client field value: plain text judged by the shared client value-safety
- * rule alone -- on the value as stored, exactly as the database and the
- * browser share judge it -- so the PDF never refuses a value the list and map
- * show ("36602-1234", "Available 03-15-2027") nor shows one they refuse.
+ * rule alone, so the PDF never refuses a value the list and map show
+ * ("36602-1234", "Available 03-15-2027"). It is judged twice: as stored,
+ * exactly as the database and the browser share judge it, AND as the exact
+ * whitespace-collapsed text this renderer prints, so nothing the PDF prints
+ * has escaped the rule.
  */
 function clientText(value, path) {
   const text = plainText(value, path, CLIENT_TEXT_MAX_CHARS, false);
-  if (!isClientSafeText(value)) reject("tour_packet_forbidden_contact", { path });
+  if (!isClientSafeText(value) || !isClientSafeText(text)) reject("tour_packet_forbidden_contact", { path });
   return text;
 }
 

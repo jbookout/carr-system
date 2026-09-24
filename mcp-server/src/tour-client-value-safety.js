@@ -28,32 +28,43 @@
 export const CLIENT_TEXT_MAX_CHARS = 120;
 export const CLIENT_ROUTE_LABEL_PATTERN = "^[A-Za-z0-9]{1,3}$";
 
-// Before the phone rule reads a value, digits separated by one or two of
-// space ( ) . - are joined, so 251 555 01 00, (251)5550100 and 251-5550100 all
-// read as 2515550100. A slash or comma does not join (dates, 4,200 SF).
-export const CLIENT_TEXT_DIGIT_JOIN = Object.freeze({ pattern: "([0-9])[ ().-]{1,2}(?=[0-9])", replacement: "$1" });
-// Before the seven-digit local-number rule reads a value, a suite/unit range
-// (Suites 100-1200, Ste 250-1200) is removed, so it is not read as 555-0100.
+
+// Before any rule reads a value, every run of spaces -- ASCII space and the
+// Unicode spaces (no-break, thin, narrow no-break, zero-width, ideographic,
+// line/paragraph separators) -- becomes ONE ASCII space, and the ends are
+// trimmed. That is the text a browser shows and the PDF prints, so every
+// engine judges what a client would actually read.
+export const CLIENT_TEXT_SPACE_RUN = "[ \\u00a0\\u1680\\u2000-\\u200b\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]+";
+// Before the phone rules read a value, digits separated by up to five of
+// space ( ) . - and en/em dash are joined, so 251 - 555 - 0100, 251 . 555 .
+// 0100, (251)5550100 and 251 555 01 00 all read as 2515550100. A slash or
+// comma does not join (dates, 4,200 SF).
+export const CLIENT_TEXT_DIGIT_JOIN = Object.freeze({ pattern: "([0-9])[ ().\\u2013\\u2014-]{1,5}(?=[0-9])", replacement: "$1" });
+// Before the seven-digit local-number rule reads a value, a suite/unit/room
+// RANGE is set aside: a suite word, then two numbers of 1-4 digits joined by
+// a dash, the second without a leading zero (Suites 100-1200, Suite
+// 251-5550, Suites 250 - 2500 SF). A dot or a leading-zero second number is
+// not a range, so Unit 555-0100 and Ste #555.0100 are still read as phones.
 export const CLIENT_TEXT_SUITE_RANGE = Object.freeze({
-  pattern: "(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]*#?[0-9]{1,4}[ ]*[-.][ ]*[0-9]{1,4}(?![0-9])",
+  pattern: "(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]?#?[0-9]{1,4}[ ]?[\\u2013\\u2014-][ ]?[1-9][0-9]{0,3}(?![0-9])",
   replacement: "$1 ",
 });
 
 // Case-insensitive, checked in this order; the first rule that matches names
-// the refusal. `target` is the text the rule reads: the trimmed value (raw),
-// the value with digit groups joined (digits), or with suite ranges removed
+// the refusal. `target` is the text the rule reads: the normalized value
+// (raw), with digit groups joined (digits), or with suite ranges set aside
 // (nosuite).
 export const CLIENT_TEXT_RULES = Object.freeze([
   // an email address (an @ between words; "4,200 RSF @ $28.50/SF" is not one)
-  Object.freeze({ rule: "email", target: "raw", pattern: "[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9-]+([.][A-Za-z0-9-]+)*[.][A-Za-z]{2,}" }),
-  // a URL or a bare web domain
-  Object.freeze({ rule: "url", target: "raw", pattern: "https?://|www[.]|[A-Za-z0-9-]{2,}[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)" }),
+  Object.freeze({ rule: "email", target: "raw", pattern: "[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}" }),
+  // a URL or a bare web domain (its name holds a letter: "Hwy 90.US 29" is a road)
+  Object.freeze({ rule: "url", target: "raw", pattern: "https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)" }),
   // a North-American phone number, however its ten digits are grouped
   Object.freeze({ rule: "phone", target: "digits", pattern: "(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)" }),
-  // a seven-digit local number: 555-0100 (exchange 2-9, as NANP requires)
-  Object.freeze({ rule: "local_phone", target: "nosuite", pattern: "(^|[^0-9])[2-9][0-9]{2}[-.][0-9]{4}([^0-9]|$)" }),
-  // an international number: +44 20 7946 0958
-  Object.freeze({ rule: "international_phone", target: "raw", pattern: "[+][0-9][0-9 ().-]{7,}[0-9]" }),
+  // a seven-digit local number: 555-0100, 555 - 0100 (exchange 2-9, as NANP requires)
+  Object.freeze({ rule: "local_phone", target: "nosuite", pattern: "(^|[^0-9])[2-9][0-9]{2} ?[.\\u2013\\u2014-] ?[0-9]{4}([^0-9]|$)" }),
+  // an international number: +44 20 7946 0958, + 44 ..., 011 44 ...
+  Object.freeze({ rule: "international_phone", target: "digits", pattern: "[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)" }),
   // access-code wording, as whole words: gate code, door combo, entry PIN,
   // alarm code, keypad code ("Westgate Pines", "Fire alarm system" pass)
   Object.freeze({ rule: "access_code", target: "raw", pattern: "(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)" }),
@@ -64,14 +75,17 @@ export const CLIENT_TEXT_RULES = Object.freeze([
 ]);
 
 const RULES = CLIENT_TEXT_RULES.map(entry => ({ ...entry, regex: new RegExp(entry.pattern, "i") }));
+const SPACE_RUN = new RegExp(CLIENT_TEXT_SPACE_RUN, "g");
 const DIGIT_JOIN = new RegExp(CLIENT_TEXT_DIGIT_JOIN.pattern, "g");
 const SUITE_RANGE = new RegExp(CLIENT_TEXT_SUITE_RANGE.pattern, "gi");
 const ROUTE_LABEL = new RegExp(CLIENT_ROUTE_LABEL_PATTERN);
 // C0 controls (tab, newline and carriage return included) and DEL.
 const CONTROL = /[\u0000-\u001F\u007F]/;
-// PostgreSQL btrim() trims spaces only; so does this, so both engines measure
-// and match the same text.
-const trimSpaces = value => value.replace(/^ +| +$/g, "");
+
+/** The text every client rule reads: space runs collapsed to one space, ends trimmed. */
+export function normalizeClientText(value) {
+  return value.replace(SPACE_RUN, " ").replace(/^ | $/g, "");
+}
 
 /**
  * The name of the first client text rule `value` breaks, or null when a client
@@ -80,7 +94,7 @@ const trimSpaces = value => value.replace(/^ +| +$/g, "");
 export function clientTextViolation(value, maximum = CLIENT_TEXT_MAX_CHARS) {
   if (typeof value !== "string") return "not_text";
   if (CONTROL.test(value)) return "control_character";
-  const text = trimSpaces(value);
+  const text = normalizeClientText(value);
   if (!text) return "empty";
   // Counted in code points, as PostgreSQL char_length() counts.
   if (Array.from(text).length > maximum) return "too_long";
@@ -92,6 +106,7 @@ export function clientTextViolation(value, maximum = CLIENT_TEXT_MAX_CHARS) {
   for (const entry of RULES) if (entry.regex.test(targets[entry.target])) return entry.rule;
   return null;
 }
+
 
 /** True when `value` is text a client may see inside an allowlisted field. */
 export function isClientSafeText(value, maximum = CLIENT_TEXT_MAX_CHARS) {
@@ -128,7 +143,7 @@ export function clientSafeMetric(value) {
     } else {
       return undefined;
     }
-    out[key] = typeof part === "string" ? trimSpaces(part) : part;
+    out[key] = typeof part === "string" ? normalizeClientText(part) : part;
   }
   if (out.value === undefined && out.min === undefined && out.max === undefined) return undefined;
   if (typeof out.min === "number" && typeof out.max === "number" && out.min > out.max) return undefined;
