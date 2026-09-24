@@ -201,108 +201,175 @@ PATTERNS = {
 }
 
 
-# ------------------------------------------------------------------ the roster
+# ------------------------------------------------------------------ client names
 #
 # THE REGEXES ABOVE CANNOT KNOW A NAME. On 2026-09-24 six edit records reached
 # the public fixtures carrying real client and practice names, each paired with
 # its pseudonym: edits made by the client-name scrub itself. A name without a
 # title, a credential or a practice word matches no shape. So every string is
-# also checked against the REAL roster.
+# also checked against the real client-name list.
 #
-# Where the roster comes from, first found wins for the plaintext side:
-#   $CARR_CLIENT_ROSTER, out/client-roster.local.txt in this checkout,
-#   ~/carr-system/out/client-roster.local.txt, ~/.config/carr/client-roster.txt
-# Each is local and untracked: one name per line, `#` comments allowed.
-# Nothing derived from the names is ever committed: a hash with a public salt
-# is the name list again to anyone holding a surname dictionary.
+# ONE NAME GUARD, NOT TWO. The list, its sources and its keyed form belong to
+# ops/no-client-names-gate.py (#1230, WR-000049). This section is a THIN
+# ADAPTER over that gate's interface and holds no name-derived data of its own:
 #
-# Matching is on normalised word runs: camelCase is split, everything is
-# lower-cased, and only [a-z0-9] runs count as words. So a name hides behind
-# neither case, punctuation, a hyphen, a path, nor running its words together.
+#   LOCAL: a gitignored plain list, one name per line, `#` comments allowed:
+#          $CARR_CLIENT_NAMES, else ops/config/client-names.local.txt (this
+#          checkout, then ~/carr-system), and additionally the local roster
+#          out/client-roster.local.txt (this checkout, then ~/carr-system).
+#   HMAC:  the gate's committed keyed digests, opened with CARR_NAME_GUARD_KEY
+#          (a CI secret a human sets; nothing here creates, prints or stores it).
+#          Delegated wholesale to the gate's select_names().
+#   NEITHER: client_names() is None and every caller SKIPS LOUDLY, never
+#          silently passes.
+#
+# ADAPTER NOTE: while #1230 is not on this branch, ops/no-client-names-gate.py
+# does not exist, so LOCAL mode matches with the small word-run matcher below
+# and HMAC mode is unavailable (a set key is reported as a loud skip, not
+# used). Once the gate lands, its module is imported and its NameList does the
+# matching; the fallback matcher can then be deleted.
+#
+# Text is pre-split on camelCase before matching, so a name hides behind
+# neither case, punctuation, a hyphen, an underscore, a path, nor running its
+# words together. Names shorter than MIN_NAME_CHARS are ignored in LOCAL mode.
 
 import functools  # noqa: E402
+import importlib.util  # noqa: E402
 import os  # noqa: E402
+import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
+from types import ModuleType  # noqa: E402
+from typing import Optional  # noqa: E402
 
 _REPO = Path(__file__).resolve().parent.parent
-ROSTER_ENV = "CARR_CLIENT_ROSTER"
+NAME_GATE = _REPO / "ops" / "no-client-names-gate.py"
+NAMES_ENV = "CARR_CLIENT_NAMES"
+KEY_ENV = "CARR_NAME_GUARD_KEY"
+LOCAL_LIST = Path("ops") / "config" / "client-names.local.txt"
+LOCAL_ROSTER = Path("out") / "client-roster.local.txt"
 _CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])")
 _WORD = re.compile(r"[a-z0-9]+")
 MIN_NAME_CHARS = 4
 
 
-def roster_tokens(text: str) -> List[str]:
-    return _WORD.findall(_CAMEL.sub(" ", text).lower())
+def split_camel(text: str) -> str:
+    return _CAMEL.sub(" ", text)
 
 
-def roster_key(name: str) -> str:
-    return " ".join(roster_tokens(name))
+def name_tokens(text: str) -> List[str]:
+    """The gate's canonical tokens (apostrophes dropped), after a camelCase split."""
+    return _WORD.findall(split_camel(text).lower().replace("'", "").replace("’", ""))
 
 
-def roster_candidates() -> List[Path]:
-    paths = []
-    if os.environ.get(ROSTER_ENV):
-        paths.append(Path(os.environ[ROSTER_ENV]))
-    paths += [_REPO / "out" / "client-roster.local.txt",
-              Path.home() / "carr-system" / "out" / "client-roster.local.txt",
-              Path.home() / ".config" / "carr" / "client-roster.txt"]
-    return paths
+def name_gate_module(path: Path = NAME_GATE) -> Optional[ModuleType]:
+    """#1230's gate, imported, or None while it is not on this branch."""
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("no_client_names_gate", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def read_roster_file(path: Path) -> Set[str]:
-    keys: Set[str] = set()
+def local_list_candidates() -> List[Path]:
+    """The gate's local-list order, then the local roster."""
+    override = os.environ.get(NAMES_ENV)
+    paths = [Path(override)] if override else [_REPO / LOCAL_LIST, Path.home() / "carr-system" / LOCAL_LIST]
+    return paths + [_REPO / LOCAL_ROSTER, Path.home() / "carr-system" / LOCAL_ROSTER]
+
+
+def read_name_list(path: Path) -> List[str]:
+    names = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key = roster_key(line)
-        if len(key) >= MIN_NAME_CHARS:
-            keys.add(key)
-    return keys
+        if line and not line.startswith("#") and len(" ".join(name_tokens(line))) >= MIN_NAME_CHARS:
+            names.append(line)
+    return names
 
 
-class Roster:
-    """The local names and the word-run lengths they span."""
+class _WordRunNames:
+    """The fallback LOCAL matcher, used only while #1230's NameList is absent."""
 
-    def __init__(self, plain: Set[str], sources: List[str]) -> None:
-        self.plain = plain
-        self.lengths = sorted({len(k.split()) for k in plain})
-        self.sources = sources
+    def __init__(self, names: Iterable[str]) -> None:
+        self.full: Set[str] = {" ".join(name_tokens(n)) for n in names}
+        self.lengths = sorted({len(k.split()) for k in self.full})
 
-    def __bool__(self) -> bool:
-        return bool(self.plain)
-
-    def hits(self, text: str) -> bool:
-        tokens = roster_tokens(text)
+    def hits(self, text: str) -> Iterable[Tuple[int, str]]:
+        tokens = name_tokens(text)
         for n in self.lengths:
             for i in range(len(tokens) - n + 1):
                 key = " ".join(tokens[i:i + n])
-                if len(key) < MIN_NAME_CHARS:
-                    continue
-                if key in self.plain:
-                    return True
-        return False
+                if key in self.full:
+                    yield 0, key
+
+
+class ClientNames:
+    """A loaded name list: `hits(text)` is a bool, `describe()` names the source
+    and mode but never a name."""
+
+    def __init__(self, matcher: Any, mode: str, source: str, count: int) -> None:
+        self.matcher, self.mode, self.source, self.count = matcher, mode, source, count
+
+    def hits(self, text: str) -> bool:
+        return any(True for _ in self.matcher.hits(split_camel(text)))
 
     def describe(self) -> str:
-        return ", ".join(self.sources) if self.sources else "NO ROSTER"
+        return f"client names, {self.mode} mode ({self.source}, {self.count} names)"
 
 
-def load_roster(extra_plain: Iterable[Path] = (), use_default_plain: bool = True) -> Roster:
-    plain: Set[str] = set()
-    sources: List[str] = []
-    candidates = list(extra_plain) + (roster_candidates() if use_default_plain else [])
-    for path in candidates:
+def local_names(path: Path, gate: Optional[ModuleType] = None) -> ClientNames:
+    names = read_name_list(path)
+    matcher = gate.NameList.from_names(names) if gate else _WordRunNames(names)
+    kind = "local list" if path.name == LOCAL_LIST.name else "local roster"
+    return ClientNames(matcher, "local", kind, len({" ".join(name_tokens(n)) for n in names}))
+
+
+def select_client_names(gate_path: Path = NAME_GATE,
+                        hmacs: Optional[Path] = None) -> Tuple[Optional[ClientNames], str]:
+    """(names, '') or (None, why the check is skipped). A wrong key raises
+    SystemExit(1) from the gate itself, as it does in the gate. The arguments
+    exist for the selftest."""
+    gate = name_gate_module(gate_path)
+    for path in local_list_candidates():
         if path.is_file():
-            names = read_roster_file(path)
-            plain |= names
-            sources.append(f"local roster ({len(names)} names)")
-            break
-    return Roster(plain, sources)
+            return local_names(path, gate), ""
+    if gate is not None:
+        matcher, why = gate.select_names(str(hmacs) if hmacs else gate.HMACS)
+        if matcher is None:
+            return None, why
+        return ClientNames(matcher, matcher.mode, "keyed digests", len(matcher.full)), ""
+    if os.environ.get(KEY_ENV):
+        return None, (f"{KEY_ENV} is set but ops/no-client-names-gate.py (#1230) is not on this "
+                      "branch, so its keyed digests cannot be opened")
+    return None, f"no local name list and {KEY_ENV} is unset"
 
 
 @functools.lru_cache(maxsize=1)
-def roster() -> Roster:
-    return load_roster()
+def _selected() -> Tuple[Optional[ClientNames], str]:
+    return select_client_names()
+
+
+def client_names() -> Optional[ClientNames]:
+    return _selected()[0]
+
+
+def client_names_skip_reason() -> str:
+    return _selected()[1]
+
+
+def skip_warning(tool: str, reason: str) -> str:
+    """The loud skip: printed to stdout and stderr, and as a GitHub annotation
+    under Actions. Returns the message."""
+    msg = (f"WARNING {tool}: client-name check SKIPPED: {reason}. Nothing was checked for "
+           f"client names. Provide the gitignored local list ({LOCAL_LIST}) or set the "
+           f"{KEY_ENV} secret.")
+    print(msg)
+    print(msg, file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title={tool} client-name check skipped::{msg}")
+    return msg
 
 
 def find_matches(text: str, *, exempt_uuids: Iterable[str] = ALLOWED_UUIDS) -> List[str]:
@@ -323,7 +390,8 @@ def find_matches(text: str, *, exempt_uuids: Iterable[str] = ALLOWED_UUIDS) -> L
             continue
         if pattern.search(text):
             hits.append(name)
-    if roster().hits(text):
+    names = client_names()
+    if names is not None and names.hits(text):
         hits.append("roster_name")
     return hits
 

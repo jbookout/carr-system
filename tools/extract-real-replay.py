@@ -421,6 +421,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--out", default=str(OUT_DIR))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if bdp.client_names() is None:
+        # Writing public fixtures with no name check is how names leaked.
+        bdp.skip_warning("extract-real-replay", bdp.client_names_skip_reason())
+        if not args.dry_run:
+            print("extract-real-replay: refusing to write fixtures without a client-name list",
+                  file=sys.stderr)
+            return 2
     out = extract(args.transcripts)
     for name, rows in out.items():
         extra = ""

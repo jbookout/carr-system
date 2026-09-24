@@ -137,8 +137,10 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-leak-") as tmp:
 committed = GR.leak_scan(GR.leak_scan_targets(manifest_data=GR.load_manifest()))
 check("every committed fixture, the manifest and the snapshot scan clean", committed == [], committed[:5])
 
-# THE ROSTER. A plain name matches no regex; only the roster knows it. The
-# name below is invented for this test and is on no roster.
+# CLIENT NAMES. A plain name matches no regex; only the name list knows it. The
+# name below is invented for this test and is on no list. Every source is
+# exercised with the real candidates hidden, so the result never depends on
+# what this machine happens to hold.
 PLANTED_NAME = "Quillon Barstow"
 NAME_SHAPES = {
     "as written": "met Quillon Barstow at the site",
@@ -148,17 +150,54 @@ NAME_SHAPES = {
     "underscored": "rename Quillon_Barstow_v2",
     "as an edit's old_string": "PAIRS = [('Quillon Barstow', 'Alder Finch')]",
 }
-real_roster = bdp.roster
-with tempfile.TemporaryDirectory(prefix="gate-replay-roster-") as tmp:
-    roster_file = Path(tmp) / "roster.txt"
-    roster_file.write_text("# test roster\n" + PLANTED_NAME + "\n")
-    plain = bdp.load_roster(extra_plain=[roster_file], use_default_plain=False)
-    for label, text in NAME_SHAPES.items():
-        check(f"local roster catches a planted name {label}", plain.hits(text), text)
-    check("one word of a two-word name alone is not a hit", not plain.hits("the quillon file"))
+# Set only inside this test, never read from or written to anywhere else.
+TEST_KEY = "gate-replay-selftest-key-not-a-secret"
+real_client_names = bdp.client_names
+real_candidates = bdp.local_list_candidates
+saved_env = {k: os.environ.get(k) for k in (bdp.NAMES_ENV, bdp.KEY_ENV, "GITHUB_ACTIONS")}
+
+
+def restore_env() -> None:
+    for key, value in saved_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def captured(fn: Any) -> str:
+    import contextlib
+    import io
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        fn()
+    return out.getvalue() + err.getvalue()
+
+
+# #1230's gate, when it is on this branch; GATE_REPLAY_SELFTEST_NAME_GATE may
+# point at a copy of it to exercise the HMAC path before it lands.
+name_gate = Path(os.environ.get("GATE_REPLAY_SELFTEST_NAME_GATE") or bdp.NAME_GATE)
+with tempfile.TemporaryDirectory(prefix="gate-replay-names-") as tmp:
+    list_file = Path(tmp) / "client-names.local.txt"
+    list_file.write_text("# test list\n" + PLANTED_NAME + "\nAl\n")
     try:
-        bdp.roster = lambda: plain  # type: ignore[assignment]
-        check("find_matches reports a roster name with no other pattern firing",
+        os.environ[bdp.NAMES_ENV] = str(list_file)
+        os.environ.pop(bdp.KEY_ENV, None)
+        bdp.local_list_candidates = lambda: [list_file]  # type: ignore[assignment]
+        local, why = bdp.select_client_names(Path(tmp) / "absent-gate.py")
+        check("LOCAL mode: a local list is selected", local is not None and local.mode == "local", why)
+        assert local is not None
+        for label, text in NAME_SHAPES.items():
+            check(f"LOCAL mode catches a planted name {label}", local.hits(text), text)
+        check("one word of a two-word name alone is not a hit", not local.hits("the quillon file"))
+        check("a name shorter than the minimum is ignored", not local.hits("Al said so"))
+        check("describe() names the mode and count, never a name",
+              "local" in local.describe() and "Quillon" not in local.describe(), local.describe())
+        check("$CARR_CLIENT_NAMES is the first local candidate",
+              real_candidates()[0] == list_file, real_candidates()[:1])
+
+        bdp.client_names = lambda: local  # type: ignore[assignment]
+        check("find_matches reports a client name with no other pattern firing",
               bdp.find_matches("met Quillon Barstow") == ["roster_name"],
               bdp.find_matches("met Quillon Barstow"))
         comment = Path(tmp) / "fixture.jsonl"
@@ -177,11 +216,62 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-roster-") as tmp:
         check("scan targets include every file under the fixture dir and every manifest-named file",
               fixture_dir / "deep" / "extra.yaml" in targets
               and fixture_dir / "../elsewhere.jsonl" in targets, targets)
-        bdp.roster = lambda: bdp.Roster(set(), [])  # type: ignore[assignment]
-        check("with no roster at all, the scan fails rather than passing blind",
-              any("no client roster" in f for f in GR.leak_scan([])))
+
+        # NEITHER source: a loud skip, never a silent pass, and never a failure.
+        bdp.local_list_candidates = lambda: []  # type: ignore[assignment]
+        none, why = bdp.select_client_names(Path(tmp) / "absent-gate.py")
+        check("no list and no key: no names, with a reason", none is None and bdp.KEY_ENV in why, why)
+        bdp.client_names = lambda: None  # type: ignore[assignment]
+        check("with no names, the name check is skipped, not failed",
+              GR.leak_scan([odd]) == [], GR.leak_scan([odd]))
+        email = Path(tmp) / "mail.txt"
+        email.write_text("write to someone@example-clinic.com\n")
+        check("with no names, the shape patterns still run", GR.leak_scan([email]) != [])
+        os.environ["GITHUB_ACTIONS"] = "true"
+        loud = captured(lambda: bdp.skip_warning("gate-replay leak scan", why))
+        check("the skip is loud: a WARNING line and a GitHub ::warning:: annotation",
+              "WARNING" in loud and "SKIPPED" in loud and "::warning" in loud, loud)
+        os.environ.pop("GITHUB_ACTIONS", None)
+        quiet = captured(lambda: bdp.skip_warning("gate-replay leak scan", why))
+        check("outside Actions the skip still prints its WARNING, without the annotation",
+              "WARNING" in quiet and "::warning" not in quiet, quiet)
+
+        os.environ[bdp.KEY_ENV] = TEST_KEY
+        # The gate reads its own local list before any key; a set override that
+        # names no file means "no list" to it, so no machine's real list is read.
+        os.environ[bdp.NAMES_ENV] = str(Path(tmp) / "no-such-list.txt")
+        gate = bdp.name_gate_module(name_gate)
+        if gate is None:
+            skipped, why = bdp.select_client_names(name_gate)
+            check("a key with #1230's gate absent is a loud skip naming the gate, not a pass",
+                  skipped is None and "#1230" in why, why)
+        else:
+            hmacs = Path(tmp) / "hmacs.json"
+            hmacs.write_text(json.dumps(gate.build_hmac_doc([PLANTED_NAME], TEST_KEY.encode())))
+            keyed, why = bdp.select_client_names(name_gate, hmacs)
+            check("HMAC mode: the gate's keyed digests are opened with the key",
+                  keyed is not None and keyed.mode == "hmac", why)
+            assert keyed is not None
+            for label, text in NAME_SHAPES.items():
+                check(f"HMAC mode catches a planted name {label}", keyed.hits(text), text)
+            check("HMAC mode: the committed digests do not contain the name",
+                  PLANTED_NAME.lower() not in hmacs.read_text().lower())
+            os.environ[bdp.KEY_ENV] = TEST_KEY + "-wrong"
+            try:
+                bdp.select_client_names(name_gate, hmacs)
+                wrong = False
+            except SystemExit as exit_:
+                wrong = exit_.code == 1
+            check("HMAC mode: a wrong key fails loudly instead of matching nothing", wrong)
+            os.environ[bdp.NAMES_ENV] = str(list_file)
+            bdp.local_list_candidates = lambda: [list_file]  # type: ignore[assignment]
+            via_gate, _ = bdp.select_client_names(name_gate)
+            check("LOCAL mode through #1230's NameList catches every shape",
+                  via_gate is not None and all(via_gate.hits(t) for t in NAME_SHAPES.values()))
     finally:
-        bdp.roster = real_roster  # type: ignore[assignment]
+        bdp.client_names = real_client_names  # type: ignore[assignment]
+        bdp.local_list_candidates = real_candidates  # type: ignore[assignment]
+        restore_env()
 
 
 # ---------------------------------------------------------------- extractor
