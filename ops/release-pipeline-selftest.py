@@ -233,6 +233,17 @@ class Fixture:
             "NEON_API_KEY='v'\nCARR_DB_JOBS_URL='v'\nCARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL='v'\n")
         (self.cred / "mcp-tokens.env").write_text("CARR_MCP_PROBE_TOKEN=v\n")
         (self.cred / "tokens.env").write_text(f"CLOUDFLARE_API_TOKEN={CF_TOKEN}\n")
+        # A stub `.venv/bin/python`, matching the real checkout's layout, so
+        # the fail-closed venv check added for the coordinator's dangling-
+        # symlink fix (a real run found `ln -s` happily linking a MISSING
+        # source venv, producing hard errors that read like a code bug
+        # rather than an environment one) does not break every OTHER test
+        # in this file, which is not testing that behavior. Tests for the
+        # fail-closed behavior itself remove this stub (see FailClosedVenv).
+        venv_python = self.repo / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n")
+        venv_python.chmod(0o755)
 
     def commit(self, files: dict[str, str]) -> str:
         for rel, text in files.items():
@@ -1503,6 +1514,68 @@ class DeployCredential(unittest.TestCase):
         self.assertIsNone(rp.read_env_value(f, "D"))
         self.assertIsNone(rp.read_env_value(f, "E"))
         self.assertIsNone(rp.read_env_value(self.cred / "absent.env", "A"))
+
+
+class FailClosedVenv(Base):
+    """The coordinator's own re-run of health-preflight at a8619391 caught
+    this: with no real `.venv` on the machine, `ln -s <repo>/.venv
+    <worktree>/.venv` happily created a DANGLING symlink anyway, and the
+    health read then reported 5 hard errors for missing psycopg/openpyxl —
+    reading exactly like a code bug when it was really this machine's
+    environment never having a venv at all. `_release_worktree_ready` (used
+    by both release_worker and health_preflight) now checks the SOURCE
+    venv's `bin/python` before linking and fails closed with a clear
+    message naming the real cause, instead of producing a dangling link
+    whose failure mode looks unrelated."""
+
+    def test_release_worker_fails_closed_when_the_source_venv_is_missing(self):
+        (self.fx.repo / ".venv" / "bin" / "python").unlink()
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["step"], "venv-link")
+        self.assertIn(".venv", rec.get("detail", ""))
+        self.assertIn("bin/python", rec.get("detail", ""))
+        # the real `ln -s` never ran — no dangling symlink was created.
+        self.assertNotIn("venv-link", runner.names())
+        self.assertNotIn("npm-ci", runner.names())
+
+    def test_release_worker_still_ships_when_the_source_venv_is_present(self):
+        # The fixture's stub `.venv/bin/python` (see Fixture.__init__) is
+        # exactly what a real checkout has; this is the control case
+        # proving the fail-closed check does not false-positive on a
+        # perfectly fine venv.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertIn("venv-link", runner.names())
+
+    def test_health_preflight_fails_closed_when_the_source_venv_is_missing(self):
+        (self.fx.repo / ".venv" / "bin" / "python").unlink()
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner)
+        lines: list[str] = []
+        pipe.out = lines.append
+        self.assertEqual(pipe.health_preflight(sha), 1)
+        text = "\n".join(lines)
+        self.assertIn(".venv", text)
+        self.assertIn("bin/python", text)
+        self.assertNotIn("health-baseline", runner.names())
+        # the throwaway worktree was still cleaned up on this failure.
+        self.assertFalse(pipe.worktrees)
+
+    def test_dry_run_never_touches_the_real_filesystem_for_the_venv_check(self):
+        # A dry run must stay purely descriptive — it must not fail closed
+        # (or succeed) based on the real machine's venv state, the same
+        # contract every other dry-run step already has.
+        (self.fx.repo / ".venv" / "bin" / "python").unlink()
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner, dry_run=True).tick(["worker"]), 0)
+        self.assertEqual(runner.calls, [])
 
 
 class DryRun(Base):

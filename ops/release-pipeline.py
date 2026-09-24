@@ -818,9 +818,34 @@ class Pipeline:
         `control_state` for every DB-backed section. Neither venv-link nor
         `npm ci` writes any production state, so running them ahead of the
         baseline does not widen what a clean Blocked hold is allowed to be.
+
+        venv-link FAILS CLOSED if the SOURCE venv (this pipeline checkout's
+        own `.venv`) is missing or has no `bin/python` (a real run at
+        a8619391 found this the hard way: the coordinator's first
+        health-preflight attempt had no `.venv` on the machine at all,
+        `ln -s` happily created a DANGLING symlink anyway, and the health
+        read then reported 5 hard errors for missing psycopg/openpyxl —
+        reading exactly like a code bug when it was actually this
+        machine's environment, never mentioning the real cause). Checking
+        the source before linking turns that into one clear StepFailed
+        naming the actual missing path, the same "loud failure, dispatch,
+        never a silent hold" contract wrangler_auth already uses for a
+        missing/rejected deploy credential — a missing venv does not heal
+        itself either.
         """
         self.add_worktree(name, self.repo, wt, sha, mark_mutated=mark_mutated)
-        self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
+        src_venv = self.repo / ".venv"
+        src_python = src_venv / "bin" / "python"
+        if not self.dry_run and not src_python.exists():
+            raise StepFailed("venv-link", 1, "",
+                             f"{src_venv} has no bin/python — this pipeline checkout's own venv "
+                             f"is missing or incomplete, so linking it into the release worktree "
+                             f"would only produce a dangling symlink whose health read then "
+                             f"reports psycopg/openpyxl as MISSING, reading like a code bug when "
+                             f"it is really this machine's environment. Fix the venv at "
+                             f"{self.repo} (a missing venv never heals itself; retrying the same "
+                             f"SHA will not help).")
+        self.step("venv-link", ["ln", "-s", str(src_venv), str(wt / ".venv")], self.repo)
         self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
 
     def health_preflight(self, sha: str) -> int:
@@ -851,6 +876,12 @@ class Pipeline:
             self.out(f"  health (post):   rc={live_res.rc} complete={live_complete} "
                      f"findings={len(live_findings)} "
                      f"hard_error={[f['key'] for f in live_findings if f.get('hard_error')]}")
+        except StepFailed as f:
+            # A fail-closed environment problem (e.g. a missing source
+            # venv) is exactly what this command exists to surface plainly
+            # — print it and return 1 rather than a raw traceback.
+            self.out(f"  health-preflight: FAILED at {f.step}: {f.detail}")
+            return 1
         finally:
             self.remove_worktrees()
         ok = baseline_complete and live_complete and not any(
