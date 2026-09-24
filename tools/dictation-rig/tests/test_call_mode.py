@@ -36,6 +36,7 @@ call_mode = load_module("call_mode_under_test", "call-mode.py")
 transcribe_session = load_module("transcribe_session_under_test", "transcribe_session.py")
 post_call = load_module("post_call_under_test", "post_call.py")
 capture_bridge = load_module("capture_bridge_under_test", "capture-bridge.py")
+post_call_jev = load_module("post_call_jev_under_test", "post_call_jev.py")
 
 
 class CallModeTests(unittest.TestCase):
@@ -825,6 +826,134 @@ class CaptureBridgePostCallTests(unittest.TestCase):
         self.assertFalse(any(url.endswith("/capture/session") for url in calls))
         self.assertFalse(any(url.endswith("/capture/post-call/report") for url in calls))
         self.assertTrue((self.session / ".capture.json").exists())
+
+
+class PostCallJevChecksTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.context = {
+            "deals": [
+                {"id": "deal-a", "name": "Acme Clinic", "owner": "Joe", "operating_state": "active", "participants": []},
+                {"id": "deal-b", "name": "Beta Medical", "owner": "Dell", "operating_state": "active", "participants": []},
+            ],
+            "speaker_labels": {"mic": "Joe", "system": "Dell"},
+            "local_partner": "Joe",
+        }
+        self.transcript = {"segments": [
+            {"speaker": "Joe", "text": "I will call the Acme Clinic vendor about the lease renewal."},
+            {"speaker": "Dell", "text": "Sounds good, let me know how it goes."},
+        ]}
+
+    def result(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "session": "2026.09.23-jev",
+            "joe_tasks": [{
+                "title": "Call the Acme Clinic vendor", "deal_id": "deal-a",
+                "participant_ids": [], "evidence": "I will call the Acme Clinic vendor",
+                "candidate_id": None, "candidate_status": "unfiled",
+            }],
+            "dell_tasks": [], "deal_updates": [], "draft_proposals": [],
+            "review_questions": [],
+        }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def fake_ask(*, deal_choice: str = "deal-a", deal_confidence: float = 0.9,
+                 speaker_probability: float = 0.9, details_probability: float = 0.9):
+        def _ask(state: object, questions: dict[str, object]) -> dict[str, object]:
+            return {"answers": {
+                "deal_match": {"type": "choice", "choice": deal_choice, "confidence": deal_confidence},
+                "speaker_right": {"type": "noul", "noul": speaker_probability},
+                "details_supported": {"type": "noul", "noul": details_probability},
+            }}
+        return _ask
+
+    def test_an_accurate_item_passes_all_three_checks_and_is_not_flagged(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript, ask=self.fake_ask(),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertFalse(checks["flagged"])
+        self.assertEqual(checks["reasons"], [])
+        self.assertTrue(checks["deal"]["pass"])
+        self.assertTrue(checks["speaker"]["pass"])
+        self.assertTrue(checks["details"]["pass"])
+        self.assertEqual(result["review_questions"], [])
+
+    def test_a_wrong_deal_match_is_flagged_with_a_plain_english_reason(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript,
+            ask=self.fake_ask(deal_choice="deal-b"),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertTrue(checks["flagged"])
+        self.assertFalse(checks["deal"]["pass"])
+        self.assertTrue(checks["speaker"]["pass"])
+        self.assertTrue(checks["details"]["pass"])
+        self.assertTrue(any("Right deal" in reason for reason in checks["reasons"]))
+
+    def test_a_wrong_speaker_attribution_is_flagged_with_a_plain_english_reason(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript,
+            ask=self.fake_ask(speaker_probability=0.05),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertTrue(checks["flagged"])
+        self.assertTrue(checks["deal"]["pass"])
+        self.assertFalse(checks["speaker"]["pass"])
+        self.assertTrue(any("Right speaker" in reason for reason in checks["reasons"]))
+
+    def test_unsupported_details_are_flagged_with_a_plain_english_reason(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript,
+            ask=self.fake_ask(details_probability=0.1),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertTrue(checks["flagged"])
+        self.assertTrue(checks["deal"]["pass"])
+        self.assertTrue(checks["speaker"]["pass"])
+        self.assertFalse(checks["details"]["pass"])
+        self.assertTrue(any("Right details" in reason for reason in checks["reasons"]))
+
+    def test_jev_unavailable_never_fails_the_pack_and_flags_every_item_unavailable(self) -> None:
+        def raising_ask(state: object, questions: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("network unreachable")
+
+        result = post_call_jev.check_distillation(
+            self.result(dell_tasks=[{
+                "title": "Send the updated LOI", "deal_id": "deal-b",
+                "participant_ids": [], "evidence": "Dell will send the updated LOI",
+                "candidate_id": None, "candidate_status": "unfiled",
+            }]),
+            self.context, self.transcript, ask=raising_ask,
+        )
+        self.assertEqual(result["joe_tasks"][0]["checks"], {"unavailable": True})
+        self.assertEqual(result["dell_tasks"][0]["checks"], {"unavailable": True})
+        self.assertEqual(len(result["review_questions"]), 1)
+        self.assertIn("Jev", result["review_questions"][0]["question"])
+        self.assertFalse(result["review_questions"][0]["resolved"])
+
+    def test_evidence_segments_are_matched_by_token_overlap_within_a_small_window(self) -> None:
+        segments = [
+            {"speaker": "Joe", "text": "unrelated small talk about parking"},
+            {"speaker": "Joe", "text": "I will call the Acme Clinic vendor about the lease renewal."},
+            {"speaker": "Dell", "text": "Sounds good, let me know how it goes."},
+            {"speaker": "Dell", "text": "completely unrelated closing remarks"},
+        ]
+        matched = post_call_jev._evidence_segments("I will call the Acme Clinic vendor", segments)
+        self.assertIn(segments[1], matched)
+        self.assertLessEqual(len(matched), post_call_jev.MAX_SEGMENTS_SENT)
+
+    def test_candidate_deals_never_include_the_full_recorded_deal_list(self) -> None:
+        many_deals = [{"id": f"deal-{n}", "name": f"Deal {n}", "owner": "Joe",
+                        "operating_state": "active", "participants": []} for n in range(56)]
+        many_deals.append({"id": "deal-a", "name": "Acme Clinic", "owner": "Joe",
+                            "operating_state": "active", "participants": []})
+        candidates = post_call_jev._candidate_deals(
+            "deal-a", many_deals, [{"speaker": "Joe", "text": "Acme Clinic vendor lease"}],
+        )
+        self.assertLessEqual(len(candidates), post_call_jev.MAX_CANDIDATE_DEALS)
+        self.assertEqual(candidates[0]["id"], "deal-a")
 
 
 if __name__ == "__main__":
