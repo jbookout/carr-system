@@ -289,7 +289,7 @@ def _preflight(git: _Git, *, when: str, out: TextIO, err: TextIO) -> int | None:
     print(f"canonical-fast-forward: {when}: branch={branch} "
           f"tracked_modified={_count_text(state['tracked'])} "
           f"untracked={_count_text(state['untracked'])}", file=out)
-    for path in state["accepted"]:
+    for path in state["accepted"] or []:
         print(f"canonical-fast-forward: accepted by name: {path} (submodule content "
               f"dirty by design, recorded commit unchanged)", file=out)
 
@@ -374,7 +374,7 @@ def fast_forward(repository: str | Path, *, dry_run: bool = False,
     # An accepted dirty submodule is only safe to carry across the merge while
     # the merge leaves its recorded commit alone. If main moved it, the edit
     # under it belongs to a build that is now out of date: refuse and say so.
-    for path in _counts(git)["accepted"]:
+    for path in _counts(git)["accepted"] or []:
         here = git.out("rev-parse", f"HEAD:{path}")
         there = git.out("rev-parse", f"origin/main:{path}")
         if here is None or there is None or here != there:
