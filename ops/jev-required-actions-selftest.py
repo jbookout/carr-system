@@ -50,10 +50,10 @@ sys.path.insert(0, REPO)
 
 from lib.jev_required_actions import (  # noqa: E402
     current_turn_slice, evaluate_required_actions, facets_called_this_turn,
-    find_build_advisory, is_real_user_turn, latest_user_turn_index,
-    load_jev_call_receipts, missing_facets, prompt_names_facet,
-    prompt_names_not_applicable, refused_facets_in_texts, required_facets,
-    semantic_creation_receipt_missing, turn_boundary_timestamp,
+    find_build_advisory, is_real_user_turn, is_synthetic_continuation,
+    latest_user_turn_index, load_jev_call_receipts, missing_facets,
+    prompt_names_facet, prompt_names_not_applicable, refused_facets_in_texts,
+    required_facets, semantic_creation_receipt_missing, turn_boundary_timestamp,
 )
 
 NOW = datetime.now(timezone.utc)
@@ -65,6 +65,23 @@ def ts(offset_seconds=0):
 
 def user(text, when=0):
     return {"type": "user", "timestamp": ts(when), "message": {"role": "user", "content": text}}
+
+
+def user_prompt(text, prompt_id, when=0):
+    """A genuine human prompt — carries `promptId`, same as a real Claude
+    Code transcript's type:"user" record. See lib.jev_required_actions'
+    _user_prompt_runs docstring for why this field is load-bearing."""
+    return {"type": "user", "promptId": prompt_id, "timestamp": ts(when),
+           "message": {"role": "user", "content": text}}
+
+
+def stop_feedback(prompt_id, when=0, text="Stop hook feedback:\nfix the missing test."):
+    """An automated Stop-hook reopen of a prompt: role "user", real
+    non-empty text, and — per direct inspection of a live transcript — the
+    SAME promptId as the turn it reopened. Must NOT be treated as a new
+    turn boundary (round-2 fix #1)."""
+    return {"type": "user", "promptId": prompt_id, "timestamp": ts(when),
+           "message": {"role": "user", "content": text}}
 
 
 def assistant(text, when=0):
@@ -340,6 +357,121 @@ def lib_semantic_creation_scoped_to_files_written_this_turn():
     return ok
 
 
+# ---------------------------------------------------------------------------
+# round-2 fixes (2026-09-24, second Opus re-replay of PR #1224)
+# ---------------------------------------------------------------------------
+
+def lib_reopen_does_not_start_a_new_turn():
+    """BLOCKING fix #1. A genuine prompt (promptId=p1) gets its advisory; a
+    Stop-hook-feedback reopen of THAT SAME prompt (also promptId=p1, real
+    non-empty "user" text) must NOT be treated as a fresh turn boundary — the
+    reviewer reproduced required -> reopen -> unavailable from exactly this
+    shape. The advisory must still be found (and be the LATEST one, since the
+    hook may also run on the reopen and attach its own) after the reopen."""
+    recs = [
+        user_prompt("design the new seam", "p1", when=0),
+        build_advisory_attachment(["architecture_or_design"], receipt_id="turn1-advisory", when=1),
+        assistant("Here is a first pass.", 2),
+        stop_feedback("p1", when=3),
+        build_advisory_attachment(["architecture_or_design"], receipt_id="turn1-reopen-advisory", when=4),
+        assistant("Revised.", 5),
+    ]
+    boundary = latest_user_turn_index(recs)
+    ok = boundary == 0  # still the ORIGINAL prompt, not the reopen at index 3
+    receipt = find_build_advisory(recs)
+    ok = ok and receipt is not None and receipt.get("receipt_id") == "turn1-reopen-advisory"
+    ok = ok and required_facets(receipt) == ["architecture_or_design"]
+    print(f"{'PASS' if ok else 'FAIL'}  lib: a Stop-hook-feedback reopen continues the "
+          f"current turn, not a new one (boundary={boundary})")
+    return ok
+
+
+def lib_reopen_does_not_start_a_new_turn_even_with_own_promptid():
+    """A reopen record has been observed carrying its own promptId in some
+    shapes; even then, its TEXT prefix ("Stop hook feedback:") must mark it
+    as a synthetic continuation rather than a new-turn boundary."""
+    recs = [
+        user_prompt("design the new seam", "p1", when=0),
+        build_advisory_attachment(["semantic_creation"], receipt_id="only-advisory", when=1),
+        assistant("First pass.", 2),
+        stop_feedback("p1-reopen-own-id", when=3),
+    ]
+    boundary = latest_user_turn_index(recs)
+    ok = boundary == 0
+    print(f"{'PASS' if ok else 'FAIL'}  lib: a reopen is recognized as synthetic by its "
+          f"own text even when its promptId differs (boundary={boundary})")
+    return ok
+
+
+def lib_new_genuine_prompt_after_a_reopen_does_start_a_new_turn():
+    """The flip side: a genuinely NEW human prompt (a different promptId,
+    real content, no synthetic prefix) after a reopened turn DOES move the
+    boundary — this must not become "advisories never expire"."""
+    recs = [
+        user_prompt("first request", "p1", when=-100),
+        build_advisory_attachment(["architecture_or_design"], receipt_id="stale", when=-99),
+        assistant("done", -98),
+        stop_feedback("p1", when=-90),
+        user_prompt("second, unrelated request", "p2", when=-10),
+        build_advisory_attachment(["semantic_creation"], receipt_id="fresh", when=-9),
+        assistant("Here.", 0),
+    ]
+    receipt = find_build_advisory(recs)
+    ok = receipt is not None and receipt.get("receipt_id") == "fresh"
+    ok = ok and required_facets(receipt) == ["semantic_creation"]
+    print(f"{'PASS' if ok else 'FAIL'}  lib: a genuinely new prompt still moves the turn "
+          "boundary forward")
+    return ok
+
+
+def lib_is_synthetic_continuation_covers_task_notifications_and_reminders():
+    task_notif = {"type": "user", "message": {"role": "user",
+                  "content": "<task-notification>a background task finished</task-notification>"}}
+    reminder_only = {"type": "user", "message": {"role": "user",
+                     "content": "<system-reminder>context only, no real prompt</system-reminder>"}}
+    genuine = {"type": "user", "message": {"role": "user", "content": "please build the seam"}}
+    ok = (is_synthetic_continuation(task_notif)
+         and is_synthetic_continuation(reminder_only)
+         and not is_synthetic_continuation(genuine))
+    print(f"{'PASS' if ok else 'FAIL'}  lib: is_synthetic_continuation covers "
+          "task-notification and system-reminder-only records")
+    return ok
+
+
+def lib_refused_facets_handles_each_batched_form():
+    """Fix #2's four literal example forms from the review, verbatim."""
+    forms_and_expected = [
+        ("JEV-REFUSED: semantic_creation, evidence_matching — reason",
+         {"semantic_creation", "evidence_matching"}),
+        ("JEV-REFUSED: semantic_creation and evidence_matching. reason",
+         {"semantic_creation", "evidence_matching"}),
+        ("JEV-REFUSED: next_action_priority. reason",
+         {"next_action_priority"}),
+        ("JEV-REFUSED: I made no separate Jev calls for semantic_creation, "
+         "diagnosis, verification_selection or evidence_matching this turn "
+         "because the advisory arrived after the write was already done.",
+         {"semantic_creation", "diagnosis", "verification_selection", "evidence_matching"}),
+    ]
+    ok = True
+    for text, expected in forms_and_expected:
+        got = refused_facets_in_texts([text])
+        this_ok = got == expected
+        ok = ok and this_ok
+        print(f"  {'PASS' if this_ok else 'FAIL'}  batched-refusal form {text[:60]!r}... "
+              f"-> {sorted(got)}")
+    print(f"{'PASS' if ok else 'FAIL'}  lib: refused_facets_in_texts handles every literal "
+          "batched-refusal form from the review")
+    return ok
+
+
+def lib_blockquoted_refusal_line_does_not_count():
+    quoted = ("> JEV-REFUSED: architecture_or_design not actually refusing, just quoting "
+             "the syntax for the teammate reading this PR.")
+    ok = refused_facets_in_texts([quoted]) == set()
+    print(f"{'PASS' if ok else 'FAIL'}  lib: a blockquoted (>) JEV-REFUSED line never counts")
+    return ok
+
+
 def lib_current_turn_slice_and_boundary_ts():
     recs = [user("hello", -10), assistant("hi", -9), user("do the thing", 0),
            build_advisory_attachment(["architecture_or_design"], when=1)]
@@ -513,6 +645,45 @@ def latch_is_per_turn_not_per_session():
         return ok
 
 
+def post_reopen_turn_still_enforced_end_to_end():
+    """Fix #1, exercised through the real hook subprocess (run_gate), not
+    just the library function: after a Stop-hook-feedback reopen of the SAME
+    prompt, with still no Jev call and no refusal, the gate must STILL
+    reopen — this reproduces (and closes) the reviewer's literal repro
+    (required -> reopen -> unavailable)."""
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        records = [
+            user_prompt("design the new seam", "p-reopen", when=0),
+            build_advisory_attachment(["architecture_or_design"], receipt_id="reopen-1", when=1),
+            assistant("First pass.", 2),
+            stop_feedback("p-reopen", when=3),
+        ]
+        blocked, reason = run_gate(records, "jev-post-reopen", state)
+        ok = blocked and "architecture_or_design" in reason
+        print(f"{'PASS' if ok else 'FAIL'}  post-reopen: a Stop-hook-feedback reopen with "
+              f"still no evidence still reopens (blocked={blocked}), not 'unavailable'")
+        return ok
+
+
+def post_reopen_turn_with_refusal_after_the_reopen_passes():
+    """The companion KNOWN-GOOD: the refusal itself can arrive IN the reopen
+    turn (after the Stop-hook-feedback record) and must still satisfy the
+    SAME original advisory, since it's still the current turn."""
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        records = [
+            user_prompt("design the new seam", "p-reopen-2", when=0),
+            build_advisory_attachment(["architecture_or_design"], receipt_id="reopen-2", when=1),
+            assistant("First pass.", 2),
+            stop_feedback("p-reopen-2", when=3),
+            assistant("JEV-REFUSED: architecture_or_design Jev was unreachable this turn.", 4),
+        ]
+        blocked, _ = run_gate(records, "jev-post-reopen-refusal", state)
+        ok = not blocked
+        print(f"{'PASS' if ok else 'FAIL'}  post-reopen: a refusal issued AFTER the reopen "
+              "still satisfies the original turn's advisory")
+        return ok
+
+
 def latch_does_not_reopen_twice_for_the_same_turn():
     with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
         records = [user("design the new seam", 0),
@@ -542,6 +713,12 @@ def main():
         lib_facet_name_drop_needs_jev_intent_nearby(),
         lib_semantic_creation_scoped_to_files_written_this_turn(),
         lib_current_turn_slice_and_boundary_ts(),
+        lib_reopen_does_not_start_a_new_turn(),
+        lib_reopen_does_not_start_a_new_turn_even_with_own_promptid(),
+        lib_new_genuine_prompt_after_a_reopen_does_start_a_new_turn(),
+        lib_is_synthetic_continuation_covers_task_notifications_and_reminders(),
+        lib_refused_facets_handles_each_batched_form(),
+        lib_blockquoted_refusal_line_does_not_count(),
         evaluate_required_actions_shapes(),
         known_bad_required_with_no_evidence_reopens(),
         known_good_real_jev_call_receipt_passes(),
@@ -552,6 +729,8 @@ def main():
         stale_earlier_turn_advisory_does_not_satisfy_current_turn(),
         latch_is_per_turn_not_per_session(),
         latch_does_not_reopen_twice_for_the_same_turn(),
+        post_reopen_turn_still_enforced_end_to_end(),
+        post_reopen_turn_with_refusal_after_the_reopen_passes(),
     ]
     print(f"jev-required-actions-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1

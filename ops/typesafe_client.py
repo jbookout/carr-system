@@ -60,6 +60,7 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 
 import json
 import os
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -68,6 +69,37 @@ from datetime import datetime, timezone
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _canonical_repo_root(fallback):
+    """The ONE repo root every worktree of this repository shares, so a call
+    made from any worktree's copy of this file and a hook reading from the
+    canonical checkout resolve to the SAME physical out/jev-calls.jsonl.
+
+    Round-2 fix (2026-09-24): `ask()` used to write next to whichever copy of
+    this file was executing (`REPO`, worktree-relative) while
+    hooks/completion-evidence-gate.py read from the canonical checkout's
+    out/ — two different physical files, so a real call from a worktree was
+    invisible to the gate. `git rev-parse --path-format=absolute
+    --git-common-dir` resolves to the shared `.git` directory across every
+    worktree of one repository (verified: an absolute path, git 2.54.0);
+    its parent is the canonical repo root regardless of which worktree is
+    running. Falls back to `fallback` (this file's own on-disk REPO) on any
+    failure — never raises, matching this module's fail-open posture.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=fallback, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if out:
+            return os.path.dirname(out)
+    except Exception:
+        pass
+    return fallback
+
+
+CANONICAL_REPO = _canonical_repo_root(REPO)
 # WHERE A CALL BECOMES OBSERVABLE (decision 0b11c89b, 2026-09-24). A missing
 # Jev call used to be checkable only by grepping a session's Bash history for
 # the string "typesafe_client", which a bare `echo typesafe_client` also
@@ -76,7 +108,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # reader (lib/jev_required_actions.py) to bind a call to a session, a time
 # window, and the facets it named. Writing this must never turn a working
 # Jev call into a failure, so every step here is wrapped and swallowed.
-JEV_CALLS_LOG = os.path.join(REPO, "out", "jev-calls.jsonl")
+# Uses CANONICAL_REPO (not the possibly-worktree-local REPO) so every
+# worktree's ask() and the canonical checkout's Stop-hook reader agree on one
+# physical file — see _canonical_repo_root above.
+JEV_CALLS_LOG = os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl")
 # The env vars a caller's own session id is found under, same set
 # ops/settlement-run-token.py's NATIVE_SESSION_KEYS already uses.
 SESSION_ID_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
@@ -183,16 +218,29 @@ def _session_id():
     return None
 
 
-def _append_call_receipt(questions, facets, model_answered, log_path):
-    """Best-effort JSONL append, never on the request or the answers, never
-    able to turn a successful ask() into a failure. See JEV_CALLS_LOG above."""
+def _append_call_receipt(questions, facets, result, log_path):
+    """Best-effort, APPEND-ONLY JSONL row, never on the request or the
+    answers, never able to turn a successful ask() into a failure. See
+    JEV_CALLS_LOG above.
+
+    Round-2 hardening (2026-09-24): `result` is now the full decoded
+    response (not just its "model" field), so a real API-assigned "id" and
+    the "usage" token counts — when the response carries them — land in the
+    receipt too, giving a nightly reconciliation job something to match
+    against if TypeSafe ever exposes an audit/usage endpoint (as of this
+    writing it does not — see ops/typesafe_client.py's module docstring /
+    the PR that added this comment for that research).
+    """
     try:
+        answered = result if isinstance(result, dict) else {}
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "session": _session_id(),
             "question_ids": sorted(questions),
             "facets": sorted({str(f) for f in facets}) if facets else [],
-            "model": model_answered,
+            "model": answered.get("model"),
+            "response_id": answered.get("id"),
+            "usage": answered.get("usage") if isinstance(answered.get("usage"), dict) else None,
             "ok": True,
         }
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -258,8 +306,13 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         try:
             with send(request, timeout=timeout) as response:
                 result = json.load(response)
-            answered_model = result.get("model") if isinstance(result, dict) else None
-            _append_call_receipt(questions, facets, answered_model, calls_log)
+            # Round-2 fix: only a REAL production call (no opener) writes a
+            # receipt. `opener` is the offline selftest/mock path (see the
+            # docstring above) — a mock response was never actually seen by
+            # the vendor, so a receipt for it would let a selftest run count
+            # as this turn's real Jev evidence.
+            if opener is None:
+                _append_call_receipt(questions, facets, result, calls_log)
             return result
         except urllib.error.HTTPError as err:
             # 429 is documented as expected under load, and the service's own

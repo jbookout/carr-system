@@ -102,6 +102,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -114,13 +115,38 @@ from stop_latch import (  # noqa: E402
 sys.path.insert(0, REPO)
 from lib.jev_required_actions import evaluate_required_actions  # noqa: E402
 
+
+def _canonical_repo_root(fallback):
+    """Same helper as ops/typesafe_client.py's (duplicated on purpose — this
+    hook deliberately has no import-time dependency on the vendor client
+    module). Resolves the ONE repo root shared by every worktree via `git
+    rev-parse --path-format=absolute --git-common-dir`, so this hook reads
+    the SAME out/jev-calls.jsonl that ask() wrote to, whichever worktree
+    either one is running from. Falls back to `fallback` on any failure."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=fallback, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if out:
+            return os.path.dirname(out)
+    except Exception:
+        pass
+    return fallback
+
+
+CANONICAL_REPO = _canonical_repo_root(REPO)
+
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
 JEV_LOG = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
-# Same path ops/typesafe_client.py's ask() appends a receipt to on every
-# successful call (its JEV_CALLS_LOG) — kept as a literal here rather than an
-# import, so this hook has no import-time dependency on the vendor client.
+# Same physical path ops/typesafe_client.py's ask() appends a receipt to on
+# every successful call (its JEV_CALLS_LOG) — resolved via CANONICAL_REPO
+# (not the possibly-worktree-local REPO) so a call made from any worktree and
+# this hook, wherever it runs from, agree on one file. Kept as a literal path
+# rather than an import of ops/typesafe_client.py, so this hook has no
+# import-time dependency on the vendor client.
 JEV_CALLS_LOG = (os.environ.get("CARR_JEV_CALLS_LOG_OVERRIDE")
-                 or os.path.join(REPO, "out", "jev-calls.jsonl"))
+                 or os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl"))
 # The FLOOR trigger, kept and widened with the verbs Joe named (finished,
 # landed, phase-complete, ready, live). It is no longer the only trigger: the
 # clause predicate below fires with or without any of these words.

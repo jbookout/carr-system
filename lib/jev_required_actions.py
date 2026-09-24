@@ -74,18 +74,46 @@ POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 # timestamp is the PROMPT's, and the call may happen minutes into a long turn).
 CALL_WINDOW_SECONDS = 3600
 
-JEV_REFUSED_RE = re.compile(r"\bJEV-REFUSED:\s*([A-Za-z_]+)\s+(\S.*)", re.I)
+# Known facet keys (ops/jev_build_advisory.py's FACETS) — used both to parse
+# a batched JEV-REFUSED list ("semantic_creation, evidence_matching — reason")
+# and to detect a facet named in a prompt (prompt_names_facet).
+FACET_NAMES = (
+    "architecture_or_design",
+    "semantic_creation",
+    "diagnosis",
+    "verification_selection",
+    "evidence_matching",
+    "next_action_priority",
+)
+FACET_TOKEN_RE = re.compile(
+    r"\b(" + "|".join(re.escape(f) for f in FACET_NAMES) + r")\b", re.I)
+# A `JEV-REFUSED:` line, matched PER LINE so a blockquote (`>`-prefixed) line
+# never counts (round-2 fix: the reviewer's literal example set includes a
+# quoted line that must be excluded). Captures everything after the colon on
+# that one line; facet names are then pulled out of it with FACET_TOKEN_RE
+# rather than assuming exactly one token, since a real refusal legitimately
+# names several facets on one line, comma- or "and"-joined, or embedded mid-
+# sentence (e.g. "I made no separate Jev calls for semantic_creation,
+# diagnosis, verification_selection or evidence_matching this turn because").
+JEV_REFUSED_LINE_RE = re.compile(r"^[ \t]*JEV-REFUSED:[ \t]*(\S.*)$", re.I | re.M)
 NOT_APPLICABLE_RE = re.compile(
     r"jev\s+required\s+actions\s*:\s*not\s+applicable\s*(?:—|-|--)\s*(\S.*)", re.I)
 FENCE_RE = re.compile(r"```.*?```", re.S)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 DQUOTE_RE = re.compile(r'"[^"\n]*"')
+SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S | re.I)
 SYNTHETIC_USER_PREFIXES = (
     "The following is the Codex agent history",
     "<environment_context>",
     "<app-context>",
 )
-MIN_REFUSAL_REASON_CHARS = 8
+# The reviewer's own literal examples use the placeholder reason word
+# "reason" (6 chars) after every facet token is stripped out — e.g. form 1
+# ("semantic_creation, evidence_matching — reason") and form 3
+# ("next_action_priority. reason") both leave exactly "reason" as residual.
+# Lowered from 8 (round-1 value) so those real forms still pass while still
+# rejecting an empty or single-character residual.
+MIN_REFUSAL_REASON_CHARS = 4
 MIN_NOT_APPLICABLE_REASON_CHARS = 12
 FACET_PROXIMITY_CHARS = 80
 
@@ -152,7 +180,12 @@ def _first_text_block(msg):
 
 def is_real_user_turn(rec):
     """A genuine human-prompt boundary: role user/human, and not a synthetic
-    wrapper (the Codex history/environment preamble)."""
+    wrapper (the Codex history/environment preamble). Used as the FALLBACK
+    turn-boundary signal for a client whose transcript carries no `promptId`
+    (see latest_user_turn_index) — Claude's own transcripts carry one, and
+    for those `is_synthetic_continuation` is the more precise signal, because
+    a Stop-hook reopen is role "user" with real (non-empty) text and would
+    otherwise pass this check."""
     msg, role = _record_message(rec)
     if role not in ("user", "human") or not isinstance(msg, dict):
         return False
@@ -162,13 +195,87 @@ def is_real_user_turn(rec):
     return not first.lstrip().startswith(SYNTHETIC_USER_PREFIXES)
 
 
-def latest_user_turn_index(recs):
-    """Index of the last real (non-synthetic) user-turn record, or -1."""
-    idx = -1
+def is_synthetic_continuation(rec):
+    """A record that CONTINUES the current turn rather than starting a new
+    one, even though it is role "user" with real, non-empty text: an
+    automated Stop-hook reopen ("Stop hook feedback: ..."), a scheduled task
+    notification, a cross-session message wrapper, or a message that is
+    nothing but system-reminder wrapper text once every
+    <system-reminder>...</system-reminder> block is stripped out.
+
+    Found 2026-09-24 (Opus re-replay over real transcripts, PR #1224): a real
+    Stop-hook-feedback reopen record is `{"type": "user", "promptId": <SAME
+    id as the turn it reopened>, "message": {"role": "user", "content":
+    "Stop hook feedback:\\n..."}}` — same shape as a genuine prompt, so a
+    plain role check treated it as a fresh turn boundary and the advisory
+    fell out of the window on the very next Stop.
+    """
+    msg, role = _record_message(rec)
+    if role not in ("user", "human") or not isinstance(msg, dict):
+        return False
+    first = _first_text_block(msg)
+    if not isinstance(first, str):
+        return False
+    stripped = first.lstrip()
+    if stripped.startswith(("Stop hook feedback:", "<task-notification>",
+                            "[SYSTEM NOTIFICATION", "[MESSAGE FROM NON-USER SOURCE")):
+        return True
+    without_reminders = SYSTEM_REMINDER_RE.sub("", first).strip()
+    return bool(first.strip()) and not without_reminders
+
+
+def _user_prompt_runs(recs):
+    """Consecutive-by-index runs of type:"user" records sharing one
+    `promptId`, in transcript order: [{"pid": ..., "start": i, "first_rec":
+    rec}, ...]. Claude's transcript stamps every type:"user" record
+    (a genuine prompt, its tool results, and any Stop-hook-feedback reopen
+    of it) with the SAME promptId — verified directly against a real
+    session — so a run is exactly "the records belonging to one submitted
+    prompt", independent of the text-based heuristics below.
+    """
+    runs = []
+    current_pid = object()  # sentinel that cannot equal a real promptId
     for i, rec in enumerate(recs or ()):
-        if is_real_user_turn(rec):
-            idx = i
-    return idx
+        if not isinstance(rec, dict) or rec.get("type") != "user" or "promptId" not in rec:
+            continue
+        pid = rec.get("promptId")
+        if pid != current_pid:
+            runs.append({"pid": pid, "start": i, "first_rec": rec})
+            current_pid = pid
+    return runs
+
+
+def latest_user_turn_index(recs):
+    """Index of the record where the CURRENT turn begins.
+
+    Primary signal: `promptId` runs (see _user_prompt_runs). Starting from
+    the LAST run, fold backward through any run whose own first record is a
+    synthetic continuation (a Stop-hook reopen that was, for whatever
+    reason, stamped with its own fresh promptId; a task notification; a
+    system-reminder-only message) — the boundary keeps moving to that
+    earlier run's start. It stops at the first run (walking backward) whose
+    first record is a genuine, non-synthetic prompt; that run's start index
+    is the turn boundary.
+
+    FALLBACK for a transcript with no `promptId` at all (a non-Claude
+    client): the old text-prefix heuristic, `is_real_user_turn`.
+
+    Returns -1 when no boundary can be found at all.
+    """
+    recs = list(recs or ())
+    runs = _user_prompt_runs(recs)
+    if not runs:
+        idx = -1
+        for i, rec in enumerate(recs):
+            if is_real_user_turn(rec):
+                idx = i
+        return idx
+    boundary = runs[-1]["start"]
+    for run in reversed(runs):
+        boundary = run["start"]
+        if not is_synthetic_continuation(run["first_rec"]):
+            break
+    return boundary
 
 
 def current_turn_slice(recs):
@@ -268,17 +375,43 @@ def required_facets(receipt):
 
 
 def refused_facets_in_texts(texts):
-    """Lower-cased facet names named by a real `JEV-REFUSED: <facet> <reason>`
-    line: outside a fenced/inline-code/quoted span, with a non-trivial reason
-    on the same line."""
+    """Lower-cased facet names named by a real `JEV-REFUSED: ...` line:
+    outside a fenced/inline-code/quoted span, on a non-blockquoted line, with
+    a non-trivial reason remaining after every facet-name token on that line
+    is accounted for.
+
+    Handles a facet LIST on one line — comma-separated
+    ("semantic_creation, evidence_matching — reason"), "and"-joined
+    ("semantic_creation and evidence_matching. reason"), a single facet
+    ("next_action_priority. reason"), or facet names embedded anywhere in a
+    sentence ("I made no separate Jev calls for semantic_creation,
+    diagnosis, verification_selection or evidence_matching this turn because
+    ..."). A `>`-prefixed blockquote line (someone quoting the syntax, not
+    issuing it) never counts, even though _strip_noise's fence/inline-
+    code/dquote stripping does not itself catch a blockquote.
+    """
     out = set()
     for value in texts or ():
         cleaned = _strip_noise(value)
-        for match in JEV_REFUSED_RE.finditer(cleaned):
-            reason = match.group(2).strip()
-            if len(reason) < MIN_REFUSAL_REASON_CHARS:
+        for line in cleaned.splitlines():
+            if line.lstrip().startswith(">"):
                 continue
-            out.add(match.group(1).strip().lower())
+            m = JEV_REFUSED_LINE_RE.match(line)
+            if not m:
+                continue
+            rest = m.group(1)
+            facets_here = {f.lower() for f in FACET_TOKEN_RE.findall(rest)}
+            if not facets_here:
+                continue
+            # Residual reason: the line's tail with every matched facet
+            # token and connective punctuation/words stripped out.
+            residual = FACET_TOKEN_RE.sub(" ", rest)
+            residual = re.sub(r"[,:;.\-—]+", " ", residual)
+            residual = re.sub(r"\b(and|or)\b", " ", residual, flags=re.I)
+            residual = residual.strip()
+            if len(residual) < MIN_REFUSAL_REASON_CHARS:
+                continue
+            out.update(facets_here)
     return out
 
 
