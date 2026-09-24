@@ -58,7 +58,17 @@
 // record layer without a partner confirmation bound to the EXACT preview digest,
 // action kind and step key of that one action, given by the SAME actor the F06
 // envelope names, and no older than one capability lifetime. There is no batch,
-// session or "all" confirmation to name. The actor's authority is the real F06
+// session or "all" confirmation to name.
+//
+// CONFIRMATION FRESHNESS IS NOT YET BOUNDED, SO NOTHING IS ADMISSIBLE. The only
+// bound a caller cannot inflate would be a capability lifetime CEILING, and V5-F06
+// does not hold one (V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM). Bounding freshness
+// by the caller's own expires_at minus issued_at alone would let a twenty-year
+// capability admit a ten-year-old confirmation. So admission runs every check and
+// every refusal keeps precedence, but where it would have answered
+// `admissible_pending_attended_runtime` it answers `unavailable`, naming that
+// seam, until F06 binds a ceiling and the lifetime is within it. The ceiling is a
+// module constant, never a caller argument. The actor's authority is the real F06
 // capability presentation, whose first check is the global-boundaries actor
 // authority answer, computed here rather than trusted.
 //
@@ -112,10 +122,29 @@
 //     vocabulary, malformed digests, credential-shaped values and unreadable
 //     instants are not policy questions; the module fails closed.
 //
+// OBLIGATIONS THIS KERNEL CANNOT CHECK, named so nobody mistakes silence for a
+// pass (V5_RW02_OPEN_OBLIGATIONS):
+//   * CASE ANCHOR COMPLETENESS is the CALLER's obligation. Duplicate linking
+//     matches a candidate's typed anchor against the anchors the case carries.
+//     A case that omits an anchor the record layer holds — a prospect-only case
+//     whose deal already exists — cannot match an opportunity linked to the
+//     omitted anchor, and would read as `create_admissible`. The case must be
+//     resolved from the record layer with every anchor it holds.
+//   * WHICH SALESFORCE FIELDS ARE PLACEHOLDERS is the field map's to settle
+//     (V5_RW02_FIELD_MAP_SEAM). The placeholder rules bind every field LABELLED
+//     `commission_placeholder` or `close_date_placeholder`; a commission field
+//     submitted with ordinary semantics is not detectable until the field map
+//     names the commission and close-date fields.
+//
 // THE DATA BOUNDARY. No field in any closed key set can hold a credential. Any
 // string that CONTAINS something shaped like one — a JWT anywhere in the text, a
-// dotted triple, a PEM block, a `password=`/`token=`/`secret=` pair, a bearer
-// header, a Salesforce session id, an API key — throws `credential_shaped_value`.
+// dotted triple, a PEM block, a `password=`/`token=`/`secret=`/`sid=` pair, a
+// bearer or Basic authorization value, a Salesforce session id (raw or
+// URL-encoded), a Salesforce refresh token, an AWS access key id, a GitHub token
+// or an API key — throws `credential_shaped_value`. The scan covers every string
+// the module normalizes AND every string and key inside the F06 envelope,
+// capability, presentation, authority and attempt objects handed through to
+// V5-F06, before they are passed on.
 // No error in this file echoes a caller's value, unknown key or unregistered
 // vocabulary word; errors name the PATH only. Readback mismatches report field
 // NAMES only, never values.
@@ -128,6 +157,7 @@ import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { V5_NO_EFFECTS, V5_ACTIONS } from "./global-boundaries.v5.js";
 import {
   V5_ATTENDED_ACTIVATION_RECEIPT_STEP,
+  V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM,
   evaluateAttemptResolution,
   evaluateCapabilityPresentation,
   evaluateConsumptionOrder,
@@ -138,7 +168,7 @@ import { V5_J102_ASSIGNMENT_PHASES, V5_J102_DEAL_AXES } from "./cre-lifecycle.v5
 export { V5_NO_EFFECTS };
 
 export const V5_RW02_SCHEMA_VERSION = "doctorcre-v5-salesforce-reconciliation.v1";
-export const V5_RW02_POLICY_VERSION = 2;
+export const V5_RW02_POLICY_VERSION = 3;
 export const V5_RW02_EVIDENCE_SCHEMA_VERSION = "doctorcre-v5-rw02-action-evidence.v1";
 export const V5_RW02_PREVIEW_SCHEMA_VERSION = "doctorcre-v5-rw02-action-preview.v2";
 
@@ -178,9 +208,16 @@ export const V5_RW02_CREDENTIAL_PATTERNS = Object.freeze({
   jwt_anywhere: /eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/,
   dotted_triple: /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/,
   pem_block: /-----BEGIN /,
-  secret_pair: /(?:password|passwd|pwd|passcode|token|secret|api[_-]?key|session[_-]?id|client[_-]?secret)\s*[=:]/i,
+  secret_pair: /(?:password|passwd|pwd|passcode|token|secret|api[_-]?key|session[_-]?id|client[_-]?secret|\bsid)\s*[=:]/i,
   bearer: /\bbearer\s+\S+/i,
+  // Base64 user:password after "Basic": mixed case and a digit or padding, so
+  // prose such as "Basic understanding" is not mistaken for one.
+  basic_auth: /\b[Bb][Aa][Ss][Ii][Cc]\s+(?=[A-Za-z0-9+/]*[0-9+/=])(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])[A-Za-z0-9+/]{12,}={0,2}/,
   salesforce_session_id: /00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]{16,}/,
+  salesforce_session_id_url_encoded: /00D[A-Za-z0-9]{12,15}%21[A-Za-z0-9._%-]{16,}/i,
+  salesforce_refresh_token: /\b5Aep861[A-Za-z0-9._]{20,}/,
+  aws_access_key_id: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
+  github_token: /\bgh[pousr]_[A-Za-z0-9]{36,}/,
   api_key: /\bsk-[A-Za-z0-9_-]{16,}/,
 });
 const CREDENTIAL_PATTERN_LIST = Object.freeze(Object.values(V5_RW02_CREDENTIAL_PATTERNS));
@@ -239,6 +276,35 @@ function assertArray(value, path, { min = 0, max = 256 } = {}) {
 
 function containsCredential(value) {
   return CREDENTIAL_PATTERN_LIST.some(pattern => pattern.test(value));
+}
+
+/**
+ * Walk an object handed through to V5-F06 and refuse any string or key shaped
+ * like a credential. Errors name the path only, never the value or the key.
+ */
+function assertNoCredentialDeep(value, path, depth = 0) {
+  if (depth > 16) fail("invalid_shape", `${path} is nested too deeply`, { path });
+  if (typeof value === "string") {
+    if (containsCredential(value)) {
+      fail("credential_shaped_value",
+        `${path} is shaped like credential material; no credential may enter this module`, { path });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => assertNoCredentialDeep(v, `${path}[${i}]`, depth + 1));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (containsCredential(k)) {
+        fail("credential_shaped_value",
+          `a key under ${path} is shaped like credential material; no credential may enter this module`,
+          { path });
+      }
+      assertNoCredentialDeep(v, `${path}.<key>`, depth + 1);
+    }
+  }
 }
 
 /** Every string that enters this module passes through here. */
@@ -435,7 +501,38 @@ export const V5_RW02_EVALUATION_WINDOW_SEAM = "step:v5-rw02-per-action-evaluatio
 export const V5_RW02_EVIDENCE_STORE_SEAM = "step:v5-rw02-durable-per-action-evidence-store";
 export const V5_RW02_ENGAGEMENT_LINK_SEAM = "step:v5-rw02-non-deal-case-link-record-verb";
 
+/**
+ * The capability lifetime ceiling RW02 bounds confirmation freshness by. V5-F06
+ * holds no ceiling yet (V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM), so this is
+ * `null` and admission answers `unavailable`. It is a module constant on
+ * purpose: a ceiling a caller supplies is no ceiling.
+ */
+export const V5_RW02_CAPABILITY_LIFETIME_CEILING_SECONDS = null;
+
+/**
+ * Whether confirmation freshness is bounded for a capability of this lifetime
+ * under this ceiling. Pure; admission calls it only with the module constant.
+ */
+export function rw02ConfirmationFreshnessBound(lifetime_ms, ceiling_seconds) {
+  if (!Number.isFinite(lifetime_ms) || lifetime_ms <= 0) {
+    fail("invalid_shape", "lifetime_ms must be a positive number of milliseconds", { path: "lifetime_ms" });
+  }
+  if (ceiling_seconds === null) {
+    return deepFreeze({ bounded: false, reason_id: "capability_lifetime_ceiling_unbound",
+      seam: V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM });
+  }
+  if (!Number.isInteger(ceiling_seconds) || ceiling_seconds <= 0) {
+    fail("invalid_shape", "ceiling_seconds must be a positive integer or null", { path: "ceiling_seconds" });
+  }
+  if (lifetime_ms > ceiling_seconds * 1000) {
+    return deepFreeze({ bounded: false, reason_id: "capability_lifetime_exceeds_ceiling",
+      seam: V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM });
+  }
+  return deepFreeze({ bounded: true, reason_id: null, seam: null });
+}
+
 export const V5_RW02_SEAMS = deepFreeze([
+  V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM,
   V5_RW02_ENGAGEMENT_LINK_SEAM,
   V5_RW02_EVALUATION_WINDOW_SEAM,
   V5_RW02_EVIDENCE_STORE_SEAM,
@@ -444,6 +541,18 @@ export const V5_RW02_SEAMS = deepFreeze([
   V5_RW02_ORG_BINDING_SEAM,
   V5_RW02_SALESFORCE_ADAPTER_SEAM,
 ].sort());
+
+/** What this kernel cannot check, and who owes it. See the module header. */
+export const V5_RW02_OPEN_OBLIGATIONS = deepFreeze({
+  case_anchor_completeness: {
+    owner: "caller",
+    obligation: "Resolve the case from the record layer with every anchor it holds (prospect, engagement, assignment, deal). An omitted anchor cannot match an opportunity linked to it, so a duplicate search would read create_admissible.",
+  },
+  placeholder_field_designation: {
+    owner: V5_RW02_FIELD_MAP_SEAM,
+    obligation: "Name which Salesforce fields are the commission and close-date placeholders. Until then a commission field submitted with ordinary semantics is not detectable, and only fields labelled as placeholders are held to placeholder rules.",
+  },
+});
 
 /**
  * R7: a connector is admitted with version, auth, data, effect and removal
@@ -644,7 +753,6 @@ function stopAnswer(answer_kind, reason_id, detail) {
 const CASE_KEYS = Object.freeze([
   "assignment_ref", "deal_ref", "engagement_ref", "prospect_ref", "workflow_ref",
 ]);
-const ANCHOR_KEYS = Object.freeze(["assignment_ref", "deal_ref", "engagement_ref", "prospect_ref"]);
 
 /**
  * Q097.D1: the opportunity is a parallel corporate case linked across prospect,
@@ -669,8 +777,12 @@ function normalizeCase(value, path) {
   return out;
 }
 
-function caseAnchors(kase) {
-  return ANCHOR_KEYS.map(k => kase[k]).filter(v => v !== null);
+/** The anchor types a candidate link can name. Each maps to one case key. */
+export const V5_RW02_CASE_ANCHOR_TYPES = deepFreeze(["assignment", "deal", "engagement", "prospect"]);
+
+/** A typed link matches only the case anchor OF THAT TYPE. */
+function linkMatchesCase(link, kase) {
+  return link !== null && kase[`${link.anchor_type}_ref`] === link.ref;
 }
 
 const ORG_BINDING_KEYS = Object.freeze(["account_ref", "org_id", "origin"]);
@@ -900,7 +1012,20 @@ export const V5_RW02_DUPLICATE_OUTCOMES = deepFreeze([
 
 const DUPLICATE_REQUEST_KEYS = Object.freeze(["case", "intent_ordinal", "page", "search", "tenant"]);
 const SEARCH_KEYS = Object.freeze(["candidates", "completeness"]);
-const CANDIDATE_KEYS = Object.freeze(["linked_ref", "name_match", "opportunity_id", "step_marker"]);
+const CANDIDATE_KEYS = Object.freeze(["linked_anchor", "name_match", "opportunity_id", "step_marker"]);
+const LINKED_ANCHOR_KEYS = Object.freeze(["anchor_type", "ref"]);
+
+function normalizeLinkedAnchor(value, path) {
+  if (value === undefined || value === null) return null;
+  const raw = assertObject(value, path);
+  assertClosedKeys(raw, LINKED_ANCHOR_KEYS, path);
+  assertRequiredKeys(raw, LINKED_ANCHOR_KEYS, path);
+  return {
+    anchor_type: assertEnum(raw.anchor_type, V5_RW02_CASE_ANCHOR_TYPES, `${path}.anchor_type`,
+      "unknown_anchor_type"),
+    ref: assertStableId(raw.ref, `${path}.ref`),
+  };
+}
 
 function normalizeSearch(value, path) {
   const raw = assertObject(value, path);
@@ -920,7 +1045,7 @@ function normalizeSearch(value, path) {
     return {
       opportunity_id,
       step_marker: assertEnum(c.step_marker, V5_RW02_MARKER_STATES, `${p}.step_marker`, "unknown_marker_state"),
-      linked_ref: assertOptionalStableId(c.linked_ref, `${p}.linked_ref`),
+      linked_anchor: normalizeLinkedAnchor(c.linked_anchor, `${p}.linked_anchor`),
       name_match: assertEnum(c.name_match, V5_RW02_NAME_MATCH_STATES, `${p}.name_match`, "unknown_name_match"),
     };
   });
@@ -935,8 +1060,11 @@ function normalizeSearch(value, path) {
  * intent ordinal. The step marker is that key as written with the opportunity
  * (the provider field that carries it is V5_RW02_IDEMPOTENCY_MARKER_SEAM). A
  * candidate carrying THIS step's marker means the create already happened — the
- * resume answer is to read it back, never to create again. A candidate already
- * linked to ANY of this case's DoctorCRE anchors means link, not create. A
+ * resume answer is to read it back, never to create again. A candidate whose
+ * TYPED link names one of this case's anchors — a prospect link against the
+ * case's prospect, a deal link against its deal — means link, not create; an id
+ * equal to an anchor of another type is not a link. Anchor completeness is the
+ * caller's obligation (V5_RW02_OPEN_OBLIGATIONS.case_anchor_completeness). A
  * name-similar candidate is a human question: never auto-merge on a name.
  *
  * The answer reports the case, step key and verified org binding it was about,
@@ -980,8 +1108,7 @@ export function evaluateDuplicateSearch(request) {
       create_permitted: false,
     }));
   }
-  const anchors = caseAnchors(kase);
-  const linked = search.candidates.filter(c => c.linked_ref !== null && anchors.includes(c.linked_ref));
+  const linked = search.candidates.filter(c => linkMatchesCase(c.linked_anchor, kase));
   if (linked.length > 1) {
     return stopAnswer(kind, "inconsistent_result", {
       ...scoped, detail_reason: "case_linked_to_multiple_opportunities",
@@ -1214,8 +1341,11 @@ const F06_PRESENTATION_KEYS = Object.freeze(["authority", "capability", "envelop
  *
  * CONFIRMATION FRESHNESS. The confirmation must not postdate the presentation
  * and must be no older than ONE CAPABILITY LIFETIME (the capability's own
- * expires_at minus issued_at). That is an existing bound, not an invented
- * number: a confirmation cannot outlive the authority window it was given for.
+ * expires_at minus issued_at); either failure is a refusal. That lifetime is the
+ * caller's, so it is not a bound by itself: until V5-F06 binds a lifetime ceiling
+ * and the lifetime is within it, an action that passes every other check answers
+ * `unavailable`, naming V5_F06_CAPABILITY_LIFETIME_CEILING_SEAM, instead of
+ * `admissible_pending_attended_runtime`.
  */
 export function evaluateActionAdmission(request) {
   const raw = assertObject(request, "request");
@@ -1327,6 +1457,7 @@ export function evaluateActionAdmission(request) {
 
   const f = assertObject(raw.f06, "request.f06");
   assertClosedKeys(f, F06_PRESENTATION_KEYS, "request.f06");
+  assertNoCredentialDeep(f, "request.f06");
   assertRequiredKeys(f, ["capability", "envelope", "now", "presentation"], "request.f06");
   const now = assertInstant(f.now, "request.f06.now");
   const envelope = assertObject(f.envelope, "request.f06.envelope");
@@ -1368,6 +1499,22 @@ export function evaluateActionAdmission(request) {
     return refuse("capability_presentation", "capability_presentation_refused", {
       f06_reason_id: presentation.reason_id, f06_blocking_check: presentation.blocking_check,
     });
+  }
+
+  const freshness = rw02ConfirmationFreshnessBound(lifetime, V5_RW02_CAPABILITY_LIFETIME_CEILING_SECONDS);
+  if (!freshness.bounded) {
+    return deepFreeze(answerBase({
+      answer_kind: kind,
+      decision: "unavailable",
+      reason_id: freshness.reason_id,
+      blocking_check: "partner_confirmation",
+      ...base,
+      org_binding: preview.org_binding,
+      seam: freshness.seam,
+      runtime_inputs_missing: [...V5_RW02_RUNTIME_EVIDENCE_INPUTS],
+      adapter_admission: V5_RW02_ADAPTER_ADMISSION,
+      seams_owed: [...V5_RW02_SEAMS],
+    }));
   }
 
   return deepFreeze(answerBase({
@@ -1446,6 +1593,7 @@ export function evaluateWriteReadback(request) {
   const f = assertObject(raw.f06, "request.f06");
   assertClosedKeys(f, F06_ATTEMPT_KEYS, "request.f06");
   assertRequiredKeys(f, F06_ATTEMPT_KEYS, "request.f06");
+  assertNoCredentialDeep(f, "request.f06");
   if (f.envelope?.payload_digest !== preview.preview_digest || f.envelope?.step_id !== preview.step_key) {
     fail("attempt_for_other_preview", "request.f06.envelope is not sealed over this preview and step",
       { path: "request.f06.envelope" });
@@ -1777,6 +1925,9 @@ export function v5Rw02PolicyPreimage() {
     decisions: V5_RW02_SETTLED_DECISIONS,
     runtime_evidence_inputs: V5_RW02_RUNTIME_EVIDENCE_INPUTS,
     seams: V5_RW02_SEAMS,
+    open_obligations: V5_RW02_OPEN_OBLIGATIONS,
+    capability_lifetime_ceiling_seconds: V5_RW02_CAPABILITY_LIFETIME_CEILING_SECONDS,
+    case_anchor_types: V5_RW02_CASE_ANCHOR_TYPES,
     adapter_admission: V5_RW02_ADAPTER_ADMISSION,
     f06_action: V5_RW02_F06_ACTION,
     workflow_stages: V5_RW02_WORKFLOW_STAGES,
@@ -1817,6 +1968,8 @@ export function v5Rw02Projection() {
     downstream: ["V5-RW01"],
     runtime_inputs_missing: [...V5_RW02_RUNTIME_EVIDENCE_INPUTS],
     seams_owed: [...V5_RW02_SEAMS],
+    open_obligations: V5_RW02_OPEN_OBLIGATIONS,
+    confirmation_freshness_bounded: false,
     adapter_admission: V5_RW02_ADAPTER_ADMISSION,
     excluded: ["unattended execution", "MFA/CAPTCHA bypass", "Salesforce state as DoctorCRE lifecycle",
       "global trust"],
@@ -1831,6 +1984,8 @@ export const V5_RW02_PUBLIC_SURFACE = deepFreeze([
   "V5_RW02_ACTION_KIND_KEYS",
   "V5_RW02_ADAPTER_ADMISSION",
   "V5_RW02_ADMISSION_CHECKS",
+  "V5_RW02_CAPABILITY_LIFETIME_CEILING_SECONDS",
+  "V5_RW02_CASE_ANCHOR_TYPES",
   "V5_RW02_CHALLENGE_STATES",
   "V5_RW02_CONSISTENCY_STATES",
   "V5_RW02_CREDENTIAL_PATTERNS",
@@ -1856,6 +2011,7 @@ export const V5_RW02_PUBLIC_SURFACE = deepFreeze([
   "V5_RW02_LINK_FIELD",
   "V5_RW02_MARKER_STATES",
   "V5_RW02_NAME_MATCH_STATES",
+  "V5_RW02_OPEN_OBLIGATIONS",
   "V5_RW02_ORG_BINDING_SEAM",
   "V5_RW02_PAGE_CHECKS",
   "V5_RW02_PLACEHOLDER_SEMANTICS",
@@ -1883,6 +2039,7 @@ export const V5_RW02_PUBLIC_SURFACE = deepFreeze([
   "evaluatePageObservation",
   "evaluateResume",
   "evaluateWriteReadback",
+  "rw02ConfirmationFreshnessBound",
   "rw02StepKey",
   "rw02WorkflowId",
   "v5Rw02PolicyDigest",

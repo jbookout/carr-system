@@ -33,7 +33,10 @@ import * as rw02 from "../src/salesforce-reconciliation-rw02.v5.js";
 const {
   V5RW02Error,
   V5_RW02_ACTION_KIND_KEYS,
+  V5_RW02_CAPABILITY_LIFETIME_CEILING_SECONDS,
   V5_RW02_CREDENTIAL_PATTERNS,
+  V5_RW02_FIELD_MAP_SEAM,
+  V5_RW02_OPEN_OBLIGATIONS,
   V5_RW02_DECISION_IDS,
   V5_RW02_EXCLUDED_ACTIONS,
   V5_RW02_PAGE_CHECKS,
@@ -50,6 +53,7 @@ const {
   evaluatePageObservation,
   evaluateResume,
   evaluateWriteReadback,
+  rw02ConfirmationFreshnessBound,
   rw02StepKey,
   rw02WorkflowId,
   v5Rw02PolicyDigest,
@@ -79,6 +83,8 @@ const CASE = Object.freeze({ workflow_ref: "rw02-case-synthetic-1", deal_ref: "d
   engagement_ref: "engagement-synthetic-1" });
 const CASE2 = Object.freeze({ workflow_ref: "rw02-case-synthetic-2", deal_ref: "deal-synthetic-2" });
 const BINDING = Object.freeze({ origin: ORIGIN, org_id: ORG, account_ref: SEAT });
+const CEILING_SEAM = "step:v5-f06-capability-lifetime-ceiling";
+
 
 const TARGETED = new Set(["opportunity_phase_update", "opportunity_link_record", "etl_document_prepare",
   "commission_agreement_prepare"]);
@@ -257,6 +263,8 @@ test("the projection grants nothing, lists every runtime input as missing and na
   assert.deepEqual(p.runtime_inputs_missing, [...V5_RW02_RUNTIME_EVIDENCE_INPUTS]);
   assert.ok(p.runtime_inputs_missing.includes("step:journey-three-production-outcome"));
   assert.deepEqual(p.seams_owed, [...V5_RW02_SEAMS]);
+  assert.ok(p.seams_owed.includes(CEILING_SEAM));
+  assert.equal(p.confirmation_freshness_bounded, false);
   assert.equal(p.adapter_admission.admitted, false);
   assert.equal(p.adapter_admission.credential_enters_model_or_context, false);
   assert.deepEqual(p.source_build_dependencies, ["V5-F01", "V5-F06", "V5-J301"]);
@@ -358,7 +366,40 @@ const CREDENTIAL_SAMPLES = {
   bearer: "Bearer abcdef123456",
   salesforce_session_id: "sid 00Dxx0000001gPL!AR8AQJXg5vYzP.qhbZrs4r1D8pX0WQ",
   api_key: "key sk-ant-api03-abcdefghijklmnopq", // synthetic, not a key; ci-secret-scan: allow
+  basic_auth: "Authorization: Basic dXNlcjpzeW50aGV0aWM=",
+  salesforce_session_id_url_encoded: "sid%3D00Dxx0000001gPL%21AR8AQJXg5vYzP.qhbZrs4r1D8pX0WQ",
+  salesforce_refresh_token: "rt 5Aep861SYNTHETICxxxxxxxxxxxxxxxxxxxxxx", // synthetic; ci-secret-scan: allow
+  aws_access_key_id: "key AKIASYNTHETIC00000XY", // synthetic, not a key; ci-secret-scan: allow
+  github_token: "ghp_SYNTHETICsyntheticSYNTHETICsynthetic0", // synthetic; ci-secret-scan: allow
 };
+
+test("data boundary: sid= is a secret pair again, and prose is not a credential", () => {
+  assert.ok(V5_RW02_CREDENTIAL_PATTERNS.secret_pair.test("sid=abc123"));
+  assert.ok(V5_RW02_CREDENTIAL_PATTERNS.secret_pair.test("SID: abc123"));
+  for (const prose of ["consider: the lane", "Basic understanding of the lane", "basic terms agreed 2026",
+    "AKIA short", "gh_pages", "Basic Understandings", "basic understandings2", "BASIC UNDERSTANDING2"]) {
+    assert.equal(Object.entries(V5_RW02_CREDENTIAL_PATTERNS).filter(([, re]) => re.test(prose)).length, 0, prose);
+  }
+});
+
+test("data boundary: strings and keys inside the F06 objects are scanned before F06 sees them", () => {
+  const secret = "00Dxx0000001gPL!AR8AQJXg5vYzP.qhbZrs4r1D8pX0WQ";
+  const r = req();
+  const p = buildActionPreview(r);
+  const env = envelopeFor(p);
+  assertThrowsQuietly(() => admission(r, {}, { capability: { ...capabilityFor(env), nonce: secret } }),
+    "credential_shaped_value", secret);
+  assertThrowsQuietly(() => admission(r, {}, { presentation: { ...presentationFor(env), note: ["ok", secret] } }),
+    "credential_shaped_value", secret);
+  assertThrowsQuietly(() => admission(r, {}, { presentation: { ...presentationFor(env), "password=x1": 1 } }),
+    "credential_shaped_value", "password=x1");
+  assertThrowsQuietly(() => readback(r, { f06: { envelope: env, capability: capabilityFor(env),
+    attempt: { ...attemptFor(env), attempt_id: `att ${secret}` } } }), "credential_shaped_value", secret);
+  let deep = "leaf";
+  for (let i = 0; i < 20; i++) deep = { n: deep };
+  assert.throws(() => admission(r, {}, { presentation: { ...presentationFor(env), note: deep } }),
+    isErr("invalid_shape"));
+});
 
 test("data boundary: every credential shape is registered and has a sample only it catches", () => {
   assert.deepEqual(Object.keys(CREDENTIAL_SAMPLES).sort(), Object.keys(V5_RW02_CREDENTIAL_PATTERNS).sort());
@@ -425,14 +466,54 @@ test("CD2 duplicates: this step's marker on the provider means already effected 
   assert.equal(d.create_permitted, false);
 });
 
+const link = (anchor_type, ref) => ({ linked_anchor: { anchor_type, ref } });
+
 test("CD2 duplicates: an opportunity linked to ANY anchor of this case is linked, not duplicated", () => {
-  for (const linked_ref of [CASE.deal_ref, CASE.engagement_ref]) {
-    const d = evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_ref })]));
-    assert.equal(d.decision, "link_existing", linked_ref);
+  for (const [type, ref] of [["deal", CASE.deal_ref], ["engagement", CASE.engagement_ref]]) {
+    const d = evaluateDuplicateSearch(dupSearch([cand(OPP, link(type, ref))]));
+    assert.equal(d.decision, "link_existing", type);
     assert.equal(d.create_permitted, false);
   }
-  const notOurs = evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_ref: "deal-someone-else" })]));
+  const full = { workflow_ref: "rw02-case-synthetic-9", prospect_ref: "p-9", engagement_ref: "e-9",
+    assignment_ref: "a-9", deal_ref: "d-9" };
+  for (const type of ["prospect", "engagement", "assignment", "deal"]) {
+    const d = evaluateDuplicateSearch(dupSearch([cand(OPP, link(type, full[`${type}_ref`]))], "complete",
+      { case: full }));
+    assert.equal(d.decision, "link_existing", type);
+  }
+  const notOurs = evaluateDuplicateSearch(dupSearch([cand(OPP, link("deal", "deal-someone-else"))]));
   assert.equal(notOurs.decision, "create_admissible");
+});
+
+test("review N2: a link is typed, so an id equal to an anchor of another type is not a link", () => {
+  const shared = { workflow_ref: "rw02-case-synthetic-8", prospect_ref: "shared-8" };
+  for (const type of ["deal", "engagement", "assignment"]) {
+    const d = evaluateDuplicateSearch(dupSearch([cand(OPP, link(type, "shared-8"))], "complete", { case: shared }));
+    assert.equal(d.decision, "create_admissible", type);
+  }
+  assert.equal(evaluateDuplicateSearch(dupSearch([cand(OPP, link("prospect", "shared-8"))], "complete",
+    { case: shared })).decision, "link_existing");
+  assertThrowsQuietly(() => evaluateDuplicateSearch(dupSearch([cand(OPP, link("account", "shared-8"))])),
+    "unknown_anchor_type", "account");
+  assert.throws(() => evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_ref: CASE.deal_ref })])),
+    isErr("unknown_field"));
+  assert.throws(() => evaluateDuplicateSearch(dupSearch([cand(OPP, { linked_anchor: { anchor_type: "deal" } })])),
+    isErr("missing_field"));
+  assert.throws(() => evaluateDuplicateSearch(dupSearch([cand(OPP,
+    { linked_anchor: { anchor_type: "deal", ref: CASE.deal_ref, also: "prospect" } })])), isErr("unknown_field"));
+});
+
+test("review N4/N13: what the kernel cannot check is named, with its owner", () => {
+  assert.equal(V5_RW02_OPEN_OBLIGATIONS.case_anchor_completeness.owner, "caller");
+  assert.equal(V5_RW02_OPEN_OBLIGATIONS.placeholder_field_designation.owner, V5_RW02_FIELD_MAP_SEAM);
+  assert.deepEqual(v5Rw02Projection().open_obligations, V5_RW02_OPEN_OBLIGATIONS);
+  // N4 as behaviour: a prospect-only case cannot see the opportunity linked to its omitted deal.
+  const omitted = { workflow_ref: "rw02-case-synthetic-1", prospect_ref: "p-1" };
+  assert.equal(evaluateDuplicateSearch(dupSearch([cand(OPP, link("deal", CASE.deal_ref))], "complete",
+    { case: omitted })).decision, "create_admissible");
+  // N13 as behaviour: a commission field labelled ordinary is not held to placeholder rules.
+  assert.equal(preview("opportunity_create", { fields: [...CREATE_FIELDS.map(f => ({ ...f })),
+    field("Commission_Estimate__c", "12,000 est.")] }).decision, "preview_ready");
 });
 
 test("CD2 duplicates: a name match is a human question, never an automatic join", () => {
@@ -451,7 +532,7 @@ test("CD2 duplicates: incomplete searches, unknown markers and double markers st
     [dupSearch([cand(OPP, { step_marker: "unstated" })]), "step_marker_unobservable"],
     [dupSearch([cand(OPP, { step_marker: "present" }), cand(OPP2, { step_marker: "present" })]),
       "step_marker_on_multiple_opportunities"],
-    [dupSearch([cand(OPP, { linked_ref: CASE.deal_ref }), cand(OPP2, { linked_ref: CASE.engagement_ref })]),
+    [dupSearch([cand(OPP, link("deal", CASE.deal_ref)), cand(OPP2, link("engagement", CASE.engagement_ref))]),
       "case_linked_to_multiple_opportunities"],
   ]) {
     const d = evaluateDuplicateSearch(request);
@@ -600,12 +681,18 @@ test("protected sends are RW01's and are refused by name", () => {
 // "distinct current exact-action capability ... atomically consumed" clause).
 // ---------------------------------------------------------------------------
 
-test("admission clean case: every RW02 check and the real F06 presentation pass, and nothing is granted", () => {
+test("admission clean case: every RW02 check and the real F06 presentation pass, and it is unavailable until F06 bounds lifetime", () => {
+  assert.equal(V5_RW02_CAPABILITY_LIFETIME_CEILING_SECONDS, null);
   for (const kind of V5_RW02_ACTION_KIND_KEYS) {
     const a = admission(req(kind));
-    assert.equal(a.decision, "admissible_pending_attended_runtime", kind);
-    assert.equal(a.blocking_check, null);
-    assert.equal(a.consumption_must_commit_before_provider_call, true);
+    assert.equal(a.decision, "unavailable", kind);
+    assert.equal(a.reason_id, "capability_lifetime_ceiling_unbound");
+    assert.equal(a.blocking_check, "partner_confirmation");
+    assert.equal(a.seam, CEILING_SEAM);
+    assert.equal(a.action_kind, kind);
+    assert.deepEqual(a.org_binding, { ...BINDING });
+    assert.equal(a.idempotency_key, undefined);
+    assert.deepEqual(a.seams_owed, [...V5_RW02_SEAMS]);
     assert.deepEqual(a.runtime_inputs_missing, [...V5_RW02_RUNTIME_EVIDENCE_INPUTS]);
     assert.equal(a.adapter_admission.admitted, false);
     assertGrantsNothing(a);
@@ -701,11 +788,42 @@ test("review C3: a confirmation from the future or older than one capability lif
     "confirmation_after_presentation");
   assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2025-09-24T11:59:00Z" }) }).reason_id,
     "confirmation_stale");
-  // Exactly one lifetime (10 minutes) old is still inside the bound; one second more is not.
-  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T11:50:00Z" }) }).decision,
-    "admissible_pending_attended_runtime");
+  // Exactly one lifetime (10 minutes) old is not refused as stale (it reaches the
+  // unbound-ceiling answer); one second more is.
+  assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T11:50:00Z" }) }).reason_id,
+    "capability_lifetime_ceiling_unbound");
   assert.equal(admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2026-09-24T11:49:59Z" }) }).reason_id,
     "confirmation_stale");
+});
+
+test("review N1: a twenty-year capability cannot admit a ten-year-old confirmation", () => {
+  const r = req();
+  const p = buildActionPreview(r);
+  const env = envelopeFor(p);
+  const cap = capabilityFor(env, { issued_at: "2016-09-24T11:58:00Z", expires_at: "2036-09-24T11:58:00Z" });
+  const a = admission(r, { confirmation: confirmationFor(p, { confirmed_at: "2016-09-24T12:00:00Z" }) },
+    { envelope: env, capability: cap });
+  assert.notEqual(a.decision, "admissible_pending_attended_runtime");
+  assert.equal(a.decision, "unavailable");
+  assert.equal(a.reason_id, "capability_lifetime_ceiling_unbound");
+  assert.equal(a.seam, CEILING_SEAM);
+  assertGrantsNothing(a);
+});
+
+test("confirmation freshness bound: unbound, over the ceiling, within it, and unreadable inputs", () => {
+  assert.deepEqual({ ...rw02ConfirmationFreshnessBound(600_000, null) },
+    { bounded: false, reason_id: "capability_lifetime_ceiling_unbound", seam: CEILING_SEAM });
+  assert.deepEqual({ ...rw02ConfirmationFreshnessBound(600_001, 600) },
+    { bounded: false, reason_id: "capability_lifetime_exceeds_ceiling", seam: CEILING_SEAM });
+  assert.deepEqual({ ...rw02ConfirmationFreshnessBound(600_000, 600) }, { bounded: true, reason_id: null, seam: null });
+  const twentyYears = Date.parse("2036-09-24T00:00:00Z") - Date.parse("2016-09-24T00:00:00Z");
+  assert.equal(rw02ConfirmationFreshnessBound(twentyYears, 900).bounded, false);
+  for (const bad of [0, -1, Number.NaN, "600000"]) {
+    assert.throws(() => rw02ConfirmationFreshnessBound(bad, 600), isErr("invalid_shape"), String(bad));
+  }
+  for (const bad of [0, -5, 1.5, "600"]) {
+    assert.throws(() => rw02ConfirmationFreshnessBound(600_000, bad), isErr("invalid_shape"), String(bad));
+  }
 });
 
 test("admission: there is no batch or session confirmation to name", () => {
@@ -863,6 +981,28 @@ test("CD2 readback: the attempt must be sealed over this preview and step", () =
     tenant: T, page: page(), preview_request: req(), evidence_class: "fixture", observed_at: NOW,
     f06: { envelope: env, capability: capabilityFor(env), attempt: attemptFor(env) },
     provider_readback: readbackOf(other),
+  }), isErr("attempt_for_other_preview"));
+});
+
+test("CD2 readback: an attempt sealed over this preview but another step is refused", () => {
+  const p = buildActionPreview(req());
+  const env = envelopeFor(p, { step_id: "step-other" });
+  assert.equal(env.payload_digest, p.preview_digest);
+  assert.throws(() => evaluateWriteReadback({
+    tenant: T, page: page(), preview_request: req(), evidence_class: "fixture", observed_at: NOW,
+    f06: { envelope: env, capability: capabilityFor(env), attempt: attemptFor(env) },
+    provider_readback: readbackOf(p),
+  }), isErr("attempt_for_other_preview"));
+});
+
+test("CD2 readback: an attempt for this step but sealed over another payload is refused", () => {
+  const p = buildActionPreview(req());
+  const env = envelopeFor(p, { payload_digest: "sha256:" + "9".repeat(64) });
+  assert.equal(env.step_id, p.preview.step_key);
+  assert.throws(() => evaluateWriteReadback({
+    tenant: T, page: page(), preview_request: req(), evidence_class: "fixture", observed_at: NOW,
+    f06: { envelope: env, capability: capabilityFor(env), attempt: attemptFor(env) },
+    provider_readback: readbackOf(p),
   }), isErr("attempt_for_other_preview"));
 });
 
