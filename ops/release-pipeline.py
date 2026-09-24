@@ -484,22 +484,44 @@ def trusted_commenter(comment: dict, cfg: dict) -> bool:
 REVIEWED_SHA_RE = re.compile(r"^\s*Reviewed-SHA:\s*([0-9a-f]{40})\s*$", re.M)
 
 
+def approval_of(comments: list[dict], cfg: dict, head_sha: str,
+                covers: Callable[[str], str | None] | None = None) -> tuple[dict, str, str]:
+    """(comment, rule, reviewed_sha). The LATEST trusted comment that carries a
+    verdict decides. It must be APPROVE and carry exactly one
+    `Reviewed-SHA: <40-hex>` line R. No clocks: a committer date says when a
+    commit was made, not when it was pushed, so an approval of H1 posted
+    between H2's commit and its push would otherwise cover H2 unreviewed.
+
+    rule "exact": R is the merged PR head H.
+    rule "main-merge-only": R != H, but `covers(R)` returns None, i.e. H is R
+    plus nothing but merges of main (what `gh pr update-branch` adds after a
+    review); covers() returns the reason otherwise, and the approval is stale."""
+    last = _latest_approval(comments, cfg)
+    reviewed = REVIEWED_SHA_RE.findall(str(last.get("body") or ""))
+    if head_sha and reviewed == [head_sha]:
+        return last, "exact", head_sha
+    why = "no main-merge rule available"
+    if head_sha and len(reviewed) == 1 and covers is not None:
+        why = covers(reviewed[0]) or ""
+        if not why:
+            return last, "main-merge-only", reviewed[0]
+    raise Blocked("review_stale", f"the approval {last.get('html_url')} carries "
+                                  f"Reviewed-SHA {reviewed or 'none'}, not the merged head {head_sha}, "
+                                  f"and the main-merge-only rule does not apply: {why}")
+
+
 def latest_verdict(comments: list[dict], cfg: dict, head_sha: str) -> dict:
-    """The LATEST trusted comment that carries a verdict decides. It must be
-    APPROVE and carry a `Reviewed-SHA: <40-hex>` line equal to the PR's exact
-    head SHA. No clocks: a committer date says when a commit was made, not when
-    it was pushed, so an approval of H1 posted between H2's commit and its push
-    would otherwise cover H2 unreviewed."""
+    """The approval comment under the exact rule only (see approval_of)."""
+    return approval_of(comments, cfg, head_sha)[0]
+
+
+def _latest_approval(comments: list[dict], cfg: dict) -> dict:
     carrying = [c for c in comments if trusted_commenter(c, cfg) and verdict(c.get("body", ""), cfg)]
     if not carrying:
         raise Blocked("no_independent_review", "no trusted comment carries a review verdict")
     last = max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
     if verdict(last.get("body", ""), cfg) != "approve":
         raise Blocked("review_blocked", f"the latest review verdict is BLOCK ({last.get('html_url')})")
-    reviewed = REVIEWED_SHA_RE.findall(str(last.get("body") or ""))
-    if not head_sha or reviewed != [head_sha]:
-        raise Blocked("review_stale", f"the approval {last.get('html_url')} does not carry exactly "
-                                      f"`Reviewed-SHA: {head_sha}` (found {reviewed or 'none'})")
     return last
 
 
@@ -634,6 +656,7 @@ class Pipeline:
         the PRs that touched a release path (each must have green CI)."""
         events = read_merge_events(self.repo / self.cfg.get("merge_event_file", "out/merge-events.jsonl"))
         reviewed: list[int] = []
+        reviews: list[dict] = []
         pre_pipeline: list[int] = []
         release_prs: list[dict] = []
         head: dict | None = None
@@ -646,8 +669,11 @@ class Pipeline:
             touches, _ = classify(self.git("diff", "--name-only", parent, commit, cwd=repo_dir).splitlines(),
                                   lane_cfg)
             approval: dict | None
+            rule = reviewed_sha = ""
             try:
-                approval = latest_verdict(gh.comments(number), lane_cfg, head_sha)
+                approval, rule, reviewed_sha = approval_of(
+                    gh.comments(number), lane_cfg, head_sha,
+                    covers=lambda r, n=number, h=head_sha, c=commit: self.main_merge_only(repo_dir, n, r, h, c))
             except Blocked as b:
                 cutover = str(lane_cfg.get("review_required_after") or "")
                 if (b.reason == "no_independent_review" and commit != sha and cutover
@@ -658,16 +684,84 @@ class Pipeline:
                     raise Blocked(b.reason, f"PR #{number} ({commit[:12]}): {b.detail}")
             if approval is not None:
                 reviewed.append(number)
+                reviews.append({"pr": number, "rule": rule, "reviewed_sha": reviewed_sha, "head_sha": head_sha})
             if touches:
                 release_prs.append({"pr": number, "head_sha": head_sha})
             if commit == sha and approval is not None:
                 head = {"pr": number, "head_sha": head_sha, "url": str(approval.get("html_url") or ""),
-                        "event": events.get(commit) or {}}
+                        "event": events.get(commit) or {}, "rule": rule, "reviewed_sha": reviewed_sha}
         if head is None:
             raise Blocked("no_independent_review", f"the head commit {sha[:12]} has no approval")
         return {"head": head, "prs": reviewed, "pre_pipeline_prs": pre_pipeline, "release_prs": release_prs,
+                "reviews": reviews,
                 "verifier": choose_verifier(lane_cfg, head["event"]),
                 "verifier_evidence": evidence_ref_from_url(head["url"])}
+
+    def main_merge_only(self, repo_dir: Path, number: int, reviewed: str, head: str,
+                        merged: str) -> str | None:
+        """None when merged PR head H is reviewed head R plus ONLY merges of
+        main (the commits `gh pr update-branch` adds after a review);
+        otherwise the reason. `merged` is the PR's commit on main, so
+        `merged^1` is main as it stood when the PR landed.
+          (a) R is an ancestor of H, and every commit in R..H that is not on
+              main (main's own commits arrive through the merges) is a two-parent
+              merge whose second parent is on main at that time and which,
+              against that parent, changes nothing but the PR's own files
+              (no content of its own smuggled in through a merge);
+          (b) none of the PR's own files, the paths changed between
+              merge-base(R, main-at-merge) and R, differ between R and H.
+        main-at-merge, not today's main: today's main contains the PR, so its
+        merge-base with R is R itself and the PR's file set would be empty."""
+        if not SHA_RE.fullmatch(reviewed or "") or not SHA_RE.fullmatch(head or ""):
+            return "Reviewed-SHA or PR head is not a full SHA"
+
+        def have(obj: str) -> bool:
+            try:
+                self.git("cat-file", "-e", f"{obj}^{{commit}}", cwd=repo_dir)
+                return True
+            except StepFailed:
+                return False
+
+        def ancestor(a: str, b: str) -> bool:
+            try:
+                self.git("merge-base", "--is-ancestor", a, b, cwd=repo_dir)
+                return True
+            except StepFailed:
+                return False
+
+        def names(a: str, b: str) -> set[str]:
+            return {x for x in self.git("diff", "--name-only", a, b, cwd=repo_dir).splitlines() if x.strip()}
+
+        if not (have(reviewed) and have(head)):
+            with contextlib.suppress(StepFailed):   # squash merges leave H off main: fetch the PR head
+                self.git("fetch", "--quiet", "origin", f"refs/pull/{number}/head", cwd=repo_dir)
+        if not have(head):
+            return f"PR head {head[:12]} is not fetchable"
+        if not have(reviewed):
+            return f"Reviewed-SHA {reviewed[:12]} is not in the PR's history"
+        if not ancestor(reviewed, head):
+            return f"Reviewed-SHA {reviewed[:12]} is not an ancestor of the PR head {head[:12]}"
+        main_then = self.git("rev-parse", f"{merged}^1", cwd=repo_dir)
+        pr_files = names(self.git("merge-base", reviewed, main_then, cwd=repo_dir), reviewed)
+        # The PR-side commits of R..H: main's own commits arrive through the
+        # merges and are excluded (they were reviewed as their own PRs).
+        added = self.git("rev-list", head, f"^{reviewed}", f"^{main_then}", cwd=repo_dir).split()
+        parents_of = {c: self.git("rev-list", "--parents", "-n", "1", c, cwd=repo_dir).split()[1:]
+                      for c in added}
+        for c in added:
+            if len(parents_of[c]) != 2:
+                return f"{c[:12]} in R..H is not a two-parent merge"
+        for c in added:
+            second = parents_of[c][1]
+            if not ancestor(second, main_then):
+                return f"merge {c[:12]}'s second parent {second[:12]} is not on main"
+            extra = sorted(names(second, c) - pr_files)
+            if extra:
+                return f"merge {c[:12]} changes non-PR file(s) against main: {', '.join(extra[:5])}"
+        touched = sorted(names(reviewed, head) & pr_files)
+        if touched:
+            return f"PR file(s) changed after review: {', '.join(touched[:5])}"
+        return None
 
     def canary_ignored(self, commit: str, lane_cfg: dict) -> bool:
         """True when EVERY path this commit changed matches main-canary's
@@ -735,6 +829,8 @@ class Pipeline:
         run_id = self.ci_run(gh, lane_cfg, head["pr"], head["head_sha"])
         repo_name = lane_cfg["github_repo"]
         return {"pr": head["pr"], "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
+                "reviews": rev["reviews"], "review_rule": head["rule"],
+                "reviewed_sha": head["reviewed_sha"], "pr_head_sha": head["head_sha"],
                 "verifier": rev["verifier"], "verifier_evidence": rev["verifier_evidence"],
                 "test_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['test_evidence_label']}",
                 "security_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['security_evidence_label']}"}
@@ -1072,7 +1168,9 @@ class Pipeline:
         if not self.dry_run:
             self.remove_worktrees()
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
-                "pr": ev["pr"], "prs": ev["prs"], "verifier": ev["verifier"],
+                "pr": ev["pr"], "prs": ev["prs"], "reviews": ev.get("reviews", []),
+                "review_rule": ev.get("review_rule"), "reviewed_sha": ev.get("reviewed_sha"),
+                "pr_head_sha": ev.get("pr_head_sha"), "verifier": ev["verifier"],
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
                 "schema_pr": schema_pr, "run_dir": str(self.run_dir)}
 
@@ -1136,7 +1234,10 @@ class Pipeline:
             if live.get("source_commit") != sha or live.get("environment") != "production":
                 raise StepFailed("app-verify-live", 1, "", "/app-release does not serve the released SHA")
             self.remove_worktrees()
+        head = rev.get("head") or {}
         return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
+                "reviews": rev.get("reviews", []), "review_rule": head.get("rule"),
+                "reviewed_sha": head.get("reviewed_sha"), "pr_head_sha": head.get("head_sha"),
                 "review_evidence": rev["verifier_evidence"]}
 
 

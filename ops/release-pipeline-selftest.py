@@ -553,6 +553,118 @@ class ReviewGate(Base):
         self.assertIn("--paginate", seen[0])
 
 
+
+class SquashGitHub(FakeGitHub):
+    """FakeGitHub, except the squash commit `merged` maps to PR `number`
+    whose real head is `head`, approved at `reviewed`."""
+
+    def __init__(self, merged: str, number: int, head: str, reviewed: str):
+        super().__init__()
+        self.merged, self.number, self.real_head = merged, number, head
+        self.comment_map = {number: [approve(number, reviewed=reviewed)]}
+
+    def pr_for_commit(self, sha):
+        if sha == self.merged:
+            self.heads[self.real_head] = self.number
+            return {"number": self.number, "merged_at": "2026-09-30T00:00:00Z",
+                    "head": {"sha": self.real_head}}
+        return super().pr_for_commit(sha)
+
+
+class UpdateBranchReview(Base):
+    """`gh pr update-branch` merges main into a PR after its review, so the
+    merged head H is not the Reviewed-SHA R. R covers H only when R..H is
+    nothing but main merges that leave the PR's own files alone. The PR is
+    built in a separate author clone and squash-merged, as on GitHub, so the
+    pipeline's checkout has neither R nor H until it fetches refs/pull/N/head."""
+
+    N = 777
+
+    def build(self, *, merge_touches_pr_file=False, merge_touches_other_file=False):
+        fx = self.fx
+        author = fx.tmp / "author"
+        git(fx.tmp, "clone", "-q", str(fx.origin), str(author))
+        git(author, "config", "user.email", "a@example.invalid")
+        git(author, "config", "user.name", "a")
+        git(author, "checkout", "-q", "-b", "pr")
+        (author / "mcp-server/src").mkdir(parents=True, exist_ok=True)
+        (author / "mcp-server/src/pr.js").write_text("reviewed\n")
+        git(author, "add", "-A")
+        git(author, "commit", "-q", "-m", "the PR")
+        reviewed = git(author, "rev-parse", "HEAD")
+        main_moved = fx.commit({"mcp-server/src/other.js": "main moved"})   # main advances
+        git(author, "fetch", "-q", "origin", "main")
+        git(author, "merge", "-q", "--no-ff", "--no-edit", "origin/main")   # what update-branch does
+        if merge_touches_pr_file or merge_touches_other_file:
+            rel = "mcp-server/src/pr.js" if merge_touches_pr_file else "mcp-server/src/sneak.js"
+            (author / rel).write_text("changed inside the merge, after review\n")
+            git(author, "add", "-A")
+            git(author, "commit", "-q", "--amend", "--no-edit")
+        head = git(author, "rev-parse", "HEAD")
+        git(author, "push", "-q", "origin", f"HEAD:refs/pull/{self.N}/head")
+        git(author, "checkout", "-q", "-B", "main", "origin/main")
+        git(author, "merge", "-q", "--squash", head)
+        git(author, "commit", "-q", "-m", f"the PR (#{self.N})")
+        merged = git(author, "rev-parse", "HEAD")
+        git(author, "push", "-q", "origin", "HEAD:main")
+        git(fx.repo, "fetch", "-q", "origin", "main")
+        self.assertNotEqual(main_moved, merged)
+        return reviewed, head, merged
+
+    def tick(self, merged, head, reviewed):
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        gh = SquashGitHub(merged, self.N, head, reviewed)
+        return self.fx.pipeline(runner, live=live, github=gh).tick(["worker"]), runner
+
+    def test_exact_rule_is_recorded(self):
+        reviewed, head, merged = self.build()
+        rc, _ = self.tick(merged, head, head)          # approval names H itself
+        self.assertEqual(rc, 0)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["status"], "shipped")
+        self.assertEqual((rec["review_rule"], rec["reviewed_sha"], rec["pr_head_sha"]), ("exact", head, head))
+        self.assertIn({"pr": self.N, "rule": "exact", "reviewed_sha": head, "head_sha": head}, rec["reviews"])
+
+    def test_main_merge_only_rule_accepts_update_branch(self):
+        reviewed, head, merged = self.build()
+        self.assertNotEqual(reviewed, head)
+        rc, _ = self.tick(merged, head, reviewed)
+        self.assertEqual(rc, 0)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["status"], "shipped")
+        self.assertEqual((rec["review_rule"], rec["reviewed_sha"], rec["pr_head_sha"]),
+                         ("main-merge-only", reviewed, head))
+
+    def test_merge_that_touches_a_pr_file_holds(self):
+        reviewed, head, merged = self.build(merge_touches_pr_file=True)
+        rc, runner = self.tick(merged, head, reviewed)
+        self.assertEqual(rc, 0)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["reason"]), ("blocked", "review_stale"))
+        self.assertIn("mcp-server/src/pr.js", rec["detail"])
+        self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
+
+    def test_merge_that_smuggles_a_non_pr_file_holds(self):
+        reviewed, head, merged = self.build(merge_touches_other_file=True)
+        rc, runner = self.tick(merged, head, reviewed)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["reason"]), ("blocked", "review_stale"))
+        self.assertIn("non-PR file", rec["detail"])
+        self.assertIn("mcp-server/src/sneak.js", rec["detail"])
+
+    def test_non_merge_commit_after_review_holds(self):
+        reviewed, head, merged = self.build()
+        # an approval of an OLDER sha whose successor is an ordinary commit: R = parent of the PR commit
+        older = git(self.fx.repo, "rev-parse", f"{self.fx.base}")
+        rc, runner = self.tick(merged, head, older)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["reason"], "review_stale")
+        self.assertIn("not a two-parent merge", rec["detail"])
+
 class CanaryAndCI(Base):
     """B2: the nearest canary verdict decides; every release-path PR has green CI."""
 
