@@ -309,18 +309,44 @@ def main() -> int:
     check("6j. an all-absent historical assurance group still round-trips",
           legacy_out.returncode == 0 and legacy_verify.returncode == 0)
 
-    historical_sha = None
-    # The P2 artifact was added 80 commits ago on this branch; keep a bounded
-    # historical window, but wide enough that the first pre-P2 commit remains
-    # discoverable as the branch advances.
-    for candidate in git("log", "-160", "--format=%H").split():
-        present = subprocess.run(
-            ("git", "-C", str(REPO), "cat-file", "-e",
-             f"{candidate}:ops/config/doctorcre-artifact.v1.json"),
-            capture_output=True)
-        if present.returncode != 0:
-            historical_sha = candidate
-            break
+    # Find the pre-P2 commit deterministically rather than walking a fixed
+    # number of commits back from HEAD. A commit-count window rots: every
+    # merge to main pushes the P2-adding commit further back, and once it
+    # falls outside the window this assertion silently stops finding a
+    # historical (pre-P2) commit at all. Instead, locate the commit that
+    # ADDED ops/config/doctorcre-artifact.v1.json and use its first parent —
+    # the file is added exactly once, and everything before that add is, by
+    # definition, pre-P2.
+    add_commits = git("log", "--diff-filter=A", "--format=%H",
+                      "--", "ops/config/doctorcre-artifact.v1.json").strip()
+    if add_commits == "":
+        raise SystemExit(
+            "release-manifest-selftest: could not find the commit that added "
+            "ops/config/doctorcre-artifact.v1.json — history is unavailable "
+            "(shallow clone?). This job's checkout needs fetch-depth: 0.")
+    artifact_added_sha = add_commits.splitlines()[-1]  # oldest, if ever re-added
+
+    parent = subprocess.run(
+        ("git", "-C", str(REPO), "rev-parse", f"{artifact_added_sha}^"),
+        capture_output=True, text=True)
+    if parent.returncode != 0:
+        raise SystemExit(
+            "release-manifest-selftest: could not resolve the parent of the "
+            f"commit that added the P2 artifact ({artifact_added_sha}) — "
+            "history is unavailable (shallow clone?). This job's checkout "
+            "needs fetch-depth: 0.")
+    historical_sha = parent.stdout.strip()
+
+    present = subprocess.run(
+        ("git", "-C", str(REPO), "cat-file", "-e",
+         f"{historical_sha}:ops/config/doctorcre-artifact.v1.json"),
+        capture_output=True)
+    if present.returncode == 0:
+        raise SystemExit(
+            "release-manifest-selftest: expected the P2 artifact to be "
+            f"absent at {historical_sha} (parent of the commit that added "
+            "it), but it is present. The add-commit detection is wrong.")
+
     historical = build("--sha", historical_sha) if historical_sha else {}
     historical_verify = run("verify", "--manifest", _tmp_json(historical)) if historical else None
     check("6k. pre-P2 manifests retain the legacy joint-source recipe",
