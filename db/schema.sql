@@ -52599,8 +52599,7 @@ CREATE TABLE ops.scac_mutation_registry_entry (
     CONSTRAINT scac_mutation_registry_entry_effect_class_check CHECK ((effect_class = ANY (ARRAY['read_only'::text, 'audit_side_effect'::text, 'record_mutation'::text, 'external_mutation'::text, 'administrative_mutation'::text, 'delegating'::text, 'break_glass'::text]))),
     CONSTRAINT scac_mutation_registry_entry_entry_digest_check CHECK ((entry_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT scac_mutation_registry_entry_ingress_key_check CHECK (((ingress_key ~ '^[a-z][a-z0-9_-]+:'::text) AND (ingress_key !~ '[
-
-	]'::text) AND (char_length(ingress_key) <= 1000))),
+	]'::text) AND (char_length(ingress_key) <= 1000))),
     CONSTRAINT scac_mutation_registry_entry_ingress_kind_check CHECK ((ingress_kind = ANY (ARRAY['mcp_tool'::text, 'worker_route'::text, 'worker_sidewrite'::text, 'db_function_acl'::text, 'db_relation_acl'::text, 'db_column_acl'::text, 'job_definition'::text, 'workflow_entrypoint'::text, 'script_entrypoint'::text, 'external_admin'::text, 'break_glass'::text]))),
     CONSTRAINT scac_mutation_registry_entry_source_locator_check CHECK (((btrim(source_locator) <> ''::text) AND (char_length(source_locator) <= 500)))
 );
@@ -52774,8 +52773,7 @@ CREATE TABLE ops.scac_pop_challenge (
     CONSTRAINT scac_pop_challenge_facts_digest_check CHECK ((facts_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT scac_pop_challenge_idempotency_digest_check CHECK ((idempotency_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT scac_pop_challenge_ingress_key_check CHECK (((ingress_key ~ '^[a-z][a-z0-9_-]+:'::text) AND (ingress_key !~ '[
-
-	]'::text) AND (char_length(ingress_key) <= 1000))),
+	]'::text) AND (char_length(ingress_key) <= 1000))),
     CONSTRAINT scac_pop_challenge_mutation_kind_check CHECK ((mutation_kind ~ '^scac\.mutation\.[a-z_]+$'::text)),
     CONSTRAINT scac_pop_challenge_nonce_bytes_check CHECK ((octet_length(nonce_bytes) = 32)),
     CONSTRAINT scac_pop_challenge_nonce_digest_check CHECK ((nonce_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -52900,8 +52898,7 @@ CREATE TABLE ops.scac_reference_monitor_receipt (
     CONSTRAINT scac_reference_monitor_receipt_grant_digest_check CHECK ((grant_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT scac_reference_monitor_receipt_idempotency_digest_check CHECK ((idempotency_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT scac_reference_monitor_receipt_ingress_key_check CHECK (((ingress_key ~ '^[a-z][a-z0-9_-]+:'::text) AND (ingress_key !~ '[
-
-	]'::text) AND (char_length(ingress_key) <= 1000))),
+	]'::text) AND (char_length(ingress_key) <= 1000))),
     CONSTRAINT scac_reference_monitor_receipt_monitor_state_check CHECK ((monitor_state = 'current'::text)),
     CONSTRAINT scac_reference_monitor_receipt_operation_manifest_digest_check CHECK ((operation_manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT scac_reference_monitor_receipt_policy_epoch_digest_check CHECK ((policy_epoch_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -85971,7 +85968,7 @@ ALTER TABLE public.memory_item ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY memory_item_sponsor_insert ON public.memory_item FOR INSERT WITH CHECK (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
    FROM public.actor a
-  WHERE ((a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text)) AND (a.kind = 'human'::text))))));
+  WHERE (a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text))))));
 
 
 --
@@ -85980,7 +85977,7 @@ CREATE POLICY memory_item_sponsor_insert ON public.memory_item FOR INSERT WITH C
 
 CREATE POLICY memory_item_sponsor_read ON public.memory_item FOR SELECT USING (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
    FROM public.actor a
-  WHERE ((a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text)) AND (a.kind = 'human'::text))))));
+  WHERE (a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text))))));
 
 
 --
@@ -85989,9 +85986,9 @@ CREATE POLICY memory_item_sponsor_read ON public.memory_item FOR SELECT USING ((
 
 CREATE POLICY memory_item_sponsor_update ON public.memory_item FOR UPDATE USING (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
    FROM public.actor a
-  WHERE ((a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text)) AND (a.kind = 'human'::text)))))) WITH CHECK (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
+  WHERE (a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text)))))) WITH CHECK (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
    FROM public.actor a
-  WHERE ((a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text)) AND (a.kind = 'human'::text))))));
+  WHERE (a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text))))));
 
 
 --
@@ -89402,6 +89399,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0571_tour_writer_login_membership.sql	4951e5929d3cbf26ced455a4da2ae50e06c2a7077918b9b86c24fddd29c06e63	2026-09-24 02:38:09.988418+00
 0572_required_args_nullable_scac_successor.sql	be40cf47d5e04687dd7bbaba8344859c25be8cc7e50411240762068d0802d3d3	2026-09-24 04:15:40.045193+00
 0573_memory_item_sponsor_rls.sql	3d8d917b8ddb745d9670aa4d26ed11e21d4699a6ba24c850e8d4aaa46bb44d57	2026-09-24 04:42:14.825622+00
+0574_memory_item_sponsor_rls_reader_safe.sql	12f50fde9f988caaa473c917ff06180552eb16bfc69b7d56c646d9bef46d0424	2026-09-24 05:52:21.301884+00
 \.
 
 
@@ -90285,7 +90283,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 156, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 157, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
