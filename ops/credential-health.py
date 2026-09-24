@@ -354,14 +354,53 @@ def _probe_claude_cli_token_age(cred, timeout_s):
     return ProbeResult("ok", "active", expires_at)
 
 
+def _read_token_file_first(spec, default_token_key):
+    """Shared file-first, env-fallback-only-if-absent policy for a bearer-style
+    credential. If `spec["path"]` is configured, that FILE is authoritative
+    whenever it exists: a missing key or an unreadable file is a genuine
+    finding (returned as `hard_fail_detail`) and is never silently papered
+    over by falling back to the environment underneath it. Only when the
+    file itself does not exist does this fall back to `os.environ`, which is
+    the legacy behaviour for a credential that has not moved to a file yet
+    on this machine.
+
+    This is the same file-vs-environment posture as
+    `_probe_cloudflare_token_file` and `_probe_claude_cli_token_age`; it
+    exists so `_probe_neon` and `_probe_worker_bearer` stop being the two
+    probes in this module that only ever look at `os.environ` — the one
+    place `bin/routine-credential-env.sh`'s `carr_routine_exec` strips bare,
+    which is exactly why those two read 'unknown' every night regardless of
+    whether the credential is actually fine.
+
+    Returns (value_or_None, hard_fail_detail_or_None)."""
+    token_key = spec.get("token_key", default_token_key)
+    path = spec.get("path")
+    if path:
+        expanded = os.path.expanduser(path)
+        if os.path.exists(expanded):
+            value, _mode, err = _read_token_from_env_file(expanded, token_key)
+            if err:
+                return None, err
+            return value, None
+        # A path is configured but nothing is there yet on THIS machine —
+        # fall through to the environment, deliberately, rather than firing
+        # a false "file missing" finding for a credential that simply still
+        # lives ambiently here.
+    return (os.environ.get(token_key, "") or None), None
+
+
 def _probe_neon(cred, timeout_s):
-    key = os.environ.get("NEON_API_KEY", "")
+    spec = cred["probe"]
+    key, hard_fail = _read_token_file_first(spec, "NEON_API_KEY")
+    if hard_fail:
+        return ProbeResult("failed", hard_fail)
     if not key:
         return ProbeResult("unknown", "env_var_missing")
-    url = cred["probe"].get("url", "https://console.neon.tech/api/v2/projects")
+    url = spec.get("url", "https://console.neon.tech/api/v2/projects")
     status, _body = HTTP_GET(
         url, {"Authorization": f"Bearer {key}", "Accept": "application/json"},
         timeout_s)
+    key = None  # the only local name that ever held it; done with it now
     if status is None:
         return ProbeResult("unknown", "timeout")
     if 200 <= status < 300:
@@ -378,17 +417,25 @@ def _probe_worker_bearer(cred, timeout_s):
     provider in front of this Worker returns (mcp-server/smoke-reads.sh's own
     preflight greps the SAME response for "invalid_token" as an equivalent,
     slower check) — so status alone is enough to classify the token without
-    ever reading the JSON-RPC body."""
+    ever reading the JSON-RPC body.
+
+    The token itself is read file-first via `_read_token_file_first` (see
+    that function for the exact policy), falling back to `spec["token_env"]`
+    in the environment only when no file is configured or present."""
     spec = cred["probe"]
-    token = os.environ.get(spec["token_env"], "")
+    token, hard_fail = _read_token_file_first(spec, spec.get("token_env", ""))
+    if hard_fail:
+        return ProbeResult("failed", hard_fail)
     if not token:
         return ProbeResult("unknown", "env_var_missing")
     url = os.environ.get(spec.get("url_env", ""), "") or spec.get("url", "")
     if not url:
+        token = None
         return ProbeResult("unknown", "config_incomplete")
     status = HTTP_POST(
         url, {"Authorization": f"Bearer {token}"},
         {"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, timeout_s)
+    token = None
     if status is None:
         return ProbeResult("unknown", "timeout")
     if status == 200:
@@ -526,18 +573,28 @@ def run_all(credentials, default_timeout_s=DEFAULT_TIMEOUT_S):
 
 
 def write_jsonl(rows, path=OUT_JSONL):
+    """Raises on a disallowed-key row (that assertion is the audit-trail
+    invariant itself and must propagate — see JSONL_ALLOWED_KEYS) but wraps
+    the actual disk write the same way every other stateful write in this
+    module does, so a full disk or a permissions problem on `out/` surfaces
+    as a clear, callable-checkable failure rather than an unhandled
+    traceback. The caller (main()) treats a write failure here as fatal: it
+    is this lane's entire audit trail for the night, not a degradable
+    extra."""
     path = Path(path)
+    lines = []
+    for row in rows:
+        # Names-and-statuses-only, enforced here rather than trusted: a row
+        # carrying any other key is a defect in THIS file, not in the
+        # caller, and it must not reach disk.
+        extra = set(row.keys()) - JSONL_ALLOWED_KEYS
+        if extra:
+            raise AssertionError(f"credential-health: refusing to write disallowed "
+                                  f"jsonl keys {sorted(extra)}")
+        lines.append(json.dumps(row, sort_keys=True) + "\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as fh:
-        for row in rows:
-            # Names-and-statuses-only, enforced here rather than trusted:
-            # a row carrying any other key is a defect in THIS file, not in
-            # the caller, and it must not reach disk.
-            extra = set(row.keys()) - JSONL_ALLOWED_KEYS
-            if extra:
-                raise AssertionError(f"credential-health: refusing to write disallowed "
-                                      f"jsonl keys {sorted(extra)}")
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+        fh.writelines(lines)
 
 
 # ── mint-date state (claude-cli-token-age probe) ─────────────────────────
@@ -584,10 +641,29 @@ def _save_dedup(state, path=DEDUP_PATH):
     tmp.replace(path)
 
 
+def _credential_file_exists(cred):
+    """True only when this credential's probe names a `path` AND that path
+    exists on this machine right now. Used to decide whether a nightly
+    `unknown` is real news (a credential Joe has provisioned here that this
+    lane still could not verify — worth a loop) or ordinary silence (nothing
+    is configured here yet, e.g. Codex on a Claude-only launch machine)."""
+    path = (cred.get("probe") or {}).get("path")
+    if not path:
+        return False
+    return os.path.exists(os.path.expanduser(path))
+
+
 def _loop_body(cred, bucket):
     """Plain words: what to create, and where. No secret ever appears here —
     only the fields the inventory itself carries (never a value)."""
-    verb = "has FAILED its daily liveness probe" if bucket == "failed" else "is EXPIRING SOON"
+    if bucket == "failed":
+        verb = "has FAILED its daily liveness probe"
+    elif bucket == "expiring_soon":
+        verb = "is EXPIRING SOON"
+    else:
+        verb = ("could NOT be verified even though its credential file is present "
+                 "on this machine — the probe itself may be broken or unreachable, "
+                 "not necessarily the credential")
     where = cred.get("location", "location not recorded")
     plan = cred.get("replacement_plan", "no replacement plan recorded")
     doc = cred.get("doc_pointer", "")
@@ -680,30 +756,77 @@ def main(argv=None):
     global MINT_STATE
     MINT_STATE = _load_mint_state(args.mint_state)
     rows = run_all(credentials, default_timeout_s=args.timeout)
-    _save_mint_state(MINT_STATE, path=args.mint_state)
-    write_jsonl(rows, path=args.out)
+
+    try:
+        _save_mint_state(MINT_STATE, path=args.mint_state)
+    except OSError as exc:
+        # Not fatal on its own: the worst case of losing this write is that
+        # the Claude token's age gets recomputed from today on the NEXT run
+        # (see _record_mint_date_if_new), which can only push an expiry
+        # warning LATER, never mask a real one. That asymmetry is why this
+        # is a loud warning and not a `return 1` — unlike write_jsonl just
+        # below, losing this state can never turn a real finding silent.
+        print(f"⚠︎ credential-health — could not persist mint-state to "
+              f"{args.mint_state} ({type(exc).__name__}: {exc}); token age "
+              f"will be recomputed from today on the next run")
+
+    try:
+        write_jsonl(rows, path=args.out)
+    except (OSError, AssertionError) as exc:
+        # Fatal, unlike the mint-state write above: this jsonl IS the lane's
+        # entire audit trail for tonight (rule 6, "never fail silently") —
+        # losing it silently would be indistinguishable from nothing having
+        # run at all, so it is reported and the run stops here rather than
+        # going on to file loops off results nobody can ever read back.
+        print(f"⚠︎ credential-health — could not write {args.out} "
+              f"({type(exc).__name__}: {exc}); this run's results were never recorded")
+        return 1
 
     dedup_state = _load_dedup(args.dedup_store)
     filed = []
     by_name = {c["name"]: c for c in credentials}
+    # A finding files a loop the moment it's real news: failed/expiring_soon
+    # always qualify, and so does an `unknown` for a credential whose
+    # declared file IS present on this machine — that is not "not yet
+    # configured", it is "configured and still couldn't be verified", which
+    # is exactly the silent-forever gap `carr_routine_exec`'s environment
+    # stripping used to leave for the file-based probes above before they
+    # moved to reading their own dotenv files directly off disk. A credential
+    # with no path configured at all (or whose file genuinely never landed
+    # on this machine) stays a quiet `unknown` — that one really is "not yet
+    # set up here", not a finding to page Joe over every night.
+    file_backed_unknown_names = set()
     for row in rows:
-        if row["status"] in ("failed", "expiring_soon"):
-            cred = by_name[row["name"]]
+        cred = by_name[row["name"]]
+        is_file_backed_unknown = (row["status"] == "unknown"
+                                   and _credential_file_exists(cred))
+        if is_file_backed_unknown:
+            file_backed_unknown_names.add(row["name"])
+        if row["status"] in ("failed", "expiring_soon") or is_file_backed_unknown:
             outcome = file_loop_if_needed(cred, row["status"], dedup_state,
                                            dry_run=args.no_file_loops)
             if outcome in ("filed", "dry_run"):
                 filed.append((row["name"], row["status"], outcome))
-    _save_dedup(dedup_state, path=args.dedup_store)
+    try:
+        _save_dedup(dedup_state, path=args.dedup_store)
+    except OSError as exc:
+        # Also not fatal: the worst case is a loop getting refiled once on
+        # the next run rather than deduplicated — noisy, never silent.
+        print(f"⚠︎ credential-health — could not persist dedup-state to "
+              f"{args.dedup_store} ({type(exc).__name__}: {exc}); a finding "
+              f"already filed above may be refiled once on the next run")
 
     counts = {b: 0 for b in BUCKETS}
     for row in rows:
         counts[row["status"]] += 1
-    needs_attention = counts["failed"] + counts["expiring_soon"]
+    needs_attention = counts["failed"] + counts["expiring_soon"] + len(file_backed_unknown_names)
+    unconfigured_unknown = counts["unknown"] - len(file_backed_unknown_names)
 
     if needs_attention:
         print(f"⚠︎ credential-health — {needs_attention} of {len(rows)} credential(s) need "
               f"attention (failed={counts['failed']} expiring_soon={counts['expiring_soon']} "
-              f"unknown={counts['unknown']} ok={counts['ok']})")
+              f"unverifiable={len(file_backed_unknown_names)} unconfigured={unconfigured_unknown} "
+              f"ok={counts['ok']})")
     else:
         print(f"OK credential-health — {len(rows)} credential(s) checked, all clear "
               f"(unknown={counts['unknown']} ok={counts['ok']})")

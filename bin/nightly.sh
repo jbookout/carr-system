@@ -1059,20 +1059,28 @@ step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-
 # itself being unable to run (its inventory unreadable, or zero credentials
 # configured — a real defect, not a credential going stale).
 #
-# WHAT THIS STEP CANNOT SEE UNDER THE CREDENTIAL BOUNDARY (bin/routine-
-# credential-env.sh's carr_routine_exec, which every step runs through): NEON_API_KEY,
-# CARR_MCP_PROBE_TOKEN, CARR_MCP_LOCAL_TOKEN and the wrangler-OAuth fallback are
-# read from this process's environment, and carr_routine_exec strips the child
-# down to HOME/PATH/LANG/TMPDIR plus the two named database capabilities —
-# never a broader ambient credential set, by design (see that file's own
-# header). Those four rows read `unknown` here specifically, every night, and
-# that is the boundary working as intended, not a defect in this step. The two
-# file-based probes (cloudflare-deploy-token, claude-cli-oauth-token-studio)
-# are unaffected: they read their own dotenv file straight off disk via HOME,
-# which IS in the stripped set. `run.sh health` run by hand carries the fuller
-# ambient environment and reads all eleven credentials correctly; this
-# nightly step is a narrower, honest subset of that same lane, not a second
-# implementation of it.
+# THE CREDENTIAL BOUNDARY (bin/routine-credential-env.sh's carr_routine_exec,
+# which every step runs through) strips the child process down to
+# HOME/PATH/LANG/TMPDIR plus the two named database capabilities — never a
+# broader ambient credential set, by design (see that file's own header). An
+# earlier version of this lane read NEON_API_KEY, CARR_MCP_PROBE_TOKEN and
+# CARR_MCP_LOCAL_TOKEN straight from os.environ, so all three read `unknown`
+# under every nightly run and a genuine finding on any of them would have
+# gone unfiled forever (independent review, PR #1218, blocked at aa435a54).
+# Fixed: those three probes now read their tokens file-first, the same way
+# cloudflare-deploy-token and claude-cli-oauth-token-studio always have —
+# straight off their dotenv files in ~/.config/carr/db.env and
+# ~/.config/carr/mcp-tokens.env via HOME, which IS in the stripped set — and
+# fall back to the (here, absent) environment variable only when the file
+# itself doesn't exist. All five file-backed credentials are therefore
+# checked for real under this boundary now; only a credential with no `path`
+# configured at all in the inventory, or one Joe hasn't provisioned as a file
+# on THIS machine yet, can still read `unknown` here — and that unknown now
+# files its own deduplicated loop too, whenever the file it names IS present
+# but couldn't be verified, so a never-checked credential can't stay silent.
+# `run.sh health` run by hand carries the fuller ambient environment and
+# reads all eleven credentials the same way; this nightly step is the same
+# lane, not a second implementation of it.
 step "credential health (reports, never rotates; loops on a finding)" \
      ./.venv/bin/python ops/credential-health.py --nightly
 

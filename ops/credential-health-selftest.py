@@ -126,6 +126,103 @@ def test_worker_bearer_unknown_when_token_absent():
     check("worker bearer with no env token set -> unknown", r.bucket == "unknown", r.bucket)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# neon_api / worker_bearer_health: file-first reads (PR #1218 review fix,
+# aa435a54 — these two probes used to read os.environ ONLY, which
+# bin/routine-credential-env.sh's carr_routine_exec strips on every nightly
+# run, so a real finding on any of the three credentials using them could
+# never actually be checked, let alone filed, overnight)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_neon_reads_token_from_file_when_present():
+    ch.HTTP_GET = lambda url, headers, timeout_s: (200, {})
+    with tempfile.TemporaryDirectory() as td:
+        path = _write_tokens_file(td, value="fake-neon-key", key="NEON_API_KEY")
+        cred = _cred("neon-file", "neon_api", probe={
+            "type": "neon_api", "path": path, "token_key": "NEON_API_KEY",
+            "url": "https://example.invalid/projects", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("neon_api reads the key from its configured file and probes ok",
+              r.bucket == "ok", r.bucket)
+
+
+def test_neon_file_present_but_key_missing_is_failed_not_env_fallback():
+    os.environ["NEON_API_KEY"] = "ambient-env-value-should-NOT-be-used"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            path = _write_tokens_file(td, value="irrelevant", key="SOME_OTHER_KEY")
+            cred = _cred("neon-file-key-missing", "neon_api", probe={
+                "type": "neon_api", "path": path, "token_key": "NEON_API_KEY",
+                "url": "https://example.invalid/projects", "timeout_s": 1})
+            r = ch.evaluate_credential(cred)
+            check("an existing file that lacks the key is a hard failure, "
+                  "never a silent fall-through to the ambient environment",
+                  r.bucket == "failed" and r.detail == "token_key_missing",
+                  (r.bucket, r.detail))
+    finally:
+        del os.environ["NEON_API_KEY"]
+
+
+def test_neon_falls_back_to_env_when_file_absent():
+    os.environ["NEON_API_KEY"] = "fake-for-selftest-env-fallback"
+    ch.HTTP_GET = lambda url, headers, timeout_s: (200, {})
+    try:
+        cred = _cred("neon-no-file", "neon_api", probe={
+            "type": "neon_api", "path": "/nonexistent/does-not-exist/db.env",
+            "token_key": "NEON_API_KEY",
+            "url": "https://example.invalid/projects", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("a configured but genuinely absent file falls back to the "
+              "environment, exactly like before this fix",
+              r.bucket == "ok", r.bucket)
+    finally:
+        del os.environ["NEON_API_KEY"]
+
+
+def test_worker_bearer_reads_token_from_file_when_present():
+    ch.HTTP_POST = lambda url, headers, body, timeout_s: 200
+    with tempfile.TemporaryDirectory() as td:
+        path = _write_tokens_file(td, value="fake-mcp-bearer", key="CARR_MCP_PROBE_TOKEN")
+        cred = _cred("mcp-probe-file", "worker_bearer_health", probe={
+            "type": "worker_bearer_health", "path": path,
+            "token_key": "CARR_MCP_PROBE_TOKEN", "token_env": "CARR_MCP_PROBE_TOKEN",
+            "url": "https://example.invalid/mcp", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("worker_bearer_health reads the token from its configured file "
+              "and probes ok", r.bucket == "ok", r.bucket)
+
+
+def test_worker_bearer_file_present_but_key_missing_is_failed():
+    with tempfile.TemporaryDirectory() as td:
+        path = _write_tokens_file(td, value="irrelevant", key="SOME_OTHER_TOKEN")
+        cred = _cred("mcp-probe-key-missing", "worker_bearer_health", probe={
+            "type": "worker_bearer_health", "path": path,
+            "token_key": "CARR_MCP_PROBE_TOKEN", "token_env": "CARR_MCP_PROBE_TOKEN",
+            "url": "https://example.invalid/mcp", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("an existing mcp-tokens.env that lacks this credential's key "
+              "is a hard failure",
+              r.bucket == "failed" and r.detail == "token_key_missing",
+              (r.bucket, r.detail))
+
+
+def test_worker_bearer_falls_back_to_env_when_file_absent():
+    os.environ["CH_SELFTEST_WB_ENV_FALLBACK"] = "fake-for-selftest"
+    ch.HTTP_POST = lambda url, headers, body, timeout_s: 200
+    try:
+        cred = _cred("mcp-no-file", "worker_bearer_health", probe={
+            "type": "worker_bearer_health",
+            "path": "/nonexistent/does-not-exist/mcp-tokens.env",
+            "token_env": "CH_SELFTEST_WB_ENV_FALLBACK",
+            "url": "https://example.invalid/mcp", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("a configured but genuinely absent file falls back to the "
+              "token_env environment variable",
+              r.bucket == "ok", r.bucket)
+    finally:
+        del os.environ["CH_SELFTEST_WB_ENV_FALLBACK"]
+
+
 def _cloudflare_cred(**probe_extra):
     probe = {"type": "cloudflare_token_file", "token_key": "CLOUDFLARE_API_TOKEN",
              "url": "https://example.invalid/tokens/verify", "timeout_s": 1}
@@ -140,6 +237,14 @@ def _write_tokens_file(td, value="fake-cf-token-DO-NOT-LEAK", mode=0o600,
     path.write_text(f"{key}={value}\n")
     os.chmod(path, mode)
     return str(path)
+
+
+test_neon_reads_token_from_file_when_present()
+test_neon_file_present_but_key_missing_is_failed_not_env_fallback()
+test_neon_falls_back_to_env_when_file_absent()
+test_worker_bearer_reads_token_from_file_when_present()
+test_worker_bearer_file_present_but_key_missing_is_failed()
+test_worker_bearer_falls_back_to_env_when_file_absent()
 
 
 def test_cloudflare_token_file_active_is_ok():
@@ -854,6 +959,206 @@ def test_nightly_flag_still_fails_on_a_broken_lane():
 
 test_nightly_flag_exits_zero_on_a_finding()
 test_nightly_flag_still_fails_on_a_broken_lane()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# a nightly 'unknown' for a credential whose file IS present is a real
+# finding and gets filed with dedup (PR #1218 review fix, item 2) — this is
+# what closes the "silently never actually checked overnight" gap for
+# neon-api-key / carr-mcp-probe-token / carr-mcp-local-token even in the rare
+# case a probe still can't produce a decisive verdict (e.g. a transient HTTP
+# timeout) despite the file being right there on disk.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_credential_file_exists_helper():
+    with tempfile.TemporaryDirectory() as td:
+        present = Path(td) / "present.env"
+        present.write_text("X=1\n")
+        cred_present = _cred("has-file", "neon_api", probe={
+            "type": "neon_api", "path": str(present), "timeout_s": 1})
+        cred_absent = _cred("no-file", "neon_api", probe={
+            "type": "neon_api", "path": str(Path(td) / "missing.env"), "timeout_s": 1})
+        cred_unconfigured = _cred("no-path-at-all", "config_only",
+                                   probe={"type": "config_only"})
+        check("_credential_file_exists is True when the configured path exists",
+              ch._credential_file_exists(cred_present) is True, "")
+        check("_credential_file_exists is False when the configured path is absent",
+              ch._credential_file_exists(cred_absent) is False, "")
+        check("_credential_file_exists is False when no path is configured at all",
+              ch._credential_file_exists(cred_unconfigured) is False, "")
+
+
+def test_unknown_with_file_present_files_a_loop():
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(a)
+        return subprocess.CompletedProcess(a, 0, b"", b"")
+    ch.SUBPROCESS_RUN = fake_run
+    ch.HTTP_GET = lambda *a, **k: (None, None)  # timeout -> unknown
+
+    with tempfile.TemporaryDirectory() as td:
+        token_path = Path(td) / "db.env"
+        token_path.write_text("NEON_API_KEY=fake-value\n")
+        inv_path = Path(td) / "inventory.json"
+        inv_path.write_text(json.dumps({"credentials": [{
+            "name": "neon-unverifiable", "display_name": "neon (file present, probe unknown)",
+            "kind": "api_key", "machines": ["studio"], "location": "test fixture",
+            "probe": {"type": "neon_api", "path": str(token_path),
+                      "token_key": "NEON_API_KEY", "url": "https://example.invalid/projects",
+                      "timeout_s": 1},
+            "replacement_plan": "n/a", "doc_pointer": "", "expiring_soon_days": 3,
+            "expiry": {},
+        }]}))
+        out_path = Path(td) / "out.jsonl"
+        dedup_path = Path(td) / "dedup.json"
+        mint_path = Path(td) / "mint.json"
+
+        rc = ch.main(["--inventory", str(inv_path), "--out", str(out_path),
+                      "--dedup-store", str(dedup_path), "--mint-state", str(mint_path),
+                      "--nightly"])
+        check("a file-backed 'unknown' still returns 0 under --nightly "
+              "(the loop it files is the alert, same as any other finding)",
+              rc == 0, rc)
+        check("a credential whose file IS present but reads unknown still "
+              "gets its loop filed, closing the silent-forever gap",
+              len(calls) == 1, len(calls))
+        written = out_path.read_text()
+        check("the unknown row was still written to the jsonl",
+              '"status": "unknown"' in written, written)
+
+
+def test_unknown_without_file_does_not_file_a_loop():
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(a)
+        return subprocess.CompletedProcess(a, 0, b"", b"")
+    ch.SUBPROCESS_RUN = fake_run
+
+    with tempfile.TemporaryDirectory() as td:
+        inv_path = Path(td) / "inventory.json"
+        inv_path.write_text(json.dumps({"credentials": [{
+            "name": "codex-not-set-up-here", "display_name": "codex (never configured here)",
+            "kind": "file_credential", "machines": ["studio"], "location": "test fixture",
+            "probe": {"type": "file_presence_age",
+                      "path": str(Path(td) / "does-not-exist.json"),
+                      "warn_after_days": 60},
+            "replacement_plan": "n/a", "doc_pointer": "", "expiring_soon_days": None,
+            "expiry": {},
+        }]}))
+        out_path = Path(td) / "out.jsonl"
+        dedup_path = Path(td) / "dedup.json"
+        mint_path = Path(td) / "mint.json"
+
+        rc = ch.main(["--inventory", str(inv_path), "--out", str(out_path),
+                      "--dedup-store", str(dedup_path), "--mint-state", str(mint_path),
+                      "--nightly"])
+        check("a credential that was simply never provisioned on this machine "
+              "(no file, ever) stays a quiet unknown — no loop filed",
+              len(calls) == 0, len(calls))
+        check("main() still exits 0 for a genuinely unconfigured credential",
+              rc == 0, rc)
+
+
+test_credential_file_exists_helper()
+test_unknown_with_file_present_files_a_loop()
+test_unknown_without_file_does_not_file_a_loop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# disk-write failures are handled the way the rest of the module handles
+# theirs (PR #1218 review fix, item 3) — write_jsonl losing this run's ENTIRE
+# audit trail is fatal (main() reports it and returns 1); losing mint-state
+# or dedup-state is a graceful, loud degradation, never a crash and never
+# silent.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_write_jsonl_disk_failure_is_fatal_in_main():
+    ch.SUBPROCESS_RUN = lambda *a, **k: subprocess.CompletedProcess(a, 0, b"", b"")
+    with tempfile.TemporaryDirectory() as td:
+        inv_path = Path(td) / "inventory.json"
+        inv_path.write_text(json.dumps({"credentials": [{
+            "name": "ok-cred", "display_name": "ok", "kind": "test",
+            "machines": ["studio"], "location": "n/a",
+            "probe": {"type": "shell_exit_status", "command": ["true"], "timeout_s": 1},
+            "replacement_plan": "n/a", "doc_pointer": "", "expiring_soon_days": 3,
+            "expiry": {},
+        }]}))
+        # A directory where the jsonl file should be: open(path, "a") on it
+        # raises OSError (IsADirectoryError), exercising the real failure
+        # mode without needing root or a read-only filesystem.
+        out_as_dir = Path(td) / "out.jsonl"
+        out_as_dir.mkdir()
+        dedup_path = Path(td) / "dedup.json"
+        mint_path = Path(td) / "mint.json"
+
+        rc = ch.main(["--inventory", str(inv_path), "--out", str(out_as_dir),
+                      "--dedup-store", str(dedup_path), "--mint-state", str(mint_path),
+                      "--nightly", "--no-file-loops"])
+        check("write_jsonl failing to reach disk is fatal even under --nightly "
+              "(this run's results were never recorded, which is not a "
+              "'reports, never mutates' non-finding)",
+              rc == 1, rc)
+        check("a write_jsonl failure never crashes main() with a raw traceback",
+              True, "")  # reaching this line at all proves no exception escaped
+
+
+def test_mint_state_save_failure_is_non_fatal():
+    ch.SUBPROCESS_RUN = lambda *a, **k: subprocess.CompletedProcess(a, 0, b"", b"")
+    with tempfile.TemporaryDirectory() as td:
+        inv_path = Path(td) / "inventory.json"
+        inv_path.write_text(json.dumps({"credentials": [{
+            "name": "ok-cred", "display_name": "ok", "kind": "test",
+            "machines": ["studio"], "location": "n/a",
+            "probe": {"type": "shell_exit_status", "command": ["true"], "timeout_s": 1},
+            "replacement_plan": "n/a", "doc_pointer": "", "expiring_soon_days": 3,
+            "expiry": {},
+        }]}))
+        out_path = Path(td) / "out.jsonl"
+        dedup_path = Path(td) / "dedup.json"
+        mint_as_dir = Path(td) / "mint.json"
+        mint_as_dir.mkdir()
+
+        rc = ch.main(["--inventory", str(inv_path), "--out", str(out_path),
+                      "--dedup-store", str(dedup_path), "--mint-state", str(mint_as_dir),
+                      "--no-file-loops"])
+        check("a mint-state write failure does not abort the run — the lane "
+              "still finishes and reports its real result",
+              rc == 0, rc)
+        check("the jsonl was still written despite the mint-state failure",
+              out_path.exists() and '"status": "ok"' in out_path.read_text(),
+              out_path.exists())
+
+
+def test_dedup_save_failure_is_non_fatal():
+    ch.SUBPROCESS_RUN = lambda *a, **k: subprocess.CompletedProcess(a, 1, b"", b"")
+    with tempfile.TemporaryDirectory() as td:
+        inv_path = Path(td) / "inventory.json"
+        inv_path.write_text(json.dumps({"credentials": [{
+            "name": "always-fails", "display_name": "fails", "kind": "test",
+            "machines": ["studio"], "location": "n/a",
+            "probe": {"type": "shell_exit_status", "command": ["false"], "timeout_s": 1},
+            "replacement_plan": "n/a", "doc_pointer": "", "expiring_soon_days": 3,
+            "expiry": {},
+        }]}))
+        out_path = Path(td) / "out.jsonl"
+        dedup_as_dir = Path(td) / "dedup.json"
+        dedup_as_dir.mkdir()
+        mint_path = Path(td) / "mint.json"
+
+        rc = ch.main(["--inventory", str(inv_path), "--out", str(out_path),
+                      "--dedup-store", str(dedup_as_dir), "--mint-state", str(mint_path),
+                      "--nightly"])
+        check("a dedup-state write failure does not abort the run either — "
+              "the loop it just filed already fired, losing only the record "
+              "that it did",
+              rc == 0, rc)
+
+
+test_write_jsonl_disk_failure_is_fatal_in_main()
+test_mint_state_save_failure_is_non_fatal()
+test_dedup_save_failure_is_non_fatal()
 
 
 print(f"\ncredential-health-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
