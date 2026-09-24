@@ -151,7 +151,11 @@ def _loop_always_finds(stmt: ast.stmt) -> bool:
     then never runs and nothing is ever recorded. Only a `for`/`else` (or
     `while`/`else`) clause qualifies: Python runs that `else` whenever the
     loop finishes without hitting a `break`, which includes finishing after
-    zero iterations, so a finding call placed there is unconditional.
+    zero iterations, so a finding call placed there is unconditional --
+    UNLESS the loop body can itself `break`, which skips the `else` clause
+    entirely (see `_loop_body_has_own_break`): a `break` anywhere in the
+    body disqualifies the loop, since Python no longer guarantees the
+    `else` runs.
 
     This is deliberately STRICTER than `_propagates_finding_call`'s own
     For/While case, which stays permissive for the different, legitimate
@@ -165,7 +169,33 @@ def _loop_always_finds(stmt: ast.stmt) -> bool:
     fires on its own, via for/else."""
     if not isinstance(stmt, (ast.For, ast.While, ast.AsyncFor)):
         return False
-    return bool(stmt.orelse) and _contains_finding_call(stmt.orelse)
+    if not stmt.orelse or not any(_contains_finding_call(s) for s in stmt.orelse):
+        return False
+    return not _loop_body_has_own_break(stmt.body)
+
+
+def _loop_body_has_own_break(body: list) -> bool:
+    """Whether an `ast.Break` appears anywhere in `body` that belongs to
+    THIS loop rather than to a loop nested inside it — a `break` inside a
+    nested `for`/`while`/`async for` targets that inner loop, not the outer
+    one being checked, so descent stops at the boundary of any nested loop
+    (its own body/orelse are skipped for this purpose; `break` cannot
+    legally appear in an `orelse` at all, so there is nothing to miss by
+    skipping it). Descends into `if`/`try`/`with` bodies, since a `break`
+    inside one of those still belongs to the enclosing loop."""
+    for stmt in body:
+        if isinstance(stmt, ast.Break):
+            return True
+        if isinstance(stmt, (ast.For, ast.While, ast.AsyncFor)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            nested = getattr(stmt, field, None)
+            if isinstance(nested, list) and nested and _loop_body_has_own_break(nested):
+                return True
+        for handler in getattr(stmt, "handlers", []) or []:
+            if _loop_body_has_own_break(handler.body):
+                return True
+    return False
 
 
 def _branch_always_finds(stmts: list) -> bool:
@@ -253,6 +283,26 @@ def _propagates_finding_call(stmt: ast.stmt) -> bool:
     return False
 
 
+def _loop_accumulator_names(stmt: ast.stmt) -> set:
+    """The `Name` ids referenced in a `for`/`while` statement's own iterated
+    expression or test (e.g. `for job in bad:` -> {'bad'}, `while queue:` ->
+    {'queue'}, `for _c, _k in (gate_failures, ...):` -> the names embedded
+    in that tuple literal, including ones buried in an f-string). Used only
+    to match a LATER sibling `if`'s condition against the SAME accumulator
+    (see `_check_block`'s point-4-of-round-5 same-name credit rule)."""
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        src: ast.expr = stmt.iter
+    elif isinstance(stmt, ast.While):
+        src = stmt.test
+    else:
+        return set()
+    return {n.id for n in ast.walk(src) if isinstance(n, ast.Name)}
+
+
+def _test_names(test: ast.expr) -> set:
+    return {n.id for n in ast.walk(test) if isinstance(n, ast.Name)}
+
+
 def _check_block(body: list, errors: list, where: str, seen_finding: bool = False) -> bool:
     """Every `rc = 1` / `return 1` reachable from THIS statement list must be
     preceded by at least one `_canonical_finding(...)` call reachable from an
@@ -267,27 +317,63 @@ def _check_block(body: list, errors: list, where: str, seen_finding: bool = Fals
     state rather than resetting it, so an inherited for/while case is not a
     false positive; an inherited if/try case never contributes at all (see
     `_propagates_finding_call`). Returns the updated state (not used by
-    callers today, but keeps the function honest about what it tracks)."""
+    callers today, but keeps the function honest about what it tracks).
+
+    A `for`/`while` loop containing a finding call does NOT set `seen_finding`
+    for the REST of the block the way an `if`/`try` propagation does (round 5
+    of an independent review of PR #1237, point 4/point-4-caveat: a bare
+    `rc = 1` mutation planted after several unrelated for-loops in the same
+    block used to be silently excused by any one of them). Instead a loop's
+    credit is scoped to exactly two shapes, both seen in the real source:
+      1. the loop's OWN DIRECT NEXT sibling statement (no other statement in
+         between), when that next statement is itself an rc=1/return 1 with
+         no guarding `if` — e.g. `for _c, _k in (...): _canonical_finding(...)`
+         immediately followed by a bare `rc = 1` (doctrine/credential-health
+         sections);
+      2. a LATER `if` sibling (anywhere in the block, not just the next
+         statement) whose test expression references the SAME name(s) the
+         loop iterated over or tested — e.g. `for job in bad: _canonical_
+         finding(...)` ... `if bad: rc = 1` (exports section), or several
+         such loops feeding one `if a or b or c: rc = 1` (jobs section)."""
+    loop_names: set = set()
+    prev_loop_credit = False
     for stmt in body:
+        name_credit = (isinstance(stmt, ast.If) and bool(loop_names & _test_names(stmt.test)))
+        credited = seen_finding or prev_loop_credit or name_credit
         if _is_rc_one_assign(stmt) or _is_return_one(stmt):
-            if not seen_finding:
+            if not credited:
                 errors.append(f"{where}:{stmt.lineno}: rc=1/return 1 with no preceding "
                               f"_canonical_finding(...) call in the same or an enclosing block")
-        if _propagates_finding_call(stmt):
+        this_loop_credit = False
+        if isinstance(stmt, (ast.For, ast.While, ast.AsyncFor)):
+            if _contains_finding_call(stmt):
+                loop_names |= _loop_accumulator_names(stmt)
+                this_loop_credit = True
+        elif _propagates_finding_call(stmt):
             seen_finding = True
         # Recurse into this statement's own nested blocks so a violation
-        # buried inside an `if`/`for`/`try` is still caught, carrying the
-        # running seen_finding state in (see docstring). This recursion is
-        # independent of whether `stmt` itself propagates to the OUTER
-        # loop's `seen_finding` above — an `if`'s own body/orelse are still
-        # checked against whatever was true BEFORE the `if`, they just
-        # don't feed anything back out to their siblings.
+        # buried inside an `if`/`for`/`try` is still caught. Unlike the
+        # `credited` value used for THIS statement's own rc=1/return-1 check
+        # above (computed from state as it stood BEFORE this statement),
+        # recursion into stmt's OWN body/orelse/handlers uses the state as
+        # it stands AFTER this statement updated it — e.g. `if _canonical_
+        # contradiction_alarm(): rc = 1`'s own test contains the delegate
+        # call, so `_propagates_finding_call` above already set `seen_
+        # finding = True` for this exact statement, and its `rc = 1` is
+        # reached only once that call has run, so its body must see the
+        # updated state, not the pre-statement one. Likewise a for-loop
+        # that itself contains a finding call credits ITS OWN nested body.
+        # This recursion is independent of whether `stmt` propagates to a
+        # LATER, OUTER-block sibling — that is governed by `seen_finding`/
+        # `prev_loop_credit`/`loop_names` at the outer level only.
+        recurse_credited = seen_finding or this_loop_credit or name_credit
         for field in ("body", "orelse", "finalbody"):
             nested = getattr(stmt, field, None)
             if isinstance(nested, list) and nested and all(isinstance(x, ast.stmt) for x in nested):
-                _check_block(nested, errors, where, seen_finding)
+                _check_block(nested, errors, where, recurse_credited)
         for handler in getattr(stmt, "handlers", []) or []:
-            _check_block(handler.body, errors, where, seen_finding)
+            _check_block(handler.body, errors, where, recurse_credited)
+        prev_loop_credit = this_loop_credit
     return seen_finding
 
 
@@ -612,6 +698,191 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
         overlap = business_keys & hard_error_keys
         self.assertEqual(overlap, set(),
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
+
+
+class ForElseBreakHandling(unittest.TestCase):
+    """Round 5 of an independent review of PR #1237: the mypy error at the
+    old `_loop_always_finds` (passing `stmt.orelse`, a list, straight into
+    `_contains_finding_call`, which expects a single `ast.AST` and calls
+    `ast.walk` on it — also a latent runtime bug, `ast.walk` on a list
+    raises) is fixed by walking each statement of `orelse` separately. This
+    class also proves the accompanying correctness fix: a `break` in the
+    loop's own body skips its `else` clause entirely, so such a loop must
+    NOT be trusted to guarantee the else's finding call runs."""
+
+    def test_for_else_without_break_is_trusted(self):
+        stmt = ast.parse(
+            "for x in items:\n"
+            "    pass\n"
+            "else:\n"
+            "    _canonical_finding('a', 'a')\n"
+        ).body[0]
+        self.assertTrue(_loop_always_finds(stmt))
+
+    def test_for_else_with_break_is_not_trusted(self):
+        stmt = ast.parse(
+            "for x in items:\n"
+            "    if x.bad:\n"
+            "        break\n"
+            "else:\n"
+            "    _canonical_finding('a', 'a')\n"
+        ).body[0]
+        self.assertFalse(_loop_always_finds(stmt))
+
+    def test_break_in_a_nested_loop_does_not_disqualify_the_outer_loop(self):
+        # A `break` inside a NESTED for/while belongs to that inner loop,
+        # not the outer one being judged -- it must not disqualify the
+        # outer for/else.
+        stmt = ast.parse(
+            "for x in items:\n"
+            "    for y in x.sub:\n"
+            "        if y.bad:\n"
+            "            break\n"
+            "else:\n"
+            "    _canonical_finding('a', 'a')\n"
+        ).body[0]
+        self.assertTrue(_loop_always_finds(stmt))
+
+    def test_end_to_end_for_else_without_break_excuses_a_later_sibling(self):
+        # Mirrors the real shape `_branch_always_finds`/`_if_always_finds`
+        # need this for: an if/else where one branch is a for/else that
+        # always finds (no break) and the other branch always finds
+        # unconditionally -- the whole if/else then legitimately excuses a
+        # LATER, unrelated sibling's rc=1.
+        src = (
+            "def f():\n"
+            "    if section:\n"
+            "        if cond:\n"
+            "            for x in items:\n"
+            "                pass\n"
+            "            else:\n"
+            "                _canonical_finding('a', 'a')\n"
+            "        else:\n"
+            "            _canonical_finding('b', 'b')\n"
+            "        rc = 1\n"
+        )
+        errors: list = []
+        _check_function_top_level_isolated(ast.parse(src).body[0], errors, "f")
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_end_to_end_for_else_with_break_does_not_excuse_a_later_sibling(self):
+        # Same shape, but the for-loop's body can break -- the else is no
+        # longer guaranteed, so this if/else must NOT be trusted, and the
+        # checker must flag the later rc=1 as a violation.
+        src = (
+            "def f():\n"
+            "    if section:\n"
+            "        if cond:\n"
+            "            for x in items:\n"
+            "                if x.bad:\n"
+            "                    break\n"
+            "            else:\n"
+            "                _canonical_finding('a', 'a')\n"
+            "        else:\n"
+            "            _canonical_finding('b', 'b')\n"
+            "        rc = 1\n"
+        )
+        errors: list = []
+        _check_function_top_level_isolated(ast.parse(src).body[0], errors, "f")
+        self.assertNotEqual(errors, [],
+                            "a for/else whose loop body can break was wrongly trusted to excuse "
+                            "a later, unrelated sibling's rc=1 -- the break-detection fix is not "
+                            "working")
+
+
+class LoopSiblingCreditIsScoped(unittest.TestCase):
+    """Round 5, point 4 of an independent review of PR #1237: a bare `rc = 1`
+    planted in the SAME block as several earlier, unrelated for-loops (each
+    of which contains a finding call) used to be silently excused by any one
+    of them, no matter how unrelated -- `seen_finding` never reset across
+    same-block siblings once any for-loop had set it. `_check_block` now
+    scopes a loop's credit to (1) its own direct next sibling statement when
+    that is a bare rc=1/return 1, or (2) a later `if` sibling whose test
+    references the SAME name the loop iterated over -- this proves both the
+    mutation is now caught and the real legitimate shapes still pass."""
+
+    def test_mutation_unrelated_rc1_after_several_for_loops_is_caught(self):
+        # The reviewer's probe, reproduced structurally: the real jobs
+        # section's shape (several for-loops over unrelated accumulators,
+        # an unrelated `if legacy: print(...)`, THEN the real closing `if
+        # bad or unreceipted or missing or stuck: rc = 1`) with an EXTRA
+        # bare `rc = 1` mutation planted right after the unrelated `if
+        # legacy:` line and before the real closing `if` -- not immediately
+        # adjacent to any for-loop, and matching no loop's accumulator name.
+        src = (
+            "def f():\n"
+            "    if section:\n"
+            "        for job in bad:\n"
+            "            _canonical_finding('job_terminal_failure', 'x', subject='j')\n"
+            "        for job in unreceipted:\n"
+            "            _canonical_finding('job_completion_receipt', 'x', subject='j')\n"
+            "        if legacy:\n"
+            "            print('carried')\n"
+            "        rc = 1\n"  # the planted mutation -- not covered by anything above
+            "        if bad or unreceipted:\n"
+            "            rc = 1\n"
+        )
+        errors: list = []
+        _check_function_top_level_isolated(ast.parse(src).body[0], errors, "f")
+        self.assertNotEqual(errors, [],
+                            "an unrelated bare rc=1 planted after several unrelated for-loops "
+                            "was wrongly excused -- the same-block loop-credit fix is not working")
+
+    def test_real_shape_direct_bare_rc1_after_a_single_loop_is_trusted(self):
+        # Doctrine/credential-health real shape: a for-loop whose iterated
+        # expression is a literal tuple (not a bare Name), immediately
+        # followed, with nothing in between, by a bare `rc = 1` -- trusted
+        # via direct adjacency, not name-matching.
+        src = (
+            "def f():\n"
+            "    if section:\n"
+            "        for _count, _key in ((gate_failures, 'a'), (stale, 'b')):\n"
+            "            if _count:\n"
+            "                _canonical_finding(_key, 'x', count=_count)\n"
+            "        rc = 1\n"
+        )
+        errors: list = []
+        _check_function_top_level_isolated(ast.parse(src).body[0], errors, "f")
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_real_shape_same_name_if_after_a_gap_is_trusted(self):
+        # Exports real shape: `for target in bad: _canonical_finding(...)`,
+        # an unrelated assignment in between, THEN `if bad: rc = 1` -- not
+        # directly adjacent, but the `if`'s test references the same name
+        # the loop iterated over, so it is trusted.
+        src = (
+            "def f():\n"
+            "    if section:\n"
+            "        for target in bad:\n"
+            "            _canonical_finding('export_receipt', 'x', subject=target)\n"
+            "        _carried = 'note'\n"
+            "        if bad:\n"
+            "            rc = 1\n"
+        )
+        errors: list = []
+        _check_function_top_level_isolated(ast.parse(src).body[0], errors, "f")
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_real_shape_multiple_loops_feeding_one_ord_if_is_trusted(self):
+        # Jobs section's real closing shape: several for-loops over
+        # different accumulators, an unrelated `if legacy: print(...)` in
+        # between, then one `if bad or unreceipted or missing or stuck: rc
+        # = 1` whose test references every accumulator -- trusted.
+        src = (
+            "def f():\n"
+            "    if section:\n"
+            "        for job in bad:\n"
+            "            _canonical_finding('job_terminal_failure', 'x', subject='j')\n"
+            "        for job in unreceipted:\n"
+            "            _canonical_finding('job_completion_receipt', 'x', subject='j')\n"
+            "        if legacy:\n"
+            "            print('carried')\n"
+            "        if bad or unreceipted:\n"
+            "            rc = 1\n"
+        )
+        errors: list = []
+        _check_function_top_level_isolated(ast.parse(src).body[0], errors, "f")
+        self.assertEqual(errors, [], "\n".join(errors))
 
 
 class CompletionMarkerAlwaysPrints(unittest.TestCase):
