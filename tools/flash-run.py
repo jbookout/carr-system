@@ -64,6 +64,7 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cach
 # (the run-length benchmark task spent 214 s on its first try and still failed), and the
 # next attempt, which starts with that attempt's failure in its prompt, is the better bet.
 ATTEMPT_TIMEOUT = 600
+ATTEMPT_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 TEST_TIMEOUT = 600
 
 
@@ -193,8 +194,12 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True):
     # MAX_THINKING_TOKENS=0 makes the harness send no thinking budget, which the ds4 server
     # serves in non-thinking mode (verified 2026-09-24 from its log: no THINKING marker).
     env = None if think else dict(os.environ, MAX_THINKING_TOKENS="0")
+    # --tools limits the tool DEFINITIONS sent, not just permissions: measured 2026-09-24 the
+    # start-up prompt drops 14,863 -> 4,320 tokens (cold read 14.4 s -> 4.3 s). A scoped fix
+    # needs nothing beyond these six; the interactive `flash` command keeps the full set.
     code, transcript = _sh([FLASH, "-p", prompt, "--effort", effort or "low",
                             "--permission-mode", "acceptEdits",
+                            "--tools", *ATTEMPT_TOOLS,
                             "--allowedTools", *allowed], dest, ATTEMPT_TIMEOUT, env=env)
     elapsed = round(time.monotonic() - started, 1)
     test_code, test_out = (None, "")
