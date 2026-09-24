@@ -4,7 +4,8 @@
 -- Joe's ruling (decision 4ab3933e, 2026-09-24): a client sees exactly what is
 -- on today's Tour PDF -- property name, address, suite, space type, size,
 -- asking economics, availability and parking. Notes, owner contacts, access
--- notes and every other field stay internal.
+-- notes and every other field stay internal. Source and caveats stay in the
+-- internal promotion receipt, not in client output.
 --
 -- Before this migration the only list was the fact-shape list in
 -- ops.tour_public_value_safe and the tour_public_projection_fact check
@@ -19,71 +20,57 @@
 --      which test/tour-client-share-allowlist.test.mjs binds to this text).
 --   2. A BEFORE INSERT trigger on ops.tour_public_projection_fact, so no path
 --      -- the seal function or a direct insert -- can put a non-allowlisted
---      fact into a projection. It is named to fire before the existing
---      tour_projection_fact_guard, so the refusal names the real reason.
+--      fact, an unsafe value (5) or a stop without a client marker (6) into a
+--      projection. It is named to fire before the existing
+--      tour_projection_fact_guard, so the refusal names the real reason: the
+--      field and the rule it broke (never the value).
 --   3. ops.read_tour_share_packet and ops.read_tour_packet_for_render select
---      only allowlisted facts and no longer name a per-property caveat
---      column. A projection sealed BEFORE this migration that holds an
---      access, caveat, photo or other now-internal fact therefore stops
---      showing it on the next read, with no data rewrite. The packet-level
---      'caveat' key stays an explicit null exactly as 0586 left it.
---
--- read_tour_packet_for_render no longer joins ops.tour for tour_name: the
--- column was selected but never emitted, and the (tenant, tour_id) foreign
--- key on ops.tour_public_projection already guarantees the tour exists, so
--- dropping the join changes no row.
+--      only the eight client columns and no longer name a per-property caveat
+--      column. The packet-level 'caveat' key stays an explicit null exactly
+--      as 0586 left it.
+--   4. ops.tour_public_value_safe: one three-valued-logic fix. For size and
+--      asking_economics the 0427 body ends with `and not (<min is number> and
+--      <max is number> and min > max)`. When the value has no min/max -- the
+--      ordinary {"value":4200,"unit":"SF"} -- that is `not NULL`, NULL, so no
+--      size or asking-economics fact without BOTH a numeric min and max could
+--      ever be sealed. The range test is now one CASE branch of
+--      ops.tour_client_value_violation (5), where a NULL test simply does not
+--      fire.
+--   5. Client VALUE safety. ops.tour_client_text_violation() is the one value
+--      rule for the eight client fields and returns the name of the first
+--      rule a text breaks: email, url, phone (ten digits however they are
+--      grouped: 251 555 01 00, (251)5550100, 251-5550100), local_phone
+--      (555-0100, after suite ranges such as "Suites 100-1200" are set
+--      aside), international_phone, access_code (gate/door/key/entry/alarm/
+--      keypad/lock + code/combo/PIN/password, as whole words), lockbox,
+--      internal_note, too_long (120), control_character, empty. The rules
+--      are whole-word and number-aware so ordinary listing text ("Westgate
+--      Pines", "4,200 RSF @ $28.50/SF", "Fire alarm system upgraded 2025",
+--      "Suites 101-1050") passes; a shared corpus
+--      (mcp-server/test/fixtures/tour-client-text-corpus.json) is run through
+--      this function and its JavaScript copy (mcp-server/src/
+--      tour-client-value-safety.js) alike. Spelled-out evasions ("bob at
+--      gmail dot com") are left to the human review before a seal.
+--      ops.tour_client_value_violation() applies it to a field value,
+--      including every part of size / asking_economics, and
+--      ops.tour_public_value_safe uses it for the client fields.
+--   6. The stop marker. A client sees route_label on every stop; it must be
+--      a 1-3 character letter/digit marker (A, B, 12). Route acceptance now
+--      refuses any other label (a trigger on ops.tour_property_membership,
+--      which only accept_tour_route_version writes), so a label that could
+--      never be sealed is refused when the route is accepted, not later.
+--   7. Legacy parity. A projection sealed BEFORE this migration may hold a
+--      now-internal fact, an unsafe value or a free-text stop label. Rather
+--      than each client surface trimming it differently, the whole share
+--      fails closed: ops.tour_public_projection_client_safe() is one
+--      predicate, and the share list, the PDF render read and the map share
+--      all return nothing for a projection that fails it, so the three can
+--      never disagree about which stops or values a client sees. The broker
+--      reseals a fresh projection, which (2) holds to the rule.
 --
 -- The existing check constraint is left alone: internal facts may still be
 -- recorded; they just cannot be sealed for a client. Signatures and grants of
 -- the replaced functions are unchanged; only their bodies change.
---
--- 4. ops.tour_public_value_safe: one three-valued-logic fix, found by this
---    migration's own proof. For size and asking_economics the 0427 body ends
---    with `and not (<min is number> and <max is number> and min > max)`. When
---    the value has no min/max -- the ordinary {"value":4200,"unit":"SF"} --
---    jsonb_typeof(NULL) is NULL, the inner conjunction is NULL, `not NULL` is
---    NULL, and the whole CASE returns NULL: not safe. So no size or asking
---    economics fact without BOTH a numeric min and max could ever be sealed,
---    which silently kept two of the eight ruled client fields off every
---    share. The inner test is wrapped in coalesce(..., false).
---
--- 5. Client VALUE safety (review of #1242). The key allowlist alone let an
---    owner phone, an email, a gate code or an internal note typed INTO an
---    allowed field (parking, availability, a size label ...) reach the client
---    word for word. ops.tour_client_text_safe() is now the one value rule for
---    the eight client fields: no email/@, URL or web domain, phone number,
---    access-code wording (gate/door/key code, lockbox, alarm, keypad) or
---    internal-note wording, at most 120 characters, no control characters.
---    Its patterns live in ops.tour_client_text_forbidden_patterns(), written
---    in regex syntax PostgreSQL and JavaScript read the same way; the JS copy
---    is CLIENT_TEXT_FORBIDDEN_PATTERNS in
---    mcp-server/src/tour-client-value-safety.js, which the browser share
---    (clientStop) and the PDF renderer both call, and a node test binds the
---    two texts. ops.tour_public_value_safe applies it to every client field
---    and to the text parts of size/asking_economics, so the seal refuses an
---    unsafe value (via tour_projection_fact_guard) and both client reads,
---    which already join on tour_public_value_safe, drop a legacy one.
---    Non-client keys (access, caveat, ...) keep their old store-only shape
---    check: they are never client-visible after (1)-(3).
--- 6. The stop marker. A client sees route_label on every stop; it is now a
---    1-3 character letter/digit marker (A, B, 12). The allowlist trigger
---    refuses to seal a fact for a stop whose membership label is anything
---    else, and both client reads emit only a conforming label.
-
-create or replace function ops.tour_client_text_forbidden_patterns()
-returns text[] language sql immutable parallel safe as $$
-  select array[
-    '@',
-    'https?://|www[.]|[A-Za-z0-9-][.](com|net|org|io|co|us|biz|info|me)([^A-Za-z0-9]|$)',
-    '(^|[^0-9])[(]?[0-9]{3}[)]?[-. ]?[0-9]{3}[-. ][0-9]{4}([^0-9]|$)',
-    '(^|[^0-9])[0-9]{10,11}([^0-9]|$)',
-    '(^|[^0-9])[0-9]{3}[-.][0-9]{4}([^0-9]|$)',
-    '[+][0-9][0-9 ().-]{7,}[0-9]',
-    '(gate|door|key|entry|garage|alarm|keypad|access)[ -]?(code|combo|combination|pin|password)',
-    'lock[ -]?box|alarm|keypad|passcode',
-    'internal[ -]?(note|only|use)|confidential|do not (share|disclose)|broker[ -]only|not for (the )?client'
-  ]::text[]
-$$;
 
 create or replace function ops.tour_client_text_max_chars()
 returns integer language sql immutable parallel safe as $$ select 120 $$;
@@ -91,52 +78,57 @@ returns integer language sql immutable parallel safe as $$ select 120 $$;
 create or replace function ops.tour_client_route_label_pattern()
 returns text language sql immutable parallel safe as $$ select '^[A-Za-z0-9]{1,3}$'::text $$;
 
-create or replace function ops.tour_client_text_safe(p_text text)
-returns boolean language sql immutable parallel safe as $$
-  select coalesce(
-    p_text !~ '[[:cntrl:]]'
-    and btrim(p_text) <> ''
-    and char_length(btrim(p_text)) <= ops.tour_client_text_max_chars()
-    and not exists (
-      select 1 from unnest(ops.tour_client_text_forbidden_patterns()) pattern
-       where btrim(p_text) ~* pattern
-    ),
-    false)
+-- Digits separated by one or two of space ( ) . - are joined before the phone
+-- rule reads a value. A slash or comma does not join (dates, 4,200 SF).
+create or replace function ops.tour_client_text_digit_join_pattern()
+returns text language sql immutable parallel safe as $$ select '([0-9])[ ().-]{1,2}(?=[0-9])'::text $$;
+
+-- A suite/unit range is set aside before the seven-digit local-number rule.
+create or replace function ops.tour_client_text_suite_range_pattern()
+returns text language sql immutable parallel safe as $$
+  select '(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]*#?[0-9]{1,4}[ ]*[-.][ ]*[0-9]{1,4}(?![0-9])'::text
 $$;
 
-create or replace function ops.tour_public_value_safe(p_field_key text, p_value jsonb)
-returns boolean language sql immutable as $$
+-- Case-insensitive, checked in ordinal order; the first match names the
+-- refusal. target: raw (trimmed value), digits (digit groups joined),
+-- nosuite (suite ranges set aside).
+create or replace function ops.tour_client_text_rules()
+returns table(ordinal integer, rule text, target text, pattern text)
+language sql immutable parallel safe as $$
+  values
+    (1, 'email', 'raw', '[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9-]+([.][A-Za-z0-9-]+)*[.][A-Za-z]{2,}'),
+    (2, 'url', 'raw', 'https?://|www[.]|[A-Za-z0-9-]{2,}[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)'),
+    (3, 'phone', 'digits', '(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)'),
+    (4, 'local_phone', 'nosuite', '(^|[^0-9])[2-9][0-9]{2}[-.][0-9]{4}([^0-9]|$)'),
+    (5, 'international_phone', 'raw', '[+][0-9][0-9 ().-]{7,}[0-9]'),
+    (6, 'access_code', 'raw', '(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)'),
+    (7, 'lockbox', 'raw', '(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)'),
+    (8, 'internal_note', 'raw', '(^|[^A-Za-z])(internal[ -]?(notes?|only|use)|confidential|do not (share|disclose)|broker[ -]only|not for (the )?clients?)([^A-Za-z]|$)')
+$$;
+
+create or replace function ops.tour_client_text_violation(p_text text)
+returns text language sql immutable parallel safe as $$
   select case
-    when p_field_key in ('display.name','display.address','suite','property_type','availability','parking') then
-      jsonb_typeof(p_value) = 'string' and ops.tour_client_text_safe(p_value #>> '{}')
-    when p_field_key in ('access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
-    when p_field_key in ('size','asking_economics') then
-      jsonb_typeof(p_value) = 'object'
-      and (p_value ? 'value' or p_value ? 'min' or p_value ? 'max')
-      and not exists (
-        select 1 from jsonb_each(p_value) e
-         where e.key not in ('value','unit','min','max','currency','period','label')
-            or (e.key in ('value','min','max') and (
-                 jsonb_typeof(e.value) not in ('string','number')
-                 or (jsonb_typeof(e.value)='string' and not ops.tour_client_text_safe(e.value #>> '{}'))))
-            or (e.key in ('unit','currency','period','label') and (
-                 jsonb_typeof(e.value)<>'string'
-                 or not ops.tour_client_text_safe(e.value #>> '{}')))
-      )
-      and not coalesce(
-        jsonb_typeof(p_value->'min')='number' and jsonb_typeof(p_value->'max')='number'
-        and (p_value->>'min')::numeric > (p_value->>'max')::numeric,
-        false
-      )
-    when p_field_key in ('photos','floor_plan') then jsonb_typeof(p_value) = 'array' and not exists (
-      select 1 from jsonb_array_elements(p_value) item
-       where jsonb_typeof(item) <> 'object'
-          or not (item ? 'asset_ref')
-          or (item->>'asset_ref') !~ '^asset:public:[A-Za-z0-9_-]+$'
-          or char_length(item->>'asset_ref') not between 29 and 269
-          or exists (select 1 from jsonb_each(item) e where e.key not in ('asset_ref','alt','caption','source') or jsonb_typeof(e.value) <> 'string')
-    )
-    else false end;
+    when p_text is null then 'not_text'
+    when p_text ~ '[[:cntrl:]]' then 'control_character'
+    when btrim(p_text) = '' then 'empty'
+    when char_length(btrim(p_text)) > ops.tour_client_text_max_chars() then 'too_long'
+    else (
+      select r.rule
+        from ops.tour_client_text_rules() r
+       where (case r.target
+                when 'digits' then regexp_replace(btrim(p_text), ops.tour_client_text_digit_join_pattern(), '\1', 'g')
+                when 'nosuite' then regexp_replace(btrim(p_text), ops.tour_client_text_suite_range_pattern(), '\1 ', 'gi')
+                else btrim(p_text)
+              end) ~* r.pattern
+       order by r.ordinal
+       limit 1)
+  end
+$$;
+
+create or replace function ops.tour_client_text_safe(p_text text)
+returns boolean language sql immutable parallel safe as $$
+  select ops.tour_client_text_violation(p_text) is null
 $$;
 
 create or replace function ops.tour_client_field_keys()
@@ -149,11 +141,68 @@ returns boolean language sql immutable parallel safe as $$
   select coalesce(p_field_key = any(ops.tour_client_field_keys()), false)
 $$;
 
+-- The reason a client may not see `p_value` under `p_field_key`, or null.
+-- A metric (size, asking_economics) is refused whole when any part fails;
+-- the reason names the part (size.label: phone).
+create or replace function ops.tour_client_value_violation(p_field_key text, p_value jsonb)
+returns text language sql immutable parallel safe as $$
+  select case
+    when not ops.tour_client_field_allowed(p_field_key) then 'field_not_client_allowlisted'
+    when p_value is null then 'missing'
+    when p_field_key in ('size','asking_economics') then (
+      case
+        when jsonb_typeof(p_value) <> 'object' or not (p_value ? 'value' or p_value ? 'min' or p_value ? 'max') then 'metric_shape'
+        when exists (select 1 from jsonb_object_keys(p_value) k where k not in ('value','unit','min','max','currency','period','label')) then 'metric_shape'
+        when jsonb_typeof(p_value->'min')='number' and jsonb_typeof(p_value->'max')='number'
+          and (p_value->>'min')::numeric > (p_value->>'max')::numeric then 'metric_range'
+        else (
+          select e.key || '.' || v.violation
+            from jsonb_each(p_value) e
+           cross join lateral (select case
+                   when e.key in ('value','min','max') and jsonb_typeof(e.value) = 'number' then null
+                   when jsonb_typeof(e.value) <> 'string' then 'not_text'
+                   else ops.tour_client_text_violation(e.value #>> '{}')
+                 end violation) v
+           where v.violation is not null
+           order by e.key
+           limit 1)
+      end)
+    when jsonb_typeof(p_value) <> 'string' then 'not_text'
+    else ops.tour_client_text_violation(p_value #>> '{}')
+  end
+$$;
+
+create or replace function ops.tour_public_value_safe(p_field_key text, p_value jsonb)
+returns boolean language sql immutable as $$
+  select case
+    when p_field_key in ('display.name','display.address','suite','property_type','size','asking_economics','availability','parking') then
+      ops.tour_client_value_violation(p_field_key, p_value) is null
+    when p_field_key in ('access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
+    when p_field_key in ('photos','floor_plan') then jsonb_typeof(p_value) = 'array' and not exists (
+      select 1 from jsonb_array_elements(p_value) item
+       where jsonb_typeof(item) <> 'object'
+          or not (item ? 'asset_ref')
+          or (item->>'asset_ref') !~ '^asset:public:[A-Za-z0-9_-]+$'
+          or char_length(item->>'asset_ref') not between 29 and 269
+          or exists (select 1 from jsonb_each(item) e where e.key not in ('asset_ref','alt','caption','source') or jsonb_typeof(e.value) <> 'string')
+    )
+    else false end;
+$$;
+
 create or replace function ops.tour_projection_fact_client_allowlist_guard() returns trigger
 language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
+declare v_value jsonb; v_violation text;
 begin
   if not ops.tour_client_field_allowed(new.display_field_key) then
     raise exception 'projection fact field is not client-allowlisted';
+  end if;
+  select a.value into v_value from ops.tour_field_assertion a
+   where a.organization_tenant_id=new.organization_tenant_id and a.id=new.field_assertion_id;
+  if found then
+    v_violation := ops.tour_client_value_violation(new.display_field_key, v_value);
+    if v_violation is not null then
+      raise exception 'projection fact % is not client-safe: %', new.display_field_key, v_violation;
+    end if;
   end if;
   if exists (
     select 1 from ops.tour_public_projection p
@@ -167,16 +216,52 @@ begin
   return new;
 end $$;
 
-revoke all on function ops.tour_client_text_forbidden_patterns(), ops.tour_client_text_max_chars(),
-  ops.tour_client_route_label_pattern(), ops.tour_client_text_safe(text),
-  ops.tour_client_field_keys(), ops.tour_client_field_allowed(text),
-  ops.tour_projection_fact_client_allowlist_guard()
-  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-
 drop trigger if exists tour_projection_fact_client_allowlist on ops.tour_public_projection_fact;
 create trigger tour_projection_fact_client_allowlist
   before insert on ops.tour_public_projection_fact
   for each row execute function ops.tour_projection_fact_client_allowlist_guard();
+
+-- (6) Route acceptance is the only writer of ops.tour_property_membership,
+-- which is append-only (0318), so an insert guard covers every path.
+create or replace function ops.tour_property_membership_client_label_guard() returns trigger
+language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
+begin
+  if new.route_label is null or new.route_label !~ ops.tour_client_route_label_pattern() then
+    raise exception 'route stop label must be a 1-3 letter or digit client marker';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists tour_property_membership_client_label on ops.tour_property_membership;
+create trigger tour_property_membership_client_label
+  before insert on ops.tour_property_membership
+  for each row execute function ops.tour_property_membership_client_label_guard();
+
+-- (7) One predicate for every client surface. True only when every sealed
+-- fact is client-allowlisted and client-safe and every stop of the route
+-- version carries a client marker.
+create or replace function ops.tour_public_projection_client_safe(p_tenant text, p_projection_id uuid)
+returns boolean language sql stable set search_path=pg_catalog,ops,public,pg_temp as $$
+  select not exists (
+      select 1 from ops.tour_public_projection_fact f
+      left join ops.tour_field_assertion a on a.organization_tenant_id=f.organization_tenant_id and a.id=f.field_assertion_id
+      where f.organization_tenant_id=p_tenant and f.projection_id=p_projection_id
+        and (a.id is null or a.field_key is distinct from f.display_field_key
+             or ops.tour_client_value_violation(f.display_field_key, a.value) is not null))
+    and not exists (
+      select 1 from ops.tour_public_projection p
+      join ops.tour_property_membership m on m.organization_tenant_id=p.organization_tenant_id and m.tour_id=p.tour_id and m.route_version=p.route_version
+      where p.organization_tenant_id=p_tenant and p.id=p_projection_id
+        and (m.route_label is null or m.route_label !~ ops.tour_client_route_label_pattern()))
+$$;
+
+revoke all on function ops.tour_client_text_max_chars(), ops.tour_client_route_label_pattern(),
+  ops.tour_client_text_digit_join_pattern(), ops.tour_client_text_suite_range_pattern(),
+  ops.tour_client_text_rules(), ops.tour_client_text_violation(text), ops.tour_client_text_safe(text),
+  ops.tour_client_field_keys(), ops.tour_client_field_allowed(text), ops.tour_client_value_violation(text,jsonb),
+  ops.tour_projection_fact_client_allowlist_guard(), ops.tour_property_membership_client_label_guard(),
+  ops.tour_public_projection_client_safe(text,uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 
 create or replace function ops.read_tour_share_packet(p_session_digest text)
 returns jsonb language sql stable security definer set search_path=pg_catalog,ops,public,pg_temp as $$
@@ -184,8 +269,9 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
     select p.* from grant_row g join ops.tour_public_projection p on p.organization_tenant_id=g.organization_tenant_id and p.id=g.projection_id
     where p.status='approved' and exists(select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id and s.canonical_projection_digest=p.projection_digest)
       and ops.read_tour_public_projection(p.organization_tenant_id,p.id) is not null
+      and ops.tour_public_projection_client_safe(p.organization_tenant_id,p.id)
   ), stops as (
-    select m.route_sequence,case when m.route_label ~ ops.tour_client_route_label_pattern() then m.route_label end route_label,'property:public:'||substr(encode(public.digest(p.organization_tenant_id||':'||p.id::text||':'||m.property_id::text,'sha256'),'hex'),1,32) property_ref,
+    select m.route_sequence,m.route_label,'property:public:'||substr(encode(public.digest(p.organization_tenant_id||':'||p.id::text||':'||m.property_id::text,'sha256'),'hex'),1,32) property_ref,
       max(a.value#>>'{}') filter(where f.display_field_key='display.name') name,
       max(a.value#>>'{}') filter(where f.display_field_key='display.address') address,
       max(a.value#>>'{}') filter(where f.display_field_key='suite') suite,
@@ -196,8 +282,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
       max(a.value#>>'{}') filter(where f.display_field_key='parking') parking
     from projection p join ops.tour_property_membership m on m.organization_tenant_id=p.organization_tenant_id and m.tour_id=p.tour_id and m.route_version=p.route_version
     join ops.tour_public_projection_fact f on f.organization_tenant_id=p.organization_tenant_id and f.projection_id=p.id and f.property_id=m.property_id
-      and ops.tour_client_field_allowed(f.display_field_key)
-    join ops.tour_field_assertion a on a.organization_tenant_id=f.organization_tenant_id and a.id=f.field_assertion_id and ops.tour_public_value_safe(a.field_key,a.value)
+    join ops.tour_field_assertion a on a.organization_tenant_id=f.organization_tenant_id and a.id=f.field_assertion_id
     group by p.organization_tenant_id,p.id,m.property_id,m.route_sequence,m.route_label
   ) select jsonb_build_object('as_of',p.as_of,'caveat',null,'stops',coalesce((select jsonb_agg(to_jsonb(stops) order by route_sequence) from stops),'[]'::jsonb)) from projection p;
 $$;
@@ -209,8 +294,9 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
     where p.organization_tenant_id=p_tenant and p.id=p_projection_id and nullif(btrim(p_actor_id),'') is not null and p.status='approved'
       and exists(select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id and s.canonical_projection_digest=p.projection_digest)
       and ops.read_tour_public_projection(p.organization_tenant_id,p.id) is not null
+      and ops.tour_public_projection_client_safe(p.organization_tenant_id,p.id)
   ), properties as (
-    select m.route_sequence,case when m.route_label ~ ops.tour_client_route_label_pattern() then m.route_label end route_label,'property:public:'||substr(encode(public.digest(p.organization_tenant_id||':'||p.id::text||':'||m.property_id::text,'sha256'),'hex'),1,32) property_ref,
+    select m.route_sequence,m.route_label,'property:public:'||substr(encode(public.digest(p.organization_tenant_id||':'||p.id::text||':'||m.property_id::text,'sha256'),'hex'),1,32) property_ref,
       max(a.value#>>'{}') filter(where f.display_field_key='display.name') name,
       max(a.value#>>'{}') filter(where f.display_field_key='display.address') address,
       max(a.value#>>'{}') filter(where f.display_field_key='suite') suite,
@@ -221,8 +307,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
       max(a.value#>>'{}') filter(where f.display_field_key='parking') parking
     from projection p join ops.tour_property_membership m on m.organization_tenant_id=p.organization_tenant_id and m.tour_id=p.tour_id and m.route_version=p.route_version
     join ops.tour_public_projection_fact f on f.organization_tenant_id=p.organization_tenant_id and f.projection_id=p.id and f.property_id=m.property_id
-      and ops.tour_client_field_allowed(f.display_field_key)
-    join ops.tour_field_assertion a on a.organization_tenant_id=f.organization_tenant_id and a.id=f.field_assertion_id and ops.tour_public_value_safe(a.field_key,a.value)
+    join ops.tour_field_assertion a on a.organization_tenant_id=f.organization_tenant_id and a.id=f.field_assertion_id
     group by p.organization_tenant_id,p.id,m.property_id,m.route_sequence,m.route_label
   ) select jsonb_build_object(
     'projection_digest',p.projection_digest,
@@ -234,8 +319,9 @@ $$;
 -- driveway / parking-access coordinate, the opaque property ref and the stop
 -- marker -- what a client needs to drive to the stop (map-architecture
 -- contract carr-workspace-market-map-route-planning 1.2.0, entrance
--- verification + native-navigation privacy rule). Only the label changes
--- from 0430: it is emitted only when it is a client-safe marker.
+-- verification + native-navigation privacy rule). The only change from 0430
+-- is the (7) predicate: a legacy projection the list and PDF refuse is
+-- refused here too.
 create or replace function ops.read_tour_share_map(p_session_digest text)
 returns jsonb language sql stable security definer set search_path=pg_catalog,ops,public,pg_temp as $$
   with grant_row as (select (ops.tour_share_session_grant(p_session_digest,'view_map')).*), projection as (
@@ -243,9 +329,10 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
     where p.status='approved' and exists(select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id and s.canonical_projection_digest=p.projection_digest)
       and ops.read_tour_public_projection(p.organization_tenant_id,p.id) is not null
       and ops.tour_public_map_projection_ready(p.organization_tenant_id,p.id)
+      and ops.tour_public_projection_client_safe(p.organization_tenant_id,p.id)
   ) select jsonb_build_object('as_of',p.as_of,'points',coalesce(jsonb_agg(jsonb_build_object(
     'property_ref','property:public:'||substr(encode(public.digest(p.organization_tenant_id||':'||p.id::text||':'||m.property_id::text,'sha256'),'hex'),1,32),
-    'route_sequence',m.route_sequence,'route_label',case when m.route_label ~ ops.tour_client_route_label_pattern() then m.route_label end,'latitude',c.latitude::double precision,'longitude',c.longitude::double precision
+    'route_sequence',m.route_sequence,'route_label',m.route_label,'latitude',c.latitude::double precision,'longitude',c.longitude::double precision
   ) order by m.route_sequence),'[]'::jsonb))
   from projection p join ops.tour_property_membership m on m.organization_tenant_id=p.organization_tenant_id and m.tour_id=p.tour_id and m.route_version=p.route_version
   join ops.tour_public_projection_map_point mp on mp.organization_tenant_id=p.organization_tenant_id and mp.projection_id=p.id and mp.property_id=m.property_id and mp.route_version=p.route_version

@@ -17,8 +17,8 @@ import {
   isClientTourFieldKey,
 } from "../src/tour-operations-contract.js";
 import {
-  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_FORBIDDEN_PATTERNS, CLIENT_TEXT_MAX_CHARS,
-  clientSafeMetric, isClientRouteLabel, isClientSafeText,
+  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_DIGIT_JOIN, CLIENT_TEXT_MAX_CHARS, CLIENT_TEXT_RULES, CLIENT_TEXT_SUITE_RANGE,
+  clientSafeMetric, clientTextViolation, isClientRouteLabel, isClientSafeText,
 } from "../src/tour-client-value-safety.js";
 import { renderTourPacket, TourPacketRenderError } from "../src/tour-packet-render.js";
 import { tourRightsProjectionTools } from "../src/tour-rights-projection.js";
@@ -93,7 +93,7 @@ test("the JavaScript allowlist and the database allowlist are the same list", ()
   for (const fn of ["read_tour_share_packet", "read_tour_packet_for_render"]) {
     const text = migration.split(new RegExp(`create or replace function ops\\.${fn}\\(`, "i"), 2)[1]?.split(/\$\$;/, 1)[0];
     assert.ok(text, fn);
-    assert.match(text, /ops\.tour_client_field_allowed\(f\.display_field_key\)/, fn);
+    assert.match(text, /and ops\.tour_public_projection_client_safe\(p\.organization_tenant_id,p\.id\)/, fn);
     // The packet-level 'caveat' key stays an explicit null (0586); what must
     // be gone is any per-property column read from a non-allowlisted fact.
     const columns = [...text.matchAll(/display_field_key='([^']*)'/g)].map(match => match[1]);
@@ -221,13 +221,11 @@ test("a share packet carries only envelope keys and allowlisted columns, never i
   assert.doesNotMatch(JSON.stringify(packet), SENTINEL_PATTERN);
 });
 
-test("an allowlisted column holding a non-scalar value is dropped rather than passed through", () => {
-  const packet = projectTourClientPacket({ ...hostilePacket, stops: [{
-    ...hostileStop, suite: { text: "Suite 200", notes: SENTINEL.note }, parking: [SENTINEL.ownerContact],
-  }] });
-  assert.equal(packet.stops[0].suite, undefined);
-  assert.equal(packet.stops[0].parking, undefined);
-  assert.doesNotMatch(JSON.stringify(packet), SENTINEL_PATTERN);
+test("an allowlisted column holding a non-scalar value refuses the packet rather than passing through", () => {
+  for (const stop of [{ ...hostileStop, suite: { text: "Suite 200", notes: SENTINEL.note } }, { ...hostileStop, parking: [SENTINEL.ownerContact] }])
+    assert.equal(projectTourClientPacket({ ...hostilePacket, stops: [stop] }), null);
+  // A column the database left empty (SQL null) is simply absent.
+  assert.equal(projectTourClientPacket({ ...hostilePacket, stops: [{ ...hostileStop, suite: null }] }).stops[0].suite, undefined);
 });
 
 function sharingHarness() {
@@ -291,52 +289,51 @@ test("the client share link is an origin, a fixed path and a random token, with 
 
 // ---------------------------------------------------------------------------
 // VALUE safety (review of #1242): an allowed KEY must not carry internal TEXT.
-// One rule -- tour-client-value-safety.js / ops.tour_client_text_safe() --
-// guards the database seal, the browser share (clientStop) and the PDF.
+// One rule -- tour-client-value-safety.js / ops.tour_client_text_violation() --
+// guards the database seal and reads, the browser share and the PDF.
 // ---------------------------------------------------------------------------
 
-// Internal text a person could type into an allowed field. Every one must be
-// refused wherever it appears.
+// One corpus, two engines. Ordinary CRE listing text a client is meant to see
+// must pass; contact, access and internal-note text must be refused under the
+// named rule. test/tour-client-share-allowlist-postgres.sql runs every one of
+// these strings through ops.tour_client_text_violation() too (asserted below).
+const CORPUS = JSON.parse(fs.readFileSync(path.join(root, "mcp-server/test/fixtures/tour-client-text-corpus.json"), "utf8"));
+const ORDINARY = CORPUS.ordinary;
 const SMUGGLED = [
-  "4 per 1000. Owner Bob 251-555-0100",
-  "Call (251) 555-0100 before visiting",
-  "Owner cell 2515550100",
-  "Ask for 555-0100 at the desk",
-  "UK owner +44 20 7946 0958",
-  "Email bob@landlord.example for access",
-  "Details at https://landlord.example/private",
-  "See www.landlord-portal.com",
-  "Leasing via landlordportal.com",
-  "Gate code 4411",
-  "Door code is 1234#",
-  "Key code 9021 on the side door",
-  "Lockbox on the rear gate",
-  "Lock box left of the entrance",
-  "Disarm the alarm first",
-  "Keypad by the loading dock",
-  "Entry PIN 5555",
-  "Internal note: client is tight on budget",
-  "Confidential - do not share with tenant",
-  "Broker-only pricing",
-  "Not for client eyes",
+  ...CORPUS.refused.map(([value]) => value),
   "A".repeat(CLIENT_TEXT_MAX_CHARS + 1),
   "Available\nnow",
 ];
-// Ordinary client values that must still pass.
-const ORDINARY = [
-  "Bayside Medical Plaza", "100 Bayside Way, Pensacola, FL 32502", "1250 E 9 Mile Rd, Pensacola, FL 32514-1234",
-  "Suite 210", "Suites 100-120", "medical_office", "Medical office", "available now", "Available 2026-10-01",
-  "4 per 1000", "4.5/1,000 SF", "Surface lot, 120 spaces", "Shell condition", "Q1 2027", "A".repeat(CLIENT_TEXT_MAX_CHARS),
-];
 
-test("the shared client value rule refuses contact, access-code and internal-note text and keeps ordinary values", () => {
+test("the client value rule passes ordinary CRE text and refuses contact, access and internal-note text by name", () => {
+  assert.ok(ORDINARY.length >= 60 && CORPUS.refused.length >= 30);
+  for (const value of ORDINARY) assert.equal(clientTextViolation(value), null, JSON.stringify(value));
+  for (const [value, rule] of CORPUS.refused) assert.equal(clientTextViolation(value), rule, JSON.stringify(value));
+  assert.equal(clientTextViolation("A".repeat(CLIENT_TEXT_MAX_CHARS)), null);
+  assert.equal(clientTextViolation("A".repeat(CLIENT_TEXT_MAX_CHARS + 1)), "too_long");
+  // Counted in code points, as PostgreSQL char_length() counts.
+  assert.equal(clientTextViolation("\u{1F3E5}".repeat(CLIENT_TEXT_MAX_CHARS)), null);
+  assert.equal(clientTextViolation("Available\nnow"), "control_character");
+  for (const [value, rule] of [[null, "not_text"], [undefined, "not_text"], [4, "not_text"], [{}, "not_text"], ["", "empty"], ["   ", "empty"]])
+    assert.equal(clientTextViolation(value), rule, String(value));
   for (const value of SMUGGLED) assert.equal(isClientSafeText(value), false, JSON.stringify(value));
-  for (const value of ORDINARY) assert.equal(isClientSafeText(value), true, JSON.stringify(value));
-  for (const value of [null, undefined, 4, {}, "", "   "]) assert.equal(isClientSafeText(value), false, String(value));
   for (const label of ["A", "B", "12", "A1"]) assert.equal(isClientRouteLabel(label), true, label);
   for (const label of ["Stop 1", "ABCD", "", " A", "A-", "Stop A: Owner Bob 251-555-0100", null])
     assert.equal(isClientRouteLabel(label), false, String(label));
+});
+
+test("the Postgres proof runs the same corpus through the database rule", () => {
+  const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");
+  const literal = value => `'${value.replaceAll("'", "''")}'`;
+  for (const value of ORDINARY) assert.ok(proof.includes(literal(value)), `proof lacks ordinary ${value}`);
+  for (const [value, rule] of CORPUS.refused)
+    assert.ok(proof.includes(`(${literal(value)},${literal(rule)})`), `proof lacks refused ${value} -> ${rule}`);
+});
+
+test("size and asking-economics metrics pass only when every part passes", () => {
   assert.deepEqual(clientSafeMetric({ value: 4200, unit: "SF" }), { value: 4200, unit: "SF" });
+  assert.deepEqual(clientSafeMetric({ value: "4,200", unit: "RSF", label: "4,200 RSF @ $28.50/SF" }),
+    { value: "4,200", unit: "RSF", label: "4,200 RSF @ $28.50/SF" });
   assert.deepEqual(clientSafeMetric({ min: 20, max: 25, currency: "USD", period: "NNN", label: "Rate" }),
     { min: 20, max: 25, currency: "USD", period: "NNN", label: "Rate" });
   for (const metric of [
@@ -344,6 +341,7 @@ test("the shared client value rule refuses contact, access-code and internal-not
     { value: 24, currency: "USD", period: "NNN gate code 4411" },
     { value: 24, unit: "U".repeat(CLIENT_TEXT_MAX_CHARS + 1) },
     { value: "call 251-555-0100" },
+    { value: "251 555 01 00", unit: "SF" },
     { value: 4200, unit: "SF", verifier: "internal" },
     { value: 4200, unit: { nested: "no" } },
     { min: 30, max: 20 },
@@ -352,28 +350,34 @@ test("the shared client value rule refuses contact, access-code and internal-not
   ]) assert.equal(clientSafeMetric(metric), undefined, JSON.stringify(metric));
 });
 
+function sqlBody(migration, fn) {
+  return migration.split(new RegExp(`create or replace function ops\\.${fn}\\(`, "i"), 2)[1]?.split(/\$\$;/, 1)[0];
+}
+
 test("the JavaScript value rule and the database value rule are the same text", () => {
   const migration = fs.readFileSync(path.join(root, "migrations/0591_tour_client_field_allowlist.sql"), "utf8");
-  const patternsBody = migration.split(/create or replace function ops\.tour_client_text_forbidden_patterns\(\)/i, 2)[1]?.split(/\$\$;/, 1)[0];
-  assert.ok(patternsBody, "migration defines ops.tour_client_text_forbidden_patterns()");
-  const sqlPatterns = [...patternsBody.matchAll(/'((?:[^']|'')*)'/g)].map(match => match[1].replaceAll("''", "'"));
-  assert.deepEqual(sqlPatterns, [...CLIENT_TEXT_FORBIDDEN_PATTERNS]);
+  const rules = sqlBody(migration, "tour_client_text_rules");
+  assert.ok(rules, "migration defines ops.tour_client_text_rules()");
+  const sqlRules = [...rules.matchAll(/\((\d+), '([a-z_]+)', '([a-z]+)', '((?:[^']|'')*)'\)/g)]
+    .map(match => ({ ordinal: Number(match[1]), rule: match[2], target: match[3], pattern: match[4].replaceAll("''", "'") }));
+  assert.deepEqual(sqlRules.map(({ ordinal }) => ordinal), CLIENT_TEXT_RULES.map((_, index) => index + 1));
+  assert.deepEqual(sqlRules.map(({ rule, target, pattern }) => ({ rule, target, pattern })), CLIENT_TEXT_RULES.map(entry => ({ ...entry })));
+  assert.ok(migration.includes(`select '${CLIENT_TEXT_DIGIT_JOIN.pattern}'::text`), "digit join pattern parity");
+  assert.ok(migration.includes(`select '${CLIENT_TEXT_SUITE_RANGE.pattern}'::text`), "suite range pattern parity");
+  const violation = sqlBody(migration, "tour_client_text_violation");
+  assert.ok(violation.includes(`ops.tour_client_text_digit_join_pattern(), '${CLIENT_TEXT_DIGIT_JOIN.replacement.replace("$1", "\\1")}', 'g')`));
+  assert.ok(violation.includes(`ops.tour_client_text_suite_range_pattern(), '${CLIENT_TEXT_SUITE_RANGE.replacement.replace("$1", "\\1")}', 'gi')`));
+  assert.match(violation, /~\* r\.pattern\s+order by r\.ordinal/);
   assert.match(migration, new RegExp(`ops\\.tour_client_text_max_chars\\(\\)\\s*returns integer language sql immutable parallel safe as \\$\\$ select ${CLIENT_TEXT_MAX_CHARS} \\$\\$`));
   assert.ok(migration.includes(`select '${CLIENT_ROUTE_LABEL_PATTERN}'::text`), "route label pattern parity");
-  // Every client field and every metric text part goes through the rule.
-  const valueSafe = migration.split(/create or replace function ops\.tour_public_value_safe\(/i, 2)[1]?.split(/\$\$;/, 1)[0];
-  assert.match(valueSafe, /when p_field_key in \('display\.name','display\.address','suite','property_type','availability','parking'\) then\s+jsonb_typeof\(p_value\) = 'string' and ops\.tour_client_text_safe\(p_value #>> '\{\}'\)/);
-  assert.equal((valueSafe.match(/not ops\.tour_client_text_safe\(e\.value #>> '\{\}'\)/g) || []).length, 2);
-  // Both client reads keep the value-safety join and emit only a safe marker.
-  for (const fn of ["read_tour_share_packet", "read_tour_packet_for_render"]) {
-    const text = migration.split(new RegExp(`create or replace function ops\\.${fn}\\(`, "i"), 2)[1]?.split(/\$\$;/, 1)[0];
-    assert.match(text, /and ops\.tour_public_value_safe\(a\.field_key,a\.value\)/, fn);
-    assert.match(text, /case when m\.route_label ~ ops\.tour_client_route_label_pattern\(\) then m\.route_label end route_label/, fn);
-  }
-  // The map share emits the stop marker only when it is one.
-  const mapRead = migration.split(/create or replace function ops\.read_tour_share_map\(/i, 2)[1]?.split(/\$\$;/, 1)[0];
-  assert.match(mapRead, /'route_label',case when m\.route_label ~ ops\.tour_client_route_label_pattern\(\) then m\.route_label end,/);
-  assert.doesNotMatch(mapRead, /'route_label',m\.route_label/);
+  // Every client field, whole metrics included, goes through the one rule.
+  const valueSafe = sqlBody(migration, "tour_public_value_safe");
+  assert.match(valueSafe, /when p_field_key in \('display\.name','display\.address','suite','property_type','size','asking_economics','availability','parking'\) then\s+ops\.tour_client_value_violation\(p_field_key, p_value\) is null/);
+  // Every client surface is gated by the one legacy predicate.
+  for (const fn of ["read_tour_share_packet", "read_tour_packet_for_render", "read_tour_share_map"])
+    assert.match(sqlBody(migration, fn), /and ops\.tour_public_projection_client_safe\(p\.organization_tenant_id,p\.id\)/, fn);
+  // Route acceptance refuses a label that could never be sealed.
+  assert.match(migration, /before insert on ops\.tour_property_membership\s+for each row execute function ops\.tour_property_membership_client_label_guard\(\)/);
 });
 
 const cleanStop = {
@@ -382,39 +386,40 @@ const cleanStop = {
   property_type: "Medical office", size: { value: 4200, unit: "SF" },
   asking_economics: { value: 24, currency: "USD", period: "NNN" }, availability: "Available now", parking: "4 per 1000",
 };
-const TEXT_COLUMNS = ["suite", "property_type", "availability", "parking"];
+const secondStop = { ...cleanStop, property_ref: "property:public:qrstuvwxyzabcdef", route_sequence: 2, route_label: "B" };
+const TEXT_COLUMNS = ["name", "address", "suite", "property_type", "availability", "parking"];
 
-test("clientStop drops internal text smuggled inside every allowed field, and drops a stop whose name or address is unsafe", () => {
-  const baseline = projectTourClientPacket({ as_of: "2026-08-27T12:15:00Z", stops: [cleanStop] }).stops[0];
-  assert.deepEqual(baseline, cleanStop);
+test("one unsafe value anywhere refuses the whole browser packet, never a trimmed copy", () => {
+  const baseline = projectTourClientPacket({ as_of: "2026-08-27T12:15:00Z", stops: [cleanStop, secondStop] });
+  assert.deepEqual(baseline.stops, [cleanStop, secondStop]);
+  for (const ordinary of ORDINARY)
+    assert.notEqual(projectTourClientPacket({ stops: [cleanStop, { ...secondStop, parking: ordinary }] }), null, ordinary);
   for (const smuggled of SMUGGLED) {
-    for (const column of TEXT_COLUMNS) {
-      const stop = projectTourClientPacket({ stops: [{ ...cleanStop, [column]: smuggled }] }).stops[0];
-      assert.equal(stop[column], undefined, `${column}: ${smuggled}`);
-      assert.equal(JSON.stringify(stop).includes(smuggled.trim()), false, `${column}: ${smuggled}`);
-    }
-    for (const column of ["name", "address"])
-      assert.deepEqual(projectTourClientPacket({ stops: [{ ...cleanStop, [column]: smuggled }] }).stops, [], `${column}: ${smuggled}`);
-    for (const [column, key] of [["size", "label"], ["size", "unit"], ["asking_economics", "period"], ["asking_economics", "currency"]]) {
-      const stop = projectTourClientPacket({ stops: [{ ...cleanStop, [column]: { ...cleanStop[column], [key]: smuggled } }] }).stops[0];
-      assert.equal(stop[column], undefined, `${column}.${key}: ${smuggled}`);
-    }
+    for (const column of TEXT_COLUMNS)
+      assert.equal(projectTourClientPacket({ stops: [cleanStop, { ...secondStop, [column]: smuggled }] }), null, `${column}: ${smuggled}`);
+    for (const [column, key] of [["size", "label"], ["size", "unit"], ["size", "value"], ["asking_economics", "period"], ["asking_economics", "currency"]])
+      assert.equal(projectTourClientPacket({ stops: [cleanStop, { ...secondStop, [column]: { ...secondStop[column], [key]: smuggled } }] }), null,
+        `${column}.${key}: ${smuggled}`);
   }
-  const relabelled = projectTourClientPacket({ stops: [{ ...cleanStop, route_label: "Stop A: Owner Bob 251-555-0100" }] }).stops[0];
-  assert.equal(relabelled.route_label, undefined);
-  assert.equal(relabelled.route_sequence, 1);
+  assert.equal(projectTourClientPacket({ stops: [cleanStop, { ...secondStop, route_label: "Stop B: Owner Bob 251-555-0100" }] }), null);
+  // A stop the client could not identify (no name or no address) is refused too.
+  for (const column of ["name", "address"]) {
+    const { [column]: _dropped, ...unnamed } = secondStop;
+    assert.equal(projectTourClientPacket({ stops: [cleanStop, unnamed] }), null, `missing ${column}`);
+  }
 });
 
-test("the map share sends only coordinate, opaque ref, order and a stop marker", () => {
-  const point = { latitude: 30.42, longitude: -87.21, property_ref: "property:public:abcdefghijklmnop", route_sequence: 1 };
-  assert.deepEqual(projectTourClientMap({ as_of: "2026-08-27T12:15:00Z", points: [{ ...point, route_label: "A" }] }).points,
-    [{ ...point, route_label: "A" }]);
+test("the map share sends only coordinate, opaque ref, order and a stop marker, and refuses a free-text label", () => {
+  const point = { latitude: 30.42, longitude: -87.21, property_ref: "property:public:abcdefghijklmnop", route_sequence: 1, route_label: "A" };
+  assert.deepEqual(projectTourClientMap({ as_of: "2026-08-27T12:15:00Z", points: [point] }).points, [point]);
   const hostile = projectTourClientMap({ as_of: "2026-08-27T12:15:00Z", tour_name: SENTINEL.clientName, points: [{
-    ...point, route_label: "Stop A: Owner Bob 251-555-0100", label: SENTINEL.accessNote, sequence: 1,
+    ...point, label: SENTINEL.accessNote, sequence: 1,
     access_notes: SENTINEL.accessNote, owner_contact: SENTINEL.ownerContact, property_id: ids.property,
   }] });
   assert.deepEqual(hostile.points, [point]);
   assert.doesNotMatch(JSON.stringify(hostile), SENTINEL_PATTERN);
+  for (const route_label of ["Stop A: Owner Bob 251-555-0100", "Stop 1", null, undefined])
+    assert.equal(projectTourClientMap({ points: [point, { ...point, route_sequence: 2, route_label }] }), null, String(route_label));
 });
 
 test("the PDF renderer admits exactly the client allowlist and refuses the same smuggled text", () => {
@@ -422,12 +427,14 @@ test("the PDF renderer admits exactly the client allowlist and refuses the same 
   const rendered = renderTourPacket(packet);
   for (const column of Object.values(CLIENT_TOUR_PACKET_COLUMNS))
     assert.ok(Object.hasOwn(rendered.facts.properties[0], column), column);
+  for (const ordinary of ORDINARY.filter(value => value.length <= 80))
+    renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: ordinary }] });
   const refused = code => error => error instanceof TourPacketRenderError && error.code === code;
   for (const key of ["caveat", "notes", "owner_contact", "access", "photos", "appointment_start", "brand_new_field"])
     assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, [key]: "x" }] }),
       error => error instanceof TourPacketRenderError && /tour_packet_(unknown|forbidden)_field/.test(error.code), key);
   for (const smuggled of SMUGGLED.filter(value => !value.includes("\n") && value.length <= CLIENT_TEXT_MAX_CHARS)) {
-    for (const column of ["name", "address", ...TEXT_COLUMNS])
+    for (const column of TEXT_COLUMNS)
       assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, [column]: smuggled }] }),
         refused("tour_packet_forbidden_contact"), `${column}: ${smuggled}`);
     assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, size: { value: 4200, unit: "SF", label: smuggled } }] }),
@@ -435,4 +442,29 @@ test("the PDF renderer admits exactly the client allowlist and refuses the same 
   }
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: "P".repeat(CLIENT_TEXT_MAX_CHARS + 1) }] }), refused("tour_packet_overflow"));
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, route_label: "Stop 1" }] }), refused("tour_packet_invalid_route_label"));
+});
+
+test("a legacy share with one unsafe stop is refused by the list, the map and the PDF alike", () => {
+  const legacyStop = { ...secondStop, route_label: "Stop 2" };
+  const point = stop => ({ latitude: 30.42, longitude: -87.21, property_ref: stop.property_ref, route_sequence: stop.route_sequence, route_label: stop.route_label });
+  assert.equal(projectTourClientPacket({ stops: [cleanStop, legacyStop] }), null);
+  assert.equal(projectTourClientMap({ points: [point(cleanStop), point(legacyStop)] }), null);
+  assert.throws(() => renderTourPacket({ as_of: "2026-08-27T12:00:00Z", caveat: null, properties: [cleanStop, legacyStop] }),
+    error => error instanceof TourPacketRenderError);
+  // ... and all three keep both stops when both are clean.
+  assert.equal(projectTourClientPacket({ stops: [cleanStop, secondStop] }).stops.length, 2);
+  assert.equal(projectTourClientMap({ points: [point(cleanStop), point(secondStop)] }).points.length, 2);
+  assert.equal(renderTourPacket({ as_of: "2026-08-27T12:00:00Z", caveat: null, properties: [cleanStop, secondStop] }).facts.properties.length, 2);
+});
+
+test("a browser read of a share the projection refuses is refused, not shown partially", async () => {
+  const client = { async query(sql) {
+    if (sql.includes("read_tour_share_packet")) return { rows: [{ packet: { as_of: "2026-08-27T12:15:00Z", stops: [cleanStop, { ...secondStop, parking: "Gate code 4411" }] } }] };
+    if (sql.includes("read_tour_share_map")) return { rows: [{ map: { as_of: "2026-08-27T12:15:00Z", points: [{ latitude: 30.4, longitude: -87.2, property_ref: cleanStop.property_ref, route_sequence: 1, route_label: "Stop 1" }] } }] };
+    throw new Error(sql);
+  } };
+  const browser = tourSharingBrowserAccess({ ToolError });
+  const refusedRead = error => error instanceof ToolError && error.payload.error === "tour_share_access_refused";
+  await assert.rejects(browser.readPacket(client, { session_digest: digest("b") }), refusedRead);
+  await assert.rejects(browser.readMap(client, { session_digest: digest("b") }), refusedRead);
 });

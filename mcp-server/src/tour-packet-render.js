@@ -44,20 +44,25 @@ export class TourPacketRenderError extends Error {
 
 function reject(code, details) { throw new TourPacketRenderError(code, details); }
 
-function plainText(value, path, maximum = MAX_FIELD_CHARS) {
+function plainText(value, path, maximum = MAX_FIELD_CHARS, contactScreen = true) {
   if (typeof value !== "string") reject("tour_packet_invalid_text", { path });
   if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value)) reject("tour_packet_invalid_text", { path });
   const text = value.trim().replace(/\s+/g, " ");
   if (!text) reject("tour_packet_invalid_text", { path });
   if (text.length > maximum) reject("tour_packet_overflow", { path, maximum });
-  if (EMAIL.test(text) || PHONE.test(text)) reject("tour_packet_forbidden_contact", { path });
+  if (contactScreen && (EMAIL.test(text) || PHONE.test(text))) reject("tour_packet_forbidden_contact", { path });
   return text;
 }
 
-/** A client field value: plain text that also passes the shared client value-safety rule. */
+/**
+ * A client field value: plain text judged by the shared client value-safety
+ * rule alone -- on the value as stored, exactly as the database and the
+ * browser share judge it -- so the PDF never refuses a value the list and map
+ * show ("36602-1234", "Available 03-15-2027") nor shows one they refuse.
+ */
 function clientText(value, path) {
-  const text = plainText(value, path, CLIENT_TEXT_MAX_CHARS);
-  if (!isClientSafeText(text)) reject("tour_packet_forbidden_contact", { path });
+  const text = plainText(value, path, CLIENT_TEXT_MAX_CHARS, false);
+  if (!isClientSafeText(value)) reject("tour_packet_forbidden_contact", { path });
   return text;
 }
 
