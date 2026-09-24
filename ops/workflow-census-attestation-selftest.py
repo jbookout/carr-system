@@ -674,11 +674,11 @@ def main() -> int:
                   "anchor answer is accepted",
                   out["anchor"] == "replayed" and len(keys) == 2 and keys[0] == keys[1],
                   json.dumps(keys))
-        keys: list[str] = []
+        flaky_keys: list[str] = []
         queue: list[Any] = [TimeoutError("slow"), _Proc(0, ok_answer)]
 
         def flaky(argv: list[str], **_kw: Any) -> _Proc:
-            keys.append(json.loads(argv[-1])["idempotency_key"])
+            flaky_keys.append(json.loads(argv[-1])["idempotency_key"])
             item = queue.pop(0)
             if isinstance(item, BaseException):
                 raise item
@@ -686,7 +686,8 @@ def main() -> int:
         writer.subprocess.run = flaky
         out = writer.record_census(census("w"), pause=no_wait)
         check("a subprocess that times out is re-sent under the SAME idempotency key",
-              out["anchor"] == "replayed" and len(keys) == 2 and keys[0] == keys[1], json.dumps(keys))
+              out["anchor"] == "replayed" and len(flaky_keys) == 2 and flaky_keys[0] == flaky_keys[1],
+              json.dumps(flaky_keys))
         keys, writer.subprocess.run = scripted(*[_Proc(1, err="HTTP 502 upstream")] * writer.ATTEMPTS)
         try:
             writer.record_census(census("w"), pause=no_wait)

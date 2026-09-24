@@ -1,6 +1,6 @@
 // The census anchor under the real Durable Object runtime (workerd, through
-// Miniflare -- already in the lockfile as wrangler's dependency, with the
-// linux-64 workerd binary CI installs). The unit suite
+// Miniflare -- already in the lockfile as wrangler's own dependency, with the
+// linux-64 workerd binary npm ci installs on the runner). The unit suite
 // (workflow-census-anchor.test.mjs) models blockConcurrencyWhile; this one
 // proves the object's serialization against the runtime that actually
 // delivers concurrent requests.
@@ -15,7 +15,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
+// Miniflare is not a direct dependency of this package; it is wrangler's
+// (pinned exactly there). Resolve it FROM wrangler so the import follows the
+// version wrangler itself runs, whatever npm's hoisting does.
+const fromWrangler = createRequire(createRequire(import.meta.url).resolve("wrangler/package.json"));
+const { Miniflare, convertV4MiniflareOptions } = await import(pathToFileURL(fromWrangler.resolve("miniflare")).href);
 
 // A worker's main module may export only handlers and classes, so the module's
 // constants and helper functions lose their `export` keyword; the class keeps it.
