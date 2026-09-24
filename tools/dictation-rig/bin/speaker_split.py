@@ -57,8 +57,11 @@ LogFunc = Callable[[str], None]
 
 
 class Timed(Protocol):
-    start_ms: int
-    end_ms: int
+    @property
+    def start_ms(self) -> int: ...
+
+    @property
+    def end_ms(self) -> int: ...
 
 
 @dataclass(frozen=True)

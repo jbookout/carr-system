@@ -21,6 +21,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 RIG_BIN = Path(__file__).resolve().parent / "dictation-rig" / "bin"
 sys.path.insert(0, str(RIG_BIN))
@@ -187,31 +188,21 @@ class ProcessSessionWiringTest(unittest.TestCase):
         }))
         (self.session / "mic.caf").write_bytes(b"")
         (self.session / "system.caf").write_bytes(b"")
-        self._saved = {
-            "convert": transcribe_session.convert_caf_to_wav,
-            "whisper": transcribe_session.run_whisper,
-            "model": transcribe_session.resolve_model,
-            "prompt": transcribe_session.load_prompt,
-            "post": transcribe_session.post_call.process_session,
-            "diarize": speaker_split.run_diarizer,
-        }
-        transcribe_session.convert_caf_to_wav = lambda caf, out_dir, log: out_dir / (caf.stem + ".wav")
-        transcribe_session.run_whisper = lambda wav, *_a: [
+        self.addCleanup(self._tmp.cleanup)
+        self.stub(transcribe_session, "convert_caf_to_wav",
+                  lambda caf, out_dir, log: out_dir / (caf.stem + ".wav"))
+        self.stub(transcribe_session, "run_whisper", lambda wav, *_a: [
             transcribe_session.RawSegment(0, 1000, f"{wav.stem} one"),
             transcribe_session.RawSegment(1000, 2000, f"{wav.stem} two"),
-        ]
-        transcribe_session.resolve_model = lambda log: Path("/models/stub.bin")
-        transcribe_session.load_prompt = lambda: ""
-        transcribe_session.post_call.process_session = lambda session_dir: {"state": "stubbed"}
+        ])
+        self.stub(transcribe_session, "resolve_model", lambda log: Path("/models/stub.bin"))
+        self.stub(transcribe_session, "load_prompt", lambda: "")
+        self.stub(transcribe_session.post_call, "process_session", lambda session_dir: {"state": "stubbed"})
 
-    def tearDown(self) -> None:
-        transcribe_session.convert_caf_to_wav = self._saved["convert"]
-        transcribe_session.run_whisper = self._saved["whisper"]
-        transcribe_session.resolve_model = self._saved["model"]
-        transcribe_session.load_prompt = self._saved["prompt"]
-        transcribe_session.post_call.process_session = self._saved["post"]
-        speaker_split.run_diarizer = self._saved["diarize"]
-        self._tmp.cleanup()
+    def stub(self, module: object, name: str, value: object) -> None:
+        patcher = mock.patch.object(module, name, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def transcript(self) -> dict:
         transcribe_session.process_session(self.session, lambda _line: None)
@@ -223,7 +214,7 @@ class ProcessSessionWiringTest(unittest.TestCase):
                 return [turn("S1", 0, 1), turn("S2", 1, 2)]
             return [turn("S1", 0, 2)]
 
-        speaker_split.run_diarizer = diarize
+        self.stub(speaker_split, "run_diarizer", diarize)
         t = self.transcript()
         by_text = {seg["text"]: seg["speaker"] for seg in t["segments"]}
         self.assertEqual(by_text, {
@@ -235,7 +226,7 @@ class ProcessSessionWiringTest(unittest.TestCase):
         self.assertEqual([s["start_ms"] for s in t["segments"] if s["text"] == "system one"], [500])
 
     def test_no_diarizer_output_is_the_old_transcript(self) -> None:
-        speaker_split.run_diarizer = lambda *_a: []
+        self.stub(speaker_split, "run_diarizer", lambda *_a: [])
         t = self.transcript()
         self.assertEqual({seg["speaker"] for seg in t["segments"]}, {"Me", "Other participant"})
         self.assertEqual(t["speaker_method"], "separate audio channels; no third-party voiceprint")
