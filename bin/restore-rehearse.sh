@@ -126,7 +126,10 @@ KEEP_BRANCH=0
 VERIFY_ONLY=0
 WANT_DATE=""
 WANT_DUMP=""
-COPY_JSON=""
+BACKUP_RUN_ID=""
+BACKUP_REPOSITORY="jbookout/carr-system"
+COPYDIR=""
+COPY_ARCHIVE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --preflight)   PREFLIGHT_ONLY=1; shift ;;
@@ -156,14 +159,19 @@ while [ $# -gt 0 ]; do
                    WANT_DUMP="$2"; shift 2 ;;
     --identity)    [ $# -ge 2 ] || { echo "FAIL: --identity needs a path" >&2; exit 2; }
                    IDENTITY="$2"; shift 2 ;;
-    # --copy-json ADDED 2026-09-24 (V5-F08 item 4). Facts about the copy this
-    # machine cannot derive — who produced it, which custody domain holds it, and
-    # the sha256 the producer recorded. With it, phase 5 writes a typed
-    # restore-exercise-receipt.v1 that mcp-server/bin/recovery-matrix-evaluate.mjs
-    # evaluates. Without it the exact watermark still gates; only the receipt is
-    # skipped.
-    --copy-json)   [ $# -ge 2 ] || { echo "FAIL: --copy-json needs a path" >&2; exit 2; }
-                   COPY_JSON="$2"; shift 2 ;;
+    # --backup-run-id ADDED 2026-09-24 (V5-F08 item 4). Restore the copy the
+    # nightly CLOUD workflow run RUN produced, fetched from the store that holds
+    # it, and take every fact about it — the digest its producer recorded, when
+    # it was produced, the store's own digest — from the provider: the run's
+    # provider-authenticated "Backup artifact" Check and the artifact API
+    # (tools/restore-watermark.py fetch-copy). Nothing about the copy is typed
+    # in by whoever runs this. Only then does phase 5 write a typed
+    # restore-exercise-receipt.v1, and it re-reads the provider to verify it.
+    # Without it the exact watermark still gates; no receipt is written, because
+    # a local backups/ file has no independently recorded digest to hold it to.
+    --backup-run-id) [ $# -ge 2 ] || { echo "FAIL: --backup-run-id needs a workflow run id" >&2; exit 2; }
+                   case "$2" in (*[!0-9]*|'') echo "FAIL: --backup-run-id must be a number" >&2; exit 2 ;; esac
+                   BACKUP_RUN_ID="$2"; shift 2 ;;
     -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
     *)             echo "FAIL: unknown argument '$1'" >&2; exit 2 ;;
   esac
@@ -228,6 +236,10 @@ cleanup() {
   if [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
     rm -rf "$WORKDIR"
     say "  teardown: decrypted dump removed"
+  fi
+  if [ -n "$COPYDIR" ] && [ -d "$COPYDIR" ]; then
+    rm -rf "$COPYDIR"
+    say "  teardown: fetched encrypted copy removed"
   fi
   if [ -n "$BRANCH_ID" ]; then
     if [ "$KEEP_BRANCH" -eq 1 ]; then
@@ -441,7 +453,20 @@ esac
 
 # Newest dump. `ls -t` matches how backup-dump.sh prunes, so "newest" means the
 # same thing in both scripts.
-if [ -n "$WANT_DUMP" ]; then
+if [ -n "$BACKUP_RUN_ID" ]; then
+  # The off-Mac copy the cloud workflow produced, fetched from the store with
+  # its producer's record (see --backup-run-id). Encrypted bytes only; the
+  # directory is a mktemp removed by the teardown trap.
+  [ -z "$WANT_DUMP$WANT_DATE" ] || die "--backup-run-id names the copy; do not combine it with --dump or --date"
+  COPYDIR="$(mktemp -d "${TMPDIR:-/tmp}/carr-restore-copy.XXXXXX")"
+  "$PY" "$REPO/tools/restore-watermark.py" fetch-copy --repository "$BACKUP_REPOSITORY" \
+      --run-id "$BACKUP_RUN_ID" --out-dir "$COPYDIR" > "$COPYDIR/fetched.json" \
+    || die "could not fetch the backup workflow run $BACKUP_RUN_ID copy and its producer record"
+  DUMP="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["dump"])' "$COPYDIR/fetched.json")"
+  COPY_ARCHIVE="$COPYDIR/artifact.zip"
+  [ -f "$DUMP" ] && [ -f "$COPY_ARCHIVE" ] || die "fetch-copy reported no dump"
+  say "  ok    selected dump: $(basename "$DUMP") (--backup-run-id $BACKUP_RUN_ID, fetched from the artifact store)"
+elif [ -n "$WANT_DUMP" ]; then
   # An explicit path, which is how an OFF-MAC copy gets tested: the R2 object or
   # the GitHub artifact, downloaded anywhere. Named loudly in the output because
   # a rehearsal against a copy that would survive this Mac is a different and
@@ -909,20 +934,23 @@ parse_rehearse_summary
 # can only ever be approximate. This compares the restored database against the
 # rows the artifact itself carries — read from its own COPY blocks by a second
 # streamed decrypt (plaintext never touches disk) — and requires equality,
-# table for table. Every public/ops base table is counted, schema-qualified,
+# table for table, of the row count AND a content digest over the rows in
+# pg_dump's own COPY text form (so a row that came back different, not just
+# missing, fails). Every public/ops base table is read, schema-qualified,
 # except extension-owned tables, whose rows CREATE EXTENSION makes rather than
-# the dump. Read-only against the throwaway branch; production is not touched.
+# the dump. The restored side is read through a read-only session whose DSN is
+# handed over in the environment, never on an argument list. Production is not
+# touched.
 step "phase 5: exact watermark vs the artifact itself"
-WM_COUNT_SQL="select n.nspname || '.' || c.relname || '|' || (xpath('/row/c/text()',
-             query_to_xml(format('select count(*) as c from %I.%I', n.nspname, c.relname),
-                          false, true, '')))[1]::text
-           from pg_class c join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname in ('public', 'ops') and c.relkind = 'r'
-            and not exists (select 1 from pg_depend d
-                             where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
-          order by 1"
-ARTIFACT_DIGEST="$("$PY" "$REPO/tools/restore-watermark.py" digest "$DUMP")" \
-  || die "could not hash the artifact that was restored"
+if [ -n "$COPY_ARCHIVE" ]; then
+  # The store holds the ZIP the producer uploaded; its recorded digest is of
+  # those bytes, so those are the bytes hashed here.
+  ARTIFACT_DIGEST="$("$PY" "$REPO/tools/restore-watermark.py" digest "$COPY_ARCHIVE")" \
+    || die "could not hash the fetched artifact"
+else
+  ARTIFACT_DIGEST="$("$PY" "$REPO/tools/restore-watermark.py" digest "$DUMP")" \
+    || die "could not hash the artifact that was restored"
+fi
 say "  ok    artifact sha256: ${ARTIFACT_DIGEST#sha256:}"
 set -o pipefail
 if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/wm.err" \
@@ -932,35 +960,37 @@ if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/wm.err" \
   die "could not read the artifact's own watermark"
 fi
 set +o pipefail
-if ! psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -At -c "$WM_COUNT_SQL" > "$WORKDIR/restored-watermark.txt" 2>"$WORKDIR/wm-rest.err"; then
-  say "$(cat "$WORKDIR/wm-rest.err")" >&2
+if ! RESTORE_DSN="$RESTORE_URL" "$PY" "$REPO/tools/restore-watermark.py" restored \
+       --artifact "$WORKDIR/artifact-watermark.json" > "$WORKDIR/restored-watermark.json" 2>"$WORKDIR/wm-rest.err"; then
+  tail -5 "$WORKDIR/wm-rest.err" >&2
   die "could not read the restored watermark"
 fi
 RESTORE_FINISHED_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$PY" "$REPO/tools/restore-watermark.py" compare \
-    --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.txt"
+    --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.json"
 case $? in
-  0) say "  ok    restored database equals the artifact exactly, table for table" ;;
+  0) say "  ok    restored database equals the artifact exactly, rows and content, table for table" ;;
   1) say "  FAIL  restored database does not equal the artifact (see MISMATCH lines)" >&2
      FAILS=$((FAILS + 1)) ;;
   *) die "the exact watermark comparison could not be read" ;;
 esac
-if [ -n "$COPY_JSON" ]; then
+if [ -n "$BACKUP_RUN_ID" ]; then
   mkdir -p "$REPO/out"
   RECEIPT_PATH="$REPO/out/restore-exercise-receipt.json"
-  if "$PY" "$REPO/tools/restore-watermark.py" receipt --copy-json "$COPY_JSON" \
+  if "$PY" "$REPO/tools/restore-watermark.py" receipt --copy-record "$COPYDIR/copy.json" \
        --target-kind disposable_branch --oracle-id restore-rehearse \
        --observed-digest "$ARTIFACT_DIGEST" \
-       --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.txt" \
-       --started-at "$RESTORE_START_ISO" --finished-at "$RESTORE_FINISHED_ISO" > "$RECEIPT_PATH"; then
-    say "  ok    restore-exercise receipt: $RECEIPT_PATH"
+       --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.json" \
+       --started-at "$RESTORE_START_ISO" --finished-at "$RESTORE_FINISHED_ISO" > "$RECEIPT_PATH" \
+     && "$PY" "$REPO/tools/restore-watermark.py" verify-receipt --repository "$BACKUP_REPOSITORY" "$RECEIPT_PATH"; then
+    say "  ok    restore-exercise receipt (copy facts re-read from the provider): $RECEIPT_PATH"
     say "        evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH"
   else
-    say "  FAIL  could not build the restore-exercise receipt from --copy-json" >&2
+    say "  FAIL  could not build or provider-verify the restore-exercise receipt" >&2
     FAILS=$((FAILS + 1))
   fi
 else
-  say "  note  no --copy-json: exact watermark gated, no receipt written"
+  say "  note  no --backup-run-id: exact watermark gated, no receipt written (a local file has no producer record)"
 fi
 
 say ""

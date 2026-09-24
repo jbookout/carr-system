@@ -1,21 +1,27 @@
 #!/usr/bin/env node
-// recovery-matrix-evaluate.mjs — evaluate V5-F08 recovery evidence from a JSON file.
+// recovery-matrix-evaluate.mjs — evaluate V5-F08 recovery evidence from JSON.
 //
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs restore  <restore-exercise-receipt.json>
-//   node mcp-server/bin/recovery-matrix-evaluate.mjs rpo      <pitr-restore-proof.json>
-//   node mcp-server/bin/recovery-matrix-evaluate.mjs matrix   <matrix-evidence.json>
-//   node mcp-server/bin/recovery-matrix-evaluate.mjs outbound <outbound-request.json>
+//   node mcp-server/bin/recovery-matrix-evaluate.mjs rpo      <rpo-evidence.json | ->
+//   node mcp-server/bin/recovery-matrix-evaluate.mjs matrix   <matrix-evidence.json | ->
+//   node mcp-server/bin/recovery-matrix-evaluate.mjs outbound <outbound-request.json | ->
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs degraded <dependency> [<dependency> ...]
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs policy
 //
-// `rpo` evaluates one RPO evidence block (bin/pitr-restore-proof.sh output) at
-// the current instant. `matrix` supplies the repository's sealed business
-// calendar (ops/config/business-calendar.us-federal.json) when the evidence
-// does not carry one; the evaluator refuses any calendar but the pinned one.
+// THE CLOCK IS THIS PROCESS'S, NEVER THE EVIDENCE'S. rpo, matrix and outbound
+// are judged at Date.now(); an evidence file that carries its own observed_at
+// is refused (exit 2), so a stale proof cannot be replayed as a fresh one.
 //
-// Read-only: it reads local files and prints the verdict. Exit 0 when the
-// verdict is pass / reconciled, 1 when it is not, 2 when the evidence cannot be
-// read at all (a contract violation, never a policy answer).
+// `rpo` evaluates one RPO evidence block — in production the block
+// `tools/pitr-restore-proof.py verify` recomputes from production and the
+// provider and pipes in on stdin ("-"). `matrix` supplies the repository's
+// sealed business calendar (ops/config/business-calendar.us-federal.json) when
+// the evidence does not carry one; the evaluator refuses any calendar but the
+// pinned one.
+//
+// Read-only: it reads local files or stdin and prints the verdict. Exit 0 when
+// the verdict is pass / reconciled, 1 when it is not, 2 when the evidence cannot
+// be read at all (a contract violation, never a policy answer).
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -29,7 +35,12 @@ import {
 
 const CALENDAR_PATH = fileURLToPath(new URL("../../ops/config/business-calendar.us-federal.json", import.meta.url));
 const [cmd, ...rest] = process.argv.slice(2);
-const read = path => JSON.parse(readFileSync(path, "utf8"));
+const read = path => JSON.parse(readFileSync(path === "-" ? 0 : path, "utf8"));
+
+// The clock is read AFTER the evidence: with `verify | evaluate`, the evaluator
+// starts before its producer finishes, and a clock taken at start-up would sit
+// before the readbacks it is judging.
+const clockNow = () => ({ now_ms: Date.now() });
 
 try {
   let result;
@@ -37,24 +48,25 @@ try {
   if (cmd === "restore") {
     result = evaluateRestoreExercise(read(rest[0]));
   } else if (cmd === "rpo") {
-    const matrix = evaluateRecoveryMatrix({
-      observed_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-      cells: { record_layer_rpo: read(rest[0]) },
-    });
+    const block = read(rest[0]);
+    const matrix = evaluateRecoveryMatrix({ cells: { record_layer_rpo: block } }, clockNow());
     result = { observed_at: matrix.observed_at, policy_digest: matrix.policy_digest, record_layer_rpo: matrix.cells.record_layer_rpo };
     passed = result.record_layer_rpo.state === "pass";
   } else if (cmd === "matrix") {
     const evidence = read(rest[0]);
-    if (evidence.business_calendar === undefined) evidence.business_calendar = read(CALENDAR_PATH);
-    result = evaluateRecoveryMatrix(evidence);
+    if (evidence !== null && typeof evidence === "object" && evidence.business_calendar === undefined) {
+      evidence.business_calendar = read(CALENDAR_PATH);
+    }
+    result = evaluateRecoveryMatrix(evidence, clockNow());
   } else if (cmd === "outbound") {
-    result = evaluateOutboundQueueRelease(read(rest[0]));
+    const request = read(rest[0]);
+    result = evaluateOutboundQueueRelease(request, clockNow());
   } else if (cmd === "degraded") {
     result = v5DegradedModeProjection(rest);
   } else if (cmd === "policy") {
     result = { policy_digest: v5RecoveryMatrixPolicyDigest() };
   } else {
-    process.stderr.write("usage: recovery-matrix-evaluate.mjs restore|rpo|matrix|outbound <file.json> | degraded <dep>... | policy\n");
+    process.stderr.write("usage: recovery-matrix-evaluate.mjs restore|rpo|matrix|outbound <file.json|-> | degraded <dep>... | policy\n");
     process.exit(2);
   }
   process.stdout.write(JSON.stringify(result, null, 2) + "\n");
