@@ -247,6 +247,90 @@ class EditDuringFetchGit(freshness._Git):
         return super().__call__(*args)
 
 
+class SubmoduleFixture(Fixture):
+    """The base fixture plus a real submodule at vendor/sub, cloned recursively."""
+
+    SUB = "vendor/sub"
+
+    def __init__(self, stack):
+        super().__init__(stack)
+        self.sub_origin = self.root / "sub-origin"
+        self.sub_origin.mkdir()
+        git(self.sub_origin, "init", "--quiet", "--initial-branch=main", ".")
+        (self.sub_origin / "ui.swift").write_text("upstream\n")
+        git(self.sub_origin, "add", "ui.swift")
+        git(self.sub_origin, "commit", "--quiet", "-m", "sub one")
+        git(self.origin, "-c", "protocol.file.allow=always", "submodule", "add",
+            "--quiet", str(self.sub_origin), self.SUB)
+        git(self.origin, "commit", "--quiet", "-m", "add submodule")
+        git(self.clone, "pull", "--quiet", "--ff-only")
+        git(self.clone, "-c", "protocol.file.allow=always", "submodule", "update",
+            "--quiet", "--init")
+
+    def patch_submodule_content(self):
+        (self.clone / self.SUB / "ui.swift").write_text("patched by the build\n")
+
+    def move_submodule_pointer_in_origin(self):
+        (self.sub_origin / "ui.swift").write_text("upstream two\n")
+        git(self.sub_origin, "commit", "--quiet", "-am", "sub two")
+        git(self.origin / self.SUB, "pull", "--quiet", "--ff-only")
+        git(self.origin, "commit", "--quiet", "-am", "bump submodule")
+
+
+def library_fast_forward(repo):
+    out, err = io.StringIO(), io.StringIO()
+    code = freshness.fast_forward(repo, out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+class AcceptedSubmoduleDirtTests(unittest.TestCase):
+    """ACCEPTED_DIRTY_SUBMODULES: content-only dirt in a NAMED submodule passes,
+    and everything outside that exact acceptance still refuses."""
+
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.fx = SubmoduleFixture(self.stack)
+        self.fx.patch_submodule_content()
+        saved = freshness.ACCEPTED_DIRTY_SUBMODULES
+        self.addCleanup(setattr, freshness, "ACCEPTED_DIRTY_SUBMODULES", saved)
+
+    def test_named_submodule_content_dirt_fast_forwards_and_keeps_the_patch(self):
+        freshness.ACCEPTED_DIRTY_SUBMODULES = (SubmoduleFixture.SUB,)
+        self.fx.advance_origin(1)
+        code, out, err = library_fast_forward(self.fx.clone)
+        self.assertEqual(code, OK, out + err)
+        self.assertIn(f"accepted by name: {SubmoduleFixture.SUB}", out)
+        self.assertEqual(self.fx.head(self.fx.clone), self.fx.head(self.fx.origin))
+        self.assertEqual((self.fx.clone / SubmoduleFixture.SUB / "ui.swift").read_text(),
+                         "patched by the build\n")
+
+    def test_the_same_dirt_in_an_unnamed_submodule_still_refuses(self):
+        freshness.ACCEPTED_DIRTY_SUBMODULES = ("vendor/other",)
+        self.fx.advance_origin(1)
+        before = self.fx.head(self.fx.clone)
+        code, out, err = library_fast_forward(self.fx.clone)
+        self.assertEqual(code, REFUSED_TRACKED_DIRT, out + err)
+        self.assertEqual(self.fx.head(self.fx.clone), before)
+
+    def test_a_merge_that_moves_the_named_submodule_pointer_refuses(self):
+        freshness.ACCEPTED_DIRTY_SUBMODULES = (SubmoduleFixture.SUB,)
+        self.fx.move_submodule_pointer_in_origin()
+        before = self.fx.head(self.fx.clone)
+        code, out, err = library_fast_forward(self.fx.clone)
+        self.assertEqual(code, REFUSED_TRACKED_DIRT, out + err)
+        self.assertIn("moves the recorded commit", err)
+        self.assertEqual(self.fx.head(self.fx.clone), before)
+
+    def test_ordinary_file_dirt_beside_an_accepted_submodule_still_refuses(self):
+        freshness.ACCEPTED_DIRTY_SUBMODULES = (SubmoduleFixture.SUB,)
+        self.fx.advance_origin(1)
+        (self.fx.clone / "tracked.txt").write_text("somebody's edit\n")
+        code, out, err = library_fast_forward(self.fx.clone)
+        self.assertEqual(code, REFUSED_TRACKED_DIRT, out + err)
+        self.assertEqual((self.fx.clone / "tracked.txt").read_text(), "somebody's edit\n")
+
+
 class CanonicalFreshnessTests(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
