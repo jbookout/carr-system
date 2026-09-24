@@ -699,9 +699,10 @@ gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdbcf60040f0	announce	G
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdd65a0f0747	announce	GATE CHANGE ANNOUNCED — peer-broadcast-gate.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d9316125677c	announce	GATE CHANGE ANNOUNCED — guard-unattended.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:fa39d0ae0973	announce	GATE CHANGE ANNOUNCED — executor-tier-gate.py is enforcement, and edit just changed it.
-guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=316 deny=5
+guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=315 deny=6
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:33015ce0899d	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:66d774f88124	deny	force push — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:6dfb251d684c	deny	broad add (-A/--all/./:/) — blocked by the CARR unattended guard. Add explicit paths instead: `git add <path> [<path>...]`.
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
