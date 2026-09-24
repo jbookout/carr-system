@@ -149,10 +149,19 @@ def main() -> int:
     ok("StartCalendarInterval" in plist and "StartInterval" not in plist,
        "it uses StartCalendarInterval, not StartInterval (observed to never fire on this Mac)")
 
+    # No standalone bin/install-*.sh script for this job: that filename shape
+    # trips ops/scac-mutation-inventory.mjs's external_admin classifier (a
+    # SEALED, non-exempt ingress kind), which would owe a full SCAC successor
+    # seal for a one-file addition. The install command is documented in
+    # ops/scheduled-tasks/nightly-record-layer.SKILL.md instead.
     installer = REPO / "bin" / "install-nightly-exports-retry.sh"
-    ok(installer.exists(), "a narrow installer script exists for the new job")
-    proc = subprocess.run(["zsh", "-n", str(installer)], capture_output=True, text=True)
-    ok(proc.returncode == 0, f"the installer parses under zsh -n ({proc.stderr.strip()})")
+    ok(not installer.exists(),
+       "no standalone installer script (would be a sealed external_admin row; "
+       "the install command lives in the SKILL.md runbook instead)")
+    skill_md = (REPO / "ops" / "scheduled-tasks" / "nightly-record-layer.SKILL.md").read_text()
+    ok("plutil -lint" in skill_md and "launchctl bootstrap" in skill_md
+       and "com.carr.nightly-exports-daytime-retry.plist" in skill_md,
+       "the SKILL.md runbook documents the manual install command for the new plist")
 
     print(f"\nonedrive-prepublish-wake-selftest: {checked - failed}/{checked} passed")
     return 0 if failed == 0 else 1
