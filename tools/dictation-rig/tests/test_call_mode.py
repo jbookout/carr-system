@@ -36,6 +36,7 @@ call_mode = load_module("call_mode_under_test", "call-mode.py")
 transcribe_session = load_module("transcribe_session_under_test", "transcribe_session.py")
 post_call = load_module("post_call_under_test", "post_call.py")
 capture_bridge = load_module("capture_bridge_under_test", "capture-bridge.py")
+post_call_jev = load_module("post_call_jev_under_test", "post_call_jev.py")
 
 
 class CallModeTests(unittest.TestCase):
@@ -530,6 +531,104 @@ class PostCallTests(unittest.TestCase):
     def test_post_call_model_port_cannot_collide_with_quill_services(self) -> None:
         self.assertNotIn(post_call.LLAMA_PORT, {8596, 8597})
 
+    class _FakeOpenerResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> "PostCallTests._FakeOpenerResponse":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    class _FakeOpener:
+        """A minimal fake for urllib.request.urlopen: never touches a real socket.
+
+        Distinguishes the /v1/models health probe (called with a bare URL
+        string) from a /v1/chat/completions POST (called with a
+        urllib.request.Request) so both paths in resident_flash_distiller can
+        be exercised without a subprocess or a network call.
+        """
+
+        def __init__(self, health_ok: bool = True, chunk_contents: list[str] | None = None) -> None:
+            self.health_ok = health_ok
+            self.chunk_contents = list(chunk_contents or [])
+            self.calls: list[str] = []
+
+        def __call__(self, target: object, timeout: float | None = None) -> "PostCallTests._FakeOpenerResponse":
+            if isinstance(target, str):
+                self.calls.append(target)
+                if not self.health_ok:
+                    raise OSError("connection refused")
+                return PostCallTests._FakeOpenerResponse(b"{}")
+            full_url = target.full_url  # type: ignore[attr-defined]
+            self.calls.append(full_url)
+            content = self.chunk_contents.pop(0)
+            outer = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": content}}]}
+            return PostCallTests._FakeOpenerResponse(json.dumps(outer).encode())
+
+    def _fake_opener(self, health_ok: bool = True, chunk_contents: list[str] | None = None) -> "PostCallTests._FakeOpener":
+        return PostCallTests._FakeOpener(health_ok=health_ok, chunk_contents=chunk_contents)
+
+    def test_resident_flash_distiller_calls_the_fixed_loopback_endpoint_and_parses_json(self) -> None:
+        content = json.dumps(self.output())
+        opener = self._fake_opener(chunk_contents=[content])
+        result = post_call.resident_flash_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": [{"speaker": "Joe", "text": "Call Vendor A"}]}}, opener=opener)
+        self.assertEqual(result["joe_tasks"][0]["title"], "Call vendor")
+        self.assertEqual(opener.calls[0], f"{post_call.FLASH_SERVER_URL}/v1/models")
+        self.assertTrue(opener.calls[1].startswith(post_call.FLASH_SERVER_URL))
+        self.assertIn("/v1/chat/completions", opener.calls[1])
+
+    def test_resident_flash_distiller_sends_model_and_disables_thinking(self) -> None:
+        captured: dict[str, object] = {}
+        real_request = post_call.urllib.request.Request
+
+        def spying_request(url, data=None, headers=None, method=None):
+            payload = json.loads(data)
+            captured["model"] = payload.get("model")
+            captured["chat_template_kwargs"] = payload.get("chat_template_kwargs")
+            return real_request(url, data=data, headers=headers, method=method)
+
+        opener = self._fake_opener(chunk_contents=[json.dumps(self.output())])
+        with patch.object(post_call.urllib.request, "Request", spying_request):
+            post_call.resident_flash_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": [{"speaker": "Joe", "text": "Call Vendor A"}]}}, opener=opener)
+        self.assertEqual(captured["model"], post_call.FLASH_SERVER_MODEL)
+        self.assertEqual(captured["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_resident_flash_distiller_fails_closed_when_the_resident_server_is_unreachable(self) -> None:
+        opener = self._fake_opener(health_ok=False)
+        with self.assertRaises(post_call.DistillerUnavailable):
+            post_call.resident_flash_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}}, opener=opener)
+
+    def test_resident_flash_distiller_never_starts_or_stops_a_process(self) -> None:
+        import inspect
+        self.assertNotIn("popen", inspect.signature(post_call.resident_flash_distiller).parameters)
+
+    def test_default_distiller_reports_an_unreachable_resident_server_and_never_uses_llama(self) -> None:
+        with patch.object(post_call, "resident_flash_distiller", side_effect=post_call.DistillerUnavailable("down")) as resident, \
+             patch.object(post_call, "llama_distiller") as llama:
+            with self.assertRaisesRegex(post_call.DistillerUnavailable, "Flash Next"):
+                post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+        resident.assert_called_once()
+        llama.assert_not_called()
+
+    def test_default_distiller_prefers_the_resident_server_and_never_falls_back_on_a_content_failure(self) -> None:
+        with patch.object(post_call, "resident_flash_distiller", return_value=self.output()) as resident, \
+             patch.object(post_call, "llama_distiller") as llama:
+            post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+        resident.assert_called_once()
+        llama.assert_not_called()
+
+        with patch.object(post_call, "resident_flash_distiller", side_effect=post_call.ContractError("bad json")) as resident, \
+             patch.object(post_call, "llama_distiller") as llama:
+            with self.assertRaises(post_call.ContractError):
+                post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+        resident.assert_called_once()
+        llama.assert_not_called()
+
     def test_long_transcript_is_split_on_segments_and_merged_without_a_real_model(self) -> None:
         transcript = {"segments": [{"speaker": "Joe", "text": "x" * 14000}, {"speaker": "Dell", "text": "y" * 14000}, {"speaker": "Joe", "text": "z" * 14000}]}
         chunks = post_call.transcript_chunks(transcript, limit=25000)
@@ -727,6 +826,134 @@ class CaptureBridgePostCallTests(unittest.TestCase):
         self.assertFalse(any(url.endswith("/capture/session") for url in calls))
         self.assertFalse(any(url.endswith("/capture/post-call/report") for url in calls))
         self.assertTrue((self.session / ".capture.json").exists())
+
+
+class PostCallJevChecksTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.context = {
+            "deals": [
+                {"id": "deal-a", "name": "Acme Clinic", "owner": "Joe", "operating_state": "active", "participants": []},
+                {"id": "deal-b", "name": "Beta Medical", "owner": "Dell", "operating_state": "active", "participants": []},
+            ],
+            "speaker_labels": {"mic": "Joe", "system": "Dell"},
+            "local_partner": "Joe",
+        }
+        self.transcript = {"segments": [
+            {"speaker": "Joe", "text": "I will call the Acme Clinic vendor about the lease renewal."},
+            {"speaker": "Dell", "text": "Sounds good, let me know how it goes."},
+        ]}
+
+    def result(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "session": "2026.09.23-jev",
+            "joe_tasks": [{
+                "title": "Call the Acme Clinic vendor", "deal_id": "deal-a",
+                "participant_ids": [], "evidence": "I will call the Acme Clinic vendor",
+                "candidate_id": None, "candidate_status": "unfiled",
+            }],
+            "dell_tasks": [], "deal_updates": [], "draft_proposals": [],
+            "review_questions": [],
+        }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def fake_ask(*, deal_choice: str = "deal-a", deal_confidence: float = 0.9,
+                 speaker_probability: float = 0.9, details_probability: float = 0.9):
+        def _ask(state: object, questions: dict[str, object]) -> dict[str, object]:
+            return {"answers": {
+                "deal_match": {"type": "choice", "choice": deal_choice, "confidence": deal_confidence},
+                "speaker_right": {"type": "noul", "noul": speaker_probability},
+                "details_supported": {"type": "noul", "noul": details_probability},
+            }}
+        return _ask
+
+    def test_an_accurate_item_passes_all_three_checks_and_is_not_flagged(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript, ask=self.fake_ask(),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertFalse(checks["flagged"])
+        self.assertEqual(checks["reasons"], [])
+        self.assertTrue(checks["deal"]["pass"])
+        self.assertTrue(checks["speaker"]["pass"])
+        self.assertTrue(checks["details"]["pass"])
+        self.assertEqual(result["review_questions"], [])
+
+    def test_a_wrong_deal_match_is_flagged_with_a_plain_english_reason(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript,
+            ask=self.fake_ask(deal_choice="deal-b"),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertTrue(checks["flagged"])
+        self.assertFalse(checks["deal"]["pass"])
+        self.assertTrue(checks["speaker"]["pass"])
+        self.assertTrue(checks["details"]["pass"])
+        self.assertTrue(any("Right deal" in reason for reason in checks["reasons"]))
+
+    def test_a_wrong_speaker_attribution_is_flagged_with_a_plain_english_reason(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript,
+            ask=self.fake_ask(speaker_probability=0.05),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertTrue(checks["flagged"])
+        self.assertTrue(checks["deal"]["pass"])
+        self.assertFalse(checks["speaker"]["pass"])
+        self.assertTrue(any("Right speaker" in reason for reason in checks["reasons"]))
+
+    def test_unsupported_details_are_flagged_with_a_plain_english_reason(self) -> None:
+        result = post_call_jev.check_distillation(
+            self.result(), self.context, self.transcript,
+            ask=self.fake_ask(details_probability=0.1),
+        )
+        checks = result["joe_tasks"][0]["checks"]
+        self.assertTrue(checks["flagged"])
+        self.assertTrue(checks["deal"]["pass"])
+        self.assertTrue(checks["speaker"]["pass"])
+        self.assertFalse(checks["details"]["pass"])
+        self.assertTrue(any("Right details" in reason for reason in checks["reasons"]))
+
+    def test_jev_unavailable_never_fails_the_pack_and_flags_every_item_unavailable(self) -> None:
+        def raising_ask(state: object, questions: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("network unreachable")
+
+        result = post_call_jev.check_distillation(
+            self.result(dell_tasks=[{
+                "title": "Send the updated LOI", "deal_id": "deal-b",
+                "participant_ids": [], "evidence": "Dell will send the updated LOI",
+                "candidate_id": None, "candidate_status": "unfiled",
+            }]),
+            self.context, self.transcript, ask=raising_ask,
+        )
+        self.assertEqual(result["joe_tasks"][0]["checks"], {"unavailable": True})
+        self.assertEqual(result["dell_tasks"][0]["checks"], {"unavailable": True})
+        self.assertEqual(len(result["review_questions"]), 1)
+        self.assertIn("Jev", result["review_questions"][0]["question"])
+        self.assertFalse(result["review_questions"][0]["resolved"])
+
+    def test_evidence_segments_are_matched_by_token_overlap_within_a_small_window(self) -> None:
+        segments = [
+            {"speaker": "Joe", "text": "unrelated small talk about parking"},
+            {"speaker": "Joe", "text": "I will call the Acme Clinic vendor about the lease renewal."},
+            {"speaker": "Dell", "text": "Sounds good, let me know how it goes."},
+            {"speaker": "Dell", "text": "completely unrelated closing remarks"},
+        ]
+        matched = post_call_jev._evidence_segments("I will call the Acme Clinic vendor", segments)
+        self.assertIn(segments[1], matched)
+        self.assertLessEqual(len(matched), post_call_jev.MAX_SEGMENTS_SENT)
+
+    def test_candidate_deals_never_include_the_full_recorded_deal_list(self) -> None:
+        many_deals = [{"id": f"deal-{n}", "name": f"Deal {n}", "owner": "Joe",
+                        "operating_state": "active", "participants": []} for n in range(56)]
+        many_deals.append({"id": "deal-a", "name": "Acme Clinic", "owner": "Joe",
+                            "operating_state": "active", "participants": []})
+        candidates = post_call_jev._candidate_deals(
+            "deal-a", many_deals, [{"speaker": "Joe", "text": "Acme Clinic vendor lease"}],
+        )
+        self.assertLessEqual(len(candidates), post_call_jev.MAX_CANDIDATE_DEALS)
+        self.assertEqual(candidates[0]["id"], "deal-a")
 
 
 if __name__ == "__main__":
