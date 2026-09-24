@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Private, local-only Call Mode post-call processing.
 
-This module deliberately has no network client and no send implementation.
-Deal Room supplies an exact, short-lived context index; transcript, report and
-email body remain in 0600 files in the recording session.  A local model is
-called only through an injected command contract so tests never need a model.
+This module has no send implementation. Deal Room supplies an exact,
+short-lived context index; transcript, report and email body remain in 0600
+files in the recording session.  A local model is called only through an
+injected command contract so tests never need a model.  The one outbound
+network call this module makes is the guarded, advisory Jev item check in
+post_call_jev.py (decision 008d682a) -- it can never block the review pack.
 """
 from __future__ import annotations
 
@@ -20,6 +22,8 @@ import fcntl
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+import post_call_jev
 
 SCHEMA_VERSION = 1
 CONTEXT_FILE = "call-context.json"
@@ -559,6 +563,13 @@ def _process_session_locked(session_dir: Path, distiller: Callable[[dict[str, An
         status = {"schema_version": SCHEMA_VERSION, "session": session_dir.name, "state": "blocked", "updated_at": now(), "reason": str(exc)}
         write_private(session_dir / STATUS_FILE, status)
         return status
+    try:
+        stored_context = read_json(session_dir / CONTEXT_FILE) or {}
+        jev_context = {**context, "speaker_labels": stored_context.get("speaker_labels"),
+                       "local_partner": stored_context.get("recorder")}
+        result = post_call_jev.check_distillation(result, jev_context, transcript)
+    except Exception:
+        pass  # Jev's item checks are advisory; they may never block the pack.
     write_private(session_dir / REPORT_FILE, result)
     # Context is single-use: no later caller gets a searchable customer index.
     stored = read_json(session_dir / CONTEXT_FILE) or {}
