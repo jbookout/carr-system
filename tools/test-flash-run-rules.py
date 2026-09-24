@@ -14,10 +14,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("flash_run", os.path.join(HERE, "flash-run.py"))
+if spec is None or spec.loader is None:
+    raise ImportError("tools/flash-run.py")
 fr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fr)
 
-FAILURES = []
+FAILURES: list[str] = []
 
 
 def check(name, fn):
