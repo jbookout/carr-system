@@ -402,11 +402,13 @@ test("AC3: retention and expiry bind", () => {
 });
 
 // Operations take the artifact, context and receipts and RE-RUN conformance.
-function opRequest(kind, { aggregate = countyAggregate(), receipt, ledger, counterpart, corp } = {}) {
+// release_history defaults to an explicit empty list; `history: null` omits it.
+function opRequest(kind, { aggregate = countyAggregate(), receipt, ledger, counterpart, corp, history = [] } = {}) {
   const request = { tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(aggregate, corp ?? corporate()),
     context: CONTEXT, route_receipts: [receipt ?? expert(aggregate)], operation: { kind }, now: NOW };
   if (ledger !== undefined) request.ledger = ledger;
   if (counterpart !== undefined) request.counterpart = counterpart;
+  if (history !== null) request.release_history = history;
   return request;
 }
 function op(kind, opts = {}, kernel = PINNED) {
@@ -903,13 +905,13 @@ test("F1: an operation re-runs conformance — forged, model-issued, future-date
     operation: { kind: "rank_units", artifact_digest: D("unrelated") } }), "unknown_field");
 });
 
-test("F1: minting a new receipt id does not mint a new budget — the ledger is keyed by artifact x binding", () => {
+test("F1: minting a new receipt id does not mint a new budget — the ledger is keyed by what the receipt binds", () => {
   const agg = countyAggregate();
   const one = conform({ artifact: artifactOf(agg), receipts: [expert(agg)] });
   const two = conform({ artifact: artifactOf(agg), receipts: [expert(agg, { receipt_id: "rid-2" })] });
   assert.equal(one.ledger_key, two.ledger_key);
-  assert.equal(one.ledger_key, privacyBudgetLedgerKey({ artifact_digest: one.artifact_digest,
-    binding_digest: one.binding_digest }));
+  assert.equal(one.ledger_key, privacyBudgetLedgerKey({ content_digest: CONTENT,
+    descriptor_digest: aggregateDescriptorDigest(agg), binding_digest: one.binding_digest }));
   // The spent ledger under receipt 1 is the ledger receipt 2 must present.
   let ledger = ledgerFor(agg);
   ledger = op("export_sealed_artifact", { aggregate: agg, ledger }).next_ledger;
@@ -1156,4 +1158,298 @@ test("DIFF: the stricter floor of the two artifacts governs their differences", 
   const r = op("difference_between_artifacts", { aggregate: first, ledger: ledgerFor(first), counterpart });
   refuses(r, "difference_below_floor");
   assert.equal(r.minimum_cell_count, 20);
+  // The same holds for a prior release in the history.
+  const h = op("view_native_precision", { aggregate: first, ledger: ledgerFor(first), history: [counterpart] });
+  refuses(h, "difference_below_floor");
+  assert.equal(h.minimum_cell_count, 20);
+});
+
+test("N2: residual checks need a published total and a revealed cell — nothing else is combined", () => {
+  // A has no total: B revealing one of A's suppressed cells subtracts from nothing.
+  const noTotal = countyAggregate({ published_total: null });
+  const reveal = secondArtifact([{ unit_id: "56005", period: "2025-Q1", patient_count: 30, suppressed: false }]);
+  assert.equal(op("view_native_precision", { aggregate: noTotal, ledger: ledgerFor(noTotal), history: [reveal] })
+    .decision, "within_budget");
+  // A's residual of 38 clears its own floor of 11. A stricter prior (floor 20)
+  // that reveals none of A's cells does not re-judge A's residual at 20.
+  const a = countyAggregate({ published_total: 103 });
+  const strictPrior = secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }],
+    { source_privacy_threshold: { minimum_cell_count: 20, declared_by: "synthetic-source-privacy-office" } });
+  assert.equal(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [strictPrior] }).decision,
+    "within_budget");
+});
+
+test("N3: a history entry with the same bytes but another descriptor is a second release, not the artifact itself", () => {
+  const first = countyAggregate({ published_total: null, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }] });
+  const other = countyAggregate({ published_total: null, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 43, suppressed: false }] });
+  const entry = { artifact: artifactOf(other), route_receipts: [expert(other)] };
+  refuses(op("view_native_precision", { aggregate: first, ledger: ledgerFor(first), history: [entry] }),
+    "difference_below_floor");
+});
+
+// ===========================================================================
+// Round 2 (N1-N6): relabelling, cross-release residuals, required release
+// history, protection intervals, widened proposal filter, store contract.
+// ===========================================================================
+
+function relabelled() {
+  return corporate({ native_version: "rev-99", native_identity: { source_system: "synthetic-corporate-source",
+    native_id: "hm-9999", native_id_epoch: "epoch-9" } });
+}
+
+test("N1: relabelling an artifact (native id or version) does not reset its budget", () => {
+  const agg = countyAggregate();
+  const one = conform({ artifact: artifactOf(agg), receipts: [expert(agg)] });
+  const two = conform({ artifact: artifactOf(agg, relabelled()), receipts: [expert(agg)] });
+  assert.equal(two.decision, "conforms");
+  assert.notEqual(one.artifact_digest, two.artifact_digest);
+  assert.equal(one.ledger_key, two.ledger_key);
+  let ledger = ledgerFor(agg);
+  ledger = op("export_sealed_artifact", { aggregate: agg, ledger }).next_ledger;
+  refuses(op("export_sealed_artifact", { aggregate: agg, corp: relabelled(), ledger }), "privacy_budget_exhausted");
+  // Other bytes, another descriptor or another binding is another ledger.
+  const other = countyAggregate({ published_total: 106 });
+  assert.notEqual(conformExpert(other).ledger_key, one.ledger_key);
+});
+
+// attack3: A publishes a total with 56005/56007 suppressed (residual 15);
+// B shows 56005 = 11 and suppresses 56007 with no total, so A's 56007 = 4.
+function attack3() {
+  const a = countyAggregate({ published_total: 80 });
+  const b = secondArtifact([
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false },
+    { unit_id: "56005", period: "2025-Q1", patient_count: 11, suppressed: false },
+    { unit_id: "56007", period: "2025-Q1", patient_count: null, suppressed: true }]);
+  return { a, b };
+}
+
+test("N2: a cell visible in one release is subtracted from the other's suppressed residual (attack3)", () => {
+  const { a, b } = attack3();
+  assert.equal(conformExpert(a).decision, "conforms");
+  assert.equal(conform({ artifact: b.artifact, receipts: b.route_receipts }).decision, "conforms");
+  const viaCounterpart = op("difference_between_artifacts", { aggregate: a, ledger: ledgerFor(a), counterpart: b });
+  refuses(viaCounterpart, "suppressed_residual_recovered_by_release");
+  assert.equal(viaCounterpart.exposure, "complementary_suppression_missing");
+  // The same pair refuses through a plain view once B is in the release history,
+  // and in the other direction (B operated on, A released before).
+  refuses(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [b] }),
+    "suppressed_residual_recovered_by_release");
+  const bLedger = emptyPrivacyBudgetLedger(conform({ artifact: b.artifact, receipts: b.route_receipts }).ledger_key);
+  const reverse = PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, artifact: b.artifact,
+    context: CONTEXT, route_receipts: b.route_receipts, ledger: bLedger, operation: { kind: "rank_units" },
+    release_history: [{ artifact: artifactOf(a), route_receipts: [expert(a)] }], now: NOW });
+  refuses(reverse, "suppressed_residual_recovered_by_release");
+  assert.equal(reverse.release_index, 0);
+});
+
+test("N2: the remainder after substitution keeps the floor, the interval and consistency", () => {
+  // Three suppressed cells, residual 45; B reveals one at 30, leaving 15 over two
+  // cells: above the floor and not pinned, so the pair clears.
+  const a = countyAggregate({ published_total: 110, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false },
+    { unit_id: "56005", period: "2025-Q1", patient_count: null, suppressed: true },
+    { unit_id: "56007", period: "2025-Q1", patient_count: null, suppressed: true },
+    { unit_id: "56009", period: "2025-Q1", patient_count: null, suppressed: true }] });
+  assert.equal(conformExpert(a).decision, "conforms");
+  const bWith = value => secondArtifact([
+    { unit_id: "56005", period: "2025-Q1", patient_count: value, suppressed: false },
+    { unit_id: "56007", period: "2025-Q1", patient_count: null, suppressed: true },
+    { unit_id: "56009", period: "2025-Q1", patient_count: null, suppressed: true }]);
+  const view = b => op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [b] });
+  assert.equal(view(bWith(30)).decision, "within_budget");
+  // Leaves 10 over two cells: below the floor.
+  const low = view(bWith(35));
+  refuses(low, "suppressed_residual_recovered_by_release");
+  assert.equal(low.exposure, "complementary_suppression_residual_below_floor");
+  // Leaves 20 over two cells: each pinned at 10.
+  const pinned = view(bWith(25));
+  refuses(pinned, "suppressed_residual_recovered_by_release");
+  assert.equal(pinned.exposure, "suppressed_cells_pinned_by_residual");
+  // A revealed value larger than the residual is an inconsistency, and refuses.
+  refuses(view(bWith(60)), "suppressed_residual_recovered_by_release");
+  // Every suppressed cell revealed: a small leftover is itself a small group.
+  const all = secondArtifact([
+    { unit_id: "56005", period: "2025-Q1", patient_count: 20, suppressed: false },
+    { unit_id: "56007", period: "2025-Q1", patient_count: 11, suppressed: false },
+    { unit_id: "56009", period: "2025-Q1", patient_count: 11, suppressed: false }]);
+  refuses(view(all), "suppressed_residual_recovered_by_release");
+});
+
+test("N2/N3 (attack2): two plain queries on two releases, and a suppressed cell shown in the next release", () => {
+  // attack2 N3: A shows 56001 = 40, B shows 43. Querying B with A in its
+  // history refuses exactly as the differencing operation does.
+  const a = countyAggregate({ published_total: null, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }] });
+  const b = secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 43, suppressed: false }]);
+  const bLedger = emptyPrivacyBudgetLedger(conform({ artifact: b.artifact, receipts: b.route_receipts }).ledger_key);
+  refuses(PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, artifact: b.artifact,
+    context: CONTEXT, route_receipts: b.route_receipts, ledger: bLedger, operation: { kind: "view_native_precision" },
+    release_history: [{ artifact: artifactOf(a), route_receipts: [expert(a)] }], now: NOW }), "difference_below_floor");
+  // attack2 N4b: A suppresses 56005/56007 (residual 25); B shows 56005 = 12,
+  // so A's 56007 = 13 is derivable — one cell left under the residual.
+  const a2 = countyAggregate({ published_total: 90 });
+  const b2 = secondArtifact([{ unit_id: "56005", period: "2025-Q1", patient_count: 12, suppressed: false }]);
+  const r = op("view_native_precision", { aggregate: a2, ledger: ledgerFor(a2), history: [b2] });
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "complementary_suppression_missing");
+});
+
+test("N2: the difference between two published totals must clear the floor", () => {
+  const a = countyAggregate({ published_total: 90 });
+  const bTotal = total => secondArtifact(countyAggregate().cells, { published_total: total });
+  const r = op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [bTotal(93)] });
+  refuses(r, "published_total_difference_below_floor");
+  assert.equal(r.minimum_cell_count, 11);
+  assert.equal(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [bTotal(90)] }).decision,
+    "within_budget");
+  assert.equal(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [bTotal(101)] }).decision,
+    "within_budget");
+  refuses(op("difference_between_artifacts", { aggregate: a, ledger: ledgerFor(a), counterpart: bTotal(93) }),
+    "published_total_difference_below_floor");
+});
+
+test("N3: every native-precision operation requires the release history, or answers unavailable", () => {
+  for (const kind of Object.keys(J302.V5_J302_OPERATIONS)) {
+    const counterpart = kind === "difference_between_artifacts"
+      ? secondArtifact(countyAggregate().cells, { published_total: 105 }) : undefined;
+    const r = op(kind, { ledger: ledgerFor(), counterpart, history: null });
+    assert.equal(r.decision, "unavailable", kind);
+    assert.equal(r.reason_id, "release_history_unavailable");
+    assert.equal(r.owed_seam, J302.V5_J302_RELEASE_HISTORY_STORE_SEAM);
+    assert.equal(r.admission, "unavailable");
+    assert.ok(!r.next_ledger && !r.compare_and_swap, kind);
+  }
+  assert.equal(J302.V5_J302_RELEASE_HISTORY_STORE_SEAM, "seam:v5-j302:release-history-store");
+  assert.ok(v5J302PolicyPreimage().seams.includes(J302.V5_J302_RELEASE_HISTORY_STORE_SEAM));
+  // An explicit empty history is accepted and reported.
+  assert.equal(op("rank_units", { ledger: ledgerFor() }).releases_checked, 0);
+});
+
+test("N3: each prior release is re-judged: it must conform, share the binding, and share the precision", () => {
+  const ledger = ledgerFor();
+  const bad = secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 3, suppressed: false }]);
+  const r = op("view_native_precision", { ledger, history: [bad] });
+  refuses(r, "release_history_entry_not_conforming");
+  assert.equal(r.conformance_reason_id, "small_cell_below_determination_threshold");
+  // Another dataset under a receipt that honestly binds it: conforms, but another binding.
+  const agg = countyAggregate();
+  const foreignDataset = D("dataset-2");
+  const foreign = { artifact: artifactOf(agg, corporate({ content_digest: D("artifact-bytes-3") }), foreignDataset),
+    route_receipts: [expert(agg, { artifact_content_digest: D("artifact-bytes-3"),
+      dataset_recipient_environment_digest: datasetRecipientEnvironmentDigest({ dataset_digest: foreignDataset,
+        recipient_id: CONTEXT.recipient_id, environment: CONTEXT.environment }) })] };
+  refuses(op("view_native_precision", { ledger, history: [foreign] }), "release_history_foreign_binding");
+  const yearly = secondArtifact([{ unit_id: "56001", period: "2025", patient_count: 40, suppressed: false }],
+    { temporal_precision: "year" });
+  refuses(op("view_native_precision", { ledger, history: [yearly] }), "release_history_precision_mismatch");
+  // The artifact itself, or a relabelled copy of it, in its own history is not a second release.
+  const self = { artifact: artifactOf(countyAggregate(), relabelled()), route_receipts: [expert()] };
+  assert.equal(op("view_native_precision", { ledger, history: [self] }).decision, "within_budget");
+  // A clean second release clears; the history is a closed list of closed entries.
+  const clean = secondArtifact(countyAggregate().cells, { published_total: 105 });
+  const ok = op("view_native_precision", { ledger, history: [self, clean] });
+  assert.equal(ok.decision, "within_budget");
+  assert.equal(ok.releases_checked, 2);
+  throwsCode(() => op("view_native_precision", { ledger, history: [{ ...clean, note: "x" }] }), "unknown_field");
+  throwsCode(() => op("view_native_precision", { ledger, history: [{ artifact: clean.artifact }] }), "missing_field");
+  throwsCode(() => op("view_native_precision", { ledger, history: "none" }), "invalid_shape");
+});
+
+test("N4: a residual that pins the suppressed cells to exact values refuses", () => {
+  // Two cells sharing 20 must each be 10 when a primary suppression is 1..10.
+  const pinned = countyAggregate({ published_total: 85 });
+  refuses(conformExpert(pinned), "suppressed_cells_pinned_by_residual");
+  // Intake applies the same interval at the platform floor (state geography,
+  // so the shipped config's unpinned county list does not answer first).
+  const stateAgg = zip3Aggregate({ geography_unit: "state", cells: [
+    { unit_id: "AA", period: "2025", patient_count: 500, suppressed: false },
+    { unit_id: "BB", period: "2025", patient_count: null, suppressed: true },
+    { unit_id: "CC", period: "2025", patient_count: null, suppressed: true }], published_total: 520 });
+  refuses(admitAggregateHeatMapArtifact({ tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(stateAgg),
+    context: CONTEXT, now: NOW }), "suppressed_cells_pinned_by_residual");
+  // 19 and 21 leave a range; three cells sharing 30 are pinned too.
+  assert.equal(conformExpert(countyAggregate({ published_total: 84 })).decision, "conforms");
+  assert.equal(conformExpert(countyAggregate({ published_total: 86 })).decision, "conforms");
+  const three = countyAggregate({ published_total: 95, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false },
+    { unit_id: "56005", period: "2025-Q1", patient_count: null, suppressed: true },
+    { unit_id: "56007", period: "2025-Q1", patient_count: null, suppressed: true },
+    { unit_id: "56009", period: "2025-Q1", patient_count: null, suppressed: true }] });
+  refuses(conformExpert(three), "suppressed_cells_pinned_by_residual");
+  // At a stricter source floor of 12, 22 over two cells is pinned at 11 each.
+  const strict = countyAggregate({ published_total: 87,
+    source_privacy_threshold: { minimum_cell_count: 12, declared_by: "synthetic-source-privacy-office" } });
+  refuses(conformExpert(strict, { source_privacy_threshold_acknowledged: 12,
+    small_cell: { minimum_cell_count: 12, complementary_suppression_required: true } }),
+  "suppressed_cells_pinned_by_residual");
+  // The helper's edges.
+  const { suppressionExposure } = J302;
+  assert.equal(suppressionExposure(0, 0, 11), null);
+  assert.equal(suppressionExposure(1, 50, 11), "complementary_suppression_missing");
+  assert.equal(suppressionExposure(2, 10, 11), "complementary_suppression_residual_below_floor");
+  assert.equal(suppressionExposure(2, 11, 11), null);
+  assert.equal(suppressionExposure(2, 20, 11), "suppressed_cells_pinned_by_residual");
+  assert.equal(suppressionExposure(2, 21, 11), null);
+  assert.equal(suppressionExposure(3, 29, 11), null);
+  assert.equal(suppressionExposure(3, 30, 11), "suppressed_cells_pinned_by_residual");
+  // Eleven cells sharing 11 are each exactly 1; sharing 12 leaves each in {1, 2}.
+  assert.equal(suppressionExposure(11, 11, 11), "suppressed_cells_pinned_by_residual");
+  assert.equal(suppressionExposure(11, 12, 11), null);
+});
+
+test("N5: hemisphere, degree-minute, spelled-out and keyword ZIP forms are finer than any aggregate", () => {
+  for (const statement of [
+    "Unit 480 clusters near 12.34 N 45.67 W.",
+    "Unit 480 clusters near 12.34N, 45.67W.",
+    "Unit 480 clusters near 12°20'N 45°40'W.",
+    "Unit 480 clusters near 12 deg 20 min.",
+    "Unit 480 clusters near 12° north.",
+    "Unit 480 sits at 20' N of the line.",
+    "Unit 480 leads in zip nine nine nine nine eight.",
+    "Unit 480 leads around nine nine nine nine eight.",
+    "Unit 480 leads around nine-nine-nine-nine-eight.",
+    "Unit 480 leads in zip 9999 8.",
+    "Unit 480 leads in zip code 12.",
+    "Unit 480 leads in ZIP: 9.",
+  ]) {
+    refuses(propose({ statement }), "proposal_finer_than_aggregate");
+  }
+  // Ordinary words and counts are not caught.
+  for (const statement of [
+    "Unit 480 grew in 2025.",
+    "Unit 480 leads by one or two points.",
+    "Unit 480 is north of unit 481 and zippy growth continued.",
+    "Unit 480 was 2x unit 481 in 2025.",
+  ]) {
+    assert.equal(propose({ statement }).decision, "proposal_pending_review", statement);
+  }
+});
+
+test("N6: the store's compare-and-swap compares the FULL ledger digest, not the version", () => {
+  const contract = J302.V5_J302_BUDGET_LEDGER_STORE_CONTRACT;
+  assert.equal(contract.compare_and_swap_compares, "expected_ledger_digest");
+  assert.equal(contract.version_only_compare_sufficient, false);
+  assert.ok(Object.isFrozen(contract));
+  assert.deepEqual(v5J302PolicyPreimage().budget_ledger_store_contract, { ...contract });
+  // attack2 N2: spend moved between classes at the same version. The kernel
+  // accepts both (each is internally consistent); only their digests differ,
+  // which is exactly what the store must compare.
+  const agg = countyAggregate();
+  let real = ledgerFor(agg);
+  real = op("export_sealed_artifact", { aggregate: agg, ledger: real }).next_ledger;
+  const reshuffled = { ...real, used: { differencing: 0, export: 0, query: 1 } };
+  const a = op("view_native_precision", { aggregate: agg, ledger: real });
+  const b = op("view_native_precision", { aggregate: agg, ledger: reshuffled });
+  assert.equal(a.compare_and_swap.expected_ledger_version, b.compare_and_swap.expected_ledger_version);
+  assert.notEqual(a.compare_and_swap.expected_ledger_digest, b.compare_and_swap.expected_ledger_digest);
+  assert.equal(a.compare_and_swap.store_must_compare, "expected_ledger_digest");
+  // With export spent, the real ledger refuses a second export; the reshuffled
+  // one would not — the residual only the store closes.
+  refuses(op("export_sealed_artifact", { aggregate: agg, ledger: real }), "privacy_budget_exhausted");
+  assert.equal(op("export_sealed_artifact", { aggregate: agg, ledger: reshuffled }).decision, "within_budget");
 });

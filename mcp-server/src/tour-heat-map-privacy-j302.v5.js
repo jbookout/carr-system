@@ -59,7 +59,16 @@
 // ledger state for one operation and names the compare-and-swap precondition the
 // persistence owner must enforce atomically; it holds no ledger and writes
 // nothing. The store that makes consumption atomic is owed at
-// V5_J302_BUDGET_LEDGER_STORE_SEAM.
+// V5_J302_BUDGET_LEDGER_STORE_SEAM, and its compare-and-swap must compare the
+// FULL ledger digest, not the version (V5_J302_BUDGET_LEDGER_STORE_CONTRACT).
+// The ledger key is built only from what a route receipt binds (content,
+// descriptor, binding), so relabelling an artifact never resets its budget.
+//
+// RELEASES ARE JUDGED TOGETHER. Every native-precision operation takes the
+// prior releases under the same binding as a required input and refuses any
+// pair whose visible differences, suppressed residuals after substitution, or
+// published-total difference expose a group below the floor. Without that
+// history it answers `unavailable`, owed at V5_J302_RELEASE_HISTORY_STORE_SEAM.
 //
 // PURE. No filesystem, network, database, provider, scheduler, environment or
 // clock: `now` is always the caller's. V5_NO_EFFECTS rides on every result.
@@ -85,7 +94,7 @@ export const V5_J302_POLICY_VERSION = 1;
 export const V5_J302_BINDING_SCHEMA_VERSION = "doctorcre-v5-j302-dataset-recipient-environment.v1";
 export const V5_J302_DESCRIPTOR_SCHEMA_VERSION = "doctorcre-v5-j302-aggregate-descriptor.v1";
 export const V5_J302_POPULATION_TABLE_SCHEMA_VERSION = "doctorcre-v5-j302-zip3-population.v1";
-export const V5_J302_LEDGER_SCHEMA_VERSION = "doctorcre-v5-j302-privacy-budget-ledger.v1";
+export const V5_J302_LEDGER_SCHEMA_VERSION = "doctorcre-v5-j302-privacy-budget-ledger.v2";
 
 // ---------------------------------------------------------------------------
 // Local primitives. Deliberately this module's own, as in the sibling slices:
@@ -285,6 +294,21 @@ export const V5_J302_REQUIRED_RUNTIME_EVIDENCE = deepFreeze([
 /** Owed seams, named so a refusal points at the missing owner rather than at "no". */
 export const V5_J302_RECEIPT_RETRIEVAL_SEAM =
   "seam:v5-j302:authenticated-independent-privacy-route-receipt-retrieval";
+export const V5_J302_RELEASE_HISTORY_STORE_SEAM =
+  "seam:v5-j302:release-history-store";
+/**
+ * What the budget ledger store owes, stated so its implementer cannot read the
+ * compare-and-swap as a version check. The kernel cannot tell a real ledger
+ * from a caller's reshuffled one at the same version (spend moved between
+ * classes), nor from a fresh zeroed one; only a store that compares the FULL
+ * ledger digest under the ledger key can.
+ */
+export const V5_J302_BUDGET_LEDGER_STORE_CONTRACT = deepFreeze({
+  keyed_by: "ledger_key",
+  compare_and_swap_compares: "expected_ledger_digest",
+  version_only_compare_sufficient: false,
+  missing_row_means: "empty_ledger_at_version_0_created_by_the_store_never_by_the_caller",
+});
 export const V5_J302_BUDGET_LEDGER_STORE_SEAM =
   "seam:v5-j302:atomic-privacy-budget-ledger-store";
 export const V5_J302_PROPOSAL_REVIEW_SEAM =
@@ -728,15 +752,13 @@ function judgeArtifact(rawArtifact, context, now, base, priorRaw, cfg) {
     if (residual < 0 || (suppressed === 0 && residual !== 0)) {
       return { refusal: refusal("published_total_inconsistent", base) };
     }
-    if (suppressed === 1) {
-      return { refusal: refusal("complementary_suppression_missing", base) };
-    }
-    // Two or more suppressed cells whose combined residual is below the floor
-    // still bound each of them tightly enough to reveal a small group. This
-    // holds under both routes, whatever a receipt says about suppression.
-    if (suppressed >= 2 && residual < cfg.platform_small_cell_floor) {
-      return { refusal: refusal("complementary_suppression_residual_below_floor", base,
-        { minimum_cell_count: cfg.platform_small_cell_floor }) };
+    // One suppressed cell beside a total is the total minus the rest. Two or more suppressed cells whose combined residual is below the floor
+    // still bound each of them tightly enough to reveal a small group, and a
+    // residual can pin every one of them exactly. This holds under both
+    // routes, whatever a receipt says about suppression.
+    const exposure = suppressionExposure(suppressed, residual, cfg.platform_small_cell_floor);
+    if (exposure) {
+      return { refusal: refusal(exposure, base, { minimum_cell_count: cfg.platform_small_cell_floor }) };
     }
   }
 
@@ -1145,13 +1167,39 @@ function effectiveFloor(receipt, facts, cfg) {
   return Math.max(...floors);
 }
 
-/** A residual below the EFFECTIVE floor, for artifacts whose floor is above the platform's. */
-function residualBelow(aggregate, minimum) {
-  if (aggregate.published_total === null) return false;
+/**
+ * What a residual R shared by k suppressed cells reveals, given the floor.
+ * Returns a refusal reason, or null when the suppression still protects.
+ *
+ *   k == 1            the residual IS the cell (complementary suppression missing)
+ *   R < floor         the group together is smaller than the floor
+ *   pinned            PROTECTION INTERVAL: a primarily suppressed cell holds
+ *                     1..floor-1. When R <= k*(floor-1) every cell could be a
+ *                     primary one, and each is bounded to
+ *                     [max(1, R-(k-1)(floor-1)), min(floor-1, R-(k-1))]; an
+ *                     interval of one value is an exact disclosure. Above
+ *                     k*(floor-1) at least one cell is a large complementary
+ *                     suppression and no cell is pinned by this bound.
+ */
+export function suppressionExposure(k, residual, floor) {
+  if (k === 0) return null;
+  if (k === 1) return "complementary_suppression_missing";
+  if (residual < floor) return "complementary_suppression_residual_below_floor";
+  const top = floor - 1;
+  if (residual <= k * top) {
+    const lo = Math.max(1, residual - (k - 1) * top);
+    const hi = Math.min(top, residual - (k - 1));
+    if (lo >= hi) return "suppressed_cells_pinned_by_residual";
+  }
+  return null;
+}
+
+/** The residual exposure at the EFFECTIVE floor, for artifacts whose floor is above the platform's. */
+function residualExposure(aggregate, minimum) {
+  if (aggregate.published_total === null) return null;
   const suppressed = aggregate.cells.filter(c => c.suppressed).length;
-  if (suppressed < 2) return false;
   const visibleSum = aggregate.cells.reduce((s, c) => s + (c.suppressed ? 0 : c.patient_count), 0);
-  return aggregate.published_total - visibleSum < minimum;
+  return suppressionExposure(suppressed, aggregate.published_total - visibleSum, minimum);
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,9 +1252,9 @@ function conformanceCore(request, cfg) {
     : judgeExpertDetermination(receipt, facts, context, now, routed, cfg);
   if (specific) return { result: specific };
   const floor = effectiveFloor(receipt, facts, cfg);
-  if (residualBelow(facts.aggregate, floor)) {
-    return { result: refusal("complementary_suppression_residual_below_floor", routed,
-      { minimum_cell_count: floor }) };
+  const exposure = residualExposure(facts.aggregate, floor);
+  if (exposure) {
+    return { result: refusal(exposure, routed, { minimum_cell_count: floor }) };
   }
 
   return {
@@ -1220,8 +1268,8 @@ function conformanceCore(request, cfg) {
         ? new Date(receipt.retention.retain_until).toISOString() : null,
       budgets: receipt.route === "expert_determination" ? { ...receipt.budgets } : null,
       effective_small_cell_floor: floor,
-      ledger_key: privacyBudgetLedgerKey({ artifact_digest: facts.artifact_digest,
-        binding_digest: facts.binding_digest }),
+      ledger_key: privacyBudgetLedgerKey({ content_digest: facts.corporate.content_digest,
+        descriptor_digest: facts.descriptor_digest, binding_digest: facts.binding_digest }),
       config_digest: digest(cfg),
       required_runtime_evidence: [...V5_J302_REQUIRED_RUNTIME_EVIDENCE],
     }),
@@ -1272,28 +1320,46 @@ export function admitAggregateHeatMapArtifact(request) {
 // and the route receipts, and RE-RUNS the full conformance judgement itself;
 // nothing about the receipt is believed until that recomputation passes. The
 // artifact digest the operation acts on is the recomputed one, and the budget
-// ledger is keyed by artifact x dataset-recipient-environment binding, so
-// minting a new receipt id cannot mint a new budget.
+// ledger is keyed only by what the receipt binds (content, descriptor,
+// binding), so neither a new receipt id nor a relabelled artifact mints a new
+// budget.
+//
+// RELEASE HISTORY IS REQUIRED. Two plain views of two releases let a person
+// subtract one from the other, so EVERY native-precision operation takes the
+// prior released artifacts under the same binding and is checked against all
+// of them. A pure kernel cannot remember releases; it can refuse to act
+// without them. Absent history answers `unavailable` naming
+// V5_J302_RELEASE_HISTORY_STORE_SEAM. An empty list states that nothing was
+// released before, and only that store can make the statement true.
 //
 // RESIDUAL, OWED TO THE STORE. A pure kernel cannot tell a genuine ledger from
-// a caller's fresh zeroed one at version 0. The ledger invariant below refuses
-// every OTHER inconsistent ledger, and the compare-and-swap precondition names
-// exactly what the store must hold; the store keyed by ledger_key is what
-// finally stops a reset (V5_J302_BUDGET_LEDGER_STORE_SEAM).
+// a caller's fresh zeroed one at version 0, or from one whose spend was moved
+// between classes at the same version. The ledger invariant refuses every
+// other inconsistent ledger; the store must compare the FULL ledger digest
+// (V5_J302_BUDGET_LEDGER_STORE_CONTRACT), not the version alone.
 // ---------------------------------------------------------------------------
 
 const OPERATION_REQUEST_KEYS = Object.freeze([
-  "tenant", "artifact", "context", "route_receipts", "ledger", "operation", "counterpart", "now",
+  "tenant", "artifact", "context", "route_receipts", "ledger", "operation", "counterpart",
+  "release_history", "now",
 ]);
+const MAX_RELEASE_HISTORY = 64;
 const OPERATION_KEYS = Object.freeze(["kind"]);
 const COUNTERPART_KEYS = Object.freeze(["artifact", "route_receipts"]);
 const LEDGER_KEYS = Object.freeze(["schema_version", "ledger_key", "ledger_version", "used"]);
 
-/** The budget ledger's identity: one artifact under one dataset x recipient x environment binding. */
-export function privacyBudgetLedgerKey({ artifact_digest, binding_digest }) {
+/**
+ * The budget ledger's identity, built ONLY from what a route receipt binds:
+ * the content digest, the descriptor digest and the dataset x recipient x
+ * environment binding. Native id and native version are labels a caller can
+ * change without the receipt noticing, so they are deliberately absent: a
+ * relabelled artifact is the same budget.
+ */
+export function privacyBudgetLedgerKey({ content_digest, descriptor_digest, binding_digest }) {
   return digest({
     schema_version: V5_J302_LEDGER_SCHEMA_VERSION,
-    artifact_digest: assertDigestRef(artifact_digest, "ledger_key.artifact_digest"),
+    content_digest: assertDigestRef(content_digest, "ledger_key.content_digest"),
+    descriptor_digest: assertDigestRef(descriptor_digest, "ledger_key.descriptor_digest"),
     binding_digest: assertDigestRef(binding_digest, "ledger_key.binding_digest"),
   });
 }
@@ -1370,6 +1436,18 @@ function operationWith(request, cfg) {
     artifact_digest: facts.artifact_digest, binding_digest: facts.binding_digest, ledger_key };
   const budgetClass = V5_J302_OPERATIONS[kind];
 
+  // Every native-precision operation is judged against every prior release.
+  if (request.release_history === undefined || request.release_history === null) {
+    return outcome({ decision: "unavailable", reason_id: "release_history_unavailable", ...routed,
+      owed_seam: V5_J302_RELEASE_HISTORY_STORE_SEAM });
+  }
+  const history = assertArray(request.release_history, "request.release_history",
+    { min: 0, max: MAX_RELEASE_HISTORY });
+  for (const [i, prior] of history.entries()) {
+    const judged = judgeAgainstRelease(request, cfg, facts, floor, routed, prior, `request.release_history[${i}]`);
+    if (judged) return deepFreeze({ ...judged, release_index: i });
+  }
+
   if (budgetClass === "differencing") {
     const differencing = judgeDifferencing(request, cfg, facts, floor, routed);
     if (differencing) return differencing;
@@ -1422,7 +1500,9 @@ function operationWith(request, cfg) {
       expected_ledger_version: ledger.ledger_version,
       expected_ledger_digest: digest(ledger),
       next_ledger_digest: digest(next_ledger),
+      store_must_compare: V5_J302_BUDGET_LEDGER_STORE_CONTRACT.compare_and_swap_compares,
     },
+    releases_checked: history.length,
     atomic_store_seam: V5_J302_BUDGET_LEDGER_STORE_SEAM,
     ledger_written: false,
   });
@@ -1442,22 +1522,93 @@ function judgeDifferencing(request, cfg, facts, floor, routed) {
     return refusal("differencing_counterpart_not_conforming", routed,
       { conformance_reason_id: other.result.reason_id });
   }
-  const a = facts.aggregate, b = other.facts.aggregate;
   if (other.facts.artifact_digest === facts.artifact_digest) {
     return refusal("differencing_same_artifact", routed);
   }
-  if (a.geography_unit !== b.geography_unit || a.temporal_precision !== b.temporal_precision) {
+  if (facts.aggregate.geography_unit !== other.facts.aggregate.geography_unit ||
+      facts.aggregate.temporal_precision !== other.facts.aggregate.temporal_precision) {
     return refusal("differencing_precision_mismatch", routed);
   }
-  const minimum = Math.max(floor, other.floor);
-  const index = new Map(b.cells.map(c => [`${c.unit_id}\u0000${c.period ?? ""}`, c]));
+  return pairExposure(facts.aggregate, other.facts.aggregate, Math.max(floor, other.floor), routed);
+}
+
+/**
+ * One prior release, re-judged and compared. A prior that does not conform,
+ * belongs to another binding, or cannot be lined up with this artifact is a
+ * refusal: history the kernel cannot read is history it cannot clear.
+ */
+function judgeAgainstRelease(request, cfg, facts, floor, routed, priorRaw, path) {
+  const prior = assertObject(priorRaw, path);
+  assertClosedKeys(prior, COUNTERPART_KEYS, path);
+  assertRequiredKeys(prior, COUNTERPART_KEYS, path);
+  const other = conformanceCore({ tenant: request.tenant, artifact: prior.artifact,
+    context: request.context, route_receipts: prior.route_receipts, now: request.now }, cfg);
+  if (other.result.decision !== "conforms") {
+    return refusal("release_history_entry_not_conforming", routed,
+      { conformance_reason_id: other.result.reason_id });
+  }
+  if (other.facts.binding_digest !== facts.binding_digest) {
+    return refusal("release_history_foreign_binding", routed);
+  }
+  if (facts.aggregate.geography_unit !== other.facts.aggregate.geography_unit ||
+      facts.aggregate.temporal_precision !== other.facts.aggregate.temporal_precision) {
+    // Different precisions nest in ways this kernel does not model; refusing
+    // is the only answer that cannot leak through an unmodelled nesting.
+    return refusal("release_history_precision_mismatch", routed);
+  }
+  // The artifact itself (or a relabelled copy) in its own history compares
+  // clean: every difference is zero and nothing suppressed is revealed.
+  return pairExposure(facts.aggregate, other.facts.aggregate, Math.max(floor, other.floor), routed);
+}
+
+const cellKey = cell => `${cell.unit_id}\u0000${cell.period ?? ""}`;
+
+/**
+ * What two releases of the same geography and precision reveal together.
+ *   1. A cell visible in both: a difference in 1..floor-1 is a small group.
+ *   2. Cells suppressed in one release but visible in the other: subtract the
+ *      visible values from the first release's suppressed residual; what is
+ *      left must still protect the cells that stay suppressed (the same
+ *      exposure rule as one artifact, applied to the remainder). Checked in
+ *      both directions.
+ *   3. Both published totals: their difference is itself a group.
+ */
+function pairExposure(a, b, minimum, routed) {
+  const bIndex = new Map(b.cells.map(c => [cellKey(c), c]));
   for (const cell of a.cells) {
-    const match = index.get(`${cell.unit_id}\u0000${cell.period ?? ""}`);
+    const match = bIndex.get(cellKey(cell));
     if (!match || cell.suppressed || match.suppressed) continue;
     const difference = Math.abs(cell.patient_count - match.patient_count);
     if (difference > 0 && difference < minimum) {
-      return refusal("difference_below_floor", routed,
-        { unit_id: cell.unit_id, minimum_cell_count: minimum });
+      return refusal("difference_below_floor", routed, { unit_id: cell.unit_id, minimum_cell_count: minimum });
+    }
+  }
+  for (const [x, y] of [[a, b], [b, a]]) {
+    if (x.published_total === null) continue;
+    const yIndex = new Map(y.cells.map(c => [cellKey(c), c]));
+    const suppressedInX = x.cells.filter(c => c.suppressed);
+    let residual = x.published_total - x.cells.reduce((s, c) => s + (c.suppressed ? 0 : c.patient_count), 0);
+    let remaining = 0;
+    let revealed = 0;
+    for (const cell of suppressedInX) {
+      const other = yIndex.get(cellKey(cell));
+      if (other && !other.suppressed) { residual -= other.patient_count; revealed += 1; }
+      else remaining += 1;
+    }
+    if (revealed === 0) continue;
+    // A negative remainder (the releases disagree) falls below the floor and refuses.
+    const leak = remaining === 0
+      ? (residual !== 0 && Math.abs(residual) < minimum ? "suppressed_residual_recovered_by_release" : null)
+      : suppressionExposure(remaining, residual, minimum);
+    if (leak) {
+      return refusal("suppressed_residual_recovered_by_release", routed,
+        { exposure: leak, minimum_cell_count: minimum });
+    }
+  }
+  if (a.published_total !== null && b.published_total !== null) {
+    const difference = Math.abs(a.published_total - b.published_total);
+    if (difference > 0 && difference < minimum) {
+      return refusal("published_total_difference_below_floor", routed, { minimum_cell_count: minimum });
     }
   }
   return null;
@@ -1486,6 +1637,14 @@ export const V5_J302_PROPOSAL_WIDENING_FRAGMENTS = deepFreeze([
 const COORDINATE_TEXT = /-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+/;
 const LONG_DIGIT_RUN = /\d{5,}(?:-\d{4})?/g;
 const SPACED_DIGITS = /(?:^|[^\d])\d(?:[\s.\-]\d){4,}(?![\d])/;
+// "30.69 N", degree and minute marks, "zip" followed by any digits, and five
+// or more digits spelled out. A named street with no house number is left to
+// the human review every proposal receives; it names no point on its own.
+const HEMISPHERE_COORDINATE = /\d{1,3}\.\d+\s*[NSEW]\b/i;
+const DEGREE_OR_MINUTE_MARK = /\d{1,3}\s*(?:°|º|\bdeg\b)|\d{1,2}(?:\.\d+)?\s*['′"″]\s*[NSEW]?\b/i;
+const ZIP_KEYWORD_DIGITS = /\bzip(?:\s*code)?\b[\s:#.-]*\d/i;
+const DIGIT_WORD = "(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)";
+const SPELLED_DIGITS = new RegExp(`\\b${DIGIT_WORD}(?:[\\s,-]+${DIGIT_WORD}){4,}\\b`, "i");
 const STREET_ADDRESS = new RegExp(
   "\\b\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){0,4}" +
   "(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|highway|hwy|" +
@@ -1503,7 +1662,9 @@ function proposalOutcome(fields) {
 
 /** True when the statement names geography finer than the artifact carries. */
 function statementFinerThanAggregate(statement, units) {
-  if (COORDINATE_TEXT.test(statement) || SPACED_DIGITS.test(statement) || STREET_ADDRESS.test(statement)) {
+  if (COORDINATE_TEXT.test(statement) || SPACED_DIGITS.test(statement) || STREET_ADDRESS.test(statement) ||
+      HEMISPHERE_COORDINATE.test(statement) || DEGREE_OR_MINUTE_MARK.test(statement) ||
+      ZIP_KEYWORD_DIGITS.test(statement) || SPELLED_DIGITS.test(statement)) {
     return true;
   }
   for (const match of statement.matchAll(LONG_DIGIT_RUN)) {
@@ -1701,8 +1862,10 @@ export function v5J302PolicyPreimage() {
     platform_small_cell_floor: V5_J302_ACTIVE_CONFIG.platform_small_cell_floor,
     config: V5_J302_ACTIVE_CONFIG,
     config_digest: digest(V5_J302_ACTIVE_CONFIG),
+    budget_ledger_store_contract: { ...V5_J302_BUDGET_LEDGER_STORE_CONTRACT },
+    release_history_required: true,
     seams: [V5_J302_BUDGET_LEDGER_STORE_SEAM, V5_J302_PROPOSAL_REVIEW_SEAM,
-      V5_J302_RECEIPT_RETRIEVAL_SEAM].sort(),
+      V5_J302_RECEIPT_RETRIEVAL_SEAM, V5_J302_RELEASE_HISTORY_STORE_SEAM].sort(),
   };
 }
 
