@@ -208,6 +208,65 @@ def test_sibling_failure_does_not_block_canonical_path():
     print("PASS  sibling outcomes (skip/ok/fail) never gate a caller's own path")
 
 
+def test_sibling_git_never_waits_on_a_credential_prompt():
+    """Every git call the sibling sync makes runs with prompting disabled.
+
+    fleet-sync runs unattended from launchd. If a remote ever wants a login
+    (an expired token, a revoked credential), a git that is allowed to prompt
+    sits waiting for an answer nobody will type, and that run stalls instead
+    of skipping. A stand-in `git` first on PATH records the prompt-control
+    environment of every call, then hands off to the real git.
+    """
+    real_git = subprocess.run(["/usr/bin/which", "git"], capture_output=True,
+                              text=True, env=ENV).stdout.strip()
+    with tempfile.TemporaryDirectory() as tmp:
+        sibling = build_pair(tmp)
+        shim_dir = os.path.join(tmp, "shim")
+        os.makedirs(shim_dir)
+        log = os.path.join(tmp, "git-env.log")
+        shim = os.path.join(shim_dir, "git")
+        with open(shim, "w") as f:
+            f.write("#!/bin/sh\n"
+                    f"printf '%s|%s|%s\\n' \"${{GIT_TERMINAL_PROMPT-unset}}\" "
+                    f"\"${{GCM_INTERACTIVE-unset}}\" \"${{GIT_SSH_COMMAND-unset}}\" >> {log}\n"
+                    f"exec {real_git} \"$@\"\n")
+        os.chmod(shim, 0o755)
+        env = dict(ENV, PATH=shim_dir + os.pathsep + ENV.get("PATH", ""))
+        env.pop("GIT_TERMINAL_PROMPT", None)
+        env.pop("GCM_INTERACTIVE", None)
+        env.pop("GIT_SSH_COMMAND", None)
+        r = subprocess.run([sys.executable, "-c", DISPATCH_SNIPPET, sibling,
+                            "doctorcre-app", "main", TOOLS_DIR],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r
+        rows = open(log).read().splitlines() if os.path.exists(log) else []
+        assert rows, "stand-in git was never called"
+        for row in rows:
+            prompt, gcm, ssh = row.split("|", 2)
+            assert prompt == "0", f"git ran with GIT_TERMINAL_PROMPT={prompt}"
+            assert gcm == "never", f"git ran with GCM_INTERACTIVE={gcm}"
+            assert "BatchMode=yes" in ssh, f"git ran with GIT_SSH_COMMAND={ssh}"
+    print("PASS  sibling git never waits on a credential prompt")
+
+
+def test_fleet_sync_disables_prompts_before_its_first_git_call():
+    """bin/fleet-sync.sh's own carr-system fetch gets the same protection.
+
+    The export has to come before the script's first git command, or the
+    canonical fetch can still stall on a login prompt.
+    """
+    lines = open(os.path.join(REPO, "bin", "fleet-sync.sh")).read().splitlines()
+    code = [(i, l.strip()) for i, l in enumerate(lines)
+            if l.strip() and not l.strip().startswith("#")]
+    export_at = next((i for i, l in code if l.startswith("export GIT_TERMINAL_PROMPT=0")), None)
+    assert export_at is not None, "bin/fleet-sync.sh never exports GIT_TERMINAL_PROMPT=0"
+    first_git = next(i for i, l in code if "git " in l and not l.startswith("export "))
+    assert export_at < first_git, (export_at, first_git)
+    for needle in ("export GCM_INTERACTIVE=never", "GIT_SSH_COMMAND"):
+        assert any(needle in l for _, l in code), f"bin/fleet-sync.sh missing {needle}"
+    print("PASS  fleet-sync disables prompts before its first git call")
+
+
 def main():
     if not os.path.exists(MODULE):
         print(f"fleet-sync-siblings-selftest: {MODULE} missing", file=sys.stderr)
@@ -219,7 +278,9 @@ def main():
     test_off_main_sibling_is_left_untouched()
     test_diverged_sibling_is_left_untouched()
     test_sibling_failure_does_not_block_canonical_path()
-    print("7/7 fleet-sync-siblings cases passed")
+    test_sibling_git_never_waits_on_a_credential_prompt()
+    test_fleet_sync_disables_prompts_before_its_first_git_call()
+    print("9/9 fleet-sync-siblings cases passed")
     return 0
 
 
