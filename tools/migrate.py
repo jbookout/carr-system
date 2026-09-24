@@ -291,6 +291,15 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0565_tour_property_registration.sql",
         "0566_tour_property_registration_scac_successor.sql",
     ),
+    # answer-work-request-for-joe: 0575 installs ops.answer_work_request_for_joe
+    # with its carr_authority EXECUTE grant; 0576 seals that catalog as v63.
+    # Applied alone, 0575 was refused at commit on production 2026-09-24 by the
+    # same deferred epoch trigger ("live SCAC v37 mutation catalog drifted") and
+    # rolled back, so the pair must be one transaction.
+    (
+        "0575_answer_needs_joe_work_request.sql",
+        "0576_answer_needs_joe_work_request_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -321,6 +330,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0565_tour_property_registration.sql",
         "0566_tour_property_registration_scac_successor.sql",
+    ),
+    (
+        "0575_answer_needs_joe_work_request.sql",
+        "0576_answer_needs_joe_work_request_scac_successor.sql",
     ),
 )
 
