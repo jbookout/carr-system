@@ -17,7 +17,9 @@ export const V5_J302_PRIVACY_CONFIG = Object.freeze({
 
   // 1. Platform-wide small-cell floor under BOTH routes: the CMS cell-size
   //    suppression standard (counts 1-10 suppressed). A source or expert
-  //    threshold replaces it only when that threshold is stricter.
+  //    threshold replaces it only when that threshold is stricter. The kernel
+  //    refuses any config below 11 (V5_J302_KERNEL_MINIMUM_SMALL_CELL_FLOOR),
+  //    so this value can be raised here but never lowered.
   platform_small_cell_floor: 11,
   platform_small_cell_floor_basis: "cms_cell_size_suppression_policy_1_to_10",
 
@@ -39,5 +41,15 @@ export const V5_J302_PRIVACY_CONFIG = Object.freeze({
     vintage: "2020",
     status: "unavailable_offline",
     table_digest: null,
+  }),
+
+  // County-bearing geography (county, census tract, block group) is checked
+  // against a bound list of county FIPS codes, because five digits alone cannot
+  // tell a county from a ZIP5. No reviewed list is available offline, so the
+  // slot is unknown and every county-bearing cell is denied until one is
+  // pinned. The kernel checks the two-digit state prefix on its own.
+  county_fips_codes: Object.freeze({
+    status: "unavailable_offline",
+    codes: null,
   }),
 });

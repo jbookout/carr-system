@@ -19,6 +19,7 @@ import {
   readHeatMapPrivacyConfig,
   datasetRecipientEnvironmentDigest,
   emptyPrivacyBudgetLedger,
+  privacyBudgetLedgerKey,
   evaluateAggregateOperation,
   evaluateDerivedStrategyProposal,
   evaluatePrivacyRouteConformance,
@@ -101,10 +102,10 @@ function countyAggregate(overrides = {}) {
     geography_unit: "county",
     temporal_precision: "quarter",
     cells: [
-      { unit_id: "99001", period: "2025-Q1", patient_count: 40, suppressed: false },
-      { unit_id: "99003", period: "2025-Q1", patient_count: 25, suppressed: false },
-      { unit_id: "99005", period: "2025-Q1", patient_count: null, suppressed: true },
-      { unit_id: "99007", period: "2025-Q1", patient_count: null, suppressed: true },
+      { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+      { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false },
+      { unit_id: "56005", period: "2025-Q1", patient_count: null, suppressed: true },
+      { unit_id: "56007", period: "2025-Q1", patient_count: null, suppressed: true },
     ],
     published_total: 105,
     ...overrides,
@@ -120,11 +121,13 @@ const POPULATION = Object.freeze({ "480": 250000, "481": 48000, "482": 20000 });
 // The shipped config leaves the 2020 Census ZIP3 slot unknown, so Safe Harbor
 // ZIP3 cells deny through the default exports. Positive Safe Harbor paths run
 // through the SAME code bound to a config that pins a synthetic 2020 table.
+const COUNTY_CODES = Object.freeze(["56001", "56003", "56005", "56007", "56009"]);
 function pinnedKernel(population = POPULATION, overrides = {}) {
   return bindHeatMapPrivacyKernel({
     ...V5_J302_PRIVACY_CONFIG,
     census_2020_zip3_population: { vintage: "2020", status: "pinned",
       table_digest: zip3PopulationTableDigest(population) },
+    county_fips_codes: { status: "pinned", codes: [...COUNTY_CODES] },
     ...overrides,
   });
 }
@@ -297,7 +300,7 @@ test("AC2: a population table edited under its digest refuses", () => {
 
 test("AC2: geography smaller than a state (other than a qualifying ZIP3) refuses under Safe Harbor", () => {
   const agg = countyAggregate({ temporal_precision: "year", cells: [
-    { unit_id: "99001", period: "2025", patient_count: 40, suppressed: false }], published_total: null });
+    { unit_id: "56001", period: "2025", patient_count: 40, suppressed: false }], published_total: null });
   refuses(conform({ artifact: artifactOf(agg), receipts: [safeHarbor(agg)] }),
     "safe_harbor_geography_smaller_than_permitted");
 });
@@ -358,12 +361,12 @@ test("AC3: identity, qualifications, method and results are required fields", ()
 
 test("AC3: numeric small-cell threshold binds, and the stricter of expert and source governs", () => {
   const agg = countyAggregate({ cells: [
-    { unit_id: "99001", period: "2025-Q1", patient_count: 15, suppressed: false }], published_total: null });
+    { unit_id: "56001", period: "2025-Q1", patient_count: 15, suppressed: false }], published_total: null });
   refuses(conformExpert(agg, { small_cell: { minimum_cell_count: 20, complementary_suppression_required: true } }),
     "small_cell_below_determination_threshold");
   // The expert would accept a cell of 5; the source said 11 (Q048.D1).
   const small = countyAggregate({ cells: [
-    { unit_id: "99001", period: "2025-Q1", patient_count: 8, suppressed: false }], published_total: null });
+    { unit_id: "56001", period: "2025-Q1", patient_count: 8, suppressed: false }], published_total: null });
   const r = conformExpert(small, { small_cell: { minimum_cell_count: 5, complementary_suppression_required: true } });
   refuses(r, "small_cell_below_determination_threshold");
   assert.equal(r.minimum_cell_count, 11);
@@ -371,15 +374,15 @@ test("AC3: numeric small-cell threshold binds, and the stricter of expert and so
 
 test("AC3: complementary suppression binds — a residual below the floor refuses", () => {
   const agg = countyAggregate({ published_total: 70 }); // two suppressed cells share a residual of 5
-  refuses(conformExpert(agg), "complementary_suppression_residual_below_threshold");
+  refuses(conformExpert(agg), "complementary_suppression_residual_below_floor");
 });
 
 test("AC3: spatial and temporal precision bind", () => {
   const tract = countyAggregate({ geography_unit: "census_tract", cells: [
-    { unit_id: "99001020100", period: "2025-Q1", patient_count: 40, suppressed: false }], published_total: null });
+    { unit_id: "56001000100", period: "2025-Q1", patient_count: 40, suppressed: false }], published_total: null });
   refuses(conformExpert(tract), "spatial_precision_finer_than_determination");
   const monthly = countyAggregate({ temporal_precision: "month", cells: [
-    { unit_id: "99001", period: "2025-01", patient_count: 40, suppressed: false }], published_total: null });
+    { unit_id: "56001", period: "2025-01", patient_count: 40, suppressed: false }], published_total: null });
   refuses(conformExpert(monthly), "temporal_precision_finer_than_determination");
   refuses(conformExpert(undefined, { precision: { finest_spatial_unit: "hexagon", finest_temporal_precision: "quarter" } }),
     "determination_precision_unknown_denied");
@@ -398,52 +401,62 @@ test("AC3: retention and expiry bind", () => {
   refuses(conformExpert(undefined, { expires_at: T.past }), "route_expired");
 });
 
+// Operations take the artifact, context and receipts and RE-RUN conformance.
+function opRequest(kind, { aggregate = countyAggregate(), receipt, ledger, counterpart, corp } = {}) {
+  const request = { tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(aggregate, corp ?? corporate()),
+    context: CONTEXT, route_receipts: [receipt ?? expert(aggregate)], operation: { kind }, now: NOW };
+  if (ledger !== undefined) request.ledger = ledger;
+  if (counterpart !== undefined) request.counterpart = counterpart;
+  return request;
+}
+function op(kind, opts = {}, kernel = PINNED) {
+  return kernel.evaluateAggregateOperation(opRequest(kind, opts));
+}
+function ledgerFor(aggregate = countyAggregate()) {
+  const r = conform({ artifact: artifactOf(aggregate), receipts: [expert(aggregate)] });
+  assert.equal(r.decision, "conforms");
+  return emptyPrivacyBudgetLedger(r.ledger_key);
+}
+
 test("AC3: repeated-query, differencing and export budgets bind and exhaust", () => {
-  const receipt = expert();
-  let ledger = emptyPrivacyBudgetLedger(receipt.receipt_id);
-  const op = kind => evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: receipt,
-    ledger, operation: { kind, artifact_digest: D("artifact") }, now: NOW });
+  let ledger = ledgerFor();
   for (let i = 0; i < 5; i++) {
-    const r = op("view_native_precision");
+    const r = op("view_native_precision", { ledger });
     assert.equal(r.decision, "within_budget");
     assert.equal(r.compare_and_swap.expected_ledger_version, ledger.ledger_version);
     assert.equal(r.ledger_written, false);
     ledger = r.next_ledger;
   }
-  refuses(op("rank_units"), "privacy_budget_exhausted");
-  const diff = op("difference_between_artifacts");
-  assert.equal(diff.decision, "within_budget");
-  ledger = diff.next_ledger;
-  refuses(op("difference_between_artifacts"), "privacy_budget_exhausted");
-  ledger = op("export_sealed_artifact").next_ledger;
-  refuses(op("export_sealed_artifact"), "privacy_budget_exhausted");
-  assert.deepEqual(ledger.used, { differencing: 1, export: 1, query: 5 });
+  refuses(op("rank_units", { ledger }), "privacy_budget_exhausted");
+  ledger = op("export_sealed_artifact", { ledger }).next_ledger;
+  refuses(op("export_sealed_artifact", { ledger }), "privacy_budget_exhausted");
+  assert.deepEqual(ledger.used, { differencing: 0, export: 1, query: 5 });
 });
 
 test("AC3: budget consumption is compare-and-swap — two callers on one ledger race for one version", () => {
-  const receipt = expert(undefined, { budgets: { query: 1, differencing: 0, export: 0 } });
-  const ledger = emptyPrivacyBudgetLedger(receipt.receipt_id);
-  const call = () => evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: receipt,
-    ledger, operation: { kind: "view_native_precision", artifact_digest: D("artifact") }, now: NOW });
-  const a = call(), b = call();
-  // Both name the SAME precondition, so the store can apply only one of them.
+  const agg = countyAggregate();
+  const receipt = expert(agg, { budgets: { query: 1, differencing: 0, export: 0 } });
+  const ledger = ledgerFor(agg);
+  const a = op("view_native_precision", { receipt, ledger });
+  const b = op("view_native_precision", { receipt, ledger });
   assert.equal(a.compare_and_swap.expected_ledger_version, 0);
   assert.deepEqual(a.compare_and_swap, b.compare_and_swap);
-  // After the winner lands, the loser's retry sees the spent unit.
-  refuses(evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: receipt,
-    ledger: a.next_ledger, operation: { kind: "view_native_precision", artifact_digest: D("artifact") }, now: NOW }),
-  "privacy_budget_exhausted");
+  assert.equal(a.compare_and_swap.ledger_key, ledger.ledger_key);
+  refuses(op("view_native_precision", { receipt, ledger: a.next_ledger }), "privacy_budget_exhausted");
 });
 
-test("AC3: a ledger for another receipt, or none at all, refuses", () => {
-  const receipt = expert();
-  refuses(evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: receipt,
-    ledger: emptyPrivacyBudgetLedger("some-other-receipt"),
-    operation: { kind: "view_native_precision", artifact_digest: D("artifact") }, now: NOW }),
-  "budget_ledger_receipt_mismatch");
-  refuses(evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: receipt,
-    operation: { kind: "view_native_precision", artifact_digest: D("artifact") }, now: NOW }),
-  "budget_ledger_required");
+test("AC3: a ledger for another artifact, an inconsistent ledger, or none at all refuses", () => {
+  refuses(op("view_native_precision", { ledger: emptyPrivacyBudgetLedger(D("another-key")) }),
+    "budget_ledger_key_mismatch");
+  refuses(op("view_native_precision"), "budget_ledger_required");
+  // A1e: a caller-built ledger claiming nothing spent at version 999.
+  const forged = { ...ledgerFor(), ledger_version: 999 };
+  const r = op("export_sealed_artifact", { ledger: forged });
+  refuses(r, "budget_ledger_inconsistent");
+  assert.equal(r.units_spent, 0);
+  // Mutant 1194: an unknown ledger schema is a contract violation.
+  throwsCode(() => op("view_native_precision", { ledger: { ...ledgerFor(), schema_version: "other" } }),
+    "unknown_ledger_schema");
 });
 
 // ===========================================================================
@@ -520,10 +533,11 @@ test("AC5: the artifact digest moves with bytes, descriptor and dataset, and wit
 // AC6 — derived facts remain proposals until reviewed.
 // ===========================================================================
 
-function propose(proposalOverrides = {}, aggregate = zip3Aggregate()) {
-  return evaluateDerivedStrategyProposal({
+function proposalRequest(proposalOverrides = {}, aggregate = zip3Aggregate(), receipts) {
+  return {
     tenant: ORGANIZATION_TENANT_ID,
-    artifact: { aggregate, descriptor_digest: aggregateDescriptorDigest(aggregate) },
+    artifact: artifactOf(aggregate), context: CONTEXT,
+    route_receipts: receipts ?? [aggregate.geography_unit === "zip3" ? safeHarbor(aggregate) : expert(aggregate)],
     proposal: {
       proposal_kind: "site_selection_context",
       statement: "Unit 480 carries the largest aggregate count in the artifact year.",
@@ -532,7 +546,10 @@ function propose(proposalOverrides = {}, aggregate = zip3Aggregate()) {
       ...proposalOverrides,
     },
     now: NOW,
-  });
+  };
+}
+function propose(proposalOverrides = {}, aggregate = zip3Aggregate(), receipts, kernel = PINNED) {
+  return kernel.evaluateDerivedStrategyProposal(proposalRequest(proposalOverrides, aggregate, receipts));
 }
 
 test("AC6: a derived strategy statement is a proposal pending human review, never a fact", () => {
@@ -555,16 +572,27 @@ test("AC6: a model cannot approve a route, set a threshold or promote itself to 
   }
 });
 
-test("AC6: a proposal cannot cite a suppressed or absent unit, or a different descriptor", () => {
+test("AC6: a proposal cannot cite a suppressed or absent unit", () => {
   const agg = countyAggregate();
-  refuses(propose({ cited_unit_ids: ["99005"], statement: "County unit 99005 looks underserved." }, agg),
+  refuses(propose({ cited_unit_ids: ["56005"], statement: "County unit 56005 looks underserved." }, agg),
     "proposal_cites_suppressed_cell");
   refuses(propose({ cited_unit_ids: ["999"] }), "proposal_cites_unit_outside_artifact");
-  const r = evaluateDerivedStrategyProposal({ tenant: ORGANIZATION_TENANT_ID,
-    artifact: { aggregate: zip3Aggregate(), descriptor_digest: D("other") },
-    proposal: { proposal_kind: "market_gap_context", statement: "x", cited_unit_ids: ["480"],
-      confidence: 0.5, evidence_ref: "e", proposed_by: { kind: "human", identity: "h" } }, now: NOW });
-  refuses(r, "proposal_artifact_digest_mismatch");
+});
+
+test("F5: a proposal is derived only from an artifact that conforms — raw rows, small cells, no route all refuse", () => {
+  // A5: patient rows, hashed identifiers, lat/lng and a count of 1.
+  const raw = zip3Aggregate({ record_grain: "patient_row", reversibility: "hashed_identifiers", geography_unit: "lat_lng",
+    cells: [{ unit_id: "480", period: "2025", patient_count: 1, suppressed: false }],
+    source_privacy_threshold: { minimum_cell_count: 1, declared_by: "x" } });
+  const r = propose({ statement: "Unit 480 has exactly 1 patient." }, raw);
+  refuses(r, "proposal_artifact_not_conforming");
+  assert.equal(r.conformance_reason_id, "raw_rows_refused");
+  const tiny = zip3Aggregate({ cells: [{ unit_id: "480", period: "2025", patient_count: 2, suppressed: false }] });
+  assert.equal(propose({}, tiny).conformance_reason_id, "small_cell_below_effective_floor");
+  assert.equal(propose({}, zip3Aggregate(), []).conformance_reason_id, "exactly_one_privacy_route_required");
+  const phi = evaluateDerivedStrategyProposal({ ...proposalRequest(),
+    artifact: artifactOf(zip3Aggregate(), corporate({ declared_data_classes: ["phi"] })) });
+  assert.equal(phi.conformance_reason_id, "phi_or_raw_patient_location_refused");
 });
 
 // ===========================================================================
@@ -600,8 +628,8 @@ test("AC7: no export returns an admission, for any shape a caller can build", ()
     undefined, null, {}, [], "", 0,
     { tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(), context: CONTEXT, route_receipts: [safeHarbor()], now: NOW },
     { tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(), context: CONTEXT, now: NOW },
-    { tenant: ORGANIZATION_TENANT_ID, route_receipt: expert(), ledger: emptyPrivacyBudgetLedger("route-receipt-synthetic-1"),
-      operation: { kind: "export_sealed_artifact", artifact_digest: D("a") }, now: NOW },
+    opRequest("export_sealed_artifact", { ledger: ledgerFor() }),
+    proposalRequest(),
   ];
   let calls = 0;
   for (const [name, fn] of Object.entries(J302)) {
@@ -623,33 +651,25 @@ test("AC7: no export returns an admission, for any shape a caller can build", ()
 
 test("REID: every named re-identifying operation refuses under both routes", () => {
   for (const receipt of [safeHarbor(), expert()]) {
+    const aggregate = receipt.route === "safe_harbor" ? zip3Aggregate() : countyAggregate();
     for (const kind of V5_J302_REIDENTIFYING_OPERATIONS) {
-      refuses(evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: receipt,
-        ledger: emptyPrivacyBudgetLedger(receipt.receipt_id),
-        operation: { kind, artifact_digest: D("a") }, now: NOW }), "reidentifying_operation_refused");
+      refuses(op(kind, { aggregate, receipt, ledger: ledgerFor() }), "reidentifying_operation_refused");
     }
   }
-  for (const kind of ["reverse_geocode", "impute_suppressed_cell", "difference_overlapping_cells"]) {
-    assert.ok(V5_J302_REIDENTIFYING_OPERATIONS.includes(kind));
-  }
-  refuses(evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: safeHarbor(),
-    operation: { kind: "nearest_patient", artifact_digest: D("a") }, now: NOW }), "unknown_operation_denied");
+  refuses(op("nearest_patient", { aggregate: zip3Aggregate(), receipt: safeHarbor() }), "unknown_operation_denied");
 });
 
 test("REID: Safe Harbor binds no differencing or export budget, so both refuse rather than run unmetered", () => {
-  for (const kind of ["difference_between_artifacts", "export_sealed_artifact"]) {
-    refuses(evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: safeHarbor(),
-      operation: { kind, artifact_digest: D("a") }, now: NOW }), "operation_budget_not_bound_by_route");
-  }
-  const view = evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, route_receipt: safeHarbor(),
-    operation: { kind: "overlay_properties_at_native_precision", artifact_digest: D("a") }, now: NOW });
+  const aggregate = zip3Aggregate();
+  refuses(op("export_sealed_artifact", { aggregate, receipt: safeHarbor() }), "operation_budget_not_bound_by_route");
+  const view = op("overlay_properties_at_native_precision", { aggregate, receipt: safeHarbor() });
   assert.equal(view.decision, "within_route");
 });
 
 test("REID: one suppressed cell beside a published total is subtractable, and refuses", () => {
   const agg = countyAggregate({ cells: [
-    { unit_id: "99001", period: "2025-Q1", patient_count: 40, suppressed: false },
-    { unit_id: "99003", period: "2025-Q1", patient_count: null, suppressed: true }], published_total: 47 });
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: null, suppressed: true }], published_total: 47 });
   refuses(conform({ artifact: artifactOf(agg), receipts: [expert(agg)] }), "complementary_suppression_missing");
 });
 
@@ -670,9 +690,25 @@ test("REID: a suppressed cell cannot carry its value alongside the flag", () => 
     { unit_id: "480", period: "2025", patient_count: 4, suppressed: true }] })) }), "suppressed_cell_carries_count");
 });
 
-test("REID: a proposal that writes a coordinate or a five-digit ZIP is finer than any aggregate", () => {
-  refuses(propose({ statement: "Cluster centered near 12.3456, -45.6789 is strongest." }), "proposal_finer_than_aggregate");
-  refuses(propose({ statement: "Most demand sits in 99998." }), "proposal_finer_than_aggregate");
+test("REID: a proposal that writes a coordinate, any ZIP form or a street address is finer than any aggregate", () => {
+  for (const statement of [
+    "Cluster centered near 12.3456, -45.6789 is strongest.",
+    "Unit 480 near 12.34, -45.67.",               // two-decimal coordinate
+    "Most demand sits in 99998.",
+    "Unit 480, concentrated near ZIP 9 9 9 9 8.",  // spaced ZIP
+    "Unit 480 near 999981234.",                    // nine digits, no dash
+    "Unit 480 near 99998-1234.",
+    "Unit 480 near 123 Synthetic Main Street.",    // street address
+    "Unit 480 near 4 Oak Ave.",
+  ]) {
+    refuses(propose({ statement }), "proposal_finer_than_aggregate");
+  }
+  // A county FIPS the artifact itself carries is not finer.
+  const agg = countyAggregate();
+  assert.equal(propose({ statement: "County 56001 leads.", cited_unit_ids: ["56001"] }, agg).decision,
+    "proposal_pending_review");
+  // Years and three-digit units are not geography.
+  assert.equal(propose({ statement: "Unit 480 grew in 2025." }).decision, "proposal_pending_review");
 });
 
 // ===========================================================================
@@ -748,7 +784,7 @@ test("DEFAULT 1: a platform floor of 11 binds under both routes; the source repl
   assert.equal(sh.minimum_cell_count, 11);
   // ...and under Expert Determination, even with an expert minimum of 5.
   const looseCounty = countyAggregate({ source_privacy_threshold: { minimum_cell_count: 5, declared_by: "src" },
-    cells: [{ unit_id: "99001", period: "2025-Q1", patient_count: 8, suppressed: false }], published_total: null });
+    cells: [{ unit_id: "56001", period: "2025-Q1", patient_count: 8, suppressed: false }], published_total: null });
   const ed = conformExpert(looseCounty, { small_cell: { minimum_cell_count: 5, complementary_suppression_required: true } });
   refuses(ed, "small_cell_below_determination_threshold");
   assert.equal(ed.minimum_cell_count, 11);
@@ -817,10 +853,307 @@ test("DEFAULT 4: once pinned, the 2020 table must be exactly the pinned one, and
 
 test("CONFIG: a malformed config is a contract violation, never a looser setting", () => {
   throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, platform_small_cell_floor: 0 }), "invalid_shape");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, platform_small_cell_floor: 10 }), "invalid_shape");
+  // Mutants 741, 747, 753: schema, vintage and digest shape are all checked.
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, schema_version: "other" }), "unknown_config_schema");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, census_2020_zip3_population:
+    { vintage: "2010", status: "unavailable_offline", table_digest: null } }), "invalid_config");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, census_2020_zip3_population:
+    { vintage: "2020", status: "pinned", table_digest: "not-a-digest" } }), "invalid_digest");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, county_fips_codes:
+    { status: "pinned", codes: ["36602", "99001"] } }), "invalid_config");
+  throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, county_fips_codes:
+    { status: "pinned", codes: null } }), "invalid_config");
   throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, census_2020_zip3_population:
     { vintage: "2020", status: "pinned", table_digest: null } }), "invalid_config");
   throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, client_visible_heat_map_content:
     ["raw_rows"] }), "invalid_config");
   throwsCode(() => readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG, extra: 1 }), "unknown_field");
   throwsCode(() => bindHeatMapPrivacyKernel({}), "missing_field");
+});
+
+// ===========================================================================
+// Independent review of 9c063f3c (REQUEST_CHANGES): each attack is a test.
+// ===========================================================================
+
+test("F1: an operation re-runs conformance — forged, model-issued, future-dated and wrong-artifact receipts refuse", () => {
+  const agg = countyAggregate();
+  const cases = [
+    [expert(agg, { issuer: { identity: "synthetic-requester", kind: "model" }, producer_role: "anything",
+      budgets: { query: 1e12, differencing: 1e12, export: 1e12 } }), "route_producer_not_independent_oracle"],
+    [expert(agg, { issuer: { identity: "some-model", kind: "model" } }), "model_cannot_issue_privacy_route"],
+    [expert(agg, { issued_at: "2026-12-01T00:00:00Z" }), "route_issued_after_now"],
+    [expert(agg, { artifact_content_digest: D("other") }), "route_artifact_digest_mismatch"],
+    [expert(agg, { small_cell: { minimum_cell_count: 1, complementary_suppression_required: false },
+      source_privacy_threshold_acknowledged: 1 }), "source_privacy_threshold_not_preserved"],
+  ];
+  for (const [receipt, reason] of cases) {
+    const r = op("export_sealed_artifact", { receipt, ledger: ledgerFor() });
+    refuses(r, "route_not_conforming");
+    assert.equal(r.conformance_reason_id, reason);
+    assert.equal(r.next_ledger, null);
+  }
+  // A forged Safe Harbor receipt on the query path refuses too.
+  const sh = safeHarbor(zip3Aggregate(), { issuer: { identity: "synthetic-requester", kind: "model" },
+    identifier_categories_removed: [], no_actual_knowledge_attestation: false });
+  const r = op("overlay_properties_at_native_precision", { aggregate: zip3Aggregate(), receipt: sh });
+  refuses(r, "route_not_conforming");
+  // An operation no longer takes a caller-supplied artifact digest at all.
+  throwsCode(() => PINNED.evaluateAggregateOperation({ ...opRequest("rank_units", { ledger: ledgerFor() }),
+    operation: { kind: "rank_units", artifact_digest: D("unrelated") } }), "unknown_field");
+});
+
+test("F1: minting a new receipt id does not mint a new budget — the ledger is keyed by artifact x binding", () => {
+  const agg = countyAggregate();
+  const one = conform({ artifact: artifactOf(agg), receipts: [expert(agg)] });
+  const two = conform({ artifact: artifactOf(agg), receipts: [expert(agg, { receipt_id: "rid-2" })] });
+  assert.equal(one.ledger_key, two.ledger_key);
+  assert.equal(one.ledger_key, privacyBudgetLedgerKey({ artifact_digest: one.artifact_digest,
+    binding_digest: one.binding_digest }));
+  // The spent ledger under receipt 1 is the ledger receipt 2 must present.
+  let ledger = ledgerFor(agg);
+  ledger = op("export_sealed_artifact", { aggregate: agg, ledger }).next_ledger;
+  refuses(op("export_sealed_artifact", { aggregate: agg, receipt: expert(agg, { receipt_id: "rid-2" }), ledger }),
+    "privacy_budget_exhausted");
+  // Another environment is another binding, and so another ledger.
+  const prod = conform({ artifact: artifactOf(agg), receipts: [expert(agg)],
+    context: { ...CONTEXT, environment: "production" } });
+  assert.equal(prod.decision, "refuse"); // the receipt is bound to staging
+});
+
+test("F2: complementary-suppression residual is held to the floor under BOTH routes, whatever the receipt says", () => {
+  // A2: Safe Harbor, state geography, two suppressed cells sharing a residual of 1.
+  const stateAgg = zip3Aggregate({ geography_unit: "state", cells: [
+    { unit_id: "AA", period: "2025", patient_count: 500, suppressed: false },
+    { unit_id: "BB", period: "2025", patient_count: null, suppressed: true },
+    { unit_id: "CC", period: "2025", patient_count: null, suppressed: true }], published_total: 501 });
+  refuses(conform({ artifact: artifactOf(stateAgg), receipts: [safeHarbor(stateAgg)] }),
+    "complementary_suppression_residual_below_floor");
+  // A2b: Expert Determination whose receipt says complementary suppression is not required.
+  const edAgg = countyAggregate({ published_total: 66 });
+  refuses(conformExpert(edAgg, { small_cell: { minimum_cell_count: 11, complementary_suppression_required: false } }),
+    "complementary_suppression_residual_below_floor");
+  // Intake applies the same floor before any receipt is read.
+  refuses(admitAggregateHeatMapArtifact({ tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(stateAgg),
+    context: CONTEXT, now: NOW }), "complementary_suppression_residual_below_floor");
+  // A residual at the floor conforms; above the platform floor but below a
+  // stricter source threshold refuses at the effective floor.
+  const at = countyAggregate({ published_total: 76 });
+  assert.equal(conformExpert(at).decision, "conforms");
+  const strict = countyAggregate({ published_total: 76,
+    source_privacy_threshold: { minimum_cell_count: 12, declared_by: "src" } });
+  refuses(conformExpert(strict), "complementary_suppression_residual_below_floor");
+});
+
+test("F3: a county is a real FIPS code — a ZIP5 declared as a county refuses", () => {
+  // A3: two ZIP5 codes declared as counties. The state prefix happens to be
+  // valid, so only the bound county list can tell them apart.
+  const zipAsCounty = countyAggregate({ cells: [
+    { unit_id: "36602", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "36604", period: "2025-Q1", patient_count: 25, suppressed: false }], published_total: null });
+  refuses(conformExpert(zipAsCounty), "cell_not_a_valid_county_fips");
+  // An impossible state prefix refuses without any list.
+  const badState = countyAggregate({ cells: [
+    { unit_id: "99001", period: "2025-Q1", patient_count: 40, suppressed: false }], published_total: null });
+  refuses(conformExpert(badState), "cell_not_a_valid_county_fips");
+  // A tract nested in an unlisted county refuses the same way.
+  const tract = countyAggregate({ geography_unit: "census_tract", cells: [
+    { unit_id: "56011000100", period: "2025-Q1", patient_count: 40, suppressed: false }], published_total: null });
+  refuses(conformExpert(tract, { precision: { finest_spatial_unit: "census_tract", finest_temporal_precision: "quarter" } }),
+    "cell_not_a_valid_county_fips");
+  // With no county list pinned (the shipped config), county-bearing cells deny.
+  const r = evaluatePrivacyRouteConformance({ tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(countyAggregate()),
+    context: CONTEXT, route_receipts: [expert()], now: NOW });
+  refuses(r, "county_fips_code_list_unknown_denied");
+  assert.equal(r.county_fips_status, "unavailable_offline");
+});
+
+test("F4: a bound config cannot lower the floor, open a client audience, or pass as the shipped config", () => {
+  // A4: floor 1 is refused by the kernel minimum.
+  throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG, platform_small_cell_floor: 1 }), "invalid_shape");
+  assert.equal(J302.V5_J302_KERNEL_MINIMUM_SMALL_CELL_FLOOR, 11);
+  // A4c: no config can list client-visible content.
+  throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG,
+    client_visible_heat_map_content: ["heat_map_render"] }), "invalid_config");
+  // A4b: an attacker-pinned 2020 table yields results stamped non-authoritative.
+  const fakePop = { "480": 250000, "999": 999999 };
+  const agg999 = zip3Aggregate({ cells: [{ unit_id: "999", period: "2025", patient_count: 40, suppressed: false }] });
+  const r = pinnedKernel(fakePop).evaluatePrivacyRouteConformance({ tenant: ORGANIZATION_TENANT_ID,
+    artifact: artifactOf(agg999), context: CONTEXT, route_receipts: [safeHarbor(agg999, {}, fakePop)], now: NOW });
+  assert.equal(r.config_authority, "non_authoritative_binding");
+  assert.match(r.config_digest, /^sha256:/);
+  assert.equal(r.admission, "unavailable");
+  // The default exports carry no such stamp and cannot be re-bound.
+  const shipped = evaluatePrivacyRouteConformance({ tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(agg999),
+    context: CONTEXT, route_receipts: [safeHarbor(agg999, {}, fakePop)], now: NOW });
+  assert.equal(shipped.config_authority, undefined);
+  refuses(shipped, "zip3_census_2020_population_unknown_denied");
+});
+
+test("F6: a client audience is always refused, through the default and a bound kernel alike", () => {
+  for (const kernel of [{ evaluateHeatMapAudienceProjection }, PINNED]) {
+    for (const content_kind of J302.V5_J302_HEAT_MAP_CONTENT_KINDS) {
+      refuses(kernel.evaluateHeatMapAudienceProjection({ tenant: ORGANIZATION_TENANT_ID, audience: "client",
+        content_kind }), "heat_map_content_not_client_visible");
+    }
+  }
+});
+
+test("F7: identities are normalized before independence is judged", () => {
+  // A6: a case variant of the issuer as requester.
+  refuses(conform({ context: { ...CONTEXT, requesting_actor: "Synthetic-Independent-Oracle" } }),
+    "route_not_independent_of_requester");
+  // A full-width Unicode variant folds to the same identity under NFKC.
+  refuses(conform({ context: { ...CONTEXT, recipient_id: "carr-synthetic-recipient" },
+    receipts: [safeHarbor(undefined, { issuer: { identity: "CARR-SYNTHETIC-RECIPIENT", kind: "organization" } })] }),
+  "route_not_independent_of_requester");
+  refuses(conformExpert(undefined, { expert: { identity: "SYNTHETIC-REQUESTER", qualifications: ["q"],
+    independent_of_recipient: true } }), "expert_not_independent_of_requester");
+  // A7: the issuer may not be the expert whose determination it attests.
+  refuses(conformExpert(undefined, { issuer: { identity: "Synthetic-Expert-1", kind: "human" } }),
+    "issuer_is_the_expert");
+});
+
+function secondArtifact(cells, overrides = {}) {
+  const agg = countyAggregate({ cells, published_total: null, ...overrides });
+  const corp = corporate({ content_digest: D("artifact-bytes-2"), native_version: "rev-2" });
+  const receipt = expert(agg, { receipt_id: "route-receipt-synthetic-2", artifact_content_digest: D("artifact-bytes-2") });
+  return { artifact: artifactOf(agg, corp), route_receipts: [receipt] };
+}
+
+test("DIFF: differencing two artifacts refuses any shared cell whose difference is below the floor", () => {
+  const first = countyAggregate({ published_total: null, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false }] });
+  const ledger = ledgerFor(first);
+  const diff = cells => op("difference_between_artifacts", { aggregate: first, ledger,
+    counterpart: secondArtifact(cells) });
+  // 40 vs 43: the difference of 3 is a small group revealed by subtraction.
+  const r = diff([{ unit_id: "56001", period: "2025-Q1", patient_count: 43, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false }]);
+  refuses(r, "difference_below_floor");
+  assert.equal(r.unit_id, "56001");
+  // A difference of 0 or at least the floor is safe, and spends one differencing unit.
+  const ok = diff([{ unit_id: "56001", period: "2025-Q1", patient_count: 51, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false }]);
+  assert.equal(ok.decision, "within_budget");
+  assert.equal(ok.budget_class, "differencing");
+  // A suppressed cell on either side is not differenced.
+  assert.equal(diff([{ unit_id: "56001", period: "2025-Q1", patient_count: null, suppressed: true },
+    { unit_id: "56003", period: "2025-Q1", patient_count: null, suppressed: true }]).decision, "within_budget");
+});
+
+test("DIFF: the counterpart is required, must itself conform, differ, and match precision", () => {
+  const first = countyAggregate();
+  const ledger = ledgerFor(first);
+  refuses(op("difference_between_artifacts", { aggregate: first, ledger }), "differencing_counterpart_required");
+  const bad = secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 3, suppressed: false }]);
+  const r = op("difference_between_artifacts", { aggregate: first, ledger, counterpart: bad });
+  refuses(r, "differencing_counterpart_not_conforming");
+  assert.equal(r.conformance_reason_id, "small_cell_below_determination_threshold");
+  refuses(op("difference_between_artifacts", { aggregate: first, ledger,
+    counterpart: { artifact: artifactOf(first), route_receipts: [expert(first)] } }), "differencing_same_artifact");
+  const yearly = secondArtifact([{ unit_id: "56001", period: "2025", patient_count: 40, suppressed: false }],
+    { temporal_precision: "year" });
+  refuses(op("difference_between_artifacts", { aggregate: first, ledger, counterpart: yearly }),
+    "differencing_precision_mismatch");
+  throwsCode(() => op("rank_units", { aggregate: first, ledger, counterpart: bad }), "unexpected_counterpart");
+});
+
+test("MUTANTS: descriptor-level refusals each have a witness", () => {
+  // 477: an unsuppressed cell must carry an integer count.
+  throwsCode(() => conform({ artifact: artifactOf(zip3Aggregate({ cells: [
+    { unit_id: "480", period: "2025", patient_count: 12.5, suppressed: false }] })) }), "invalid_shape");
+  // 610: a prior artifact must itself be a routed heat-map artifact.
+  throwsCode(() => conform({ prior_artifact: corporate({ declared_data_classes: ["market_comp"] }) }),
+    "invalid_prior_artifact");
+  // 635 / 647: unregistered reversibility and temporal precision are denied.
+  refuses(conform({ artifact: artifactOf(zip3Aggregate({ reversibility: "mystery" })) }), "unknown_reversibility_denied");
+  refuses(conform({ artifact: artifactOf(zip3Aggregate({ temporal_precision: "fortnight" })) }),
+    "unknown_temporal_precision_denied");
+  // 669 / 670: with no temporal precision, a cell may not carry a period; without one it conforms.
+  const none = zip3Aggregate({ temporal_precision: "none", cells: [
+    { unit_id: "480", period: "2025", patient_count: 40, suppressed: false }] });
+  refuses(conform({ artifact: artifactOf(none), receipts: [safeHarbor(none)] }), "cell_period_finer_than_declared");
+  const noneOk = zip3Aggregate({ temporal_precision: "none", cells: [
+    { unit_id: "480", patient_count: 40, suppressed: false }] });
+  assert.equal(conform({ artifact: artifactOf(noneOk), receipts: [safeHarbor(noneOk)] }).decision, "conforms");
+  // 677: a repeated cell is a contract violation.
+  throwsCode(() => conform({ artifact: artifactOf(zip3Aggregate({ cells: [
+    { unit_id: "480", period: "2025", patient_count: 40, suppressed: false },
+    { unit_id: "480", period: "2025", patient_count: 41, suppressed: false }] })) }), "duplicate_cell");
+});
+
+test("MUTANTS: privacy guards that only fire in combination each have a witness", () => {
+  // 699: the state prefix refuses on its own, before any county list is consulted.
+  const badState = countyAggregate({ cells: [
+    { unit_id: "99001", period: "2025-Q1", patient_count: 40, suppressed: false }], published_total: null });
+  refuses(evaluatePrivacyRouteConformance({ tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(badState),
+    context: CONTEXT, route_receipts: [expert(badState)], now: NOW }), "cell_not_a_valid_county_fips");
+  // 1153: a published total with nothing suppressed carries no residual to protect.
+  const totalled = countyAggregate({ published_total: 65, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56003", period: "2025-Q1", patient_count: 25, suppressed: false }] });
+  assert.equal(conformExpert(totalled).decision, "conforms");
+  // 1457: a cell with no counterpart is not differenced (and does not crash).
+  const first = countyAggregate({ published_total: null, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false },
+    { unit_id: "56009", period: "2025-Q1", patient_count: 30, suppressed: false }] });
+  const r = op("difference_between_artifacts", { aggregate: first, ledger: ledgerFor(first),
+    counterpart: secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }]) });
+  assert.equal(r.decision, "within_budget");
+  // 1550: confidence outside [0, 1] is a contract violation.
+  for (const confidence of [1.5, -0.1, Number.NaN]) {
+    throwsCode(() => propose({ confidence }), "invalid_shape");
+  }
+  // The widening scan covers every key because no declared key contains a fragment.
+  for (const key of J302.V5_J302_PROPOSAL_KEYS) {
+    assert.ok(!J302.V5_J302_PROPOSAL_WIDENING_FRAGMENTS.some(f => key.includes(f)), key);
+  }
+});
+
+test("MUTANTS: duplicates in columns, processors, processor terms and population keys are contract violations", () => {
+  throwsCode(() => conform({ artifact: artifactOf(zip3Aggregate({ columns: ["unit_id", "unit_id", "patient_count"] })) }),
+    "duplicate_column");
+  throwsCode(() => conform({ context: { ...CONTEXT, processors: ["p", "p"] } }), "duplicate_processor");
+  throwsCode(() => conformExpert(undefined, { processor_terms: [
+    { processor_id: "synthetic-processor-a", terms_digest: D("t1") },
+    { processor_id: "synthetic-processor-a", terms_digest: D("t2") }] }), "duplicate_processor");
+  throwsCode(() => zip3PopulationTableDigest({ "4800": 1 }), "invalid_zip3");
+});
+
+test("MUTANTS: the shape primitives refuse what they cannot read", () => {
+  const base = { tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(), context: CONTEXT,
+    route_receipts: [safeHarbor()], now: NOW };
+  // Accessors, symbol keys and non-plain objects are never read.
+  const getter = { ...base };
+  Object.defineProperty(getter, "now", { get: () => NOW, enumerable: true });
+  throwsCode(() => evaluatePrivacyRouteConformance(getter), "invalid_shape");
+  throwsCode(() => evaluatePrivacyRouteConformance({ ...base, [Symbol("x")]: 1 }), "invalid_shape");
+  throwsCode(() => evaluatePrivacyRouteConformance(new Map()), "invalid_shape");
+  throwsCode(() => evaluatePrivacyRouteConformance({ ...base, route_receipts: "one" }), "invalid_shape");
+  throwsCode(() => conform({ context: { ...CONTEXT, recipient_id: "has space" } }), "invalid_identifier");
+  throwsCode(() => propose({ statement: "hidden‮text" }), "invalid_shape");
+  throwsCode(() => conform({ receipts: [safeHarbor(undefined, { no_actual_knowledge_attestation: "yes" })] }),
+    "invalid_shape");
+  throwsCode(() => conform({ now: "yesterday" }), "invalid_timestamp");
+  // An error carries the detail it names.
+  try { conform({ context: { ...CONTEXT, extra: 1 } }); assert.fail("expected a throw"); }
+  catch (err) { assert.equal(err.detail.key, "extra"); }
+  // Every result is deeply frozen, so a caller cannot edit an answer after the fact.
+  const r = conform();
+  assert.ok(Object.isFrozen(r));
+  assert.ok(Object.isFrozen(r.required_runtime_evidence));
+  assert.ok(Object.isFrozen(r.effects));
+});
+
+test("DIFF: the stricter floor of the two artifacts governs their differences", () => {
+  const first = countyAggregate({ published_total: null, cells: [
+    { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }] });
+  // The counterpart's source declared 20; a difference of 15 clears 11 but not 20.
+  const counterpart = secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 55, suppressed: false }],
+    { source_privacy_threshold: { minimum_cell_count: 20, declared_by: "synthetic-source-privacy-office" } });
+  const r = op("difference_between_artifacts", { aggregate: first, ledger: ledgerFor(first), counterpart });
+  refuses(r, "difference_below_floor");
+  assert.equal(r.minimum_cell_count, 20);
 });

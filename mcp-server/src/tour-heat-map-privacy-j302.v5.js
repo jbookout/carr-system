@@ -220,15 +220,20 @@ function assertInstant(value, path) {
       (offsetHour !== undefined && (Number(offsetHour) > 23 || Number(offsetMinute) > 59))) {
     fail("invalid_timestamp", `${path} names an instant that does not exist on the calendar`, { path });
   }
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) fail("invalid_timestamp", `${path} is not a readable instant`, { path });
-  return parsed;
+  // The pattern and calendar checks above admit only instants Date.parse reads.
+  return Date.parse(value);
 }
 
 function assertTenant(value, path) {
   if (value !== ORGANIZATION_TENANT_ID) {
     fail("foreign_tenant", `${path} must be the organization tenant`, { path });
   }
+}
+
+/** Identities compare after Unicode NFKC, trimming and case folding. */
+function sameIdentity(a, b) {
+  const norm = v => String(v).normalize("NFKC").trim().toLowerCase();
+  return norm(a) === norm(b);
 }
 
 /** A validated, frozen, accessor-free copy, so a later mutation reaches nothing. */
@@ -373,6 +378,27 @@ export const V5_J302_IDENTIFIER_COLUMNS = deepFreeze([
   "longitude", "medical_record_number", "mrn", "name", "patient_id", "patient_name",
   "phone", "photo", "ssn", "street", "url", "vehicle_id", "zip", "zip5", "zip_code",
 ]);
+
+/**
+ * The two-digit state FIPS prefixes (50 states, DC, and the five populated
+ * territories). A county-bearing unit whose first two digits are not one of
+ * these is not a county, whatever its length.
+ */
+export const V5_J302_STATE_FIPS = deepFreeze([
+  "01", "02", "04", "05", "06", "08", "09", "10", "11", "12", "13", "15", "16", "17",
+  "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
+  "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "44", "45", "46",
+  "47", "48", "49", "50", "51", "53", "54", "55", "56", "60", "66", "69", "72", "78",
+]);
+/** County-bearing geographies: their first five digits are a county FIPS code. */
+export const V5_J302_COUNTY_BEARING_UNITS = deepFreeze(["census_block_group", "census_tract", "county"]);
+
+/**
+ * The kernel's own floor beneath any config. A config may RAISE the platform
+ * small-cell floor; it can never lower it below this, and the complementary-
+ * suppression residual is held to the same floor under both routes.
+ */
+export const V5_J302_KERNEL_MINIMUM_SMALL_CELL_FLOOR = 11;
 
 const UNIT_ID_FORMAT = deepFreeze({
   state: /^[A-Z]{2}$/,
@@ -568,7 +594,7 @@ export function zip3PopulationTableDigest(table) {
  * complementary suppression. Returns either a refusal or the facts later
  * stages need.
  */
-function judgeArtifact(rawArtifact, context, now, base, priorRaw) {
+function judgeArtifact(rawArtifact, context, now, base, priorRaw, cfg) {
   assertObject(rawArtifact, "request.artifact");
   assertClosedKeys(rawArtifact, ARTIFACT_KEYS, "request.artifact");
   assertRequiredKeys(rawArtifact, ARTIFACT_KEYS, "request.artifact");
@@ -666,6 +692,20 @@ function judgeArtifact(rawArtifact, context, now, base, priorRaw) {
     if (!zip3Suppressed && !unitFormat.test(cell.unit_id)) {
       return { refusal: refusal("cell_finer_than_declared_geography", base, { cell_index: i }) };
     }
+    // Five digits cannot tell a county from a ZIP5, so a county-bearing unit
+    // must carry a real state prefix AND a county code on the bound list.
+    if (V5_J302_COUNTY_BEARING_UNITS.includes(aggregate.geography_unit)) {
+      if (!V5_J302_STATE_FIPS.includes(cell.unit_id.slice(0, 2))) {
+        return { refusal: refusal("cell_not_a_valid_county_fips", base, { cell_index: i }) };
+      }
+      if (cfg.county_fips_codes.codes === null) {
+        return { refusal: refusal("county_fips_code_list_unknown_denied", base, {
+          cell_index: i, county_fips_status: cfg.county_fips_codes.status }) };
+      }
+      if (!cfg.county_fips_codes.codes.includes(cell.unit_id.slice(0, 5))) {
+        return { refusal: refusal("cell_not_a_valid_county_fips", base, { cell_index: i }) };
+      }
+    }
     if (aggregate.temporal_precision === "none") {
       if (cell.period !== null) {
         return { refusal: refusal("cell_period_finer_than_declared", base, { cell_index: i }) };
@@ -690,6 +730,13 @@ function judgeArtifact(rawArtifact, context, now, base, priorRaw) {
     }
     if (suppressed === 1) {
       return { refusal: refusal("complementary_suppression_missing", base) };
+    }
+    // Two or more suppressed cells whose combined residual is below the floor
+    // still bound each of them tightly enough to reveal a small group. This
+    // holds under both routes, whatever a receipt says about suppression.
+    if (suppressed >= 2 && residual < cfg.platform_small_cell_floor) {
+      return { refusal: refusal("complementary_suppression_residual_below_floor", base,
+        { minimum_cell_count: cfg.platform_small_cell_floor }) };
     }
   }
 
@@ -721,7 +768,7 @@ const CONFIG_KEYS = Object.freeze([
   "schema_version", "provenance", "set_on", "platform_small_cell_floor",
   "platform_small_cell_floor_basis", "client_visible_heat_map_content",
   "client_visibility_decision_ref", "safe_harbor_unbudgeted_operations",
-  "census_2020_zip3_population",
+  "census_2020_zip3_population", "county_fips_codes",
 ]);
 export const V5_J302_CONFIG_SCHEMA_VERSION = "doctorcre-v5-j302-privacy-config.v1";
 export const V5_J302_AUDIENCES = deepFreeze(["client", "internal"]);
@@ -751,24 +798,41 @@ export function readHeatMapPrivacyConfig(raw) {
     fail("invalid_config", "a pinned 2020 table carries a digest and an unavailable one carries null");
   }
   if (census.table_digest !== null) assertDigestRef(census.table_digest, "config.census_2020_zip3_population.table_digest");
-  const visible = assertArray(raw.client_visible_heat_map_content, "config.client_visible_heat_map_content",
-    { min: 0, max: V5_J302_HEAT_MAP_CONTENT_KINDS.length })
-    .map((k, i) => assertEnum(k, V5_J302_HEAT_MAP_CONTENT_KINDS, `config.client_visible_heat_map_content[${i}]`,
-      "invalid_config"));
+  // Clients see exactly the Tour PDF fields; no config can open a heat-map
+  // content kind to them.
+  assertArray(raw.client_visible_heat_map_content, "config.client_visible_heat_map_content");
+  if (raw.client_visible_heat_map_content.length !== 0) {
+    fail("invalid_config", "config.client_visible_heat_map_content must be empty");
+  }
+  const county = assertObject(raw.county_fips_codes, "config.county_fips_codes");
+  assertClosedKeys(county, ["status", "codes"], "config.county_fips_codes");
+  assertRequiredKeys(county, ["status", "codes"], "config.county_fips_codes");
+  assertEnum(county.status, ["pinned", "unavailable_offline"], "config.county_fips_codes.status", "invalid_config");
+  if ((county.status === "pinned") !== (county.codes !== null)) {
+    fail("invalid_config", "a pinned county list carries codes and an unavailable one carries null");
+  }
+  const countyCodes = county.codes === null ? null
+    : assertArray(county.codes, "config.county_fips_codes.codes", { min: 1, max: 4000 }).map((c, i) => {
+      if (typeof c !== "string" || !/^\d{5}$/.test(c) || !V5_J302_STATE_FIPS.includes(c.slice(0, 2))) {
+        fail("invalid_config", `config.county_fips_codes.codes[${i}] is not a county FIPS code`);
+      }
+      return c;
+    });
   return deepFreeze({
     schema_version: raw.schema_version,
     provenance: assertIdent(raw.provenance, "config.provenance"),
     set_on: assertIdent(raw.set_on, "config.set_on"),
     platform_small_cell_floor: assertInteger(raw.platform_small_cell_floor, "config.platform_small_cell_floor",
-      { min: 1 }),
+      { min: V5_J302_KERNEL_MINIMUM_SMALL_CELL_FLOOR }),
     platform_small_cell_floor_basis: assertIdent(raw.platform_small_cell_floor_basis,
       "config.platform_small_cell_floor_basis"),
-    client_visible_heat_map_content: [...visible].sort(),
+    client_visible_heat_map_content: [],
     client_visibility_decision_ref: assertIdent(raw.client_visibility_decision_ref,
       "config.client_visibility_decision_ref"),
     safe_harbor_unbudgeted_operations: assertEnum(raw.safe_harbor_unbudgeted_operations, ["refuse"],
       "config.safe_harbor_unbudgeted_operations", "invalid_config"),
     census_2020_zip3_population: { vintage: "2020", status: census.status, table_digest: census.table_digest },
+    county_fips_codes: { status: county.status, codes: countyCodes === null ? null : [...new Set(countyCodes)].sort() },
   });
 }
 
@@ -938,8 +1002,8 @@ function judgeReceiptCommon(receipt, facts, context, now, base) {
   if (receipt.issuer.kind === "model") {
     return refusal("model_cannot_issue_privacy_route", base);
   }
-  if (receipt.issuer.identity === context.requesting_actor ||
-      receipt.issuer.identity === context.recipient_id) {
+  if (sameIdentity(receipt.issuer.identity, context.requesting_actor) ||
+      sameIdentity(receipt.issuer.identity, context.recipient_id)) {
     return refusal("route_not_independent_of_requester", base);
   }
   if (receipt.issued_at > now) return refusal("route_issued_after_now", base);
@@ -1016,10 +1080,7 @@ function judgeSafeHarbor(receipt, facts, base, cfg) {
       }
     }
   }
-  // The platform floor binds under Safe Harbor too; the source's threshold
-  // replaces it only when stricter.
-  const minimum = Math.max(cfg.platform_small_cell_floor,
-    aggregate.source_privacy_threshold.minimum_cell_count);
+  const minimum = effectiveFloor(receipt, facts, cfg);
   const breach = smallCellBreach(aggregate, minimum);
   if (breach >= 0) {
     return refusal("small_cell_below_effective_floor", base, { cell_index: breach, minimum_cell_count: minimum });
@@ -1028,9 +1089,14 @@ function judgeSafeHarbor(receipt, facts, base, cfg) {
 }
 
 function judgeExpertDetermination(receipt, facts, context, now, base, cfg) {
-  if (receipt.expert.identity === context.requesting_actor ||
-      receipt.expert.identity === context.recipient_id) {
+  if (sameIdentity(receipt.expert.identity, context.requesting_actor) ||
+      sameIdentity(receipt.expert.identity, context.recipient_id)) {
     return refusal("expert_not_independent_of_requester", base);
+  }
+  // The oracle attests the expert's determination; an expert attesting their
+  // own determination is self-certification, not an independent route.
+  if (sameIdentity(receipt.expert.identity, receipt.issuer.identity)) {
+    return refusal("issuer_is_the_expert", base);
   }
   if (receipt.expert.independent_of_recipient !== true) {
     return refusal("expert_independence_not_stated", base);
@@ -1051,21 +1117,12 @@ function judgeExpertDetermination(receipt, facts, context, now, base, cfg) {
       { temporal_precision: aggregate.temporal_precision, finest_temporal_precision: finestTemporal });
   }
   // Q048.D1: the source threshold is preserved even when the expert would
-  // accept a smaller cell. The stricter of the two governs.
-  const minimum = Math.max(receipt.small_cell.minimum_cell_count,
-    aggregate.source_privacy_threshold.minimum_cell_count, cfg.platform_small_cell_floor);
+  // accept a smaller cell, and the platform floor binds beneath both.
+  const minimum = effectiveFloor(receipt, facts, cfg);
   const breach = smallCellBreach(aggregate, minimum);
   if (breach >= 0) {
     return refusal("small_cell_below_determination_threshold", base,
       { cell_index: breach, minimum_cell_count: minimum });
-  }
-  if (receipt.small_cell.complementary_suppression_required &&
-      aggregate.cells.some(c => c.suppressed) && aggregate.published_total !== null &&
-      aggregate.published_total - aggregate.cells.reduce((s, c) => s + (c.suppressed ? 0 : c.patient_count), 0)
-        < minimum) {
-    // Two or more suppressed cells whose combined residual is below the floor
-    // still bound each of them tightly enough to reveal a small group.
-    return refusal("complementary_suppression_residual_below_threshold", base);
   }
   const covered = new Set(receipt.processor_terms.map(t => t.processor_id));
   const uncovered = context.processors.filter(p => !covered.has(p));
@@ -1079,6 +1136,22 @@ function judgeExpertDetermination(receipt, facts, context, now, base, cfg) {
     return refusal("retention_outlives_determination", base);
   }
   return null;
+}
+
+/** The strictest of the platform floor, the source threshold and (ED) the expert's minimum. */
+function effectiveFloor(receipt, facts, cfg) {
+  const floors = [cfg.platform_small_cell_floor, facts.aggregate.source_privacy_threshold.minimum_cell_count];
+  if (receipt.route === "expert_determination") floors.push(receipt.small_cell.minimum_cell_count);
+  return Math.max(...floors);
+}
+
+/** A residual below the EFFECTIVE floor, for artifacts whose floor is above the platform's. */
+function residualBelow(aggregate, minimum) {
+  if (aggregate.published_total === null) return false;
+  const suppressed = aggregate.cells.filter(c => c.suppressed).length;
+  if (suppressed < 2) return false;
+  const visibleSum = aggregate.cells.reduce((s, c) => s + (c.suppressed ? 0 : c.patient_count), 0);
+  return aggregate.published_total - visibleSum < minimum;
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1173,8 @@ export function evaluatePrivacyRouteConformance(request) {
   return conformanceWith(request, V5_J302_ACTIVE_CONFIG);
 }
 
-function conformanceWith(request, cfg) {
+/** Returns { result } always, and { receipt, facts, context } when the route conforms. */
+function conformanceCore(request, cfg) {
   assertObject(request, "request");
   assertClosedKeys(request, CONFORMANCE_KEYS, "request");
   assertRequiredKeys(request, ["tenant", "artifact", "context", "route_receipts", "now"], "request");
@@ -1110,41 +1184,52 @@ function conformanceWith(request, cfg) {
   const receipts = assertArray(request.route_receipts, "request.route_receipts", { min: 0, max: 8 });
   const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null };
 
-  const judged = judgeArtifact(request.artifact, context, now, base, request.prior_artifact);
-  if (judged.refusal) return judged.refusal;
+  const judged = judgeArtifact(request.artifact, context, now, base, request.prior_artifact, cfg);
+  if (judged.refusal) return { result: judged.refusal };
   const { facts } = judged;
   const withArtifact = { ...base, artifact_digest: facts.artifact_digest,
     binding_digest: facts.binding_digest };
 
   if (receipts.length !== 1) {
-    return refusal("exactly_one_privacy_route_required", withArtifact,
-      { routes_presented: receipts.length });
+    return { result: refusal("exactly_one_privacy_route_required", withArtifact,
+      { routes_presented: receipts.length }) };
   }
   const receipt = readReceipt(receipts[0], "request.route_receipts[0]");
   const routed = { ...withArtifact, route: receipt.route, receipt_id: receipt.receipt_id };
 
   const common = judgeReceiptCommon(receipt, facts, context, now, routed);
-  if (common) return common;
+  if (common) return { result: common };
   const specific = receipt.route === "safe_harbor"
     ? judgeSafeHarbor(receipt, facts, routed, cfg)
     : judgeExpertDetermination(receipt, facts, context, now, routed, cfg);
-  if (specific) return specific;
+  if (specific) return { result: specific };
+  const floor = effectiveFloor(receipt, facts, cfg);
+  if (residualBelow(facts.aggregate, floor)) {
+    return { result: refusal("complementary_suppression_residual_below_floor", routed,
+      { minimum_cell_count: floor }) };
+  }
 
-  return outcome({
-    decision: "conforms",
-    reason_id: "route_conforms_pending_independent_issuance",
-    ...routed,
-    expires_at: new Date(receipt.expires_at).toISOString(),
-    retain_until: receipt.route === "expert_determination"
-      ? new Date(receipt.retention.retain_until).toISOString() : null,
-    budgets: receipt.route === "expert_determination" ? { ...receipt.budgets } : null,
-    effective_small_cell_floor: receipt.route === "safe_harbor"
-      ? Math.max(cfg.platform_small_cell_floor, facts.aggregate.source_privacy_threshold.minimum_cell_count)
-      : Math.max(cfg.platform_small_cell_floor, facts.aggregate.source_privacy_threshold.minimum_cell_count,
-        receipt.small_cell.minimum_cell_count),
-    config_digest: digest(cfg),
-    required_runtime_evidence: [...V5_J302_REQUIRED_RUNTIME_EVIDENCE],
-  });
+  return {
+    receipt, facts, context, now, floor,
+    result: outcome({
+      decision: "conforms",
+      reason_id: "route_conforms_pending_independent_issuance",
+      ...routed,
+      expires_at: new Date(receipt.expires_at).toISOString(),
+      retain_until: receipt.route === "expert_determination"
+        ? new Date(receipt.retention.retain_until).toISOString() : null,
+      budgets: receipt.route === "expert_determination" ? { ...receipt.budgets } : null,
+      effective_small_cell_floor: floor,
+      ledger_key: privacyBudgetLedgerKey({ artifact_digest: facts.artifact_digest,
+        binding_digest: facts.binding_digest }),
+      config_digest: digest(cfg),
+      required_runtime_evidence: [...V5_J302_REQUIRED_RUNTIME_EVIDENCE],
+    }),
+  };
+}
+
+function conformanceWith(request, cfg) {
+  return conformanceCore(request, cfg).result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,7 +1253,8 @@ export function admitAggregateHeatMapArtifact(request) {
   const now = assertInstant(request.now, "request.now");
   const context = readContext(request.context, "request.context");
   const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null };
-  const judged = judgeArtifact(request.artifact, context, now, base, request.prior_artifact);
+  const judged = judgeArtifact(request.artifact, context, now, base, request.prior_artifact,
+    V5_J302_ACTIVE_CONFIG);
   if (judged.refusal) return judged.refusal;
   return refusal("independent_privacy_route_receipt_unavailable", {
     ...base, artifact_digest: judged.facts.artifact_digest, binding_digest: judged.facts.binding_digest,
@@ -1181,11 +1267,36 @@ export function admitAggregateHeatMapArtifact(request) {
 
 // ---------------------------------------------------------------------------
 // Public: one operation over an artifact, and its budget.
+//
+// NEVER TRUST HANDED EVIDENCE. The operation takes the artifact, the context
+// and the route receipts, and RE-RUNS the full conformance judgement itself;
+// nothing about the receipt is believed until that recomputation passes. The
+// artifact digest the operation acts on is the recomputed one, and the budget
+// ledger is keyed by artifact x dataset-recipient-environment binding, so
+// minting a new receipt id cannot mint a new budget.
+//
+// RESIDUAL, OWED TO THE STORE. A pure kernel cannot tell a genuine ledger from
+// a caller's fresh zeroed one at version 0. The ledger invariant below refuses
+// every OTHER inconsistent ledger, and the compare-and-swap precondition names
+// exactly what the store must hold; the store keyed by ledger_key is what
+// finally stops a reset (V5_J302_BUDGET_LEDGER_STORE_SEAM).
 // ---------------------------------------------------------------------------
 
-const OPERATION_REQUEST_KEYS = Object.freeze(["tenant", "route_receipt", "ledger", "operation", "now"]);
-const OPERATION_KEYS = Object.freeze(["kind", "artifact_digest"]);
-const LEDGER_KEYS = Object.freeze(["schema_version", "receipt_id", "ledger_version", "used"]);
+const OPERATION_REQUEST_KEYS = Object.freeze([
+  "tenant", "artifact", "context", "route_receipts", "ledger", "operation", "counterpart", "now",
+]);
+const OPERATION_KEYS = Object.freeze(["kind"]);
+const COUNTERPART_KEYS = Object.freeze(["artifact", "route_receipts"]);
+const LEDGER_KEYS = Object.freeze(["schema_version", "ledger_key", "ledger_version", "used"]);
+
+/** The budget ledger's identity: one artifact under one dataset x recipient x environment binding. */
+export function privacyBudgetLedgerKey({ artifact_digest, binding_digest }) {
+  return digest({
+    schema_version: V5_J302_LEDGER_SCHEMA_VERSION,
+    artifact_digest: assertDigestRef(artifact_digest, "ledger_key.artifact_digest"),
+    binding_digest: assertDigestRef(binding_digest, "ledger_key.binding_digest"),
+  });
+}
 
 function readLedger(raw, path) {
   assertObject(raw, path);
@@ -1199,17 +1310,17 @@ function readLedger(raw, path) {
   assertRequiredKeys(used, V5_J302_BUDGET_CLASSES, `${path}.used`);
   return {
     schema_version: V5_J302_LEDGER_SCHEMA_VERSION,
-    receipt_id: assertIdent(raw.receipt_id, `${path}.receipt_id`),
+    ledger_key: assertDigestRef(raw.ledger_key, `${path}.ledger_key`),
     ledger_version: assertInteger(raw.ledger_version, `${path}.ledger_version`),
     used: Object.fromEntries(V5_J302_BUDGET_CLASSES.map(k => [k, assertInteger(used[k], `${path}.used.${k}`)])),
   };
 }
 
-/** A fresh, zeroed ledger for one receipt. The persistence owner stores it; this returns bytes. */
-export function emptyPrivacyBudgetLedger(receipt_id) {
+/** A fresh, zeroed ledger for one ledger key. The persistence owner stores it; this returns bytes. */
+export function emptyPrivacyBudgetLedger(ledger_key) {
   return deepFreeze({
     schema_version: V5_J302_LEDGER_SCHEMA_VERSION,
-    receipt_id: assertIdent(receipt_id, "receipt_id"),
+    ledger_key: assertDigestRef(ledger_key, "ledger_key"),
     ledger_version: 0,
     used: { differencing: 0, export: 0, query: 0 },
   });
@@ -1217,12 +1328,13 @@ export function emptyPrivacyBudgetLedger(receipt_id) {
 
 /**
  * Judge one operation. Re-identifying operations refuse by name under every
- * route. Under Expert Determination a permitted operation consumes exactly one
- * unit of its budget class; the answer carries the next ledger and the
- * compare-and-swap precondition the store must hold atomically, so two
- * concurrent callers holding the same ledger cannot both spend its last unit.
- * Safe Harbor binds no budget, so any budgeted class beyond plain viewing is
- * refused there rather than left unmetered.
+ * route; everything else first re-runs conformance on the artifact and its
+ * receipts. Under Expert Determination a permitted operation consumes exactly
+ * one unit of its budget class from a ledger whose key and internal
+ * consistency are both checked. Safe Harbor binds no budget, so any budgeted
+ * class beyond plain viewing is refused there. Differencing needs the second
+ * artifact and its receipts, re-runs conformance on it too, and refuses any
+ * shared cell whose difference is non-zero and below the small-cell floor.
  */
 export function evaluateAggregateOperation(request) {
   return operationWith(request, V5_J302_ACTIVE_CONFIG);
@@ -1231,17 +1343,14 @@ export function evaluateAggregateOperation(request) {
 function operationWith(request, cfg) {
   assertObject(request, "request");
   assertClosedKeys(request, OPERATION_REQUEST_KEYS, "request");
-  assertRequiredKeys(request, ["tenant", "route_receipt", "operation", "now"], "request");
+  assertRequiredKeys(request, ["tenant", "artifact", "context", "route_receipts", "operation", "now"], "request");
   assertTenant(request.tenant, "request.tenant");
-  const now = assertInstant(request.now, "request.now");
   const operation = assertObject(request.operation, "request.operation");
   assertClosedKeys(operation, OPERATION_KEYS, "request.operation");
   assertRequiredKeys(operation, OPERATION_KEYS, "request.operation");
   const kind = assertText(operation.kind, "request.operation.kind", { maxLength: 64 });
-  const artifact_digest = assertDigestRef(operation.artifact_digest, "request.operation.artifact_digest");
-  const receipt = readReceipt(request.route_receipt, "request.route_receipt");
-  const base = { tenant: ORGANIZATION_TENANT_ID, route: receipt.route, receipt_id: receipt.receipt_id,
-    operation_kind: kind, artifact_digest, next_ledger: null, compare_and_swap: null };
+  const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null, operation_kind: kind,
+    next_ledger: null, compare_and_swap: null };
 
   if (V5_J302_REIDENTIFYING_OPERATIONS.includes(kind)) {
     return refusal("reidentifying_operation_refused", base);
@@ -1249,43 +1358,67 @@ function operationWith(request, cfg) {
   if (!V5_J302_OPERATION_KINDS.includes(kind)) {
     return refusal("unknown_operation_denied", base);
   }
-  if (receipt.expires_at <= now) return refusal("route_expired", base);
+
+  const core = conformanceCore({ tenant: request.tenant, artifact: request.artifact, context: request.context,
+    route_receipts: request.route_receipts, now: request.now }, cfg);
+  if (core.result.decision !== "conforms") {
+    return refusal("route_not_conforming", base, { conformance_reason_id: core.result.reason_id });
+  }
+  const { receipt, facts, floor } = core;
+  const ledger_key = core.result.ledger_key;
+  const routed = { ...base, route: receipt.route, receipt_id: receipt.receipt_id,
+    artifact_digest: facts.artifact_digest, binding_digest: facts.binding_digest, ledger_key };
   const budgetClass = V5_J302_OPERATIONS[kind];
+
+  if (budgetClass === "differencing") {
+    const differencing = judgeDifferencing(request, cfg, facts, floor, routed);
+    if (differencing) return differencing;
+  } else if (request.counterpart !== undefined) {
+    fail("unexpected_counterpart", "request.counterpart is read only for differencing",
+      { path: "request.counterpart" });
+  }
 
   if (receipt.route === "safe_harbor") {
     if (budgetClass !== "query" && cfg.safe_harbor_unbudgeted_operations === "refuse") {
-      return refusal("operation_budget_not_bound_by_route", base, { budget_class: budgetClass });
+      return refusal("operation_budget_not_bound_by_route", routed, { budget_class: budgetClass });
     }
     return outcome({ decision: "within_route", reason_id: "safe_harbor_native_precision_query",
-      ...base, budget_class: budgetClass });
+      ...routed, budget_class: budgetClass });
   }
 
   if (request.ledger === undefined || request.ledger === null) {
-    return refusal("budget_ledger_required", base, { owed_seam: V5_J302_BUDGET_LEDGER_STORE_SEAM });
+    return refusal("budget_ledger_required", routed, { owed_seam: V5_J302_BUDGET_LEDGER_STORE_SEAM });
   }
   const ledger = readLedger(request.ledger, "request.ledger");
-  if (ledger.receipt_id !== receipt.receipt_id) {
-    return refusal("budget_ledger_receipt_mismatch", base);
+  if (ledger.ledger_key !== ledger_key) {
+    return refusal("budget_ledger_key_mismatch", routed);
   }
-  if (receipt.retention.retain_until <= now) return refusal("retention_elapsed", base);
+  // Every reservation moves the version by one and spends exactly one unit, so
+  // a ledger whose version and spend disagree was not produced by this kernel.
+  const spent = V5_J302_BUDGET_CLASSES.reduce((sum, k) => sum + ledger.used[k], 0);
+  if (ledger.ledger_version !== spent) {
+    return refusal("budget_ledger_inconsistent", routed,
+      { ledger_version: ledger.ledger_version, units_spent: spent });
+  }
   const limit = receipt.budgets[budgetClass];
   if (ledger.used[budgetClass] + 1 > limit) {
-    return refusal("privacy_budget_exhausted", base,
+    return refusal("privacy_budget_exhausted", routed,
       { budget_class: budgetClass, used: ledger.used[budgetClass], limit });
   }
   const next_ledger = {
     schema_version: V5_J302_LEDGER_SCHEMA_VERSION,
-    receipt_id: ledger.receipt_id,
+    ledger_key,
     ledger_version: ledger.ledger_version + 1,
     used: { ...ledger.used, [budgetClass]: ledger.used[budgetClass] + 1 },
   };
   return outcome({
     decision: "within_budget", reason_id: "expert_determination_budget_unit_reserved_in_kernel",
-    ...base,
+    ...routed,
     budget_class: budgetClass,
     remaining_after: limit - next_ledger.used[budgetClass],
     next_ledger,
     compare_and_swap: {
+      ledger_key,
       expected_ledger_version: ledger.ledger_version,
       expected_ledger_digest: digest(ledger),
       next_ledger_digest: digest(next_ledger),
@@ -1295,24 +1428,68 @@ function operationWith(request, cfg) {
   });
 }
 
+/** The two-artifact differencing floor. Returns a refusal, or null when every shared difference is safe. */
+function judgeDifferencing(request, cfg, facts, floor, routed) {
+  if (request.counterpart === undefined || request.counterpart === null) {
+    return refusal("differencing_counterpart_required", routed);
+  }
+  const counterpart = assertObject(request.counterpart, "request.counterpart");
+  assertClosedKeys(counterpart, COUNTERPART_KEYS, "request.counterpart");
+  assertRequiredKeys(counterpart, COUNTERPART_KEYS, "request.counterpart");
+  const other = conformanceCore({ tenant: request.tenant, artifact: counterpart.artifact,
+    context: request.context, route_receipts: counterpart.route_receipts, now: request.now }, cfg);
+  if (other.result.decision !== "conforms") {
+    return refusal("differencing_counterpart_not_conforming", routed,
+      { conformance_reason_id: other.result.reason_id });
+  }
+  const a = facts.aggregate, b = other.facts.aggregate;
+  if (other.facts.artifact_digest === facts.artifact_digest) {
+    return refusal("differencing_same_artifact", routed);
+  }
+  if (a.geography_unit !== b.geography_unit || a.temporal_precision !== b.temporal_precision) {
+    return refusal("differencing_precision_mismatch", routed);
+  }
+  const minimum = Math.max(floor, other.floor);
+  const index = new Map(b.cells.map(c => [`${c.unit_id}\u0000${c.period ?? ""}`, c]));
+  for (const cell of a.cells) {
+    const match = index.get(`${cell.unit_id}\u0000${cell.period ?? ""}`);
+    if (!match || cell.suppressed || match.suppressed) continue;
+    const difference = Math.abs(cell.patient_count - match.patient_count);
+    if (difference > 0 && difference < minimum) {
+      return refusal("difference_below_floor", routed,
+        { unit_id: cell.unit_id, minimum_cell_count: minimum });
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
-// Public: derived strategy proposals (Q071.D2). A proposal stays a proposal.
+// Public: derived strategy proposals (Q071.D2). A proposal stays a proposal,
+// and it is derived only from an artifact that conforms — the same artifact
+// checks, F01 admission and floors, recomputed here rather than trusted.
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_REQUEST_KEYS = Object.freeze(["tenant", "artifact", "proposal", "now"]);
-const PROPOSAL_KEYS = Object.freeze([
+const PROPOSAL_REQUEST_KEYS = Object.freeze(["tenant", "artifact", "context", "route_receipts", "proposal", "now"]);
+export const V5_J302_PROPOSAL_KEYS = Object.freeze([
   "proposal_kind", "statement", "cited_unit_ids", "confidence", "evidence_ref", "proposed_by",
 ]);
 const PROPOSER_KEYS = Object.freeze(["kind", "identity"]);
 /** Keys that reach past "worth a review". Refused by name before the shape is read. */
-const PROPOSAL_WIDENING_FRAGMENTS = deepFreeze([
+export const V5_J302_PROPOSAL_WIDENING_FRAGMENTS = deepFreeze([
   "accept", "admit", "apply", "approve", "authority", "commit", "effect", "fact",
   "privacy", "publish", "receipt", "route", "threshold",
 ]);
-// A statement that carries a coordinate or a five-digit ZIP has gone finer than
-// any permitted aggregate, whatever the artifact said.
-const COORDINATE_TEXT = /-?\d{1,3}\.\d{3,}\s*,\s*-?\d{1,3}\.\d{3,}/;
-const ZIP5_TEXT_GLOBAL = /(^|[^\d])(\d{5})(?:-\d{4})?(?=[^\d]|$)/g;
+// Text finer than any permitted aggregate: coordinates at any decimal
+// precision, digit runs of five or more (ZIP5, ZIP+4, nine-digit ZIPs) unless
+// they are one of the artifact's own unit ids, digits spelled out one at a
+// time with separators, and street addresses.
+const COORDINATE_TEXT = /-?\d{1,3}\.\d+\s*,\s*-?\d{1,3}\.\d+/;
+const LONG_DIGIT_RUN = /\d{5,}(?:-\d{4})?/g;
+const SPACED_DIGITS = /(?:^|[^\d])\d(?:[\s.\-]\d){4,}(?![\d])/;
+const STREET_ADDRESS = new RegExp(
+  "\\b\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){0,4}" +
+  "(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|highway|hwy|" +
+  "parkway|pkwy|place|pl|circle|cir|terrace|ter|trail|trl)\\b", "i");
 
 function proposalOutcome(fields) {
   return outcome({
@@ -1324,28 +1501,44 @@ function proposalOutcome(fields) {
   });
 }
 
+/** True when the statement names geography finer than the artifact carries. */
+function statementFinerThanAggregate(statement, units) {
+  if (COORDINATE_TEXT.test(statement) || SPACED_DIGITS.test(statement) || STREET_ADDRESS.test(statement)) {
+    return true;
+  }
+  for (const match of statement.matchAll(LONG_DIGIT_RUN)) {
+    if (!units.has(match[0])) return true;
+  }
+  return false;
+}
+
 /**
  * Judge one strategy proposal derived from an aggregate artifact. A model may
  * propose; it cannot inspect the raw source, approve a route or turn its
- * proposal into a fact. The best answer is `proposal_pending_review`.
+ * proposal into a fact. The artifact must conform first; the best answer is
+ * `proposal_pending_review`.
  */
 export function evaluateDerivedStrategyProposal(request) {
+  return proposalWith(request, V5_J302_ACTIVE_CONFIG);
+}
+
+function proposalWith(request, cfg) {
   assertObject(request, "request");
   assertClosedKeys(request, PROPOSAL_REQUEST_KEYS, "request");
   assertRequiredKeys(request, PROPOSAL_REQUEST_KEYS, "request");
   assertTenant(request.tenant, "request.tenant");
-  assertInstant(request.now, "request.now");
   const proposal = assertObject(request.proposal, "request.proposal");
   const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null };
+  // No declared proposal key contains a widening fragment (asserted by the
+  // suite), so every key is scanned and none needs an exemption.
   for (const key of Object.keys(proposal)) {
-    if (PROPOSAL_KEYS.includes(key)) continue;
-    if (PROPOSAL_WIDENING_FRAGMENTS.some(f => key.toLowerCase().includes(f))) {
+    if (V5_J302_PROPOSAL_WIDENING_FRAGMENTS.some(f => key.toLowerCase().includes(f))) {
       return proposalOutcome({ decision: "refuse", reason_id: "proposal_widening_refused", ...base,
         offending_field: key });
     }
   }
-  assertClosedKeys(proposal, PROPOSAL_KEYS, "request.proposal");
-  assertRequiredKeys(proposal, PROPOSAL_KEYS, "request.proposal");
+  assertClosedKeys(proposal, V5_J302_PROPOSAL_KEYS, "request.proposal");
+  assertRequiredKeys(proposal, V5_J302_PROPOSAL_KEYS, "request.proposal");
   const proposer = assertObject(proposal.proposed_by, "request.proposal.proposed_by");
   assertClosedKeys(proposer, PROPOSER_KEYS, "request.proposal.proposed_by");
   assertRequiredKeys(proposer, PROPOSER_KEYS, "request.proposal.proposed_by");
@@ -1362,15 +1555,17 @@ export function evaluateDerivedStrategyProposal(request) {
   const cited = assertArray(proposal.cited_unit_ids, "request.proposal.cited_unit_ids", { min: 1, max: 64 })
     .map((u, i) => assertText(u, `request.proposal.cited_unit_ids[${i}]`, { maxLength: 64 }));
 
-  const artifactRaw = assertObject(request.artifact, "request.artifact");
-  assertClosedKeys(artifactRaw, ["aggregate", "descriptor_digest"], "request.artifact");
-  assertRequiredKeys(artifactRaw, ["aggregate", "descriptor_digest"], "request.artifact");
-  const aggregate = readAggregate(artifactRaw.aggregate, "request.artifact.aggregate");
-  const descriptor_digest = digest(descriptorPreimage(aggregate));
-  if (descriptor_digest !== assertDigestRef(artifactRaw.descriptor_digest, "request.artifact.descriptor_digest")) {
-    return proposalOutcome({ decision: "refuse", reason_id: "proposal_artifact_digest_mismatch", ...base });
+  // Recompute, never trust: the artifact must conform before anything is
+  // derived from it.
+  const core = conformanceCore({ tenant: request.tenant, artifact: request.artifact, context: request.context,
+    route_receipts: request.route_receipts, now: request.now }, cfg);
+  if (core.result.decision !== "conforms") {
+    return proposalOutcome({ decision: "refuse", reason_id: "proposal_artifact_not_conforming", ...base,
+      conformance_reason_id: core.result.reason_id });
   }
-  const withArtifact = { ...base, descriptor_digest };
+  const { aggregate, descriptor_digest } = core.facts;
+  const withArtifact = { ...base, route: core.receipt.route, receipt_id: core.receipt.receipt_id,
+    artifact_digest: core.facts.artifact_digest, descriptor_digest };
 
   const units = new Map();
   for (const cell of aggregate.cells) {
@@ -1378,11 +1573,7 @@ export function evaluateDerivedStrategyProposal(request) {
     list.push(cell);
     units.set(cell.unit_id, list);
   }
-  // A five-digit token is finer geography unless it is one of this artifact's
-  // own unit ids: a county FIPS code is also five digits, and naming a unit the
-  // artifact already carries at its own precision reveals nothing finer.
-  const fiveDigitTokens = [...statement.matchAll(ZIP5_TEXT_GLOBAL)].map(m => m[2]);
-  if (COORDINATE_TEXT.test(statement) || fiveDigitTokens.some(token => !units.has(token))) {
+  if (statementFinerThanAggregate(statement, units)) {
     return proposalOutcome({ decision: "refuse", reason_id: "proposal_finer_than_aggregate", ...withArtifact });
   }
   for (const unit of cited) {
@@ -1401,6 +1592,7 @@ export function evaluateDerivedStrategyProposal(request) {
     ...withArtifact,
     proposal_digest: digest({
       schema_version: V5_J302_SCHEMA_VERSION,
+      artifact_digest: core.facts.artifact_digest,
       descriptor_digest,
       proposal_kind: proposal.proposal_kind,
       statement,
@@ -1415,9 +1607,9 @@ export function evaluateDerivedStrategyProposal(request) {
 
 // ---------------------------------------------------------------------------
 // Public: who may see heat-map output. Clients see exactly the Tour PDF fields,
-// and no heat-map-derived content is one of them (Q136.D1 as settled by the
-// config's client-visibility reference). Internal projection is answered as
-// internal-only, and is still no admission.
+// and no heat-map-derived content is one of them. A client audience is ALWAYS
+// refused; no config can open it (the config reader requires the client list
+// to be empty). Internal projection is internal-only, and is still no admission.
 // ---------------------------------------------------------------------------
 
 const AUDIENCE_KEYS = Object.freeze(["tenant", "audience", "content_kind"]);
@@ -1436,25 +1628,33 @@ function audienceWith(request, cfg) {
     "request.content_kind", "unknown_content_kind");
   const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null, audience, content_kind,
     client_visibility_decision_ref: cfg.client_visibility_decision_ref };
-  if (audience === "client" && !cfg.client_visible_heat_map_content.includes(content_kind)) {
+  if (audience === "client") {
     return refusal("heat_map_content_not_client_visible", base);
   }
   return outcome({ decision: "internal_only", reason_id: "heat_map_content_internal_projection", ...base });
 }
 
 /**
- * The same public functions bound to another validated config. Production
- * imports the default-bound exports; this exists so a reviewed config change
- * (for example a pinned 2020 Census table) is exercised through the real code
- * rather than a copy. A config that does not validate throws.
+ * The same public functions bound to another validated config, so a reviewed
+ * config change (a pinned 2020 Census table, a pinned county list, a higher
+ * floor) is exercised through the real code rather than a copy.
+ *
+ * NON-AUTHORITATIVE. A config handed in here is caller data: every result is
+ * stamped config_authority "non_authoritative_binding" with the bound config's
+ * digest, the floor can never go below the kernel minimum, and no client
+ * audience can be opened. Only the default exports carry the shipped config.
  */
 export function bindHeatMapPrivacyKernel(config) {
   const cfg = readHeatMapPrivacyConfig(config);
+  const config_digest = digest(cfg);
+  const stamp = fn => request => deepFreeze({ ...fn(request, cfg),
+    config_authority: "non_authoritative_binding", config_digest });
   return Object.freeze({
     config: cfg,
-    evaluatePrivacyRouteConformance: request => conformanceWith(request, cfg),
-    evaluateAggregateOperation: request => operationWith(request, cfg),
-    evaluateHeatMapAudienceProjection: request => audienceWith(request, cfg),
+    evaluatePrivacyRouteConformance: stamp(conformanceWith),
+    evaluateAggregateOperation: stamp(operationWith),
+    evaluateDerivedStrategyProposal: stamp(proposalWith),
+    evaluateHeatMapAudienceProjection: stamp(audienceWith),
   });
 }
 
@@ -1491,10 +1691,13 @@ export function v5J302PolicyPreimage() {
     spatial_unit_rank: { ...V5_J302_SPATIAL_UNIT_RANK },
     raw_location_units: [...V5_J302_RAW_LOCATION_UNITS],
     temporal_rank: { ...V5_J302_TEMPORAL_RANK },
+    state_fips: [...V5_J302_STATE_FIPS],
+    county_bearing_units: [...V5_J302_COUNTY_BEARING_UNITS],
     permitted_columns: [...V5_J302_PERMITTED_COLUMNS],
     identifier_columns: [...V5_J302_IDENTIFIER_COLUMNS],
     operations: { ...V5_J302_OPERATIONS },
     reidentifying_operations: [...V5_J302_REIDENTIFYING_OPERATIONS],
+    kernel_minimum_small_cell_floor: V5_J302_KERNEL_MINIMUM_SMALL_CELL_FLOOR,
     platform_small_cell_floor: V5_J302_ACTIVE_CONFIG.platform_small_cell_floor,
     config: V5_J302_ACTIVE_CONFIG,
     config_digest: digest(V5_J302_ACTIVE_CONFIG),
