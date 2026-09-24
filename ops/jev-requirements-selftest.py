@@ -213,6 +213,21 @@ class CheckTests(unittest.TestCase):
             req.check({"session_id": "s1"}, recs, judge_module=fake, llm=no_llm)
             self.assertEqual(fake.last[0]["task"], "Add a dry run flag to the exporter.")
 
+    def test_harness_notices_are_not_the_partners_request(self):
+        # 2026-09-24: a background-task notice's "send a PushNotification" line
+        # was judged an unmet request and reopened the turn.
+        with Repo() as repo:
+            repo.change()
+            fake = FakeJudge()
+            notice = user("[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>monitor event"
+                          "</task-notification>\nIf this event is something the user would act on now, "
+                          "send a PushNotification.")
+            queued = {"type": "user", "origin": {"kind": "task-notification"},
+                      "message": {"role": "user", "content": "send a PushNotification"}}
+            recs = [user("Add a dry run flag to the exporter."), edit(repo.path), notice, queued]
+            req.check({"session_id": "s1"}, recs, judge_module=fake, llm=no_llm)
+            self.assertEqual(fake.last[0]["task"], "Add a dry run flag to the exporter.")
+
     def test_broken_input_never_raises(self):
         self.assertIsNone(req.check(None, [{"type": "user", "message": 7}, "junk"]))
 

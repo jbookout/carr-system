@@ -79,6 +79,10 @@ BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 SENTENCE_END = re.compile(r"(?<=[.!?;])\s+(?=[A-Z0-9`\"'(])")
 SYSTEM_TAG = re.compile(r"<(system-reminder|command-[a-z-]+|local-command-[a-z-]+)>.*?</\1>", re.S)
 FENCE = re.compile(r"```.*?```", re.S)
+# The same markers hooks/conduct-stop-gate.py is_harness_injected() refuses to
+# read as the partner's words.
+HARNESS_MARKERS = ("<system-reminder>", "<task-notification>", "[SYSTEM NOTIFICATION",
+                   "<local-command", "<command-name>", "Caveat:", "<user-prompt-submit-hook>")
 
 
 def _sibling(name):
@@ -172,6 +176,14 @@ def _human_text(rec):
     """The text of a human prompt record, or None for tool results and meta."""
     if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
         return None
+    # Harness-injected turns are not the partner's keystrokes (the conduct gate's
+    # is_harness_injected() rule). Once this check could reopen a turn, a
+    # background-task notice's boilerplate "If this event is something the user
+    # would act on now, send a PushNotification" was read as Joe's request and
+    # held a turn open (2026-09-24, the first day it acted).
+    origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+    if origin.get("kind") not in (None, "", "user", "keyboard") or rec.get("isCompactSummary"):
+        return None
     content = _content(rec)
     if isinstance(content, str):
         text = content
@@ -181,6 +193,8 @@ def _human_text(rec):
         text = "\n".join(b.get("text", "") for b in content
                          if isinstance(b, dict) and b.get("type") == "text")
     else:
+        return None
+    if text.lstrip().startswith(HARNESS_MARKERS):
         return None
     stripped = SYSTEM_TAG.sub(" ", text).strip()
     return stripped or None
