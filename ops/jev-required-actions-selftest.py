@@ -1028,6 +1028,130 @@ def receipt_unexplained_event_recorded_end_to_end():
     return ok
 
 
+# ---------------------------------------------------------------------------
+# mixed reopens (fresh review of fdc927fd): when ANY other reopen fires first
+# — #1228's Jev unmet-requirement reopen or a deterministic claim reopen — the
+# required-facets check must still run and ride in that same single reopen.
+# Before the fix it never ran on those paths, and the continuation Stop returns
+# early on stop_hook_active, so an unverified "done" claim skipped Jev.
+# ---------------------------------------------------------------------------
+
+_STUBBED_GATE = (
+    "import importlib.util, json, os, sys\n"
+    "spec = importlib.util.spec_from_file_location('ceg', os.environ['CEG_HOOK'])\n"
+    "m = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(m)\n"
+    "stub = json.loads(os.environ['CEG_JEV_REQUIREMENTS_STUB'])\n"
+    "m.jev_requirements_advisory = lambda payload, recs: stub\n"
+    "raise SystemExit(m.main())\n"
+)
+
+
+def run_gate_stubbed(records, session, state, requirements_stub):
+    """The real hook's main(), with #1228's live requirement checklist
+    replaced by a fixed answer so the case is offline and deterministic."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
+        for row in records:
+            fh.write(json.dumps(row) + "\n")
+        path = fh.name
+    try:
+        env = {**os.environ, "CARR_STOP_LATCH_STATE": state,
+               "CARR_JEV_CALLS_LOG_OVERRIDE": "/nonexistent.jsonl",
+               "CEG_HOOK": os.path.join(REPO, "hooks", "completion-evidence-gate.py"),
+               "CEG_JEV_REQUIREMENTS_STUB": json.dumps(requirements_stub)}
+        proc = subprocess.run(
+            [sys.executable, "-c", _STUBBED_GATE], text=True, capture_output=True,
+            timeout=30, env=env,
+            input=json.dumps({"transcript_path": path, "session_id": session,
+                              "stop_hook_active": False, "cwd": REPO}))
+        # EXACTLY ONE decision object: one reopen carrying both reasons, never
+        # two reopens printed back to back.
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        if len(lines) > 1:
+            return None, f"{len(lines)} output objects: {proc.stdout[:200]}"
+        body = json.loads(lines[0]) if lines else {}
+        return body.get("decision") == "block", body.get("reason", "")
+    finally:
+        os.unlink(path)
+
+
+def mixed_claim_reopen_with_refused_facet_names_only_the_claim():
+    """The converse: the facet IS refused, so the claim reopen must not gain a
+    Jev section (no spurious second reason)."""
+    recs = _unverified_done_claim(["diagnosis"], "r-mixed-refused")
+    recs.insert(-1, assistant("JEV-REFUSED: diagnosis TypeSafe returned HTTP 402, no credits", 3))
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        blocked, reason = run_gate_stubbed(recs, "s-mixed-refused", state, None)
+    ok = (blocked is True and "COMPLETION EVIDENCE GATE" in reason
+          and "JEV REQUIRED ACTIONS" not in reason)
+    print(f"{'PASS' if ok else 'FAIL'}  mixed: a claim reopen whose facet is refused names only the "
+          f"claim (blocked={blocked}, jev-named={'JEV REQUIRED ACTIONS' in reason})")
+    return ok
+
+
+def _unverified_done_claim(facets, receipt_id):
+    """A deterministic claim reopen: a multi-file patch closed with a bare
+    'Done.' (the completion-evidence selftest's own blocking case)."""
+    recs = [real_human_prompt("P1", 0, content="fix it")]
+    if facets is not None:
+        recs.append(real_advisory(facets, receipt_id, 1))
+    recs += [tool_use("apply_patch", {"command": "*** Update File: a.py\n+x\n"
+                                                 "*** Update File: b.py\n+y"}, when=2),
+             assistant("Done.", 3)]
+    return recs
+
+
+def mixed_claim_reopen_carries_missing_facet():
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        blocked, reason = run_gate_stubbed(
+            _unverified_done_claim(["diagnosis"], "r-mixed-claim"), "s-mixed-claim", state, None)
+        again, _ = run_gate_stubbed(
+            _unverified_done_claim(["diagnosis"], "r-mixed-claim"), "s-mixed-claim", state, None)
+    ok = (blocked and "COMPLETION EVIDENCE GATE" in reason
+          and "JEV REQUIRED ACTIONS" in reason and "diagnosis" in reason
+          and again is False)
+    print(f"{'PASS' if ok else 'FAIL'}  mixed: a deterministic claim reopen also names the missing "
+          f"facet in the same single reopen, and both are latched (blocked={blocked}, "
+          f"both-named={'JEV REQUIRED ACTIONS' in reason}, second={again})")
+    return ok
+
+
+def mixed_requirement_reopen_carries_missing_facet():
+    stub = {"advisory": None,
+            "unmet": [{"index": 1, "text": "add a regression test for the parser",
+                       "probability": 0.05}]}
+    recs = [real_human_prompt("P1", 0, content="fix the parser and add a regression test"),
+            real_advisory(["verification_selection"], "r-mixed-req", 1),
+            assistant("Here is where the parser work stands.", 2)]
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        blocked, reason = run_gate_stubbed(recs, "s-mixed-req", state, stub)
+        again, _ = run_gate_stubbed(recs, "s-mixed-req", state, stub)
+    ok = (blocked and "requirement judged unmet" in reason
+          and "JEV REQUIRED ACTIONS" in reason and "verification_selection" in reason
+          and again is False)
+    print(f"{'PASS' if ok else 'FAIL'}  mixed: #1228's unmet-requirement reopen also names the missing "
+          f"facet in the same single reopen, and both are latched (blocked={blocked}, "
+          f"both-named={'JEV REQUIRED ACTIONS' in reason}, second={again})")
+    return ok
+
+
+def latched_claim_does_not_hide_missing_facet():
+    """The claim reopen already fired (and latched) at an earlier Stop that
+    had no readable advisory; the same claim now arrives with a required
+    facet. The latched claim returns early — it must not take the facet
+    check with it."""
+    with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+        first, _ = run_gate_stubbed(
+            _unverified_done_claim(None, "r-latched"), "s-latched", state, None)
+        blocked, reason = run_gate_stubbed(
+            _unverified_done_claim(["diagnosis"], "r-latched"), "s-latched", state, None)
+    ok = (first is True and blocked is True and "JEV REQUIRED ACTIONS" in reason
+          and "COMPLETION EVIDENCE GATE" not in reason)
+    print(f"{'PASS' if ok else 'FAIL'}  mixed: a latched claim reopen does not hide a missing facet "
+          f"(first={first}, second={blocked})")
+    return ok
+
+
 def main():
     outcomes = [
         lib_reads_real_shape(),
@@ -1073,6 +1197,10 @@ def main():
         refusal_then_notification_facet_does_not_reopen_end_to_end(),
         receipt_provenance_backstop(),
         receipt_unexplained_event_recorded_end_to_end(),
+        mixed_claim_reopen_carries_missing_facet(),
+        mixed_requirement_reopen_carries_missing_facet(),
+        latched_claim_does_not_hide_missing_facet(),
+        mixed_claim_reopen_with_refused_facet_names_only_the_claim(),
     ]
     print(f"jev-required-actions-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1

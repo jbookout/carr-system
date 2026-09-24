@@ -1244,6 +1244,17 @@ def jev_required_actions_check(session, recs):
     return True, reason, identity
 
 
+def jev_required_actions_message(req_reason):
+    """The required-facets reopen text: on its own, or appended to another
+    reopen's message so one reopen carries both reasons."""
+    return ("JEV REQUIRED ACTIONS GATE — " + req_reason + ".\n"
+            "Decision 0b11c89b (2026-09-24, Joe): Jev is required, not advisory, for "
+            "the facets this turn's build advisory names. Either call Jev through "
+            "ops/typesafe_client.py (noul/choice/ask) for the missing facet(s) before "
+            "closing, or say so explicitly with a line reading "
+            "\"JEV-REFUSED: <facet> <reason>\" (for example, Jev unreachable).")
+
+
 def jev_requirements_advisory(payload, recs):
     """ops/jev_requirements.py asks Jev whether each requirement of the last
     human request is met by this turn's diff, records the answer in
@@ -1330,26 +1341,25 @@ def main():
             record_satisfied(session, claim_identity(
                 "completion-evidence-gate", reason_class, tokens))
 
+        # DECISION 0b11c89b'S STOP-SIDE HALF runs on EVERY Stop, whatever
+        # else decides to reopen. It used to run only when nothing else had:
+        # an unverified "done" claim (or #1228's unmet-requirement reopen)
+        # took the one reopen, the continuation Stop returned early on
+        # stop_hook_active, and the missing facets were never raised — a
+        # model could skip Jev by claiming done (fresh review of fdc927fd).
+        # Now one reopen carries both reasons, and both identities are fired
+        # so neither repeats. Named req_* so it cannot be confused with
+        # #1228's jev_identity (the requirement-checklist reopen).
+        req_blocked, req_reason, req_identity = jev_required_actions_check(session, recs)
+
         if not blocked:
-            # DECISION 0b11c89b'S STOP-SIDE HALF. Independent of the claim-set
-            # layers above: it fires whenever THIS turn's own build advisory
-            # required a Jev facet and the turn shows neither a call nor a
-            # named refusal, whether or not anything was ever claimed done.
-            # Named req_* so it cannot be confused with #1228's jev_identity
-            # (the requirement-checklist reopen), which is None on this path.
-            req_blocked, req_reason, req_identity = jev_required_actions_check(session, recs)
             if req_blocked:
                 record_fire(session, req_identity)
                 audit({"ts": now(), "hook": "completion-evidence-gate",
                        "session": session, "reason": req_reason,
                        "claim_identity": req_identity})
-                print(json.dumps({"decision": "block", "reason":
-                    "JEV REQUIRED ACTIONS GATE — " + req_reason + ".\n"
-                    "Decision 0b11c89b (2026-09-24, Joe): Jev is required, not advisory, for "
-                    "the facets this turn's build advisory names. Either call Jev through "
-                    "ops/typesafe_client.py (noul/choice/ask) for the missing facet(s) before "
-                    "closing, or say so explicitly with a line reading "
-                    "\"JEV-REFUSED: <facet> <reason>\" (for example, Jev unreachable)."}))
+                print(json.dumps({"decision": "block",
+                                  "reason": jev_required_actions_message(req_reason)}))
                 return 0
             if isinstance(jev, dict) and jev.get("advisory"):
                 print(json.dumps({"systemMessage": jev["advisory"]}))
@@ -1367,13 +1377,28 @@ def main():
             reason_class, tokens = ledger["identity"]
             identity = claim_identity("completion-evidence-gate", reason_class, tokens)
             if latched(session, identity):
+                # The claim was already reopened once; a latched claim must
+                # not take the required-facets check down with it.
+                if req_blocked:
+                    record_fire(session, req_identity)
+                    audit({"ts": now(), "hook": "completion-evidence-gate",
+                           "session": session, "reason": req_reason,
+                           "claim_identity": req_identity})
+                    print(json.dumps({"decision": "block",
+                                      "reason": jev_required_actions_message(req_reason)}))
                 return 0
             record_fire(session, identity)
 
+        also = ""
+        if req_blocked:
+            record_fire(session, req_identity)
+            also = "\n\nALSO — " + jev_required_actions_message(req_reason)
         audit({"ts": now(), "hook": "completion-evidence-gate",
                "session": session, "reason": reason,
-               "claim_identity": identity})
-        print(json.dumps({"decision": "block", "reason":
+               "claim_identity": identity,
+               **({"jev_required_reason": req_reason,
+                   "jev_required_identity": req_identity} if req_blocked else {})})
+        print(json.dumps({"decision": "block", "reason": (
             "COMPLETION EVIDENCE GATE — " + reason + ".\n"
             "A close binds to the ORDER, not to the slice you finished. Every ordered "
             "clause needs one of: a fresh receipt read from the surface that was "
@@ -1381,7 +1406,7 @@ def main():
             "that invokes it, the loaded scheduler, a named recipient, real first use), "
             "or a sentence naming that clause as not done. Rewording the close does not "
             "help — silence blocks the same as \"done\". If your own record already shows "
-            "the work landed, do not close by calling it unbuilt."}))
+            "the work landed, do not close by calling it unbuilt.") + also}))
         return 0
     except Exception:
         return 0
