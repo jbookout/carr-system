@@ -104,18 +104,36 @@ def test_worker_bearer_ok_and_unauthorized():
     import os
     os.environ["CH_SELFTEST_TOKEN"] = "not-a-real-token"
     try:
-        ch.HTTP_POST = lambda url, headers, body, timeout_s: 200
+        ch.HTTP_POST = lambda url, headers, body, timeout_s: (200, {"jsonrpc": "2.0", "id": 0, "result": {"tools": []}})
         cred = _cred("worker-ok", "worker_bearer_health", probe={
             "type": "worker_bearer_health", "token_env": "CH_SELFTEST_TOKEN",
             "url": "https://example.invalid/mcp", "timeout_s": 1})
         r = ch.evaluate_credential(cred)
-        check("worker bearer HTTP 200 -> ok", r.bucket == "ok", r.bucket)
+        check("worker bearer HTTP 200 + JSON-RPC result -> ok", r.bucket == "ok", r.bucket)
 
-        ch.HTTP_POST = lambda url, headers, body, timeout_s: 401
+        ch.HTTP_POST = lambda url, headers, body, timeout_s: (401, None)
         r = ch.evaluate_credential(cred)
         check("worker bearer HTTP 401 -> failed", r.bucket == "failed", r.bucket)
     finally:
         del os.environ["CH_SELFTEST_TOKEN"]
+
+
+def test_worker_bearer_200_without_result_key_is_failed():
+    """PR #1218 review, round 2: status 200 alone is not proof of a working
+    call — a JSON-RPC-level error can still land on an HTTP 200. Only a
+    response body that actually carries a `result` key counts as ok."""
+    os.environ["CH_SELFTEST_TOKEN_2"] = "not-a-real-token"
+    try:
+        ch.HTTP_POST = lambda url, headers, body, timeout_s: (
+            200, {"jsonrpc": "2.0", "id": 0, "error": {"code": -32601, "message": "n/a"}})
+        cred = _cred("worker-200-jsonrpc-error", "worker_bearer_health", probe={
+            "type": "worker_bearer_health", "token_env": "CH_SELFTEST_TOKEN_2",
+            "url": "https://example.invalid/mcp", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("HTTP 200 with a JSON-RPC error (no result key) -> failed, not ok",
+              r.bucket == "failed", r.bucket)
+    finally:
+        del os.environ["CH_SELFTEST_TOKEN_2"]
 
 
 def test_worker_bearer_unknown_when_token_absent():
@@ -180,7 +198,7 @@ def test_neon_falls_back_to_env_when_file_absent():
 
 
 def test_worker_bearer_reads_token_from_file_when_present():
-    ch.HTTP_POST = lambda url, headers, body, timeout_s: 200
+    ch.HTTP_POST = lambda url, headers, body, timeout_s: (200, {"jsonrpc": "2.0", "id": 0, "result": {}})
     with tempfile.TemporaryDirectory() as td:
         path = _write_tokens_file(td, value="fake-mcp-bearer", key="CARR_MCP_PROBE_TOKEN")
         cred = _cred("mcp-probe-file", "worker_bearer_health", probe={
@@ -208,7 +226,7 @@ def test_worker_bearer_file_present_but_key_missing_is_failed():
 
 def test_worker_bearer_falls_back_to_env_when_file_absent():
     os.environ["CH_SELFTEST_WB_ENV_FALLBACK"] = "fake-for-selftest"
-    ch.HTTP_POST = lambda url, headers, body, timeout_s: 200
+    ch.HTTP_POST = lambda url, headers, body, timeout_s: (200, {"jsonrpc": "2.0", "id": 0, "result": {}})
     try:
         cred = _cred("mcp-no-file", "worker_bearer_health", probe={
             "type": "worker_bearer_health",
@@ -239,12 +257,213 @@ def _write_tokens_file(td, value="fake-cf-token-DO-NOT-LEAK", mode=0o600,
     return str(path)
 
 
+def test_neon_401_is_failed():
+    ch.HTTP_GET = lambda *a, **k: (401, None)
+    os.environ["NEON_API_KEY"] = "fake-for-selftest"
+    try:
+        cred = _cred("neon-401", "neon_api", probe={
+            "type": "neon_api", "url": "https://example.invalid/api_keys", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("neon_api HTTP 401 -> failed", r.bucket == "failed", r.bucket)
+    finally:
+        del os.environ["NEON_API_KEY"]
+
+
+def test_neon_ambiguous_status_is_unknown_not_guessed_either_way():
+    """PR #1218 review, round 2: the ORIGINAL /projects endpoint returned a
+    bare 400 for a perfectly good key (missing org scope) — a probe bug that
+    would have been reported as a false 'failed' if 400 were treated the
+    same as 401/403. Only 401/403 means 'this key does not authenticate';
+    anything else non-2xx is an ambiguous response and stays unknown, with
+    the status code visible in the detail for whoever reads the loop."""
+    ch.HTTP_GET = lambda *a, **k: (400, {"message": "org_id required"})
+    os.environ["NEON_API_KEY"] = "fake-for-selftest"
+    try:
+        cred = _cred("neon-400", "neon_api", probe={
+            "type": "neon_api", "url": "https://example.invalid/api_keys", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("neon_api HTTP 400 -> unknown, not failed (never guessed at "
+              "either verdict)", r.bucket == "unknown", r.bucket)
+        check("the status code is visible in the detail",
+              r.detail == "http_status_400", r.detail)
+    finally:
+        del os.environ["NEON_API_KEY"]
+
+
+def test_neon_default_url_is_api_keys_not_projects():
+    """The bare inventory default (no `url` override) must point at the
+    endpoint tools/rotate-credential.py's own neon() verification call
+    uses — /projects needed an org scope this key may not carry and
+    returned 400 for a good key."""
+    captured = {}
+
+    def spying_get(url, headers, timeout_s):
+        captured["url"] = url
+        return 200, {}
+    ch.HTTP_GET = spying_get
+    os.environ["NEON_API_KEY"] = "fake-for-selftest"
+    try:
+        cred = _cred("neon-default-url", "neon_api", probe={"type": "neon_api", "timeout_s": 1})
+        ch.evaluate_credential(cred)
+        check("neon_api's bare default URL is the /api_keys endpoint",
+              captured.get("url") == "https://console.neon.tech/api/v2/api_keys",
+              captured.get("url"))
+    finally:
+        del os.environ["NEON_API_KEY"]
+
+
 test_neon_reads_token_from_file_when_present()
 test_neon_file_present_but_key_missing_is_failed_not_env_fallback()
 test_neon_falls_back_to_env_when_file_absent()
+test_neon_401_is_failed()
+test_neon_ambiguous_status_is_unknown_not_guessed_either_way()
+test_neon_default_url_is_api_keys_not_projects()
 test_worker_bearer_reads_token_from_file_when_present()
 test_worker_bearer_file_present_but_key_missing_is_failed()
 test_worker_bearer_falls_back_to_env_when_file_absent()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HTTP layer: a non-default User-Agent is always sent (PR #1218 review,
+# round 2) — Python urllib's default User-Agent is a known Cloudflare
+# bot-fight-mode signature and the deployed Worker's edge blocked EVERY
+# urllib request with a bare 403 regardless of an otherwise-correct,
+# correctly-authenticated call. Reproduced live against the real Worker and
+# fixed by nothing except this header.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _FakeHTTPResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self, n=None):
+        # Mirrors http.client.HTTPResponse.read(n): a cap smaller than the
+        # body truncates, exactly like the real socket read this stands in
+        # for — needed so test_default_http_post_does_not_truncate_a_large_
+        # tools_list_response can actually exercise the cap, not just call
+        # through a fake that always hands back everything regardless.
+        return self._body if n is None else self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_default_http_get_sends_a_non_default_user_agent():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["user_agent"] = req.get_header("User-agent")
+        return _FakeHTTPResponse(200, b"{}")
+    real_urlopen = ch._urllib_request.urlopen
+    ch._urllib_request.urlopen = fake_urlopen
+    try:
+        ch._default_http_get("https://example.invalid/x", {"Authorization": "Bearer x"}, 1)
+    finally:
+        ch._urllib_request.urlopen = real_urlopen
+    check("_default_http_get sets a non-default, non-empty User-Agent",
+          bool(captured.get("user_agent")) and "python-urllib" not in captured["user_agent"].lower(),
+          captured.get("user_agent"))
+
+
+def test_default_http_post_sends_a_non_default_user_agent():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["user_agent"] = req.get_header("User-agent")
+        return _FakeHTTPResponse(200, b'{"jsonrpc":"2.0","id":0,"result":{}}')
+    real_urlopen = ch._urllib_request.urlopen
+    ch._urllib_request.urlopen = fake_urlopen
+    try:
+        ch._default_http_post("https://example.invalid/mcp", {"Authorization": "Bearer x"},
+                               {"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, 1)
+    finally:
+        ch._urllib_request.urlopen = real_urlopen
+    check("_default_http_post sets a non-default, non-empty User-Agent",
+          bool(captured.get("user_agent")) and "python-urllib" not in captured["user_agent"].lower(),
+          captured.get("user_agent"))
+
+
+def test_default_http_post_returns_status_and_parsed_body():
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(200, b'{"jsonrpc":"2.0","id":0,"result":{"tools":[]}}')
+    real_urlopen = ch._urllib_request.urlopen
+    ch._urllib_request.urlopen = fake_urlopen
+    try:
+        status, body = ch._default_http_post(
+            "https://example.invalid/mcp", {"Authorization": "Bearer x"},
+            {"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, 1)
+    finally:
+        ch._urllib_request.urlopen = real_urlopen
+    check("_default_http_post returns (status, parsed_body), not status alone",
+          status == 200 and isinstance(body, dict) and "result" in body,
+          (status, body))
+
+
+def test_default_http_post_does_not_truncate_a_large_tools_list_response():
+    """PR #1218 review, round 2: the real Worker's tools/list response is
+    ~93KB — over the GET helper's 64KiB cap this POST helper originally
+    shared. A cap that truncates mid-object makes json.loads raise, so
+    _default_http_post returned (200, None) for a call that had fully
+    succeeded, and _probe_worker_bearer then read that as a fabricated
+    'malformed body' FAILURE for a perfectly good token. Build a body
+    bigger than the OLD 64KiB cap (but under the new one) and prove it
+    parses whole."""
+    huge_tools_array = ",".join(
+        f'{{"name":"tool_{i}","description":"{"x" * 200}"}}' for i in range(400))
+    big_body = ('{"jsonrpc":"2.0","id":0,"result":{"tools":[' + huge_tools_array + ']}}').encode()
+    check("the constructed fixture body is actually bigger than the old 64KiB cap",
+          len(big_body) > 65536, len(big_body))
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(200, big_body)
+    real_urlopen = ch._urllib_request.urlopen
+    ch._urllib_request.urlopen = fake_urlopen
+    try:
+        status, body = ch._default_http_post(
+            "https://example.invalid/mcp", {"Authorization": "Bearer x"},
+            {"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, 1)
+    finally:
+        ch._urllib_request.urlopen = real_urlopen
+    check("a >64KiB tools/list-shaped body still parses whole under the 1MiB cap",
+          status == 200 and isinstance(body, dict) and "result" in body,
+          (status, type(body)))
+
+
+def test_worker_bearer_ok_survives_a_large_real_shaped_tools_list_body():
+    """End-to-end version of the truncation fix through the actual probe,
+    not just the HTTP helper: a large tools/list body with a real `result`
+    key must still classify as ok."""
+    huge_tools_array = ",".join(
+        f'{{"name":"tool_{i}","description":"{"x" * 200}"}}' for i in range(400))
+    big_body = ('{"jsonrpc":"2.0","id":0,"result":{"tools":[' + huge_tools_array + ']}}').encode()
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(200, big_body)
+    real_urlopen = ch._urllib_request.urlopen
+    ch._urllib_request.urlopen = fake_urlopen
+    os.environ["CH_SELFTEST_BIG_BODY_TOKEN"] = "fake-for-selftest"
+    try:
+        cred = _cred("worker-big-body", "worker_bearer_health", probe={
+            "type": "worker_bearer_health", "token_env": "CH_SELFTEST_BIG_BODY_TOKEN",
+            "url": "https://example.invalid/mcp", "timeout_s": 1})
+        r = ch.evaluate_credential(cred)
+        check("a large, real-shaped tools/list response with a genuine "
+              "result key still buckets ok end-to-end",
+              r.bucket == "ok", r.bucket)
+    finally:
+        ch._urllib_request.urlopen = real_urlopen
+        del os.environ["CH_SELFTEST_BIG_BODY_TOKEN"]
+
+
+test_default_http_get_sends_a_non_default_user_agent()
+test_default_http_post_sends_a_non_default_user_agent()
+test_default_http_post_returns_status_and_parsed_body()
+test_default_http_post_does_not_truncate_a_large_tools_list_response()
+test_worker_bearer_ok_survives_a_large_real_shaped_tools_list_body()
 
 
 def test_cloudflare_token_file_active_is_ok():
@@ -737,6 +956,7 @@ test_shell_exit_ok()
 test_shell_exit_failed()
 test_shell_exit_unknown_missing_tool()
 test_worker_bearer_ok_and_unauthorized()
+test_worker_bearer_200_without_result_key_is_failed()
 test_worker_bearer_unknown_when_token_absent()
 test_expiring_soon_from_configured_rotation_date()
 test_failed_from_past_expiry()

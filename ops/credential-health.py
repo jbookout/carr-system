@@ -86,12 +86,24 @@ WHICH = shutil.which
 # It holds a token FINGERPRINT (sha256) and a date, never the token itself.
 MINT_STATE: dict = {}
 
+# Set explicitly because Python's urllib default ("Python-urllib/3.x") is a
+# known Cloudflare bot-fight-mode signature: the deployed Worker's edge
+# blocked EVERY urllib request with a bare 403 (Cloudflare error 1010)
+# regardless of an otherwise-perfectly-formed, correctly-authenticated
+# JSON-RPC call — reproduced live 2026-09-24 (PR #1218 review, round 2) and
+# fixed by nothing except this header; curl (which smoke-reads.sh and this
+# lane's own selftests-by-precedent use) was never affected because its
+# default User-Agent isn't on that list.
+_HTTP_USER_AGENT = "carr-credential-health/1 (+ops/credential-health.py)"
+
 
 def _default_http_get(url, headers, timeout_s):
     """GET -> (status_code, parsed_json_or_None). Body capped at 64KiB and
     parsed once here; callers below pull out at most one or two named fields
     and the rest of the parsed object is discarded by them, never logged."""
-    req = _urllib_request.Request(url, headers=headers, method="GET")
+    hdrs = dict(headers)
+    hdrs.setdefault("user-agent", _HTTP_USER_AGENT)
+    req = _urllib_request.Request(url, headers=hdrs, method="GET")
     try:
         with _urllib_request.urlopen(req, timeout=timeout_s) as resp:
             status = resp.status
@@ -106,19 +118,43 @@ def _default_http_get(url, headers, timeout_s):
         return status, None
 
 
+_HTTP_POST_BODY_CAP = 1_048_576  # 1 MiB — see docstring below
+
+
 def _default_http_post(url, headers, body, timeout_s):
-    """POST JSON -> status_code only. The response body is never read."""
+    """POST JSON -> (status_code, parsed_json_or_None) — same shape as
+    _default_http_get, added 2026-09-24 (PR #1218 review, round 2) because a
+    bearer probe needs more than a status code to call a credential 'ok':
+    an HTTP 200 that carries a JSON-RPC `error` instead of a `result` is
+    NOT a passing call (see _probe_worker_bearer), and status alone cannot
+    tell the two apart.
+
+    Capped at 1 MiB, not the GET helper's 64KiB: this lane's one POST caller
+    calls `tools/list` (the same call smoke-reads.sh's own preflight makes),
+    whose response is the FULL published tool catalog — ~93KB against the
+    live Worker as of 2026-09-24 — not a small status object like
+    Cloudflare's or Neon's GET responses. The 64KiB cap silently truncated
+    that body mid-object, so json.loads raised and every worker_bearer probe
+    read a fabricated 'malformed body' failure even when the call had fully
+    succeeded (PR #1218 review, round 2) — the response was never too big to
+    trust, only too big for the wrong cap."""
     data = json.dumps(body).encode("utf-8")
     hdrs = dict(headers)
     hdrs["content-type"] = "application/json"
+    hdrs.setdefault("user-agent", _HTTP_USER_AGENT)
     req = _urllib_request.Request(url, headers=hdrs, data=data, method="POST")
     try:
         with _urllib_request.urlopen(req, timeout=timeout_s) as resp:
-            return resp.status
+            status = resp.status
+            raw = resp.read(_HTTP_POST_BODY_CAP)
     except HTTPError as e:
-        return e.code
+        return e.code, None
     except (URLError, TimeoutError, OSError, ValueError):
-        return None
+        return None, None
+    try:
+        return status, json.loads(raw.decode("utf-8", "replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return status, None
 
 
 HTTP_GET = _default_http_get
@@ -390,13 +426,27 @@ def _read_token_file_first(spec, default_token_key):
 
 
 def _probe_neon(cred, timeout_s):
+    """NEON_API_KEY against Neon's own control-plane API.
+
+    GET /api_keys — the exact path tools/rotate-credential.py's neon()
+    helper already calls to verify a freshly-rotated key before writing it
+    (see that file's `neon()`/`_rotate_api_key_locked` around line 730) —
+    rather than /projects, which this probe used to call and which needs an
+    organisation scope this key may not carry: it returned a bare 400 for a
+    perfectly good key (PR #1218 review, round 2), a probe bug, not a
+    finding about the credential.
+
+    401/403 is treated as the only unambiguous "this key does not
+    authenticate" shape Neon uses. Anything else non-2xx is reported as
+    `unknown` with the status code in the detail — an ambiguous response,
+    never guessed at as either a pass or a fail."""
     spec = cred["probe"]
     key, hard_fail = _read_token_file_first(spec, "NEON_API_KEY")
     if hard_fail:
         return ProbeResult("failed", hard_fail)
     if not key:
         return ProbeResult("unknown", "env_var_missing")
-    url = spec.get("url", "https://console.neon.tech/api/v2/projects")
+    url = spec.get("url", "https://console.neon.tech/api/v2/api_keys")
     status, _body = HTTP_GET(
         url, {"Authorization": f"Bearer {key}", "Accept": "application/json"},
         timeout_s)
@@ -407,17 +457,24 @@ def _probe_neon(cred, timeout_s):
         return ProbeResult("ok", "http_ok")
     if status in (401, 403):
         return ProbeResult("failed", "http_unauthorized")
-    return ProbeResult("failed", "http_error")
+    return ProbeResult("unknown", f"http_status_{status}")
 
 
 def _probe_worker_bearer(cred, timeout_s):
     """A machine-actor bearer (CARR_MCP_PROBE_TOKEN / CARR_MCP_LOCAL_TOKEN)
     against the deployed Worker's authenticated /mcp read (`tools/list`).
-    RFC 6750 puts an invalid bearer at HTTP 401, which is what the OAuth
-    provider in front of this Worker returns (mcp-server/smoke-reads.sh's own
-    preflight greps the SAME response for "invalid_token" as an equivalent,
-    slower check) — so status alone is enough to classify the token without
-    ever reading the JSON-RPC body.
+
+    OK REQUIRES TWO THINGS, NOT ONE (PR #1218 review, round 2): an HTTP 200
+    AND a JSON-RPC `result` key in the body. Status alone was the original
+    design (RFC 6750 puts an invalid bearer at HTTP 401, confirmed live
+    against the real Worker — a bad token returns 401 with
+    `{"error":"invalid_token",...}` at the TRANSPORT layer, never a 200
+    dressed up as a failure), which still holds for classifying a bad
+    token — but a 200 whose JSON-RPC body carries an `error` instead of a
+    `result` is not proof of a working call either, so the response body's
+    top-level SHAPE (does `result` or `error` appear) is read as the second
+    half of the check. Nothing inside either key is ever read, stored, or
+    printed — only which one is present.
 
     The token itself is read file-first via `_read_token_file_first` (see
     that function for the exact policy), falling back to `spec["token_env"]`
@@ -432,17 +489,19 @@ def _probe_worker_bearer(cred, timeout_s):
     if not url:
         token = None
         return ProbeResult("unknown", "config_incomplete")
-    status = HTTP_POST(
+    status, body = HTTP_POST(
         url, {"Authorization": f"Bearer {token}"},
         {"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, timeout_s)
     token = None
     if status is None:
         return ProbeResult("unknown", "timeout")
-    if status == 200:
-        return ProbeResult("ok", "http_ok")
     if status in (401, 403):
         return ProbeResult("failed", "http_unauthorized")
-    return ProbeResult("failed", "http_error")
+    if status != 200:
+        return ProbeResult("failed", "http_error")
+    if isinstance(body, dict) and "result" in body:
+        return ProbeResult("ok", "http_ok")
+    return ProbeResult("failed", "jsonrpc_error_or_malformed_body")
 
 
 def _probe_file_presence_age(cred, timeout_s):
