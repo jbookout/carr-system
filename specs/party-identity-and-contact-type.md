@@ -56,7 +56,7 @@ active client`, …). Two axes beat that on three counts:
    is "aligned" while his lead stage is "outreach active". Two axes can.
 3. **Cannot drift.** The vendor Y is derived from the vendor record existing, so marking
    someone a vendor *is* creating their vendor record. A typed flag would be one more field
-   able to disagree with reality — exactly the Tubbs fault (0045), where `drip_campaign`
+   able to disagree with reality — exactly the Whitley fault (0045), where `drip_campaign`
    said one thing while three other fields said another.
 
 **Past client implies prospect — by DEFAULT, not automatically.** Joe: *"if a deal ended
@@ -138,7 +138,7 @@ Three facts, all held properly elsewhere, frozen into a string that cannot updat
 because they are already tagged as a vendor in the database and they already have a unique
 id 'P-#'."*
 
-**Proven the same afternoon.** Chris Kelly was recorded as `V-CPA-006` and is a financial
+**Proven the same afternoon.** Chris Kellan was recorded as `V-CPA-006` and is a financial
 advisor. Adding the category took one row — the ref-table design working as intended — and
 his ref still reads CPA. **227 vendor refs encode a category that can now change beneath
 them.**
@@ -159,7 +159,7 @@ duplicate parties were the symptom.
 breaking an ID:
 
 ```
-P-0603 · Justin Dansby        · Vendor  · Financial Advisor · Established
+P-0603 · Justin Danforth        · Vendor  · Financial Advisor · Established
 P-0425 · Dr. Marcus Whitfield    · Client
 P-0355 · Owen Feld   · Vendor + Lead · Supply
 ```

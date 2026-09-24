@@ -1073,7 +1073,7 @@
       "home": "gate",
       "id": "9f15f21a",
       "reason": "Already machine-enforced via control 'deal_guard' (mcp-server/src/tools.js, migrations/0079_deal_room_api.sql); binds national-account deal assignment. Failure mode on violation: transaction refusal",
-      "title_gist": "NATIONAL ACCOUNT MODELLING, ruled by Joe 2026-08-02 on the Musicologie case"
+      "title_gist": "NATIONAL ACCOUNT MODELLING, ruled by Joe 2026-08-02 on the Cadence Studio case"
     },
     {
       "carrying_control": "egress_guard",
