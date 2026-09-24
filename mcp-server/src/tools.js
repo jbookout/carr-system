@@ -390,7 +390,7 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
-// add-party (kind='org', name='Ruff House Resort') refused twice with
+// add-party (kind='org', name='Wagtail Lodge Resort') refused twice with
 // unique_violation on party_org_identity_uniq while a read-only tap of the same
 // database found zero matching rows — because the collision was with the verb's
 // OWN uncommitted work. The call carried org_name restating the org itself, so
@@ -1201,7 +1201,7 @@ async function validateClaimType(c, slug) {
 // vendor.stage is a FOREIGN KEY into vendor_stage(slug), and until now nothing
 // checked it before the insert — so a plausible label (`prospect`, `Prospect`,
 // `building`) came back as a bare "internal error" naming neither the field nor
-// the options. Measured live 2026-08-10 re-creating Carissa Adams: four calls
+// the options. Measured live 2026-08-10 re-creating Carla Adair: four calls
 // died that way before the pattern was readable. Same failure class as
 // new-lead's stage/lane and update-vendor's category_slug branch.
 //
@@ -2233,7 +2233,7 @@ export const TOOLS = {
          order by merged, similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
       // ORGS AND UNLINKED PEOPLE, GROUPED (0056, 2026-08-02). Until migration 0056
       // v_ref_index held only role records, so 415 org parties were invisible here:
-      // `find "Henry Schein"` returned "Henry Pruett" — a trigram hit on one word —
+      // `find "Henry Schein"` returned "Henry Prescott" — a trigram hit on one word —
       // and none of the 17 rows literally named Henry Schein.
       // GROUPED BY NAME ON PURPOSE. Those 17 rows are one company minted 17 times,
       // once per rep, and listing them raw would spend the whole 10-row budget on
@@ -2577,7 +2577,7 @@ export const TOOLS = {
       // ── walk BACKWARD from the target, following edge direction ──────────
       // Direction is the semantics: an edge A -> B means A can reach B, so the
       // people who get Joe to the target are the ones upstream of it. The
-      // visited-array guard is what keeps the Coleman <-> Nickelsen pair (a real
+      // visited-array guard is what keeps the Colby <-> Nordin pair (a real
       // two-cycle in the book) from generating paths for ever.
       const paths = await c.query(
         `with recursive e as (${WHO_EDGES}),
@@ -4094,7 +4094,7 @@ export const TOOLS = {
       // to go straight into the insert, so a plausible-but-wrong value — `lane:
       // "referral"`, which reads like an obvious lane and is not one — came back as
       // a bare "internal error" with nothing naming the field or the options.
-      // Measured live 2026-08-10 creating Dr. Hyder's lead: three attempts failed
+      // Measured live 2026-08-10 creating Dr. Harlan's lead: three attempts failed
       // opaquely and the bare call succeeded, which tells the caller nothing about
       // WHICH field was wrong. Same failure class as loop #261.
       for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {
@@ -5088,7 +5088,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true,
-    description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
+    description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Hovanian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
       match_basis: { type: "string", description: "The corroborating signal: exact domain, normalized org name, phone, address, or corroborated name plus city. Recorded permanently with the merge." },
@@ -5245,7 +5245,7 @@ export const TOOLS = {
   },
 
   // [0069, loop #199] The case confirm-merge structurally cannot do: two VENDOR
-  // rows riding ONE party. The 8/1-ruled Crowley and Woulston merges executed at
+  // rows riding ONE party. The 8/1-ruled Cromwell and Wexler merges executed at
   // party level and left exactly this behind (V-GC-001+V-GC-013, V-MKT-001+
   // V-MSC-024), and the build sweep found a third pair the loop never named
   // (T-004+T-040). Backlog #119/#120's "executed" claims were true-but-incomplete.

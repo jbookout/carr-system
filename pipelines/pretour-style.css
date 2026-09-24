@@ -1,5 +1,5 @@
 /* CARR pre-tour packet stylesheet.
-   Lifted verbatim from the Hughes pre-tour briefing of 2026-08-19, which is the
+   Lifted verbatim from the Ferris pre-tour briefing of 2026-08-19, which is the
    format Dell asked for by name. That deliverable's build2.py was a one-off with
    its content hardcoded and half its CSS appended inline at build time; both halves
    are joined here so the design is one file and the next packet is data, not a fork.
@@ -138,7 +138,7 @@ footer{background:var(--navy);color:#fff;padding:26px 44px 30px;margin-top:34px}
 }
 
 /* ---- page-break discipline, 2026-08-21 ----
-   A card is allowed to break across two sheets, which is what the Hughes briefing did.
+   A card is allowed to break across two sheets, which is what the Ferris briefing did.
    Forcing break-inside:avoid on a full-page card is what stranded three headings and
    two paragraphs on sheets of their own: the card could not fit beside them, so it
    jumped and left them behind. The sub-blocks are protected instead, so a break never
@@ -159,7 +159,7 @@ footer{background:var(--navy);color:#fff;padding:26px 44px 30px;margin-top:34px}
 }
 
 /* ---- stranded-page fix, 2026-08-25 ----
-   Dell, on the first PDF of the Hughes packet: the format is different on the PDF
+   Dell, on the first PDF of the Ferris packet: the format is different on the PDF
    than the HTML. It was, and the cause was the rule above applied one level too high.
 
    The 2026-08-21 fix correctly stopped treating a whole CARD as atomic. It then made
