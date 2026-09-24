@@ -651,6 +651,16 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     ap.add_argument("--no-file-loops", action="store_true",
                      help="report statuses but never call add-loop (verification runs)")
+    ap.add_argument("--nightly", action="store_true",
+                     help="unattended-chain exit code: 0 whenever the lane itself ran to "
+                          "completion, even with failed/expiring_soon findings — those "
+                          "already have their own alerting channel (the loop this run "
+                          "files). Matches the repo's other 'reports, never mutates' "
+                          "nightly steps (e.g. ops/rule-admission-drift.py), which return "
+                          "0 on a finding and reserve nonzero for the check ITSELF being "
+                          "unable to run. Without this flag (the default, used by `run.sh "
+                          "health` and CI) a finding still returns nonzero, because a human "
+                          "reading that surface wants to see it turn amber.")
     args = ap.parse_args(argv)
 
     try:
@@ -703,6 +713,14 @@ def main(argv=None):
     for name, bucket, outcome in filed:
         print(f"  loop {outcome:<10} {name} ({bucket})")
 
+    if args.nightly:
+        # The lane ran to completion and did its job (jsonl written, any
+        # finding already loop-filed and deduplicated) — that IS success for
+        # an unattended chain step. Turning the whole night red for the same
+        # thing the loop already says would be the exact "an alarm that fires
+        # every day trains people to stop reading alarms" failure this file's
+        # own module docstring and bin/nightly.sh's GATES section both name.
+        return 0
     return 1 if needs_attention else 0
 
 

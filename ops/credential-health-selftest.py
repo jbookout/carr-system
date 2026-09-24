@@ -806,6 +806,56 @@ def test_main_reports_unreadable_inventory_nonzero():
 test_main_reports_unreadable_inventory_nonzero()
 
 
+def test_nightly_flag_exits_zero_on_a_finding():
+    """The unattended-chain flag: a real failed/expiring_soon finding still
+    gets written to the jsonl and still files a loop — it just does not turn
+    main()'s own exit code nonzero, because bin/nightly.sh's step() would
+    otherwise redden the whole night for something the loop already says.
+    Same shape as ops/rule-admission-drift.py: return 0 on a finding, reserve
+    nonzero for the lane itself being unable to run."""
+    ch.SUBPROCESS_RUN = lambda *a, **k: subprocess.CompletedProcess(a, 1, b"", b"")
+    with tempfile.TemporaryDirectory() as td:
+        inv_path = Path(td) / "inventory.json"
+        inv_path.write_text(json.dumps({"credentials": [{
+            "name": "always-fails", "display_name": "always fails",
+            "kind": "test", "machines": ["studio"], "location": "n/a",
+            "probe": {"type": "shell_exit_status", "command": ["false"], "timeout_s": 1},
+            "replacement_plan": "n/a", "doc_pointer": "", "expiring_soon_days": 3,
+            "expiry": {},
+        }]}))
+        out_path = Path(td) / "out.jsonl"
+        dedup_path = Path(td) / "dedup.json"
+        mint_path = Path(td) / "mint.json"
+
+        rc_default = ch.main(["--inventory", str(inv_path), "--out", str(out_path),
+                               "--dedup-store", str(dedup_path), "--mint-state", str(mint_path),
+                               "--no-file-loops"])
+        check("without --nightly, a real finding still returns nonzero "
+              "(run.sh health / CI want to see it)",
+              rc_default == 1, rc_default)
+
+        (Path(td) / "dedup2.json").write_text("{}")
+        rc_nightly = ch.main(["--inventory", str(inv_path), "--out", str(out_path),
+                               "--dedup-store", str(td) + "/dedup2.json",
+                               "--mint-state", str(mint_path), "--nightly"])
+        check("with --nightly, the SAME finding returns 0 (non-fatal to the chain)",
+              rc_nightly == 0, rc_nightly)
+        written = out_path.read_text()
+        check("the finding was still written to the jsonl under --nightly",
+              '"status": "failed"' in written, written)
+
+
+def test_nightly_flag_still_fails_on_a_broken_lane():
+    rc = ch.main(["--inventory", "/nonexistent/path/does-not-exist.json", "--nightly"])
+    check("--nightly does not mask a lane that could not run at all "
+          "(unreadable inventory stays a real failure)",
+          rc == 1, rc)
+
+
+test_nightly_flag_exits_zero_on_a_finding()
+test_nightly_flag_still_fails_on_a_broken_lane()
+
+
 print(f"\ncredential-health-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
 if FAILED:
     print("FAILED: " + ", ".join(FAILED))

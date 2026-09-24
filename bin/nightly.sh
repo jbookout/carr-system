@@ -1039,6 +1039,43 @@ step "rule-admission drift (reports, never admits)" ./.venv/bin/python ops/rule-
 # contract as its siblings: 0 whether or not it finds a miss, 78 = SKIP.
 step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-delivery-shadow-watch.py
 
+# CREDENTIAL HEALTH, added 2026-09-24. Joe is replacing every interactive login
+# CARR depends on with a long-lived scoped token, so the daily question is no
+# longer "did somebody re-authenticate" but "is each credential still good, and
+# how long until it isn't". ops/credential-health.py probes every credential in
+# ops/config/credential-inventory.v1.json (exit status / HTTP status only, never
+# a command's output or a response body beyond one named non-secret field),
+# writes out/credential-health.jsonl, and on a failed or expiring_soon finding
+# files exactly one deduplicated CARR loop per credential through
+# `./run.sh call add-loop` — the SAME finding-channel a human reading
+# `run.sh health` sees under tools/health-check.py's `credentials` section.
+#
+# --nightly IS THE POINT OF THIS COMMENT. Without it this step would exit
+# nonzero on every ordinary finding and redden the whole night for something
+# the loop it just filed already says — the exact "an alarm that fires every
+# day trains people to stop reading alarms" failure the four report-only steps
+# above this one were each written to avoid, and the same shape as
+# ops/rule-admission-drift.py: 0 on a finding, nonzero reserved for the lane
+# itself being unable to run (its inventory unreadable, or zero credentials
+# configured — a real defect, not a credential going stale).
+#
+# WHAT THIS STEP CANNOT SEE UNDER THE CREDENTIAL BOUNDARY (bin/routine-
+# credential-env.sh's carr_routine_exec, which every step runs through): NEON_API_KEY,
+# CARR_MCP_PROBE_TOKEN, CARR_MCP_LOCAL_TOKEN and the wrangler-OAuth fallback are
+# read from this process's environment, and carr_routine_exec strips the child
+# down to HOME/PATH/LANG/TMPDIR plus the two named database capabilities —
+# never a broader ambient credential set, by design (see that file's own
+# header). Those four rows read `unknown` here specifically, every night, and
+# that is the boundary working as intended, not a defect in this step. The two
+# file-based probes (cloudflare-deploy-token, claude-cli-oauth-token-studio)
+# are unaffected: they read their own dotenv file straight off disk via HOME,
+# which IS in the stripped set. `run.sh health` run by hand carries the fuller
+# ambient environment and reads all eleven credentials correctly; this
+# nightly step is a narrower, honest subset of that same lane, not a second
+# implementation of it.
+step "credential health (reports, never rotates; loops on a finding)" \
+     ./.venv/bin/python ops/credential-health.py --nightly
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
 # This assignment used to sit at the bottom of the portability mirror below, so
