@@ -100,9 +100,9 @@ THE HONEST LIMIT. A model that REWRITES the transcript (not appends) can
 splice a record onto the chain, and can make real ask-jev calls. What it
 cannot do is erase or backdate a server row, so a spliced prompt cannot drop
 the genuine advisory's facets from the union window, and it cannot credit a
-facet without a real Jev call. hooks/gate-integrity.py's header states the
-same limit for the gates themselves: same-uid means detection, not prevention,
-until ops/harden-gates.sh is run.
+facet without a real Jev call. hooks/gate-integrity.py states the same limit
+for the gates themselves: with OS hardening off by Joe's 2026-08-10 ruling,
+same-uid tampering is detectable, not prevented.
 
 Fixtures: ops/jev-required-actions-selftest.py, ops/jev-server-receipts-selftest.py
 """
