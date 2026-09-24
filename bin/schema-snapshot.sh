@@ -874,6 +874,17 @@ if [ "$RELEASE_PIPELINE_REGISTRY_APPLIED" = t ] && [ "$TIMEBOMB_AUDIT_REGISTRY_A
   echo "schema-snapshot: release pipeline v68 is applied without v67 predecessor" >&2
   exit 1
 fi
+V5_R02_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0594_doctorcre_r02_scac_successor.sql')" \
+  2>/dev/null)"
+case "$V5_R02_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read V5-R02 v71 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$V5_R02_REGISTRY_APPLIED" = t ] && [ "$RELEASE_PIPELINE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: V5-R02 v71 is applied without v68 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -1975,6 +1986,11 @@ case "$SCAC_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the SCAC registry ledger state" >&2; exit 1 ;;
 esac
 
+# Default: no declared registry-version gap. Only the v71 (DoctorCRE V5-R02)
+# branch below overrides this, for the v69/v70 ordinals reserved by the
+# not-yet-merged Jev server-log PR (#1235).
+SCAC_KNOWN_GAP_ORDINALS=""
+
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   if [ "$WR130_HOTFIX_REGISTRY_APPLIED" = t ]; then
     [ "$MODEL_ROLE_REGISTRY_APPLIED" = t ] || {
@@ -2275,6 +2291,22 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                             SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v67'"
                                                             SCAC_FULL_SET_SEAL_COUNT=67
                                                             SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v68_current()"
+                                                            if [ "$V5_R02_REGISTRY_APPLIED" = t ]; then
+                                                              # v71, not v69: v69/v70 are claimed by the not-yet-merged
+                                                              # Jev server-log PR (#1235). v71 is the next free registry
+                                                              # version (coordinator collision check, 2026-09-24), sealed
+                                                              # from predecessor v68 (migration 0585) rather than v70.
+                                                              SCAC_CURRENT_NUMBER=71
+                                                              SCAC_VERSION_COUNT=69
+                                                              SCAC_KNOWN_GAP_ORDINALS="69,70"
+                                                              SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v71'")"
+                                                              SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v71'")"
+                                                              SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v71.generated.js"
+                                                              SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v71'"
+                                                              SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v68'"
+                                                              SCAC_FULL_SET_SEAL_COUNT=69
+                                                              SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v71_current()"
+                                                            fi
                                                           fi
                                                         fi
                                                       fi
@@ -2727,10 +2759,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_EXPECTED_CURRENT_SOURCE_SET="sha256:$SCAC_EXPECTED_CURRENT_SOURCE_SET"
   SCAC_EXPECTED_CURRENT_CATALOG="sha256:$SCAC_EXPECTED_CURRENT_CATALOG"
   SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
+  # SCAC_KNOWN_GAP_ORDINALS names ordinals between 2 and SCAC_CURRENT_NUMBER
+  # that never get a seal on THIS branch's own chain -- today only v69/v70,
+  # reserved by the not-yet-merged Jev server-log PR (#1235), which v71
+  # deliberately does not chain through (see SEALED_PREDECESSOR_ORDINAL in
+  # ops/siep18-reference-monitor-local-pg-gate.py for the matching override).
+  # Empty for every other version, so this changes nothing historically.
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     const count=Number(process.argv[2]); const current=Number(process.argv[3]);
-    const allKeys=Array.from({length:current},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    const gaps=new Set((process.argv[4]||"").split(",").filter(Boolean).map(Number));
+    const allKeys=Array.from({length:current},(_,i)=>i+1).filter(n=>!gaps.has(n)).map(n=>`scac-mutation-registry.v${n}`);
     const keys=allKeys.slice(0,count);
     if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
         !Number.isInteger(count) || !Number.isInteger(current) ||
@@ -2739,7 +2778,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
     process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
-  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT" "$SCAC_CURRENT_NUMBER")" || {
+  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT" "$SCAC_CURRENT_NUMBER" "$SCAC_KNOWN_GAP_ORDINALS")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
   }
   # WHAT THIS CHECK ASKS, AND WHAT IT DELIBERATELY DOES NOT. Every comparison

@@ -247,6 +247,19 @@ WRITE_ACTION_EXACT = {
                                   # is deliberately not generalized, so this sibling gets the
                                   # same exact-entry treatment
     "open-investigation-branch",  # sibling of open-investigation, same reasoning
+    "open-workflow-cutover-plan",  # DoctorCRE V5-R02 (Q116): opens a cutover state-machine
+                                  # plan for one workflow identity. Same "open" first-word
+                                  # reasoning as open-campaign/open-incident -- not
+                                  # generalized into a prefix, exact entry instead.
+    "advance-workflow-cutover-stage",  # DoctorCRE V5-R02 (Q116): moves a cutover plan one
+                                  # stage forward (read_legacy..recovery_ready). A durable
+                                  # state transition a session could report as done without
+                                  # having actually advanced, so it is a write this gate cares
+                                  # about; "advance" has no sibling verb today to justify a
+                                  # blanket prefix.
+    "mark-slice-completion",     # DoctorCRE V5-R02 (Q153): the explicit slice-completion
+                                  # marker Joe asked for. "mark" is not generalized into a
+                                  # prefix (a future mark-* read must not inherit this class).
     "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
                                   # exact because issue-style reads may exist elsewhere
     "presence-lease",

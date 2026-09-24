@@ -310,6 +310,18 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
     ),
+    # DoctorCRE V5-R02: 0593 installs the workflow cutover state machine
+    # (Q116), the caller inventory, and the explicit slice-completion marker
+    # (Q153) with their five new SECURITY DEFINER writers; 0594 seals that
+    # catalog as v71 (chained from the last-merged v68, migration 0585 --
+    # v69/v70 are reserved by the not-yet-merged Jev server-log PR #1235, see
+    # ops/siep18-reference-monitor-local-pg-gate.py's SEALED_PREDECESSOR_ORDINAL).
+    # Same deferred-epoch-trigger shape as the pairs above: 0593 applied alone
+    # would be refused at commit, so the pair must be one transaction.
+    (
+        "0593_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
+        "0594_doctorcre_r02_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -348,6 +360,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
+    ),
+    (
+        "0593_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
+        "0594_doctorcre_r02_scac_successor.sql",
     ),
 )
 

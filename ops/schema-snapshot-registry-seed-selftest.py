@@ -188,7 +188,14 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 69)}
+# v69/v70 are reserved by the not-yet-merged Jev server-log PR (#1235) and
+# never sealed on this branch; v71 (DoctorCRE V5-R02) chains from v68
+# directly (migration 0594) and is the one declared exception to an otherwise
+# dense v1..v68 set. See SEALED_PREDECESSOR_ORDINAL in
+# ops/siep18-reference-monitor-local-pg-gate.py for the matching override.
+assert set(FULL_SET_SEALS) == (
+    {f"scac-mutation-registry.v{version}" for version in range(1, 69)} | {"scac-mutation-registry.v71"}
+)
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -629,18 +636,41 @@ loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
     "SCAC_FULL_SET_SQL=\"$(node -e '\n"
 )
 loader_end = GENERATOR.index(
-    "\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\" \"$SCAC_CURRENT_NUMBER\")\"",
+    "\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\" \"$SCAC_CURRENT_NUMBER\" \"$SCAC_KNOWN_GAP_ORDINALS\")\"",
     loader_start,
 )
 loader = GENERATOR[loader_start:loader_end]
+# This loader now runs against the LIVE seals file, which since DoctorCRE
+# V5-R02 (v71) is no longer a dense v1..v68 set: v69/v70 are reserved by the
+# not-yet-merged Jev server-log PR (#1235) and never sealed here, so the full
+# key set is v1..v68 plus v71 (69 keys), in that order. count=68 of
+# current=71 with the v69/v70 gap declared proves the loader still takes a
+# strict PREFIX of the full ordered set (v1..v68, dropping the trailing v71)
+# when asked for fewer than every sealed key.
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "67", "68"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"),
+     "68", "71", "69,70"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 67
-assert loaded_sql.count("sha256:") == 67
+assert loaded_sql.count("scac-mutation-registry.v") == 68
+assert loaded_sql.count("sha256:") == 68
+assert "scac-mutation-registry.v71" not in loaded_sql
+# The gap check proves the fourth argv (known-gap ordinals) is what makes the
+# loader accept today's actual, non-dense live file at all -- a silent pass
+# with no gap ordinals declared would mean a real v69/v70 gap could go
+# unnoticed.
+gapless_failure = subprocess.run(
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"),
+     "69", "71"],
+    capture_output=True,
+    text=True,
+)
+assert gapless_failure.returncode == 2, (
+    "the loader must refuse the live (gapped) seals file when no known-gap "
+    "ordinals are given"
+)
 assert FULL_SET_SEALS["scac-mutation-registry.v67"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )

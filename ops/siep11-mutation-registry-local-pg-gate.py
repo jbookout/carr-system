@@ -176,7 +176,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23", "scac-mutation-registry.v24", "scac-mutation-registry.v25", "scac-mutation-registry.v26", "scac-mutation-registry.v27", "scac-mutation-registry.v28", "scac-mutation-registry.v29", "scac-mutation-registry.v30", "scac-mutation-registry.v31", "scac-mutation-registry.v32", "scac-mutation-registry.v33", "scac-mutation-registry.v34", "scac-mutation-registry.v35", "scac-mutation-registry.v36", "scac-mutation-registry.v37", "scac-mutation-registry.v38", "scac-mutation-registry.v39", "scac-mutation-registry.v40", "scac-mutation-registry.v41", "scac-mutation-registry.v42", "scac-mutation-registry.v43", "scac-mutation-registry.v44", "scac-mutation-registry.v45", "scac-mutation-registry.v46", "scac-mutation-registry.v47", "scac-mutation-registry.v48", "scac-mutation-registry.v49", "scac-mutation-registry.v50", "scac-mutation-registry.v51", "scac-mutation-registry.v52", "scac-mutation-registry.v53", "scac-mutation-registry.v54", "scac-mutation-registry.v55", "scac-mutation-registry.v56", "scac-mutation-registry.v57", "scac-mutation-registry.v58", "scac-mutation-registry.v59", "scac-mutation-registry.v60", "scac-mutation-registry.v61", "scac-mutation-registry.v62", "scac-mutation-registry.v63", "scac-mutation-registry.v64", "scac-mutation-registry.v65", "scac-mutation-registry.v66", "scac-mutation-registry.v67", "scac-mutation-registry.v68"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23", "scac-mutation-registry.v24", "scac-mutation-registry.v25", "scac-mutation-registry.v26", "scac-mutation-registry.v27", "scac-mutation-registry.v28", "scac-mutation-registry.v29", "scac-mutation-registry.v30", "scac-mutation-registry.v31", "scac-mutation-registry.v32", "scac-mutation-registry.v33", "scac-mutation-registry.v34", "scac-mutation-registry.v35", "scac-mutation-registry.v36", "scac-mutation-registry.v37", "scac-mutation-registry.v38", "scac-mutation-registry.v39", "scac-mutation-registry.v40", "scac-mutation-registry.v41", "scac-mutation-registry.v42", "scac-mutation-registry.v43", "scac-mutation-registry.v44", "scac-mutation-registry.v45", "scac-mutation-registry.v46", "scac-mutation-registry.v47", "scac-mutation-registry.v48", "scac-mutation-registry.v49", "scac-mutation-registry.v50", "scac-mutation-registry.v51", "scac-mutation-registry.v52", "scac-mutation-registry.v53", "scac-mutation-registry.v54", "scac-mutation-registry.v55", "scac-mutation-registry.v56", "scac-mutation-registry.v57", "scac-mutation-registry.v58", "scac-mutation-registry.v59", "scac-mutation-registry.v60", "scac-mutation-registry.v61", "scac-mutation-registry.v62", "scac-mutation-registry.v63", "scac-mutation-registry.v64", "scac-mutation-registry.v65", "scac-mutation-registry.v66", "scac-mutation-registry.v67", "scac-mutation-registry.v68", "scac-mutation-registry.v71"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             # A successor may only ADD a seal. Whatever version is live, the one
             # immediately below it must still be present AND still validate its
@@ -185,8 +185,17 @@ def main() -> int:
             # above stays enumerated so an unreviewed frontier fails closed; this
             # predecessor check is derived from whichever member is live.
             runtime_ordinal = int(runtime_version.rsplit(".v", 1)[1])
+            # v71 (DoctorCRE V5-R02) is this codebase's first non-sequential
+            # successor: v69/v70 are claimed by the not-yet-merged Jev
+            # server-log PR (#1235), so v71's real sealed predecessor by DB
+            # presence is v68 (migration 0585), not "ordinal - 1". Whichever of
+            # #1235 or this PR merges second rebases its seal onto the other;
+            # this override is what makes that a review-time fact instead of a
+            # silent wrong-predecessor check.
+            PREDECESSOR_ORDINAL_OVERRIDE = {71: 68}
+            predecessor_ordinal = PREDECESSOR_ORDINAL_OVERRIDE.get(runtime_ordinal, runtime_ordinal - 1)
             if runtime_ordinal > 1:
-                predecessor_version = f"scac-mutation-registry.v{runtime_ordinal - 1}"
+                predecessor_version = f"scac-mutation-registry.v{predecessor_ordinal}"
                 if cur.execute(
                     "select count(*) from ops.scac_mutation_registry_version where registry_version=%s",
                     (predecessor_version,),
@@ -196,8 +205,8 @@ def main() -> int:
                     )
                 # Per-version seal-availability functions begin at v5, so only ask
                 # the database to revalidate a predecessor that actually has one.
-                if runtime_ordinal >= 6 and cur.execute(
-                    f"select ops.scac_mutation_registry_v{runtime_ordinal - 1}_seal_available()"
+                if predecessor_ordinal >= 5 and cur.execute(
+                    f"select ops.scac_mutation_registry_v{predecessor_ordinal}_seal_available()"
                 ).fetchone()[0] is not True:
                     raise RuntimeError(
                         f"sealed predecessor {predecessor_version} no longer validates its entry set"
