@@ -45,13 +45,28 @@ function plainText(value, path, maximum = MAX_FIELD_CHARS) {
   return text;
 }
 
+// Accepts the canonical "Z" form unchanged, and the "+HH:MM" form that
+// Postgres timestamptz takes through jsonb (ops.read_tour_packet_for_render),
+// normalized to UTC ISO. Calendar-impossible values still refuse.
+const TIMESTAMP = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{1,6})?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 function timestamp(value, path) {
-  const text = plainText(value, path, 40);
-  const parsed = Date.parse(text);
-  const expected = /\.\d{3}Z$/.test(text) ? text : text.replace(/Z$/, ".000Z");
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(text) || Number.isNaN(parsed) || new Date(parsed).toISOString() !== expected)
-    reject("tour_packet_invalid_as_of", { path });
-  return text;
+  // The anchored pattern admits digits and separators only, so the free-text
+  // contact screen is not applied: microsecond digits read as a phone number.
+  if (typeof value !== "string" || value.length > 40) reject("tour_packet_invalid_as_of", { path });
+  const text = value;
+  const match = TIMESTAMP.exec(text);
+  if (!match) reject("tour_packet_invalid_as_of", { path });
+  const [, local, fraction = "", sign, hours, minutes] = match;
+  const wall = Date.parse(`${local}.000Z`);
+  if (Number.isNaN(wall) || new Date(wall).toISOString().slice(0, 19) !== local) reject("tour_packet_invalid_as_of", { path });
+  if (!sign) {
+    if (fraction && fraction.length !== 4) reject("tour_packet_invalid_as_of", { path });
+    return text;
+  }
+  if (Number(hours) > 23 || Number(minutes) > 59) reject("tour_packet_invalid_as_of", { path });
+  const offset = (sign === "-" ? -1 : 1) * (Number(hours) * 60 + Number(minutes));
+  const millis = Number((fraction.slice(1) + "000").slice(0, 3));
+  return new Date(wall + millis - offset * 60000).toISOString();
 }
 
 function assertExactObject(value, allowed, path) {
