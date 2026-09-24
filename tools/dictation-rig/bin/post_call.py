@@ -39,6 +39,17 @@ LLAMA_MODEL = Path.home() / ".cache" / "llama.cpp" / "models" / "qwen2.5-1.5b-in
 LLAMA_PORT = 8598
 OUTLOOK_URL_LIMIT = 1900
 
+# The already-running Flash Next server (ds4-serve, launchd label
+# local.ds4-flash-next), shared with the Model Room flash desk. This module
+# never starts, stops, or restarts it: it is a fixed loopback endpoint the
+# distiller calls like any other resident service, and requests here may
+# queue behind other callers. It is a much stronger model than the bundled
+# 1.5B llama.cpp model and, unlike it, reliably produces a usable review pack
+# (2026-09-23 feasibility check against a real and a synthetic transcript).
+FLASH_SERVER_URL = "http://127.0.0.1:8000"
+FLASH_SERVER_MODEL = "qwen3.8-flash-next"
+FLASH_SERVER_HEALTH_TIMEOUT = 3
+
 
 def distiller_json_schema() -> dict[str, Any]:
     string_array = {"type": "array", "items": {"type": "string"}}
@@ -447,6 +458,79 @@ def parse_model_json(content: str) -> dict[str, Any]:
     return parsed
 
 
+def _distiller_instruction() -> str:
+    """The shared system prompt for every local distiller backend.
+
+    Spells out the exact top-level and nested key names the caller must
+    return. Some local OpenAI-compatible servers accept a ``response_format``
+    json_schema without actually constraining decoding against it (verified
+    2026-09-23 against the resident Flash Next server: a deeply nested
+    ``strict`` schema was silently ignored and the model invented its own
+    shape), so the schema is also spelled out in prose and by example here;
+    ``parse_model_json`` plus ``_validate_distillation`` remain the real
+    enforcement.
+    """
+    return (
+        "You distill a Joe-and-Dell weekly commercial-real-estate call. "
+        "Use only exact deal_id and party_id values present in CONTEXT; never copy display names into ID fields. "
+        "When Joe says he/I/we will do something, create a joe_tasks item. "
+        "When Dell says he/I/we will do something, create a dell_tasks item. "
+        "A deal status statement creates a deal_updates item. "
+        "A request to tell, update, email, or draft a message to an exact attached participant creates a draft_proposals item. "
+        "Each item includes a transcript evidence phrase of at most 15 words and only attached participant_ids (an array of exact party_id strings, [] if none). "
+        "Draft bodies are concise, professional, factual, and under 900 characters. "
+        "Unknown or ambiguous references (including a recipient with no attached party_id) become review_questions; never invent an ID. "
+        "Return ONLY one JSON object matching EXACTLY this shape, with these exact top-level and nested key names "
+        "(no renaming, no extra keys, empty arrays/strings when there is nothing to report):\n"
+        '{"schema_version": 1, '
+        '"report": {"summary": "<string>", "decisions": ["<string>", ...], "open_questions": ["<string>", ...]}, '
+        '"joe_tasks": [{"title": "<string>", "deal_id": "<exact deal id>", "participant_ids": ["<id>", ...], "evidence": "<<=15 words>"}], '
+        '"dell_tasks": [{"title": "<string>", "deal_id": "<exact deal id>", "participant_ids": ["<id>", ...], "evidence": "<<=15 words>"}], '
+        '"deal_updates": [{"deal_id": "<exact deal id>", "summary": "<string>", "participant_ids": ["<id>", ...], "evidence": "<<=15 words>"}], '
+        '"draft_proposals": [{"recipient_party_id": "<exact party id>", "deal_id": "<exact deal id>", "subject": "<string>", "body": "<string>", "participant_ids": ["<id>", ...], "evidence": "<<=15 words>"}], '
+        '"review_questions": ["<string>", ...]}\n'
+        "If there is nothing for a section, use an empty array. Never omit schema_version or report. "
+        "Return only that JSON object and no transcript field."
+    )
+
+
+def _distiller_chat_body(chunk: dict[str, Any], context: dict[str, Any], *, model: str | None = None,
+                          max_tokens: int = 1200, extra: dict[str, Any] | None = None) -> bytes:
+    source = json.dumps({"CONTEXT": context, "TRANSCRIPT": chunk}, ensure_ascii=False)
+    payload: dict[str, Any] = {
+        "messages": [
+            {"role": "system", "content": _distiller_instruction()},
+            {"role": "user", "content": source},
+        ],
+        "temperature": 0, "max_tokens": max_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "carr_post_call", "strict": True,
+                "schema": distiller_json_schema(),
+            },
+        },
+    }
+    if model:
+        payload["model"] = model
+    if extra:
+        payload.update(extra)
+    return json.dumps(payload).encode()
+
+
+def _distiller_chunk_content(outer: dict[str, Any]) -> str:
+    choice = outer["choices"][0]
+    message = choice["message"]
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        fields = ",".join(sorted(str(key) for key in message))
+        finish = str(choice.get("finish_reason") or "unknown")
+        raise RuntimeError(
+            f"local post-call model returned empty content (fields={fields}; finish={finish})"
+        )
+    return content
+
+
 def llama_distiller(request: dict[str, Any], popen: Callable[..., Any] = subprocess.Popen, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
     """One bounded, private llama-server child; never touches Quill's port 8596."""
     if not Path(LLAMA_SERVER).is_file() or not LLAMA_MODEL.is_file():
@@ -472,47 +556,11 @@ def llama_distiller(request: dict[str, Any], popen: Callable[..., Any] = subproc
             raise RuntimeError("local post-call model did not become ready")
         outputs: list[dict[str, Any]] = []
         for chunk in chunks:
-            instruction = (
-                "You distill a Joe-and-Dell weekly commercial-real-estate call. "
-                "Use only exact deal_id and party_id values present in CONTEXT; never copy display names into ID fields. "
-                "When Joe says he/I/we will do something, create a joe_tasks item. "
-                "When Dell says he/I/we will do something, create a dell_tasks item. "
-                "A deal status statement creates a deal_updates item. "
-                "A request to tell, update, email, or draft a message to an exact attached participant creates a draft_proposals item. "
-                "Each item includes a transcript evidence phrase of at most 15 words and only attached participant_ids. "
-                "Draft bodies are concise, professional, factual, and under 900 characters. "
-                "Unknown or ambiguous references become review_questions; never invent an ID. "
-                "Return only the required JSON object and no transcript field."
-            )
-            source = json.dumps(
-                {"CONTEXT": request["context"], "TRANSCRIPT": chunk}, ensure_ascii=False,
-            )
-            body = json.dumps({
-                "messages": [
-                    {"role": "system", "content": instruction},
-                    {"role": "user", "content": source},
-                ],
-                "temperature": 0, "max_tokens": 1200,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "carr_post_call", "strict": True,
-                        "schema": distiller_json_schema(),
-                    },
-                },
-            }).encode()
+            body = _distiller_chat_body(chunk, request["context"], max_tokens=1200)
             req = urllib.request.Request(f"http://127.0.0.1:{LLAMA_PORT}/v1/chat/completions", data=body, headers={"Content-Type": "application/json"}, method="POST")
             with opener(req, timeout=120) as response:
                 outer = json.loads(response.read().decode("utf-8"))
-            choice = outer["choices"][0]
-            message = choice["message"]
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                fields = ",".join(sorted(str(key) for key in message))
-                finish = str(choice.get("finish_reason") or "unknown")
-                raise RuntimeError(
-                    f"local post-call model returned empty content (fields={fields}; finish={finish})"
-                )
+            content = _distiller_chunk_content(outer)
             outputs.append(parse_model_json(content))
         return merge_chunk_outputs(outputs)
     except (RuntimeError, ContractError):
@@ -527,9 +575,90 @@ def llama_distiller(request: dict[str, Any], popen: Callable[..., Any] = subproc
             child.kill()
 
 
+class DistillerUnavailable(RuntimeError):
+    """The resident distiller server could not be reached at all.
+
+    Kept distinct from other ``RuntimeError``s raised by
+    ``resident_flash_distiller`` (bad/oversized content, malformed response)
+    so ``default_distiller`` can fall back to the bundled llama path only on
+    unreachability, never on a content-quality failure it should surface
+    instead of papering over.
+    """
+
+
+def flash_server_available(opener: Callable[..., Any] = urllib.request.urlopen, timeout: float = FLASH_SERVER_HEALTH_TIMEOUT) -> bool:
+    try:
+        with opener(f"{FLASH_SERVER_URL}/v1/models", timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def resident_flash_distiller(request: dict[str, Any], opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    """Call the already-running Flash Next server; never spawns or kills it.
+
+    That server (127.0.0.1:8000, ds4-serve / local.ds4-flash-next) is shared
+    with the Model Room flash desk, so requests may queue behind other
+    callers. This function owns no lifecycle over it: if it cannot be
+    reached, that is reported as ``DistillerUnavailable`` (a RuntimeError
+    subclass) rather than started, retried past a short bound, or silently
+    swallowed.
+    """
+    context_json = json.dumps(request["context"], ensure_ascii=False)
+    if len(context_json) > 28000:
+        raise RuntimeError("call-context index exceeds bounded local distiller context")
+    if not flash_server_available(opener=opener):
+        raise DistillerUnavailable(
+            f"the resident local model server at {FLASH_SERVER_URL} is unreachable"
+        )
+    chunks = transcript_chunks(request["transcript"])
+    outputs: list[dict[str, Any]] = []
+    try:
+        for chunk in chunks:
+            body = _distiller_chat_body(
+                chunk, request["context"], model=FLASH_SERVER_MODEL, max_tokens=2000,
+                extra={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            req = urllib.request.Request(f"{FLASH_SERVER_URL}/v1/chat/completions", data=body, headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with opener(req, timeout=150) as response:
+                    outer = json.loads(response.read().decode("utf-8"))
+            except (OSError, TimeoutError) as exc:
+                raise DistillerUnavailable(
+                    f"the resident local model server at {FLASH_SERVER_URL} became unreachable mid-request"
+                ) from exc
+            content = _distiller_chunk_content(outer)
+            outputs.append(parse_model_json(content))
+        return merge_chunk_outputs(outputs)
+    except (RuntimeError, ContractError):
+        raise
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("resident local post-call model failed closed") from exc
+
+
 def default_distiller(request: dict[str, Any]) -> dict[str, Any]:
+    """CARR_POST_CALL_DISTILLER_COMMAND still wins outright (test/ops override).
+
+    Otherwise the resident Flash Next server is the only default. There is NO
+    fallback to the bundled 1.5B llama.cpp model: on 2026-09-23 that model
+    looped ("Joe says: 'I will do this.'") until it hit its token limit on
+    both a real session and a realistic synthetic one, so falling back to it
+    would only replace "Flash Next is not running" with a misleading
+    "no JSON object" reason. Unreachability is reported as itself, in words a
+    partner can act on, and the session stays blocked until it is retried.
+    llama_distiller is kept for an explicit CARR_POST_CALL_DISTILLER_COMMAND-
+    style override only.
+    """
     command = os.environ.get("CARR_POST_CALL_DISTILLER_COMMAND")
-    return command_distiller(request, command=command) if command else llama_distiller(request)
+    if command:
+        return command_distiller(request, command=command)
+    try:
+        return resident_flash_distiller(request)
+    except DistillerUnavailable as exc:
+        raise DistillerUnavailable(
+            "Flash Next, the local model that writes the review pack, is not running; "
+            "start it and retry this call"
+        ) from exc
 
 
 def process_session(session_dir: Path, distiller: Callable[[dict[str, Any]], dict[str, Any]] = default_distiller) -> dict[str, Any]:
