@@ -16,11 +16,17 @@ plants the names in a throwaway git repository. It proves, in order:
   * with neither source the gate SKIPS LOUDLY (WARNING line, exit 0);
   * the allowlist covers FILES pinned by content: an edited pinned file is no
     longer covered, and an allowlist entry carrying a name digest is refused;
+  * a planted name DIGEST fails in local mode: plain md5/sha1/sha256, a
+    12-hex truncated prefix, and salted forms whose salt sits in the same file
+    (JSON field or source assignment, either order, or an HMAC keyed by it),
+    and the allowlist never covers one; an HMAC keyed by an external secret,
+    and unrelated hex beside a salt field, pass;
   * the committed tree carries no plain name-hash list and no name digest.
 """
 from __future__ import annotations
 
 import hashlib
+import hmac as hmac_mod
 import importlib.util
 import io
 import json
@@ -171,6 +177,57 @@ with tempfile.TemporaryDirectory(prefix="no-client-names-") as tmp:
     except ValueError:
         refused = True
     checks.append(("an allowlist entry carrying a name digest is refused", refused))
+
+# ── planted name DIGESTS (the 2026-09-24 defect class, twice in one day) ────
+salt = "s" + secrets.token_hex(15)
+leak_cases = {
+    "plain sha256 of a name is caught":
+        ("plain.json", json.dumps({"hashes": [sha("zebulon quaxmire")]})),
+    "a truncated (12-hex) sha256 prefix is caught":
+        ("prefix.txt", "id = " + sha("orrin fettlewick paine")[:12] + "\n"),
+    "md5 and sha1 are caught too":
+        ("other.js", "const a='" + hashlib.md5(b"zebulon quaxmire").hexdigest() + "';\nconst b='"
+         + hashlib.sha1(b"glimmerstone dental arts").hexdigest() + "';\n"),
+    "a salt stored in the same file does not hide the name (salt\\0name, first 20 hex)":
+        ("salted.json", json.dumps({"salt": salt, "hashes": [
+            hashlib.sha256((salt + "\0" + "glimmerstone dental arts").encode()).hexdigest()[:20]]})),
+    "name+salt order and an in-file HMAC 'key' are caught":
+        ("salted2.json", json.dumps({"pepper": salt, "a": hashlib.sha256(("zebulon quaxmire:" + salt).encode()).hexdigest(),
+                                     "b": hmac_mod.new(salt.encode(), b"orrin fettlewick paine", hashlib.sha256).hexdigest()})),
+    "a salt assigned in source code does not hide the name":
+        ("salted.py", f'NAME_SALT = "{salt}"\nKNOWN = ["' + hashlib.sha1((salt + "zebulon quaxmire").encode()).hexdigest() + '"]\n'),
+}
+with tempfile.TemporaryDirectory(prefix="no-client-names-digest-") as tmp:
+    for label, (fname, body) in leak_cases.items():
+        repo = Path(tmp) / fname.replace(".", "-")
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, env=ENV)
+        (repo / fname).write_text(body)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=ENV)
+        rc, text = run_gate(repo, [])
+        checks.append((label, rc == 1 and "name DIGEST" in text and no_name_in(text)))
+        file_pin = hashlib.sha256((repo / fname).read_bytes()).hexdigest()
+        rc, _ = run_gate(repo, [{"path": fname, "file_sha256": file_pin, "reason": "test"}])
+        if fname == "plain.json":
+            checks.append(("the allowlist never covers a name digest", rc == 1))
+
+    # The one allowed form: HMAC keyed by a secret held OUTSIDE the repo.
+    repo = Path(tmp) / "external-hmac"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=ENV)
+    (repo / "hmacs.json").write_text(json.dumps(doc))
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=ENV)
+    rc, text = run_gate(repo, [])
+    checks.append(("an HMAC keyed by an external secret is NOT flagged", rc == 0))
+
+    repo = Path(tmp) / "unrelated-hex"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=ENV)
+    (repo / "lock.json").write_text(json.dumps({"salt": "abcd1234", "integrity": sha("left-pad 1.3.0"),
+                                                "commit": secrets.token_hex(20)}))
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=ENV)
+    rc, _ = run_gate(repo, [])
+    checks.append(("unrelated hex beside a salt field is not flagged", rc == 0))
 
 # ── the committed tree ──────────────────────────────────────────────────────
 checks.append(("no plain name-hash list is committed",

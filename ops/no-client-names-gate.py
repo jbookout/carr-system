@@ -50,6 +50,11 @@ config. An entry with file_sha256 covers the file only while its bytes are
 unchanged, so any edit to it re-arms the gate; an entry without one (only the
 generated schema dump) covers the path.
 
+NAME DIGESTS (local mode). Any tracked hex run that starts with an md5, sha1
+or sha256 of a listed name (12+ hex prefixes count) fails, and so does a digest
+salted with a value stored in the same file. See DigestIndex below. The
+allowlist never covers a digest.
+
 Output never names a match. LOCAL mode reports the line number in the local
 list; HMAC mode reports a 12-hex prefix of the keyed digest.
 
@@ -70,7 +75,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HMACS = os.path.join(REPO, "ops", "config", "client-name-hmacs.v1.json")
@@ -217,9 +222,121 @@ def read_text(repo: str, rel: str) -> str | None:
     return data.decode("utf-8", "replace")
 
 
+# ── dictionary-checkable DIGESTS of a name (LOCAL mode only) ───────────────
+# The defect this closes happened twice on 2026-09-24: a public commit carried
+# name HASHES instead of names (plain sha256 in one PR, sha256 salted with a
+# salt stored in the same public file in another). Either is readable by
+# hashing a name dictionary. So with the plain list at hand the gate also
+# flags any tracked hex run that begins with an md5/sha1/sha256 digest of a
+# listed name (a prefix of 12+ hex counts), and, when a file carries a
+# salt-like field, any digest of salt+name or name+salt (common separators,
+# either order, and HMAC keyed by that in-file value). The one allowed form is
+# an HMAC keyed by a secret held OUTSIDE the repo (CARR_NAME_GUARD_KEY), which
+# no in-file value reproduces. HMAC mode cannot run this check: without the
+# plain list there is nothing to hash.
+DIGEST_PREFIX = 12
+HEX_RUN = re.compile(r"[0-9a-fA-F]{%d,}" % DIGEST_PREFIX)
+ALGOS: tuple[tuple[str, Any], ...] = (
+    ("md5", hashlib.md5), ("sha1", hashlib.sha1), ("sha256", hashlib.sha256))
+SALT_KEY = re.compile(r"(?i)(salt|pepper)")
+SALT_ASSIGN = re.compile(r"""(?i)\b[\w-]*(?:salt|pepper)[\w-]*["']?\s*[:=]\s*["']([^"'\n]{4,256})["']""")
+SEPARATORS = ("", ":", "\0", "|", "\n", " ", "-", "_", "/", ".")
+MAX_SALT_CANDIDATES = 64
+
+
+def name_variants(raw: str) -> set[str]:
+    c = canonical(raw)
+    return {v for v in (c, c.replace(" ", ""), raw.strip(), raw.strip().lower()) if v}
+
+
+class DigestIndex:
+    """12-hex prefixes of unsalted digests of every listed name, and the same
+    for a given salt on demand. Values map a prefix to a name-free label."""
+
+    def __init__(self, raw_names: list[str]):
+        self.variants: list[tuple[int, set[str]]] = [
+            (i, name_variants(r)) for i, r in enumerate(raw_names, 1) if canonical(r)]
+        self.plain: dict[str, str] = {}
+        for i, vs in self.variants:
+            for v in vs:
+                for algo, fn in ALGOS:
+                    self.plain.setdefault(fn(v.encode()).hexdigest()[:DIGEST_PREFIX],
+                                          f"{algo} of local-list line {i}")
+
+    def salted(self, salt: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        sb = salt.encode("utf-8", "replace")
+        for i, vs in self.variants:
+            for v in vs:
+                vb = v.encode()
+                for algo, fn in ALGOS:
+                    lab = f"salted {algo} of local-list line {i}"
+                    for sep in SEPARATORS:
+                        s = sep.encode()
+                        out.setdefault(fn(sb + s + vb).hexdigest()[:DIGEST_PREFIX], lab)
+                        out.setdefault(fn(vb + s + sb).hexdigest()[:DIGEST_PREFIX], lab)
+                    out.setdefault(hmac.new(sb, vb, fn).hexdigest()[:DIGEST_PREFIX],
+                                   f"hmac-{algo} keyed by an in-file value, local-list line {i}")
+        return out
+
+
+def salt_candidates(rel: str, text: str) -> list[str]:
+    """Every string that sits beside a salt-like field: all string values of a
+    JSON object (or JSONL line's object) that has a salt/pepper key, plus any
+    `...salt... = "value"` assignment in any text file."""
+    found: list[str] = []
+
+    def walk(o: object) -> None:
+        if isinstance(o, dict):
+            if any(isinstance(k, str) and SALT_KEY.search(k) for k in o):
+                found.extend(v for v in o.values() if isinstance(v, str) and 4 <= len(v) <= 256)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    if rel.endswith((".json", ".jsonl", ".ndjson")) and SALT_KEY.search(text):
+        try:
+            walk(json.loads(text))
+        except ValueError:
+            for line in text.splitlines():
+                if SALT_KEY.search(line):
+                    try:
+                        walk(json.loads(line))
+                    except ValueError:
+                        pass
+    found.extend(m.group(1) for m in SALT_ASSIGN.finditer(text))
+    seen: list[str] = []
+    for s in found:
+        if s not in seen:
+            seen.append(s)
+    return seen[:MAX_SALT_CANDIDATES]
+
+
+def digest_findings(index: DigestIndex, rel: str, text: str) -> list[tuple[int, str]]:
+    runs = [(m.start(), m.group(0).lower()) for m in HEX_RUN.finditer(text)]
+    if not runs:
+        return []
+    tables = [index.plain] + [index.salted(s) for s in salt_candidates(rel, text)]
+    out: list[tuple[int, str]] = []
+    for pos, run in runs:
+        for off in range(0, len(run) - DIGEST_PREFIX + 1):
+            key = run[off:off + DIGEST_PREFIX]
+            label = next((t[key] for t in tables if key in t), None)
+            if label:
+                out.append((text.count("\n", 0, pos) + 1, label))
+                break
+    return out
+
+
 def scan(names: NameList, files: Iterable[tuple[str, str | None]],
-         covered: Callable[[str], bool]) -> tuple[list[tuple[str, str, str]], set[str]]:
-    """Violations as (path, line-or-'path', label) and the allowlisted paths that matched."""
+         covered: Callable[[str], bool],
+         digests: DigestIndex | None = None) -> tuple[list[tuple[str, str, str]], set[str]]:
+    """Violations as (path, line-or-'path', label) and the allowlisted paths that matched.
+
+    A name DIGEST is never covered by the allowlist: the allowlist exists for
+    immutable files that carry names, and no such file carries a digest."""
     bad, used = [], set()
     for rel, text in files:
         found = [("path", h) for _, h in names.hits(rel)]
@@ -230,6 +347,9 @@ def scan(names: NameList, files: Iterable[tuple[str, str | None]],
                 used.add(rel)
             else:
                 bad.append((rel, where, names.label(h)))
+        if digests is not None and text is not None:
+            bad += [(rel, str(ln), f"name DIGEST ({label})") for ln, label in
+                    digest_findings(digests, rel, text)]
     return bad, used
 
 
@@ -304,7 +424,9 @@ def main(argv: list[str] | None = None) -> int:
         return shas[rel] == pins[rel]
 
     files = ((rel, read_text(a.repo, rel)) for rel in tracked(a.repo))
-    bad, used = scan(names, files, covered)
+    local = local_names_path() if names.mode == "local" else None
+    digests = DigestIndex(read_local_names(local)) if local else None
+    bad, used = scan(names, files, covered, digests)
     stale = sorted(set(pins) - used)
     if stale:
         # Informational: an allowlisted file nothing needs any more should be
@@ -322,7 +444,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {rel}:{where}  {label}", file=sys.stderr)
         return 1
     print(f"no-client-names-gate: clean ({names.mode} mode). {len(names.full)} listed names, "
-          f"{len(used)} allowlisted file(s) carry one.")
+          f"{len(used)} allowlisted file(s) carry one; name digests "
+          f"{'checked (plain and in-file salted)' if digests else 'NOT checked (needs the local list)'}.")
     return 0
 
 
