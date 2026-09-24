@@ -86486,19 +86486,17 @@ $carr_backup_snapshot_policy$;
 ALTER TABLE public.memory_item ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_item memory_item_partners_read; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY memory_item_partners_read ON public.memory_item FOR SELECT USING (true);
+
+
+--
 -- Name: memory_item memory_item_sponsor_insert; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY memory_item_sponsor_insert ON public.memory_item FOR INSERT WITH CHECK (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
-   FROM public.actor a
-  WHERE (a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text))))));
-
-
---
--- Name: memory_item memory_item_sponsor_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY memory_item_sponsor_read ON public.memory_item FOR SELECT USING (((scope = 'shared'::text) OR (owner_actor_id = ( SELECT a.id
    FROM public.actor a
   WHERE (a.slug = NULLIF(current_setting('carr.sponsoring_human_slug'::text, true), ''::text))))));
 
@@ -89948,6 +89946,7 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0576_answer_needs_joe_work_request_scac_successor.sql	aceb070f9ba8167f5923cee09a5988f658ff2197a936e24d712b76cf6f46388c	2026-09-24 08:37:03.435323+00
 0577_work_request_card_admits_needs_joe.sql	4cd44914350cd29307f71b0dbc93a45d48590b5172ff64d84caae3810fb2296b	2026-09-24 08:37:27.592191+00
 0578_answer_joe_atomic_pair_scac_successor.sql	66a845177b703da8ca84039af2161f1d05041243cc6639530e81e769b6f70920	2026-09-24 08:37:43.42257+00
+0579_memory_item_readable_by_both_partners.sql	37c5dfea4b5627dfe4b90e109ad016058ff9af45e8b3340fb19f45e596651ca3	2026-09-24 10:02:23.098423+00
 \.
 
 

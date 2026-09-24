@@ -363,6 +363,17 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
             if result_text is None:
                 return {"desk": name, "outcome": "desktop_result_not_ready",
                         "session_id": session_id}
+            # The session has already reported completion — result_text above
+            # is its real answer, already in hand. A /desktop handoff failure
+            # from here on (e.g. desktop_handoff_timeout) is a problem with
+            # opening a window onto a finished session, never a reason to
+            # treat the TASK as failed: doing so used to fall through to
+            # queue_executor.fail_pending, which schedules a retry (a second
+            # launch, duplicating the work — defect a2e7dcb5) or blocks a task
+            # that in fact already succeeded. So a handoff failure here only
+            # posts its own honest receipt and falls through to the ordinary
+            # completion handling below, which finishes the task with the
+            # result already read.
             try:
                 handoff_background(session_id)
             except claude_desktop_wire.ClaudeDesktopError as exc:
@@ -372,20 +383,13 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     }}, separators=(",", ":")),
                     seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
                 )
-                if pending.get("origin_kind") == "queue" and queue_executor is not None:
-                    terminal = queue_executor.fail_pending(
-                        pending, "provider_unavailable", now=now)
-                    state_mod.clear_pending(state, name)
-                    return {"desk": name, "session_id": session_id, **terminal}
-                state_mod.clear_pending(state, name)
-                return {"desk": name, "outcome": "desktop_handoff_failed",
-                        "session_id": session_id}
-            add_room_turn(
-                body=json.dumps({"claude_desktop_handoff": {
-                    "session_id": session_id, "status": "opened",
-                }}, separators=(",", ":")),
-                seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
-            )
+            else:
+                add_room_turn(
+                    body=json.dumps({"claude_desktop_handoff": {
+                        "session_id": session_id, "status": "opened",
+                    }}, separators=(",", ":")),
+                    seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+                )
         elif observed_state in (claude_desktop_wire.FAILED_STATES
                                 | claude_desktop_wire.NEEDS_INPUT_STATES):
             if pending.get("origin_kind") == "queue" and queue_executor is not None:
