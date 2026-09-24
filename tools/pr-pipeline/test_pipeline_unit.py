@@ -23,6 +23,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -743,7 +744,7 @@ def test_escalation_calls_add_loop_verb():
 # (2026-09-24, `./run.sh call read-room-queue '{"room":"partner-line"}'`) —
 # the exact shape this file's fixtures are built to match, down to field
 # names and types (source_seq as a plain JSON int, task_id as "t_<hex>").
-REAL_READ_ROOM_QUEUE_EVENT_SHAPE = {
+REAL_READ_ROOM_QUEUE_EVENT_SHAPE: dict[str, Any] = {
     "v": 1, "board": "carr-build", "event_id": 2126, "event": "blocked",
     "task_id": "t_f18eb2ff",
     "card": {
