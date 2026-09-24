@@ -166,32 +166,6 @@ def _find_vault():
 
 VAULT = _find_vault()
 
-
-def _find_call_mode_python():
-    """The Call Mode LaunchAgent (com.carr.call-mode.plist) needs a REAL,
-    grantable interpreter path in ProgramArguments[0], not /usr/bin/python3.
-    That path is the xcrun shim: a LaunchAgent loaded from
-    ~/Library/LaunchAgents gets its Accessibility (TCC) responsibility
-    attributed to ProgramArguments[0], and macOS will not let a human
-    usefully grant Accessibility to the shim (System Events clicks then fail
-    with -25211 even with python3, Python.app and osascript all enabled).
-    Resolve what the shim actually forwards to (the Command Line Tools
-    python3) the same way tools/dictation-rig/bin/install-call-mode.sh does,
-    so the two installers of this same plist never disagree.
-    """
-    try:
-        out = subprocess.run(
-            ["/usr/bin/python3", "-c", "import sys; print(sys.executable)"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    path = out.stdout.strip() if out.returncode == 0 else ""
-    return path if path and os.path.isfile(path) and os.access(path, os.X_OK) else ""
-
-
-CALL_MODE_PYTHON = _find_call_mode_python()
-
 SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 TASKS_SRC = os.path.join(HOME, ".claude", "scheduled-tasks")
 TASKS_REPO = os.path.join(REPO, "ops", "scheduled-tasks")
@@ -241,8 +215,7 @@ CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
 # _find_vault() returns "" when no Drive mount matches, so one unmounted Drive
 # would otherwise shred every tracked config on the next pull.
 TOKENS = [(tok, real) for tok, real in
-          (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME),
-           ("{{PYTHON}}", CALL_MODE_PYTHON)) if real]
+          (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME)) if real]
 
 # RUNS ON EXACTLY ONE MACHINE. Not a statement about Joe; a statement about what
 # the job writes. Each of these mutates state that is SHARED between the two
@@ -1976,14 +1949,6 @@ def cmd_install(apply):
             print(f"  ERROR  cannot render {f} because its tracked source is missing")
             return 1
         body = concrete(source)
-        if "{{" in body:
-            # A token concrete() does not know a real value for (CALL_MODE_PYTHON
-            # unresolved, most likely: no Command Line Tools python3 on this
-            # machine) must never install silently -- launchd would load a
-            # ProgramArguments[0] that is a literal template string, not a path.
-            print(f"  ERROR  {f} still has an unresolved template token after "
-                  f"rendering; refusing to install it. Body:\n{body}")
-            return 1
         body_matches = launchd_texts_match(read(dest), source)
         if body_matches and not apply:
             continue

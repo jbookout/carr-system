@@ -40,21 +40,15 @@ companion; every other web origin is refused by the companion.
 Call Mode clicks Quill's Start/Stop menu item via `osascript`/System Events, so
 the agent needs Accessibility access. A LaunchAgent loaded from
 `~/Library/LaunchAgents` gets its Accessibility responsibility attributed to
-`ProgramArguments[0]` — and that cannot be `/usr/bin/python3`. That path is the
-macOS Command Line Tools shim (`xcrun`'s stub), and macOS will not let a human
-usefully grant it Accessibility: the click then fails with
-`osascript is not allowed assistive access (-25211)` even with python3,
-Python.app and osascript all enabled in System Settings. `install-call-mode.sh`
-resolves the real interpreter the shim forwards to
-(`/usr/bin/python3 -c 'import sys; print(sys.executable)'`, normally
-`/Library/Developer/CommandLineTools/usr/bin/python3`) and bakes that concrete
-path into the plist via `{{PYTHON}}`, alongside the existing `{{REPO}}` and
-`{{HOME}}` tokens. The installer prints exactly which interpreter it installed
-— grant **that** path Accessibility access under System Settings > Privacy &
-Security > Accessibility, not `/usr/bin/python3` and not `python3` on PATH.
-`ops/config-as-code.py` (the machine-converge/nightly install path for this
-same tracked plist) resolves and substitutes `{{PYTHON}}` the same way, so the
-two installers never disagree.
+`ProgramArguments[0]`, and that cannot be `/usr/bin/python3`: that path is the
+Command Line Tools shim, and macOS will not let a human usefully grant it
+Accessibility (the click fails with `osascript is not allowed assistive access
+(-25211)` even with python3, Python.app and osascript all enabled). The tracked
+plist therefore names the real interpreter directly,
+`/Library/Developer/CommandLineTools/usr/bin/python3` (verified live on the Mac
+Studio 2026-09-23). Grant **that** path Accessibility under System Settings >
+Privacy & Security > Accessibility. A machine without the Command Line Tools
+fails visibly at load rather than silently.
 
 **Risk color: red, human initiated.** Starting a call fires the audible consent
 announcement and begins client-visible recording, so it only happens after Joe

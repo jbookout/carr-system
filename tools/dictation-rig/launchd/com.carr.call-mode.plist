@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>{{PYTHON}}</string>
+        <string>/Library/Developer/CommandLineTools/usr/bin/python3</string>
         <string>{{REPO}}/tools/dictation-rig/bin/call-mode.py</string>
         <string>serve</string>
     </array>
