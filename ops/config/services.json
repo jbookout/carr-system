@@ -132,6 +132,25 @@
       ]
     },
     {
+      "key": "nightly-exports-daytime-retry",
+      "name": "Nightly exports daytime retry",
+      "purpose": "Safety net for nightly-record-layer's exports step (defect: failed 9/22-9/24, the OneDrive File Provider idling overnight — see doctrine 'nightly-exports-onedrive-wake'). Re-runs `./run.sh export` once, only if tonight's own archived nightly log did not report the exports step OK.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/nightly-exports-retry.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 7200,
+          "notes": "Daily at 16:00 UTC (11:00 local), one fixed calendar fire. A no-op most days (exits immediately once tonight's own nightly-record-layer run already landed exports OK), so absence of a RETRY line in out/nightly.log is the expected common case, not an anomaly — same posture as migrate-prod above."
+        }
+      ]
+    },
+    {
       "key": "rules-refresh",
       "name": "Taught-rule refresh",
       "purpose": "Re-renders the compiled rule files Dell's sessions boot from.",
