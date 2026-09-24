@@ -536,7 +536,8 @@ create or replace function ops.retire_workflow_cutover_plan(
   p_disable_receipt_id uuid,
   p_reason text,
   p_idempotency_key uuid,
-  p_actor_slug text
+  p_actor_slug text,
+  p_census_available boolean default false
 ) returns ops.workflow_cutover_plan
 language plpgsql security definer
 set search_path = pg_catalog, ops
@@ -634,6 +635,18 @@ begin
     raise exception 'legacy_schedule_disable_receipt_missing_for_% legacy surface(s)', v_missing_surface_count;
   end if;
 
+  -- P1 fix (PR #1245 review, item 6 / Q157): retirement is irreversible and
+  -- the independent workflow-truth census is the one signal that isn't
+  -- purely a paperwork trail (the receipt and evidence chain above all just
+  -- prove a human clicked the right buttons). A census that cannot say
+  -- available:true means retirement proceeds fail-open on trust alone --
+  -- refuse it, ordered AFTER every other check so the more specific
+  -- receipt/stage errors above still surface first when those are what's
+  -- actually wrong.
+  if not p_census_available then
+    raise exception 'workflow_cutover_retire_refused_census_unknown';
+  end if;
+
   update ops.workflow_cutover_plan
      set stage = 'retired',
          -- P1 fix (item 2): status must leave 'active' too, or the plan
@@ -658,10 +671,10 @@ end;
 $$;
 
 comment on function ops.retire_workflow_cutover_plan is
-  'DoctorCRE V5-R02 authority write door (Q116 last step): the only path to stage=retired, which also moves status to retired so the plan frees the one-active-plan slot. Requires the plan at recovery_ready; a legacy_schedule_disable_receipt matching this exact (workflow_key, workflow_version), approved at or after the cutover transition, not already used to retire another plan, and one receipt for every ops.legacy_schedule_surface_registry row of this workflow. The real actor is ops.authority_actor_slug(), never a caller-supplied string.';
+  'DoctorCRE V5-R02 authority write door (Q116 last step): the only path to stage=retired, which also moves status to retired so the plan frees the one-active-plan slot. Requires the plan at recovery_ready; a legacy_schedule_disable_receipt matching this exact (workflow_key, workflow_version), approved at or after the cutover transition, not already used to retire another plan, and one receipt for every ops.legacy_schedule_surface_registry row of this workflow. p_census_available (PR #1245 item 6 / Q157) must be true -- the caller (the MCP verb) passes the independent workflow-truth census read verbatim, and this function refuses retirement when it is anything but true, checked last so the more specific stage/receipt errors above still surface first. The real actor is ops.authority_actor_slug(), never a caller-supplied string.';
 
-revoke all on function ops.retire_workflow_cutover_plan(uuid, uuid, text, uuid, text) from public;
-grant execute on function ops.retire_workflow_cutover_plan(uuid, uuid, text, uuid, text) to carr_authority;
+revoke all on function ops.retire_workflow_cutover_plan(uuid, uuid, text, uuid, text, boolean) from public;
+grant execute on function ops.retire_workflow_cutover_plan(uuid, uuid, text, uuid, text, boolean) to carr_authority;
 
 -- ops.record_workflow_caller: caller inventory upsert. status='done' is
 -- refused without evidence_ref -- Q157, never a claim from silence.
@@ -702,6 +715,18 @@ begin
   if p_status = 'blocked' and (p_blocked_reason is null or btrim(p_blocked_reason) = '') then
     raise exception 'caller_blocked_requires_reason';
   end if;
+  -- P1 fix (PR #1245 review, item 6 / Q157): status='done' for a workflow
+  -- identity that names no real ops.job_definition row is exactly the same
+  -- "hides uncertainty" failure Q157 already treats status=done without
+  -- evidence_ref as -- a caller can claim done against a workflow_key/
+  -- workflow_version that was never actually registered as a real
+  -- migratable workflow, and nothing before this line would have noticed.
+  if p_status = 'done' and not exists (
+    select 1 from ops.job_definition
+     where key = p_workflow_key and version = p_workflow_version
+  ) then
+    raise exception 'caller_done_requires_registered_job_definition: % v%', p_workflow_key, p_workflow_version;
+  end if;
 
   insert into ops.workflow_caller (
     workflow_key, workflow_version, caller_locator, caller_kind, status,
@@ -716,12 +741,26 @@ begin
         updated_by_actor_slug = excluded.updated_by_actor_slug, updated_at = now()
   returning * into v_row;
 
+  -- P1 fix (item 6): "append history instead of overwriting it" (PR #1245
+  -- review) -- the upsert above is still the fast-lookup CURRENT row
+  -- workflow-cutover-board reads, but every call, upsert or first-insert,
+  -- now also appends its own row to the append-only
+  -- ops.workflow_caller_history ledger, so a prior status is never lost to
+  -- the next update the way the bare upsert above would lose it on its own.
+  insert into ops.workflow_caller_history (
+    workflow_key, workflow_version, caller_locator, caller_kind, status,
+    blocked_reason, evidence_ref, actor_slug
+  ) values (
+    p_workflow_key, p_workflow_version, p_caller_locator, p_caller_kind, p_status,
+    p_blocked_reason, p_evidence_ref, p_actor_slug
+  );
+
   return v_row;
 end;
 $$;
 
 comment on function ops.record_workflow_caller is
-  'DoctorCRE V5-R02 write door: upserts one caller row for one workflow identity. status=done is refused without a non-null evidence_ref, and status=blocked is refused without blocked_reason -- Q157, an absent-evidence caller cannot read back done.';
+  'DoctorCRE V5-R02 write door: upserts one caller row for one workflow identity into ops.workflow_caller (current state) and appends one row to ops.workflow_caller_history (full history, never overwritten). status=done is refused without a non-null evidence_ref and without a real ops.job_definition row for the exact workflow identity; status=blocked is refused without blocked_reason -- Q157, an absent-evidence or unregistered caller cannot read back done.';
 
 revoke all on function ops.record_workflow_caller(text, integer, text, text, text, text, text, text) from public;
 grant execute on function ops.record_workflow_caller(text, integer, text, text, text, text, text, text) to carr_writer;

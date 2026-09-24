@@ -140,11 +140,24 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
       },
       handler: async (c, actor, args) => withEnvelope(c, actor, "retire-workflow-cutover-plan", args, async () => {
         const census = readWorkflowTruthCensus();
+        // P1 fix (PR #1245 review, item 6 / Q157): the census used to be
+        // surfaced only as a decorative, non-authoritative field on the
+        // response -- retire proceeded on the receipt/evidence chain alone
+        // even when the independent workflow-truth census could not say
+        // whether the legacy and new systems actually agree. The census
+        // read is now passed straight into the store as p_census_available,
+        // which refuses retirement whenever it isn't literally true --
+        // ordered AFTER the store's own stage/receipt checks, so a plan
+        // that's simply in the wrong state, or has the wrong receipt, still
+        // gets that specific error rather than a generic census refusal.
+        // Until the real census store lands (not yet), this refuses every
+        // retire attempt -- the correct, intended state, not a bug.
         let row;
         try {
           row = (await c.query(
-            "select * from ops.retire_workflow_cutover_plan($1,$2,$3,$4,$5)",
-            [args.plan_id, args.disable_receipt_id, args.reason, args.idempotency_key, actor.slug || null],
+            "select * from ops.retire_workflow_cutover_plan($1,$2,$3,$4,$5,$6)",
+            [args.plan_id, args.disable_receipt_id, args.reason, args.idempotency_key, actor.slug || null,
+             census.available === true],
           )).rows[0];
         } catch (err) {
           throw new ToolError({ error: "workflow_cutover_retire_refused", detail: String(err.message || err) });

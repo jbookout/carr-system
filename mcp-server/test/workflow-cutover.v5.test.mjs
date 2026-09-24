@@ -96,7 +96,7 @@ class WorkflowCutoverFake {
     }
 
     if (sql.includes("ops.retire_workflow_cutover_plan")) {
-      const [planId, disableReceiptId, reason, idempotencyKey] = params;
+      const [planId, disableReceiptId, reason, idempotencyKey, , censusAvailable] = params;
       const replayed = this.transitions.find(t => t.idempotency_key === idempotencyKey);
       if (replayed) return { rows: [this.plans.get(replayed.plan_id)] };
       if (!reason) throw new Error("reason_required");
@@ -108,6 +108,11 @@ class WorkflowCutoverFake {
       const receipt = this.disableReceipts.get(disableReceiptId);
       if (!receipt) throw new Error("legacy_schedule_disable_receipt_not_found");
       if (receipt.workflow_key !== plan.workflow_key) throw new Error("legacy_schedule_disable_receipt_workflow_mismatch");
+      // P1 fix (PR #1245 review, item 6 / Q157): mirrors the real
+      // ops.retire_workflow_cutover_plan's p_census_available check, ordered
+      // last so the more specific errors above still win when those are
+      // what's actually wrong.
+      if (censusAvailable !== true) throw new Error("workflow_cutover_retire_refused_census_unknown");
       plan.stage = "retired";
       this.transitions.push({ plan_id: planId, from_stage: "recovery_ready", to_stage: "retired",
         evidence_ref: disableReceiptId, reason, idempotency_key: idempotencyKey });
@@ -300,21 +305,26 @@ test("Q116: retire-workflow-cutover-plan refuses before recovery_ready, and refu
   }));
   assert.match(noReceipt.detail, /legacy_schedule_disable_receipt_not_found/);
   client.seedDisableReceipt("80000000-0000-0000-0000-000000000001", { workflow_key: "y" });
-  const retired = await executeRegisteredTool(client, AUTHORITY_AGENT, "retire-workflow-cutover-plan", {
+  // P1 fix (PR #1245 review, item 6 / Q157): retire-workflow-cutover-plan now
+  // refuses outright when the independent workflow-truth census answers
+  // unavailable, rather than proceeding on the receipt/evidence chain alone
+  // and merely decorating the response with the raw reading. The census
+  // route answers unavailable today (the durable census store has not
+  // landed), so THIS build refuses every retire -- that is the intended,
+  // correct fail-closed behavior, not a bug to work around in the fixture.
+  // The check is ordered LAST in the store (after stage/receipt checks,
+  // which the two sub-cases above already proved still fire first), so a
+  // fully valid plan+receipt still gets refused specifically for the census.
+  const refused = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "retire-workflow-cutover-plan", {
     idempotency_key: "60000000-0000-0000-0000-000000000016",
     plan_id: opened.plan_id, disable_receipt_id: "80000000-0000-0000-0000-000000000001",
     reason: "legacy schedule confirmed disabled",
-  });
-  assert.equal(retired.stage, "retired");
-  // The disable receipt is real per-fixture evidence composed from the
-  // already-existing disable-legacy-schedule store, not fabricated by this
-  // slice, and retirement is a fixture-only workflow key ("y"), never a real
-  // production identity -- this build retires no live workflow. The
-  // authority-only door surfaces the raw fail-closed census reading
-  // (available:false today) as a non-authoritative signal alongside the
-  // real receipt-backed authority; only workflow-cutover-board normalizes
-  // it to state='unknown'.
-  assert.equal(retired.census.available, false);
+  }));
+  assert.equal(refused.error, "workflow_cutover_retire_refused");
+  assert.match(refused.detail, /workflow_cutover_retire_refused_census_unknown/);
+  // The plan must still be exactly where it was -- refused, not partially
+  // applied.
+  assert.equal(client.plans.get(opened.plan_id).stage, "recovery_ready");
 });
 
 test("Q157: record-workflow-caller refuses status=done without evidence, and refuses status=blocked without a reason", async () => {
