@@ -407,16 +407,16 @@ def main():
     # standing over an empty grid.
     take = "".join(f'<div class="tk"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
                    for t, d in (client.get("findings") or []))
-    take_block = ('<h2><span class="secnum">What this search tells you</span></h2>'
-                  f'<div class="tkgrid">{take}</div>') if take else ""
+    take_block = ('<section class="closing"><h2><span class="secnum">What this search tells you</span></h2>'
+                  f'<div class="tkgrid">{take}</div></section>') if take else ""
     conf = "".join(f'<div class="dq"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
                    for t, d in client["confirmations"])
     # Optional now, and omitted entirely rather than rendered as an empty heading
     # over an empty grid.
     decl = "".join(f'<div class="dq"><h4>{e(t)}</h4><p>{e(d)}</p></div>'
                    for t, d in (client.get("declined_and_why") or []))
-    decl_block = (f'<h2><span class="secnum">What we would not do, and why</span></h2>'
-                  f'<div class="dqgrid">{decl}</div>') if decl else ""
+    decl_block = (f'<section class="closing"><h2><span class="secnum">What we would not do, and why</span></h2>'
+                  f'<div class="dqgrid">{decl}</div></section>') if decl else ""
 
     doc = f'''<!DOCTYPE html>
 <html lang="en"><head>
@@ -446,8 +446,8 @@ def main():
 
   {take_block}
 
-  <h2><span class="secnum">To confirm on your side</span></h2>
-  <div class="dqgrid">{conf}</div>
+  <section class="closing"><h2><span class="secnum">To confirm on your side</span></h2>
+  <div class="dqgrid">{conf}</div></section>
 
   {decl_block}
 </main>

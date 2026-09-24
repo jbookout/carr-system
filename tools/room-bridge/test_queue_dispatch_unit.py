@@ -273,6 +273,80 @@ class QueueDispatchTests(unittest.TestCase):
             self.assertEqual(block[2], "result_protocol_error")
             self.assertNotIn(raw, json.dumps(adapter.calls))
 
+    def test_real_session_results_with_extra_fields_complete_as_success(self):
+        """t_24b0a0c6 (V5-UX-C14) and t_a4765f1b (V5-UX-B04) opened their PRs
+        and ended with a valid result line that also carried pr_url, verbs,
+        gaps and room_seq.  The exact-field-set check blocked both as
+        result_protocol_error (seq 43828, 43860).  Their real final texts,
+        read from the transcripts, must now finish as success with their own
+        summary, and the extra fields must not leak into the callback."""
+        fixture = json.loads((HERE / "testdata" / "claude_desktop_real_capture.json").read_text())
+        for task_id, raw in fixture["queue_final_texts"]["texts"].items():
+            adapter = FakeAdapter([task(task_id, target="claude", cap="repo-write")])
+            pending = {"kanban_task_id": task_id, "target": "claude-desktop", "finish": "done",
+                       "cap": "repo-write", "source_seq": 43733, "source_msg_id": "source-message"}
+            outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).finish_pending(
+                pending, raw)
+            self.assertEqual(outcome["outcome"], "done", task_id)
+            callback = outcome["completion"]["queue_completion"]
+            self.assertEqual(callback["outcome"], "success")
+            self.assertTrue(callback["summary"].startswith("Opened"), callback["summary"])
+            self.assertNotIn("code", callback)
+            for extra in ("pr_url", "verbs", "gaps", "room_seq"):
+                self.assertNotIn(extra, callback)
+            complete = next(call for call in adapter.calls if call[0] == "complete")
+            self.assertEqual(complete[2], callback["summary"])
+            self.assertNotIn("pr_url", json.dumps(complete[3]))
+
+    def test_extra_fields_never_excuse_a_broken_result(self):
+        base = {"v": 1, "task_id": "t_queue0001", "outcome": "success",
+                "summary": "Done.", "pr_url": "https://example.invalid/pr/1"}
+        broken = [
+            {k: v for k, v in base.items() if k != "summary"},          # required field absent
+            {**base, "task_id": "t_other0001"},                          # another task
+            {**base, "v": 2},                                             # wrong protocol version
+            {**base, "outcome": "done"},                                  # outcome outside the enum
+            {**base, "code": "capability_escalation_required"},           # code on a success
+            {**base, "outcome": "blocked", "code": "made_up"},            # unknown block code
+            {**base, "summary": "x" * 501},                               # oversize summary
+        ]
+        for payload in broken:
+            raw = "prose\nCARR_QUEUE_RESULT " + json.dumps(payload)
+            with self.assertRaises(queue_dispatch.QueueDispatchError, msg=payload):
+                queue_dispatch.parse_terminal_result(raw, "t_queue0001", "repo-write")
+        blocked = queue_dispatch.parse_terminal_result(
+            "CARR_QUEUE_RESULT " + json.dumps({**base, "outcome": "blocked",
+                                                "summary": "Could not open the PR."}),
+            "t_queue0001", "repo-write")
+        self.assertEqual(blocked, {"v": 1, "task_id": "t_queue0001", "outcome": "blocked",
+                                   "summary": "Could not open the PR."})
+
+    def test_record_write_still_needs_its_evidence_despite_extra_fields(self):
+        evidence = {"mcp_verb": "update-lead", "record_id": "lead:123",
+                    "readback_verb": "lead-board", "readback_record_id": "lead:123"}
+        extra = {"pr_url": "https://example.invalid/pr/1"}
+        missing = FakeAdapter([task(target="claude", cap="record-write", finish="done")])
+        refused = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=missing).start(
+            "claude", dispatch_call=lambda _prompt: {"status": "completed",
+                                                     "result": result(record_evidence=extra)})
+        self.assertEqual(refused["outcome"], "record_write_evidence_missing")
+        verified = FakeAdapter([task(target="claude", cap="record-write", finish="done")])
+        ok = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=verified).start(
+            "claude", dispatch_call=lambda _prompt: {"status": "completed",
+                                                     "result": result(record_evidence={**evidence, **extra})})
+        self.assertEqual(ok["outcome"], "done")
+        self.assertEqual(ok["completion"]["queue_completion"]["record_write"], evidence)
+
+    def test_prompt_spells_out_the_exact_result_shape(self):
+        adapter = FakeAdapter([task()])
+        seen: list[str] = []
+        queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
+            "sol", dispatch_call=lambda prompt: seen.append(prompt) or {"status": "completed",
+                                                                        "result": result()})
+        self.assertIn('CARR_QUEUE_RESULT {"v":1,"task_id":"t_queue0001","outcome":"success",'
+                      '"summary":"<one sentence>"}', seen[0])
+        self.assertIn("not in extra JSON fields", seen[0])
+
     def test_quota_failure_reclaims_with_closed_reason_and_bounded_backoff(self):
         adapter = FakeAdapter([task()])
         outcome = queue_dispatch.QueueDeskExecutor(catalog=CATALOG, adapter=adapter).start(
