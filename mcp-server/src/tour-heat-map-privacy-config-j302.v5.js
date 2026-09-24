@@ -30,6 +30,13 @@ export const V5_J302_PRIVACY_CONFIG = Object.freeze({
   //     INTERVAL_VALUES). 3 refuses cells bounded to one or two values.
   minimum_protection_interval_values: 3,
 
+  // 1c. Revision tolerance: two releases of the same cells may disagree by a
+  //     revision (a refresh, a late record). Every cross-release check is run
+  //     at each residual difference within +/- this many patients, and a pair
+  //     that disagrees by more is refused as inconsistent, never skipped. The
+  //     kernel refuses a negative value.
+  revision_tolerance_patients: 2,
+
   // 2. Client-visible heat-map content: none. Clients see exactly the Tour PDF
   //    fields (decision 4ab3933e, as relayed by the orchestrator), and no
   //    heat-map-derived content is on the PDF.

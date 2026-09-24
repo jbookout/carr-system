@@ -423,6 +423,12 @@ function opRequest(kind, { aggregate = countyAggregate(), receipt, ledger, count
 function op(kind, opts = {}, kernel = PINNED) {
   return kernel.evaluateAggregateOperation(opRequest(kind, opts));
 }
+// A differencing operation against a clean second release of the same cells
+// (other bytes, identical counts): it spends one differencing unit.
+function diffOp(ledger, aggregate = countyAggregate(), extra = {}) {
+  const counterpart = secondArtifact(aggregate.cells, { published_total: aggregate.published_total });
+  return op("difference_between_artifacts", { aggregate, ledger, counterpart, ...extra });
+}
 function ledgerFor(aggregate = countyAggregate()) {
   const r = conform({ artifact: artifactOf(aggregate), receipts: [expert(aggregate)] });
   assert.equal(r.decision, "conforms");
@@ -439,9 +445,11 @@ test("AC3: repeated-query, differencing and export budgets bind and exhaust", ()
     ledger = r.next_ledger;
   }
   refuses(op("rank_units", { ledger }), "privacy_budget_exhausted");
-  ledger = op("export_sealed_artifact", { ledger }).next_ledger;
-  refuses(op("export_sealed_artifact", { ledger }), "privacy_budget_exhausted");
-  assert.deepEqual(ledger.used, { differencing: 0, export: 1, query: 5 });
+  ledger = diffOp(ledger).next_ledger;
+  refuses(diffOp(ledger), "privacy_budget_exhausted");
+  assert.deepEqual(ledger.used, { differencing: 1, export: 0, query: 5 });
+  // Export is blocked before any budget is read (see M1).
+  assert.equal(op("export_sealed_artifact", { ledger }).decision, "unavailable");
 });
 
 test("AC3: budget consumption is compare-and-swap — two callers on one ledger race for one version", () => {
@@ -462,7 +470,7 @@ test("AC3: a ledger for another artifact, an inconsistent ledger, or none at all
   refuses(op("view_native_precision"), "budget_ledger_required");
   // A1e: a caller-built ledger claiming nothing spent at version 999.
   const forged = { ...ledgerFor(), ledger_version: 999 };
-  const r = op("export_sealed_artifact", { ledger: forged });
+  const r = op("view_native_precision", { ledger: forged });
   refuses(r, "budget_ledger_inconsistent");
   assert.equal(r.units_spent, 0);
   // Mutant 1194: an unknown ledger schema is a contract violation.
@@ -925,9 +933,8 @@ test("F1: minting a new receipt id does not mint a new budget — the ledger is 
     descriptor_digest: aggregateDescriptorDigest(agg), binding_digest: one.binding_digest }));
   // The spent ledger under receipt 1 is the ledger receipt 2 must present.
   let ledger = ledgerFor(agg);
-  ledger = op("export_sealed_artifact", { aggregate: agg, ledger }).next_ledger;
-  refuses(op("export_sealed_artifact", { aggregate: agg, receipt: expert(agg, { receipt_id: "rid-2" }), ledger }),
-    "privacy_budget_exhausted");
+  ledger = diffOp(ledger, agg).next_ledger;
+  refuses(diffOp(ledger, agg, { receipt: expert(agg, { receipt_id: "rid-2" }) }), "privacy_budget_exhausted");
   // Another environment is another binding, and so another ledger.
   const prod = conform({ artifact: artifactOf(agg), receipts: [expert(agg)],
     context: { ...CONTEXT, environment: "production" } });
@@ -1218,8 +1225,8 @@ test("N1: relabelling an artifact (native id or version) does not reset its budg
   assert.notEqual(one.artifact_digest, two.artifact_digest);
   assert.equal(one.ledger_key, two.ledger_key);
   let ledger = ledgerFor(agg);
-  ledger = op("export_sealed_artifact", { aggregate: agg, ledger }).next_ledger;
-  refuses(op("export_sealed_artifact", { aggregate: agg, corp: relabelled(), ledger }), "privacy_budget_exhausted");
+  ledger = diffOp(ledger, agg).next_ledger;
+  refuses(diffOp(ledger, agg, { corp: relabelled() }), "privacy_budget_exhausted");
   // Other bytes, another descriptor or another binding is another ledger.
   const other = countyAggregate({ published_total: 106 });
   assert.notEqual(conformExpert(other).ledger_key, one.ledger_key);
@@ -1318,8 +1325,12 @@ test("N2: the difference between two published totals must clear the floor", () 
   assert.equal(r.minimum_cell_count, 11);
   assert.equal(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [bTotal(90)] }).decision,
     "within_budget");
-  assert.equal(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [bTotal(101)] }).decision,
-    "within_budget");
+  // Identical shown cells with totals 11 apart: the same suppressed pair
+  // cannot hold both, beyond the revision band, so the pair is inconsistent
+  // and refuses rather than being skipped (R1).
+  const drift = op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [bTotal(101)] });
+  refuses(drift, "suppressed_cell_bounded_across_releases");
+  assert.equal(drift.exposure, "releases_inconsistent_beyond_revision_tolerance");
   refuses(op("difference_between_artifacts", { aggregate: a, ledger: ledgerFor(a), counterpart: bTotal(93) }),
     "published_total_difference_below_floor");
 });
@@ -1471,17 +1482,17 @@ test("N6: the store's compare-and-swap compares the FULL ledger digest, not the 
   // which is exactly what the store must compare.
   const agg = countyAggregate();
   let real = ledgerFor(agg);
-  real = op("export_sealed_artifact", { aggregate: agg, ledger: real }).next_ledger;
+  real = diffOp(real, agg).next_ledger;
   const reshuffled = { ...real, used: { differencing: 0, export: 0, query: 1 } };
   const a = op("view_native_precision", { aggregate: agg, ledger: real });
   const b = op("view_native_precision", { aggregate: agg, ledger: reshuffled });
   assert.equal(a.compare_and_swap.expected_ledger_version, b.compare_and_swap.expected_ledger_version);
   assert.notEqual(a.compare_and_swap.expected_ledger_digest, b.compare_and_swap.expected_ledger_digest);
   assert.equal(a.compare_and_swap.store_must_compare, "expected_ledger_digest");
-  // With export spent, the real ledger refuses a second export; the reshuffled
-  // one would not — the residual only the store closes.
-  refuses(op("export_sealed_artifact", { aggregate: agg, ledger: real }), "privacy_budget_exhausted");
-  assert.equal(op("export_sealed_artifact", { aggregate: agg, ledger: reshuffled }).decision, "within_budget");
+  // With differencing spent, the real ledger refuses a second one; the
+  // reshuffled one would not — the residual only the store closes.
+  refuses(diffOp(real, agg), "privacy_budget_exhausted");
+  assert.equal(diffOp(reshuffled, agg).decision, "within_budget");
 });
 
 // ===========================================================================
@@ -1549,8 +1560,9 @@ test("H1c: an expired prior receipt does not un-release its cells, nor block the
   // A prior whose own residual pins its cells (released before that rule) is read,
   // not refused; its cells still count.
   const pinnedPrior = refreshed(countyAggregate({ published_total: 85 }), { dataset: DATASET });
-  assert.equal(op("view_native_precision", { history: [{ artifact: pinnedPrior.artifact,
-    route_receipts: pinnedPrior.route_receipts }], ledger: ledgerFor() }).decision, "within_budget");
+  const shown = countyAggregate({ cells: [q1("56001", 40), q1("56003", 25)], published_total: null });
+  assert.equal(op("view_native_precision", { aggregate: shown, history: [{ artifact: pinnedPrior.artifact,
+    route_receipts: pinnedPrior.route_receipts }], ledger: ledgerFor(shown) }).decision, "within_budget");
   // The prior's floor at release (an expert minimum of 20) governs the pair.
   const first = countyAggregate({ published_total: null, cells: [
     { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }] });
@@ -1711,11 +1723,15 @@ test("P1: three-cell nested groups keep the floor and the interval width", () =>
   assert.equal(r.exposure, "suppressed_cells_interval_too_narrow");
   // Sum 25: each of 5..10, and the pair clears.
   assert.equal(jointView(bWith(25), a).decision, "within_budget");
-  // A group sum below one per cell cannot be the same data: a revision, not a leak.
+  // A group sum of -1 is not "no exposure": within the revision band (2) it may
+  // be a revision of -2 with Z = 1, so Z is effectively exact (R1).
   const revised = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null),
     q1("56007", null), q2("56001", 30)], published_total: 94 });
   assert.equal(conformExpert(revised).decision, "conforms");
-  assert.equal(jointView(revised, a).decision, "within_budget");
+  const rr = jointView(revised, a);
+  refuses(rr, "suppressed_cell_bounded_across_releases");
+  assert.equal(rr.exposure, "complementary_suppression_missing");
+  assert.equal(Math.abs(rr.revision_offsets[0]) + Math.abs(rr.revision_offsets[1]), 2);
 });
 
 test("P1: partially overlapping suppressed sets narrow a cell below the interval width", () => {
@@ -1731,14 +1747,24 @@ test("P1: partially overlapping suppressed sets narrow a cell below the interval
   const r = jointView(b, a);
   refuses(r, "suppressed_cell_bounded_across_releases");
   assert.equal(r.exposure, "suppressed_cells_interval_too_narrow");
-  // B at 27 (W - Z = 7): Z in 1..3 and W in 8..10 — the pair clears.
-  const b27 = countyAggregate({ cells: b.cells, published_total: 107 });
-  assert.equal(jointView(b27, a).decision, "within_budget");
-  // attack5 P2 (X + Y = 18 and X + W = 12): every cell keeps three values.
+  // B at 27 (W - Z = 7) clears without drift, but a revision of +1 makes it 8:
+  // refused (R2). At 25 (W - Z = 5, up to 7 in the band) the pair clears.
+  refuses(jointView(countyAggregate({ cells: b.cells, published_total: 107 }), a),
+    "suppressed_cell_bounded_across_releases");
+  assert.equal(jointView(countyAggregate({ cells: b.cells, published_total: 105 }), a).decision, "within_budget");
+  // attack5 P2 (X + Y = 18 and X + W = 12): with no revision every cell keeps
+  // three values; within the band a revision of 2 would pin Y = 10 and W = 2,
+  // so the default (tolerance 2) refuses and a tolerance of 0 clears.
   const p2a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 68 });
   const p2b = countyAggregate({ cells: [q1("56001", 50), q1("56003", 20), q1("56005", null), q1("56009", null)],
     published_total: 82 });
-  assert.equal(jointView(p2b, p2a).decision, "within_budget");
+  const p2 = jointView(p2b, p2a);
+  refuses(p2, "suppressed_cell_bounded_across_releases");
+  assert.notDeepEqual(p2.revision_offsets, [0, 0]);
+  const exact = pinnedKernel(POPULATION, { revision_tolerance_patients: 0 });
+  assert.equal(exact.evaluateAggregateOperation(opRequest("view_native_precision", { aggregate: p2b,
+    ledger: ledgerFor(p2b), history: [secondArtifact(p2a.cells, { published_total: 68 })] })).decision,
+  "within_budget");
   // Identical releases combine to nothing new.
   assert.equal(jointView(a, a).decision, "within_budget");
 });
@@ -1764,11 +1790,21 @@ test("M1: operations and proposals take a recipient class; only internal proceed
   const missing = opRequest("rank_units", { ledger: ledgerFor() });
   delete missing.recipient_class;
   throwsCode(() => PINNED.evaluateAggregateOperation(missing), "missing_field");
-  // An internal export is still only an internal sealed artifact, and names
-  // the human promotion receipt it owes before any client or public use.
+  // HARD BLOCKER: even an internal export answers unavailable until the
+  // authenticated recipient-class registry exists, before any budget is read,
+  // and names the human promotion receipt it will still owe.
   const exp = op("export_sealed_artifact", { ledger: ledgerFor() });
-  assert.equal(exp.decision, "within_budget");
-  assert.equal(exp.export_audience, "internal_only");
+  assert.equal(exp.decision, "unavailable");
+  assert.equal(exp.reason_id, "export_blocked_until_recipient_class_registry");
+  assert.equal(exp.owed_seam, J302.V5_J302_RECIPIENT_CLASS_SEAM);
+  assert.equal(J302.V5_J302_EXPORT_BLOCKED_UNTIL, J302.V5_J302_RECIPIENT_CLASS_SEAM);
+  assert.equal(v5J302PolicyPreimage().export_blocked_until, J302.V5_J302_RECIPIENT_CLASS_SEAM);
+  assert.ok(!exp.next_ledger && !exp.compare_and_swap);
+  // No ledger at all still answers unavailable, not budget_ledger_required.
+  assert.equal(op("export_sealed_artifact").reason_id, "export_blocked_until_recipient_class_registry");
+  // A bound config cannot open it.
+  assert.equal(pinnedKernel().evaluateAggregateOperation(opRequest("export_sealed_artifact",
+    { ledger: ledgerFor() })).decision, "unavailable");
   assert.deepEqual(exp.owed_human_promotion_receipt, {
     method_id: "human_promotion_receipt", verb: "record-tour-map-promotion-receipt",
     map_contract: J302.V5_J302_EXPORT_PROMOTION_REQUIREMENT.map_contract,
@@ -1880,4 +1916,254 @@ test("P1: overlapping sets of different sizes are not nested, and joint propagat
   const r = jointView(pb, pa);
   refuses(r, "suppressed_cell_bounded_across_releases");
   assert.equal(r.exposure, "suppressed_cells_pinned_by_residual");
+});
+
+// ===========================================================================
+// Round 5 (R1, R2, R3): a revision tolerance band. "No solution" is never
+// "no exposure": every residual difference within +/- tolerance is checked,
+// and a pair no variant explains refuses as inconsistent.
+// ===========================================================================
+
+const SIX = pinnedKernel(POPULATION, { county_fips_codes: { status: "pinned",
+  codes: ["56001", "56003", "56005", "56007", "56009", "56011"] } });
+function sixView(current, prior, kernel = SIX) {
+  const c = kernel.evaluatePrivacyRouteConformance({ tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(current),
+    context: CONTEXT, route_receipts: [expert(current)], now: NOW });
+  assert.equal(c.decision, "conforms", JSON.stringify(c));
+  return kernel.evaluateAggregateOperation(opRequest("view_native_precision",
+    { aggregate: current, ledger: emptyPrivacyBudgetLedger(c.ledger_key),
+      history: [secondArtifact(prior.cells, { published_total: prior.published_total })] }));
+}
+
+test("R1 (attack6): an inconsistent pair is refused, never read as no exposure", () => {
+  // A: X + Y = 13. B adds Z with a residual of 13 (R1a), 12 (R1b): the
+  // difference 0 or -1 is Z within a revision of 1 or 2, so Z is effectively exact.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 63 });
+  for (const total of [93, 92]) {
+    const b = countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null), q1("56007", null),
+      q1("56009", null)], published_total: total });
+    assert.equal(conformExpert(b).decision, "conforms");
+    const r = jointView(b, a);
+    refuses(r, "suppressed_cell_bounded_across_releases");
+    assert.equal(r.exposure, "complementary_suppression_missing");
+  }
+  // R1d: B adds Z and W with a residual of 13 (Z + W = 0 before revision).
+  const d = countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null), q1("56007", null),
+    q1("56009", null), q1("56011", null)], published_total: 93 });
+  const r = sixView(d, a);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.exposure, "complementary_suppression_residual_below_floor");
+  // Beyond the band: the same pair X, Y summing to 13 in A and 17 in B (B also
+  // shows 56003 = 30, so the totals differ by more than the floor) — 4 apart,
+  // no variant explains both, and the pair is refused as inconsistent.
+  const far = countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null), q1("56007", null)],
+    published_total: 97 });
+  assert.equal(conformExpert(far).decision, "conforms");
+  const f = jointView(far, a);
+  refuses(f, "suppressed_cell_bounded_across_releases");
+  assert.equal(f.exposure, "releases_inconsistent_beyond_revision_tolerance");
+  // Directly: a pair no variant explains returns the inconsistency, not null.
+  const { jointSuppressionExposure } = J302;
+  assert.deepEqual(jointSuppressionExposure(far, a, 11, 3, 2),
+    { exposure: "releases_inconsistent_beyond_revision_tolerance" });
+  // Equal suppressed sets with different sums are inconsistent by the nested
+  // check itself, whatever the propagation depth.
+  assert.deepEqual(jointSuppressionExposure(far, a, 11, 3, 2, { maxRounds: 1 }),
+    { exposure: "releases_inconsistent_beyond_revision_tolerance" });
+});
+
+test("R2 (attack6): a revision of +1 cannot lift a refused group over the floor", () => {
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 63 });
+  const withGroup = group => countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null),
+    q1("56007", null), q1("56009", null), q1("56011", null)], published_total: 93 + group });
+  // True Z + W = 10; a +1 revision shows 11; +2 shows 12; all refuse.
+  for (const group of [10, 11, 12]) {
+    const r = sixView(withGroup(group), a);
+    refuses(r, "suppressed_cell_bounded_across_releases");
+    assert.equal(r.exposure, "complementary_suppression_residual_below_floor", String(group));
+  }
+  // 13 is three past the floor's edge: every variant (11..15) clears.
+  assert.equal(sixView(withGroup(13), a).decision, "within_budget");
+  // With the tolerance set to 0, 11 clears — the band is what closes R2.
+  const exact = pinnedKernel(POPULATION, { revision_tolerance_patients: 0, county_fips_codes: { status: "pinned",
+    codes: ["56001", "56003", "56005", "56007", "56009", "56011"] } });
+  assert.equal(sixView(withGroup(11), a, exact).decision, "within_budget");
+});
+
+test("R2: the revision band also covers a residual after substituting shown cells", () => {
+  // Every suppressed cell of A shown by B: a leftover of 1..10 is a small group,
+  // and 11 or more is an inconsistency — both refuse, neither is skipped.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 80 });
+  const show = (x, y) => secondArtifact([q1("56005", x), q1("56007", y)]);
+  const view = b => op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [b] });
+  assert.equal(view(show(15, 15)).decision, "within_budget");
+  let r = view(show(14, 15));
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "suppressed_residual_recovered_by_release");
+  r = view(show(40, 40));
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "releases_inconsistent_beyond_revision_tolerance");
+  // Two cells left of three (residual 45): over two cells, 20 pins both, 19
+  // leaves two values, 21 or more clears. A remainder of 22 clears at 0 and
+  // at -1, and pins at -2 — only the full band sees it. 23 clears everywhere.
+  const three = countyAggregate({ published_total: 110, cells: [q1("56001", 40), q1("56003", 25), q1("56005", null),
+    q1("56007", null), q1("56009", null)] });
+  const threeView = shown => op("view_native_precision", { aggregate: three, ledger: ledgerFor(three),
+    history: [secondArtifact([q1("56005", shown)])] });
+  r = threeView(23);
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "suppressed_cells_pinned_by_residual");
+  assert.equal(threeView(22).decision, "within_budget");
+  // A remainder of 0 over two cells: only +2 has a solution (both cells 1),
+  // and that variant is a group below the floor — not an inconsistency.
+  r = threeView(45);
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "complementary_suppression_residual_below_floor");
+  // The differencing operation runs the same band.
+  const diffThree = shown => op("difference_between_artifacts", { aggregate: three, ledger: ledgerFor(three),
+    counterpart: secondArtifact([q1("56005", shown)]) });
+  r = diffThree(23);
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "suppressed_cells_pinned_by_residual");
+  assert.equal(diffThree(22).decision, "within_budget");
+  // A remainder no variant can hold is inconsistent.
+  r = op("view_native_precision", { aggregate: three, ledger: ledgerFor(three),
+    history: [secondArtifact([q1("56005", 48)])] });
+  refuses(r, "suppressed_residual_recovered_by_release");
+  assert.equal(r.exposure, "releases_inconsistent_beyond_revision_tolerance");
+});
+
+test("R2: the revision tolerance is config, defaulted to 2, and never negative", () => {
+  assert.equal(V5_J302_PRIVACY_CONFIG.revision_tolerance_patients, 2);
+  throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG, revision_tolerance_patients: -1 }),
+    "invalid_shape");
+  throwsCode(() => bindHeatMapPrivacyKernel({ ...V5_J302_PRIVACY_CONFIG, revision_tolerance_patients: 11 }),
+    "invalid_shape");
+  const { revision_tolerance_patients: _drop, ...missing } = V5_J302_PRIVACY_CONFIG;
+  throwsCode(() => bindHeatMapPrivacyKernel(missing), "missing_field");
+});
+
+// A seeded corpus of release pairs, some with a per-cell revision in B.
+function driftCorpus(count, seed) {
+  let rng = seed;
+  const rand = n => { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng % n; };
+  const pairs = [];
+  while (pairs.length < count) {
+    const n = 2 + rand(4);
+    const truth = Array.from({ length: n }, () => (rand(6) === 0 ? 11 + rand(15) : 1 + rand(10)));
+    const supA = truth.map(() => rand(2) === 0), supB = truth.map(() => rand(2) === 0);
+    const drift = rand(3) === 0 ? truth.map(() => rand(3) - 1) : truth.map(() => 0);
+    const mk = (sup, dr) => ({ cells: truth.map((t, i) => ({ unit_id: `U${i}`, period: null,
+      patient_count: sup[i] ? null : Math.max(1, t + dr[i]), suppressed: sup[i] })),
+      published_total: truth.reduce((sum, t, i) => sum + Math.max(1, t + dr[i]), 0) });
+    pairs.push([mk(supA, truth.map(() => 0)), mk(supB, drift)]);
+  }
+  return pairs;
+}
+
+test("R3: the round cap never changes a refuse-or-pass answer (differential)", () => {
+  const { jointSuppressionExposure } = J302;
+  let refusedByFull = 0;
+  for (const [a, b] of driftCorpus(4000, 99)) {
+    const full = Boolean(jointSuppressionExposure(a, b, 11, 3, 2));
+    if (full) refusedByFull++;
+    for (const maxRounds of [1, 2]) {
+      assert.equal(Boolean(jointSuppressionExposure(a, b, 11, 3, 2, { maxRounds })), full,
+        JSON.stringify({ a, b, maxRounds }));
+    }
+  }
+  assert.ok(refusedByFull > 0, "the corpus exercises refusals");
+});
+
+test("R1-R3: a drift-aware exhaustive adversary finds nothing the kernel lets through", () => {
+  // For every variant |da| + |db| <= 2, enumerate every integer assignment of
+  // the still-suppressed cells; an exposure in ANY variant (a pinned cell, a
+  // cell confined below the floor to under 3 values, a nested group below the
+  // floor), or no consistent variant at all, must be refused.
+  const { jointSuppressionExposure, suppressionExposure } = J302;
+  const T = 2, FLOOR = 11, MINV = 3, TOP = 10;
+  const key = c => `${c.unit_id}\u0000${c.period ?? ""}`;
+  const equation = (x, y) => {
+    const yi = new Map(y.cells.map(c => [key(c), c]));
+    const vars = []; let total = x.published_total;
+    for (const c of x.cells) {
+      if (!c.suppressed) { total -= c.patient_count; continue; }
+      const o = yi.get(key(c));
+      if (o && !o.suppressed) total -= o.patient_count; else vars.push(key(c));
+    }
+    return { vars, total };
+  };
+  const valueSets = (ea, eb, cap) => {
+    const vars = [...new Set([...ea.vars, ...eb.vars])];
+    const sets = vars.map(() => new Set()); let any = false; const assign = [];
+    const rec = (j, sa, sb) => {
+      if (sa > ea.total || sb > eb.total) return;
+      if (j === vars.length) {
+        if (sa === ea.total && sb === eb.total) { any = true; assign.forEach((v, q) => sets[q].add(v)); }
+        return;
+      }
+      for (let v = 1; v <= cap; v++) {
+        assign[j] = v;
+        rec(j + 1, sa + (ea.vars.includes(vars[j]) ? v : 0), sb + (eb.vars.includes(vars[j]) ? v : 0));
+      }
+    };
+    rec(0, 0, 0);
+    return { any, sets };
+  };
+  const own = x => {
+    const k = x.cells.filter(c => c.suppressed).length;
+    const r = x.published_total - x.cells.reduce((sum, c) => sum + (c.suppressed ? 0 : c.patient_count), 0);
+    return k === 0 ? null : suppressionExposure(k, r, FLOOR, MINV);
+  };
+  let judged = 0, exposures = 0;
+  for (const [a, b] of driftCorpus(1500, 7)) {
+    if (own(a) || own(b)) continue;
+    const ea = equation(a, b), eb = equation(b, a);
+    if (!ea.vars.length || !eb.vars.length) continue;
+    judged++;
+    let consistent = false, exposed = false;
+    for (let da = -T; da <= T; da++) for (let db = -T; db <= T; db++) {
+      if (Math.abs(da) + Math.abs(db) > T) continue;
+      const va = { vars: ea.vars, total: ea.total + da }, vb = { vars: eb.vars, total: eb.total + db };
+      const pos = valueSets(va, vb, Math.max(va.total, vb.total, 1));
+      if (!pos.any) continue;
+      consistent = true;
+      for (const [sm, lg] of [[va, vb], [vb, va]]) {
+        if (!sm.vars.every(v => lg.vars.includes(v))) continue;
+        const extra = lg.vars.filter(v => !sm.vars.includes(v));
+        if (extra.length && suppressionExposure(extra.length, lg.total - sm.total, FLOOR, MINV)) exposed = true;
+      }
+      for (const set of pos.sets) {
+        if (set.size === 1 || (Math.max(...set) <= TOP && set.size < MINV)) exposed = true;
+      }
+      const pri = valueSets(va, vb, TOP);
+      if (pri.any && pri.sets.some(set => set.size < MINV)) exposed = true;
+    }
+    const kernel = jointSuppressionExposure(a, b, FLOOR, MINV, T);
+    if (exposed || !consistent) {
+      exposures++;
+      assert.ok(kernel, JSON.stringify({ a, b, consistent }));
+    }
+  }
+  assert.ok(judged > 500 && exposures > 0, JSON.stringify({ judged, exposures }));
+});
+
+test("R1: jointSuppressionExposure's positivity bounds, called directly (non-nested sets)", () => {
+  // Through the operations these cases are already refused by each release's
+  // own residual rule and by the banded step-2 check; the exported function
+  // keeps its own contract as defense in depth.
+  const { jointSuppressionExposure } = J302;
+  const cell = (u, c) => ({ unit_id: u, period: null, patient_count: c, suppressed: c === null });
+  const pair = (totalA, totalB) => [
+    { cells: [cell("U0", 50), cell("X", null), cell("Y", null)], published_total: 50 + totalA },
+    { cells: [cell("U0", 50), cell("Y", null), cell("Z", null)], published_total: 50 + totalB }];
+  // X + Y = 2 and Y + Z = 30: X and Y are exactly 1; the all-primary system has no solution.
+  assert.equal(jointSuppressionExposure(...pair(2, 30), 11, 3, 0).exposure, "suppressed_cell_recovered_exactly");
+  // X + Y = 3: X and Y in {1, 2}, below the floor with two values.
+  assert.equal(jointSuppressionExposure(...pair(3, 30), 11, 3, 0).exposure, "suppressed_cells_interval_too_narrow");
+  // X + Y = -1: no positive solution in any variant within +/-2: inconsistent, never a pass.
+  assert.deepEqual(jointSuppressionExposure(...pair(-1, 30), 11, 3, 2),
+    { exposure: "releases_inconsistent_beyond_revision_tolerance" });
+  // Wide on both sides: nothing to refuse.
+  assert.equal(jointSuppressionExposure(...pair(40, 30), 11, 3, 2), null);
 });

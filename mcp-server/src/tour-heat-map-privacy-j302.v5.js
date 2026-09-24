@@ -350,6 +350,13 @@ export const V5_J302_BUDGET_LEDGER_STORE_SEAM =
 export const V5_J302_RECIPIENT_CLASSES = deepFreeze(["client", "internal", "public"]);
 export const V5_J302_PERMITTED_RECIPIENT_CLASSES = deepFreeze(["internal"]);
 export const V5_J302_RECIPIENT_CLASS_SEAM = "seam:v5-j302:authenticated-recipient-class-registry";
+/**
+ * HARD BLOCKER. The recipient class is caller-stated until an authenticated
+ * registry exists, so the export path — the one operation whose output leaves
+ * the platform — answers `unavailable` naming that seam, before any budget is
+ * reserved. Removing this requires the registry, not a config change.
+ */
+export const V5_J302_EXPORT_BLOCKED_UNTIL = V5_J302_RECIPIENT_CLASS_SEAM;
 /** What an export still owes before it is anything but an internal sealed artifact. */
 export const V5_J302_EXPORT_PROMOTION_REQUIREMENT = deepFreeze({
   method_id: "human_promotion_receipt",
@@ -841,7 +848,8 @@ function judgeArtifact(rawArtifact, context, now, base, priorRaw, cfg, { asRelea
 
 const CONFIG_KEYS = Object.freeze([
   "schema_version", "provenance", "set_on", "platform_small_cell_floor",
-  "platform_small_cell_floor_basis", "minimum_protection_interval_values", "client_visible_heat_map_content",
+  "platform_small_cell_floor_basis", "minimum_protection_interval_values", "revision_tolerance_patients",
+  "client_visible_heat_map_content",
   "client_visibility_decision_ref", "safe_harbor_unbudgeted_operations",
   "census_2020_zip3_population", "county_fips_codes",
 ]);
@@ -904,6 +912,8 @@ export function readHeatMapPrivacyConfig(raw) {
     minimum_protection_interval_values: assertInteger(raw.minimum_protection_interval_values,
       "config.minimum_protection_interval_values",
       { min: V5_J302_KERNEL_MINIMUM_PROTECTION_INTERVAL_VALUES, max: 10 }),
+    revision_tolerance_patients: assertInteger(raw.revision_tolerance_patients,
+      "config.revision_tolerance_patients", { min: 0, max: 10 }),
     client_visible_heat_map_content: [],
     client_visibility_decision_ref: assertIdent(raw.client_visibility_decision_ref,
       "config.client_visibility_decision_ref"),
@@ -1535,6 +1545,12 @@ function operationWith(request, cfg) {
       ...routed, budget_class: budgetClass });
   }
 
+  if (budgetClass === "export") {
+    return outcome({ decision: "unavailable", reason_id: "export_blocked_until_recipient_class_registry",
+      ...routed, budget_class: budgetClass, owed_seam: V5_J302_EXPORT_BLOCKED_UNTIL,
+      owed_human_promotion_receipt: { ...V5_J302_EXPORT_PROMOTION_REQUIREMENT,
+        required_before: [...V5_J302_EXPORT_PROMOTION_REQUIREMENT.required_before] } });
+  }
   if (request.ledger === undefined || request.ledger === null) {
     return refusal("budget_ledger_required", routed, { owed_seam: V5_J302_BUDGET_LEDGER_STORE_SEAM });
   }
@@ -1575,11 +1591,6 @@ function operationWith(request, cfg) {
     },
     releases_checked: history.checked,
     atomic_store_seam: V5_J302_BUDGET_LEDGER_STORE_SEAM,
-    ...(budgetClass === "export" ? {
-      export_audience: "internal_only",
-      owed_human_promotion_receipt: { ...V5_J302_EXPORT_PROMOTION_REQUIREMENT,
-        required_before: [...V5_J302_EXPORT_PROMOTION_REQUIREMENT.required_before] },
-    } : {}),
     ledger_written: false,
   });
 }
@@ -1606,7 +1617,7 @@ function judgeDifferencing(request, cfg, facts, floor, routed) {
     return refusal("differencing_precision_mismatch", routed);
   }
   return pairExposure(facts.aggregate, other.facts.aggregate, Math.max(floor, other.floor), routed,
-    cfg.minimum_protection_interval_values);
+    cfg.minimum_protection_interval_values, cfg.revision_tolerance_patients);
 }
 
 /**
@@ -1686,7 +1697,7 @@ function judgeAgainstRelease(cfg, core, routed, priorRaw, path) {
   // The artifact itself (or a relabelled copy) in its own history compares
   // clean: every difference is zero and nothing suppressed is revealed.
   return pairExposure(facts.aggregate, other.aggregate, Math.max(floor, effectiveFloor(receipt, other, cfg)),
-    routed, cfg.minimum_protection_interval_values);
+    routed, cfg.minimum_protection_interval_values, cfg.revision_tolerance_patients);
 }
 
 const cellKey = cell => `${cell.unit_id}\u0000${cell.period ?? ""}`;
@@ -1702,8 +1713,12 @@ const cellKey = cell => `${cell.unit_id}\u0000${cell.period ?? ""}`;
  *   3. Both published totals: their difference is itself a group.
  *   4. Both totals together (jointSuppressionExposure): nested or overlapping
  *      suppressed sets combine into equations no single release shows.
+ * Steps 2 and 4 assume a cell holds the same count in both releases up to a
+ * revision of +/- `tolerance` patients: every residual difference in that
+ * band is checked, and a pair that disagrees by more is refused as
+ * inconsistent. "No solution" is never read as "no exposure".
  */
-function pairExposure(a, b, minimum, routed, minimumValues) {
+function pairExposure(a, b, minimum, routed, minimumValues, tolerance) {
   const bIndex = new Map(b.cells.map(c => [cellKey(c), c]));
   for (const cell of a.cells) {
     const match = bIndex.get(cellKey(cell));
@@ -1726,10 +1741,9 @@ function pairExposure(a, b, minimum, routed, minimumValues) {
       else remaining += 1;
     }
     if (revealed === 0) continue;
-    // A negative remainder (the releases disagree) falls below the floor and refuses.
     const leak = remaining === 0
-      ? (residual !== 0 && Math.abs(residual) < minimum ? "suppressed_residual_recovered_by_release" : null)
-      : suppressionExposure(remaining, residual, minimum, minimumValues);
+      ? revealedResidualExposure(residual, minimum)
+      : bandedExposure(remaining, residual, minimum, minimumValues, tolerance);
     if (leak) {
       return refusal("suppressed_residual_recovered_by_release", routed,
         { exposure: leak, minimum_cell_count: minimum });
@@ -1740,12 +1754,47 @@ function pairExposure(a, b, minimum, routed, minimumValues) {
     if (difference > 0 && difference < minimum) {
       return refusal("published_total_difference_below_floor", routed, { minimum_cell_count: minimum });
     }
-    const joint = jointSuppressionExposure(a, b, minimum, minimumValues);
+    const joint = jointSuppressionExposure(a, b, minimum, minimumValues, tolerance);
     if (joint) {
       return refusal("suppressed_cell_bounded_across_releases", routed, { ...joint, minimum_cell_count: minimum });
     }
   }
   return null;
+}
+
+/** Revision offsets in the band, nearest first: 0, -1, +1, -2, +2, ... */
+function revisionOffsets(tolerance) {
+  const offsets = [0];
+  for (let d = 1; d <= tolerance; d++) offsets.push(-d, d);
+  return offsets;
+}
+
+/**
+ * Every suppressed cell of x was shown by y: what is left is not a hidden
+ * cell, it is a disagreement. Small, it is a small group; large, the releases
+ * are inconsistent. Either way it refuses.
+ */
+function revealedResidualExposure(residual, minimum) {
+  if (residual === 0) return null;
+  return Math.abs(residual) < minimum ? "suppressed_residual_recovered_by_release"
+    : "releases_inconsistent_beyond_revision_tolerance";
+}
+
+/**
+ * The single-release rule on k remaining cells, at every residual within the
+ * revision band. A variant with fewer patients than cells has no solution and
+ * is skipped; if EVERY variant has none, the pair is inconsistent and refuses.
+ */
+function bandedExposure(k, residual, minimum, minimumValues, tolerance) {
+  let consistent = false;
+  for (const delta of revisionOffsets(tolerance)) {
+    const r = residual + delta;
+    if (r < k) continue;
+    consistent = true;
+    const exposure = suppressionExposure(k, r, minimum, minimumValues);
+    if (exposure) return exposure;
+  }
+  return consistent ? null : "releases_inconsistent_beyond_revision_tolerance";
 }
 
 /**
@@ -1770,9 +1819,9 @@ function residualEquation(x, y) {
  * sum(coef * v) = total, integer variables, to a fixpoint. Returns the bounds
  * Map, or null when the system has no solution inside the starting bounds.
  */
-function propagateBounds(equations, start) {
+function propagateBounds(equations, start, maxRounds = 64) {
   const bounds = new Map([...start].map(([v, b]) => [v, [...b]]));
-  for (let round = 0; round < 64; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     let changed = false;
     for (const { terms, total } of equations) {
       let minSum = 0;
@@ -1800,30 +1849,64 @@ function propagateBounds(equations, start) {
   return bounds;
 }
 
+const INFEASIBLE = Symbol("no solution in this variant");
+
 /**
- * What two releases' totals reveal TOGETHER. Each release with a total gives
- * one equation over its still-suppressed cells; their difference is a third.
- * A cell suppressed in both is assumed to hold the same count in both, as an
- * adversary would assume; when no single count per cell satisfies both
- * releases (a revision), the equations are not combined.
- *   - Nested sets: the cells one release suppresses beyond the other form a
- *     group whose sum is the residual difference; the single-release rule
- *     (one cell exact, floor, protection-interval width) applies to it.
- *   - All-primary bounds [1, floor-1], when that hypothesis is feasible: each
- *     cell must keep at least `minimumValues` possible values.
- * Returns { exposure, unit_id? } or null.
+ * What two releases' totals reveal TOGETHER, across the revision band. Each
+ * release with a total gives one equation over its still-suppressed cells;
+ * their difference is a third. A cell suppressed in both is assumed to hold
+ * the same count in both, up to a revision: the joint system is re-run with
+ * each residual shifted by every offset in +/- `tolerance`, and the pair is
+ * refused if ANY variant exposes a cell. A variant with no solution is not an
+ * exposure and not a pass: if no variant has a solution, the releases are
+ * inconsistent beyond the tolerance and the pair refuses.
+ * Returns { exposure, unit_id?, revision_offsets?: [a, b] } or null.
+ *
+ * Exported for the differential round-cap test; operations call it through
+ * pairExposure with the configured tolerance and the full fixpoint.
  */
-function jointSuppressionExposure(a, b, minimum, minimumValues) {
+export function jointSuppressionExposure(a, b, minimum, minimumValues, tolerance, { maxRounds = 64 } = {}) {
   const ea = residualEquation(a, b);
   const eb = residualEquation(b, a);
   if (ea.vars.size === 0 || eb.vars.size === 0) return null; // pairExposure step 2 owns these
+  // Either residual may carry part of the revision (a shown cell substituted
+  // from the other release can have drifted too), and together no more than
+  // the tolerance. Nearest offsets first.
+  const offsets = revisionOffsets(tolerance);
+  const pairs = offsets.flatMap(da => offsets.map(db => [da, db]))
+    .filter(([da, db]) => Math.abs(da) + Math.abs(db) <= tolerance)
+    .sort((p, q) => (Math.abs(p[0]) + Math.abs(p[1])) - (Math.abs(q[0]) + Math.abs(q[1])));
+  let consistent = false;
+  for (const [da, db] of pairs) {
+    const found = jointVariant({ vars: ea.vars, total: ea.total + da }, { vars: eb.vars, total: eb.total + db },
+      minimum, minimumValues, maxRounds);
+    if (found === INFEASIBLE) continue;
+    consistent = true;
+    if (found) return { ...found, revision_offsets: [da, db] };
+  }
+  return consistent ? null : { exposure: "releases_inconsistent_beyond_revision_tolerance" };
+}
+
+/**
+ * One variant of the joint system. Returns INFEASIBLE, an exposure, or null.
+ *   - Nested sets: the extra cells' group sum, by the single-release rule.
+ *   - Positivity [1, R]: a cell pinned to one value, or confined below the
+ *     floor to fewer than `minimumValues` values, is exposed whatever the
+ *     hypothesis. No positive solution: INFEASIBLE.
+ *   - All-primary [1, floor-1], when that hypothesis has a solution: each cell
+ *     keeps at least `minimumValues` values. When it has none, some cell is a
+ *     large complementary suppression — the hypothesis is excluded, as in the
+ *     single-release rule, and the positivity check above still stands.
+ */
+function jointVariant(ea, eb, minimum, minimumValues, maxRounds) {
   const unitOf = key => key.split("\u0000")[0];
   for (const [small, large] of [[ea, eb], [eb, ea]]) {
     if (![...small.vars].every(v => large.vars.has(v))) continue;
     const extra = [...large.vars].filter(v => !small.vars.has(v));
     const groupSum = large.total - small.total;
-    // Fewer than one per extra cell cannot be the same data: a revision.
-    if (groupSum < extra.length) continue;
+    // Fewer patients than extra cells has no solution. Equal sets with unequal
+    // sums land here too: one of the two directions sees a negative group sum.
+    if (groupSum < extra.length) return INFEASIBLE;
     const exposure = suppressionExposure(extra.length, groupSum, minimum, minimumValues);
     if (exposure) return { exposure, unit_id: unitOf(extra[0]) };
   }
@@ -1840,11 +1923,17 @@ function jointSuppressionExposure(a, b, minimum, minimumValues) {
     { terms: difference, total: eb.total - ea.total },
   ].filter(eq => eq.terms.size > 0);
   const top = minimum - 1;
-  const primary = propagateBounds(equations, new Map([...union].map(v => [v, [1, top]])));
-  // No solution: some cell is a large complementary suppression, or the data
-  // changed between releases (a revision), and equations that disagree reveal
-  // nothing jointly.
-  if (primary === null) return null;
+  const ceiling = Math.max(ea.total, eb.total, 1);
+  const positive = propagateBounds(equations, new Map([...union].map(v => [v, [1, ceiling]])), maxRounds);
+  if (positive === null) return INFEASIBLE;
+  for (const [v, [lo, hi]] of positive) {
+    if (lo === hi) return { exposure: "suppressed_cell_recovered_exactly", unit_id: unitOf(v) };
+    if (hi <= top && hi - lo + 1 < minimumValues) {
+      return { exposure: "suppressed_cells_interval_too_narrow", unit_id: unitOf(v) };
+    }
+  }
+  const primary = propagateBounds(equations, new Map([...union].map(v => [v, [1, top]])), maxRounds);
+  if (primary === null) return null; // the all-primary hypothesis is excluded; positivity already judged
   for (const [v, [lo, hi]] of primary) {
     const values = hi - lo + 1;
     if (values <= 1) return { exposure: "suppressed_cells_pinned_by_residual", unit_id: unitOf(v) };
@@ -2140,6 +2229,7 @@ export function v5J302PolicyPreimage() {
     release_history_store_contract: { ...V5_J302_RELEASE_HISTORY_STORE_CONTRACT,
       spans: [...V5_J302_RELEASE_HISTORY_STORE_CONTRACT.spans] },
     kernel_minimum_protection_interval_values: V5_J302_KERNEL_MINIMUM_PROTECTION_INTERVAL_VALUES,
+    export_blocked_until: V5_J302_EXPORT_BLOCKED_UNTIL,
     recipient_classes: [...V5_J302_RECIPIENT_CLASSES],
     permitted_recipient_classes: [...V5_J302_PERMITTED_RECIPIENT_CLASSES],
     export_promotion_requirement: { ...V5_J302_EXPORT_PROMOTION_REQUIREMENT,
