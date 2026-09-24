@@ -273,6 +273,7 @@ HUMAN_ONLY_WRITE_ACTION_EXACT = {
 CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
+JEV_REQUIREMENT_REASON = "jev requirement judged unmet"
 
 CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
 NESTED_CARR_CALL = re.compile(
@@ -1065,6 +1066,11 @@ def evaluate(recs, ledger=None):
         candidate = text(rec, {"assistant"}).strip()
         if candidate:
             final = candidate
+    if ledger is not None:
+        # jev_requirements_advisory() (see main()) needs the same "did the
+        # close name this as not done" text evaluate() already computed here,
+        # so it is not recomputed a second, possibly divergent way.
+        ledger["final"] = final
 
     contradiction = dual_block(recs, final)
     if contradiction:
@@ -1132,10 +1138,13 @@ def evaluate(recs, ledger=None):
 
 
 def jev_requirements_advisory(payload, recs):
-    """SHADOW ONLY: ops/jev_requirements.py asks Jev whether each requirement
-    of the last human request is met by this turn's diff, records the answer
-    in out/jev-judge.jsonl and returns at most one advisory line. It never
-    decides `blocked`; every failure returns None."""
+    """ops/jev_requirements.py asks Jev whether each requirement of the last
+    human request is met by this turn's diff, records the answer in
+    out/jev-judge.jsonl, and returns None or {"advisory": str|None, "unmet":
+    [...]}. It decides nothing itself -- main() is what turns an `unmet`
+    requirement into a reopened turn, and only when the close does not
+    already name that requirement as not done. Every failure returns None,
+    the abstention path: no requirement report is ever read as met."""
     try:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -1162,7 +1171,32 @@ def main():
         session = payload.get("session_id") or payload.get("sessionId")
         ledger = {}
         blocked, reason = evaluate(recs, ledger)
-        advisory = jev_requirements_advisory(payload, recs)
+        jev = jev_requirements_advisory(payload, recs)
+
+        # JEV ACTS BELOW LOW_AT (Joe, 2026-09-24, decision 5ec806a4: "every
+        # jev check in the system too is not a shadow"). Only tried when the
+        # deterministic layer above did not already reopen the turn for its
+        # own reason -- one reopening is enough, and the deterministic finding
+        # is reported first because it is what the session actually changed,
+        # not a probability about it. The ONE escape is the same one the
+        # clause layer gives: the close already says the requirement is not
+        # done, reusing RESIDUAL/terms_match rather than a second detector.
+        jev_identity = None
+        if not blocked and isinstance(jev, dict):
+            final = ledger.get("final", "")
+            for item in jev.get("unmet") or []:
+                if RESIDUAL.search(final) and terms_match(terms_of(item["text"]), final):
+                    continue
+                candidate = claim_identity(
+                    "completion-evidence-gate", JEV_REQUIREMENT_REASON, [item["text"]])
+                if candidate and latched(session, candidate):
+                    continue
+                jev_identity = candidate
+                blocked = True
+                reason = (f'requirement judged unmet by Jev (p={item["probability"]:.2f}): '
+                          f'"{item["text"]}" — no receipt and the close does not say '
+                          "it is not done")
+                break
 
         # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
         #
@@ -1190,8 +1224,8 @@ def main():
                 "completion-evidence-gate", reason_class, tokens))
 
         if not blocked:
-            if advisory:
-                print(json.dumps({"systemMessage": advisory}))
+            if isinstance(jev, dict) and jev.get("advisory"):
+                print(json.dumps({"systemMessage": jev["advisory"]}))
             return 0
 
         # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
@@ -1199,7 +1233,10 @@ def main():
         # calls landed work unbuilt is worth refusing every time it is uttered,
         # and its identity is the artifact rather than a claim-set anyway.
         identity = None
-        if ledger.get("identity"):
+        if jev_identity:
+            identity = jev_identity
+            record_fire(session, identity)
+        elif ledger.get("identity"):
             reason_class, tokens = ledger["identity"]
             identity = claim_identity("completion-evidence-gate", reason_class, tokens)
             if latched(session, identity):

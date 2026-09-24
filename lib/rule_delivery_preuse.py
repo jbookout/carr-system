@@ -245,7 +245,7 @@ def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
             return False
     elif row["status"] == "skipped":
         if (row["models"] or row["findings"] or row.get("reason") not in
-                {"no_jev_candidate", "no_supported_code_paths"}
+                {"no_jev_candidate", "no_supported_code_paths", "outside_repo"}
                 or row.get("instruction") is not None
                 or any(isinstance(path, dict) and path.get("status") == "jev_reviewed"
                        for path in row["paths"])):
@@ -253,6 +253,11 @@ def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
         if (row["reason"] == "no_supported_code_paths" and
                 any(path.get("status") != "not_reviewed" or
                     path.get("reason") != "unsupported_extension"
+                    for path in row["paths"])):
+            return False
+        if (row["reason"] == "outside_repo" and
+                any(path.get("status") != "not_reviewed" or
+                    path.get("reason") != "outside_repo"
                     for path in row["paths"])):
             return False
     elif not _nonempty(row.get("reason")) or not _nonempty(row.get("instruction")):
