@@ -914,6 +914,15 @@ check_pushfloor() {
          floor_fail no-client-deliverables \
            "a client-deliverable path is tracked. git rm it — this repo is public and must carry no client record."; }
 
+  # The NAMES half of the same rule: every tracked file and path against the
+  # hashed client-name list (ops/config/client-name-hashes.v1.json, hashes only).
+  # Whole tree, never scoped to $changed, for the same reason as the check above.
+  run_quiet "$LOGDIR/pushfloor-no-client-names.log" \
+    "$PY" ops/no-client-names-gate.py \
+    || { tail -12 "$LOGDIR/pushfloor-no-client-names.log" >&2
+         floor_fail no-client-names \
+           "a known client name is tracked. Replace it with a synthetic name, or move a live roster to a gitignored local file (see ops/no-client-names-gate.py)."; }
+
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"

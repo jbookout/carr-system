@@ -44,6 +44,11 @@ tools/dictation-rig/vocab-local.txt
 # fixture-externalization note near the top of that script.
 mcp-server/smoke-reads.local.env
 
+# The dossier roster (WR-000049): its keys are client names. Read by
+# exporters/dossier_roster.py for exporters/targets.py, the import pipeline and
+# hooks/record-home-gate.py. Per machine; never tracked.
+exporters/dossier-roster.local.json
+
 # Python virtualenvs — never source, and they carry >100MB binaries GitHub refuses
 .venv/
 .venv-*/

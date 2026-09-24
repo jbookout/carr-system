@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { TOOLS } from "../src/tools.js";
 import { createLiveClient } from "../../dealroom/js/live-client.js";
@@ -66,10 +67,17 @@ test("release 1–5 verbs are registered with human gates on structural creation
   assert.equal(TOOLS["create-national-market-deal"].humanOnly, undefined);
 });
 
-test("national-account migration keeps the 0061 hierarchy and explicitly assigns Musicologie", async () => {
+// The migration names the account it assigns; this public test must not
+// (WR-000049). It pins the SAME literal by digest: sha256 of the lowercased
+// account name the migration compares against.
+const ASSIGNED_ACCOUNT_SHA256 = "9f40a8b6e33a230ee639cd91140f74930ef0489da690acb7560419c4141f8697";
+
+test("national-account migration keeps the 0061 hierarchy and explicitly assigns the national account", async () => {
   const sql = await file("migrations/0090_deal_room_workspaces.sql");
   assert.match(sql, /left join v_client_account vca/);
-  assert.match(sql, /lower\(p\.name\) = 'musicologie'/);
+  const assigned = sql.match(/lower\(p\.name\) = '([^']+)'/);
+  assert.ok(assigned, "the migration assigns an account by exact lowercased name");
+  assert.equal(createHash("sha256").update(assigned[1]).digest("hex"), ASSIGNED_ACCOUNT_SHA256);
   assert.match(sql, /join actor a on a\.slug = 'dell'/);
   assert.match(sql, /create table deal_market_assignment/);
   assert.match(sql, /create table deal_review_session/);
