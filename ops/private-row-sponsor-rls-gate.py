@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 # ci: db-gate
 # doctrine: runbook
-"""Personal rows are fenced by the database, per partner (migration 0573).
+"""Personal rows are write-fenced by the database, per partner (0573, 0579).
 
 Decisions 04101316 and 443fe82a (audit ruling 5, 2026-09-24). Two proofs, one
 rolled-back transaction on the disposable migration-lane database:
 
+  Joe, 2026-09-24: partners need not hide personal doctrine or memories from
+  each other. 'personal' scopes which partner a row APPLIES to and who may
+  CHANGE it, not who may read it (migration 0579 opened memory reads).
+
   ENUMERATION. Every public/ops table whose CHECK constraints mention the
-  'personal' scope is a table that can hold a partner's private rows. Each one
-  must either have row security enabled with a policy that reads the
+  'personal' scope is a table that can hold a partner's own rows. Each one
+  must either have row security enabled with a write policy that reads the
   server-set carr.sponsoring_human_slug, be named in ACCEPTED_SHARED with the
   reason its "personal" marker is not privacy, or be named in PENDING with the
   follow-up that will fence it. A new table that grows a personal scope without
   one of the three fails here, before it can leak.
 
-  BEHAVIOUR on public.memory_item, as the real runtime role carr_writer: Joe's
-  session sees shared rows and Joe's personal rows, never Dell's; Dell's the
-  mirror; a shared-only machine session sees shared rows only; a session
-  cannot insert, or update, a personal row owned by another partner; a login
-  that is a member of carr_writer (the deployed app_writer shape) is fenced
-  the same way; carr_reader sees shared rows rather than failing; carr_backup,
-  where the role exists, still reads every row so the nightly dump stays
-  complete.
+  BEHAVIOUR on public.memory_item, as the real runtime role carr_writer: every
+  session (Joe, Dell, a machine) reads every row; a session cannot insert, or
+  update, a personal row owned by another partner; a login that is a member of
+  carr_writer (the deployed app_writer shape) is fenced the same way;
+  carr_reader reads every row rather than failing; carr_backup, where the role
+  exists, reads every row so the nightly dump stays complete. Applying only a
+  partner's own memories is recall-memory's query filter, tested in
+  mcp-server/test/memory-kernel.test.mjs.
 
   WHAT THIS DOES NOT PROVE. The sponsor is a transaction-local setting the
   trusted server writes. A session holding a writer or reader login directly
@@ -49,19 +53,18 @@ ACCEPTED_SHARED = {
         "decision 443fe82a: add-loop stamps every open loop and idea 'personal' "
         "to whoever filed it, automation included; the loop board is the shared "
         "work queue both partners and the system drain"),
+    "public.doctrine_document": (
+        "decision 9c06bf1e (Joe 2026-09-24): partners need not hide personal doctrine from each "
+        "other; 'personal' scopes which partner a document APPLIES to "
+        "(search-doctrine and resolve-doctrine-rules filter by owner), while "
+        "read-doctrine, doctrine-sections and doctrine-index show it to both "
+        "with owner_slug; writes stay owner-only"),
 }
 
 # A table here IS private and is NOT yet fenced by the database; the server's
 # own filter is its only guard until the named follow-up lands. Listing it is an
 # admission, not an exemption: the entry must be removed when its policy ships.
-PENDING = {
-    "public.doctrine_document": (
-        "visibility 'personal' is real privacy (doctrine.js filters it), but the "
-        "text lives in doctrine_section rows with no personal marker, so a "
-        "document-level policy alone would fence titles, not content; the "
-        "section-level policy through the parent document is the next slice "
-        "(0 personal documents live on 2026-09-24)"),
-}
+PENDING: dict[str, str] = {}
 
 
 def fail(message: str) -> int:
@@ -92,14 +95,17 @@ def main() -> int:
             for table in personal_tables:
                 if table in ACCEPTED_SHARED or table in PENDING:
                     continue
-                rls, policy_reads_sponsor = cur.execute("""
+                rls, insert_fenced, update_fenced = cur.execute("""
                     select c.relrowsecurity,
                            exists (select 1 from pg_policy p
-                                    where p.polrelid = c.oid and p.polcmd in ('r', '*')
-                                      and pg_get_expr(p.polqual, p.polrelid) like %s)
+                                    where p.polrelid = c.oid and p.polcmd in ('a', '*')
+                                      and coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '') like %s),
+                           exists (select 1 from pg_policy p
+                                    where p.polrelid = c.oid and p.polcmd in ('w', '*')
+                                      and coalesce(pg_get_expr(p.polqual, p.polrelid), '') like %s)
                       from pg_class c where c.oid = %s::regclass""",
-                    (f"%{GUC}%", table)).fetchone()
-                if not (rls and policy_reads_sponsor):
+                    (f"%{GUC}%", f"%{GUC}%", table)).fetchone()
+                if not (rls and insert_fenced and update_fenced):
                     uncovered.append(table)
             stale = sorted((set(ACCEPTED_SHARED) | set(PENDING)) - set(personal_tables))
             if stale:
@@ -143,11 +149,8 @@ def main() -> int:
 
             grant_settable_runtime_roles(cur, "carr_writer")
             set_local_role(cur, "carr_writer")
-            expected = {
-                "joe": {"shared": 1, "joe": 1, "dell": 0},
-                "dell": {"shared": 1, "joe": 0, "dell": 1},
-                "": {"shared": 1, "joe": 0, "dell": 0},
-            }
+            everything = {"shared": 1, "joe": 1, "dell": 1}
+            expected = {"joe": everything, "dell": everything, "": everything}
             observed = {}
             for sponsor, want in expected.items():
                 cur.execute("select set_config(%s, %s, true)", (GUC, sponsor))
@@ -167,9 +170,9 @@ def main() -> int:
             else:
                 return fail("Dell's session inserted a personal memory owned by Joe")
 
-            # A cross-partner UPDATE (review of PR 1183): Dell's session cannot
-            # even see Joe's personal row, so an update aimed at it touches
-            # nothing rather than editing another partner's memory.
+            # A cross-partner UPDATE (review of PR 1183): Dell's session can
+            # read Joe's personal row (0579) but the update policy still
+            # excludes it, so an update aimed at it touches nothing.
             cur.execute("update public.memory_item set confidence = 0.9 "
                         "where statement like %s and owner_actor_id = %s",
                         (f"{tag}%", actors["joe"]))
@@ -190,12 +193,17 @@ def main() -> int:
             set_local_role(cur, login)
             cur.execute("select set_config(%s, 'joe', true)", (GUC,))
             observed[f"{login} as joe"] = got = visible()
-            if got != {"shared": 1, "joe": 1, "dell": 0}:
+            if got != everything:
                 return fail(f"{login} (member of carr_writer) as Joe saw {got}")
+            cur.execute("update public.memory_item set confidence = 0.9 "
+                        "where statement like %s and owner_actor_id = %s",
+                        (f"{tag}%", actors["dell"]))
+            if cur.rowcount != 0:
+                return fail(f"{login} as Joe updated {cur.rowcount} of Dell's personal memories")
             cur.execute("reset role")
 
-            # carr_reader holds actor (id, slug) only. A reader query must see
-            # shared rows, never fail on the policy's own lookup (0574).
+            # carr_reader holds actor (id, slug) only. A reader query must read
+            # every row, never fail on a policy lookup (0574, 0579).
             grant_settable_runtime_roles(cur, "carr_reader")
             set_local_role(cur, "carr_reader")
             cur.execute("select set_config(%s, '', true)", (GUC,))
@@ -203,7 +211,7 @@ def main() -> int:
                 observed["carr_reader"] = got = visible()
             except psycopg.errors.InsufficientPrivilege as exc:
                 return fail(f"carr_reader cannot read memory_item at all: {exc}")
-            if got != {"shared": 1, "joe": 0, "dell": 0}:
+            if got != everything:
                 return fail(f"carr_reader with no sponsor saw {got}")
             cur.execute("reset role")
             backup = None
