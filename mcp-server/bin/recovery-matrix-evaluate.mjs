@@ -46,7 +46,8 @@ try {
   let result;
   let passed;
   if (cmd === "restore") {
-    result = evaluateRestoreExercise(read(rest[0]));
+    const receipt = read(rest[0]);
+    result = evaluateRestoreExercise(receipt, clockNow());
   } else if (cmd === "rpo") {
     const block = read(rest[0]);
     const matrix = evaluateRecoveryMatrix({ cells: { record_layer_rpo: block } }, clockNow());

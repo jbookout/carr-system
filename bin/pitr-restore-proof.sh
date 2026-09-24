@@ -15,15 +15,15 @@
 # ops.pitr_probe rows (migration 0597's own function, append-only table).
 # No credential or connection string is printed or placed on an argument list.
 #
-#   bin/pitr-restore-proof.sh                    # attended; needs the provider API credential
-#   bin/pitr-restore-proof.sh --stand-in-parent  # rehearse the mechanism on a disposable
-#                                                # copy of production (fails the RPO cell by design)
+#   bin/pitr-restore-proof.sh        # attended; needs the provider API credential
 #
-# Exit 0 only when the evaluator passes the RPO cell; 1 otherwise; 130 on Ctrl-C
-# (the proof deletes its branches on every exit path, and the next run sweeps
-# any a crash left behind).
+# Exit 0 only when the evaluator passes the RPO cell; 1 otherwise; 130 on
+# Ctrl-C, 129 on a closed terminal. Every branch the proof creates carries a
+# one-hour provider-side expiry; the proof also deletes its branches on every
+# exit path, and the next run sweeps any a crash left behind.
 set -u
 trap 'exit 130' INT TERM
+trap 'exit 129' HUP
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/usr/local/opt/node@22/bin:/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -39,10 +39,12 @@ export NEON_API_KEY
 
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || { print -ru2 -- "pitr-restore-proof: $PY missing (the proof needs the repo venv's psycopg)"; exit 1; }
-MODE_ARGS=()
-[ "${1:-}" = "--stand-in-parent" ] && MODE_ARGS=(--stand-in-parent)
+if [ "$#" -ne 0 ]; then
+  print -ru2 -- "pitr-restore-proof: takes no arguments (the stand-in-parent rehearsal mode was removed)"
+  exit 2
+fi
 
-"$PY" "$REPO/tools/pitr-restore-proof.py" prove "${MODE_ARGS[@]}" || exit 1
-"$PY" "$REPO/tools/pitr-restore-proof.py" verify "${MODE_ARGS[@]}" \
+"$PY" "$REPO/tools/pitr-restore-proof.py" prove || exit 1
+"$PY" "$REPO/tools/pitr-restore-proof.py" verify \
   | node "$REPO/mcp-server/bin/recovery-matrix-evaluate.mjs" rpo -
 exit $?

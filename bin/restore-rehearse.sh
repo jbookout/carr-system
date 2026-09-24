@@ -96,6 +96,10 @@ RESTORE_DB="restore_rehearse"
 # `set -u` an unassigned $PY aborts the run at that call before the gate is
 # consulted.
 PY="$REPO/.venv/bin/python"
+# Every psql below reaches its database through this: the connection URL goes
+# into PG* environment variables, never onto a command line where `ps` shows
+# the password (V5-F08 review G6).
+PGX="$REPO/tools/pg-env-exec.py"
 [ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 # The tables whose absence means the restore is worthless rather than merely
@@ -651,8 +655,8 @@ PROD_COUNTS="$WORKDIR/prod-counts.txt"
 
 # default_transaction_read_only=on is the guard, not the comment above it. Any
 # write against production in this session fails at the server.
-if ! PGOPTIONS="-c default_transaction_read_only=on" \
-     psql "$PROD_URL" -v ON_ERROR_STOP=1 -At -c "$COUNT_SQL" > "$PROD_COUNTS" 2>"$WORKDIR/prod.err"; then
+if ! PGOPTIONS="-c default_transaction_read_only=on" PGURL_PROD="$PROD_URL" \
+     "$PY" "$PGX" PGURL_PROD psql -v ON_ERROR_STOP=1 -At -c "$COUNT_SQL" > "$PROD_COUNTS" 2>"$WORKDIR/prod.err"; then
   say "$(cat "$WORKDIR/prod.err")" >&2
   die "could not read production row counts"
 fi
@@ -694,7 +698,8 @@ if [ "$BRANCH_HOST" = "$PROD_HOST" ]; then
 fi
 say "  ok    branch endpoint is a different host from production"
 
-if ! psql "$BRANCH_ADMIN_URL" -v ON_ERROR_STOP=1 -q -c "create database $RESTORE_DB" >/dev/null 2>"$WORKDIR/createdb.err"; then
+if ! PGURL_ADMIN="$BRANCH_ADMIN_URL" "$PY" "$PGX" PGURL_ADMIN \
+     psql -v ON_ERROR_STOP=1 -q -c "create database $RESTORE_DB" >/dev/null 2>"$WORKDIR/createdb.err"; then
   say "$(cat "$WORKDIR/createdb.err")" >&2
   die "could not create the $RESTORE_DB database on the branch"
 fi
@@ -713,7 +718,7 @@ say "  ok    empty database $RESTORE_DB created on the branch"
 # tree (0001 and 0135). Install them in the throwaway target before loading;
 # production is untouched and every application object still comes from the
 # encrypted artifact.
-if ! psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -q \
+if ! PGURL_RESTORE="$RESTORE_URL" "$PY" "$PGX" PGURL_RESTORE psql -v ON_ERROR_STOP=1 -q \
     -c "create extension if not exists pg_trgm; create extension if not exists pgcrypto;" \
     >/dev/null 2>"$WORKDIR/extensions.err"; then
   say "$(cat "$WORKDIR/extensions.err")" >&2
@@ -780,7 +785,8 @@ say "  note: stripping the pre-created public schema declaration and ownership/A
 set -o pipefail
 if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/restore.err" \
      | sed -E "$RESTORE_FILTER" \
-     | psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -q >"$WORKDIR/restore.out" 2>>"$WORKDIR/restore.err"; then
+     | PGURL_RESTORE="$RESTORE_URL" "$PY" "$PGX" PGURL_RESTORE \
+         psql -v ON_ERROR_STOP=1 -q >"$WORKDIR/restore.out" 2>>"$WORKDIR/restore.err"; then
   set +o pipefail
   say ""
   say "  --- decrypt/restore output (last 40 lines) ---" >&2
@@ -793,7 +799,8 @@ say "  ok    dump decrypted and loaded"
 # ── PHASE 4: the assertion. This is the whole point; everything above is setup.
 step "phase 4: row counts, restored vs production"
 REST_COUNTS="$WORKDIR/restored-counts.txt"
-if ! psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -At -c "$COUNT_SQL" > "$REST_COUNTS" 2>"$WORKDIR/rest.err"; then
+if ! PGURL_RESTORE="$RESTORE_URL" "$PY" "$PGX" PGURL_RESTORE \
+     psql -v ON_ERROR_STOP=1 -At -c "$COUNT_SQL" > "$REST_COUNTS" 2>"$WORKDIR/rest.err"; then
   say "$(cat "$WORKDIR/rest.err")" >&2
   die "could not read row counts back out of the restored database"
 fi
@@ -977,13 +984,24 @@ esac
 if [ -n "$BACKUP_RUN_ID" ]; then
   mkdir -p "$REPO/out"
   RECEIPT_PATH="$REPO/out/restore-exercise-receipt.json"
-  if "$PY" "$REPO/tools/restore-watermark.py" receipt --copy-record "$COPYDIR/copy.json" \
+  # An earlier run's receipt must not stand in for this one's outcome.
+  rm -f "$RECEIPT_PATH"
+  if [ "$FAILS" -ne 0 ]; then
+    # Review G4: a rehearsal that failed phase 4 (the production comparison)
+    # or phase 5 writes and verifies NO receipt; the evaluator never sees one.
+    say "  FAIL  no restore-exercise receipt: $FAILS earlier assertion(s) failed" >&2
+  elif "$PY" "$REPO/tools/restore-watermark.py" receipt --copy-record "$COPYDIR/copy.json" \
        --target-kind disposable_branch --oracle-id restore-rehearse \
        --observed-digest "$ARTIFACT_DIGEST" \
        --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.json" \
-       --started-at "$RESTORE_START_ISO" --finished-at "$RESTORE_FINISHED_ISO" > "$RECEIPT_PATH" \
-     && "$PY" "$REPO/tools/restore-watermark.py" verify-receipt --repository "$BACKUP_REPOSITORY" "$RECEIPT_PATH"; then
-    say "  ok    restore-exercise receipt (copy facts re-read from the provider): $RECEIPT_PATH"
+       --started-at "$RESTORE_START_ISO" --finished-at "$RESTORE_FINISHED_ISO" > "$WORKDIR/receipt.unbound.json" \
+     && "$PY" "$REPO/tools/restore-watermark.py" verify-receipt --repository "$BACKUP_REPOSITORY" \
+          "$WORKDIR/receipt.unbound.json" > "$WORKDIR/receipt.verified.json" \
+     && mv "$WORKDIR/receipt.verified.json" "$RECEIPT_PATH"; then
+    # The receipt on disk is verify-receipt's OUTPUT: the copy block as re-read
+    # from the provider, stamped with the binding the evaluator requires. It is
+    # judged fresh for 15 minutes; re-run verify-receipt to judge it later.
+    say "  ok    restore-exercise receipt (copy facts re-read from the provider, bound): $RECEIPT_PATH"
     say "        evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH"
   else
     say "  FAIL  could not build or provider-verify the restore-exercise receipt" >&2

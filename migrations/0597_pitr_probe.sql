@@ -11,10 +11,12 @@
 -- really is production at T rather than at some later point. No business table
 -- is written by the proof; these rows are the only thing it writes.
 --
--- THE DOOR. The only writer is ops.write_pitr_probe(role). The nonce and the
--- write instant are made HERE, server-side (gen_random_bytes, clock_timestamp),
--- so a caller can neither choose a nonce it already knows is on some branch nor
--- backdate a write. Rows are append-only: update, delete and truncate refuse.
+-- THE DOOR. The writer is ops.write_pitr_probe(role). The id, the nonce and the
+-- write instant are made HERE, server-side, by a BEFORE INSERT trigger on the
+-- table itself (gen_random_uuid, gen_random_bytes, clock_timestamp), so no
+-- insert, through the function or straight into the table, can choose a nonce
+-- it already knows is on some branch or backdate a write. Rows are
+-- append-only: update, delete and truncate refuse.
 --
 -- NO RUNTIME ROLE GETS ANYTHING. The function is NOT security definer and is
 -- granted to no runtime role; the table is granted to none either. The only
@@ -50,6 +52,24 @@ create trigger pitr_probe_append_only before update or delete on ops.pitr_probe
 create trigger pitr_probe_no_truncate before truncate on ops.pitr_probe
   for each statement execute function ops.pitr_probe_rows_immutable();
 
+-- EVERY insert, not only the function's, gets a server-made id, nonce and write
+-- instant (review G5): an owner session inserting into the table directly can
+-- neither backdate a row nor pick a nonce it knows is on some branch. Whatever
+-- the caller supplied for those three columns is overwritten, never kept.
+create function ops.pitr_probe_server_stamp() returns trigger
+language plpgsql set search_path = pg_catalog, ops, public
+as $$
+begin
+  new.id := gen_random_uuid();
+  new.nonce := encode(public.gen_random_bytes(16), 'hex');
+  new.written_at := clock_timestamp();
+  return new;
+end $$;
+revoke all on function ops.pitr_probe_server_stamp() from public;
+
+create trigger pitr_probe_server_stamp before insert on ops.pitr_probe
+  for each row execute function ops.pitr_probe_server_stamp();
+
 create function ops.write_pitr_probe(p_role text)
 returns table (id uuid, nonce text, role text, written_at timestamptz)
 language plpgsql security invoker set search_path = pg_catalog, ops, public
@@ -59,8 +79,8 @@ begin
     raise exception 'write_pitr_probe: role must be positive or negative';
   end if;
   return query
-    insert into ops.pitr_probe as p (nonce, role)
-    values (encode(public.gen_random_bytes(16), 'hex'), p_role)
+    insert into ops.pitr_probe as p (role)
+    values (p_role)
     returning p.id, p.nonce, p.role, p.written_at;
 end $$;
 

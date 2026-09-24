@@ -29,6 +29,8 @@ import {
   V5_RECOVERY_MATRIX_CELLS,
   V5_DEGRADED_MODES,
   V5_BUSINESS_CALENDAR_DIGEST,
+  V5_EVIDENCE_VERIFIERS,
+  V5_REVERIFY_MAX_AGE_SECONDS,
   evaluateRestoreExercise,
   evaluateRecoveryMatrix,
   evaluateOutboundQueueRelease,
@@ -48,6 +50,31 @@ const D = ch => `sha256:${ch.repeat(64)}`;
 const clone = v => JSON.parse(JSON.stringify(v));
 const W = (rows, ch) => ({ rows, content_digest: D(ch) });
 const at = iso => ({ now_ms: Date.parse(iso) });
+const wholeSecond = ms => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");
+
+/**
+ * What the verify step does (lib/recovery_evidence.py bind): stamp re-derived
+ * facts with { verifier, verified_at, facts_digest }. Tests stamp at the
+ * evaluator's own clock; the binding's own refusals are tested directly below.
+ */
+function stamp(facts, kind, clock, verifiedAtMs = clock.now_ms) {
+  const { verification: _old, ...rest } = facts;
+  return { ...rest, verification: { verifier: V5_EVIDENCE_VERIFIERS[kind], verified_at: wholeSecond(verifiedAtMs), facts_digest: digest(rest) } };
+}
+const R_NOW = at("2026-09-24T10:30:00Z");
+const R = (req, clock = R_NOW) => evaluateRestoreExercise(stamp(req, "restore_exercise", clock), clock);
+function stampCells(m, clock) {
+  const c = clone(m);
+  if (c.cells?.record_layer_rpo) c.cells.record_layer_rpo = stamp(c.cells.record_layer_rpo, "record_layer_rpo", clock);
+  for (const name of ["independent_daily_restorable_copy", "core_rto"]) {
+    if (c.cells?.[name]?.restore_exercise) c.cells[name].restore_exercise = stamp(c.cells[name].restore_exercise, "restore_exercise", clock);
+  }
+  return c;
+}
+const M = (m, clock) => evaluateRecoveryMatrix(stampCells(m, clock), clock);
+const O = (req, clock) => (clock && typeof clock.now_ms === "number"
+  ? evaluateOutboundQueueRelease(stamp(req, "outbound_census", clock), clock)
+  : evaluateOutboundQueueRelease(req, clock));
 
 function receipt() {
   return {
@@ -84,7 +111,7 @@ function assertRefused(result, reason, check) {
 // --- item 4: restore from independently controlled copy, exact watermark/hash
 
 test("item 4: an exact restore of an independently held copy passes every check", () => {
-  const r = evaluateRestoreExercise(receipt());
+  const r = R(receipt());
   assert.equal(r.decision, "pass");
   assert.equal(r.reason_id, "restore_exercise_exact");
   for (const c of V5_RESTORE_EXERCISE_CHECKS) assert.equal(r.checks[c], "pass");
@@ -98,112 +125,154 @@ test("item 4: an exact restore of an independently held copy passes every check"
 test("item 4: a restore aimed at production is refused before anything else is read", () => {
   const req = receipt();
   req.target_kind = "production";
-  assertRefused(evaluateRestoreExercise(req), "restore_target_is_production", "restore_target_not_production");
+  assertRefused(R(req), "restore_target_is_production", "restore_target_not_production");
   req.target_kind = "unstated";
-  assertRefused(evaluateRestoreExercise(req), "restore_target_unstated", "restore_target_not_production");
+  assertRefused(R(req), "restore_target_unstated", "restore_target_not_production");
   req.target_kind = "staging";
-  assert.equal(evaluateRestoreExercise(req).decision, "pass");
+  assert.equal(R(req).decision, "pass");
 });
 
 test("item 4: a copy held in the primary's own domain is not independently controlled", () => {
   const req = receipt();
   req.copy.custody_domain = "neon-primary";
-  assertRefused(evaluateRestoreExercise(req), "copy_not_independently_controlled", "copy_independently_controlled");
+  assertRefused(R(req), "copy_not_independently_controlled", "copy_independently_controlled");
 });
 
 test("item 4: the producer cannot be its own restore oracle", () => {
   const req = receipt();
   req.oracle_id = "backup-nightly-workflow";
-  assertRefused(evaluateRestoreExercise(req), "oracle_is_the_producer", "oracle_independent_of_producer");
+  assertRefused(R(req), "oracle_is_the_producer", "oracle_independent_of_producer");
 });
 
 test("item 4: a digest the operator typed in is not the producer's record", () => {
   const req = receipt();
   req.copy.recorded_digest_source.kind = "operator_supplied";
-  assertRefused(evaluateRestoreExercise(req), "recorded_digest_not_from_producer", "recorded_digest_from_producer");
+  assertRefused(R(req), "recorded_digest_not_from_producer", "recorded_digest_from_producer");
   const unknown = receipt();
   unknown.copy.recorded_digest_source.kind = "a_file_i_wrote";
-  assert.throws(() => evaluateRestoreExercise(unknown), e => e.code === "unknown_state");
+  assert.throws(() => R(unknown), e => e.code === "unknown_state");
   const noSource = receipt();
   delete noSource.copy.recorded_digest_source;
-  assert.throws(() => evaluateRestoreExercise(noSource), e => e.code === "missing_field");
+  assert.throws(() => R(noSource), e => e.code === "missing_field");
 });
 
 test("item 4: the store's own digest must equal the producer's record", () => {
   const req = receipt();
   req.copy.store_readback_digest = D("c");
-  assertRefused(evaluateRestoreExercise(req), "store_readback_mismatch", "store_readback_matches_record");
+  assertRefused(R(req), "store_readback_mismatch", "store_readback_matches_record");
 });
 
 test("item 4: a restored artifact whose hash differs from the recorded one fails", () => {
   const req = receipt();
   req.observed_artifact_digest = D("b");
-  assertRefused(evaluateRestoreExercise(req), "artifact_hash_mismatch", "artifact_hash_exact");
+  assertRefused(R(req), "artifact_hash_mismatch", "artifact_hash_exact");
 });
 
 test("item 4: one row off, one row changed, one table missing or one table extra is not exact", () => {
   const off = receipt();
   off.restored_watermark["public.party"].rows = 119;
-  const r1 = evaluateRestoreExercise(off);
+  const r1 = R(off);
   assertRefused(r1, "watermark_mismatch", "watermark_exact");
   assert.deepEqual(r1.watermark_mismatches, [{ table: "public.party", artifact_rows: 120, restored_rows: 119, content_differs: false }]);
 
   const changed = receipt();
   changed.restored_watermark["public.party"].content_digest = D("9");
-  const r2 = evaluateRestoreExercise(changed);
+  const r2 = R(changed);
   assertRefused(r2, "watermark_mismatch", "watermark_exact");
   assert.deepEqual(r2.watermark_mismatches, [{ table: "public.party", artifact_rows: 120, restored_rows: 120, content_differs: true }]);
 
   const missing = receipt();
   delete missing.restored_watermark["ops.run"];
-  assert.deepEqual(evaluateRestoreExercise(missing).watermark_mismatches,
+  assert.deepEqual(R(missing).watermark_mismatches,
     [{ table: "ops.run", artifact_rows: 9, restored_rows: null, content_differs: true }]);
 
   const extra = receipt();
   extra.restored_watermark["public.stray"] = W(0, "0");
-  assertRefused(evaluateRestoreExercise(extra), "watermark_mismatch", "watermark_exact");
+  assertRefused(R(extra), "watermark_mismatch", "watermark_exact");
 });
 
 test("item 4: a watermark must be non-empty, whole, non-negative and digest-bearing", () => {
   const empty = receipt(); empty.artifact_watermark = {};
-  assert.throws(() => evaluateRestoreExercise(empty), e => e.code === "missing_field");
+  assert.throws(() => R(empty), e => e.code === "missing_field");
   const negative = receipt(); negative.restored_watermark["ops.run"].rows = -1;
-  assert.throws(() => evaluateRestoreExercise(negative), e => e.code === "invalid_shape");
+  assert.throws(() => R(negative), e => e.code === "invalid_shape");
   const fractional = receipt(); fractional.restored_watermark["ops.run"].rows = 1.5;
-  assert.throws(() => evaluateRestoreExercise(fractional), e => e.code === "invalid_shape");
+  assert.throws(() => R(fractional), e => e.code === "invalid_shape");
   const countOnly = receipt(); countOnly.restored_watermark["ops.run"] = 9;
-  assert.throws(() => evaluateRestoreExercise(countOnly), e => e.code === "invalid_shape");
+  assert.throws(() => R(countOnly), e => e.code === "invalid_shape");
   const noDigest = receipt(); delete noDigest.restored_watermark["ops.run"].content_digest;
-  assert.throws(() => evaluateRestoreExercise(noDigest), e => e.code === "missing_field");
+  assert.throws(() => R(noDigest), e => e.code === "missing_field");
   const badName = receipt(); badName.restored_watermark.nodot = W(1, "1");
-  assert.throws(() => evaluateRestoreExercise(badName), e => e.code === "invalid_identifier");
+  assert.throws(() => R(badName), e => e.code === "invalid_identifier");
   const zero = receipt(); zero.artifact_watermark["ops.run"].rows = 0; zero.restored_watermark["ops.run"].rows = 0;
-  assert.equal(evaluateRestoreExercise(zero).decision, "pass");
+  assert.equal(R(zero).decision, "pass");
 });
 
 test("item 4: a restore that finishes before it starts, or starts before the copy existed, is refused", () => {
   const req = receipt();
   req.finished_at = "2026-09-24T09:59:59Z";
-  assertRefused(evaluateRestoreExercise(req), "restore_interval_invalid", "restore_interval_well_formed");
+  assertRefused(R(req), "restore_interval_invalid", "restore_interval_well_formed");
   const early = receipt();
   early.started_at = "2026-09-24T02:00:00Z";
-  assertRefused(evaluateRestoreExercise(early), "restore_interval_invalid", "restore_interval_well_formed");
+  assertRefused(R(early), "restore_interval_invalid", "restore_interval_well_formed");
   const instant = receipt();
   instant.finished_at = instant.started_at;
-  assert.equal(evaluateRestoreExercise(instant).decision, "pass");
+  assert.equal(R(instant).decision, "pass");
   const atProduction = receipt();
   atProduction.started_at = atProduction.copy.produced_at;
-  assert.equal(evaluateRestoreExercise(atProduction).decision, "pass");
+  assert.equal(R(atProduction).decision, "pass");
 });
 
 test("item 4: no caller field can skip a check or assert trust", () => {
   for (const key of ["trusted", "skip_checks", "already_verified"]) {
     const req = { ...receipt(), [key]: true };
-    assert.throws(() => evaluateRestoreExercise(req), e => e instanceof V5BoundaryError && e.code === "unknown_field");
+    assert.throws(() => R(req), e => e instanceof V5BoundaryError && e.code === "unknown_field");
   }
   const req = receipt();
   req.observed_artifact_digest = "sha256:ABC";
-  assert.throws(() => evaluateRestoreExercise(req), e => e.code === "invalid_digest");
+  assert.throws(() => R(req), e => e.code === "invalid_digest");
+});
+
+test("item 4 (G4): a receipt counts only as verify-receipt's fresh re-read output", () => {
+  const verified = stamp(receipt(), "restore_exercise", R_NOW);
+  assert.equal(evaluateRestoreExercise(verified, R_NOW).decision, "pass");
+  // Unbound: a contract violation. A malformed binding likewise.
+  assert.throws(() => evaluateRestoreExercise(receipt(), R_NOW), e => e.code === "missing_field");
+  const extra = clone(verified); extra.verification.trusted = true;
+  assert.throws(() => evaluateRestoreExercise(extra, R_NOW), e => e.code === "unknown_field");
+  const badDigest = clone(verified); badDigest.verification.facts_digest = "sha256:nope";
+  assert.throws(() => evaluateRestoreExercise(badDigest, R_NOW), e => e.code === "invalid_digest");
+  // Edited after verification: every other field would pass, the binding does not.
+  const edited = clone(verified); edited.finished_at = "2026-09-24T10:19:00Z";
+  assertRefused(evaluateRestoreExercise(edited, R_NOW), "evidence_not_reverified", "evidence_reverified");
+  // Another verifier's stamp, a stamp from the future, and a stale stamp are refused.
+  const other = clone(verified); other.verification.verifier = V5_EVIDENCE_VERIFIERS.record_layer_rpo;
+  assertRefused(evaluateRestoreExercise(other, R_NOW), "evidence_not_reverified", "evidence_reverified");
+  const ahead = stamp(receipt(), "restore_exercise", R_NOW, R_NOW.now_ms + 1000);
+  assertRefused(evaluateRestoreExercise(ahead, R_NOW), "evidence_not_reverified", "evidence_reverified");
+  const maxAgeMs = V5_REVERIFY_MAX_AGE_SECONDS * 1000;
+  const edge = stamp(receipt(), "restore_exercise", R_NOW, R_NOW.now_ms - maxAgeMs);
+  assert.equal(evaluateRestoreExercise(edge, R_NOW).decision, "pass");
+  const stale = stamp(receipt(), "restore_exercise", R_NOW, R_NOW.now_ms - maxAgeMs - 1000);
+  assertRefused(evaluateRestoreExercise(stale, R_NOW), "evidence_not_reverified", "evidence_reverified");
+  // The evaluator needs a clock to judge freshness.
+  assert.throws(() => evaluateRestoreExercise(verified), e => e.code === "invalid_shape");
+  const numericVerifier = clone(verified); numericVerifier.verification.verifier = 7;
+  assert.throws(() => evaluateRestoreExercise(numericVerifier, R_NOW), e => e.code === "invalid_shape");
+});
+
+test("item 5 (G4): the matrix judges each cell's receipt binding at the MATRIX's clock", () => {
+  const m = matrix();
+  const staleAt = NOW.now_ms - (V5_REVERIFY_MAX_AGE_SECONDS + 1) * 1000;
+  m.cells.record_layer_rpo = stamp(m.cells.record_layer_rpo, "record_layer_rpo", NOW);
+  m.cells.independent_daily_restorable_copy.restore_exercise =
+    stamp(m.cells.independent_daily_restorable_copy.restore_exercise, "restore_exercise", NOW, staleAt);
+  m.cells.core_rto.restore_exercise = stamp(m.cells.core_rto.restore_exercise, "restore_exercise", NOW, staleAt);
+  const r = evaluateRecoveryMatrix(m, NOW);
+  assert.deepEqual(r.cells.independent_daily_restorable_copy.failures, ["restore_exercise_not_exact"]);
+  assert.equal(r.cells.core_rto.state, "fail");
+  assert.equal(r.cells.core_rto.restore_exercise_reason, "evidence_not_reverified");
+  assert.equal(r.cells.record_layer_rpo.state, "pass");
 });
 
 // --- item 5: RPO/RTO cells pass independently --------------------------------
@@ -232,7 +301,7 @@ function pitrProof() {
     positive_on_branch: clone(POSITIVE),
     negative_present_on_branch: false,
     branch_core_table_rows: { "public.party": 120, "ops.run": 9 },
-    branch_deleted_confirmed: true,
+    branch_operations: { create: "op-create-7", delete: "op-delete-9" },
     history_retention_seconds: 604800,
     retention_read_at: "2026-09-24T11:58:30Z",
     production_readback: { positive: clone(POSITIVE), negative: clone(NEGATIVE), read_at: "2026-09-24T11:59:00Z" },
@@ -241,7 +310,7 @@ function pitrProof() {
 
 function rpoOf(mutate, clock = NOW) {
   const block = pitrProof(); mutate(block);
-  return evaluateRecoveryMatrix({ cells: { record_layer_rpo: block } }, clock).cells.record_layer_rpo;
+  return M({ cells: { record_layer_rpo: block } }, clock).cells.record_layer_rpo;
 }
 
 function matrix() {
@@ -266,7 +335,7 @@ function matrix() {
 }
 
 test("item 5: every cell passes on measured evidence inside the settled floor", () => {
-  const m = evaluateRecoveryMatrix(matrix(), NOW);
+  const m = M(matrix(), NOW);
   assert.equal(m.decision, "pass");
   assert.equal(m.observed_at, "2026-09-24T12:00:00.000Z");
   assert.deepEqual(m.not_passed, []);
@@ -285,7 +354,7 @@ test("item 5 (F1): the clock is the caller's, never the evidence's", () => {
   assert.throws(() => evaluateRecoveryMatrix(matrix(), { now_ms: "2026-09-24T12:00:00Z" }), e => e.code === "invalid_shape");
   assert.throws(() => evaluateRecoveryMatrix(matrix(), { now_ms: 1, trusted: true }), e => e.code === "unknown_field");
   // The same evidence judged a day later is stale on every clocked cell.
-  const later = evaluateRecoveryMatrix(matrix(), at("2026-09-25T12:00:00Z"));
+  const later = M(matrix(), at("2026-09-25T12:00:00Z"));
   assert.equal(later.cells.record_layer_rpo.state, "fail");
   assert.ok(later.cells.record_layer_rpo.failures.includes("exposure_exceeds_rpo"));
   assert.ok(later.cells.record_layer_rpo.failures.includes("production_readback_stale"));
@@ -296,7 +365,7 @@ test("item 5 (F2): a copy's bare production instant is not a recovery point", ()
   m.cells.record_layer_rpo = { source: "verified_copy_produced_at", recovery_point_at: "2026-09-24T11:59:00Z" };
   assert.throws(() => evaluateRecoveryMatrix(m, NOW), e => e.code === "unknown_field" || e.code === "unknown_state");
   const s = pitrProof(); s.source = "verified_copy_produced_at";
-  assert.throws(() => evaluateRecoveryMatrix({ cells: { record_layer_rpo: s } }, NOW), e => e.code === "unknown_state");
+  assert.throws(() => evaluateRecoveryMatrix({ cells: { record_layer_rpo: stamp(s, "record_layer_rpo", NOW) } }, NOW), e => e.code === "unknown_state");
 });
 
 test("item 5: RPO is measured from the PROVEN positive probe, passes at exactly 15 minutes and fails one second later", () => {
@@ -331,7 +400,8 @@ test("item 5 (F6/Q7): the point-in-time proof fails on each broken link, one at 
     [b => { b.production_readback.negative.nonce = "d".repeat(32); }, "probe_not_recomputed_from_production"],
     [b => { b.production_readback.read_at = "2026-09-24T11:44:59Z"; }, "production_readback_stale"],
     [b => { b.production_readback.read_at = "2026-09-24T12:00:01Z"; }, "production_readback_stale"],
-    [b => { b.branch_deleted_confirmed = false; }, "branch_not_deleted"],
+    [b => { b.branch_operations.create = null; }, "branch_create_not_confirmed"],
+    [b => { b.branch_operations.delete = null; }, "branch_delete_not_confirmed"],
     [b => { b.history_retention_seconds = 300; }, "retention_does_not_cover_exposure"],
     [b => { b.retention_read_at = "2026-09-24T11:44:59Z"; }, "retention_readback_stale"],
     [b => { b.retention_read_at = "2026-09-24T12:00:01Z"; }, "retention_readback_stale"],
@@ -356,12 +426,28 @@ test("item 5 (F6/Q7): the point-in-time proof fails on each broken link, one at 
   assert.ok(future.failures.includes("restorable_point_after_observation"));
 });
 
+test("item 5 (G4): the RPO proof counts only as `pitr-restore-proof.py verify`'s fresh re-read output", () => {
+  const judge = block => evaluateRecoveryMatrix({ cells: { record_layer_rpo: block } }, NOW).cells.record_layer_rpo;
+  const verified = stamp(pitrProof(), "record_layer_rpo", NOW);
+  assert.equal(judge(verified).state, "pass");
+  const edited = clone(verified); edited.branch_operations.delete = "op-delete-10";
+  assert.deepEqual(judge(edited).failures, ["evidence_not_reverified"]);
+  const stale = stamp(pitrProof(), "record_layer_rpo", NOW, NOW.now_ms - (V5_REVERIFY_MAX_AGE_SECONDS + 1) * 1000);
+  assert.deepEqual(judge(stale).failures, ["evidence_not_reverified"]);
+  const other = clone(verified); other.verification.verifier = V5_EVIDENCE_VERIFIERS.outbound_census;
+  assert.deepEqual(judge(other).failures, ["evidence_not_reverified"]);
+  const { verification: _v, ...bare } = verified;
+  assert.throws(() => judge(bare), e => e.code === "missing_field");
+});
+
 test("item 5: the RPO block is closed and typed", () => {
   const throwsWith = (mutate, code) => assert.throws(() => rpoOf(mutate), e => e.code === code, code);
   throwsWith(b => { b.rpo_max_seconds = 86400; }, "unknown_field");
   throwsWith(b => { delete b.negative_probe; }, "missing_field");
   throwsWith(b => { b.negative_present_on_branch = "no"; }, "invalid_shape");
-  throwsWith(b => { b.branch_deleted_confirmed = 1; }, "invalid_shape");
+  throwsWith(b => { b.branch_deleted_confirmed = true; }, "unknown_field");
+  throwsWith(b => { b.branch_operations = { create: "op-1" }; }, "missing_field");
+  throwsWith(b => { b.branch_operations.delete = 7; }, "invalid_identifier");
   throwsWith(b => { b.history_retention_seconds = -1; }, "invalid_shape");
   throwsWith(b => { b.history_retention_seconds = 1.5; }, "invalid_shape");
   throwsWith(b => { b.branch_core_table_rows = {}; }, "missing_field");
@@ -373,23 +459,23 @@ test("item 5: the RPO block is closed and typed", () => {
 });
 
 test("item 5: cells are independent — a missing, null or failing cell changes no other cell", () => {
-  const base = evaluateRecoveryMatrix(matrix(), NOW);
+  const base = M(matrix(), NOW);
   const noAdapter = matrix(); delete noAdapter.cells.adapter_rto;
-  const m1 = evaluateRecoveryMatrix(noAdapter, NOW);
+  const m1 = M(noAdapter, NOW);
   assert.equal(m1.cells.adapter_rto.state, "no_evidence");
   assert.equal(m1.decision, "fail");
   assert.deepEqual(m1.not_passed, ["adapter_rto"]);
   for (const c of ["record_layer_rpo", "independent_daily_restorable_copy", "core_rto"]) assert.deepEqual(m1.cells[c], base.cells[c]);
 
   const nullCore = matrix(); nullCore.cells.core_rto = null;
-  assert.equal(evaluateRecoveryMatrix(nullCore, NOW).cells.core_rto.state, "no_evidence");
+  assert.equal(M(nullCore, NOW).cells.core_rto.state, "no_evidence");
 
   const badRpo = matrix(); badRpo.cells.record_layer_rpo.negative_present_on_branch = true;
-  const m2 = evaluateRecoveryMatrix(badRpo, NOW);
+  const m2 = M(badRpo, NOW);
   assert.deepEqual(m2.not_passed, ["record_layer_rpo"]);
   for (const c of ["independent_daily_restorable_copy", "core_rto", "adapter_rto"]) assert.deepEqual(m2.cells[c], base.cells[c]);
 
-  const empty = evaluateRecoveryMatrix({ cells: {} }, NOW);
+  const empty = M({ cells: {} }, NOW);
   assert.deepEqual(empty.not_passed, [...V5_RECOVERY_MATRIX_CELLS]);
   for (const c of V5_RECOVERY_MATRIX_CELLS) assert.equal(empty.cells[c].state, "no_evidence");
 });
@@ -409,7 +495,7 @@ test("item 5: the daily copy cell needs a fresh independent copy, a matching rea
   ];
   for (const [mutate, failure, clock] of cases) {
     const m = matrix(); mutate(m);
-    const cellResult = evaluateRecoveryMatrix(m, clock).cells.independent_daily_restorable_copy;
+    const cellResult = M(m, clock).cells.independent_daily_restorable_copy;
     assert.equal(cellResult.state, "fail", failure);
     assert.ok(cellResult.failures.includes(failure), `${failure} in ${cellResult.failures}`);
   }
@@ -417,23 +503,23 @@ test("item 5: the daily copy cell needs a fresh independent copy, a matching rea
   const at26h = matrix();
   daily(at26h).newest_copy.produced_at = "2026-09-23T10:00:00Z";
   daily(at26h).restore_exercise.copy.produced_at = "2026-09-23T10:00:00Z";
-  assert.equal(evaluateRecoveryMatrix(at26h, NOW).cells.independent_daily_restorable_copy.state, "pass");
+  assert.equal(M(at26h, NOW).cells.independent_daily_restorable_copy.state, "pass");
   const at7d = matrix();
   daily(at7d).newest_copy.produced_at = "2026-10-01T03:00:00Z";
-  const c7 = evaluateRecoveryMatrix(at7d, at("2026-10-01T10:20:00Z")).cells.independent_daily_restorable_copy;
+  const c7 = M(at7d, at("2026-10-01T10:20:00Z")).cells.independent_daily_restorable_copy;
   assert.equal(c7.restore_exercise_age_seconds, 7 * 86400);
   assert.equal(c7.state, "pass");
-  const atNow = evaluateRecoveryMatrix(matrix(), at("2026-09-24T10:20:00Z")).cells.independent_daily_restorable_copy;
+  const atNow = M(matrix(), at("2026-09-24T10:20:00Z")).cells.independent_daily_restorable_copy;
   assert.equal(atNow.state, "pass");
 });
 
 test("item 5: core RTO passes at 4 hours, fails beyond, and a non-exact restore has no RTO", () => {
   const at4h = matrix(); at4h.cells.core_rto.restore_exercise.finished_at = "2026-09-24T14:00:00Z";
-  assert.equal(evaluateRecoveryMatrix(at4h, NOW).cells.core_rto.state, "pass");
+  assert.equal(M(at4h, NOW).cells.core_rto.state, "pass");
   const over = matrix(); over.cells.core_rto.restore_exercise.finished_at = "2026-09-24T14:00:01Z";
-  assert.equal(evaluateRecoveryMatrix(over, NOW).cells.core_rto.state, "fail");
+  assert.equal(M(over, NOW).cells.core_rto.state, "fail");
   const inexact = matrix(); inexact.cells.core_rto.restore_exercise.observed_artifact_digest = D("f");
-  const c = evaluateRecoveryMatrix(inexact, NOW).cells.core_rto;
+  const c = M(inexact, NOW).cells.core_rto;
   assert.equal(c.state, "fail");
   assert.equal(c.restore_exercise_reason, "artifact_hash_mismatch");
 });
@@ -443,7 +529,7 @@ const CALENDAR = JSON.parse(readFileSync(new URL("../../ops/config/business-cale
 function adapter(start, end, calendar = CALENDAR) {
   const m = { cells: { adapter_rto: { recoveries: [{ adapter_id: "crm", outage_started_at: start, recovered_at: end }] } } };
   if (calendar) m.business_calendar = calendar;
-  return evaluateRecoveryMatrix(m, at("2026-12-31T00:00:00Z")).cells.adapter_rto;
+  return M(m, at("2026-12-31T00:00:00Z")).cells.adapter_rto;
 }
 
 test("item 5: the pinned calendar digest is the digest of the config file", () => {
@@ -506,12 +592,12 @@ test("item 5: a calendar with an extra holiday is not the pinned calendar and ca
 test("item 5: one failing adapter fails the cell even beside an indeterminate one; backwards intervals fail", () => {
   const long = matrix();
   long.cells.adapter_rto.recoveries.push({ adapter_id: "drive", outage_started_at: "2026-09-19T17:00:00Z", recovered_at: "2026-09-22T09:00:00Z" });
-  const m = evaluateRecoveryMatrix(long, NOW);
+  const m = M(long, NOW);
   assert.equal(m.cells.adapter_rto.state, "indeterminate");
   assert.deepEqual(m.not_passed, ["adapter_rto"]);
   assert.equal(m.decision, "fail");
   long.cells.adapter_rto.recoveries.push({ adapter_id: "mail", outage_started_at: "2026-09-20T07:00:00Z", recovered_at: "2026-09-20T06:00:00Z" });
-  const mixed = evaluateRecoveryMatrix(long, NOW).cells.adapter_rto;
+  const mixed = M(long, NOW).cells.adapter_rto;
   assert.equal(mixed.state, "fail");
   assert.equal(mixed.adapters[2].reason, "recovered_before_outage");
 });
@@ -520,6 +606,8 @@ test("item 5: one failing adapter fails the cell even beside an indeterminate on
 
 const K = { a: D("1"), b: D("2"), c: D("3"), d: D("4"), e: D("5") };
 const OUT_NOW = at("2026-09-24T12:00:00Z");
+/** Each readback's own read instant: 30 minutes after the 11:00 attempts, so outside the settle window. */
+const READ = "2026-09-24T11:30:00Z";
 
 function outbound(items) {
   const list = items ?? [
@@ -531,17 +619,17 @@ function outbound(items) {
   ];
   return {
     restore_id: "restore-2026-09-24",
-    census: { digest: v5OutboundCensusDigest(list), item_count: list.length },
+    census: { source: "ops.notification_delivery:device", digest: v5OutboundCensusDigest(list), item_count: list.length },
     items: list,
     readbacks: [],
   };
 }
 
 const allPresent = req => req.items.filter(i => i.state !== "settled")
-  .map(i => ({ item_id: i.item_id, idempotency_key: i.envelope_digest, readback: "effect_present" }));
+  .map(i => ({ item_id: i.item_id, idempotency_key: i.envelope_digest, read_at: READ, readback: "effect_present" }));
 
 test("item 6: after a restore every unsettled outbound item is quarantined and nothing is released", () => {
-  const r = evaluateOutboundQueueRelease(outbound(), OUT_NOW);
+  const r = O(outbound(), OUT_NOW);
   assert.equal(r.decision, "hold");
   assert.deepEqual(r.quarantined_item_ids, ["mail-1", "mail-2", "sf-3", "sf-4"]);
   assert.equal(r.dispositions.find(d => d.item_id === "done-5").disposition, "already_settled");
@@ -553,12 +641,12 @@ test("item 6: after a restore every unsettled outbound item is quarantined and n
 test("item 6: only an exact-key provider readback moves an item, and present is never resent", () => {
   const req = outbound();
   req.readbacks = [
-    { item_id: "mail-1", idempotency_key: K.a, readback: "effect_present" },
-    { item_id: "mail-2", idempotency_key: K.b, readback: "effect_absent" },
-    { item_id: "sf-3", idempotency_key: K.c, readback: "indeterminate" },
-    { item_id: "sf-4", idempotency_key: K.a, readback: "effect_absent" },
+    { item_id: "mail-1", idempotency_key: K.a, read_at: READ, readback: "effect_present" },
+    { item_id: "mail-2", idempotency_key: K.b, read_at: READ, readback: "effect_absent" },
+    { item_id: "sf-3", idempotency_key: K.c, read_at: READ, readback: "indeterminate" },
+    { item_id: "sf-4", idempotency_key: K.a, read_at: READ, readback: "effect_absent" },
   ];
-  const r = evaluateOutboundQueueRelease(req, OUT_NOW);
+  const r = O(req, OUT_NOW);
   const by = Object.fromEntries(r.dispositions.map(d => [d.item_id, d]));
   assert.equal(by["mail-1"].disposition, "settle_without_resend");
   assert.equal(by["mail-2"].disposition, "release_for_governed_send");
@@ -570,50 +658,70 @@ test("item 6: only an exact-key provider readback moves an item, and present is 
   assert.deepEqual(r.quarantined_item_ids, ["sf-3", "sf-4"]);
 });
 
-test("item 6 (F5): an in-flight item whose effect reads absent stays quarantined until the settle window passes", () => {
-  const req = outbound();
-  req.readbacks = [{ item_id: "mail-2", idempotency_key: K.b, readback: "effect_absent" },
-    { item_id: "sf-3", idempotency_key: K.c, readback: "effect_absent" }];
-  const early = evaluateOutboundQueueRelease(req, at("2026-09-24T11:14:59Z"));
-  for (const id of ["mail-2", "sf-3"]) {
-    const d = early.dispositions.find(x => x.item_id === id);
-    assert.equal(d.disposition, "quarantined", id);
-    assert.equal(d.reason, "settle_window_open");
-    assert.equal(d.settles_at, "2026-09-24T11:15:00.000Z");
+test("item 6 (F5/G2): an attempted item reading absent is released only when THAT readback was taken after the settle window", () => {
+  const absent = readAt => {
+    const req = outbound();
+    req.readbacks = [{ item_id: "mail-2", idempotency_key: K.b, read_at: readAt, readback: "effect_absent" },
+      { item_id: "sf-3", idempotency_key: K.c, read_at: readAt, readback: "effect_absent" }];
+    return req;
+  };
+  // Read 1 s before the window closed: held, however late the evaluator runs.
+  for (const clock of [at("2026-09-24T11:15:00Z"), OUT_NOW, at("2026-09-24T11:29:59Z")]) {
+    const early = O(absent("2026-09-24T11:14:59Z"), clock);
+    for (const id of ["mail-2", "sf-3"]) {
+      const d = early.dispositions.find(x => x.item_id === id);
+      assert.equal(d.disposition, "quarantined", id);
+      assert.equal(d.reason, "readback_inside_settle_window");
+      assert.equal(d.settles_at, "2026-09-24T11:15:00.000Z");
+    }
   }
-  const onTime = evaluateOutboundQueueRelease(req, at("2026-09-24T11:15:00Z"));
+  // Read exactly at the window's close: released.
+  const onTime = O(absent("2026-09-24T11:15:00Z"), OUT_NOW);
   assert.equal(onTime.dispositions.find(x => x.item_id === "mail-2").disposition, "release_for_governed_send");
+  // A readback stamped after the evaluator's clock is not a reading yet; one read exactly now is.
+  const future = O(absent("2026-09-24T12:00:01Z"), OUT_NOW);
+  assert.equal(future.dispositions.find(x => x.item_id === "mail-2").reason, "readback_after_observation");
+  const justNow = O(absent("2026-09-24T12:00:00Z"), OUT_NOW);
+  assert.equal(justNow.dispositions.find(x => x.item_id === "mail-2").disposition, "release_for_governed_send");
+  // A pending item was never attempted: an absent read releases it at once.
+  const pending = outbound();
+  pending.readbacks = [{ item_id: "mail-1", idempotency_key: K.a, read_at: "2026-09-24T11:00:01Z", readback: "effect_absent" }];
+  assert.equal(O(pending, OUT_NOW).dispositions.find(x => x.item_id === "mail-1").disposition, "release_for_governed_send");
   // A present effect settles at once (nothing is resent), window or not.
   const present = outbound();
-  present.readbacks = [{ item_id: "mail-2", idempotency_key: K.b, readback: "effect_present" }];
-  assert.equal(evaluateOutboundQueueRelease(present, at("2026-09-24T11:00:01Z"))
+  present.readbacks = [{ item_id: "mail-2", idempotency_key: K.b, read_at: "2026-09-24T11:00:01Z", readback: "effect_present" }];
+  assert.equal(O(present, OUT_NOW)
     .dispositions.find(x => x.item_id === "mail-2").disposition, "settle_without_resend");
+  // read_at is required and typed.
+  const noRead = outbound();
+  noRead.readbacks = [{ item_id: "mail-2", idempotency_key: K.b, readback: "effect_absent" }];
+  assert.throws(() => O(noRead, OUT_NOW), e => e.code === "missing_field");
   // An attempted item must say when it was last attempted.
   const noStamp = outbound();
   noStamp.items[1].last_attempt_at = null;
-  noStamp.census = { digest: v5OutboundCensusDigest(noStamp.items), item_count: 5 };
-  assert.throws(() => evaluateOutboundQueueRelease(noStamp, OUT_NOW), e => e.code === "missing_field");
+  noStamp.census = { ...noStamp.census, digest: v5OutboundCensusDigest(noStamp.items) };
+  assert.throws(() => O(noStamp, OUT_NOW), e => e.code === "missing_field");
 });
 
 test("item 6 (F5): the item list is bound to the restored queue's census, and an empty census holds", () => {
   const dropped = outbound();
   dropped.items = dropped.items.filter(i => i.item_id !== "sf-3");
   dropped.readbacks = allPresent(dropped);
-  const r1 = evaluateOutboundQueueRelease(dropped, OUT_NOW);
+  const r1 = O(dropped, OUT_NOW);
   assert.equal(r1.decision, "hold");
   assert.equal(r1.reason_id, "outbound_census_mismatch");
   assert.equal(r1.releases_anything, false);
 
   const relabelled = outbound();
   relabelled.items[1].state = "settled";
-  assert.equal(evaluateOutboundQueueRelease(relabelled, OUT_NOW).reason_id, "outbound_census_mismatch");
+  assert.equal(O(relabelled, OUT_NOW).reason_id, "outbound_census_mismatch");
 
   const miscounted = outbound();
   miscounted.census.item_count = 6;
-  assert.equal(evaluateOutboundQueueRelease(miscounted, OUT_NOW).reason_id, "outbound_census_mismatch");
+  assert.equal(O(miscounted, OUT_NOW).reason_id, "outbound_census_mismatch");
 
   const empty = outbound([]);
-  const r2 = evaluateOutboundQueueRelease(empty, OUT_NOW);
+  const r2 = O(empty, OUT_NOW);
   assert.equal(r2.decision, "hold");
   assert.equal(r2.reason_id, "outbound_census_empty");
 
@@ -621,36 +729,63 @@ test("item 6 (F5): the item list is bound to the restored queue's census, and an
   const shuffled = outbound();
   shuffled.items.reverse();
   shuffled.readbacks = allPresent(shuffled);
-  assert.equal(evaluateOutboundQueueRelease(shuffled, OUT_NOW).decision, "reconciled");
+  assert.equal(O(shuffled, OUT_NOW).decision, "reconciled");
+
+  // A census source other than the restored queue's reader is refused.
+  const elsewhere = outbound();
+  elsewhere.census.source = "caller_list";
+  assert.throws(() => O(elsewhere, OUT_NOW), e => e.code === "unknown_state");
+});
+
+test("item 6 (G2/G4): the request must be the census reader's own re-read output; a caller's subset with its own digest holds", () => {
+  const verified = stamp(outbound(), "outbound_census", OUT_NOW);
+  verified.readbacks = [];
+  // Drop an item and recompute the census digest, keeping the reader's binding.
+  const subset = clone(verified);
+  subset.items = subset.items.filter(i => i.item_id !== "sf-3");
+  subset.census = { ...subset.census, digest: v5OutboundCensusDigest(subset.items), item_count: subset.items.length };
+  subset.readbacks = allPresent(subset);
+  const r = evaluateOutboundQueueRelease(subset, OUT_NOW);
+  assert.equal(r.decision, "hold");
+  assert.equal(r.reason_id, "outbound_evidence_not_reverified");
+  assert.equal(r.releases_anything, false);
+  // No binding at all is a contract violation, not a hold.
+  const { verification: _v, ...bare } = verified;
+  assert.throws(() => evaluateOutboundQueueRelease(bare, OUT_NOW), e => e.code === "missing_field");
+  // Another step's verifier, or a stale stamp, holds.
+  const wrong = clone(verified); wrong.verification.verifier = V5_EVIDENCE_VERIFIERS.restore_exercise;
+  assert.equal(evaluateOutboundQueueRelease(wrong, OUT_NOW).reason_id, "outbound_evidence_not_reverified");
+  const stale = stamp(outbound(), "outbound_census", OUT_NOW, OUT_NOW.now_ms - (V5_REVERIFY_MAX_AGE_SECONDS + 1) * 1000);
+  assert.equal(evaluateOutboundQueueRelease(stale, OUT_NOW).reason_id, "outbound_evidence_not_reverified");
 });
 
 test("item 6: the queue is reconciled only when every item has an exact readback", () => {
   const req = outbound();
   req.readbacks = allPresent(req);
-  const r = evaluateOutboundQueueRelease(req, OUT_NOW);
+  const r = O(req, OUT_NOW);
   assert.equal(r.decision, "reconciled");
   assert.equal(r.census_digest, req.census.digest);
   assert.deepEqual(r.quarantined_item_ids, []);
   const onlySettled = outbound([{ item_id: "done-5", envelope_digest: K.e, state: "settled", last_attempt_at: null }]);
-  assert.equal(evaluateOutboundQueueRelease(onlySettled, OUT_NOW).decision, "reconciled");
+  assert.equal(O(onlySettled, OUT_NOW).decision, "reconciled");
 });
 
 test("item 6: no age-out, no operator override, no duplicate item or readback, and a clock is required", () => {
   for (const key of ["force_release", "release_after_seconds", "operator_override"]) {
-    assert.throws(() => evaluateOutboundQueueRelease({ ...outbound(), [key]: true }, OUT_NOW), e => e.code === "unknown_field");
+    assert.throws(() => O({ ...outbound(), [key]: true }, OUT_NOW), e => e.code === "unknown_field");
   }
   const dupReadback = outbound();
   dupReadback.readbacks = [
-    { item_id: "mail-1", idempotency_key: K.a, readback: "effect_absent" },
-    { item_id: "mail-1", idempotency_key: K.a, readback: "effect_present" },
+    { item_id: "mail-1", idempotency_key: K.a, read_at: READ, readback: "effect_absent" },
+    { item_id: "mail-1", idempotency_key: K.a, read_at: READ, readback: "effect_present" },
   ];
-  assert.throws(() => evaluateOutboundQueueRelease(dupReadback, OUT_NOW), e => e.code === "duplicate_readback");
+  assert.throws(() => O(dupReadback, OUT_NOW), e => e.code === "duplicate_readback");
   const dupItem = outbound();
   dupItem.items.push({ ...dupItem.items[0] });
-  assert.throws(() => evaluateOutboundQueueRelease(dupItem, OUT_NOW), e => e.code === "duplicate_item");
-  assert.throws(() => evaluateOutboundQueueRelease(outbound()), e => e.code === "invalid_shape");
+  assert.throws(() => O(dupItem, OUT_NOW), e => e.code === "duplicate_item");
+  assert.throws(() => O(outbound()), e => e.code === "invalid_shape");
   const noCensus = outbound(); delete noCensus.census;
-  assert.throws(() => evaluateOutboundQueueRelease(noCensus, OUT_NOW), e => e.code === "missing_field");
+  assert.throws(() => O(noCensus, OUT_NOW), e => e.code === "missing_field");
 });
 
 // --- degraded-mode projection ------------------------------------------------
@@ -680,7 +815,7 @@ test("policy: the digest is sha256 of the canonical bytes and closes exactly the
   assert.deepEqual(pre.recovery_point_sources, ["pitr_branch_proof"]);
   assert.equal(pre.clock_source, "caller_clock_option_never_evidence");
   assert.equal(pre.outbound_settle_window_seconds, 900);
-  assert.equal(evaluateRestoreExercise(clone(receipt())).policy_digest, v5RecoveryMatrixPolicyDigest());
+  assert.equal(R(clone(receipt())).policy_digest, v5RecoveryMatrixPolicyDigest());
 });
 
 // --- the CLI, with the real clock ---------------------------------------------
@@ -701,7 +836,7 @@ function liveProof() {
   for (const p of [b.negative_probe, b.production_readback.negative]) p.written_at = iso(-100, true);
   b.production_readback.read_at = iso(-10);
   b.retention_read_at = iso(-30);
-  return b;
+  return stamp(b, "record_layer_rpo", { now_ms: now });
 }
 
 test("CLI rpo: judges stdin evidence at the real current time; a supplied observed_at is refused", () => {
@@ -718,7 +853,7 @@ test("CLI rpo: judges stdin evidence at the real current time; a supplied observ
   assert.match(refused.stderr, /unknown_field/);
 
   // The fixed-clock fixture, run today, is long stale.
-  const stale = cli(["rpo", "-"], JSON.stringify(pitrProof()));
+  const stale = cli(["rpo", "-"], JSON.stringify(stamp(pitrProof(), "record_layer_rpo", { now_ms: Date.now() })));
   assert.equal(stale.status, 1);
   assert.ok(JSON.parse(stale.stdout).record_layer_rpo.failures.includes("exposure_exceeds_rpo"));
 });
@@ -732,7 +867,7 @@ test("CLI rpo: the clock is read after the evidence, so a slow `verify | evaluat
   const b = liveProof();
   // read "just now", 1.5 s after the evaluator started: whole seconds, never ahead of the real clock
   b.production_readback.read_at = b.retention_read_at = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace(".000Z", "Z");
-  child.stdin.end(JSON.stringify(b));
+  child.stdin.end(JSON.stringify(stamp(b, "record_layer_rpo", { now_ms: Date.now() })));
   const code = await new Promise(r => child.on("close", r));
   assert.equal(code, 0, out);
   assert.deepEqual(JSON.parse(out).record_layer_rpo.failures, []);
@@ -764,11 +899,11 @@ test("CLI matrix: supplies the pinned calendar, uses the real clock, refuses obs
 });
 
 test("CLI: restore, outbound, degraded and policy exit 0/1/2 by verdict", () => {
-  assert.equal(cli(["restore", "-"], JSON.stringify(receipt())).status, 0);
+  assert.equal(cli(["restore", "-"], JSON.stringify(stamp(receipt(), "restore_exercise", { now_ms: Date.now() }))).status, 0);
   const bad = receipt(); bad.observed_artifact_digest = D("b");
-  assert.equal(cli(["restore", "-"], JSON.stringify(bad)).status, 1);
+  assert.equal(cli(["restore", "-"], JSON.stringify(stamp(bad, "restore_exercise", { now_ms: Date.now() }))).status, 1);
   assert.equal(cli(["restore", "-"], "{}").status, 2);
-  assert.equal(cli(["outbound", "-"], JSON.stringify(outbound())).status, 1);
+  assert.equal(cli(["outbound", "-"], JSON.stringify(stamp(outbound(), "outbound_census", { now_ms: Date.now() }))).status, 1);
   assert.equal(cli(["degraded", "edge_unavailable"]).status, 0);
   assert.equal(JSON.parse(cli(["policy"]).stdout).policy_digest, v5RecoveryMatrixPolicyDigest());
   assert.equal(cli(["bogus"]).status, 2);

@@ -34,7 +34,15 @@ only thing a restore can be compared EXACTLY against is the artifact itself.
                re-reads the Check and the artifact named in a receipt from the
                provider and exits 1 unless the recorded digest, the store's
                digest and the production instant still say what the receipt
-               says. A receipt is never trusted because it exists.
+               says; on a match it prints the receipt with the copy block AS
+               RE-READ, stamped with the verify binding the evaluator requires
+               (lib/recovery_evidence.py). A receipt is never trusted because
+               it exists.
+  outbound-census
+               every device row of the RESTORED ops.notification_delivery as
+               an outbound item, plus the provider readbacks from --readbacks,
+               as the bound request evaluateOutboundQueueRelease reads. The
+               item list comes from the database, never from a caller.
 
 Nothing here writes to a database or reads a credential. fetch-copy and
 verify-receipt call the GitHub API through the logged-in `gh`.
@@ -50,10 +58,14 @@ import re
 import subprocess
 import sys
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from lib.recovery_evidence import bind, canonical_json  # noqa: E402
 
 COPY_RE = re.compile(
     rb'^COPY ((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))\.((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))'
@@ -233,24 +245,75 @@ def _status_module():
     return module
 
 
+BACKUP_RUN_EVENTS = ("schedule", "workflow_dispatch")
+BACKUP_RUN_BRANCH = "main"
+
+
+def _instant(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _check_bound_to_run(bws, repository: str, identity, run: dict[str, Any], item: dict[str, Any]) -> bool:
+    """Is this Actions-app Check, whose external_id already equals the run identity, THIS run's?
+
+    A Check a workflow creates with GITHUB_TOKEN does not land in its own run's
+    check suite: read live on 2026-09-24, 0 of the last 5 nightly runs had it
+    there; each sat in another github-actions suite on the same head. So the
+    run is bound three ways, all provider-assigned except the envelope: the
+    suite GitHub placed the Check in is a github-actions suite for this head
+    on main; the Check's provider-stamped start and completion fall inside the
+    run's own window; and its external_id (checked by matching_checks) names
+    this run id and attempt. Its own run's suite is accepted as well.
+    RESIDUAL (documented, not closed): a different workflow with checks:write
+    running on the same main commit inside the same window could write an
+    identical envelope; admitting a workflow to main is the control there.
+    """
+    check_suite = item.get("check_suite")
+    suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
+    if suite_id is None:
+        return False
+    if suite_id != run.get("check_suite_id"):
+        suite = bws.api(f"/repos/{repository}/check-suites/{int(suite_id)}")
+        if not isinstance(suite, dict):
+            return False
+        raw_app = suite.get("app")
+        app: dict[str, Any] = raw_app if isinstance(raw_app, dict) else {}
+        if (app.get("id") != bws.ACTIONS_APP_ID or app.get("slug") != bws.ACTIONS_APP_SLUG
+                or suite.get("head_branch") != BACKUP_RUN_BRANCH
+                or str(suite.get("head_sha", "")).lower() != identity.head_sha):
+            return False
+    started, completed = _instant(item.get("started_at")), _instant(item.get("completed_at"))
+    run_start, run_end = _instant(run.get("run_started_at")), _instant(run.get("updated_at"))
+    if started is None or completed is None or run_start is None or run_end is None:
+        return False
+    return run_start <= started <= completed <= run_end
+
+
 def _authentic_backup_check(bws, identity, run: dict[str, Any], check_run_id: int | None = None) -> dict[str, Any]:
     """The run's ONE "Backup artifact" Check, authenticated by what the provider assigned.
 
-    The name and the external_id envelope select; they do not authenticate
-    (both are free text its creator writes). What authenticates is the Actions
-    app stamp AND the check-suite GitHub placed the row in being the suite of
-    THIS backup-workflow run — the one identity a Check's creator cannot choose.
+    The name and the external_id envelope select; they do not authenticate on
+    their own (both are free text its creator writes). The Actions app stamp,
+    the suite GitHub placed the Check in and the provider's own timestamps do;
+    see _check_bound_to_run. Zero or several candidates fail closed.
     """
-    suite = run.get("check_suite_id")
-    candidates = [
+    repository = identity.repository
+    stamped = [
         item for item in bws.matching_checks(identity)
         if isinstance(item.get("app"), dict)
         and item["app"].get("id") == bws.ACTIONS_APP_ID and item["app"].get("slug") == bws.ACTIONS_APP_SLUG
-        and isinstance(item.get("check_suite"), dict) and item["check_suite"].get("id") == suite
         and (check_run_id is None or item.get("id") == check_run_id)
     ]
+    candidates = [item for item in stamped if _check_bound_to_run(bws, repository, identity, run, item)]
     if len(candidates) != 1:
-        raise ValueError(f"expected one provider-authenticated Backup artifact Check for run {identity.run_id}, found {len(candidates)}")
+        raise ValueError(
+            f"expected one provider-authenticated Backup artifact Check bound to run {identity.run_id}, "
+            f"found {len(candidates)} (of {len(stamped)} Actions-app Checks carrying its envelope); refusing")
     item = candidates[0]
     if item.get("status") != "completed" or item.get("conclusion") != "success":
         raise ValueError("the Backup artifact Check did not complete successfully")
@@ -258,6 +321,7 @@ def _authentic_backup_check(bws, identity, run: dict[str, Any], check_run_id: in
 
 
 def _backup_run(bws, repository: str, run_id: int):
+    """A nightly backup run whose copy may be trusted: the workflow's own, on main, started by the schedule or by hand."""
     run = bws.api(f"/repos/{repository}/actions/runs/{run_id}")
     if not isinstance(run, dict):
         raise ValueError("workflow run API returned no object")
@@ -265,7 +329,21 @@ def _backup_run(bws, repository: str, run_id: int):
         raise ValueError(f"run {run_id} is not a run of {bws.BACKUP_WORKFLOW_PATH}")
     if run.get("conclusion") != "success":
         raise ValueError(f"run {run_id} did not conclude success")
-    identity = bws.Identity(repository, int(run["id"]), int(run["run_attempt"]), str(run["head_sha"]).lower())
+    # G1: a run of the backup workflow file from any other branch or trigger
+    # (a pull request, a push to a feature branch) runs code nobody reviewed
+    # onto main, so its artifact is not the producer's copy.
+    if run.get("head_branch") != BACKUP_RUN_BRANCH:
+        raise ValueError(f"run {run_id} ran on {run.get('head_branch')!r}, not {BACKUP_RUN_BRANCH}")
+    if run.get("event") not in BACKUP_RUN_EVENTS:
+        raise ValueError(f"run {run_id} was triggered by {run.get('event')!r}, not {' or '.join(BACKUP_RUN_EVENTS)}")
+    head_sha = str(run.get("head_sha", "")).lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise ValueError(f"run {run_id} has no commit sha")
+    # head_branch is a name; the commit must actually be in main's history.
+    cmp = bws.api(f"/repos/{repository}/compare/{head_sha}...{BACKUP_RUN_BRANCH}")
+    if not isinstance(cmp, dict) or cmp.get("status") not in ("ahead", "identical") or cmp.get("behind_by") != 0:
+        raise ValueError(f"run {run_id}'s commit is not an ancestor of {BACKUP_RUN_BRANCH}")
+    identity = bws.Identity(repository, int(run["id"]), int(run["run_attempt"]), head_sha)
     return run, identity
 
 
@@ -315,15 +393,94 @@ def fetch_copy(repository: str, run_id: int, out_dir: Path) -> tuple[Path, Path]
     return archive, dump
 
 
-def verify_receipt(receipt: dict[str, Any], repository: str) -> list[str]:
-    """Re-read the receipt's copy facts from the provider; return what no longer matches."""
+def verify_receipt(receipt: dict[str, Any], repository: str,
+                   now: datetime | None = None) -> tuple[list[str], dict[str, Any] | None]:
+    """Re-derive the receipt's copy block from the provider (review G4).
+
+    Returns (differences, bound receipt). The bound receipt carries the copy
+    block AS RE-READ, not as the input said it, stamped with the verify
+    binding the evaluator requires; it is None whenever anything differs. A
+    receipt that already carries a binding is refused: re-verify the unbound
+    receipt restore-rehearse wrote, never re-stamp a stamped one.
+    """
+    if "verification" in receipt:
+        return (["receipt already carries a verification block"], None)
     copy = receipt.get("copy", {})
     source = copy.get("recorded_digest_source", {})
     if source.get("kind") != DIGEST_SOURCE_KIND:
-        return [f"recorded digest source is {source.get('kind')!r}, not the producer's Check"]
+        return ([f"recorded digest source is {source.get('kind')!r}, not the producer's Check"], None)
     fresh = read_copy_record(repository, int(source["workflow_run_id"]), int(source["check_run_id"]))
     fresh.pop("_artifact_id")
-    return [k for k in COPY_KEYS if fresh.get(k) != copy.get(k)]
+    differs = [k for k in COPY_KEYS if fresh.get(k) != copy.get(k)]
+    if differs:
+        return (differs, None)
+    return ([], bind({**receipt, "copy": {k: fresh[k] for k in COPY_KEYS}}, "restore_exercise", now))
+
+
+# ── the outbound census, read from the RESTORED database (review G2) ─────────
+
+OUTBOUND_CENSUS_SOURCE = "ops.notification_delivery:device"
+OUTBOUND_SQL = """
+select id::text, notification_id::text, channel, state, attempted_at
+  from ops.notification_delivery
+ where channel = 'device'
+ order by id
+"""
+READBACK_KEYS = ("idempotency_key", "item_id", "read_at", "readback")
+
+
+def _utc_micros(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def outbound_item(row_id: str, notification_id: str, channel: str, state: str, attempted_at: datetime) -> dict[str, Any]:
+    """One device delivery row as an outbound item (mapping decided with Jev, 0.65).
+
+    in_app rows are rendered in the record layer and have no provider effect,
+    so only device rows are outbound. A pending row may have been handed to the
+    push provider before the outage, so its outcome is unknown and it carries
+    its attempt instant into the settle window; delivered, suppressed and
+    failed rows are final. The envelope key is the delivery's natural key
+    (unique (notification_id, channel)), digested canonically.
+    """
+    envelope = "sha256:" + hashlib.sha256(canonical_json({"channel": channel, "notification_id": notification_id}).encode()).hexdigest()
+    return {"item_id": row_id, "envelope_digest": envelope,
+            "state": "outcome_unknown" if state == "pending" else "settled",
+            "last_attempt_at": _utc_micros(attempted_at)}
+
+
+def census_digest(items: list[dict[str, Any]]) -> str:
+    """Byte-for-byte recovery-matrix.v5.js v5OutboundCensusDigest."""
+    keyed = [{k: i[k] for k in ("envelope_digest", "item_id", "last_attempt_at", "state")} for i in items]
+    keyed.sort(key=lambda i: i["item_id"])
+    return "sha256:" + hashlib.sha256(canonical_json(keyed).encode("utf-8")).hexdigest()
+
+
+def restored_outbound_items(dsn: str) -> list[dict[str, Any]]:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("set default_transaction_read_only = on")
+            cur.execute(OUTBOUND_SQL)
+            return [outbound_item(*row) for row in cur.fetchall()]
+
+
+def outbound_census(items: list[dict[str, Any]], readbacks: list[dict[str, Any]], restore_id: str,
+                    now: datetime | None = None) -> dict[str, Any]:
+    """The evaluator's request: every restored device row, the readbacks as given, the census, bound."""
+    if not isinstance(readbacks, list):
+        raise ValueError("readbacks must be a JSON array")
+    for i, rb in enumerate(readbacks):
+        if not isinstance(rb, dict) or sorted(rb) != sorted(READBACK_KEYS):
+            raise ValueError(f"readbacks[{i}] must hold exactly {', '.join(READBACK_KEYS)}")
+    request = {
+        "restore_id": restore_id,
+        "census": {"source": OUTBOUND_CENSUS_SOURCE, "digest": census_digest(items), "item_count": len(items)},
+        "items": items,
+        "readbacks": readbacks,
+    }
+    return bind(request, "outbound_census", now)
 
 
 def build_receipt(*, copy: dict, target_kind: str, oracle_id: str, observed_digest: str,
@@ -380,6 +537,10 @@ def main(argv=None) -> int:
     v = sub.add_parser("verify-receipt")
     v.add_argument("--repository", required=True)
     v.add_argument("receipt")
+    o = sub.add_parser("outbound-census")
+    o.add_argument("--restore-id", required=True)
+    o.add_argument("--readbacks", required=True, help="JSON array of provider readbacks, each with its own read_at")
+    o.add_argument("--dsn-env", default="RESTORE_DSN")
     a = p.parse_args(argv)
     try:
         if a.cmd == "count":
@@ -399,9 +560,19 @@ def main(argv=None) -> int:
             print(json.dumps({"archive": str(archive), "dump": str(dump)}))
             return 0
         if a.cmd == "verify-receipt":
-            differs = verify_receipt(_load_json(a.receipt), a.repository)
-            print(json.dumps({"receipt_copy_matches_provider": not differs, "differs": differs}))
-            return 0 if not differs else 1
+            differs, bound = verify_receipt(_load_json(a.receipt), a.repository)
+            if differs:
+                print(json.dumps({"receipt_copy_matches_provider": False, "differs": differs}), file=sys.stderr)
+                return 1
+            print(json.dumps(bound, sort_keys=True))
+            return 0
+        if a.cmd == "outbound-census":
+            dsn = os.environ.get(a.dsn_env, "")
+            if not dsn:
+                raise ValueError(f"${a.dsn_env} is empty; the restored database DSN is read from the environment only")
+            request = outbound_census(restored_outbound_items(dsn), _load_json(a.readbacks), a.restore_id)
+            print(json.dumps(request, sort_keys=True))
+            return 0
         artifact = _load_json(a.artifact)
         restored = _load_json(a.restored)
         if a.cmd == "compare":

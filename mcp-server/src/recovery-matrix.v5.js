@@ -112,6 +112,7 @@ export const V5_INDEPENDENT_RECORDED_DIGEST_SOURCES = Object.freeze(["github_act
 
 /** The checks of item 4, IN ORDER. The first that does not pass decides. */
 export const V5_RESTORE_EXERCISE_CHECKS = Object.freeze([
+  "evidence_reverified",
   "restore_target_not_production",
   "copy_independently_controlled",
   "oracle_independent_of_producer",
@@ -161,9 +162,32 @@ export const V5_PITR_NEGATIVE_MARGIN_SECONDS = 5;
 /**
  * After a restore, an item whose last send attempt is this recent may still be
  * in flight at the provider, so an "effect absent" readback does not yet mean
- * the effect will never land. It stays quarantined until the window passes.
+ * the effect will never land. It stays quarantined unless its readback was
+ * TAKEN at least this long after the last attempt.
  */
 export const V5_OUTBOUND_SETTLE_WINDOW_SECONDS = 15 * 60;
+
+/**
+ * THE VERIFY RE-READ BINDING (review G4). Evidence is accepted only as the
+ * output of its verify step, which RE-DERIVES it from provider and database
+ * reads and stamps it: verification = { verifier, verified_at, facts_digest },
+ * facts_digest being the canonical digest of the evidence without that block
+ * (lib/recovery_evidence.py writes it). The verifier must be the one registered
+ * for the kind, the digest must recompute, and verified_at must be within
+ * V5_REVERIFY_MAX_AGE_SECONDS of the evaluator's clock — so evidence is
+ * re-verified at the moment it is judged, and a file edited after verification
+ * fails. This is not a signature: there is no key, and a deliberate forger can
+ * recompute a digest. It closes stale, edited and never-re-read evidence.
+ */
+export const V5_EVIDENCE_VERIFIERS = Object.freeze({
+  restore_exercise: "tools/restore-watermark.py verify-receipt",
+  record_layer_rpo: "tools/pitr-restore-proof.py verify",
+  outbound_census: "tools/restore-watermark.py outbound-census",
+});
+export const V5_REVERIFY_MAX_AGE_SECONDS = 15 * 60;
+
+/** The persisted outbound queues a census may be read from (the restored database's). */
+export const V5_OUTBOUND_CENSUS_SOURCES = Object.freeze(["ops.notification_delivery:device"]);
 
 /** Where the point-in-time proof ran. Production is registered so it can be refused by name. */
 export const V5_PITR_PROOF_TARGET_KINDS = Object.freeze(["disposable_branch", "production", "unstated"]);
@@ -178,6 +202,8 @@ export const V5_OUTBOUND_DISPOSITIONS = Object.freeze([
 ]);
 
 export const V5_RECOVERY_MATRIX_REASON_IDS = Object.freeze([
+  "evidence_not_reverified",
+  "outbound_evidence_not_reverified",
   "artifact_hash_mismatch",
   "copy_not_independently_controlled",
   "oracle_is_the_producer",
@@ -334,8 +360,27 @@ function checkStates(checks, firstFailIndex) {
 
 const RECEIPT_KEYS = Object.freeze([
   "artifact_watermark", "copy", "finished_at", "oracle_id", "observed_artifact_digest",
-  "receipt_kind", "restored_watermark", "started_at", "target_kind",
+  "receipt_kind", "restored_watermark", "started_at", "target_kind", "verification",
 ]);
+const VERIFICATION_KEYS = Object.freeze(["facts_digest", "verified_at", "verifier"]);
+
+/**
+ * Does `input` carry a valid verify re-read binding for `kind` at `nowMs`?
+ * A malformed block is a contract violation (throws); a wrong verifier, a digest
+ * that does not recompute, or a stamp that is stale or in the future is a
+ * policy answer (false).
+ */
+function reverified(input, kind, nowMs, path) {
+  const v = closed(input.verification, VERIFICATION_KEYS, `${path}.verification`);
+  if (typeof v.verifier !== "string") fail("invalid_shape", `${path}.verification.verifier must be a string`, { path: `${path}.verification.verifier` });
+  digestRef(v.facts_digest, `${path}.verification.facts_digest`);
+  const stampedMs = instant(v.verified_at, `${path}.verification.verified_at`);
+  const { verification: _binding, ...facts } = input;
+  return v.verifier === V5_EVIDENCE_VERIFIERS[kind]
+    && v.facts_digest === digest(facts)
+    && stampedMs <= nowMs
+    && nowMs - stampedMs <= V5_REVERIFY_MAX_AGE_SECONDS * 1000;
+}
 const COPY_KEYS = Object.freeze([
   "copy_id", "custody_domain", "primary_domain", "produced_at", "producer_id", "recorded_artifact_digest",
   "recorded_digest_source", "store_readback_digest",
@@ -392,12 +437,19 @@ function watermarkDiff(artifact, restored) {
     }));
 }
 
-export function evaluateRestoreExercise(receiptInput) {
+/**
+ * @param receiptInput the receipt as `restore-watermark.py verify-receipt` emits it
+ * @param clock        { now_ms } — the binding must be fresh at this instant
+ */
+export function evaluateRestoreExercise(receiptInput, clock) {
+  const nowMs = clockMs(clock);
   const r = normalizeRestoreExerciseReceipt(receiptInput);
+  const isReverified = reverified(receiptInput, "restore_exercise", nowMs, "receipt");
   const mismatches = watermarkDiff(r.artifact_watermark, r.restored_watermark);
   const startedMs = Date.parse(r.started_at);
   const finishedMs = Date.parse(r.finished_at);
   const outcomes = [
+    () => isReverified ? null : "evidence_not_reverified",
     () => r.target_kind === "production" ? "restore_target_is_production"
       : !V5_ADMISSIBLE_RESTORE_TARGETS.includes(r.target_kind) ? "restore_target_unstated" : null,
     () => r.copy.custody_domain === r.copy.primary_domain ? "copy_not_independently_controlled" : null,
@@ -443,12 +495,13 @@ export function evaluateRestoreExercise(receiptInput) {
 const MATRIX_KEYS = Object.freeze(["business_calendar", "cells"]);
 const CELL_BLOCK_KEYS = Object.freeze([...V5_RECOVERY_MATRIX_CELLS]);
 const RPO_PITR_KEYS = Object.freeze([
-  "branch_core_table_rows", "branch_deleted_confirmed", "branch_id", "branch_parent_id", "branch_parent_lsn",
+  "branch_core_table_rows", "branch_operations", "branch_id", "branch_parent_id", "branch_parent_lsn", "verification",
   "branch_parent_timestamp", "history_retention_seconds", "negative_probe", "negative_present_on_branch",
   "positive_on_branch", "positive_probe", "production_branch_id", "production_readback", "project_id",
   "proof_target_kind", "requested_parent_timestamp", "retention_read_at", "source",
 ]);
 const PROBE_KEYS = Object.freeze(["id", "nonce", "written_at"]);
+const BRANCH_OPERATION_KEYS = Object.freeze(["create", "delete"]);
 const READBACK_BLOCK_KEYS = Object.freeze(["negative", "positive", "read_at"]);
 const DAILY_KEYS = Object.freeze(["newest_copy", "restore_exercise"]);
 const NEWEST_COPY_KEYS = Object.freeze([
@@ -504,7 +557,11 @@ function rpoCell(block, nowMs) {
   const negative = probeRow(block.negative_probe, `${at}.negative_probe`);
   const onBranch = optionalProbeRow(block.positive_on_branch, `${at}.positive_on_branch`);
   const negativePresent = booleanValue(block.negative_present_on_branch, `${at}.negative_present_on_branch`);
-  const deleted = booleanValue(block.branch_deleted_confirmed, `${at}.branch_deleted_confirmed`);
+  const ops = closed(block.branch_operations, BRANCH_OPERATION_KEYS, `${at}.branch_operations`);
+  for (const key of BRANCH_OPERATION_KEYS) {
+    if (ops[key] !== null) stableId(ops[key], `${at}.branch_operations.${key}`);
+  }
+  const isReverified = reverified(block, "record_layer_rpo", nowMs, at);
   if (!isPlainObject(block.branch_core_table_rows)) fail("invalid_shape", `${at}.branch_core_table_rows must be a plain object`, { path: `${at}.branch_core_table_rows` });
   const coreRows = Object.entries(block.branch_core_table_rows).map(([table, rows]) => {
     if (!TABLE_NAME.test(table)) fail("invalid_identifier", `${at}.branch_core_table_rows key "${table}" must be schema.table`, { path: `${at}.branch_core_table_rows` });
@@ -521,6 +578,7 @@ function rpoCell(block, nowMs) {
   // The proven point is the positive probe's write instant, never the requested T.
   const exposure = Math.floor((nowUs - positive.us) / 1e6);
   const failures = [];
+  if (!isReverified) failures.push("evidence_not_reverified");
   if (block.proof_target_kind !== "disposable_branch") failures.push("proof_target_not_disposable");
   if (block.branch_id === block.production_branch_id) failures.push("proof_target_is_production");
   if (block.branch_parent_id !== block.production_branch_id) failures.push("branch_parent_not_production");
@@ -538,7 +596,11 @@ function rpoCell(block, nowMs) {
   if (coreRows.some(([, rows]) => rows === 0)) failures.push("core_table_empty_on_branch");
   if (!sameProbe(rbPositive, positive) || !sameProbe(rbNegative, negative)) failures.push("probe_not_recomputed_from_production");
   if (!isFreshReadback(rbReadMs, nowMs)) failures.push("production_readback_stale");
-  if (!deleted) failures.push("branch_not_deleted");
+  // Create and delete are confirmed from the provider's operations log (a
+  // finished create_branch / delete_timeline operation on this branch id), not
+  // from a 404, which an invented branch id also returns.
+  if (ops.create === null) failures.push("branch_create_not_confirmed");
+  if (ops.delete === null) failures.push("branch_delete_not_confirmed");
   if (exposure > V5_RPO_MAX_SECONDS) failures.push("exposure_exceeds_rpo");
   if (retention < exposure) failures.push("retention_does_not_cover_exposure");
   if (!isFreshReadback(retentionReadMs, nowMs)) failures.push("retention_readback_stale");
@@ -565,7 +627,7 @@ function dailyCopyCell(block, nowMs) {
   stableId(c.producer_id, `${at}.producer_id`);
   digestRef(c.recorded_artifact_digest, `${at}.recorded_artifact_digest`);
   digestRef(c.independent_store_readback_digest, `${at}.independent_store_readback_digest`);
-  const exercise = evaluateRestoreExercise(block.restore_exercise);
+  const exercise = evaluateRestoreExercise(block.restore_exercise, { now_ms: nowMs });
   const ageSeconds = Math.floor((nowMs - producedMs) / 1000);
   const exerciseAge = Math.floor((nowMs - Date.parse(exercise.finished_at)) / 1000);
   const failures = [];
@@ -588,9 +650,9 @@ function dailyCopyCell(block, nowMs) {
   });
 }
 
-function coreRtoCell(block) {
+function coreRtoCell(block, nowMs) {
   closed(block, CORE_RTO_KEYS, "cells.core_rto");
-  const exercise = evaluateRestoreExercise(block.restore_exercise);
+  const exercise = evaluateRestoreExercise(block.restore_exercise, { now_ms: nowMs });
   if (exercise.decision !== "pass") {
     // A restore that did not come back exact has no recovery time: it did not recover.
     return cell("fail", { reason: "restore_exercise_not_exact", restore_exercise_reason: exercise.reason_id });
@@ -726,7 +788,7 @@ function adapterRtoCell(block, calendar) {
 const CELL_EVALUATORS = Object.freeze({
   record_layer_rpo: (block, nowMs) => rpoCell(block, nowMs),
   independent_daily_restorable_copy: (block, nowMs) => dailyCopyCell(block, nowMs),
-  core_rto: block => coreRtoCell(block),
+  core_rto: (block, nowMs) => coreRtoCell(block, nowMs),
   adapter_rto: (block, _nowMs, calendar) => adapterRtoCell(block, calendar),
 });
 
@@ -772,23 +834,26 @@ export function evaluateRecoveryMatrix(request, clock) {
 //   effect_absent  -> release_for_governed_send (a fresh governed send, not a replay)
 //   indeterminate / unstated / no readback / key mismatch -> stays quarantined
 // An item that was in flight, or whose outcome was unknown, stays quarantined
-// even on "effect absent" until V5_OUTBOUND_SETTLE_WINDOW_SECONDS have passed
-// since its last attempt by the caller's clock: a send made seconds before the
-// outage can still land, and releasing it early is exactly a double send.
+// even on "effect absent" unless THAT READBACK was taken at least
+// V5_OUTBOUND_SETTLE_WINDOW_SECONDS after the item's last attempt: a send made
+// seconds before the outage can still land, so an "absent" read before the
+// window closes proves nothing, however late the evaluator itself runs.
 //
-// THE ITEM LIST IS BOUND TO THE RESTORED QUEUE. `census` carries the digest the
-// reader of the restored queue computed over every item it found; the evaluator
-// recomputes it over the items it was handed and holds on any difference, so an
-// item cannot be dropped from the list to dodge quarantine. An EMPTY census
-// holds too: "nothing to reconcile" must be a positive reading, not the absence
-// of one. There is no age-out and no operator override field. The readback
-// vocabulary and its resolution map are F06's, imported rather than copied.
+// THE ITEM LIST IS THE RESTORED QUEUE. The request is emitted by
+// `restore-watermark.py outbound-census`, which reads every device row of the
+// restored ops.notification_delivery and stamps the whole request with the
+// verify re-read binding (V5_EVIDENCE_VERIFIERS.outbound_census). The evaluator
+// holds on a missing, stale or non-recomputing binding, so a caller-assembled
+// subset with its own digest does not reconcile; it also recomputes the census
+// digest. An EMPTY census holds too: "nothing to reconcile" must be a positive
+// reading, not the absence of one. There is no age-out and no operator override
+// field. The readback vocabulary and its resolution map are F06's.
 // ---------------------------------------------------------------------------
 
-const OUTBOUND_KEYS = Object.freeze(["census", "items", "readbacks", "restore_id"]);
-const CENSUS_KEYS = Object.freeze(["digest", "item_count"]);
+const OUTBOUND_KEYS = Object.freeze(["census", "items", "readbacks", "restore_id", "verification"]);
+const CENSUS_KEYS = Object.freeze(["digest", "item_count", "source"]);
 const ITEM_KEYS = Object.freeze(["envelope_digest", "item_id", "last_attempt_at", "state"]);
-const READBACK_KEYS = Object.freeze(["idempotency_key", "item_id", "readback"]);
+const READBACK_KEYS = Object.freeze(["idempotency_key", "item_id", "read_at", "readback"]);
 /** States whose last attempt may still be landing at the provider. */
 const ATTEMPTED_STATES = Object.freeze(["in_flight", "outcome_unknown"]);
 
@@ -814,6 +879,7 @@ export function evaluateOutboundQueueRelease(request, clock) {
   closed(request, OUTBOUND_KEYS, "request");
   stableId(request.restore_id, "request.restore_id");
   const census = closed(request.census, CENSUS_KEYS, "request.census");
+  enumValue(census.source, V5_OUTBOUND_CENSUS_SOURCES, "request.census.source");
   digestRef(census.digest, "request.census.digest");
   nonNegativeInteger(census.item_count, "request.census.item_count");
   if (!Array.isArray(request.items)) fail("invalid_shape", "request.items must be an array", { path: "request.items" });
@@ -833,6 +899,7 @@ export function evaluateOutboundQueueRelease(request, clock) {
     }
     return item;
   });
+  const isReverified = reverified(request, "outbound_census", nowMs, "request");
   const hold = reason => deepFreeze({
     schema_version: V5_RECOVERY_MATRIX_SCHEMA_VERSION,
     policy_digest: v5RecoveryMatrixPolicyDigest(),
@@ -844,8 +911,6 @@ export function evaluateOutboundQueueRelease(request, clock) {
     releases_anything: false,
     effects: V5_NO_EFFECTS,
   });
-  if (census.item_count !== items.length || census.digest !== v5OutboundCensusDigest(items)) return hold("outbound_census_mismatch");
-  if (items.length === 0) return hold("outbound_census_empty");
   const readbacks = new Map();
   request.readbacks.forEach((rb, i) => {
     const at = `request.readbacks[${i}]`;
@@ -853,9 +918,13 @@ export function evaluateOutboundQueueRelease(request, clock) {
     stableId(rb.item_id, `${at}.item_id`);
     digestRef(rb.idempotency_key, `${at}.idempotency_key`);
     enumValue(rb.readback, V5_READBACK_STATES, `${at}.readback`);
+    const readMs = instant(rb.read_at, `${at}.read_at`);
     if (readbacks.has(rb.item_id)) fail("duplicate_readback", `${at}.item_id has two readbacks`, { path: at });
-    readbacks.set(rb.item_id, rb);
+    readbacks.set(rb.item_id, { ...rb, readMs });
   });
+  if (!isReverified) return hold("outbound_evidence_not_reverified");
+  if (census.item_count !== items.length || census.digest !== v5OutboundCensusDigest(items)) return hold("outbound_census_mismatch");
+  if (items.length === 0) return hold("outbound_census_empty");
   const dispositions = items.map(item => {
     if (item.state === "settled") return { item_id: item.item_id, disposition: "already_settled" };
     const rb = readbacks.get(item.item_id);
@@ -863,12 +932,13 @@ export function evaluateOutboundQueueRelease(request, clock) {
     if (rb.idempotency_key !== item.envelope_digest) {
       return { item_id: item.item_id, disposition: "quarantined", reason: "idempotency_key_mismatch" };
     }
+    if (rb.readMs > nowMs) return { item_id: item.item_id, disposition: "quarantined", reason: "readback_after_observation" };
     const disposition = READBACK_DISPOSITION[V5_READBACK_RESOLUTIONS[rb.readback]];
     if (disposition === "quarantined") return { item_id: item.item_id, disposition, reason: `readback_${rb.readback}` };
     if (disposition === "release_for_governed_send" && ATTEMPTED_STATES.includes(item.state)) {
       const settleAt = Date.parse(item.last_attempt_at) + V5_OUTBOUND_SETTLE_WINDOW_SECONDS * 1000;
-      if (nowMs < settleAt) {
-        return { item_id: item.item_id, disposition: "quarantined", reason: "settle_window_open", settles_at: new Date(settleAt).toISOString() };
+      if (rb.readMs < settleAt) {
+        return { item_id: item.item_id, disposition: "quarantined", reason: "readback_inside_settle_window", settles_at: new Date(settleAt).toISOString() };
       }
     }
     return { item_id: item.item_id, disposition, readback: rb.readback };
@@ -966,7 +1036,13 @@ export function v5RecoveryMatrixPolicyPreimage() {
     independent_recorded_digest_sources: [...V5_INDEPENDENT_RECORDED_DIGEST_SOURCES].sort(),
     watermark_entry: "rows_and_sorted_copy_text_sha256",
     outbound_settle_window_seconds: V5_OUTBOUND_SETTLE_WINDOW_SECONDS,
+    outbound_settle_window_measured_at: "each_readback_read_at_not_evaluator_clock",
     outbound_census_bound: true,
+    outbound_census_sources: [...V5_OUTBOUND_CENSUS_SOURCES].sort(),
+    evidence_verifiers: { ...V5_EVIDENCE_VERIFIERS },
+    reverify_max_age_seconds: V5_REVERIFY_MAX_AGE_SECONDS,
+    reverify_binding_is_signature: false,
+    pitr_branch_lifecycle_confirmed_by: "provider_operations_log_finished_create_branch_and_delete_timeline",
     outbound_empty_census_is_reconciled: false,
     // Bound by reference so a change to the admission half moves this digest too.
     backup_quarantine_policy_digest: v5BackupQuarantinePolicyDigest(),

@@ -6,9 +6,11 @@ Three layers:
   * the copy record — fetch-copy / verify-receipt read the producer's
     "Backup artifact" Check and the artifact API through the REAL
     ops/backup-workflow-status.py matching and cross-check code, with only its
-    `api` transport and the `gh` download replaced by fixtures. A Check the
-    provider did not place in the run's own suite, a summary that disagrees
-    with the store, or a receipt edited after the fact are all refused;
+    `api` transport and the `gh` download replaced by fixtures. A run not on
+    main, not scheduled or dispatched, or whose commit is not in main; a Check
+    in a suite not bound to the run or stamped outside its window; a summary
+    that disagrees with the store; or a receipt edited after the fact are all
+    refused. The outbound census is read from a restored queue, not handed in;
   * end to end — a real pg_dump of a throwaway local cluster, restored with the
     rehearsal's OWN restore filter (read out of bin/restore-rehearse.sh, so the
     script text is what is tested) into a second throwaway database, read back
@@ -39,10 +41,14 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from lib import recovery_evidence  # noqa: E402
 TOOL = REPO / "tools" / "restore-watermark.py"
 REHEARSE = REPO / "bin" / "restore-rehearse.sh"
 EVALUATOR = REPO / "mcp-server" / "bin" / "recovery-matrix-evaluate.mjs"
@@ -268,7 +274,7 @@ class RestoredReader(unittest.TestCase):
 
 # ── the copy record, read from the provider ──────────────────────────────────
 
-RUN_ID, ATTEMPT, HEAD, SUITE = 101, 1, "a" * 40, 9001
+RUN_ID, ATTEMPT, HEAD, SUITE, OTHER_SUITE = 101, 1, "a" * 40, 9001, 9002
 REPO_SLUG = "jbookout/carr-system"
 
 
@@ -302,10 +308,17 @@ class FakeProvider:
             "external_id": json.dumps({"head_sha": HEAD, "repository": REPO_SLUG, "run_attempt": ATTEMPT, "run_id": RUN_ID},
                                       sort_keys=True, separators=(",", ":")),
             "app": {"id": 15368, "slug": "github-actions"}, "check_suite": {"id": SUITE},
+            "started_at": "2026-09-24T03:01:00Z", "completed_at": "2026-09-24T03:06:00Z",
             "output": {"summary": None},
         }
         self.run = {"id": RUN_ID, "run_attempt": ATTEMPT, "head_sha": HEAD, "conclusion": "success",
-                    "path": ".github/workflows/backup-nightly.yml", "check_suite_id": SUITE}
+                    "path": ".github/workflows/backup-nightly.yml", "check_suite_id": SUITE,
+                    "head_branch": "main", "event": "schedule",
+                    "run_started_at": "2026-09-24T03:00:30Z", "updated_at": "2026-09-24T03:07:00Z"}
+        # As observed live: the Check lands in ANOTHER github-actions suite on the same head.
+        self.suites = {OTHER_SUITE: {"id": OTHER_SUITE, "app": {"id": 15368, "slug": "github-actions"},
+                                     "head_branch": "main", "head_sha": HEAD}}
+        self.compare = {"status": "ahead", "ahead_by": 3, "behind_by": 0}
         self.extra_checks: list[dict] = []
 
     def api(self, path, *, method="GET", body=None, query=None):
@@ -317,6 +330,11 @@ class FakeProvider:
             return {"check_runs": rows, "total_count": len(rows)}
         if path == f"/repos/{REPO_SLUG}/actions/runs/{RUN_ID}/artifacts":
             return {"artifacts": [self.artifact], "total_count": 1}
+        if path == f"/repos/{REPO_SLUG}/compare/{HEAD}...main":
+            return self.compare
+        if path.startswith(f"/repos/{REPO_SLUG}/check-suites/"):
+            # an unknown suite answers with something that is not a suite object
+            return self.suites.get(int(path.rsplit("/", 1)[1]), [])
         raise AssertionError(f"unexpected API path {path}")
 
 
@@ -337,10 +355,60 @@ class CopyRecordFromProvider(unittest.TestCase):
         self.assertEqual(rec["recorded_digest_source"],
                          {"kind": "github_actions_backup_check", "check_run_id": 555, "workflow_run_id": RUN_ID})
 
-    def test_a_check_outside_the_runs_own_suite_is_not_the_producer(self):
-        self.fake.check["check_suite"] = {"id": SUITE + 1}
+    def test_g1_a_check_in_another_actions_suite_on_this_main_head_inside_the_run_window_is_accepted(self):
+        # The live shape: GITHUB_TOKEN Checks do not land in their own run's suite.
+        self.fake.check["check_suite"] = {"id": OTHER_SUITE}
+        self.assertEqual(rw.read_copy_record(REPO_SLUG, RUN_ID)["recorded_digest_source"]["check_run_id"], 555)
+
+    def test_g1_a_check_in_a_suite_not_bound_to_this_run_fails_closed(self):
+        self.fake.check["check_suite"] = {"id": OTHER_SUITE}
+        cases = [
+            lambda s: s.update(app={"id": 1, "slug": "someone-else"}),
+            lambda s: s.update(head_branch="feature"),
+            lambda s: s.update(head_sha="b" * 40),
+        ]
+        for mutate in cases:
+            original = json.loads(json.dumps(self.fake.suites[OTHER_SUITE]))
+            mutate(self.fake.suites[OTHER_SUITE])
+            with self.assertRaisesRegex(ValueError, "found 0 .*refusing"):
+                rw.read_copy_record(REPO_SLUG, RUN_ID)
+            self.fake.suites[OTHER_SUITE] = original
+        self.fake.check["check_suite"] = {"id": 424242}  # a suite the provider cannot read back
         with self.assertRaisesRegex(ValueError, "found 0"):
             rw.read_copy_record(REPO_SLUG, RUN_ID)
+
+    def test_g1_a_check_stamped_outside_the_runs_own_window_is_not_the_runs(self):
+        for field, value in (("started_at", "2026-09-24T03:00:29Z"), ("completed_at", "2026-09-24T03:07:01Z"),
+                             ("completed_at", None)):
+            original = self.fake.check[field]
+            self.fake.check[field] = value
+            with self.assertRaisesRegex(ValueError, "found 0"):
+                rw.read_copy_record(REPO_SLUG, RUN_ID)
+            self.fake.check[field] = original
+        # exactly at the run's own edges is inside
+        self.fake.check.update(started_at="2026-09-24T03:00:30Z", completed_at="2026-09-24T03:07:00Z")
+        self.assertEqual(rw.read_copy_record(REPO_SLUG, RUN_ID)["recorded_digest_source"]["check_run_id"], 555)
+
+    def test_g1_only_a_scheduled_or_dispatched_run_on_main_whose_commit_is_in_main_counts(self):
+        for field, bad, message in (("head_branch", "pr-branch", "not main"),
+                                    ("event", "pull_request", "not schedule or workflow_dispatch"),
+                                    ("event", "push", "not schedule or workflow_dispatch")):
+            original = self.fake.run[field]
+            self.fake.run[field] = bad
+            with self.assertRaisesRegex(ValueError, message):
+                rw.read_copy_record(REPO_SLUG, RUN_ID)
+            self.fake.run[field] = original
+        self.fake.run["event"] = "workflow_dispatch"
+        self.assertEqual(rw.read_copy_record(REPO_SLUG, RUN_ID)["copy_id"], self.fake.artifact["name"])
+        for compare in ({"status": "diverged", "ahead_by": 2, "behind_by": 1},
+                        {"status": "diverged", "ahead_by": 2, "behind_by": 0},  # status alone decides too
+                        {"status": "behind", "ahead_by": 0, "behind_by": 4},
+                        {"status": "ahead", "ahead_by": 1, "behind_by": 1}, {}, []):
+            self.fake.compare = compare
+            with self.assertRaisesRegex(ValueError, "not an ancestor of main"):
+                rw.read_copy_record(REPO_SLUG, RUN_ID)
+        self.fake.compare = {"status": "identical", "ahead_by": 0, "behind_by": 0}
+        self.assertEqual(rw.read_copy_record(REPO_SLUG, RUN_ID)["copy_id"], self.fake.artifact["name"])
 
     def test_a_forged_second_check_with_the_same_name_and_envelope_does_not_count(self):
         forged = json.loads(json.dumps(self.fake.check))
@@ -406,16 +474,152 @@ class CopyRecordFromProvider(unittest.TestCase):
     def test_verify_receipt_rereads_the_provider_and_names_every_edited_field(self):
         rec = rw.read_copy_record(REPO_SLUG, RUN_ID)
         rec.pop("_artifact_id")
-        receipt = {"copy": rec}
-        self.assertEqual(rw.verify_receipt(receipt, REPO_SLUG), [])
+        receipt = {"copy": rec, "oracle_id": "restore-rehearse"}
+        now = datetime(2026, 9, 24, 10, 30, tzinfo=timezone.utc)
+        differs, bound = rw.verify_receipt(receipt, REPO_SLUG, now)
+        self.assertEqual(differs, [])
+        # G4: the output is the receipt with the RE-READ copy block, bound.
+        self.assertEqual(bound["verification"], {
+            "verifier": "tools/restore-watermark.py verify-receipt", "verified_at": "2026-09-24T10:30:00Z",
+            "facts_digest": recovery_evidence.facts_digest(receipt)})
         edited = json.loads(json.dumps(receipt))
         edited["copy"]["recorded_artifact_digest"] = D("c")
         edited["copy"]["produced_at"] = "2026-09-24T09:00:00Z"
-        self.assertEqual(rw.verify_receipt(edited, REPO_SLUG), ["produced_at", "recorded_artifact_digest"])
+        self.assertEqual(rw.verify_receipt(edited, REPO_SLUG), (["produced_at", "recorded_artifact_digest"], None))
         typed_in = json.loads(json.dumps(receipt))
         typed_in["copy"]["recorded_digest_source"]["kind"] = "operator_supplied"
         self.assertEqual(rw.verify_receipt(typed_in, REPO_SLUG),
-                         ["recorded digest source is 'operator_supplied', not the producer's Check"])
+                         (["recorded digest source is 'operator_supplied', not the producer's Check"], None))
+        # A stamped receipt is never re-stamped.
+        self.assertEqual(rw.verify_receipt(bound, REPO_SLUG), (["receipt already carries a verification block"], None))
+        # The bound copy block is the one RE-READ from the provider, not the input's:
+        # a field the provider does not report does not survive verification.
+        padded = json.loads(json.dumps(receipt))
+        padded["copy"]["note"] = "trust me"
+        _, rebound = rw.verify_receipt(padded, REPO_SLUG, now)
+        self.assertEqual(sorted(rebound["copy"]), sorted(rw.COPY_KEYS))
+
+    def test_verify_receipt_cli_prints_only_a_bound_receipt_and_exits_1_on_any_difference(self):
+        rec = rw.read_copy_record(REPO_SLUG, RUN_ID)
+        rec.pop("_artifact_id")
+        with tempfile.TemporaryDirectory() as tmp:
+            good, bad = Path(tmp) / "good.json", Path(tmp) / "bad.json"
+            good.write_text(json.dumps({"copy": rec}))
+            bad.write_text(json.dumps({"copy": {**rec, "store_readback_digest": D("c")}}))
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                self.assertEqual(rw.main(["verify-receipt", "--repository", REPO_SLUG, str(good)]), 0)
+            self.assertIn("verification", json.loads(out.getvalue()))
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                self.assertEqual(rw.main(["verify-receipt", "--repository", REPO_SLUG, str(bad)]), 1)
+            self.assertEqual(out.getvalue(), "")
+            self.assertEqual(json.loads(err.getvalue())["differs"], ["store_readback_digest"])
+
+
+class RehearsalReceiptGate(unittest.TestCase):
+    """G4: the rehearsal's own receipt block, run with a stub tool, writes a receipt only on a clean run."""
+
+    def run_block(self, fails: int, verify_exit: int = 0):
+        text = REHEARSE.read_text()
+        m = re.search(r'(if \[ -n "\$BACKUP_RUN_ID" \]; then\n  mkdir -p "\$REPO/out"\n.*?\nfi\n)', text, re.S)
+        if m is None:
+            self.fail("receipt block not found in bin/restore-rehearse.sh")
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / "out").mkdir()
+            (t / "out" / "restore-exercise-receipt.json").write_text('{"stale": true}')
+            calls = t / "calls.log"
+            stub = t / "stub.sh"
+            stub.write_text(f"#!/bin/sh\necho \"$2\" >> '{calls}'\n"
+                            f"case \"$2\" in receipt) echo '{{\"unbound\":1}}';; verify-receipt) echo '{{\"bound\":1}}'; exit {verify_exit};; esac\n")
+            stub.chmod(0o755)
+            script = ("say() { print -r -- \"$*\"; }\n"
+                      f"REPO='{t}'; WORKDIR='{t}'; COPYDIR='{t}'; PY='{stub}'; FAILS={fails}; BACKUP_RUN_ID=101\n"
+                      "BACKUP_REPOSITORY=o/r; ARTIFACT_DIGEST=x; RESTORE_START_ISO=a; RESTORE_FINISHED_ISO=b\n"
+                      + m.group(1) + "print -r -- \"FAILS=$FAILS\"\n")
+            got = subprocess.run(["zsh", "-c", script], capture_output=True, text=True)
+            receipt = t / "out" / "restore-exercise-receipt.json"
+            return (got.stdout, calls.read_text().split() if calls.exists() else [],
+                    receipt.read_text() if receipt.exists() else None)
+
+    def test_a_clean_run_writes_the_verified_output_as_the_receipt(self):
+        out, calls, receipt = self.run_block(0)
+        self.assertEqual(calls, ["receipt", "verify-receipt"])
+        self.assertEqual(json.loads(receipt), {"bound": 1})
+        self.assertIn("FAILS=0", out)
+
+    def test_a_failed_phase_4_writes_and_verifies_nothing_and_removes_a_stale_receipt(self):
+        out, calls, receipt = self.run_block(1)
+        self.assertEqual(calls, [])
+        self.assertIsNone(receipt)
+        self.assertIn("FAILS=1", out)
+
+    def test_a_failed_verify_leaves_no_receipt_and_counts_a_failure(self):
+        out, calls, receipt = self.run_block(0, verify_exit=1)
+        self.assertEqual(calls, ["receipt", "verify-receipt"])
+        self.assertIsNone(receipt)
+        self.assertIn("FAILS=1", out)
+
+
+class OutboundCensus(unittest.TestCase):
+    """G2: the item list is read from the restored ops.notification_delivery, never handed in."""
+
+    T = datetime(2026, 9, 24, 11, 0, 0, 123456, tzinfo=timezone.utc)
+
+    def test_device_rows_map_pending_to_outcome_unknown_and_everything_final_to_settled(self):
+        pending = rw.outbound_item("00000000-0000-4000-8000-000000000001", "n-1", "device", "pending", self.T)
+        self.assertEqual(pending["state"], "outcome_unknown")
+        self.assertEqual(pending["last_attempt_at"], "2026-09-24T11:00:00.123456Z")
+        self.assertEqual(pending["envelope_digest"],
+                         "sha256:" + hashlib.sha256(b'{"channel":"device","notification_id":"n-1"}').hexdigest())
+        for final in ("delivered", "suppressed_quiet_hours", "failed"):
+            self.assertEqual(rw.outbound_item("x", "n-1", "device", final, self.T)["state"], "settled")
+
+    def test_the_census_digest_matches_the_evaluators_and_the_request_is_bound(self):
+        items = [rw.outbound_item(f"0000000{i}-0000-4000-8000-000000000000", f"n-{i}", "device", s, self.T)
+                 for i, s in ((2, "pending"), (1, "delivered"))]
+        rb = [{"item_id": items[0]["item_id"], "idempotency_key": items[0]["envelope_digest"],
+               "read_at": "2026-09-24T11:30:00Z", "readback": "effect_absent"}]
+        req = rw.outbound_census(items, rb, "restore-1", datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(req["census"]["source"], "ops.notification_delivery:device")
+        self.assertEqual(req["census"]["item_count"], 2)
+        self.assertEqual(req["verification"]["verifier"], "tools/restore-watermark.py outbound-census")
+        node = subprocess.run(["node", "--input-type=module", "-e",
+                               "import {evaluateOutboundQueueRelease as e, v5OutboundCensusDigest as d} from "
+                               f"'{REPO / 'mcp-server/src/recovery-matrix.v5.js'}';"
+                               "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);"
+                               "console.log(JSON.stringify({d:d(r.items),v:e(r,{now_ms:Date.parse('2026-09-24T12:00:00Z')})}))})"],
+                              input=json.dumps(req), capture_output=True, text=True, check=True)
+        got = json.loads(node.stdout)
+        self.assertEqual(got["d"], req["census"]["digest"])
+        self.assertEqual(got["v"]["decision"], "reconciled")
+        by = {d["item_id"]: d["disposition"] for d in got["v"]["dispositions"]}
+        self.assertEqual(by, {items[0]["item_id"]: "release_for_governed_send", items[1]["item_id"]: "already_settled"})
+
+    def test_bind_never_restamps_and_digests_exactly_the_facts(self):
+        facts = {"b": [1, "é"], "a": {"z": None, "y": True}}
+        bound = recovery_evidence.bind(facts, "outbound_census", datetime(2026, 9, 24, 12, 0, 0, 999999, tzinfo=timezone.utc))
+        self.assertEqual(bound["verification"]["verified_at"], "2026-09-24T12:00:00Z")  # floored, never rounded up
+        self.assertEqual(bound["verification"]["facts_digest"],
+                         "sha256:" + hashlib.sha256('{"a":{"y":true,"z":null},"b":[1,"é"]}'.encode()).hexdigest())
+        with self.assertRaisesRegex(ValueError, "already carries"):
+            recovery_evidence.bind(bound, "outbound_census")
+        with self.assertRaises(KeyError):
+            recovery_evidence.bind(facts, "made_up_kind")
+
+    def test_readbacks_must_be_exactly_shaped(self):
+        for bad in ({}, [{"item_id": "x", "idempotency_key": D("a"), "readback": "effect_absent"}], ["x"]):
+            with self.assertRaises(ValueError):
+                rw.outbound_census([], bad, "restore-1")
+
+    def test_the_cli_reads_the_dsn_from_the_environment_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rb = Path(tmp) / "rb.json"
+            rb.write_text("[]")
+            with mock.patch.dict(os.environ, {"RESTORE_DSN": ""}), mock.patch("sys.stderr", io.StringIO()) as err:
+                self.assertEqual(rw.main(["outbound-census", "--restore-id", "r", "--readbacks", str(rb)]), 2)
+            self.assertIn("environment only", err.getvalue())
 
 
 # ── end to end on a disposable local cluster ─────────────────────────────────
@@ -487,7 +691,10 @@ class EndToEndDisposableCluster(unittest.TestCase):
     def evaluate(self, receipt_args, receipt: Path):
         built = run_tool(*receipt_args)
         self.assertEqual(built.returncode, 0, built.stderr)
-        receipt.write_text(built.stdout)
+        # The provider half of verify-receipt is proved in CopyRecordFromProvider;
+        # here the local fixture copy has no provider, so the test stamps the
+        # binding the evaluator requires with the same helper verify-receipt uses.
+        receipt.write_text(json.dumps(recovery_evidence.bind(json.loads(built.stdout), "restore_exercise")))
         return subprocess.run(["node", str(EVALUATOR), "restore", str(receipt)], capture_output=True, text=True)
 
     def test_exact_restore_passes_and_a_lost_or_changed_row_fails(self):
@@ -570,6 +777,35 @@ class EndToEndDisposableCluster(unittest.TestCase):
         record.write_text(json.dumps({**COPY_RECORD, "recorded_artifact_digest": D("0"), "store_readback_digest": D("0")}))
         self.restored(artifact, restored)
         self.assertEqual(json.loads(self.evaluate(receipt_args, receipt).stdout)["reason_id"], "artifact_hash_mismatch")
+
+    def test_outbound_census_reads_every_device_row_of_the_restored_queue(self):
+        self.psql("postgres", "create database outbound")
+        self.psql("outbound", '''
+          create schema ops;
+          create table ops.notification_delivery (id uuid primary key default gen_random_uuid(), notification_id uuid not null,
+            channel text not null, state text not null, attempted_at timestamptz not null default now());
+          insert into ops.notification_delivery (notification_id, channel, state, attempted_at)
+            select gen_random_uuid(), c, s, '2026-09-24 11:00:00.5+00'
+              from (values ('device','pending'), ('device','delivered'), ('device','failed'), ('in_app','pending')) v(c, s);
+        ''')
+        rb = self.tmp / "readbacks.json"
+        rb.write_text("[]")
+        got = run_tool("outbound-census", "--restore-id", "restore-e2e", "--readbacks", str(rb),
+                       env={**os.environ, "RESTORE_DSN": self.dsn("outbound")})
+        self.assertEqual(got.returncode, 0, got.stderr)
+        req = json.loads(got.stdout)
+        self.assertEqual(req["census"]["item_count"], 3)  # in_app rows have no provider effect
+        self.assertEqual(sorted(i["state"] for i in req["items"]), ["outcome_unknown", "settled", "settled"])
+        self.assertEqual({i["last_attempt_at"] for i in req["items"]}, {"2026-09-24T11:00:00.500000Z"})
+        verdict = subprocess.run(["node", str(EVALUATOR), "outbound", "-"], input=json.dumps(req),
+                                 capture_output=True, text=True)
+        self.assertEqual(verdict.returncode, 1, verdict.stderr)  # the pending row has no readback yet
+        self.assertEqual(json.loads(verdict.stdout)["reason_id"], "outbound_items_quarantined")
+        # Dropping the pending row from the census the reader emitted holds the whole queue.
+        req["items"] = [i for i in req["items"] if i["state"] == "settled"]
+        verdict = subprocess.run(["node", str(EVALUATOR), "outbound", "-"], input=json.dumps(req),
+                                 capture_output=True, text=True)
+        self.assertEqual(json.loads(verdict.stdout)["reason_id"], "outbound_evidence_not_reverified")
 
 
 if __name__ == "__main__":
