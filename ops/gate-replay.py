@@ -19,13 +19,10 @@ WHAT IT DOES, EVERY RUN, WITH NOTHING COMPUTED FROM A BASE REF:
   1. LEAK SCAN. Every file under the fixture directory and every fixture file
      the manifest names (any extension, `#` comment lines included), the
      manifest, and the verdict snapshot are scanned with
-     ops/business_data_patterns.py: its shape patterns AND the real client
-     names, through that module's thin adapter over #1230's
-     ops/no-client-names-gate.py (a gitignored local list, or keyed digests
-     opened with the CARR_NAME_GUARD_KEY secret). Any hit fails. With neither
-     available the name check SKIPS LOUDLY (a WARNING line and a GitHub
-     ::warning:: annotation); the shape patterns still run. The repository is
-     public.
+     ops/business_data_patterns.py: its shape patterns (emails, phone
+     numbers, addresses, practice and title words, secrets and the rest) and,
+     where a local roster file exists, the names on it. Any hit fails. The
+     repository is public.
   2. MANIFEST COVERAGE. ops/config/gate-replay-manifest.json must name every
      hooks/*.py file (gate, helper, or wrapper). Every hook wiring in
      ops/config/hooks.json, .claude/settings.json and the tracked project
@@ -1210,11 +1207,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     manifest = load_manifest()
     if args.only:
         return run_only(manifest, args)
-    names = bdp.client_names()
-    if names is None:
-        bdp.skip_warning("gate-replay leak scan", bdp.client_names_skip_reason())
-    else:
-        print(f"gate-replay: leak scan against {names.describe()}")
+    names = bdp.roster()
+    print("gate-replay: leak scan against the shape patterns"
+          + (f" and the {names.describe()}" if names is not None else ""))
     leaks = leak_scan(leak_scan_targets(manifest_data=manifest))
     for finding in leaks:
         failures.append(f"LEAK {finding}")
