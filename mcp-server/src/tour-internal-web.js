@@ -147,18 +147,30 @@ const SEAMS = {
 // and a verb's can echo input. No actor, tenant, body, token or header goes
 // out. This leaf still writes to no log itself; the production adapter
 // supplies `reportFailureFn` and owns the sink.
+//
+// A route can also fail WITHOUT throwing: a seam returns its own {ok:false}
+// (runTourPdfRender's catch persists a "failed" job receipt and returns
+// {ok:false,status:500,...} rather than rethrow). `error` is undefined on that
+// path, so error_class/code stay null -- there is no caught error object to
+// read a class or code off of. That seam still knows WHICH internal phase
+// failed (store, verify, record), and reports it on its own successful {ok:
+// true,...}-shaped `data`; when present and shaped like a bare identifier,
+// surface it here instead of leaving an operator with two nulls.
 const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
-export function tourFailureRecord(pathname, status, error) {
+const FAILURE_PHASE = new Set(["prepare", "store", "verify", "record"]);
+export function tourFailureRecord(pathname, status, error, data) {
   const errorClass = error === undefined ? null
     : ERROR_CLASS.test(error?.name || "") ? error.name
       : ERROR_CLASS.test(error?.constructor?.name || "") ? error.constructor.name : "UnknownError";
   const code = typeof error?.payload?.error === "string" && ERROR_CODE.test(error.payload.error) ? error.payload.error : null;
-  return { event: "tour_internal_failure", route: METHODS.has(pathname) ? pathname : null, status, error_class: errorClass, code };
+  const record = { event: "tour_internal_failure", route: METHODS.has(pathname) ? pathname : null, status, error_class: errorClass, code };
+  if (error === undefined && typeof data?.phase === "string" && FAILURE_PHASE.has(data.phase)) record.phase = data.phase;
+  return record;
 }
 function safeFailure(result, pathname, error, report) {
   const status = [403, 404, 409].includes(result?.status) ? result.status : 503;
-  if (typeof report === "function") { try { report(tourFailureRecord(pathname, status, error)); } catch {} }
+  if (typeof report === "function") { try { report(tourFailureRecord(pathname, status, error, result?.data)); } catch {} }
   return json({ error: status === 403 ? "forbidden" : status === 404 ? "not_found" : status === 409 ? "conflict" : "tour_unavailable" }, status);
 }
 const CONFLICT_MESSAGES = new Set([

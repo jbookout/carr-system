@@ -68,7 +68,7 @@ test("trusted PDF orchestration records a terminal failure after a queued job", 
       return { ok: true, data: { status: args.status } };
     },
   });
-  assert.deepEqual(result, { ok: false, status: 500, data: { render_job_id: jobId, status: "failed" } });
+  assert.deepEqual(result, { ok: false, status: 500, data: { render_job_id: jobId, status: "failed", phase: "store" } });
   assert.deepEqual(calls.map(call => call.verb), ["request-tour-pdf-render", "record-tour-pdf-render-result"]);
   const failure = calls[1].args;
   assert.equal(failure.status, "failed");
