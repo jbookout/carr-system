@@ -28,10 +28,8 @@ import uuid
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
-try:
-    import psycopg
-except ImportError:  # pragma: no cover
-    psycopg = None
+import psycopg
+from psycopg.types.json import Jsonb
 
 
 def fail(message: str) -> int:
@@ -54,8 +52,6 @@ def main() -> int:
     dsn = os.environ.get("DATABASE_URL", "")
     if not dsn:
         return fail("DATABASE_URL is required")
-    if psycopg is None:
-        return fail("psycopg is required")
     tenant = f"tour-pdf-storage-ref-gate-{uuid.uuid4().hex[:8]}"
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
@@ -82,7 +78,7 @@ def main() -> int:
                    projection_digest,packet_digest,template_digest,renderer_digest,qc_ruleset_digest,
                    expected_property_count)
                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                  (one_job_id, tenant, uuid.uuid4(), f"actor:{actor_id}", psycopg.types.json.Jsonb({"fixture": True}),
+                  (one_job_id, tenant, uuid.uuid4(), f"actor:{actor_id}", Jsonb({"fixture": True}),
                    digest("1"), digest("2"), digest("3"), digest("4"), digest("5"), 1))
 
             grant_settable_runtime_roles(cur, "carr_authority")
