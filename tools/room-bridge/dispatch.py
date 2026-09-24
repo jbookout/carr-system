@@ -249,8 +249,13 @@ def dispatch(
     env: dict | None = None,
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
+    cwd: str | None = None,
 ) -> dict:
-    """Send one task to one desk. Raises DeskError when the desk is not usable."""
+    """Send one task to one desk. Raises DeskError when the desk is not usable.
+
+    `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
+    thread and leaves the desk's standing thread untouched: flash-run's escalation gives
+    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
@@ -283,6 +288,10 @@ def dispatch(
         )
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
+    elif cwd:
+        outcome = _to_codex(
+            {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+        )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
