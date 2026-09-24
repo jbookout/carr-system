@@ -103,7 +103,10 @@ test("public and internal projections strip secrets and unsupported scopes", asy
   assert.equal(packet.allow_comments, undefined);
   assert.equal(packet.stops[0].access_notes, undefined);
   assert.equal(packet.stops[0].suite, "Suite 200");
-  assert.deepEqual(packet.stops[0].size, { value: 1200, unit: "sf" });
+  // A metric carrying any key outside the client metric shape is refused whole
+  // (the database value-safety rule refuses the same object), never trimmed.
+  assert.equal(packet.stops[0].size, undefined);
+  assert.deepEqual(projectTourClientPacket({ ...packetFixture, stops: [{ ...packetFixture.stops[0], size: { value: 1200, unit: "sf" } }] }).stops[0].size, { value: 1200, unit: "sf" });
   assert.equal(packet.stops[0].latest_reaction, undefined);
   assert.deepEqual(projectTourPublicAsset({ media_type: "image/jpeg", provider: "private" }, "asset:public:abcdefghijklmnop"),
     { asset_ref: "asset:public:abcdefghijklmnop", media_type: "image/jpeg" });

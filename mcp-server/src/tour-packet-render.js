@@ -4,14 +4,23 @@
  * routing, or map capability.
  */
 
-export const TOUR_PACKET_RENDER_VERSION = "1.2.0";
+import { CLIENT_TOUR_PACKET_COLUMNS, CLIENT_TOUR_STOP_ENVELOPE_KEYS } from "./tour-operations-contract.js";
+import { CLIENT_TEXT_MAX_CHARS, isClientRouteLabel, isClientSafeText } from "./tour-client-value-safety.js";
+
+// 1.3.0 (V5-J303): fields are CLIENT_TOUR_FIELD_KEYS only (no per-property
+// caveat), every value passes the shared client value-safety rule, and the
+// stop marker is 1-3 letters or digits.
+export const TOUR_PACKET_RENDER_VERSION = "1.3.0";
 export const TOUR_PACKET_TEMPLATE_VERSION = "1.1.0";
 export const TOUR_PACKET_BRAND = "CARR";
 
+// `caveat` stays a recognised top-level key only because the database packet
+// carries it as an explicit null (0586); any non-null caveat is refused.
 const TOP_LEVEL_FIELDS = new Set(["as_of", "caveat", "properties"]);
+// The client allowlist and its envelope, plus the per-property as-of stamp
+// the PDF prints. Nothing else -- a caveat included -- is renderable.
 const PROPERTY_FIELDS = new Set([
-  "property_ref", "route_sequence", "route_label", "name", "address", "suite",
-  "property_type", "size", "asking_economics", "availability", "parking", "as_of", "caveat",
+  ...CLIENT_TOUR_STOP_ENVELOPE_KEYS, ...Object.values(CLIENT_TOUR_PACKET_COLUMNS), "as_of",
 ]);
 const METRIC_FIELDS = new Set(["value", "unit", "min", "max", "currency", "period", "label"]);
 const REQUIRED_PROPERTY_FIELDS = ["property_ref", "route_sequence", "route_label", "name", "address"];
@@ -42,6 +51,13 @@ function plainText(value, path, maximum = MAX_FIELD_CHARS) {
   if (!text) reject("tour_packet_invalid_text", { path });
   if (text.length > maximum) reject("tour_packet_overflow", { path, maximum });
   if (EMAIL.test(text) || PHONE.test(text)) reject("tour_packet_forbidden_contact", { path });
+  return text;
+}
+
+/** A client field value: plain text that also passes the shared client value-safety rule. */
+function clientText(value, path) {
+  const text = plainText(value, path, CLIENT_TEXT_MAX_CHARS);
+  if (!isClientSafeText(text)) reject("tour_packet_forbidden_contact", { path });
   return text;
 }
 
@@ -83,7 +99,7 @@ function finiteNumber(value, path) {
 }
 
 function metricPart(value, path) {
-  return typeof value === "number" ? finiteNumber(value, path) : plainText(value, path, 120);
+  return typeof value === "number" ? finiteNumber(value, path) : clientText(value, path);
 }
 
 /** Preserve a structured approved metric after strict allowlist validation. */
@@ -93,7 +109,7 @@ function approvedMetric(value, path) {
     reject("tour_packet_invalid_metric", { path });
   const output = {};
   for (const field of ["value", "min", "max"]) if (value[field] !== undefined) output[field] = metricPart(value[field], `${path}.${field}`);
-  for (const field of ["unit", "currency", "period", "label"]) if (value[field] !== undefined) output[field] = plainText(value[field], `${path}.${field}`, 120);
+  for (const field of ["unit", "currency", "period", "label"]) if (value[field] !== undefined) output[field] = clientText(value[field], `${path}.${field}`);
   if (output.min !== undefined && output.max !== undefined && typeof output.min === "number" && typeof output.max === "number" && output.min > output.max)
     reject("tour_packet_invalid_metric", { path, reason: "min_gt_max" });
   return Object.freeze(output);
@@ -109,7 +125,7 @@ export function formatApprovedMetric(metric) {
   return metric.label ? `${metric.label}: ${withPeriod}` : withPeriod;
 }
 
-function canonicalProperty(property, index, packetAsOf, packetCaveat) {
+function canonicalProperty(property, index, packetAsOf) {
   assertExactObject(property, PROPERTY_FIELDS, `properties[${index}]`);
   const output = {};
   for (const field of REQUIRED_PROPERTY_FIELDS) {
@@ -121,20 +137,16 @@ function canonicalProperty(property, index, packetAsOf, packetCaveat) {
     reject("tour_packet_invalid_route_sequence", { path: `properties[${index}].route_sequence` });
   output.route_sequence = property.route_sequence;
   output.route_label = plainText(property.route_label, `properties[${index}].route_label`, 80);
-  output.name = plainText(property.name, `properties[${index}].name`);
-  output.address = plainText(property.address, `properties[${index}].address`);
+  if (!isClientRouteLabel(output.route_label)) reject("tour_packet_invalid_route_label", { path: `properties[${index}].route_label` });
+  output.name = clientText(property.name, `properties[${index}].name`);
+  output.address = clientText(property.address, `properties[${index}].address`);
   for (const field of ["suite", "property_type", "availability", "parking"]) {
-    if (property[field] !== undefined && property[field] !== null) output[field] = plainText(property[field], `properties[${index}].${field}`);
+    if (property[field] !== undefined && property[field] !== null) output[field] = clientText(property[field], `properties[${index}].${field}`);
   }
   for (const field of ["size", "asking_economics"]) {
     if (property[field] !== undefined && property[field] !== null) output[field] = approvedMetric(property[field], `properties[${index}].${field}`);
   }
   output.as_of = property.as_of === undefined ? packetAsOf : timestamp(property.as_of, `properties[${index}].as_of`);
-  // A caveat is optional client-facing content, never a boilerplate default:
-  // a property with no caveat of its own falls back to the packet-wide value
-  // only when one was genuinely supplied, and otherwise carries none at all.
-  const propertyCaveat = property.caveat == null ? packetCaveat : plainText(property.caveat, `properties[${index}].caveat`, 500);
-  if (propertyCaveat != null) output.caveat = propertyCaveat;
 
   const displayValues = Object.values(output).filter(value => value != null).map(value => typeof value === "object" ? formatApprovedMetric(value) : String(value));
   const totalChars = displayValues.reduce((total, item) => total + item.length, 0);
@@ -153,7 +165,7 @@ function markerFor(property) { return `property-${property.route_sequence}-${pro
 
 function page(property, marker) {
   const title = escapeHtml(property.name);
-  return `<section class="tour-property-page" data-deliverable-page="property" data-property-marker="${marker}" data-property-ref="${escapeHtml(property.property_ref)}" data-route-sequence="${property.route_sequence}" aria-labelledby="${marker}-title">\n<!-- property-marker:${marker} -->\n<header class="property-header" data-brand="CARR"><p class="brand">CARR</p><p class="page-index">${escapeHtml(property.route_label)}</p></header>\n<h1 id="${marker}-title">${title}</h1><p class="address">${escapeHtml(property.address)}${property.suite ? ` · ${escapeHtml(property.suite)}` : ""}</p><dl class="facts">${row("Property type", property.property_type)}${row("Size", property.size && formatApprovedMetric(property.size))}${row("Asking economics", property.asking_economics && formatApprovedMetric(property.asking_economics))}${row("Availability", property.availability)}${row("Parking", property.parking)}</dl><aside class="facts-caveat"><p><strong>As of:</strong> ${escapeHtml(property.as_of)}</p>${property.caveat ? `<p>${escapeHtml(property.caveat)}</p>` : ""}</aside>\n</section>`;
+  return `<section class="tour-property-page" data-deliverable-page="property" data-property-marker="${marker}" data-property-ref="${escapeHtml(property.property_ref)}" data-route-sequence="${property.route_sequence}" aria-labelledby="${marker}-title">\n<!-- property-marker:${marker} -->\n<header class="property-header" data-brand="CARR"><p class="brand">CARR</p><p class="page-index">${escapeHtml(property.route_label)}</p></header>\n<h1 id="${marker}-title">${title}</h1><p class="address">${escapeHtml(property.address)}${property.suite ? ` · ${escapeHtml(property.suite)}` : ""}</p><dl class="facts">${row("Property type", property.property_type)}${row("Size", property.size && formatApprovedMetric(property.size))}${row("Asking economics", property.asking_economics && formatApprovedMetric(property.asking_economics))}${row("Availability", property.availability)}${row("Parking", property.parking)}</dl><aside class="facts-caveat"><p><strong>As of:</strong> ${escapeHtml(property.as_of)}</p></aside>\n</section>`;
 }
 
 const STYLE = `<style>
@@ -182,13 +194,14 @@ dt { color: #002F6C; font-size: 9pt; font-weight: 700; text-transform: uppercase
 export function renderTourPacket(input) {
   assertExactObject(input, TOP_LEVEL_FIELDS, "packet");
   const asOf = timestamp(input.as_of, "as_of");
-  // caveat is optional client-facing content, never a boilerplate default:
-  // null/absent means the packet carries none, not that one was omitted by
-  // mistake.
-  const caveat = input.caveat == null ? null : plainText(input.caveat, "caveat", 500);
+  // No caveat reaches a client (V5-J303 ruling; no-caveats rule cbb267fb).
+  // The database packet carries caveat as an explicit null; anything else is
+  // refused rather than printed.
+  if (input.caveat != null) reject("tour_packet_forbidden_field", { path: "packet.caveat" });
+  const caveat = null;
   if (!Array.isArray(input.properties) || input.properties.length === 0 || input.properties.length > MAX_PROPERTIES)
     reject("tour_packet_property_count_invalid", { count: Array.isArray(input.properties) ? input.properties.length : null, maximum: MAX_PROPERTIES });
-  const properties = input.properties.map((property, index) => canonicalProperty(property, index, asOf, caveat));
+  const properties = input.properties.map((property, index) => canonicalProperty(property, index, asOf));
   const routeSequences = new Set(properties.map(property => property.route_sequence));
   const propertyRefs = new Set(properties.map(property => property.property_ref));
   if (routeSequences.size !== properties.length) reject("tour_packet_duplicate_route_sequence", {});

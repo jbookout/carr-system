@@ -13,6 +13,12 @@ import {
   snapshotCanonicalJsonValue,
   snapshotPublicValue,
 } from "./tour-operations-contract.js";
+import { clientSafeMetric, isClientSafeText } from "./tour-client-value-safety.js";
+
+function clientValueSafe(fieldKey, value) {
+  if (fieldKey === "size" || fieldKey === "asking_economics") return clientSafeMetric(value) !== undefined;
+  return isClientSafeText(value);
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -204,6 +210,12 @@ function publicProjection(value, ToolError) {
     catch { fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` }); }
     if (!PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` });
+    // The same client value rule the seal, the browser share and the PDF
+    // apply: a legacy fact whose allowed key carries unsafe text is withheld.
+    if (!clientValueSafe(displayFieldKey, publicValue)) {
+      withheld += 1;
+      continue;
+    }
     const effectiveFrom = databaseTimestamp(fact.effective_from, `facts[${index}].effective_from`, ToolError);
     const effectiveTo = databaseTimestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
     if (effectiveTo && Date.parse(effectiveTo) <= Date.parse(effectiveFrom))

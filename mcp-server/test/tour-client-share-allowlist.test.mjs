@@ -16,8 +16,13 @@ import {
   CLIENT_TOUR_FIELD_KEYS, CLIENT_TOUR_PACKET_COLUMNS, CLIENT_TOUR_STOP_ENVELOPE_KEYS,
   isClientTourFieldKey,
 } from "../src/tour-operations-contract.js";
+import {
+  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_FORBIDDEN_PATTERNS, CLIENT_TEXT_MAX_CHARS,
+  clientSafeMetric, isClientRouteLabel, isClientSafeText,
+} from "../src/tour-client-value-safety.js";
+import { renderTourPacket, TourPacketRenderError } from "../src/tour-packet-render.js";
 import { tourRightsProjectionTools } from "../src/tour-rights-projection.js";
-import { projectTourClientPacket, tourSharingBrowserAccess, tourSharingTools } from "../src/tour-sharing.js";
+import { projectTourClientMap, projectTourClientPacket, tourSharingBrowserAccess, tourSharingTools } from "../src/tour-sharing.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 
@@ -157,14 +162,25 @@ test("a legacy sealed projection that already holds internal facts reads back wi
       fact("caveat", SENTINEL.caveat, 4),
       fact("source_attribution", SENTINEL.ownerContact, 5),
       fact("photos", [{ asset_ref: "asset:public:abcdefghijklmnop", caption: SENTINEL.note }], 6),
+      // an ALLOWED key carrying internal text is withheld by the value rule
+      fact("parking", `4 per 1000. ${SENTINEL.ownerContact}`, 7),
+      fact("size", { value: 4200, unit: "SF", label: SENTINEL.accessNote }, 8),
+      // an internal KEY is withheld even when its text is innocuous
+      fact("access", "Side entrance", 9),
     ],
   };
   const h = rightsHarness(legacy);
   const result = await h.tools["read-tour-public-projection"].handler(h.client, actor, { projection_id: ids.projection });
   assert.deepEqual(result.projection.facts.map(item => item.display_field_key), ["display.name", "display.address"]);
-  assert.equal(result.projection.withheld_internal_fact_count, 4);
-  for (const leaked of [SENTINEL.accessNote, SENTINEL.caveat, SENTINEL.ownerContact, SENTINEL.note])
+  assert.equal(result.projection.withheld_internal_fact_count, 7);
+  for (const leaked of [SENTINEL.accessNote, SENTINEL.caveat, SENTINEL.ownerContact, SENTINEL.note, "Side entrance"])
     assert.equal(JSON.stringify(result).includes(leaked), false, leaked);
+
+  // A projection whose every fact is withheld is refused, not returned empty.
+  const onlyInternal = rightsHarness({ ...legacy, facts: legacy.facts.filter(item => !["display.name", "display.address"].includes(item.display_field_key)) });
+  await assert.rejects(
+    onlyInternal.tools["read-tour-public-projection"].handler(onlyInternal.client, actor, { projection_id: ids.projection }),
+    error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid" && error.payload.field === "facts");
 });
 
 // A database row that carries far more than the allowlist: every key here that
@@ -172,8 +188,8 @@ test("a legacy sealed projection that already holds internal facts reads back wi
 const hostileStop = {
   property_ref: "property:public:abcdefghijklmnop", route_sequence: 1, route_label: "A",
   name: "Medical Plaza", address: "100 Clinic Way", suite: "Suite 200", property_type: "medical_office",
-  size: { value: 4200, unit: "SF", verifier: SENTINEL.note },
-  asking_economics: { value: 24, currency: "USD", period: "NNN", owner_floor: SENTINEL.ownerContact },
+  size: { value: 4200, unit: "SF" },
+  asking_economics: { value: 24, currency: "USD", period: "NNN" },
   availability: "available", parking: "4/1000",
   access: SENTINEL.accessNote, access_notes: SENTINEL.accessNote, notes: SENTINEL.note,
   owner_contact: SENTINEL.ownerContact, owner_phone: "251-555-0100", caveat: SENTINEL.caveat,
@@ -271,4 +287,152 @@ test("the client share link is an origin, a fixed path and a random token, with 
   // The token travels in the fragment, so it never reaches a server log, and
   // the path carries no tour, projection, grant, client or deal identifier.
   assert.doesNotMatch(urls[0], /projection|tour_?id|grant|client|deal|name|\?/i);
+});
+
+// ---------------------------------------------------------------------------
+// VALUE safety (review of #1242): an allowed KEY must not carry internal TEXT.
+// One rule -- tour-client-value-safety.js / ops.tour_client_text_safe() --
+// guards the database seal, the browser share (clientStop) and the PDF.
+// ---------------------------------------------------------------------------
+
+// Internal text a person could type into an allowed field. Every one must be
+// refused wherever it appears.
+const SMUGGLED = [
+  "4 per 1000. Owner Bob 251-555-0100",
+  "Call (251) 555-0100 before visiting",
+  "Owner cell 2515550100",
+  "Ask for 555-0100 at the desk",
+  "UK owner +44 20 7946 0958",
+  "Email bob@landlord.example for access",
+  "Details at https://landlord.example/private",
+  "See www.landlord-portal.com",
+  "Leasing via landlordportal.com",
+  "Gate code 4411",
+  "Door code is 1234#",
+  "Key code 9021 on the side door",
+  "Lockbox on the rear gate",
+  "Lock box left of the entrance",
+  "Disarm the alarm first",
+  "Keypad by the loading dock",
+  "Entry PIN 5555",
+  "Internal note: client is tight on budget",
+  "Confidential - do not share with tenant",
+  "Broker-only pricing",
+  "Not for client eyes",
+  "A".repeat(CLIENT_TEXT_MAX_CHARS + 1),
+  "Available\nnow",
+];
+// Ordinary client values that must still pass.
+const ORDINARY = [
+  "Bayside Medical Plaza", "100 Bayside Way, Pensacola, FL 32502", "1250 E 9 Mile Rd, Pensacola, FL 32514-1234",
+  "Suite 210", "Suites 100-120", "medical_office", "Medical office", "available now", "Available 2026-10-01",
+  "4 per 1000", "4.5/1,000 SF", "Surface lot, 120 spaces", "Shell condition", "Q1 2027", "A".repeat(CLIENT_TEXT_MAX_CHARS),
+];
+
+test("the shared client value rule refuses contact, access-code and internal-note text and keeps ordinary values", () => {
+  for (const value of SMUGGLED) assert.equal(isClientSafeText(value), false, JSON.stringify(value));
+  for (const value of ORDINARY) assert.equal(isClientSafeText(value), true, JSON.stringify(value));
+  for (const value of [null, undefined, 4, {}, "", "   "]) assert.equal(isClientSafeText(value), false, String(value));
+  for (const label of ["A", "B", "12", "A1"]) assert.equal(isClientRouteLabel(label), true, label);
+  for (const label of ["Stop 1", "ABCD", "", " A", "A-", "Stop A: Owner Bob 251-555-0100", null])
+    assert.equal(isClientRouteLabel(label), false, String(label));
+  assert.deepEqual(clientSafeMetric({ value: 4200, unit: "SF" }), { value: 4200, unit: "SF" });
+  assert.deepEqual(clientSafeMetric({ min: 20, max: 25, currency: "USD", period: "NNN", label: "Rate" }),
+    { min: 20, max: 25, currency: "USD", period: "NNN", label: "Rate" });
+  for (const metric of [
+    { value: 4200, unit: "SF", label: "owner cell 251-555-0100" },
+    { value: 24, currency: "USD", period: "NNN gate code 4411" },
+    { value: 24, unit: "U".repeat(CLIENT_TEXT_MAX_CHARS + 1) },
+    { value: "call 251-555-0100" },
+    { value: 4200, unit: "SF", verifier: "internal" },
+    { value: 4200, unit: { nested: "no" } },
+    { min: 30, max: 20 },
+    { unit: "SF" },
+    { value: Infinity },
+  ]) assert.equal(clientSafeMetric(metric), undefined, JSON.stringify(metric));
+});
+
+test("the JavaScript value rule and the database value rule are the same text", () => {
+  const migration = fs.readFileSync(path.join(root, "migrations/0591_tour_client_field_allowlist.sql"), "utf8");
+  const patternsBody = migration.split(/create or replace function ops\.tour_client_text_forbidden_patterns\(\)/i, 2)[1]?.split(/\$\$;/, 1)[0];
+  assert.ok(patternsBody, "migration defines ops.tour_client_text_forbidden_patterns()");
+  const sqlPatterns = [...patternsBody.matchAll(/'((?:[^']|'')*)'/g)].map(match => match[1].replaceAll("''", "'"));
+  assert.deepEqual(sqlPatterns, [...CLIENT_TEXT_FORBIDDEN_PATTERNS]);
+  assert.match(migration, new RegExp(`ops\\.tour_client_text_max_chars\\(\\)\\s*returns integer language sql immutable parallel safe as \\$\\$ select ${CLIENT_TEXT_MAX_CHARS} \\$\\$`));
+  assert.ok(migration.includes(`select '${CLIENT_ROUTE_LABEL_PATTERN}'::text`), "route label pattern parity");
+  // Every client field and every metric text part goes through the rule.
+  const valueSafe = migration.split(/create or replace function ops\.tour_public_value_safe\(/i, 2)[1]?.split(/\$\$;/, 1)[0];
+  assert.match(valueSafe, /when p_field_key in \('display\.name','display\.address','suite','property_type','availability','parking'\) then\s+jsonb_typeof\(p_value\) = 'string' and ops\.tour_client_text_safe\(p_value #>> '\{\}'\)/);
+  assert.equal((valueSafe.match(/not ops\.tour_client_text_safe\(e\.value #>> '\{\}'\)/g) || []).length, 2);
+  // Both client reads keep the value-safety join and emit only a safe marker.
+  for (const fn of ["read_tour_share_packet", "read_tour_packet_for_render"]) {
+    const text = migration.split(new RegExp(`create or replace function ops\\.${fn}\\(`, "i"), 2)[1]?.split(/\$\$;/, 1)[0];
+    assert.match(text, /and ops\.tour_public_value_safe\(a\.field_key,a\.value\)/, fn);
+    assert.match(text, /case when m\.route_label ~ ops\.tour_client_route_label_pattern\(\) then m\.route_label end route_label/, fn);
+  }
+  // The map share emits the stop marker only when it is one.
+  const mapRead = migration.split(/create or replace function ops\.read_tour_share_map\(/i, 2)[1]?.split(/\$\$;/, 1)[0];
+  assert.match(mapRead, /'route_label',case when m\.route_label ~ ops\.tour_client_route_label_pattern\(\) then m\.route_label end,/);
+  assert.doesNotMatch(mapRead, /'route_label',m\.route_label/);
+});
+
+const cleanStop = {
+  property_ref: "property:public:abcdefghijklmnop", route_sequence: 1, route_label: "A",
+  name: "Bayside Medical Plaza", address: "100 Bayside Way, Pensacola, FL", suite: "Suite 210",
+  property_type: "Medical office", size: { value: 4200, unit: "SF" },
+  asking_economics: { value: 24, currency: "USD", period: "NNN" }, availability: "Available now", parking: "4 per 1000",
+};
+const TEXT_COLUMNS = ["suite", "property_type", "availability", "parking"];
+
+test("clientStop drops internal text smuggled inside every allowed field, and drops a stop whose name or address is unsafe", () => {
+  const baseline = projectTourClientPacket({ as_of: "2026-08-27T12:15:00Z", stops: [cleanStop] }).stops[0];
+  assert.deepEqual(baseline, cleanStop);
+  for (const smuggled of SMUGGLED) {
+    for (const column of TEXT_COLUMNS) {
+      const stop = projectTourClientPacket({ stops: [{ ...cleanStop, [column]: smuggled }] }).stops[0];
+      assert.equal(stop[column], undefined, `${column}: ${smuggled}`);
+      assert.equal(JSON.stringify(stop).includes(smuggled.trim()), false, `${column}: ${smuggled}`);
+    }
+    for (const column of ["name", "address"])
+      assert.deepEqual(projectTourClientPacket({ stops: [{ ...cleanStop, [column]: smuggled }] }).stops, [], `${column}: ${smuggled}`);
+    for (const [column, key] of [["size", "label"], ["size", "unit"], ["asking_economics", "period"], ["asking_economics", "currency"]]) {
+      const stop = projectTourClientPacket({ stops: [{ ...cleanStop, [column]: { ...cleanStop[column], [key]: smuggled } }] }).stops[0];
+      assert.equal(stop[column], undefined, `${column}.${key}: ${smuggled}`);
+    }
+  }
+  const relabelled = projectTourClientPacket({ stops: [{ ...cleanStop, route_label: "Stop A: Owner Bob 251-555-0100" }] }).stops[0];
+  assert.equal(relabelled.route_label, undefined);
+  assert.equal(relabelled.route_sequence, 1);
+});
+
+test("the map share sends only coordinate, opaque ref, order and a stop marker", () => {
+  const point = { latitude: 30.42, longitude: -87.21, property_ref: "property:public:abcdefghijklmnop", route_sequence: 1 };
+  assert.deepEqual(projectTourClientMap({ as_of: "2026-08-27T12:15:00Z", points: [{ ...point, route_label: "A" }] }).points,
+    [{ ...point, route_label: "A" }]);
+  const hostile = projectTourClientMap({ as_of: "2026-08-27T12:15:00Z", tour_name: SENTINEL.clientName, points: [{
+    ...point, route_label: "Stop A: Owner Bob 251-555-0100", label: SENTINEL.accessNote, sequence: 1,
+    access_notes: SENTINEL.accessNote, owner_contact: SENTINEL.ownerContact, property_id: ids.property,
+  }] });
+  assert.deepEqual(hostile.points, [point]);
+  assert.doesNotMatch(JSON.stringify(hostile), SENTINEL_PATTERN);
+});
+
+test("the PDF renderer admits exactly the client allowlist and refuses the same smuggled text", () => {
+  const packet = { as_of: "2026-08-27T12:00:00Z", caveat: null, properties: [cleanStop] };
+  const rendered = renderTourPacket(packet);
+  for (const column of Object.values(CLIENT_TOUR_PACKET_COLUMNS))
+    assert.ok(Object.hasOwn(rendered.facts.properties[0], column), column);
+  const refused = code => error => error instanceof TourPacketRenderError && error.code === code;
+  for (const key of ["caveat", "notes", "owner_contact", "access", "photos", "appointment_start", "brand_new_field"])
+    assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, [key]: "x" }] }),
+      error => error instanceof TourPacketRenderError && /tour_packet_(unknown|forbidden)_field/.test(error.code), key);
+  for (const smuggled of SMUGGLED.filter(value => !value.includes("\n") && value.length <= CLIENT_TEXT_MAX_CHARS)) {
+    for (const column of ["name", "address", ...TEXT_COLUMNS])
+      assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, [column]: smuggled }] }),
+        refused("tour_packet_forbidden_contact"), `${column}: ${smuggled}`);
+    assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, size: { value: 4200, unit: "SF", label: smuggled } }] }),
+      refused("tour_packet_forbidden_contact"), `size.label: ${smuggled}`);
+  }
+  assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: "P".repeat(CLIENT_TEXT_MAX_CHARS + 1) }] }), refused("tour_packet_overflow"));
+  assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, route_label: "Stop 1" }] }), refused("tour_packet_invalid_route_label"));
 });
