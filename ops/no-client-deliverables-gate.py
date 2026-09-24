@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# doctrine: runbook
 """Fail if any client-deliverable path is tracked (WR-000049).
 
 Joe's ruling of 2026-09-03 is that the repository stays public, so the tree
