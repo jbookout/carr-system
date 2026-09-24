@@ -2956,7 +2956,10 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // reviewed administrative entrypoint; it also has a CLI shebang.
   // v40 adds the tracked private snapshot connection helper as one reviewed
   // script ingress; it carries no runtime authorization.
-  assert.equal(rows.length, 553);
+  // Decision 05e144eb (2026-09-24): a new script no longer reseals the
+  // registry, so this is a floor at the last sealed frontier (v61), not a pin.
+  // Pull-request review notices a new source; the floor notices mass loss.
+  assert.ok(rows.length >= 553, `non-MCP rows fell below the v61 frontier: ${rows.length}`);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -2973,7 +2976,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // command-line entrypoints, so discovery advances by the same exact two.
   // WR126 adds the canonical-ownership issuer provisioner.
   // v40 adds the private snapshot connection helper; B09 adds its local PG gate.
-  assert.equal(scripts.length, 544);
+  assert.ok(scripts.length >= 544, `discovered scripts fell below the v61 frontier: ${scripts.length}`);
   // AND THE SEALER IS ASSERTED ABSENT, because a shebang put back on it is an
   // ingress this branch's registry successor does not seal, and the whole point
   // of the predicate is that intent does not enter it.

@@ -2044,6 +2044,12 @@ export function frozenInventory(version) {
   return Object.freeze(rows.map(row => Object.freeze(structuredClone(row))));
 }
 
+export const UNSEALED_INGRESS_KINDS = Object.freeze(new Set(["script-entrypoint", "github-workflow", "launchd-workflow"]));
+
+export function ingressKind(row) {
+  return row.ingress_key.split(":")[0];
+}
+
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
   version = REGISTRY_V61_VERSION) {
   const current = fullInventory(tools);
@@ -2096,10 +2102,21 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
     }
     frozen = reviewed;
   }
-  const currentDigest = sourceInventoryFixtureDigest(current);
-  const frozenDigest = sourceInventoryFixtureDigest(frozen);
-  if (current.length !== frozen.length || currentDigest !== frozenDigest)
-    throw new Error(`current source inventory drifted from the ${version} frontier fixture: count ${current.length}/${frozen.length}, sha256 ${currentDigest}/${frozenDigest}`);
+  // Decision 05e144eb (2026-09-24): script, CI-workflow and launchd rows no
+  // longer bind a pull request to the frozen frontier. Nothing live checks
+  // their digests (the runtime enforces MCP verb rows from the generated
+  // registry; the database registration function is never mutation authority),
+  // and pinning them made every script edit in every parallel session claim
+  // the one next registry version. They remain in fullInventory for audit and
+  // in every historical seal; only this current-versus-frozen comparison drops
+  // them. Every other row kind still has to match exactly.
+  const bound = rows => rows.filter(row => !UNSEALED_INGRESS_KINDS.has(ingressKind(row)));
+  const currentBound = bound(current);
+  const frozenBound = bound(frozen);
+  const currentDigest = sourceInventoryFixtureDigest(currentBound);
+  const frozenDigest = sourceInventoryFixtureDigest(frozenBound);
+  if (currentBound.length !== frozenBound.length || currentDigest !== frozenDigest)
+    throw new Error(`current source inventory drifted from the ${version} frontier fixture: count ${currentBound.length}/${frozenBound.length}, sha256 ${currentDigest}/${frozenDigest}`);
   return true;
 }
 

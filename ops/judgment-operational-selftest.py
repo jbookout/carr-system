@@ -362,11 +362,26 @@ class ChangeTollAdvisoryTests(unittest.TestCase):
                 ["hooks/delegation-gate.py", "ops/ci.sh"],
             "this_branch_merged_another_branch": False})
         named = {name for _probability, name, _fix in owed}
-        for expected in ("new_ingress_admitted", "inventory_reseal", "gate_rebless"):
-            self.assertIn(expected, named,
-                          f"a new hook with a shebang plus two edited entrypoints "
-                          f"plainly owes {expected}; missing it means the judgment "
-                          f"stopped discriminating")
+        self.assertIn("gate_rebless", named,
+                      "an edited gate under hooks/ plainly owes a re-bless; "
+                      "missing it means the judgment stopped discriminating")
+        # Decision 05e144eb (2026-09-24): scripts are no longer sealed, so a new
+        # hook and two edited scripts owe no registry successor. Naming one
+        # would send every session back to hand-sealing.
+        for absent in ("new_ingress_admitted", "inventory_reseal"):
+            self.assertNotIn(absent, named,
+                             f"a script-only change no longer owes {absent}")
+
+    def test_it_still_names_a_reseal_for_a_new_verb(self):
+        owed = self.module.owed({
+            "files": {"added": [], "edited": ["mcp-server/src/tools.js"]},
+            "added_files_with_a_shebang_or_main_guard": [],
+            "edited_files_that_are_script_entrypoints": [],
+            "summary": "adds a new MCP write verb register-widget to tools.js",
+            "this_branch_merged_another_branch": False})
+        named = {name for _probability, name, _fix in owed}
+        self.assertTrue(named & {"new_ingress_admitted", "inventory_reseal"},
+                        "a new MCP verb is still a sealed row and owes a successor")
 
     def test_it_still_stays_quiet_on_a_change_that_owes_nothing(self):
         owed = self.module.owed({
