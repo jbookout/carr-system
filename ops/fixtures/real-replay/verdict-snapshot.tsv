@@ -7,12 +7,10 @@
 # gate	event	fixture	verdict	reason
 bash-write-gate.py	PreToolUse[Bash]	(all)	counts	allow=320
 blocker-decider-gate.py	PreToolUse[mcp__.*__(record-defect|add-loop)]	(all)	counts	allow=4
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	deny=78
+canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	deny=72
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:005d482ca566	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:010a4c03c18b	deny	CANONICAL EDIT GATE — refused.
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:01ae1bd19913	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:03e198646e6d	deny	CANONICAL EDIT GATE — refused.
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:090724b72058	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:0a64781c385b	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:0ba2e8a87506	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:0ebaefe865cb	deny	CANONICAL EDIT GATE — refused.
@@ -25,7 +23,6 @@ canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:282101857332	deny	
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:2846baa603e1	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:2a66692e0056	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:2d46204312ac	deny	CANONICAL EDIT GATE — refused.
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:352c8dc8ef9e	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:35d9f017b2f2	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:37a4a6b3751c	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:3ea11d9f62a3	deny	CANONICAL EDIT GATE — refused.
@@ -60,15 +57,12 @@ canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:9c08586d67cf	deny	
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:a6bb8d7e4899	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:bd28a4705e8e	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:c44bca5616e8	deny	CANONICAL EDIT GATE — refused.
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:c97dd4636c97	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdbcf60040f0	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdd65a0f0747	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cf9fe3e4634d	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d1e2d11c38bf	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d1f3ea015436	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d2e9f981721e	deny	CANONICAL EDIT GATE — refused.
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d30781a88870	deny	CANONICAL EDIT GATE — refused.
-canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d4564e9ee298	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d9316125677c	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d9f8158e788a	deny	CANONICAL EDIT GATE — refused.
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:e118d512a4fa	deny	CANONICAL EDIT GATE — refused.
@@ -88,7 +82,7 @@ canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:fcec80f23365	deny	
 canonical-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:fd26ca56df4b	deny	CANONICAL EDIT GATE — refused.
 chat-lint-carryover.py	UserPromptSubmit	(all)	counts	allow=6
 chat-lint-gate.py	Stop	(all)	counts	allow=87
-close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=78
+close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72
 completion-evidence-gate.py	Stop	(all)	counts	allow=40 reopen=47
 completion-evidence-gate.py	Stop	advisories:0b5544d0632d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:1131c706f9fd/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
@@ -138,7 +132,7 @@ completion-evidence-gate.py	Stop	advisories:f9556cac264d/claims-done	reopen	COMP
 completion-evidence-gate.py	Stop	advisories:fb34ec1f1d75/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:fc80d2b5ad77/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 conduct-stop-gate.py	Stop	(all)	counts	allow=87
-context-handoff-gate.py	PostToolUse	(all)	counts	announce=445
+context-handoff-gate.py	PostToolUse	(all)	counts	announce=439
 context-handoff-gate.py	PostToolUse	bash:004b318591f1	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	bash:00b256fc19a5	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	bash:02d4f09f883f	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
@@ -461,9 +455,7 @@ context-handoff-gate.py	PostToolUse	bash:fde408390b92	announce	Context lifecycle
 context-handoff-gate.py	PostToolUse	bash:fe264cb28a77	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:005d482ca566	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:010a4c03c18b	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
-context-handoff-gate.py	PostToolUse	edits:01ae1bd19913	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:03e198646e6d	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
-context-handoff-gate.py	PostToolUse	edits:090724b72058	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:0a64781c385b	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:0ba2e8a87506	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:0ebaefe865cb	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
@@ -476,7 +468,6 @@ context-handoff-gate.py	PostToolUse	edits:282101857332	announce	Context lifecycl
 context-handoff-gate.py	PostToolUse	edits:2846baa603e1	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:2a66692e0056	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:2d46204312ac	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
-context-handoff-gate.py	PostToolUse	edits:352c8dc8ef9e	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:35d9f017b2f2	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:37a4a6b3751c	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:3ea11d9f62a3	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
@@ -511,15 +502,12 @@ context-handoff-gate.py	PostToolUse	edits:9c08586d67cf	announce	Context lifecycl
 context-handoff-gate.py	PostToolUse	edits:a6bb8d7e4899	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:bd28a4705e8e	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:c44bca5616e8	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
-context-handoff-gate.py	PostToolUse	edits:c97dd4636c97	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:cdbcf60040f0	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:cdd65a0f0747	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:cf9fe3e4634d	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:d1e2d11c38bf	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:d1f3ea015436	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:d2e9f981721e	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
-context-handoff-gate.py	PostToolUse	edits:d30781a88870	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
-context-handoff-gate.py	PostToolUse	edits:d4564e9ee298	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:d9316125677c	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:d9f8158e788a	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
 context-handoff-gate.py	PostToolUse	edits:e118d512a4fa	announce	Context lifecycle signal is CONTEXT_SIGNAL_UNAVAILABLE; fallback activity counters are active.
@@ -688,7 +676,7 @@ executor-tier-gate.py	PreToolUse[Agent]	(all)	counts	allow=4 deny=3
 executor-tier-gate.py	PreToolUse[Agent]	agent:2cd5a04c133c	deny	EXECUTOR NOT NAMED. This Agent call passes no `model`, and `Plan` has no model pinned in a definition file, so it will INHERIT THE PARENT TI
 executor-tier-gate.py	PreToolUse[Agent]	agent:cce5ca978235	deny	EXECUTOR NOT NAMED. This Agent call passes no `model`, and `general-purpose` has no model pinned in a definition file, so it will INHERIT TH
 executor-tier-gate.py	PreToolUse[Agent]	agent:cec1ad97860a	deny	EXECUTOR NOT NAMED. This Agent call passes no `model`, and `Explore` has no model pinned in a definition file, so it will INHERIT THE PARENT
-gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=68 announce=10
+gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=62 announce=10
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:0ba2e8a87506	announce	GATE CHANGE ANNOUNCED — hook-meter-run.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:4ea164ba7c1a	announce	GATE CHANGE ANNOUNCED — jev-supervisor.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:50d0da61a891	announce	GATE CHANGE ANNOUNCED — completion-evidence-gate.py is enforcement, and edit just changed it.
@@ -706,15 +694,13 @@ guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:6dfb251d684c	deny	broad add (
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=447
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=441
 jev-supervisor.py	Stop	(all)	counts	allow=87
 ledger-sweep.py	Stop	(all)	counts	allow=87
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	(all)	counts	announce=78
+lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	(all)	counts	announce=72
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:005d482ca566	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:010a4c03c18b	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:01ae1bd19913	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:03e198646e6d	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:090724b72058	announce	json schema=jev-post-write-review/v# status=skipped reason=no_supported_code_paths
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:0a64781c385b	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:0ba2e8a87506	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:0ebaefe865cb	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
@@ -727,7 +713,6 @@ lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:2846baa603e1	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:2a66692e0056	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:2d46204312ac	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:352c8dc8ef9e	announce	json schema=jev-post-write-review/v# status=skipped reason=no_supported_code_paths
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:35d9f017b2f2	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:37a4a6b3751c	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:3ea11d9f62a3	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
@@ -762,15 +747,12 @@ lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:a6bb8d7e4899	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:bd28a4705e8e	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:c44bca5616e8	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:c97dd4636c97	announce	json schema=jev-post-write-review/v# status=skipped reason=no_supported_code_paths
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:cdbcf60040f0	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:cdd65a0f0747	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:cf9fe3e4634d	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d1e2d11c38bf	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d1f3ea015436	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d2e9f981721e	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d30781a88870	announce	json schema=jev-post-write-review/v# status=skipped reason=no_supported_code_paths
-lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d4564e9ee298	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d9316125677c	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:d9f8158e788a	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	edits:e118d512a4fa	announce	json schema=jev-post-write-review/v# status=skipped reason=no_jev_candidate
@@ -791,11 +773,11 @@ lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch
 loose-work-gate.py	Stop	(all)	counts	allow=87
 map-architecture-gate.py	Stop	(all)	counts	allow=87
 model-floor-gate.py	PreToolUse[Bash|mcp__claude-in-chrome__.*]	(all)	counts	allow=322
-one-repo-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=78
+one-repo-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72
 peer-broadcast-gate.py	PreToolUse[SendMessage]	(all)	counts	allow=2
-record-home-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=78
+record-home-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72
 rule-pack-drift-gate.py	Stop	(all)	counts	allow=87
-rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*]	(all)	counts	allow=400 announce=18
+rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*]	(all)	counts	allow=394 announce=18
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*]	agent:2cd5a04c133c	announce	RULE JIT TRIGGER DELIVERY FAILED: selector_unavailable. One or more matched triggers were not delivered; Stop telemetry must treat their pac
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*]	agent:3d22d90ff649	announce	RULE JIT TRIGGER DELIVERY FAILED: selector_unavailable. One or more matched triggers were not delivered; Stop telemetry must treat their pac
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*]	agent:42d84884c681	announce	RULE JIT TRIGGER DELIVERY FAILED: selector_unavailable. One or more matched triggers were not delivered; Stop telemetry must treat their pac

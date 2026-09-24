@@ -79,6 +79,49 @@ MAX_FIELD_CHARS = 3000
 # scan says about any one of them.
 QUOTING_ADVISORY_PREFIXES = ("LEDGER SWEEP", "CHAT LINT", "<persisted-output>")
 
+# Edits that carry client or practice names by construction, whatever the
+# leak scan says about them (2026-09-24: the client-name scrub's own edits
+# reached the public fixtures, each pairing a real name with its pseudonym).
+# exporters/targets.py holds DOSSIER_FILES, the roster of client dossiers.
+NAME_BEARING_PATHS = ("exporters/targets.py",)
+NAME_BEARING_MARKERS = ("DOSSIER_FILES",)
+WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def scrub_style_rename(old: str, new: str) -> bool:
+    """True when an edit only swaps words: the same text with the words taken
+    out, and every changed word alphabetic, at least one of them capitalised
+    (a name) on either side. That is the shape of a rename or a scrub, and the
+    swapped words are the payload."""
+    if not old or not new or old == new:
+        return False
+    if WORD_RE.sub("", old) != WORD_RE.sub("", new):
+        return False
+    a, b = WORD_RE.findall(old), WORD_RE.findall(new)
+    if len(a) != len(b):
+        return False
+    changed = [(x, y) for x, y in zip(a, b) if x != y]
+    return bool(changed) and any(x[:1].isupper() or y[:1].isupper() for x, y in changed)
+
+
+def name_bearing_edit(tool_input: Record) -> bool:
+    path = str(tool_input.get("file_path", ""))
+    if any(path.endswith("/" + p) or path == p for p in NAME_BEARING_PATHS):
+        return True
+    pieces: List[Record] = [tool_input]
+    if isinstance(tool_input.get("edits"), list):
+        pieces += [e for e in tool_input["edits"] if isinstance(e, dict)]
+    for piece in pieces:
+        for key in ("old_string", "new_string", "content"):
+            value = piece.get(key)
+            if isinstance(value, str) and any(m in value for m in NAME_BEARING_MARKERS):
+                return True
+        old, new = piece.get("old_string"), piece.get("new_string")
+        if isinstance(old, str) and isinstance(new, str) and scrub_style_rename(old, new):
+            return True
+    return False
+
+
 WORKTREE_RE = re.compile(re.escape(REAL_REPO) + r"/\.claude/worktrees/[A-Za-z0-9._-]+")
 UUID_RE = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 
@@ -283,7 +326,7 @@ def extract(root: str, tracked: Optional[Tuple[set, set]] = None) -> Dict[str, L
     edits = Bucket(per_stratum=10, total=110)
     reads = Bucket(per_stratum=6, total=60)
     advisories = Bucket(per_stratum=2, total=100)
-    stats = {"dropped_leak": 0, "dropped_size": 0}
+    stats = {"dropped_leak": 0, "dropped_size": 0, "dropped_name_bearing": 0}
 
     def admit(bucket: Bucket, stratum: str, record: Record) -> None:
         if too_big(record):
@@ -319,6 +362,9 @@ def extract(root: str, tracked: Optional[Tuple[set, set]] = None) -> Dict[str, L
                 # and vault records, and untracked files in the checkout are
                 # scratch: prose about the business, the same class as prompts.
                 if not in_tracked_tree(path, files, dirs):
+                    continue
+                if name_bearing_edit(record["tool_input"]):
+                    stats["dropped_name_bearing"] += 1
                     continue
                 admit(edits, f"{name}|{top_dir(path)}", record)
             elif name in ("Read", "Grep", "Glob"):
