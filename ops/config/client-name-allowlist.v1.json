@@ -60,6 +60,11 @@
   },
   {
    "path": "migrations/0001_init.sql",
+   "sha256": "2b82ba8aab66f192f5977551a98666d1d285cf3e4b081da0ec4714c29486ac9e",
+   "reason": "applied migration (immutable, checksum-pinned); on the requires-history-purge list"
+  },
+  {
+   "path": "migrations/0001_init.sql",
    "sha256": "9d4ab53e4e61adfdfe2978fe8100f78c174a63fa2c02197157bb1c001a898ca5",
    "reason": "applied migration: immutable history; requires history purge (WR-000049)"
   },
@@ -147,6 +152,11 @@
    "path": "migrations/0041_classify_loops.sql",
    "sha256": "2a8bb1524a4057e8f88b258761cfe422e0c609914c98e3bd480747b078cc8395",
    "reason": "applied migration: immutable history; requires history purge (WR-000049)"
+  },
+  {
+   "path": "migrations/0041_classify_loops.sql",
+   "sha256": "2b82ba8aab66f192f5977551a98666d1d285cf3e4b081da0ec4714c29486ac9e",
+   "reason": "applied migration (immutable, checksum-pinned); on the requires-history-purge list"
   },
   {
    "path": "migrations/0041_classify_loops.sql",
@@ -282,6 +292,11 @@
    "path": "migrations/0045_drip_conflict.sql",
    "sha256": "31eba5e78e3217b154e7da5f5d0a5da6f42a371e347bbce7d4cf23fa2a5a300d",
    "reason": "applied migration: immutable history; requires history purge (WR-000049)"
+  },
+  {
+   "path": "migrations/0045_drip_conflict.sql",
+   "sha256": "70ba1ad89b1498957fbff6355c7087c9914f0c511882603cc4d3cd5d52716172",
+   "reason": "applied migration (immutable, checksum-pinned); on the requires-history-purge list"
   },
   {
    "path": "migrations/0045_drip_conflict.sql",
@@ -500,6 +515,11 @@
   },
   {
    "path": "migrations/0060_participant_sides.sql",
+   "sha256": "2b82ba8aab66f192f5977551a98666d1d285cf3e4b081da0ec4714c29486ac9e",
+   "reason": "applied migration (immutable, checksum-pinned); on the requires-history-purge list"
+  },
+  {
+   "path": "migrations/0060_participant_sides.sql",
    "sha256": "3a5e6ee5ff50a6ab66c8daac7fce6d1c1119f2156356e282964a0a038f0de535",
    "reason": "applied migration: immutable history; requires history purge (WR-000049)"
   },
@@ -712,6 +732,11 @@
    "path": "migrations/0062_orphaned_edge.sql",
    "sha256": "1406ab67e9639607820271fd21e2647068397c37600cf9f924f540e9322b780a",
    "reason": "applied migration: immutable history; requires history purge (WR-000049)"
+  },
+  {
+   "path": "migrations/0062_orphaned_edge.sql",
+   "sha256": "2b82ba8aab66f192f5977551a98666d1d285cf3e4b081da0ec4714c29486ac9e",
+   "reason": "applied migration (immutable, checksum-pinned); on the requires-history-purge list"
   },
   {
    "path": "migrations/0062_orphaned_edge.sql",
