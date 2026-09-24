@@ -123,5 +123,5 @@
   },
   "enforcement_class_is_a_property_of_the_control": "Deriving the class from the rules that cite a control was tried first and rejected: deal_guard and loop_guard both fail as 'transaction refusal' yet their rules were tagged differently, because a rule's enforcement_class describes what the RULE does while this describes how the CONTROL fires.",
   "schema_version": "carr-control-enforcement-classes-v1",
-  "why_this_file_exists": "ops.enforcement_control_catalog needs an enforcement_class per control, and rule-enforcement-map.json does not carry one. It is NOT added there because audits/guidance-situation-curation-review.v1.json pins that file by sha256 as the base inventory of a curation review that is still in review_state 'proposed'. Editing the map would invalidate a pending human review, and updating the recorded digest to match would assert a review that never happened. So the class lives here, beside the map rather than inside it, until that review is settled and the two can merge."
+  "why_this_file_exists": "ops.enforcement_control_catalog needs an enforcement_class per control, while rule-enforcement-map.json binds active rules to controls. This separate catalog records control classes. When the active map changes, the proposed guidance curation review must bind the new map and manifest bytes without claiming approval of the proposal."
 }

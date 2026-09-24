@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+import os
 from typing import Any, Iterable
 
 
@@ -100,11 +102,17 @@ def validate_siep18_guard_rows(rows: Iterable[dict[str, Any]]) -> dict[str, list
 def normalize_siep18_reference_monitor_guards(
     fingerprint: dict[str, Any], validated_guards: dict[str, list[dict[str, str]]]
 ) -> dict[str, Any]:
-    """Remove only the exact enabled SIEP-18 row/truncate guard pair.
+    """Match the exact enabled SIEP-18 guard generation in the baseline.
 
     Eligibility comes from the live runtime-DML ACL projection. The caller must
     still compare the returned value byte-for-byte with its pre-0450 baseline;
     normalization never excuses any other catalog, grant, or trigger drift.
+
+    Historical baselines predate SIEP-18, so their validated pairs are removed
+    from the current fingerprint. A refreshed schema snapshot already contains
+    those pairs. When that snapshot is the disposable baseline, preserve the
+    same exact pairs instead of manufacturing drift by deleting them from only
+    the current side of the comparison.
     """
 
     normalized = deepcopy(fingerprint)
@@ -117,6 +125,18 @@ def normalize_siep18_reference_monitor_guards(
             f"runtime-DML fingerprint target is absent: {sorted(missing_targets)!r}"
         )
 
+    baseline_tables: dict[str, Any] = {}
+    baseline_text = os.environ.get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT", "")
+    if baseline_text:
+        try:
+            baseline = json.loads(baseline_text)
+            candidate_tables = baseline.get("tables")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise SIEP18NormalizationError("catalog fingerprint baseline is malformed") from exc
+        if not isinstance(candidate_tables, dict):
+            raise SIEP18NormalizationError("catalog fingerprint baseline tables are malformed")
+        baseline_tables = candidate_tables
+
     for target, table in tables.items():
         if not isinstance(table, dict) or not isinstance(table.get("triggers"), list):
             raise SIEP18NormalizationError(f"catalog trigger projection is malformed: {target}")
@@ -127,6 +147,17 @@ def normalize_siep18_reference_monitor_guards(
             raise SIEP18NormalizationError(
                 f"fingerprint guard records differ from the validated pg_trigger surface: {target}"
             )
-        if expected:
+        baseline_table = baseline_tables.get(target, {})
+        if not isinstance(baseline_table, dict):
+            raise SIEP18NormalizationError(f"baseline catalog table is malformed: {target}")
+        baseline_triggers = baseline_table.get("triggers", [])
+        if not isinstance(baseline_triggers, list):
+            raise SIEP18NormalizationError(f"baseline catalog triggers are malformed: {target}")
+        baseline_candidates = [trigger for trigger in baseline_triggers if _is_guard_candidate(trigger)]
+        if baseline_candidates and baseline_candidates != expected:
+            raise SIEP18NormalizationError(
+                f"baseline fingerprint carries a nonexact SIEP-18 guard: {target}"
+            )
+        if expected and not baseline_candidates:
             table["triggers"] = [trigger for trigger in triggers if not _is_guard_candidate(trigger)]
     return normalized

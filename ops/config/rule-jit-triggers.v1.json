@@ -1,14 +1,14 @@
 {
  "counts": {
   "pack_fallback_triggers": 7,
-  "seeded_detector_rule_ids": 49,
-  "seeded_detector_triggers": 13,
+  "seeded_detector_rule_ids": 50,
+  "seeded_detector_triggers": 14,
   "structural_extra_triggers": 1,
-  "triggers": 21
+  "triggers": 22
  },
  "generated_from": {
-  "map_sha256": "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3112468268e3335c",
-  "triage_sha256": "ac7241551e2e9f46521c71e9399d116214551bb77be6d30bd2ed49f5a42ceb86"
+  "map_sha256": "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a",
+  "triage_sha256": "1e3911923285fe54a820f2a4eebcc714a2b591bdc380f4061fc3c0ab3fcb7b73"
  },
  "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
  "max_rules_per_trigger": 5,
@@ -108,11 +108,25 @@
    ],
    "pattern": "\\bgit\\b|\\bbranch\\b|\\bworktree\\b|\\bcommit\\b|\\bpush\\b|\\bpull\\ request\\b|\\bci\\b|\\bgate\\b|\\bhook\\b|\\bmigration\\b|\\bschema\\b|\\bdeploy\\b|\\bwrangler\\b|\\btest\\b|\\bselftest\\b|\\bconfig\\ file\\b|\\bbaseline\\b|\\brefactor\\b|\\barchitecture\\ fork\\b",
    "rule_ids": [
+    "204391be",
+    "a2e78f48",
     "efbdfb1a",
     "f0f9156e"
    ],
    "source": "pack_fallback",
    "trigger_id": "963b8f2da763"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "governance-rules"
+   ],
+   "pattern": "\\bheavy[-\\s]?build\\b|\\bheavy\\s+build\\s+protocol\\b|\\b(?:write\\-work\\-shape|set\\-work\\-shape\\-disposition|propose\\-ready\\-plan|review\\-heavy\\-build\\-plan|accept\\-ready\\-plan|register\\-engineering\\-slice\\-plan|admit\\-engineering\\-slice|review\\-engineering\\-slice)\\b",
+   "rule_ids": [
+    "1fcaa63a"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "156b1b159ab5"
   },
   {
    "kind": "content_regex",

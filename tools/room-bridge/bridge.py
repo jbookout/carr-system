@@ -207,6 +207,38 @@ def rehearse_job_passport(envelope: dict, receipt: dict, events: list[dict], pro
             "attempt_id": completed["attempt_id"], "projection": projection, "published": published}
 
 
+# WR-000119 — THE BRIDGE MINTS THE LINK, AND ONLY THE BRIDGE.
+#
+# At the moment the bridge appends the dispatch turn it holds, in its hand and
+# from nowhere else, the three facts the link is made of: the msg_id of the turn
+# it just wrote, the target session id it just dispatched to, and the work
+# request that queued the task. Writing the link LATER, from a re-read of the
+# turn, would mean recovering the session id out of prose again -- which is the
+# substring match 0531 exists to retire.
+#
+# hermes-projector IS THE CREDENTIAL, not a courtesy. 0531 refuses any derived
+# identity other than hermes-pilot inside the definer, and that selector is the
+# one path by which the Worker derives hermes-pilot (see verb_io.project_room_queue).
+# ``verb_io._run_verb`` is reused rather than a second subprocess path invented:
+# verb_io.py is outside this Work Request's authorized paths, so no public
+# wrapper could be added there, and two paths to the record layer would be two
+# places for the identity derivation to drift.
+def record_dispatch_link(*, turn_msg_id: str, session_id: str,
+                          work_request_id: str | None = None,
+                          dispatch_ref: str | None = None,
+                          call_verb=verb_io._run_verb) -> dict:
+    """Mint the explicit link between a room turn and the session it went to."""
+    args = {
+        "dispatch_ref": dispatch_ref or str(uuid.uuid4()),
+        "turn_msg_id": turn_msg_id,
+        "session_id": session_id,
+    }
+    if work_request_id:
+        args["work_request_id"] = work_request_id
+    return call_verb("record-dispatch-link", args,
+                     client_profile="hermes-projector")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -234,6 +266,13 @@ def conversational_desk_seats(entries: dict[str, dict]) -> dict[str, str]:
         name: entry["room_seat"] for name, entry in entries.items()
         if entry.get("room_seat") and entry.get("kind") != "claude-desktop"
     }
+
+
+def mention_only_desks(entries: dict[str, dict]) -> frozenset[str]:
+    """Desks registered with room_listen="mention": they hear people's turns but
+    hear another desk only when @-mentioned (state.is_unaddressed_desk_turn)."""
+    return frozenset(name for name, entry in entries.items()
+                     if entry.get("room_listen") == "mention")
 
 
 def _elapsed_seconds(iso_ts: str | None, *, now: str | None = None) -> float:
@@ -324,8 +363,19 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
             if result_text is None:
                 return {"desk": name, "outcome": "desktop_result_not_ready",
                         "session_id": session_id}
+            # The session has already reported completion — result_text above
+            # is its real answer, already in hand. A /desktop handoff failure
+            # from here on (e.g. desktop_handoff_timeout) is a problem with
+            # opening a window onto a finished session, never a reason to
+            # treat the TASK as failed: doing so used to fall through to
+            # queue_executor.fail_pending, which schedules a retry (a second
+            # launch, duplicating the work — defect a2e7dcb5) or blocks a task
+            # that in fact already succeeded. So a handoff failure here only
+            # posts its own honest receipt and falls through to the ordinary
+            # completion handling below, which finishes the task with the
+            # result already read.
             try:
-                handoff_background(session_id)
+                handed = handoff_background(session_id)
             except claude_desktop_wire.ClaudeDesktopError as exc:
                 add_room_turn(
                     body=json.dumps({"claude_desktop_handoff": {
@@ -333,20 +383,18 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     }}, separators=(",", ":")),
                     seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
                 )
-                if pending.get("origin_kind") == "queue" and queue_executor is not None:
-                    terminal = queue_executor.fail_pending(
-                        pending, "provider_unavailable", now=now)
-                    state_mod.clear_pending(state, name)
-                    return {"desk": name, "session_id": session_id, **terminal}
-                state_mod.clear_pending(state, name)
-                return {"desk": name, "outcome": "desktop_handoff_failed",
-                        "session_id": session_id}
-            add_room_turn(
-                body=json.dumps({"claude_desktop_handoff": {
-                    "session_id": session_id, "status": "opened",
-                }}, separators=(",", ":")),
-                seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
-            )
+            else:
+                # "already_open": Claude Desktop already holds the session
+                # (claude attach refuses it as running in another terminal),
+                # which is the state the handoff exists to reach.
+                status = handed.get("status") if isinstance(handed, dict) else None
+                add_room_turn(
+                    body=json.dumps({"claude_desktop_handoff": {
+                        "session_id": session_id,
+                        "status": status if status in {"opened", "already_open"} else "opened",
+                    }}, separators=(",", ":")),
+                    seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+                )
         elif observed_state in (claude_desktop_wire.FAILED_STATES
                                 | claude_desktop_wire.NEEDS_INPUT_STATES):
             if pending.get("origin_kind") == "queue" and queue_executor is not None:
@@ -607,6 +655,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     # it from conversational fan-out prevents ordinary room chatter from
     # creating model sessions or spending tokens.
     desk_seats = conversational_desk_seats(desk_entries)
+    mention_only = mention_only_desks(desk_entries)
 
     # The target catalog is configuration for command ingress, not a reason to
     # stop the conversational bridge.  When it cannot be loaded, only an
@@ -663,7 +712,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             routed[str(t.get("msg_id"))] = []
             queue_events.append({"seq": t.get("seq"), "kind": queued.get("kind")})
             continue
-        routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats)
+        routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats, mention_only=mention_only)
         control = auth_control.parse_control(t)
         if control is not None:
             controls.append(handle_control(
@@ -811,15 +860,47 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                             session_id=pending.get("session_id"),
                         )
                         if pending.get("transport") == "claude-desktop":
+                            # ONE msg_id, minted here and used twice: once as the
+                            # turn's own id and once as what the link names. A
+                            # second uuid would make the link point at a turn
+                            # nobody could find.
+                            dispatch_turn_msg_id = str(uuid.uuid4())
+                            dispatch_ref = str(uuid.uuid4())
                             add_room_turn(
                                 body=json.dumps({"claude_desktop_session": {
                                     "session_id": pending.get("session_id"),
                                     "status": "backgrounded",
                                     "task_id": pending.get("kanban_task_id"),
                                     "desktop_visibility": "after_completion",
+                                    "dispatch_ref": dispatch_ref,
                                 }}, separators=(",", ":")),
-                                seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+                                seat="hermes", kind="receipt",
+                                msg_id=dispatch_turn_msg_id,
                             )
+                            # A link that cannot be written is a visible error on
+                            # this cycle, never a silent fall back to the body
+                            # match the link exists to replace.
+                            try:
+                                record_dispatch_link(
+                                    turn_msg_id=dispatch_turn_msg_id,
+                                    session_id=str(pending.get("session_id") or ""),
+                                    work_request_id=pending.get("work_request_id"),
+                                    dispatch_ref=dispatch_ref,
+                                )
+                                # The DESK's own acknowledgement, written by the
+                                # desk dispatcher and never by this file: the
+                                # stage is fixed at `received` there, so the
+                                # bridge cannot send `acknowledged` even by
+                                # accident. `acknowledged` belongs to the session
+                                # that acts, from inside its own turn.
+                                dispatch.acknowledge_received(
+                                    dispatch_ref, desk=name, log_offset=offset,
+                                    injected_at=str(pending.get("injected_at") or ""),
+                                )
+                            except (RuntimeError, desks.DeskError) as exc:
+                                errors.append({"desk": name,
+                                               "error": "dispatch_link_failed",
+                                               "detail": str(exc)[:500]})
                     if queue_outcome.get("outcome") != "idle":
                         delivered.append({"desk": name, **queue_outcome})
             registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)

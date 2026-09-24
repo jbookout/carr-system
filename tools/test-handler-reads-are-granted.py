@@ -45,7 +45,7 @@ GRANT = re.compile(r"^\s*grant\s+.+?\s+on\s+table\s+([a-z_]+\.[a-z_]+)\s+to\b", 
 # Captures the privilege list and the role list too, so "granted, but not to the
 # role that reads it" can be told apart from "granted to nobody".
 GRANT_FULL = re.compile(
-    r"^\s*grant\s+(.+?)\s+on\s+table\s+([a-z_]+\.[a-z_]+)\s+to\s+([a-z_, ]+);", re.I | re.M | re.S)
+    r"^\s*grant\s+([^;]+?)\s+on\s+table\s+([a-z_]+\.[a-z_]+)\s+to\s+([a-z_, ]+);", re.I | re.M | re.S)
 
 # Tables a handler names that the READER is not expected to select, with the
 # reason. Empty on purpose: as of 2026-08-27 every declared table any handler
@@ -58,6 +58,11 @@ READ = re.compile(r"\b(?:from|join)\s+(ops|public)\.([a-z_]+)\b", re.I)
 
 
 def main() -> int:
+    # A non-table grant must not borrow SELECT from a later statement. Keep
+    # multiline and column-scoped table grants while bounding the schema scan.
+    assert GRANT_FULL.findall("GRANT EXECUTE ON FUNCTION public.f() TO carr_reader;\n"
+                              "GRANT SELECT (id, slug)\nON TABLE public.actor TO carr_reader;") == [
+        ("SELECT (id, slug)", "public.actor", "carr_reader")]
     schema = SNAPSHOT.read_text(encoding="utf-8", errors="replace")
     declared = {t.lower() for t in DECLARED.findall(schema)}
     granted = {t.lower() for t in GRANT.findall(schema)}

@@ -130,9 +130,15 @@ test("closed evidence, measurement, and outcome consistency refuse before databa
     { ...PROPOSE, manual_context_transfers: 101 },
     { ...PROPOSE, extra: true },
   ]) assert.ok((await refused(() => executeRegisteredTool(noDb, JOE, "propose-outcome-feedback", args))).error);
-  // INVERTED, not deleted (Joe's ruling 2026-08-26, decision dc57f62d): a
-  // machine actor is admitted now, so restoring the gate fails here loudly.
-  assert.ok(await executeRegisteredTool(new OutcomeFake(), BOT, "accept-outcome-feedback", structuredClone(ACCEPT)));
+  // RE-INVERTED 2026-09-11 (WR-000021): the humanOnly refusal is a gate again,
+  // enforced at the tools.js dispatcher for every verb carrying the flag. The
+  // 2026-08-26 inversion was written to fail loudly if the gate ever came back
+  // rather than to disappear, and it did exactly that. Acceptance is a human
+  // act: an agent reaching this verb would write the sponsor's name onto a
+  // decision the sponsor never made.
+  const machine = await refused(() => executeRegisteredTool(new OutcomeFake(), BOT, "accept-outcome-feedback", structuredClone(ACCEPT)));
+  assert.equal(machine.error, "human_only_verb_requires_verified_partner");
+  assert.equal(machine.verb, "accept-outcome-feedback");
   assert.equal((await refused(() => callTool({}, JOE, "accept-outcome-feedback", structuredClone(ACCEPT), "full"))).error, "authority_connection_unavailable");
 });
 

@@ -1,0 +1,27 @@
+{
+  "schema": "carr-doctorcre-artifact-pin.v1",
+  "repository": "jbookout/doctorcre-app",
+  "release_tag": "app-v0.2.0",
+  "release_url": "https://github.com/jbookout/doctorcre-app/releases/tag/app-v0.2.0",
+  "source_commit": "6fdf8341177ca8fe165908b6b3368b6021057ad6",
+  "archive_url": "https://github.com/jbookout/doctorcre-app/releases/download/app-v0.2.0/doctorcre-app.tar",
+  "archive_bytes": 3256832,
+  "archive_sha256": "e9341d908c5c039e23908a70b98b73515fa2e5b3e55300accf45172d03b7a087",
+  "manifest_url": "https://github.com/jbookout/doctorcre-app/releases/download/app-v0.2.0/doctorcre-app.manifest.json",
+  "manifest_bytes": 20693,
+  "manifest_sha256": "bb5c1b1fa38b95d8162f3a08f0e722ef950a1a58873bce283d121d53fdd92603",
+  "file_count": 129,
+  "entrypoint": "workspace.html",
+  "contracts": {
+    "carr_interface": {
+      "schema": "doctorcre-carr-interface.v1",
+      "version": "1.20.0",
+      "sha256": "5645c62cdab2c48e02733d2d74a857abe3084d337e08be63331f1ca90c72adfb"
+    },
+    "route_contract": {
+      "schema": "doctorcre-app-routes.v1",
+      "version": "1.11.0",
+      "sha256": "c503e79d7adb67b9a9402f714c146ad01289135ba59e6731011b4c14e2545531"
+    }
+  }
+}

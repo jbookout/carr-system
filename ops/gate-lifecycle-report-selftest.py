@@ -45,15 +45,12 @@ from datetime import datetime, timedelta, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, "ops", "gate-lifecycle-report.py")
 
-failures: list[str] = []
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "lib"))
+from selftest_harness import Checker  # noqa: E402
 
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  ok   {name}")
-    else:
-        print(f"  FAIL {name} {detail}")
-        failures.append(name)
+CHECKER = Checker()
+failures = CHECKER.failures
+check = CHECKER.check
 
 
 def stamp(days_ago, hour=12):
@@ -345,13 +342,7 @@ def main():
     finally:
         shutil.rmtree(tmp3, ignore_errors=True)
 
-    print()
-    if failures:
-        print(f"FAIL {len(failures)} check(s): {', '.join(failures[:10])}"
-              + (" …" if len(failures) > 10 else ""))
-        return 1
-    print("OK all checks passed")
-    return 0
+    return CHECKER.summary(limit=10)
 
 
 if __name__ == "__main__":

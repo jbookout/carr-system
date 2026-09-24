@@ -52,6 +52,22 @@ def authority_roles(cur) -> None:
     )
 
 
+def assert_wr122_route_is_fenced(cur) -> None:
+    """The abandoned 0535/0536 WR122 route remains history, never execution."""
+    expected = {
+        ("PLAN-954b03dd464d-v1", "sha256:954b03dd464dab9986bc705d01fdb197edd29b23ad10ca673da53ad0ac03c27d", "0535_ready_plan_amendment.sql"),
+        ("PLAN-954b03dd464d-v1", "sha256:954b03dd464dab9986bc705d01fdb197edd29b23ad10ca673da53ad0ac03c27d", "0536_ready_plan_amendment_scac_successor.sql"),
+    }
+    rows = set(cur.execute("""select plan_ref,plan_hash,unnest(migration_filenames)
+                              from ops.engineering_stale_contract_fence
+                             where work_request_ref='WR-000122'""").fetchall())
+    if rows != expected:
+        raise RuntimeError(f"WR122 stale route fence drifted: {rows!r}")
+    refusal(cur, "insert into public.schema_migrations(filename,sha256) values (%s,%s)",
+            ("0536_ready_plan_amendment_scac_successor.sql", "0" * 64),
+            "stale WR122 migration route")
+
+
 def fixture(cur, actor_id: uuid.UUID):
     token = uuid.uuid4().hex
     source_doc = one(cur, """insert into doctrine_document
@@ -124,6 +140,7 @@ def main() -> int:
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             authority_roles(cur)
+            assert_wr122_route_is_fenced(cur)
             joe_id = one(cur, "select id from actor where slug='joe' and active and kind='human'")[0]
             source_section, source_rev, origin_ref, runbook_ref = fixture(cur, joe_id)
             set_local_role(cur, "carr_writer")

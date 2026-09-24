@@ -82,7 +82,27 @@ def main() -> int:
         finally:
             os.chdir(old_cwd)
 
-    print(f"path-index-hygiene-selftest: {8 - len(failures)}/8 passed")
+        # THE M IN THE FILTER. 0e22e34a judges the SHAPE of a path, so only a
+        # path new to the repository can violate it. A historical filename that
+        # would be refused as an addition must stay editable — the case that
+        # blocked the r7 amendment while staged_paths() still asked for ACMR.
+        (root / "tool-v5-review.cjs").write_text("legacy\n")
+        git(root, "add", "tool-v5-review.cjs")
+        git(root, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "historical name")
+        (root / "tool-v5-review.cjs").write_text("legacy, edited\n")
+        git(root, "add", "tool-v5-review.cjs")
+        try:
+            os.chdir(root)
+            check("editing a historical version-suffixed path passes",
+                  not PATHS.violations(PATHS.staged_paths()), failures)
+            (root / "added-v5-file.cjs").write_text("new\n")
+            git(root, "add", "added-v5-file.cjs")
+            check("adding a version-suffixed path still refuses",
+                  bool(PATHS.violations(PATHS.staged_paths())), failures)
+        finally:
+            os.chdir(old_cwd)
+
+    print(f"path-index-hygiene-selftest: {10 - len(failures)}/10 passed")
     return 1 if failures else 0
 
 

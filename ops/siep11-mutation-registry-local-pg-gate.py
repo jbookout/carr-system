@@ -8,7 +8,11 @@ from __future__ import annotations
 import os
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import psycopg
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 from scac_mutation_db_inventory import project, summarize
@@ -26,6 +30,40 @@ JOB_DEFINITION_CATALOG = {
 def fail(message: str) -> int:
     print(f"siep11-mutation-registry-local-pg-gate: FAIL — {message}", file=sys.stderr)
     return 1
+
+
+def validate_incident_work_request_same_key_serialization(dsn: str) -> None:
+    """The WR69 handler takes this lock before withEnvelope reads replay state.
+
+    The JS unit test proves that call order. This disposable-Postgres check
+    proves that two real transactions using the same key cannot cross that
+    boundary together.
+    """
+    uppercase_input = "A0B0C0D0-E0F0-4A00-8B00-C00000000069"
+    key = uppercase_input.lower()
+    case_variant = uppercase_input.lower()  # the handler's UUID normalization
+    second_started = threading.Event()
+
+    def acquire_second() -> bool:
+        with psycopg.connect(dsn, autocommit=False) as second:
+            second_started.set()
+            second.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s,0))", (case_variant,)
+            )
+            second.rollback()
+        return True
+
+    with psycopg.connect(dsn, autocommit=False) as first:
+        first.execute("select pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            waiting = pool.submit(acquire_second)
+            if not second_started.wait(timeout=2):
+                raise RuntimeError("second same-key transaction did not start")
+            if waiting.done():
+                raise RuntimeError("same-key transaction crossed the pre-envelope lock")
+            first.rollback()
+            if waiting.result(timeout=5) is not True:
+                raise RuntimeError("same-key transaction did not continue after lock release")
 
 
 def refusal(cur, query: str, params: tuple, fragment: str) -> None:
@@ -94,6 +132,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL or CARR_LOCAL_PG_DSN is required")
     try:
+        validate_incident_work_request_same_key_serialization(dsn)
         registry = json.loads((REPO / "ops/config/control-plane-scheduler-cutover.v1.json").read_text(encoding="utf-8"))
         manifest = json.loads((REPO / "ops/config/control-plane-workflows.v1.json").read_text(encoding="utf-8"))
         services = json.loads((REPO / "ops/config/services.json").read_text(encoding="utf-8"))
@@ -137,8 +176,32 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23", "scac-mutation-registry.v24", "scac-mutation-registry.v25", "scac-mutation-registry.v26", "scac-mutation-registry.v27", "scac-mutation-registry.v28", "scac-mutation-registry.v29", "scac-mutation-registry.v30", "scac-mutation-registry.v31", "scac-mutation-registry.v32", "scac-mutation-registry.v33", "scac-mutation-registry.v34", "scac-mutation-registry.v35", "scac-mutation-registry.v36", "scac-mutation-registry.v37", "scac-mutation-registry.v38", "scac-mutation-registry.v39", "scac-mutation-registry.v40", "scac-mutation-registry.v41", "scac-mutation-registry.v42", "scac-mutation-registry.v43", "scac-mutation-registry.v44", "scac-mutation-registry.v45", "scac-mutation-registry.v46", "scac-mutation-registry.v47", "scac-mutation-registry.v48", "scac-mutation-registry.v49", "scac-mutation-registry.v50", "scac-mutation-registry.v51", "scac-mutation-registry.v52", "scac-mutation-registry.v53", "scac-mutation-registry.v54", "scac-mutation-registry.v55", "scac-mutation-registry.v56", "scac-mutation-registry.v57", "scac-mutation-registry.v58", "scac-mutation-registry.v59", "scac-mutation-registry.v60", "scac-mutation-registry.v61", "scac-mutation-registry.v62", "scac-mutation-registry.v63", "scac-mutation-registry.v64", "scac-mutation-registry.v65", "scac-mutation-registry.v66"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
+            # A successor may only ADD a seal. Whatever version is live, the one
+            # immediately below it must still be present AND still validate its
+            # own entry-set seal -- that is what makes v22 sealed HISTORY under
+            # v26 rather than a row the successor quietly rewrote. The allowlist
+            # above stays enumerated so an unreviewed frontier fails closed; this
+            # predecessor check is derived from whichever member is live.
+            runtime_ordinal = int(runtime_version.rsplit(".v", 1)[1])
+            if runtime_ordinal > 1:
+                predecessor_version = f"scac-mutation-registry.v{runtime_ordinal - 1}"
+                if cur.execute(
+                    "select count(*) from ops.scac_mutation_registry_version where registry_version=%s",
+                    (predecessor_version,),
+                ).fetchone()[0] != 1:
+                    raise RuntimeError(
+                        f"sealed predecessor {predecessor_version} is absent under live {runtime_version}"
+                    )
+                # Per-version seal-availability functions begin at v5, so only ask
+                # the database to revalidate a predecessor that actually has one.
+                if runtime_ordinal >= 6 and cur.execute(
+                    f"select ops.scac_mutation_registry_v{runtime_ordinal - 1}_seal_available()"
+                ).fetchone()[0] is not True:
+                    raise RuntimeError(
+                        f"sealed predecessor {predecessor_version} no longer validates its entry set"
+                    )
             lookup_function = f"ops.scac_mutation_registration_{runtime_version.rsplit('.', 1)[1]}"
             runtime_digest = cur.execute(
                 "select registry_digest from ops.scac_mutation_registry_version where registry_version=%s",
@@ -337,7 +400,7 @@ def main() -> int:
             cur.execute("release savepoint registry_same_cardinality_probe")
     except Exception as exc:  # noqa: BLE001 - concise CI surface
         return fail(str(exc))
-    print("siep11-mutation-registry-local-pg-gate passed: 1264 exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
+    print("siep11-mutation-registry-local-pg-gate passed: exact immutable application/catalog entries; 4 runtime roles have lookup-only access")
     return 0
 
 

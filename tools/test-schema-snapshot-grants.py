@@ -38,12 +38,14 @@ import sys
 from schema_snapshot_grants import (
     SECTION_MARKER,
     SnapshotGrantError,
+    _snapshot_function_identity,
     carr_grants_section_lines,
     grants_to_role,
+    match_generated_grant,
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
+DEFAULT_SNAPSHOT = os.path.join(REPO, "db", "schema.sql")
 GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 
 # The app roles the migrations grant to. neondb_owner may appear as a membership
@@ -74,14 +76,20 @@ ROLE_GRANT_MIGRATIONS = {
     "carr_calendar_prebrief_email_resolver": "0229_calendar_prebrief_projection.sql",
     "carr_program5_forward_fix_verifiers": "0315_program5_forward_fix_rehearsal.sql",
     "carr_renewal_source_attestors": "0249_renewal_signed_source_ingress.sql",
+    "carr_gate_zero_producer": "0502_gate_zero_read_only_outcome.sql",
+    "carr_foundation_assurance_oracle": "0511_foundation_assurance_minimum_outcome.sql",
+    "carr_ownership_issuer": "0532a_canonical_ownership_lease_activation.sql",
 }
 APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_authority", "carr_device_evidence",
              "carr_calendar_prebrief_jobs", "carr_calendar_prebrief_canary_jobs",
              "carr_calendar_prebrief_attestors", "carr_calendar_prebrief_email_resolver",
              "carr_program5_forward_fix_verifiers",
-             "carr_renewal_source_attestors"]
-MEMBERSHIP_ONLY = ["neondb_owner"]
+             "carr_renewal_source_attestors",
+             "carr_gate_zero_producer", "carr_foundation_assurance_oracle",
+             "carr_ownership_issuer"]
+MEMBERSHIP_ONLY = ["neondb_owner", "carr_ownership_issuer_g1",
+                   "carr_ownership_issuer_g2"]
 
 failures: list[str] = []
 checked = 0
@@ -97,11 +105,27 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
-def main():
-    if not os.path.exists(SNAPSHOT):
-        print(f"FAIL: {SNAPSHOT} not present")
+def parse_snapshot(argv):
+    if not argv:
+        return DEFAULT_SNAPSHOT
+    if len(argv) == 2 and argv[0] == "--snapshot":
+        snapshot = argv[1]
+        if not os.path.isabs(snapshot):
+            raise ValueError("--snapshot must be an absolute path")
+        return snapshot
+    raise ValueError("usage: test-schema-snapshot-grants.py [--snapshot /absolute/candidate.sql]")
+
+
+def main(argv):
+    try:
+        snapshot = parse_snapshot(argv)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    if not os.path.exists(snapshot):
+        print(f"FAIL: {snapshot} not present")
         return 1
-    sql = open(SNAPSHOT).read()
+    sql = open(snapshot).read()
     lines = sql.split("\n")
 
     check("the snapshot carries a CARR GRANTS section",
@@ -136,6 +160,18 @@ def main():
         destructive_refused = False
     check("multi-statement/comment SQL disguised as a writer GRANT is refused",
           destructive_refused)
+
+    # 0557's ops.meeting_mode_actor() takes only OUT arguments, and
+    # pg_get_function_identity_arguments() prints them with their mode. The
+    # grammar refused that line, so every snapshot refreshed past 0557 failed
+    # here; Postgres ignores OUT arguments in a function's identity.
+    out_only = match_generated_grant(
+        "revoke all on function ops.meeting_mode_actor(OUT actor_id uuid, "
+        "OUT actor_slug text, OUT is_partner boolean, OUT tenant text) from public;")
+    check("an OUT-only function revoke parses to its argument-free identity",
+          _snapshot_function_identity(out_only["schema"], out_only["object"],
+                                       out_only["function_args"])
+          == "ops.meeting_mode_actor()")
 
     applied_migrations = {
         migration for migration in ROLE_GRANT_MIGRATIONS.values()
@@ -195,16 +231,26 @@ def main():
           any(ln == "grant carr_reader to carr_exporter;"
               for _, ln in grant_lines))
 
+    ownership_activation_applied = (
+        "0532a_canonical_ownership_lease_activation.sql\t" in sql
+    )
+    for principal in ("carr_ownership_issuer_g1", "carr_ownership_issuer_g2"):
+        expected = f"grant carr_ownership_issuer to {principal};"
+        check(f"ownership issuer membership for {principal} is ledger-appropriate",
+              (expected in canonical_section) if ownership_activation_applied
+              else (expected not in canonical_section))
+
     generator = open(GENERATOR).read()
     check("function ACL renderer uses a qualification-neutral search path",
           re.search(r"cat > \"\$GRANTS_SQL\" <<'GRANTSQL'\n.*?set search_path = '';",
                     generator, re.S) is not None)
     renewal_delivery_applied = bool(re.search(
         r"^0230_renewal_decision_delivery\.sql\t", sql, re.M))
+    canonical_grants = "\n".join(canonical_section)
     check("composite function arguments stay schema-qualified in ACL statements",
           (not renewal_delivery_applied)
-          or ("ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in sql
-              and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in sql))
+          or ("ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in canonical_grants
+              and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in canonical_grants))
     membership_query = re.search(
         r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
         r".*?from pg_auth_members m.*?order by 1;",
@@ -213,6 +259,21 @@ def main():
     )
     check("membership renderer de-duplicates only identical rendered lines",
           membership_query is not None)
+    check("membership renderer excludes LOGIN roles from bundle replay",
+          membership_query is not None
+          and "and not gr.rolcanlogin" in membership_query.group(0))
+
+    for direct_login in ("carr_jobs", "carr_gate_zero_producer",
+                         "carr_foundation_assurance_oracle"):
+        check(f"snapshot does not replay {direct_login} as a membership bundle",
+              f"grant {direct_login} to neondb_owner;" not in canonical_section)
+
+    check("all five ACL renderers retain the foundation-assurance oracle",
+          generator.count("('carr_foundation_assurance_oracle')") == 5)
+    check("all five ACL renderers retain the ownership issuer bundle",
+          generator.count("('carr_ownership_issuer')") == 5)
+    check("ownership issuer generations are membership-only renderer targets",
+          "('carr_ownership_issuer_g1'), ('carr_ownership_issuer_g2')" in generator)
 
     # THE WIDENING GUARD. Every grantee in the file must be an app role —
     # or neondb_owner, on membership lines only. Anything else means some
@@ -247,4 +308,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

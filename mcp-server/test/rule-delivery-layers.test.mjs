@@ -51,6 +51,18 @@ function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX,
       calls.push({ sql, params });
       if (/from v_compiled_rules/i.test(sql))
         return { rows: [...rows(SHARED, false), ...rows(PERSONAL, true)] };
+      if (/with guidance_registry as/i.test(sql)) {
+        const state = mapState || { map_versions: 1, map_digest: "d".repeat(64),
+                                    tagged_rules: plan.length };
+        const declared = params[5] || [];
+        return { rows: [{ state: null, manifest_digest: null,
+          standing_rules: [], projection_summary: [], mode, ...state,
+          pack_index: packIndex,
+          delivery_plan: plan
+            .filter(r => r.scope === "shared" || (params[4] && r.scope === params[4]))
+            .map(r => ({ ...r, selected: r.load_layer === "layer0"
+                         || r.packs.some(p => declared.includes(p)) })) }] };
+      }
       if (/v_guidance_registry_state/i.test(sql)) return { rows: [] };
       if (/with registry as/i.test(sql)) {
         const state = mapState || { map_versions: 1, map_digest: "d".repeat(64),
@@ -243,6 +255,11 @@ test("an active guidance registry cannot narrow the boot below Layer 0", async (
   const c = client({ mode: "enforced" });
   const inner = c.query;
   c.query = async (sql, params = []) => {
+    if (/with guidance_registry as/i.test(sql)) {
+      const result = await inner(sql, params);
+      return { rows: [{ ...result.rows[0], state: "active",
+        manifest_digest: "d".repeat(64), standing_rules: [], projection_summary: [] }] };
+    }
     if (/v_guidance_registry_state/i.test(sql))
       return { rows: [{ state: "active", manifest_digest: "d".repeat(64) }] };
     if (/ops\.standing_guidance/i.test(sql))

@@ -230,7 +230,7 @@ gates_name_the_move() {  # gates_name_the_move <failed check names...>
     esac
   done
   [ "$named" = "1" ] || printf '        \033[36mTHE MOVE\033[0m  %s\n' \
-    "each check above names its own remedy in its output — read the 12-line tail, not just this summary line" >&2
+    "each check above names its own remedy in its output — read the failing check's own output above, not just this summary line" >&2
 }
 
 INHERIT_ASKED=0
@@ -250,7 +250,15 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
     printf '        \033[33mattribution\033[0m  %s\n' "$verdict" >&2
     return 0
   fi
-  [ "$rc" -eq 0 ] || return 0         # 2 = cannot tell; behave exactly as before
+  if [ "$rc" -ne 0 ]; then
+    # rc=2 is "cannot tell", and it used to return in silence -- so a run that
+    # took this path looked exactly like a run where the probe never fired, and
+    # the widened replay tail that rc=0/rc=1 print was never reached. The full
+    # run still proceeds, unchanged; it just says why no attribution appears.
+    printf '        \033[33mattribution\033[0m  %s\n' \
+      "the inherited-from-main probe could not tell whether main fails $name too; no attribution, the full run proceeds" >&2
+    return 0
+  fi
   bad gates "INHERITED FROM MAIN: $name"
   echo "$verdict" >&2
   echo
@@ -264,12 +272,68 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
   exit 1
 }
 
+# A FAILING GATE'S OUTPUT IS THE DIAGNOSIS, so print enough of it to contain the
+# failing line. `tail -12` was narrower than the suites this class reports on:
+# tools/room-bridge/test_engineering_dispatch_adapter_unit.py prints one ok line
+# per check across 32 checks, so on 2026-09-11 the twelve-line window showed the
+# last eleven ok lines and the exclusion summary while the FAIL itself sat above
+# the window -- a hosted-Linux-only red whose cause was unreadable from the log,
+# through two full CI rounds. Whole log when it is short enough to read, else the
+# last 80 lines. Nothing else about failure handling changes.
+#
+# AND IT IS REDACTED, because widening the window widened the exposure with it.
+# This prints a CHILD PROCESS'S captured stdout and stderr -- up to a whole gate
+# log -- into a CI log that outlives the run and that more people can read than
+# can read the tree. Twelve lines of that was already a hole; eighty, or the
+# whole file, is a bigger one. The redaction is ops/ci-secret-scan.py's own
+# --redact filter over its own PATTERNS list, NOT a pattern set written here: a
+# second list drifts from the first, and the drift is invisible because each
+# side looks correct alone. A pattern added to the scanner now protects this
+# print too, with nothing to remember.
+#
+# FAIL-CLOSED, and this is the one place that trade goes that way. If the filter
+# cannot run, the window is WITHHELD and the log path is named instead. Printing
+# unredacted child output because the redactor was missing would publish the
+# credential to argue that a diagnosis is more important than not publishing it;
+# the log is still on disk and the reader is told exactly where.
+fail_tail() {  # fail_tail <logfile>
+  local log="$1" lines window
+  lines="$(wc -l < "$log" 2>/dev/null | tr -d ' ')"
+  [ -n "$lines" ] || lines=0
+  window="$(mktemp)"
+  if [ "$lines" -lt 200 ]; then cat "$log" >"$window" 2>/dev/null
+  else tail -80 "$log" >"$window" 2>/dev/null; fi
+  if "$PY" ops/ci-secret-scan.py --redact <"$window" >"$window.redacted" 2>/dev/null; then
+    cat "$window.redacted" >&2
+  else
+    printf '        %s\n' "gate output WITHHELD: ops/ci-secret-scan.py --redact could not run, and unredacted child output is never printed. The captured log is at $log." >&2
+  fi
+  rm -f "$window" "$window.redacted"
+}
+
 # ---------------------------------------------------------------- unit
+# F03_PARITY_REQUIRE_PYTHON=1, ON THE mcp-server SUITE ONLY. The V5-F03
+# cross-language parity suite (mcp-server/test/f03-design-contract-parity.test.mjs)
+# drives the portable Python validator over the same corpus as the server one,
+# and every one of its cross-language cases SKIPS when no Python 3.9+ interpreter
+# can be found. Unset, that is a skip inside a suite whose runner reports pass, so
+# it never reaches this file's SKIPPED accounting and --strict cannot see it: a
+# runner that lost its interpreter would keep printing a green unit class while
+# the half of the parity claim that compares the two validators stopped running.
+# SKIPPED IS NOT PASSED, per the header. The variable is the suite's own
+# documented escape from that — set, a missing interpreter FAILS instead of
+# skipping, which is correct here because CI has Python by construction.
+# Deliberately scoped to this one command: control-room's and workspace's
+# environment, every other class, and the semantics of every test on a machine
+# that HAS Python are all unchanged.
 check_unit() {
   local failed_pkgs=""
   for pkg in mcp-server control-room workspace; do
     [ -f "$pkg/package.json" ] || continue
-    if ! run_quiet "$LOGDIR/unit-$pkg.log" npm --prefix "$pkg" test; then
+    local unit_env=""
+    [ "$pkg" = "mcp-server" ] && unit_env="F03_PARITY_REQUIRE_PYTHON=1"
+    # shellcheck disable=SC2086  # one deliberate assignment, or nothing at all
+    if ! run_quiet "$LOGDIR/unit-$pkg.log" env $unit_env npm --prefix "$pkg" test; then
       failed_pkgs="$failed_pkgs $pkg"
       echo "--- $pkg ---" >&2
       tail -25 "$LOGDIR/unit-$pkg.log" >&2
@@ -512,8 +576,22 @@ PYEOF
   # the git-isolation selftest and the class-level tree fingerprint enforce
   # that — and each still runs under the same per-suite timeout helper.
   # Pool width: hosted runners have 4 vCPUs; CARR_CI_GATE_JOBS overrides.
+  # SUBDIRECTORIES ARE NOT REACHED BY A ONE-LEVEL GLOB, and that is how
+  # tools/room-bridge/ came to hold fifteen test files that no loop in this
+  # file matched. Twelve *_unit.py suites and test_activation_reliability.py
+  # pass on this interpreter today and had never been asked at a merge gate;
+  # they are named below. The two *_live.py suites are NOT collected on
+  # purpose: they boot a real Claude desk and a real Codex app-server, and
+  # ops/ci-selftest.py's UNCOLLECTED_BY_DECISION carries the written reason
+  # for each. Widening this line is the fix for today; the durable half is
+  # that selftest, which now WALKS the tree at any depth and fails on any
+  # test-shaped file that neither a glob here nor that list accounts for. So
+  # the next tools/somewhere/deeper/test_x.py turns a gate red asking to be
+  # decided, rather than sitting in the tree looking like coverage.
   local eligible=""
-  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py \
+           tools/room-bridge/test_*_unit.py \
+           tools/room-bridge/test_activation_reliability.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
     local why; why="$(excluded_reason "$base")"
@@ -568,7 +646,7 @@ PYEOF
         "$base" "$(tail -1 "$LOGDIR/gate-$base.log" 2>/dev/null)" >&2
     elif [ "$grc" -ne 0 ]; then
       inherited_abort "$base" "$PY" "$t"
-      failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2
+      failures="$failures $base"; fail_tail "$LOGDIR/gate-$base.log"
     fi
   done
 
@@ -579,7 +657,7 @@ PYEOF
   # Some things under test here ARE shell (mcp-server/smoke-reads.sh), and a
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
-  # counting, same captured log and same 12-line tail on failure.
+  # counting, same captured log and the same fail_tail print on failure.
   if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh tools/test_*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
@@ -602,7 +680,7 @@ PYEOF
       break
     elif [ "$grc" -ne 0 ]; then
       inherited_abort "$sbase" "$t"
-      failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2
+      failures="$failures $sbase"; fail_tail "$LOGDIR/gate-$sbase.log"
     fi
   done; fi
   # gate-integrity is the baseline check itself: a gate edited without a
@@ -874,6 +952,21 @@ check_pushfloor() {
     fi
   fi
 
+  # A registry successor changes the active version returned by the inventory
+  # graph. The 2026-09-22 v41 successor reached hosted unit before this exact
+  # assertion ran locally, costing a full strict-CI cycle. These two focused
+  # tests take under a second together and keep the local floor bounded.
+  if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Eq \
+      '^(migrations/[0-9]+_.*scac.*\.sql|mcp-server/src/scac-mutation-registry\.v[0-9]+\.generated\.js|ops/config/scac-registry-.*\.json)$'; then
+    ran="$ran scac-atlas"
+    run_quiet "$LOGDIR/pushfloor-scac-atlas.log" node --test \
+      mcp-server/test/atlas-inventory-graph-read.test.mjs \
+      mcp-server/test/atlas-inventory-graph-web.test.mjs \
+      || { tail -18 "$LOGDIR/pushfloor-scac-atlas.log" >&2
+           floor_fail scac-atlas \
+             "active registry changed; update the Atlas version contract or repair its reader before push"; }
+  fi
+
   # ── predictor: the gate-impact closure ───────────────────────────────────
   local gate_surface=""
   if [ -n "$changed" ]; then
@@ -942,25 +1035,25 @@ check_pushfloor() {
                "a new mechanism must name the doctrine section explaining it (open loop 504 — knowledge ships with the mechanism)."; }
     fi
 
-    # ...but never when the full gates class is ALREADY going to run in this
-    # invocation. Hosted CI runs every class, so the fallback there would simply
-    # run the 252 suites twice. It is a substitute for the class, not a second
-    # copy of it.
+    # A TOUCHED GATE WITH NO PAIRED SELFTEST IS NAMED, NOT PAID FOR LOCALLY.
+    #
+    # This branch used to run the WHOLE gates class here. That is a class-scale
+    # suite on the push path, and the floor is the only thing between a session
+    # and --no-verify, which disables this hook entirely — so an expensive floor
+    # costs the cheap checks above it too.
+    #
+    # Nothing stopped being checked: `gates` is a REQUIRED status check on main
+    # (ops/ci.sh --strict), so the class still runs hosted on this exact push
+    # before anything merges. Only the payment moved. Name the gate, name the
+    # command for anyone who wants the class now, and name the durable fix.
+    #
+    # Silent when the class is already selected: hosted runs every class, so the
+    # note would only advise running something already running.
     if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
-      # THE DELIBERATE EXPENSE. Codex's chair asked for this by name: when the
-      # gate impact cannot be classified, fall back to the full gates class
-      # locally rather than assume it is fine. It costs ~222s and it fires only
-      # on a gate with no paired selftest, which is itself worth fixing.
-      printf '        \033[33mfull gates\033[0m — no paired selftest for:%s — running the whole class rather than guessing\n' \
+      ran="$ran gates-deferred"
+      printf '        \033[33mdeferred\033[0m   gates — no paired selftest for:%s — the full class runs hosted (required check on main)\n' \
         "$unclassified" >&2
-      ran="$ran full-gates-fallback"
-      check_gates
-      if [ -n "$FAILED_CLASSES" ]; then
-        case " $FAILED_CLASSES " in
-          *" gates "*) floor_fail gates-fallback \
-            "give each gate a paired ops/<gate>-selftest.py so this push does not have to run all 252 suites." ;;
-        esac
-      fi
+      printf '                   run it locally now: ops/ci.sh --only gates · durable fix: add ops/<gate>-selftest.py\n' >&2
     fi
   fi
 
@@ -1097,6 +1190,9 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
 
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
+  # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
+  # its digest recomputation, append-only guards and post-acceptance freeze are
+  # database behaviour, and a regex over the migration would prove none of it.
   # Run every slice's transaction-scoped acceptance proof on the same
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
@@ -1106,7 +1202,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-operations-slice2-postgres.sql \
     mcp-server/test/tour-property-identity-jurisdiction-postgres.sql \
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
-    mcp-server/test/tour-delivery-data-plane-postgres.sql; do
+    mcp-server/test/tour-delivery-data-plane-postgres.sql \
+    mcp-server/test/work-portfolio-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \
@@ -1116,6 +1213,290 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       return
     fi
   done
+
+  if ! run_quiet "$LOGDIR/model-role-store-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/model-role-store-postgres.sql; then
+    tail -30 "$LOGDIR/model-role-store-postgres.log" >&2
+    bad migration "Model Room role-store PostgreSQL acceptance failed"
+    return
+  fi
+
+  # Continuity bindings and append-only records need actual PostgreSQL proof.
+  if ! run_quiet "$LOGDIR/codex-continuity-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/codex-continuity-postgres.sql; then
+    tail -30 "$LOGDIR/codex-continuity-postgres.log" >&2
+    bad migration "Codex continuity PostgreSQL acceptance failed"
+    return
+  fi
+  if ! run_quiet "$LOGDIR/claude-continuity-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/claude-continuity-postgres.sql; then
+    tail -30 "$LOGDIR/claude-continuity-postgres.log" >&2
+    bad migration "Claude continuity PostgreSQL acceptance failed"
+    return
+  fi
+
+  # THE GATE ZERO CANDIDATE-KEY RACE, added 2026-09-13 (PR 1014 correction).
+  # ops.gate_zero_record_read_only_outcome collapses a retry onto the row that
+  # exists, and whether it does so under CONCURRENCY is a property of one unique
+  # index and two transactions -- a mock can show what the handler sends and
+  # nothing about that. Two connections, one candidate, one durable row; the
+  # earlier lookup-then-insert shape fails this with a unique_violation, which is
+  # what makes it a falsifier rather than a demonstration.
+  #
+  # IT COMMITS, deliberately: an uncommitted race proves nothing, and the record
+  # is append-only by trigger so the rows stay. This class already builds and
+  # removes a throwaway database, which is the only place that is acceptable --
+  # and the proof refuses a DSN that is not loopback on its own account.
+  #
+  # NOTHING AFTER THIS POINT READS ops.gate_zero_read_only_outcome, so it runs
+  # last among the proofs rather than first.
+  # THE GATE ZERO SEAT BOUNDARY, added 2026-09-14 (PR 1014 third correction).
+  # Standing-rule amendment 9: seat-only write is enforced by CONNECTION ROLE.
+  # Whether carr_writer is refused, whether the dedicated login role is admitted,
+  # and whether re-granting carr_writer turns the privilege proof red are three
+  # properties of real grants and a real session_user -- none of which a mock can
+  # show. It runs BEFORE the race proof: it creates the dedicated login role that
+  # proof now needs, and its own mutation control restores the revoke before it
+  # returns, which it asserts rather than assumes.
+  if [ -f mcp-server/test/gate-zero-outcome-role-boundary.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-role-boundary.log" \
+         node --test mcp-server/test/gate-zero-outcome-role-boundary.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-role-boundary.log" >&2
+      bad migration "the Gate Zero producer seat/connection-role boundary proof failed"
+      return
+    fi
+  fi
+
+  if [ -f mcp-server/test/foundation-assurance-oracle-role-boundary.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_FOUNDATION_ASSURANCE_DB_REQUIRED=1 \
+         run_quiet "$LOGDIR/foundation-assurance-role-boundary.log" \
+         node --test mcp-server/test/foundation-assurance-oracle-role-boundary.v5.test.mjs; then
+      tail -30 "$LOGDIR/foundation-assurance-role-boundary.log" >&2
+      bad migration "the foundation-assurance oracle connection-role boundary proof failed"
+      return
+    fi
+  fi
+
+  # WR-000110. The V5-F02 program-controller seam boundary: which connection
+  # role may record which fact kind, and whether the column-scoped SELECT grants
+  # actually reach the writer bundle the admission door connects as. Both are
+  # properties of real grants and a real session_user, which no mock can show.
+  if [ -f mcp-server/test/program-controller-census-role-boundary.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_PROGRAM_CONTROLLER_DB_REQUIRED=1 \
+         run_quiet "$LOGDIR/program-controller-role-boundary.log" \
+         node --test mcp-server/test/program-controller-census-role-boundary.v5.test.mjs; then
+      tail -30 "$LOGDIR/program-controller-role-boundary.log" >&2
+      bad migration "the program-controller seam connection-role boundary proof failed"
+      return
+    fi
+  fi
+
+  # The measured catalog-delta proof: exactly two secdef rows for the privileged
+  # writer and none for public, no relation or column DML row naming any of the
+  # seven new tables, and four rows for the one v29 registration function.
+  if [ -f mcp-server/test/program-controller-census-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/program-controller-census-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/program-controller-census-postgres.sql; then
+      tail -30 "$LOGDIR/program-controller-census-postgres.log" >&2
+      bad migration "the program-controller seam catalog and ledger proof failed"
+      return
+    fi
+  fi
+
+  # WR-000111/112/113: the three acceptance suites that need a real database.
+  # Each one SKIPS in the unit class and is REQUIRED here, so a silent skip in
+  # the lane that can actually prove them is a failure rather than a pass.
+  # WR-000117 joins the same loop for the same reason: its identity cases mint
+  # TWO actors and compare two answers, which only a database can do.
+  # WR-000119 joins it too: its centre case mints a link with NO ack beside a
+  # dispatch with no link at all and asserts the two nulls are different, which
+  # is a claim about rows and not about a shaper.
+  # V5-UX-B11 Meeting Mode joins it: two devices, one row, one acceptance and
+  # one processing owner are claims about real locks on separate connections.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode; do
+    if [ -f "mcp-server/test/$proof.test.mjs" ]; then
+      if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
+           CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
+           CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
+           CARR_MEETING_MODE_DB_REQUIRED=1 \
+           run_quiet "$LOGDIR/$proof-db.log" \
+           node --test "mcp-server/test/$proof.test.mjs"; then
+        tail -30 "$LOGDIR/$proof-db.log" >&2
+        bad migration "the $proof database acceptance proof failed"
+        return
+      fi
+    fi
+  done
+
+  # WR-000111: the producer cost ledger's role-boundary and catalog proof --
+  # the compare-and-swap refusal from TWO direct authority callers, the refusal
+  # row that writes zero entries, and the revoked direct writes.
+  if [ -f mcp-server/test/producer-cost-ledger-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/producer-cost-ledger-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/producer-cost-ledger-postgres.sql; then
+      tail -30 "$LOGDIR/producer-cost-ledger-postgres.log" >&2
+      bad migration "the producer cost ledger admission and grant proof failed"
+      return
+    fi
+  fi
+
+  # WR-000112: server-derived attribution and the access list, proved on the
+  # connection each grant actually names.
+  if [ -f mcp-server/test/doc-conversation-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/doc-conversation-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/doc-conversation-postgres.sql; then
+      tail -30 "$LOGDIR/doc-conversation-postgres.log" >&2
+      bad migration "the Doc conversation attribution and access-list proof failed"
+      return
+    fi
+  fi
+
+  # WR-000114: the three Doc conversation write doors, proved where only a
+  # database can prove them -- the creator rule raised INSIDE the definer under
+  # a second acting-actor context (a check written in the JavaScript handler is
+  # bypassed by exactly this call), the revoke that stamps rather than deletes,
+  # and the execute grants on the connection each verb actually arrives on.
+  if [ -f mcp-server/test/doc-conversation-write-doors-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/doc-conversation-write-doors-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/doc-conversation-write-doors-postgres.sql; then
+      tail -30 "$LOGDIR/doc-conversation-write-doors-postgres.log" >&2
+      bad migration "the Doc conversation write-door creator and grant proof failed"
+      return
+    fi
+  fi
+
+  # WR-000115: the Doc conversation list door, proved where only a database can
+  # prove it -- the returned SET following the acting-actor context set directly
+  # rather than any argument, the three-part cursor surviving a pin that lands
+  # between page one and page two (the case a two-part cursor fails), and the
+  # execute grant on the exact argument types.
+  if [ -f mcp-server/test/doc-conversation-list-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/doc-conversation-list-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/doc-conversation-list-postgres.sql; then
+      tail -30 "$LOGDIR/doc-conversation-list-postgres.log" >&2
+      bad migration "the Doc conversation list attribution, paging and grant proof failed"
+      return
+    fi
+  fi
+
+  # WR-000113: the mint's grant from both sides, the recipient resolver on the
+  # WRITER login, the no-sponsor no-op, quiet hours and the status boundary.
+  if [ -f mcp-server/test/r03-notifications-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/r03-notifications-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/r03-notifications-postgres.sql; then
+      tail -30 "$LOGDIR/r03-notifications-postgres.log" >&2
+      bad migration "the R03 notification mint, recipient and status proof failed"
+      return
+    fi
+  fi
+
+  # WR-000116: defaults without an insert, the compare-and-swap, the first save,
+  # the replay, the two named refusals and quiet_now across a midnight
+  # wrap-around in a zone the proof's own SQL chooses.
+  if [ -f mcp-server/test/notification-preferences-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/notification-preferences-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/notification-preferences-postgres.sql; then
+      tail -30 "$LOGDIR/notification-preferences-postgres.log" >&2
+      bad migration "the notification preference read, write and quiet-hours proof failed"
+      return
+    fi
+  fi
+
+  # WR-000117: the permission filter asserted PER BOOK across four books with
+  # four different owner columns, the count comparison, a root distinguished
+  # from an unrecorded parent, the age rule computed from each row's own
+  # timestamp, the two proven dispatch stages with the named unavailable
+  # reason, an opaque cursor that neither skips nor repeats, and no row count
+  # moved by either read.
+  if [ -f mcp-server/test/session-identity-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/session-identity-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/session-identity-postgres.sql; then
+      tail -30 "$LOGDIR/session-identity-postgres.log" >&2
+      bad migration "the session identity projection, filter and dispatch proof failed"
+      return
+    fi
+  fi
+
+  # WR-000119: the dispatch spine proved where only a database can prove it --
+  # append-only by GRANT rather than by convention, one link per assignment and
+  # none for a turn never assigned, the hermes-pilot restriction raised inside
+  # the definer, a dangling ack refused by the reference, a second ack of one
+  # stage refused by the unique constraint, all four stages evidenced in one
+  # answer, proved distinguished from body_match, not_acknowledged distinguished
+  # from no_dispatch_spine per row, and public.partner_room_turn never written.
+  if [ -f mcp-server/test/dispatch-spine-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/dispatch-spine-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/dispatch-spine-postgres.sql; then
+      tail -30 "$LOGDIR/dispatch-spine-postgres.log" >&2
+      bad migration "the dispatch spine link, acknowledgement and per-dispatch reason proof failed"
+      return
+    fi
+  fi
+
+  if [ -f mcp-server/test/foundation-assurance-minimum-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/foundation-assurance-minimum-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/foundation-assurance-minimum-postgres.sql; then
+      tail -30 "$LOGDIR/foundation-assurance-minimum-postgres.log" >&2
+      bad migration "the foundation-assurance candidate/evidence atomic binding proof failed"
+      return
+    fi
+  fi
+
+  if [ -f mcp-server/test/gate-zero-outcome-record-race.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-outcome-race.log" \
+         node --test mcp-server/test/gate-zero-outcome-record-race.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-outcome-race.log" >&2
+      bad migration "the Gate Zero outcome candidate-key race proof failed"
+      return
+    fi
+  fi
+
+  # THE TAGGED OUTCOME DIGEST, added 2026-09-13 (the third release candidate's
+  # refusal, finding 2). r7's amended receipt_payload_digest_rule declares the
+  # payload digest of consumer-gate-receipt.v1 as digest(["consumer-gate-receipt.v1",
+  # receipt]) and states that a plain digest over the receipt does not satisfy
+  # it. Whether ops.gate_zero_outcome_digest() and artifact-trust.js produce the
+  # SAME BYTES over that preimage is a question about two canonicalizers, one in
+  # plpgsql; a mock that called the JS one would agree with it by construction and
+  # prove nothing. It runs after the race proof because it records a row.
+  if [ -f mcp-server/test/gate-zero-outcome-digest-tagged.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-digest-tagged.log" \
+         node --test mcp-server/test/gate-zero-outcome-digest-tagged.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-digest-tagged.log" >&2
+      bad migration "the Gate Zero tagged outcome-digest cross-implementation proof failed"
+      return
+    fi
+  fi
+
+  # The real release recorder files service candidates with carr_jobs provenance.
+  # This proof also checks that the historical Gate Zero reader accepts only a
+  # separately authenticated human-authority row. Both paths use real grants
+  # and a real manifest on a disposable database.
+  if [ -f mcp-server/test/gate-zero-candidate-authority-filing.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_GATE_ZERO_RACE_REQUIRED=1 \
+         run_quiet "$LOGDIR/gate-zero-candidate-filing.log" \
+         node --test mcp-server/test/gate-zero-candidate-authority-filing.test.mjs; then
+      tail -30 "$LOGDIR/gate-zero-candidate-filing.log" >&2
+      bad migration "the service-candidate and historical Gate Zero provenance proof failed"
+      return
+    fi
+  fi
 
   # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
   # for months this class built a database where the app roles existed and held
@@ -1383,6 +1764,13 @@ check_binding() {
 # verb loss is caught before it is a release.
 check_artifact() {
   local shipping marker
+  if ! run_quiet "$LOGDIR/doctorcre-artifact.log" "$PY" \
+      tools/release-manifest.py doctorcre-artifact verify \
+      --pin ops/config/doctorcre-artifact.v1.json; then
+    tail -20 "$LOGDIR/doctorcre-artifact.log" >&2
+    bad artifact "the exact DoctorCRE release artifact did not match its CARR pin"
+    return
+  fi
   shipping="$(sh ops/verb-count.sh "$REPO/mcp-server" 2>"$LOGDIR/artifact.log")"
   if [ -z "$shipping" ]; then
     cat "$LOGDIR/artifact.log" >&2

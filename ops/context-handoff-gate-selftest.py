@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable acceptance for session_context_lifecycle_gate_v1."""
+"""Executable acceptance for session_context_lifecycle_gate_v2."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks/context-handoff-gate.py"
 RUNNER = REPO / "hooks/hook-meter-run.py"
-MANIFEST = REPO / "ops/config/session-context-lifecycle.v1.json"
+MANIFEST = REPO / "ops/config/session-context-lifecycle.v2.json"
 APPROVED_BASE = "01c3977580e8d9d490380f6c2135d1c4d7d20fd7"
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -74,7 +75,7 @@ def base_env(root: Path, **extra):
     env.update({
         "CARR_SESSION_CONTEXT_STATE_DIR": str(root / "state"),
         "CARR_SESSION_CONTEXT_MANIFEST": str(root / "manifest.json"),
-        "CARR_CONTEXT_AUDIT": "off",
+        "CARR_CONTEXT_AUDIT": str(root / "audit.jsonl"),
         "CARR_HOOK_TELEMETRY": str(root / "telemetry.jsonl"),
         "CARR_HOOK_FIXTURE": "1",
     })
@@ -107,6 +108,12 @@ def run_hook(root: Path, event: str, transcript: Path | None, *,
             parsed = json.loads(proc.stdout)
         except Exception:
             parsed = {"unparseable": proc.stdout}
+    audit_path = root / "audit.jsonl"
+    if isinstance(parsed, dict) and audit_path.exists():
+        rows = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+        matching = [row for row in rows if row.get("session") == session and row.get("event") == event]
+        if matching:
+            parsed["_audit"] = matching[-1]
     return proc, parsed
 
 
@@ -123,7 +130,24 @@ def run_cli(root: Path, *args):
 
 
 def reason(parsed):
-    if not isinstance(parsed, dict) or parsed.get("decision") != "block":
+    if not isinstance(parsed, dict):
+        return None
+    audit = parsed.get("_audit")
+    if isinstance(audit, dict) and audit.get("action") == "ANNOUNCE":
+        signal = audit.get("signal") if isinstance(audit.get("signal"), dict) else {}
+        reason_code = audit.get("reason") or signal.get("reason")
+        return {"reason": reason_code, "signal": {"window_tier": "control_error", **signal,
+            "signal_reason": signal.get("signal_reason") or reason_code}}
+    context = parsed.get("hookSpecificOutput", {}).get("additionalContext")
+    if isinstance(context, str):
+        warning = re.search(r"warning \(([A-Z_]+)\)", context)
+        if warning:
+            return {"reason": warning.group(1), "signal": {
+                "signal_reason": warning.group(1), "window_tier": "control_error"}}
+        if "headroom notice" in context:
+            return {"reason": "CONTEXT_HANDOFF_REQUIRED", "signal": {
+                "signal_reason": "CONTEXT_HANDOFF_REQUIRED"}}
+    if parsed.get("decision") != "block":
         return None
     try:
         return json.loads(parsed["reason"])
@@ -496,8 +520,15 @@ def fallback_and_hook_sequence():
               (typed_bad_proc.returncode, typed_bad_out,
                typed_bad_proc.stderr))
 
+        # The Stop headroom notice fires once per task, so a repeated Stop on
+        # the same task is silent; the spoof probe below therefore needs its
+        # own fresh task to observe which event the hook actually honored.
+        proc, repeat_stop = run_hook(root, "Stop", transcript, session="sequence")
+        check("Stop headroom notice fires once per task",
+              proc.returncode == 0 and repeat_stop is None, repeat_stop)
+
         spoofed_stop = json.dumps({
-            "hook_event_name": "PostToolUse", "session_id": "sequence",
+            "hook_event_name": "PostToolUse", "session_id": "spoofed-sequence",
             "prompt_id": "spoofed-stop", "tool_use_id": "spoofed-tool",
             "transcript_path": str(transcript),
         })
@@ -3276,14 +3307,43 @@ def static_contract_cases():
     # would be false. It is dropped from this list, not silently: the map is now
     # covered by gate-integrity's contract hash (re-blessed in the same R02
     # commit) and by control-catalog-parity-gate. stop_latch.py,
-    # ops/stop_latch-selftest.py and ops/config/codex-hooks.json stay frozen —
-    # R02 did not touch them, and the context-handoff scoping guard for those is
-    # unchanged.
-    for path in ("ops/stop_latch-selftest.py", "ops/config/codex-hooks.json"):
+    # ops/stop_latch-selftest.py stays frozen. Codex hook continuity additions
+    # are checked below against the historical PreToolUse/Stop groups.
+    for path in ("ops/stop_latch-selftest.py",):
         base = subprocess.check_output(
             ["git", "show",
              f"01c3977580e8d9d490380f6c2135d1c4d7d20fd7:{path}"], cwd=REPO)
         check(path + " is explicitly unchanged", base == (REPO / path).read_bytes())
+    old_codex = json.loads(subprocess.check_output(
+        ["git", "show", "01c3977580e8d9d490380f6c2135d1c4d7d20fd7:ops/config/codex-hooks.json"],
+        cwd=REPO))
+    current_codex = json.loads((REPO / "ops/config/codex-hooks.json").read_text())
+    old_hooks = old_codex.get("hooks", {})
+    current_hooks = current_codex.get("hooks", {})
+    normalized_pretool = json.loads(json.dumps(current_hooks.get("PreToolUse")))
+    allowed_exec_matchers = {
+        "^(Bash|exec_command|functions\\.exec)$": "^(Bash|functions\\.exec)$",
+        "^(Bash|exec_command|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$":
+            "^(Bash|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
+    }
+    for group in normalized_pretool:
+        group["matcher"] = allowed_exec_matchers.get(group.get("matcher"), group.get("matcher"))
+    # The rule-pack drift gate moved onto the repo interpreter through the hook
+    # meter on 2026-09-23 (ops/rule-delivery-cutover.py HOOK_TEMPLATE). The
+    # historical Stop group is otherwise unchanged; compare it with that one
+    # command spelled the historical way.
+    normalized_stop = json.loads(json.dumps(current_hooks.get("Stop")))
+    for group in normalized_stop or []:
+        for hook in group.get("hooks", []):
+            if hook.get("command") == "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py":
+                hook["command"] = "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py"
+    check("Codex historical PreToolUse/Stop groups preserved",
+          normalized_pretool == old_hooks.get("PreToolUse")
+          and normalized_stop == old_hooks.get("Stop"),
+          {"historical": old_hooks, "current": {k: current_hooks.get(k) for k in ("PreToolUse", "Stop")}})
+    check("Codex continuity lifecycle groups registered",
+          all(event in current_hooks for event in ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")),
+          sorted(current_hooks))
 
 
 def main():

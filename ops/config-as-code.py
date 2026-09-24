@@ -36,21 +36,32 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py check      # drift report; exit 1 if any. THE DEFAULT.
     ops/config-as-code.py pull       # machine -> repo (capture what is live)
     ops/config-as-code.py install    # repo -> machine (deploy; needs --apply)
+    ops/config-as-code.py install-codex-continuity --apply
+    ops/config-as-code.py verify-codex-continuity
+    ops/config-as-code.py install-codex-continuity-mcp --apply
+    ops/config-as-code.py verify-codex-continuity-mcp
+    ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
 the config we think we have", which is the question nobody could answer tonight.
 """
 
+import copy
 import json
 import os
 import plistlib
 import re
+import select
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
+from lib import claude_continuity_config as continuity_config
+from lib import machine_role
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
@@ -107,13 +118,15 @@ PREREQUISITE_CHECK = machine_prerequisites
 # ran its git commands against the live checkout instead, rewrote local main
 # onto its own seed commits, and marked the repository core.bare true.
 #
-# THIS FILE WAS ASSESSED AS READ-ONLY AND THAT WAS WRONG. Line ~844 runs
-# `git -C REPO config core.hooksPath ops/githooks`, which is a WRITE. Under an
-# inherited GIT_DIR that write lands in whatever repository the variable names,
-# not in REPO — so `config-as-code.py install` invoked from a hook could point a
-# different repository's hooksPath at this repo's ops/githooks. The four reads
-# are the milder half: misdirected, they yield a wrong drift verdict rather than
-# a wrong write, which is a lie in a checker whose entire job is detecting drift.
+# THIS FILE WAS ASSESSED AS READ-ONLY AND THAT WAS WRONG. It used to run
+# `git -C REPO config core.hooksPath ops/githooks`, which is a WRITE: under an
+# inherited GIT_DIR it lands in whatever repository the variable names, not in
+# REPO, so `config-as-code.py install` invoked from a hook could point a
+# different repository's hooksPath at this repo's ops/githooks. That write is
+# GONE — core.hooksPath is no-touch now — which removes the worst case but not
+# the reason for this scrubber: the remaining git calls are reads, and
+# misdirected they yield a wrong drift verdict, which is a lie in a checker
+# whose entire job is detecting drift.
 #
 # GIT_CONFIG_COUNT is the subtle one and is why this list is not just GIT_DIR:
 # its KEY_<n>/VALUE_<n> pairs can set core.worktree and relocate a call with
@@ -162,6 +175,11 @@ TASKS_REPO = os.path.join(REPO, "ops", "scheduled-tasks")
 TASKS_QUARANTINE = os.path.join(
     HOME, ".claude", "scheduled-tasks-quarantine", "carr-primary-only"
 )
+# Same idea for launch agents: a primary-only plist found on a secondary is
+# unloaded and moved here, never deleted, so demoting a Mac is reversible.
+LAUNCHD_QUARANTINE = os.path.join(
+    HOME, "Library", "LaunchAgents-quarantine", "carr-primary-only"
+)
 LAUNCHD_SRC = os.path.join(HOME, "Library", "LaunchAgents")
 LAUNCHD_REPO = os.path.join(REPO, "ops", "launchd")
 LAUNCHD_ALT_REPO = {
@@ -173,6 +191,19 @@ HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
 CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
 CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
+CLAUDE_CONTINUITY_MODE_FILE = os.path.join(
+    HOME, ".config", "carr", "claude-continuity-mode.json"
+)
+CLAUDE_MCP_CONFIG = os.path.join(HOME, ".claude.json")
+CODEX_CONTINUITY_EVENTS = ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")
+CODEX_CONTINUITY_APP_EVENTS = {
+    "PreCompact": "preCompact",
+    "PostCompact": "postCompact",
+    "SessionStart": "sessionStart",
+    "UserPromptSubmit": "userPromptSubmit",
+}
+CODEX_APP_SERVER_TIMEOUT_SECONDS = 15
+CODEX_APP_SERVER_OUTPUT_LIMIT = 4 * 1024 * 1024
 CODEX_PERMISSIONS_REPO = os.path.join(REPO, "ops", "config", "codex-permissions.toml")
 CODEX_PERMISSIONS_BEGIN = "# >>> CARR managed permissions >>>"
 CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
@@ -253,6 +284,26 @@ DEFINITION_ONLY: dict[str, str] = {
     # first accepted shadow receipt on record; the wrapper pins --mode shadow,
     # so installing activates evidence production only — legacy schedules keep
     # running until each workflow's replacement is accepted at its own tier.
+    "com.carr.repo-hygiene-janitor.plist":
+        "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
+        "gate is a separately reviewed live-effect packet, so the definition is "
+        "written down and left uninstalled until that packet is approved",
+    # com.carr.gate-zero-canary.plist was held here from 2026-09-11 to
+    # 2026-09-12 with the reason "starting a schedule is Joe's act, so the
+    # definition is written down and left uninstalled until he takes it off this
+    # list deliberately". THAT ACT IS TAKEN. Joe's blanket approval (decision
+    # idempotency 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84, "I approve everything")
+    # together with his 2026-09-13 ruling that the orchestrator runs release and
+    # activation commands itself is the deliberate removal the reason asked for,
+    # so the canary reconciles like any other agent and the next `install
+    # --apply` loads it. What this buys is the only question Gate Zero's fourth
+    # predecessor actually asks: a hand dispatch through bin/run-scheduled.sh
+    # proves the WRAPPER mints a receipt, and only launchd firing on its own
+    # proves the SCHEDULER does -- which is what `step:scheduler-active-receipt`
+    # reads. ops/config-as-code-selftest.py now asserts this release, the way it
+    # already asserts the 2026-08-26 control-plane tick cutover, so putting the
+    # canary back on the list is a change a test refuses rather than a silent
+    # revert.
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
@@ -412,32 +463,16 @@ def scheduled_task_install_plan():
     return {"install": [], **secondary_scheduled_task_state()}
 
 
-def _owner_email():
-    """The repo owner's git identity, read from the ONE place it is written.
-
-    ops/githooks/pre-push has decided since 2026-08-03 who may push to main, and
-    duplicating its constant here would create the two-copies problem this file
-    exists to prevent. Parsed rather than re-declared; the shell hook is left
-    untouched so the push path cannot regress. Missing or unreadable returns ""
-    which makes IS_PRIMARY false, and false is the safe direction: a machine
-    that cannot prove it is primary installs only the per-machine jobs.
-    """
-    try:
-        with open(os.path.join(REPO, "ops", "githooks", "pre-push"),
-                  encoding="utf-8") as fh:
-            m = re.search(r'^OWNER_EMAIL="([^"]+)"', fh.read(), re.M)
-        return m.group(1) if m else ""
-    except OSError:
-        return ""
-
-
 def _is_primary():
-    owner = _owner_email()
-    if not owner:
-        return False
+    """Primary is decided in ONE place, lib/machine_role.py: the per-machine
+    marker ~/.config/carr/machine-role.json when present, else git user.email
+    against OWNER_EMAIL in ops/githooks/pre-push (the determinant this file
+    used alone until 2026-09-23). Anything unprovable returns False, and false
+    is the safe direction: a machine that cannot prove it is primary installs
+    only the per-machine jobs."""
     me = subprocess.run(["git", "-C", REPO, "config", "user.email"],
                         capture_output=True, text=True, env=_git_env()).stdout.strip()
-    return me == owner
+    return machine_role.is_primary(REPO, git_email=me)
 
 
 IS_PRIMARY = _is_primary()
@@ -533,7 +568,7 @@ def hook_scripts_untracked():
 
     Returns a list of (path, why) — repo-relative where possible.
     """
-    block = live_hooks_block()
+    block = raw_live_hooks_block()
     if not block:
         return []
     out = []
@@ -576,11 +611,60 @@ def launchd_repo_path(name):
     return LAUNCHD_ALT_REPO.get(name, os.path.join(LAUNCHD_REPO, name))
 
 
-def live_hooks_block():
+def raw_live_hooks_block():
     raw = read(SETTINGS)
     if raw is None:
         return None
-    return json.loads(raw).get("hooks")
+    document = json.loads(raw)
+    if not isinstance(document, dict):
+        raise RuntimeError("Claude settings root must be an object")
+    return document.get("hooks")
+
+
+def _read_claude_mcp_config():
+    raw = read(CLAUDE_MCP_CONFIG)
+    if raw is None:
+        return {}
+    if len(raw.encode("utf-8")) > continuity_config.MAX_CONFIG_BYTES:
+        raise RuntimeError(f"Claude MCP configuration is too large: {CLAUDE_MCP_CONFIG}")
+    try:
+        document = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Claude MCP configuration is invalid: {CLAUDE_MCP_CONFIG}") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError("Claude MCP configuration root must be an object")
+    return document
+
+
+def claude_continuity_state(live_hooks, *, require_complete):
+    """Validate the independent continuity receipt, hooks, and MCP binding."""
+    contract = continuity_config.load(REPO)
+    mode = continuity_config.read_mode(CLAUDE_CONTINUITY_MODE_FILE, contract)
+    installed = mode in continuity_config.MODES
+    continuity_config.validate_hooks(
+        live_hooks, contract, require_complete=installed and require_complete
+    )
+    mcp = _read_claude_mcp_config()
+    continuity_config.validate_mcp(mcp, contract, required=installed)
+    servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+    has_mcp = isinstance(servers, dict) and continuity_config.MCP_SERVER_NAME in servers
+    if not installed and (continuity_config.has_overlay(live_hooks) or has_mcp):
+        raise RuntimeError(
+            "Claude continuity hooks or MCP binding exist without a valid installed mode; "
+            "use install-claude-continuity.py remove --apply"
+        )
+    return contract, mode
+
+
+def live_hooks_block():
+    """Return the base hook projection after validating the live overlay."""
+    live = raw_live_hooks_block()
+    contract, mode = claude_continuity_state(
+        {} if live is None else live, require_complete=True
+    )
+    if live is None:
+        return None
+    return continuity_config.strip_installed_overlay(live, contract, mode)
 
 
 def live_codex_hooks():
@@ -606,7 +690,12 @@ def is_carr_hook_command(command):
     if not isinstance(command, str):
         return False
     candidate = command.replace("\\", "/").lower()
-    return "/carr-system/hooks/" in candidate or "/my drive/carr ai/hooks/" in candidate
+    return ("/carr-system/hooks/" in candidate or
+            "/my drive/carr ai/hooks/" in candidate or
+            "/carr-system/ops/codex-continuity-hook.py" in candidate or
+            "/my drive/carr ai/ops/codex-continuity-hook.py" in candidate or
+            "{{repo}}/hooks/" in candidate or
+            "{{repo}}/ops/codex-continuity-hook.py" in candidate)
 
 
 def carr_owned_hooks_document(document, include_events=()):
@@ -655,6 +744,47 @@ def merge_codex_carr_hooks(live, desired):
                 retained.append(clone)
         desired_groups = (desired_hooks or {}).get(event, [])
         retained.extend(json.loads(json.dumps(desired_groups)) if isinstance(desired_groups, list) else [])
+        live_hooks[event] = retained
+    result["hooks"] = live_hooks
+    return result
+
+
+def is_codex_continuity_hook_command(command):
+    """Recognize only the continuity wrapper owned by the narrow installer."""
+    if not isinstance(command, str):
+        return False
+    candidate = command.replace("\\", "/").lower()
+    return ("/carr-system/ops/codex-continuity-hook.py" in candidate or
+            "/my drive/carr ai/ops/codex-continuity-hook.py" in candidate or
+            "{{repo}}/ops/codex-continuity-hook.py" in candidate)
+
+
+def merge_codex_continuity_hooks(live, desired):
+    """Merge continuity groups while preserving all other Codex configuration."""
+    result = json.loads(json.dumps(live if isinstance(live, dict) else {}))
+    live_hooks = result.get("hooks")
+    if not isinstance(live_hooks, dict):
+        live_hooks = {}
+    desired_hooks = desired.get("hooks") if isinstance(desired, dict) else {}
+    if not isinstance(desired_hooks, dict):
+        desired_hooks = {}
+    for event in CODEX_CONTINUITY_EVENTS:
+        retained = []
+        groups = live_hooks.get(event, [])
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, dict):
+                retained.append(group)
+                continue
+            non_continuity = [hook for hook in group.get("hooks", [])
+                              if not (isinstance(hook, dict) and
+                                      is_codex_continuity_hook_command(hook.get("command")))]
+            if non_continuity:
+                clone = dict(group)
+                clone["hooks"] = non_continuity
+                retained.append(clone)
+        desired_groups = desired_hooks.get(event, [])
+        if isinstance(desired_groups, list):
+            retained.extend(json.loads(json.dumps(desired_groups)))
         live_hooks[event] = retained
     result["hooks"] = live_hooks
     return result
@@ -723,6 +853,515 @@ def codex_configuration_state():
     return "absent"
 
 
+def codex_app_server_request(method, params):
+    """Call one bounded experimental Codex app-server method over JSONL stdio."""
+    command = [os.environ.get("CARR_CODEX_CLI", "codex"), "app-server", "--stdio"]
+    messages = [
+        {"method": "initialize", "id": 1, "params": {
+            "clientInfo": {"name": "carr-continuity-installer", "version": "1.0.0"},
+            "capabilities": {"experimentalApi": True},
+        }},
+        {"method": "initialized", "params": {}},
+        {"method": method, "id": 2, "params": params},
+    ]
+    process = None
+    try:
+        process = subprocess.Popen(
+            command, cwd=REPO, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise RuntimeError("Codex app-server stdio pipes were not created")
+        payload = b"".join((json.dumps(message) + "\n").encode() for message in messages)
+        process.stdin.write(payload)
+        process.stdin.flush()
+        deadline = time.monotonic() + CODEX_APP_SERVER_TIMEOUT_SECONDS
+        buffer = b""
+        stderr_buffer = b""
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select(
+                [process.stdout, process.stderr], [], [],
+                min(0.25, max(0, deadline - time.monotonic())))
+            if not ready:
+                if process.poll() is not None:
+                    break
+                continue
+            for stream in ready:
+                chunk = os.read(stream.fileno(), 65536)
+                if stream is process.stderr:
+                    stderr_buffer += chunk
+                    if len(stderr_buffer) > CODEX_APP_SERVER_OUTPUT_LIMIT:
+                        raise RuntimeError("Codex app-server stderr exceeded the 4 MiB limit")
+                    continue
+                if not chunk:
+                    continue
+                buffer += chunk
+                if len(buffer) > CODEX_APP_SERVER_OUTPUT_LIMIT:
+                    raise RuntimeError("Codex app-server response exceeded the 4 MiB limit")
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    response = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError(f"Codex app-server returned invalid JSON ({exc})") from exc
+                if response.get("id") != 2:
+                    continue
+                if "error" in response:
+                    error = response.get("error") or {}
+                    message = str(error.get("message") or "request refused")[:500]
+                    raise RuntimeError(f"Codex app-server {method} failed: {message}")
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise RuntimeError(f"Codex app-server {method} returned no object result")
+                return result
+        raise RuntimeError(f"Codex app-server {method} did not answer within "
+                           f"{CODEX_APP_SERVER_TIMEOUT_SECONDS}s")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Codex app-server {method} unavailable ({exc})") from exc
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+
+def canonical_codex_continuity_hooks():
+    """Load and validate the four exact rendered hook contracts from the repo."""
+    source = read(CODEX_HOOKS_REPO)
+    if source is None:
+        raise RuntimeError(f"no tracked Codex hooks at {CODEX_HOOKS_REPO}")
+    try:
+        document = json.loads(concrete(source))
+    except Exception as exc:
+        raise RuntimeError(f"{CODEX_HOOKS_REPO} is not valid JSON ({exc})") from exc
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        raise RuntimeError(f"{CODEX_HOOKS_REPO} must contain a hooks object")
+    desired = {"hooks": {event: hooks.get(event, [])
+                          for event in CODEX_CONTINUITY_EVENTS}}
+    contracts = []
+    for event in CODEX_CONTINUITY_EVENTS:
+        groups = desired["hooks"][event]
+        if (not isinstance(groups, list) or len(groups) != 1 or
+                not isinstance(groups[0], dict)):
+            raise RuntimeError(f"{event} must contain exactly one continuity group")
+        group = groups[0]
+        handlers = group.get("hooks")
+        if (not isinstance(handlers, list) or len(handlers) != 1 or
+                not isinstance(handlers[0], dict)):
+            raise RuntimeError(f"{event} must contain exactly one continuity handler")
+        handler = handlers[0]
+        if (handler.get("type") != "command" or
+                not isinstance(handler.get("command"), str) or
+                not isinstance(handler.get("timeout"), int) or
+                isinstance(handler.get("timeout"), bool)):
+            raise RuntimeError(f"{event} continuity handler shape is invalid")
+        contracts.append({
+            "eventName": CODEX_CONTINUITY_APP_EVENTS[event],
+            "command": handler["command"],
+            "matcher": group.get("matcher"),
+            "handlerType": handler["type"],
+            "timeoutSec": handler["timeout"],
+        })
+    return desired, contracts
+
+
+def codex_continuity_hook_entries(contracts, require_trusted=False):
+    """Return the exact four user hook instances observed by Codex itself."""
+    response = codex_app_server_request("hooks/list", {"cwds": [REPO]})
+    data = response.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        raise RuntimeError("hooks/list did not return exactly one requested working directory")
+    listing = data[0]
+    if listing.get("errors"):
+        raise RuntimeError("hooks/list reported hook configuration errors")
+    hooks = listing.get("hooks")
+    if not isinstance(hooks, list):
+        raise RuntimeError("hooks/list returned no hook array")
+    source_path = os.path.realpath(CODEX_HOOKS_SRC)
+    candidates = []
+    for contract in contracts:
+        matches = [hook for hook in hooks if isinstance(hook, dict) and
+                   os.path.realpath(str(hook.get("sourcePath") or "")) == source_path and
+                   all(hook.get(field) == value for field, value in contract.items())]
+        if len(matches) != 1:
+            raise RuntimeError("hooks/list did not uniquely match the canonical "
+                               f"{contract['eventName']} continuity hook")
+        candidates.append(matches[0])
+    keys = set()
+    for hook in candidates:
+        key = hook.get("key")
+        current_hash = hook.get("currentHash")
+        if (hook.get("source") != "user" or hook.get("handlerType") != "command" or
+                hook.get("enabled") is not True or not isinstance(key, str) or not key or
+                not isinstance(current_hash, str) or
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", current_hash)):
+            raise RuntimeError("hooks/list returned malformed continuity hook metadata")
+        if key in keys:
+            raise RuntimeError("hooks/list returned a duplicate continuity hook key")
+        keys.add(key)
+        if require_trusted and hook.get("trustStatus") != "trusted":
+            raise RuntimeError(f"{hook.get('eventName')} continuity hook is "
+                               f"{hook.get('trustStatus') or 'not trusted'}")
+    return candidates
+
+
+def _codex_user_config_layer():
+    response = codex_app_server_request(
+        "config/read", {"cwd": REPO, "includeLayers": True})
+    layers = response.get("layers")
+    if not isinstance(layers, list):
+        raise RuntimeError("config/read returned no configuration layers")
+    expected_path = os.path.realpath(CODEX_CONFIG)
+    matches = []
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        name = layer.get("name")
+        if (isinstance(name, dict) and name.get("type") == "user" and
+                os.path.realpath(str(name.get("file") or "")) == expected_path):
+            matches.append(layer)
+    if len(matches) != 1:
+        raise RuntimeError("config/read did not uniquely identify the user config layer")
+    layer = matches[0]
+    if (not isinstance(layer.get("config"), dict) or
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", str(layer.get("version") or ""))):
+        raise RuntimeError("config/read returned malformed user config metadata")
+    return layer
+
+
+def _without_continuity_trust(config, keys):
+    """Mask only selected trust tables so every unrelated value can be compared."""
+    masked = copy.deepcopy(config)
+    hooks = masked.get("hooks")
+    if not isinstance(hooks, dict):
+        return masked
+    state = hooks.get("state")
+    if isinstance(state, dict):
+        for key in keys:
+            state.pop(key, None)
+        if not state:
+            hooks.pop("state", None)
+    if not hooks:
+        masked.pop("hooks", None)
+    return masked
+
+
+def _hook_trust_state(config):
+    hooks = config.get("hooks") if isinstance(config, dict) else None
+    state = hooks.get("state") if isinstance(hooks, dict) else None
+    return state if isinstance(state, dict) else {}
+
+
+def _write_codex_config_edits(edits, expected_version):
+    result = codex_app_server_request("config/batchWrite", {
+        "edits": edits,
+        "expectedVersion": expected_version,
+        "filePath": CODEX_CONFIG,
+        "reloadUserConfig": True,
+    })
+    if (result.get("status") != "ok" or
+            os.path.realpath(str(result.get("filePath") or "")) !=
+            os.path.realpath(CODEX_CONFIG)):
+        raise RuntimeError("config/batchWrite did not confirm an effective user-config write")
+    return _codex_user_config_layer()
+
+
+def _restore_codex_continuity_trust(before_config, keys):
+    """Restore selected trust tables without reverting unrelated concurrent config."""
+    current = _codex_user_config_layer()
+    current_config = current["config"]
+    before_state = _hook_trust_state(before_config)
+    current_state = _hook_trust_state(current_config)
+    edits = []
+    for key in keys:
+        prior = before_state.get(key)
+        if key in before_state and current_state.get(key) != prior:
+            edits.append({"keyPath": f"hooks.state.{json.dumps(key)}",
+                          "value": copy.deepcopy(prior), "mergeStrategy": "replace"})
+        elif key not in before_state and key in current_state:
+            edits.append({"keyPath": f"hooks.state.{json.dumps(key)}",
+                          "value": None, "mergeStrategy": "upsert"})
+    if not edits:
+        return
+    restored = _write_codex_config_edits(edits, current["version"])
+    if (_without_continuity_trust(current_config, keys) !=
+            _without_continuity_trust(restored["config"], keys)):
+        raise RuntimeError("trust rollback changed unrelated Codex configuration")
+    restored_state = _hook_trust_state(restored["config"])
+    if any((key in before_state) != (key in restored_state) or
+           (key in before_state and restored_state.get(key) != before_state.get(key))
+           for key in keys):
+        raise RuntimeError("trust rollback did not restore prior continuity entries")
+
+
+def persist_codex_continuity_trust(entries, contracts, remove=False):
+    """Atomically upsert or delete only four app-server-derived trust tables."""
+    before = _codex_user_config_layer()
+    config = before["config"]
+    state = _hook_trust_state(config)
+    expected = {entry["key"]: entry["currentHash"] for entry in entries}
+    if remove:
+        if all(key not in state for key in expected):
+            print("  Codex continuity hook trust already absent")
+            return 0
+    elif (all(state.get(key) == {"trusted_hash": current_hash}
+              for key, current_hash in expected.items()) and
+          all(entry.get("trustStatus") == "trusted" for entry in entries)):
+        print("  Codex continuity hooks already trusted")
+        return 0
+
+    edits = []
+    for key, current_hash in expected.items():
+        quoted = json.dumps(key)
+        edits.append({
+            "keyPath": (f"hooks.state.{quoted}" if remove else
+                        f"hooks.state.{quoted}.trusted_hash"),
+            "value": None if remove else current_hash,
+            "mergeStrategy": "upsert",
+        })
+    try:
+        after = _write_codex_config_edits(edits, before["version"])
+        after_state = _hook_trust_state(after["config"])
+        if _without_continuity_trust(config, expected) != _without_continuity_trust(
+                after["config"], expected):
+            raise RuntimeError("config/batchWrite changed unrelated Codex configuration")
+        if remove:
+            if any(key in after_state for key in expected):
+                raise RuntimeError("config/batchWrite left continuity trust entries behind")
+            print("  REMOVED   four Codex continuity hook trust entries")
+            return 0
+        if any(after_state.get(key) != {"trusted_hash": current_hash}
+               for key, current_hash in expected.items()):
+            raise RuntimeError("config/batchWrite did not persist exact continuity hook hashes")
+        verified = codex_continuity_hook_entries(contracts, require_trusted=True)
+        observed = {entry["key"]: entry["currentHash"] for entry in verified}
+        if observed != expected:
+            raise RuntimeError("hooks/list changed continuity identity during trust installation")
+        print("  TRUSTED   four Codex continuity hooks using authoritative current hashes")
+        return 0
+    except RuntimeError as exc:
+        try:
+            _restore_codex_continuity_trust(config, expected)
+        except RuntimeError as rollback_exc:
+            raise RuntimeError(f"{exc}; trust rollback failed ({rollback_exc})") from exc
+        raise
+
+
+def cmd_install_codex_continuity_mcp(apply=False):
+    """Install the existing adapter in explicit Codex mode with scoped permissions."""
+    import copy
+    import hashlib
+    import shutil
+    from pathlib import Path
+    ROOT = Path(__file__).resolve().parents[1]
+    DEST = Path.home() / '.config/carr/codex-continuity'
+    SERVER = 'carr-codex-continuity'
+    TOOLS = ['codex-checkpoint', 'codex-read-recovery']
+    FILES = ['continuity-stdio-proxy.mjs', 'continuity-reference-manifest.mjs',
+             'local-client-auth.mjs']
+    node = shutil.which('node')
+    if not node:
+        raise RuntimeError('Node runtime unavailable')
+    before = _codex_user_config_layer()
+    expected = copy.deepcopy(before['config'])
+    servers = expected.setdefault('mcp_servers', {})
+    servers[SERVER] = {'command': node, 'args': [str(DEST / FILES[0]), '--codex'],
+                       'enabled_tools': TOOLS,
+                       'tools': {name: {'approval_mode': 'approve'} for name in TOOLS}}
+    # Remove the two broken duplicate routes in Codex only. All other tools and
+    # authentication settings retain their previous values.
+    for name in ('carr', 'carr-records'):
+        if name in servers:
+            disabled = servers[name].setdefault('disabled_tools', [])
+            for tool in TOOLS:
+                if tool not in disabled:
+                    disabled.append(tool)
+    if apply:
+        DEST.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for name in FILES:
+            source = ROOT / 'mcp-server' / name
+            target = DEST / name
+            if not target.exists() or target.read_bytes() != source.read_bytes():
+                temporary = DEST / (name + '.tmp')
+                temporary.write_bytes(source.read_bytes())
+                temporary.replace(target)
+        edits = [{'keyPath': 'mcp_servers.' + SERVER, 'value': servers[SERVER], 'mergeStrategy': 'replace'}]
+        for name in ('carr', 'carr-records'):
+            if name in servers:
+                edits.append({'keyPath': 'mcp_servers.' + name + '.disabled_tools',
+                              'value': servers[name]['disabled_tools'], 'mergeStrategy': 'replace'})
+        after = _write_codex_config_edits(edits, before['version'])
+    else:
+        after = before
+    if after['config'] != expected:
+        raise RuntimeError('Codex continuity MCP configuration differs from the expected scoped update')
+    for name in FILES:
+        if (DEST / name).read_bytes() != (ROOT / 'mcp-server' / name).read_bytes():
+            raise RuntimeError('Installed adapter differs from source: ' + name)
+    print(json.dumps({'ok': True, 'server': SERVER, 'tools': TOOLS,
+                      'credential': 'existing dedicated Codex credential, never copied into configuration',
+                      'adapter_sha256': hashlib.sha256((DEST / FILES[0]).read_bytes()).hexdigest()}))
+
+    return 0
+
+
+def cmd_verify_codex_continuity():
+    """Read-only proof that Codex will automatically execute all four hooks."""
+    try:
+        _, contracts = canonical_codex_continuity_hooks()
+        entries = codex_continuity_hook_entries(contracts, require_trusted=True)
+    except RuntimeError as exc:
+        print(f"ERROR: Codex continuity trust verification failed ({exc}).")
+        return 1
+    for entry in entries:
+        print(f"  TRUSTED   {entry['eventName']}: {entry['currentHash']}")
+    print("  Codex hooks/list confirms all four continuity hooks are trusted")
+    return 0
+
+
+def _write_codex_hooks_text(raw):
+    """Atomically write or restore hooks.json after validating its object shape."""
+    if raw is None:
+        if os.path.exists(CODEX_HOOKS_SRC):
+            os.unlink(CODEX_HOOKS_SRC)
+        return
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Codex hooks restore content is not a JSON object")
+    parent = os.path.dirname(CODEX_HOOKS_SRC)
+    os.makedirs(parent, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent,
+                                         prefix=".codex-continuity-", delete=False) as fh:
+            temp_path = fh.name
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, CODEX_HOOKS_SRC)
+        check = json.loads(read(CODEX_HOOKS_SRC))
+        if not isinstance(check, dict):
+            raise RuntimeError("written Codex hooks are not a JSON object")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def cmd_install_codex_continuity(apply, remove=False):
+    """Install only the four CARR continuity hook groups owned by Codex.
+
+    This intentionally has no relationship to the broad machine reconciler:
+    it never reads or writes Claude settings, Codex permissions, LaunchAgents,
+    scheduled tasks, git configuration, or any other global client state.
+    """
+    try:
+        canonical_desired, contracts = canonical_codex_continuity_hooks()
+    except RuntimeError as exc:
+        print(f"ERROR: Codex continuity hook source is invalid ({exc}).")
+        return 1
+    desired = ({"hooks": {event: [] for event in CODEX_CONTINUITY_EVENTS}}
+               if remove else canonical_desired)
+
+    raw_live = read(CODEX_HOOKS_SRC)
+    if raw_live is None:
+        if remove:
+            print("  No Codex continuity hook file exists; nothing to remove")
+            return 0
+        live = {}
+        print(f"  Codex continuity hooks: {'WILL CREATE' if apply else 'would create'} {CODEX_HOOKS_SRC}")
+    else:
+        try:
+            live = json.loads(raw_live)
+        except Exception as exc:
+            print(f"ERROR: {CODEX_HOOKS_SRC} is not valid JSON ({exc}) — refusing to touch it.")
+            return 1
+        if not isinstance(live, dict):
+            print(f"ERROR: {CODEX_HOOKS_SRC} must contain a JSON object — refusing to touch it.")
+            return 1
+
+    merged = merge_codex_continuity_hooks(live, desired)
+    rendered = json.dumps(merged, indent=2) + "\n"
+    unchanged = raw_live is not None and raw_live == rendered
+    if unchanged and (remove or not apply):
+        print("  Codex continuity hooks already match the repo (unrelated configuration preserved)")
+        return 0
+    if not apply:
+        print(f"  Codex continuity hooks: would write {CODEX_HOOKS_SRC}")
+        action = "remove-codex-continuity" if remove else "install-codex-continuity"
+        print(f"\nDRY RUN — nothing written. Re-run with `{action} --apply`.")
+        return 0
+
+    # Removal must capture Codex's exact keys and prior trust state before
+    # hooks.json stops exposing them. Its trust deletion is phase one; if the
+    # hook rewrite fails, only those four trust tables are restored. Install is
+    # the inverse: hooks.json is phase one and is restored if trust phase two
+    # refuses.
+    entries = None
+    removal_config = None
+    if remove:
+        try:
+            entries = codex_continuity_hook_entries(contracts)
+            removal_config = _codex_user_config_layer()["config"]
+            persist_codex_continuity_trust(entries, contracts, remove=True)
+        except RuntimeError as exc:
+            print(f"ERROR: Codex continuity trust removal failed ({exc}).")
+            return 1
+
+    if not unchanged:
+        parent = os.path.dirname(CODEX_HOOKS_SRC)
+        os.makedirs(parent, exist_ok=True)
+        backup = CODEX_HOOKS_SRC + ".bak-codex-continuity"
+        had_live = raw_live is not None
+        if had_live:
+            shutil.copy2(CODEX_HOOKS_SRC, backup)
+        try:
+            _write_codex_hooks_text(rendered)
+        except Exception as exc:
+            rollback_errors = []
+            try:
+                _write_codex_hooks_text(raw_live)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"hooks rollback failed ({rollback_exc})")
+            if remove and removal_config is not None and entries is not None:
+                try:
+                    _restore_codex_continuity_trust(
+                        removal_config, {entry["key"] for entry in entries})
+                except RuntimeError as rollback_exc:
+                    rollback_errors.append(f"trust rollback failed ({rollback_exc})")
+            suffix = ("; " + "; ".join(rollback_errors)) if rollback_errors else ""
+            print(f"ERROR: Codex continuity hook write failed ({exc}){suffix}.")
+            return 1
+        print(f"  WROTE OK  {CODEX_HOOKS_SRC} "
+              f"(backup: {backup if had_live else 'none; new file'})")
+    else:
+        print("  Codex continuity hooks already match the repo "
+              "(unrelated configuration preserved)")
+
+    if remove:
+        return 0
+    try:
+        entries = codex_continuity_hook_entries(contracts)
+        persist_codex_continuity_trust(entries, contracts)
+    except RuntimeError as exc:
+        try:
+            _write_codex_hooks_text(raw_live)
+        except Exception as rollback_exc:
+            print("ERROR: Codex continuity trust update failed "
+                  f"({exc}); hooks rollback failed ({rollback_exc}).")
+            return 1
+        action = "removal" if remove else "installation"
+        print(f"ERROR: Codex continuity trust {action} failed ({exc}); "
+              "prior hooks restored.")
+        return 1
+    return 0
+
+
 # A DEFINITION-ONLY TASK IS NOT A MISSING JOB. Four calendar-prebrief contracts
 # live in the repository and say, in their own bodies, "This definition is
 # disabled. Do not create, enable, or invoke any scheduler." Their activation
@@ -775,12 +1414,41 @@ def pairs():
                         None, source))
 
     for f in carr_plists():
+        # A DEFINITION_ONLY agent is deliberately absent from the machine, so it
+        # is not an ordinary tracked pair in either direction. Its absence is the
+        # intended state rather than drift, and a copy that HAS been installed
+        # must not be waved through merely because its body matches the repo —
+        # matching bytes are exactly what an unauthorized install would have.
+        # It is reported separately, by presence, in cmd_check.
+        if f in DEFINITION_ONLY:
+            continue
         out.append((f"launchd {f}", portable(read(os.path.join(LAUNCHD_SRC, f))),
                     launchd_repo_path(f)))
     return out
 
 
+def definition_only_installed_plists():
+    """DEFINITION_ONLY agents that are on the machine and must not be.
+
+    Body equality is deliberately not consulted: the failure being detected is
+    that an agent whose activation gate has not passed exists in LaunchAgents at
+    all, and an install performed from this very repo is the likeliest way for
+    that to happen.
+    """
+    return [f for f in carr_plists() if f in DEFINITION_ONLY]
+
+
 def cmd_check():
+    # THE OBSERVATION TRAILS THE VERDICT. _cmd_check returns this command's
+    # whole judgement; the core.hooksPath line is appended after it because it
+    # is an observation about a no-touch setting, so it changes neither the exit
+    # code nor the first line the health row reads.
+    verdict = _cmd_check()
+    print(git_hooks_path_report())
+    return verdict
+
+
+def _cmd_check():
     # SEVERITY IS NOT COSMETIC HERE, and the 2026-08-08 incident is why.
     # A tracked item MISSING from the machine means a protection that was
     # supposed to be running is not running. A tracked item merely DIFFERENT
@@ -805,8 +1473,14 @@ def cmd_check():
               f"{CODEX_CONFIG} does not; refusing to treat this client as absent")
         return 1
 
+    try:
+        configured_pairs = pairs()
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"config-as-code: CLAUDE CONTINUITY INVALID — {exc}")
+        return 1
+
     missing, untracked, different = [], [], []
-    for label, live, repo_path in pairs():
+    for label, live, repo_path in configured_pairs:
         have = read(repo_path)
         if live is None:
             missing.append((label, "on disk: MISSING; in repo: present"))
@@ -826,13 +1500,28 @@ def cmd_check():
          "present on disk; this machine has no approved scope for it")
         for name in secondary_task_violations
     ]
+    # An agent held as a definition is expected to be absent, so its absence is
+    # silence. Its PRESENCE is the finding, and it is a finding whatever the
+    # body says: an activation that skipped its gate installs the repo's own
+    # bytes, so byte equality is the shape the failure takes rather than
+    # evidence against it.
+    disallowed += [
+        (f"launchd {name} (DEFINITION ONLY, MUST NOT BE INSTALLED)",
+         f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
+        for name in definition_only_installed_plists()
+    ]
     drift = missing + untracked + different + disallowed
     if not drift and not unversioned:
         prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
         if prerequisite_report:
             print(prerequisite_report)
             return 1
-        print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
+        mode = continuity_config.read_mode(
+            CLAUDE_CONTINUITY_MODE_FILE, continuity_config.load(REPO)
+        )
+        if mode in continuity_config.MODES:
+            print(f"  Claude continuity overlay and dedicated MCP binding verified; mode={mode}")
+        print(f"config-as-code: OK — {len(configured_pairs)} items, repo matches machine")
         return 0
     if not drift and unversioned:
         print(f"config-as-code: UNVERSIONED HOOKS — {len(unversioned)} script(s) the live "
@@ -849,7 +1538,7 @@ def cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(pairs()) + len(disallowed)
+    checked_items = len(configured_pairs) + len(disallowed)
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -889,8 +1578,13 @@ def cmd_pull(apply):
         print("ERROR: unapproved scheduled task(s) on this secondary machine: "
               + ", ".join(disallowed) + "; refusing to capture them into the repo.")
         return 1
+    try:
+        configured_pairs = pairs()
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: Claude continuity configuration is invalid ({exc}); refusing to capture it.")
+        return 1
     wrote = 0
-    for label, live, repo_path in pairs():
+    for label, live, repo_path in configured_pairs:
         if live is None:
             print(f"  SKIP  {label} (not on this machine; left in the repo)")
             continue
@@ -905,6 +1599,28 @@ def cmd_pull(apply):
     print(f"\n{wrote} item(s) {'written' if apply else 'would be written'}."
           + ("" if apply else " Re-run with --apply."))
     return 0
+
+
+def retire_primary_only_plist(filename, live, apply):
+    """Unload a primary-only job found on a secondary and move its plist aside.
+
+    Happens when a Mac that used to be primary is marked secondary. Returns
+    ``retired``, ``planned`` (dry run), or ``failed``. Refuses to overwrite an
+    earlier quarantined copy, same rule as the scheduled-task quarantine.
+    """
+    dest = os.path.join(LAUNCHD_QUARANTINE, filename)
+    if not apply:
+        print(f"  would retire  {filename} (primary-only job on a secondary) -> {dest}")
+        return "planned"
+    if os.path.exists(dest):
+        print(f"  ERROR  quarantine already has {dest}; refusing to overwrite it")
+        return "failed"
+    subprocess.run(["launchctl", "unload", "-w", live],
+                   capture_output=True, check=False)
+    os.makedirs(LAUNCHD_QUARANTINE, exist_ok=True)
+    shutil.move(live, dest)
+    print(f"  RETIRED  {filename} (primary-only job on a secondary) -> {dest}")
+    return "retired"
 
 
 def install_launchd_plist(filename, dest, body, body_matches):
@@ -948,6 +1664,114 @@ def install_launchd_plist(filename, dest, body, body_matches):
     return "failed"
 
 
+def write_claude_settings(path, document, before, sink=None):
+    """Write the settings render, optionally exposing one redacted fake witness.
+
+    ``sink`` is a callback used by the R06 fixture only.  Production supplies no
+    callback, and this function contains no notification or target transport.
+    The callback runs before overwrite and receives hashes/counts, never config
+    values or paths.
+    """
+    import hashlib
+    body = json.dumps(document, indent=2) + "\n"
+    before = before if before is not None else ""
+    permissions = document.get("permissions", {}) if isinstance(document, dict) else {}
+    permission_count = sum(
+        len(value) for value in permissions.values() if isinstance(value, list)
+    ) if isinstance(permissions, dict) else 0
+    event = {
+        "schema_version": "r06-config-pre-overwrite.v1",
+        "writer": "ops/config-as-code.py:write_claude_settings",
+        "target_class": "claude-settings",
+        "before_sha256": "sha256:" + hashlib.sha256(before.encode("utf-8")).hexdigest(),
+        "after_sha256": "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "preserved_top_level_key_count": len([
+            key for key in document if key != "hooks"
+        ]) if isinstance(document, dict) else 0,
+        "preserved_permission_entry_count": permission_count,
+        "actual_notification": False,
+    }
+    if sink is not None:
+        sink(copy.deepcopy(event))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return event
+
+
+# The conventional relative value, kept as the name of a shape this file
+# RECOGNISES. Nothing here writes it: see git_hooks_path_report.
+GIT_HOOKS_RELATIVE = "ops/githooks"
+
+
+def git_hooks_path_conformant(configured: str, hooks_dir: str) -> bool:
+    """Does an ALREADY-CONFIGURED core.hooksPath point at these same hooks?
+
+    A CLASSIFIER FOR A REPORT, NOT A TEST THAT PRECEDES A WRITE. core.hooksPath
+    lives in the single .git/config that every worktree on this machine reads,
+    and install writes it under no condition whatever (see cmd_install). The
+    only caller is git_hooks_path_report, which prints what is observed so a
+    human can decide; a future caller that uses this answer to write the setting
+    would reintroduce exactly the hazard the no-touch contract exists for.
+
+    Install used to write the relative "ops/githooks" unconditionally, which
+    turned the ABSOLUTE canonical path — the designed state, as
+    ops/prepush-floor-selftest.py says in as many words ("always canonical's —
+    core.hooksPath is one shared path for every worktree") — into a value git
+    resolves against whichever worktree is running the hook. On a Mac carrying
+    ~50 worktrees that silently changed WHICH pre-push runs in every one of
+    them, as a side effect of a job about plists. Found and undone by hand
+    during the 2026-09-12 Gate Zero activation.
+
+    The test is RESOLUTION, not string equality, so two shapes count as pointing
+    at these hooks:
+
+      * the literal relative default, which git resolves per worktree but which
+        names this repository's own hooks directory in a canonical checkout;
+      * an absolute path whose realpath is this repo's ops/githooks.
+
+    A relative value that is NOT the default is non-conformant: git resolves it
+    per worktree, so it names no single directory this function could honestly
+    compare. Unset is non-conformant too — that is the fresh-machine case, and
+    it is now reported rather than repaired.
+    """
+    if not configured:
+        return False
+    if configured == GIT_HOOKS_RELATIVE:
+        return True
+    if not os.path.isabs(configured):
+        return False
+    return os.path.realpath(configured) == os.path.realpath(hooks_dir)
+
+
+def git_hooks_path_report() -> str:
+    """One INFORMATIONAL line for `check`: what core.hooksPath is. Nothing else.
+
+    This is the whole of what this tool has to say about a setting it may not
+    touch. It never writes, and it never contributes to the check's exit code —
+    a machine whose hooks are off is not drift this installer may silently
+    repair, because the repair would land in the one .git/config every worktree
+    shares. It is printed AFTER the verdict on purpose: the health row reads
+    only the first line of this command's output, so an observation must never
+    take the headline from a real finding.
+    """
+    hooks_dir = os.path.join(REPO, "ops", "githooks")
+    observed = subprocess.run(
+        ["git", "-C", REPO, "config", "--get", "core.hooksPath"],
+        capture_output=True, text=True, env=_git_env()).stdout.strip()
+    if not observed:
+        note = (f"unset, so git runs .git/hooks and the guards in {hooks_dir} "
+                "are not active; enabling them is a human's own command")
+    elif observed == GIT_HOOKS_RELATIVE:
+        note = ("the relative default, which git resolves against whichever "
+                "worktree runs the hook")
+    elif git_hooks_path_conformant(observed, hooks_dir):
+        note = f"resolves to {hooks_dir}"
+    else:
+        note = (f"does not resolve to {hooks_dir}; this machine's hook "
+                "resolution is someone else's deliberate setting")
+    return f"  git core.hooksPath: {observed or '(unset)'} — {note} [informational]"
+
+
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     settings_existed = os.path.exists(SETTINGS)
@@ -965,7 +1789,28 @@ def cmd_install(apply):
         print(f"ERROR: no tracked hooks block at {HOOKS_REPO}. Run `pull` first.")
         return 1
 
-    planned = json.loads(concrete(src))
+    try:
+        base_planned = json.loads(concrete(src))
+        live_hooks = cfg.get("hooks", {})
+        contract, continuity_mode = claude_continuity_state(
+            live_hooks, require_complete=False
+        )
+        planned = continuity_config.render_effective_hooks(
+            base_planned, live_hooks, contract, continuity_mode
+        )
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: Claude continuity configuration is invalid ({exc}); "
+              "settings left untouched.")
+        return 1
+
+    if continuity_mode in continuity_config.MODES:
+        present = all(
+            continuity_config.observed_entries(live_hooks.get(event)) == wanted
+            for event, wanted in contract.hooks.items()
+        )
+        action = "PRESERVE" if present else "RESTORE"
+        print(f"  Claude continuity overlay: WILL {action} five canonical entries; "
+              f"mode={continuity_mode}; dedicated MCP binding verified")
 
     # REFUSE A BLOCK WHOSE SCRIPTS ARE NOT THERE (added after 2026-08-24).
     # Settings apply on the very next prompt of every session, so a hooks block
@@ -1088,13 +1933,18 @@ def cmd_install(apply):
             print(f"  SKIP  {f} (definition only: {DEFINITION_ONLY[f]})")
             continue
         if f in PRIMARY_ONLY and not IS_PRIMARY:
-            print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
+            live = os.path.join(LAUNCHD_SRC, f)
+            if os.path.exists(live):
+                if retire_primary_only_plist(f, live, apply) == "failed":
+                    launchd_activation_failures.append(f)
+            else:
+                print(f"  SKIP  {f} (writes shared state; runs on the primary machine only)")
             continue
         if f in SECONDARY_ONLY and IS_PRIMARY:
             print(f"  SKIP  {f} (the nightly chain already does this here)")
             continue
         dest = os.path.join(LAUNCHD_SRC, f)
-        source = read(os.path.join(LAUNCHD_REPO, f))
+        source = read(launchd_repo_path(f))
         if source is None:
             print(f"  ERROR  cannot render {f} because its tracked source is missing")
             return 1
@@ -1126,27 +1976,39 @@ def cmd_install(apply):
     # branch protection is unavailable on a private free-plan repo — so the pull
     # request review team-loops T39 relied on has no server-side replacement.
     # ops/githooks/pre-push refuses a direct push to main from any identity but
-    # the owner's. It installs HERE rather than being a step in the runbook,
-    # because a guard that depends on someone remembering a config command is
-    # not a guard. Machine config ships with the code; that is what this file is.
+    # the owner's. The hooks ship with the code and this block makes them
+    # executable. That is ALL it does.
+    #
+    # core.hooksPath IS NO-TOUCH, UNCONDITIONALLY. Install does not set it, does
+    # not reconcile it, and does not read it in order to decide whether to write
+    # it — not when it is unset, not when it is relative, not when it is
+    # absolute, not when it names another repository's hooks. ONE .git/config
+    # holds that value for every worktree on this machine, so any write here
+    # changes which pre-push runs in all of them as a side effect of a job about
+    # plists: an apply run for two launch agents re-pointed ~50 worktrees away
+    # from the canonical hooks ops/prepush-floor-selftest.py relies on, and the
+    # absolute canonical path had to be restored by hand during the 2026-09-12
+    # Gate Zero activation. A conditional write is the same hazard with a
+    # narrower trigger, so there is no condition under which this code writes.
+    #
+    # WHICH LEAVES THE FRESH-MACHINE CASE TO A HUMAN, deliberately. Whether hook
+    # resolution is enabled at all is REPORTED by `config-as-code.py check`
+    # (git_hooks_path_report below) as an observation that never changes the
+    # value and never changes the exit code. Setting it on a new clone is one
+    # documented command a person runs once, which is a smaller cost than an
+    # installer that can silently re-aim every worktree on the machine.
     hooks_dir = os.path.join(REPO, "ops", "githooks")
     if os.path.isdir(hooks_dir):
-        current = subprocess.run(
-            ["git", "-C", REPO, "config", "--get", "core.hooksPath"],
-            capture_output=True, text=True).stdout.strip()
-        if current == "ops/githooks":
-            print("  git hooksPath already points at ops/githooks")
-        else:
-            print(f"  git hooksPath: {current or '(unset)'} -> ops/githooks"
-                  + ("" if apply else "   [would set]"))
         if apply:
-            subprocess.run(["git", "-C", REPO, "config", "core.hooksPath", "ops/githooks"],
-                           check=False, env=_git_env())
             for h in sorted(os.listdir(hooks_dir)):
                 p = os.path.join(hooks_dir, h)
                 if os.path.isfile(p):
                     os.chmod(p, os.stat(p).st_mode | 0o111)
-            print("  git hooks installed (pre-push guards main)")
+            print("  git hooks made executable "
+                  "(core.hooksPath untouched — `check` reports the observed value)")
+        else:
+            print("  would make ops/githooks executable "
+                  "(core.hooksPath untouched — `check` reports the observed value)")
 
     if not apply:
         print("\nDRY RUN — nothing written. Re-run with --apply.")
@@ -1185,9 +2047,7 @@ def cmd_install(apply):
     backup = SETTINGS + ".bak-config-as-code"
     if settings_existed:
         shutil.copy2(SETTINGS, backup)
-    with open(SETTINGS, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2)
-        fh.write("\n")
+    write_claude_settings(SETTINGS, cfg, raw)
     try:
         json.loads(read(SETTINGS))
     except Exception as exc:
@@ -1293,8 +2153,29 @@ def main():
         return cmd_check()
     if mode == "pull":
         return cmd_pull(apply)
+    if mode == "install-codex-continuity-mcp":
+        return cmd_install_codex_continuity_mcp(apply)
+    if mode == "verify-codex-continuity-mcp":
+        return cmd_install_codex_continuity_mcp(False)
+    if mode == "install-codex-continuity":
+        return cmd_install_codex_continuity(apply)
+    if mode == "remove-codex-continuity":
+        return cmd_install_codex_continuity(apply, remove=True)
+    if mode == "verify-codex-continuity":
+        return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "set-role":
+        # Writes ~/.config/carr/machine-role.json, then installs in a fresh
+        # process: IS_PRIMARY is fixed at import, so this one would still
+        # carry the old role. A secondary retires its primary-only jobs.
+        role = sys.argv[2] if len(sys.argv) > 2 else ""
+        if role not in machine_role.ROLES:
+            print("usage: ops/config-as-code.py set-role primary|secondary")
+            return 64
+        print(f"machine role: {role} ({machine_role.write_marker(role)})")
+        return subprocess.run([sys.executable, os.path.abspath(__file__),
+                               "install", "--apply"], stdin=subprocess.DEVNULL).returncode
     print(__doc__)
     return 2
 

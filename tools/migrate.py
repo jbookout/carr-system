@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """carr-system migrations runner (record layer, scaffolded 2026-07-30).
 
-Applies migrations/NNNN_*.sql in filename order, each in its own transaction,
-tracked in schema_migrations. Forward-only by design: a bad migration is
+Applies migrations/NNNN_*.sql in filename order, normally one transaction per
+file, tracked in schema_migrations. A small reviewed group may share one outer
+transaction when an authority-surface migration and its registry successor
+must become visible atomically. Forward-only by design: a bad migration is
 fixed by a NEW migration, never by editing an applied file (applied files'
 sha256 is recorded and re-checked, so drift is caught).
 
@@ -85,6 +87,274 @@ DATA_DEPENDENT_MIGRATIONS: dict[str, tuple[str, str]] = {
         "which this database does not carry",
     ),
 }
+
+# ── MIGRATIONS WHOSE INTERMEDIATE CATALOG MUST NEVER COMMIT ────────────────
+#
+# 0480 adds the Codex continuity writer surface. That correctly makes the
+# sealed SCAC v10 live catalog cease to be current; 0481 installs and activates
+# the exact v11 successor. ops.scac_policy_epoch_refresh() is a DEFERRABLE
+# constraint trigger on schema_migrations, so committing 0480 by itself asks
+# the old v10 snapshot to bless the intentionally-new surface and must fail.
+# The two reviewed files therefore share ONE runner-owned transaction: both
+# SQL bodies and both immutable ledger rows commit together, and the deferred
+# trigger observes only the final v11 state. A caller may not cut this group in
+# half with --through.
+ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
+    (
+        "0480_codex_continuity.sql",
+        "0481_codex_continuity_registry_activation.sql",
+    ),
+    # 0485 adds the Claude continuity writer surface and 0486 seals that
+    # catalog as SCAC v12. They have the same deferred-policy boundary as the
+    # Codex pair above and must become visible in one transaction.
+    (
+        "0485_claude_continuity.sql",
+        "0486_claude_continuity_registry_activation.sql",
+    ),
+    # 0502 creates the Gate Zero outcome record, its readers' function and the
+    # dedicated login role that alone may write it; 0503 is its SEALED REGISTRY
+    # SUCCESSOR, admitting the two new ingresses and sealing the source
+    # inventory from 840 rows to 842. 0503 refuses before 0502 exists, so the
+    # order is already fixed -- what this declaration adds is the guarantee that
+    # a 0503 failure cannot leave 0502 committed ALONE. That state is the one no
+    # later reseal can express cleanly: the record and the role live in
+    # Production while the inventory is unsealed, and the forward-only rule then
+    # allows no retry of 0503, only a new successor sealing from wherever the
+    # database actually is.
+    (
+        "0502_gate_zero_read_only_outcome.sql",
+        "0503_gate_zero_outcome_and_scac_successor.sql",
+    ),
+    # WR95 creates its benchmark, Journey One input, and Foundation Assurance
+    # mutation surfaces in 0508-0511; 0512 seals their SCAC v27 successor. The
+    # deferred policy-epoch trigger correctly refuses every intermediate
+    # catalog, so these reviewed files must commit as one transaction.
+    (
+        "0508_foundation_assurance_minimum_receipt.sql",
+        "0509_journey_one_clock_store.sql",
+        "0510_journey_one_clock_input_store.sql",
+        "0511_foundation_assurance_minimum_outcome.sql",
+        "0512_foundation_assurance_scac_successor.sql",
+    ),
+    # WR-000110 creates the program-controller seam tables, the one authority
+    # writer function and its grants in 0517; 0518 is its SEALED REGISTRY
+    # SUCCESSOR. ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint
+    # trigger on public.schema_migrations, so a commit of 0517 alone asks the
+    # v28 snapshot to bless the new authority surface and must fail. Both files
+    # therefore share ONE runner-owned transaction and --through may not cut
+    # them.
+    (
+        "0517_program_controller_seams.sql",
+        "0518_program_controller_seams_scac_successor.sql",
+    ),
+    # WR111/112/113 create the producer cost ledger, the Doc conversation store
+    # and the R03 notification store in 0519-0521; 0522 seals their SCAC v30
+    # successor. Same deferred policy-epoch boundary as the groups above:
+    # ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint trigger on
+    # public.schema_migrations, so committing any of the three domain files
+    # without the seal asks the old v29 snapshot to bless an intentionally-new
+    # surface and must fail. The four SQL bodies and their four immutable ledger
+    # rows therefore commit in ONE runner-owned transaction, and a caller may not
+    # cut this group with --through.
+    (
+        "0519_producer_cost_ledger.sql",
+        "0520_doc_conversation_store.sql",
+        "0521_r03_notifications.sql",
+        "0522_producer_trio_scac_successor.sql",
+    ),
+    # WR-000114 adds the three Doc conversation write doors -- create,
+    # share/revoke and rename/pin/archive -- as SECURITY DEFINER functions with
+    # their grants in 0523; 0524 is its SEALED REGISTRY SUCCESSOR, admitting the
+    # three new ingresses and resealing the source inventory. Same deferred
+    # policy-epoch boundary as every group above: ops.scac_policy_epoch_refresh()
+    # is a DEFERRABLE constraint trigger on public.schema_migrations, so
+    # committing 0523 alone asks the old v30 snapshot to bless three
+    # intentionally-new definer surfaces and must fail. The two SQL bodies and
+    # their two immutable ledger rows therefore commit in ONE runner-owned
+    # transaction, and a caller may not cut this group with --through.
+    (
+        "0523_doc_conversation_write_doors.sql",
+        "0524_doc_conversation_write_doors_scac_successor.sql",
+    ),
+    # WR-000115 adds the Doc conversation LIST door -- one SECURITY DEFINER
+    # function with its revoke and grant, and nothing else -- in 0525; 0526 is
+    # its SEALED REGISTRY SUCCESSOR, admitting the one new ingress and resealing
+    # the source inventory. Same deferred policy-epoch boundary as every group
+    # above: ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint trigger
+    # on public.schema_migrations, so committing 0525 alone asks the old v31
+    # snapshot to bless an intentionally-new definer surface and must fail. The
+    # two SQL bodies and their two immutable ledger rows therefore commit in ONE
+    # runner-owned transaction, and a caller may not cut this group with
+    # --through. A read verb owes no completion-evidence gate entry, but it is
+    # still a new ingress and still owes the successor.
+    (
+        "0525_doc_conversation_list.sql",
+        "0526_doc_conversation_list_scac_successor.sql",
+    ),
+    # WR-000116 adds the notification-preference PAIR -- one read door and one
+    # write door, two SECURITY DEFINER functions with their revokes and grants
+    # plus the one replay ledger the write's idempotency clause needs, and
+    # nothing else -- in 0527; 0528 is its SEALED REGISTRY SUCCESSOR, admitting
+    # the two new ingresses and resealing the source inventory. Same deferred
+    # policy-epoch boundary as every group above: ops.scac_policy_epoch_refresh()
+    # is a DEFERRABLE constraint trigger on public.schema_migrations, so
+    # committing 0527 alone asks the old v32 snapshot to bless an
+    # intentionally-new definer surface and must fail. The two SQL bodies and
+    # their two immutable ledger rows therefore commit in ONE runner-owned
+    # transaction, and a caller may not cut this group with --through. The write
+    # verb's name already classifies as a write through the gate's own `set`
+    # prefix, so no completion-evidence gate entry is owed -- and the pair still
+    # owes this group.
+    (
+        "0527_notification_preferences.sql",
+        "0528_notification_preferences_scac_successor.sql",
+    ),
+    # WR-000117 adds the session-identity READ PAIR -- two SECURITY DEFINER
+    # functions projecting the four existing session books, with their revokes
+    # and their grants, and nothing else -- in 0529; 0530 is its SEALED REGISTRY
+    # SUCCESSOR, admitting the two new ingresses and resealing the source
+    # inventory. Same deferred policy-epoch boundary as every group above:
+    # ops.scac_policy_epoch_refresh() is a DEFERRABLE constraint trigger on
+    # public.schema_migrations, so committing 0529 alone asks the old v33
+    # snapshot to bless two intentionally-new definer surfaces and must fail.
+    # The two SQL bodies and their two immutable ledger rows therefore commit in
+    # ONE runner-owned transaction, and a caller may not cut this group with
+    # --through. Both verbs are READS -- `read` is in neither of the
+    # completion-evidence gate's two collections -- so no gate entry is owed;
+    # the pair still owes this group.
+    (
+        "0529_session_identity_reads.sql",
+        "0530_session_identity_scac_successor.sql",
+    ),
+    # WR-000119 adds the DISPATCH SPINE -- the two append-only side relations
+    # public.room_dispatch_link and public.room_dispatch_ack with their grants,
+    # the rewrite of ops.session_dispatch_history at the same name and arity,
+    # and the two SECURITY DEFINER write doors the three first-hand writers
+    # call -- in 0531; 0532 is its SEALED REGISTRY SUCCESSOR, admitting the two
+    # new write ingresses and resealing the source inventory. Same deferred
+    # policy-epoch boundary as every group above: ops.scac_policy_epoch_refresh()
+    # is a DEFERRABLE constraint trigger on public.schema_migrations, so
+    # committing 0531 alone asks the old v34 snapshot to bless two
+    # intentionally-new definer surfaces and two new relation grants and must
+    # fail. The two SQL bodies and their two immutable ledger rows therefore
+    # commit in ONE runner-owned transaction, and a caller may not cut this
+    # group with --through. Unlike the 0529/0530 pair above this one DOES owe a
+    # completion-evidence gate entry: acknowledge-dispatch is a durable append
+    # and `acknowledge` is deliberately not a write prefix.
+    (
+        "0531_room_dispatch_spine.sql",
+        "0532_room_dispatch_spine_scac_successor.sql",
+    ),
+    # WR-000125 activates the previously-dark 0450 kernel and the same-request
+    # accepted-plan successor lifecycle in 0532a; 0532b is the sole v36 SCAC
+    # owner. Production already has 0532, so the pending suffix pair is its own
+    # atomic group and must never be resumed from 0532b alone.
+    (
+        "0532a_canonical_ownership_lease_activation.sql",
+        "0532b_ready_plan_amendment_scac_successor.sql",
+    ),
+    # WR-000130 changes the live ownership assurance surface in 0538; 0539
+    # seals that exact catalog as v37. Neither intermediate catalog nor a
+    # partial ledger may become visible to another session.
+    (
+        "0538_canonical_ownership_assurance_binding.sql",
+        "0539_canonical_ownership_assurance_scac_successor.sql",
+    ),
+    (
+        "0540_release_readiness_without_repeat_approval.sql",
+        "0541_release_readiness_scac_successor.sql",
+    ),
+    (
+        "0542_model_role_store.sql",
+        "0543_model_role_store_scac_successor.sql",
+    ),
+    # 0546 exposes the outcome-card reader and its grants.  0547 registers
+    # the v41 successor that seals that new catalog, so the deferred epoch
+    # trigger may only observe them together.
+    (
+        "0546_read_doc_outcome_cards_successor.sql",
+        "0547_read_doc_outcome_cards_scac_successor.sql",
+    ),
+    # V5-UX-B11: 0556 installs the Meeting Mode store and its eight writer
+    # doors; 0557 seals that catalog as v49. Same deferred-epoch boundary.
+    (
+        "0556_meeting_mode_store.sql",
+        "0557_meeting_mode_scac_successor.sql",
+    ),
+    # Tour property registration: 0565 installs ops.register_tour_property
+    # with its authority EXECUTE grant; 0566 seals that catalog as v57. Applied
+    # alone, 0565 is refused at commit by the deferred epoch trigger ("live
+    # SCAC v37 mutation catalog drifted") -- production did exactly that on
+    # 2026-09-23 and rolled the batch back -- so the pair must be one
+    # transaction.
+    (
+        "0565_tour_property_registration.sql",
+        "0566_tour_property_registration_scac_successor.sql",
+    ),
+    # answer-work-request-for-joe: 0575 installs ops.answer_work_request_for_joe
+    # with its carr_authority EXECUTE grant; 0576 seals that catalog as v63.
+    # Applied alone, 0575 was refused at commit on production 2026-09-24 by the
+    # same deferred epoch trigger ("live SCAC v37 mutation catalog drifted") and
+    # rolled back, so the pair must be one transaction.
+    (
+        "0575_answer_needs_joe_work_request.sql",
+        "0576_answer_needs_joe_work_request_scac_successor.sql",
+    ),
+    # DoctorCRE V5-UX-C02/C06: 0580 installs ops.record_resource_observation
+    # (the resource collector's write door) with its carr_writer EXECUTE
+    # grant; 0581 seals that catalog as v65. Same deferred-epoch-trigger
+    # shape as the 0575/0576 pair immediately above -- 0580 applied alone
+    # would be refused at commit ("live SCAC vNN mutation catalog drifted"),
+    # so the pair must be one transaction.
+    (
+        "0580_resource_observation.sql",
+        "0581_resource_observation_scac_successor.sql",
+    ),
+)
+
+STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
+    (
+        "0532a_canonical_ownership_lease_activation.sql",
+        "0532b_ready_plan_amendment_scac_successor.sql",
+    ),
+    (
+        "0538_canonical_ownership_assurance_binding.sql",
+        "0539_canonical_ownership_assurance_scac_successor.sql",
+    ),
+    (
+        "0540_release_readiness_without_repeat_approval.sql",
+        "0541_release_readiness_scac_successor.sql",
+    ),
+    (
+        "0542_model_role_store.sql",
+        "0543_model_role_store_scac_successor.sql",
+    ),
+    (
+        "0546_read_doc_outcome_cards_successor.sql",
+        "0547_read_doc_outcome_cards_scac_successor.sql",
+    ),
+    (
+        "0556_meeting_mode_store.sql",
+        "0557_meeting_mode_scac_successor.sql",
+    ),
+    (
+        "0565_tour_property_registration.sql",
+        "0566_tour_property_registration_scac_successor.sql",
+    ),
+    (
+        "0575_answer_needs_joe_work_request.sql",
+        "0576_answer_needs_joe_work_request_scac_successor.sql",
+    ),
+    (
+        "0580_resource_observation.sql",
+        "0581_resource_observation_scac_successor.sql",
+    ),
+)
+
+FORBIDDEN_MIGRATION_FILENAMES = frozenset({
+    "0535_ready_plan_amendment.sql",
+    "0536_ready_plan_amendment_scac_successor.sql",
+})
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # NNNN_name.sql, plus an OPTIONAL single lowercase letter after the number:
@@ -296,6 +566,8 @@ def load_migrations() -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for p in sorted(MIGRATIONS_DIR.iterdir()):
         if p.suffix == ".sql":
+            if p.name in FORBIDDEN_MIGRATION_FILENAMES:
+                fail(f"stale WR122 migration filename is permanently refused: {p.name}")
             if not NAME_RE.match(p.name):
                 fail(f"bad migration filename (want NNNN_name.sql): {p.name}")
             sql = p.read_text()
@@ -355,7 +627,42 @@ def migrations_through(
         )
     selected = [item for item in pending if item[0] <= through]
     held_back = [item for item in pending if item[0] > through]
+    selected_names = {item[0] for item in selected}
+    held_names = {item[0] for item in held_back}
+    for group in ATOMIC_MIGRATION_GROUPS:
+        if selected_names.intersection(group) and held_names.intersection(group):
+            raise ValueError(
+                "--through target cuts reviewed atomic migration group: "
+                + ", ".join(group)
+                + ". Select through the final file so the intermediate authority "
+                  "catalog can never commit."
+            )
     return selected, held_back
+
+
+def migration_batches(
+    pending: list[tuple[str, str, str]],
+) -> list[list[tuple[str, str, str]]]:
+    """Return ordered transaction batches for an already-authorized prefix.
+
+    A complete pending reviewed group is one batch. A suffix whose earlier
+    member is already in the immutable ledger remains individually resumable;
+    this is the recovery shape for a database that predated the group rule.
+    """
+    by_first = {group[0]: group for group in ATOMIC_MIGRATION_GROUPS}
+    batches: list[list[tuple[str, str, str]]] = []
+    i = 0
+    while i < len(pending):
+        group = by_first.get(pending[i][0])
+        if group is not None:
+            candidate = pending[i:i + len(group)]
+            if tuple(item[0] for item in candidate) == group:
+                batches.append(candidate)
+                i += len(group)
+                continue
+        batches.append([pending[i]])
+        i += 1
+    return batches
 
 
 class AppliedMigrationLedgerError(ValueError):
@@ -402,6 +709,13 @@ def validate_applied_ledger(
         for name in applied
         if name in LEGACY_APPLIED_ALIASES
     )
+    for group in STRICT_ATOMIC_MIGRATION_GROUPS:
+        present = tuple(name for name in group if name in effective_applied)
+        if present and present != group:
+            raise AppliedMigrationLedgerError(
+                "partial strict atomic migration group is forbidden: expected "
+                + ", ".join(group) + "; found " + ", ".join(present)
+            )
     first_hole: str | None = None
     later_applied: list[str] = []
     for name, _sql, _digest in migrations:
@@ -496,62 +810,76 @@ def main() -> None:
                 fail("confirmation did not match host; nothing applied")
 
         print(f"lock_timeout: {LOCK_TIMEOUT}   statement_timeout: {STATEMENT_TIMEOUT}")
-        for name, sql, digest in pending:
+        for batch in migration_batches(pending):
+            staged: list[tuple[str, str]] = []
             with conn.cursor() as cur:
-                precondition = DATA_DEPENDENT_MIGRATIONS.get(name)
-                if precondition is not None:
-                    probe, inert_because = precondition
-                    cur.execute(probe)
-                    if cur.fetchone() is None:
-                        # RECORDED AS DISCHARGED, NOT SILENTLY SKIPPED. The row it
-                        # binds does not exist here, so the file has nothing to do
-                        # and its own proof would raise. The reason it is safe is
-                        # stated in the table beside it and is checkable, not
-                        # asserted.
-                        cur.execute(
-                            "insert into schema_migrations (filename, sha256) values (%s, %s)",
-                            (name, digest),
-                        )
-                        conn.commit()
-                        print(f"discharged (precondition absent) — {inert_because}")
-                        continue
-                print(f"applying {name} ...", end=" ", flush=True)
-                # SET LOCAL, not SET: scoped to THIS migration's transaction and
-                # reverted at commit, so one migration can never leak a timeout
-                # onto the next. It is re-issued per migration on purpose — a
-                # migration that resets the session must not silently disarm the
-                # guard for everything that follows it.
-                cur.execute(f"set local lock_timeout = '{LOCK_TIMEOUT}'")
-                cur.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
-                try:
-                    cur.execute(sql)
-                except psycopg.errors.LockNotAvailable:
-                    # Named explicitly so nobody debugs the migration. Nothing is
-                    # applied: this migration's transaction rolls back whole, and
-                    # every migration before it is already committed and recorded,
-                    # so a re-run picks up exactly here. Forward-only is intact.
-                    conn.rollback()
-                    fail(f"{name} could not acquire its lock within {LOCK_TIMEOUT} and was "
-                         "ABANDONED (nothing applied from this file).\n"
-                         "  This is the guard working, not a broken migration. Something else "
-                         "is holding a lock on the tables it touches — usually a long-running "
-                         "read from the Worker.\n"
-                         "  Check pg_stat_activity for the blocker, then just re-run: earlier "
-                         "migrations are already committed and will be skipped.\n"
-                         f"  To wait longer on purpose: CARR_MIGRATE_LOCK_TIMEOUT=30s")
-                except psycopg.errors.QueryCanceled:
-                    conn.rollback()
-                    fail(f"{name} exceeded statement_timeout ({STATEMENT_TIMEOUT}) and was "
-                         "ABANDONED (nothing applied from this file).\n"
-                         "  If this migration genuinely needs longer, raise the ceiling "
-                         "deliberately rather than removing it:\n"
-                         f"  CARR_MIGRATE_STATEMENT_TIMEOUT=30min python3 tools/migrate.py --apply")
-                cur.execute(
-                    "insert into schema_migrations (filename, sha256) values (%s, %s)",
-                    (name, digest),
+                for name, sql, digest in batch:
+                    precondition = DATA_DEPENDENT_MIGRATIONS.get(name)
+                    if precondition is not None:
+                        probe, inert_because = precondition
+                        cur.execute(probe)
+                        if cur.fetchone() is None:
+                            # RECORDED AS DISCHARGED, NOT SILENTLY SKIPPED. The
+                            # row it binds does not exist here, so the file has
+                            # nothing to do and its own proof would raise.
+                            cur.execute(
+                                "insert into schema_migrations (filename, sha256) values (%s, %s)",
+                                (name, digest),
+                            )
+                            staged.append((
+                                name,
+                                f"discharged (precondition absent) — {inert_because}",
+                            ))
+                            continue
+                    print(f"applying {name} ...", end=" ", flush=True)
+                    # SET LOCAL is scoped to the current batch transaction. It
+                    # is re-issued per file so a migration cannot disarm the
+                    # guard for its successor inside an atomic group.
+                    cur.execute(f"set local lock_timeout = '{LOCK_TIMEOUT}'")
+                    cur.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
+                    try:
+                        cur.execute(sql)
+                    except psycopg.errors.LockNotAvailable:
+                        conn.rollback()
+                        fail(f"{name} could not acquire its lock within {LOCK_TIMEOUT} and was "
+                             "ABANDONED (its whole transaction batch was rolled back).\n"
+                             "  This is the guard working, not a broken migration. Something else "
+                             "is holding a lock on the tables it touches — usually a long-running "
+                             "read from the Worker.\n"
+                             "  Check pg_stat_activity for the blocker, then just re-run: earlier "
+                             "batches are already committed and will be skipped.\n"
+                             f"  To wait longer on purpose: CARR_MIGRATE_LOCK_TIMEOUT=30s")
+                    except psycopg.errors.QueryCanceled:
+                        conn.rollback()
+                        fail(f"{name} exceeded statement_timeout ({STATEMENT_TIMEOUT}) and was "
+                             "ABANDONED (its whole transaction batch was rolled back).\n"
+                             "  If this migration genuinely needs longer, raise the ceiling "
+                             "deliberately rather than removing it:\n"
+                             f"  CARR_MIGRATE_STATEMENT_TIMEOUT=30min python3 tools/migrate.py --apply")
+                    cur.execute(
+                        "insert into schema_migrations (filename, sha256) values (%s, %s)",
+                        (name, digest),
+                    )
+                    staged.append((name, "ok"))
+                    if len(batch) > 1:
+                        print("staged")
+            try:
+                conn.commit()
+            except psycopg.Error as exc:
+                conn.rollback()
+                names = ", ".join(name for name, _sql, _digest in batch)
+                fail(
+                    f"commit refused for migration batch [{names}] and the whole batch was "
+                    f"rolled back: {exc}"
                 )
-            conn.commit()
-            print("ok")
+            for _name, outcome in staged:
+                if len(batch) == 1 and outcome == "ok":
+                    print("ok")
+                elif outcome != "ok":
+                    print(outcome)
+            if len(batch) > 1:
+                print("atomic migration group committed: "
+                      + ", ".join(name for name, _sql, _digest in batch))
         print("done")
 
 

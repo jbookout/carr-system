@@ -25,7 +25,7 @@ the packet's Field 7 still governs which of them must be opened.
 import os
 import sys
 
-ROOT = os.environ.get("CARR_ROOT", "/Users/booko/carr-system")
+ROOT = os.environ.get("CARR_ROOT", os.path.join(os.path.expanduser("~"), "carr-system"))
 PROG = os.path.join(ROOT, "out", "doctorcre-program")
 
 # Upstream bundles every capability-map seed is entitled to read, and the one

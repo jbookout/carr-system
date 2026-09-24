@@ -154,6 +154,20 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
+                                 # receipt a session could report as "I cleared that".
+                                 # EXACT rather than a prefix for adjudicate's reason --
+                                 # "acknowledge" would cover exactly one verb today and
+                                 # would silently capture a future read named the same.
+    "acknowledge-dispatch",  # WR-000119: appends a public.room_dispatch_ack row, a durable
+                                 # per-dispatch receipt a session could report as "I took that
+                                 # up". EXACT for acknowledge-notification's own reason --
+                                 # "acknowledge" covers exactly two verbs today and as a prefix
+                                 # would silently capture a future read named the same.
+    "claude-checkpoint",     # durable Claude semantic checkpoint write
+    "claude-record-event",   # append-only Claude lifecycle receipt
+    "codex-checkpoint",      # durable semantic checkpoint write
+    "codex-record-event",    # append-only native lifecycle receipt
     "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
                               # duplicate-of. Same reasoning as its investigation sibling below:
                               # "adjudicate" stays an exact entry rather than becoming a prefix,
@@ -162,6 +176,15 @@ WRITE_ACTION_EXACT = {
     "adjudicate-investigation-branch",  # owner-only branch judgment write, like review-deal:
                                          # a one-off judgment verb whose first word ("adjudicate")
                                          # is not a generic write prefix
+    "share-doc-conversation",   # WR-000114: widens or withdraws another partner's access
+                                 # to a Doc conversation. EXACT rather than a prefix for
+                                 # acknowledge-notification's reason -- "share" would cover
+                                 # exactly one verb today and would silently capture a
+                                 # future read named the same way.
+    "rename-doc-conversation",  # WR-000114: renames, pins, unpins, archives or unarchives
+                                 # a Doc conversation under a compare-and-swap. EXACT for
+                                 # the same reason: "rename" covers one verb today, and a
+                                 # future rename-shaped read must not inherit the class.
     "call-verb",             # unknown inner call is conservatively a write
     "cancel-capability-session",  # abandons the open build session on a capability
                               # project and returns that project to ready. A write in
@@ -189,6 +212,14 @@ WRITE_ACTION_EXACT = {
     "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
                                   # exact because issue-style reads may exist elsewhere
     "presence-lease",
+    "produce-assurance-fabric-preactivation-receipt",
+    "produce-foundation-assurance-benchmark-coverage",
+    "produce-foundation-control-plane-preactivation-receipt",
+    "produce-global-execution-contract-receipt",
+    "produce-global-no-phi-boundary-receipt",
+    "produce-global-prompt-injection-boundary-receipt",
+    "produce-global-secrets-boundary-receipt",
+    "produce-global-source-authority-receipt",
     "project-room-queue",   # shape-checked unattended room projection write;
                               # "project" is not generalized because projection reads exist
     "report-problem",       # Program 6 additive Work Request capture; "report"
@@ -197,6 +228,8 @@ WRITE_ACTION_EXACT = {
                                   # "request" remains exact because request-shaped reads exist
     "review-and-triage",    # Program 6 human state transition; exact because
                               # other review-* actions include non-mutating reads
+    "review-benchmark-manifest-draft",  # persisted independent WR95 benchmark verdict;
+                                          # exact because other review-* actions are reads
     "rotate-tour-share-grant",  # supersedes an active share grant; exact rather than
                                   # widening every future rotate-* action
     "propose-ready-plan",   # Program 6 immutable plan proposal; explicit evidence coverage
@@ -205,6 +238,8 @@ WRITE_ACTION_EXACT = {
     "accept-ready-plan",    # Program 6 human readiness transition; never execution
     "propose-outcome-feedback", # Program 6 immutable evidence proposal; no self-attestation
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
+    "answer-work-request-for-joe",  # human-only needs_joe -> triaged answer; exact rather
+                                      # than widening every future answer-* action
     "supersede-work-request",  # Program 6 withdrawal of a request captured in error, into the
                                 # request that replaced it. Its sibling decline-work-request is
                                 # already covered by the "decline" prefix; "supersede" is in
@@ -217,12 +252,19 @@ WRITE_ACTION_EXACT = {
     "review-deal",
     "review-engineering-slice",  # independent typed review is a persisted verdict;
                                    # other review-* actions include non-mutating reads
+    "review-portfolio-revision",  # the portfolio's independent review is a persisted
+                                    # pass/fail row the acceptance guard then reads, so it
+                                    # is a write for the same reason review-deal is
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
     "forget-memory",   # reversible suppression write; exact transition
     "issue-execution-envelope",  # persists one immutable governed execution envelope
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
+    "record-foundation-assurance-minimum-outcome",
+}
+HUMAN_ONLY_WRITE_ACTION_EXACT = {
+    "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
 }
 # The three reason classes that carry a latch identity. Named constants rather
 # than repeated literals, because an identity keyed on a string that drifts is
@@ -232,7 +274,9 @@ CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
 
-NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")
+CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
+NESTED_CARR_CALL = re.compile(
+    r"(?:tools\.)?(mcp__carr(?:_records|-continuity)?__([A-Za-z0-9_-]+))")
 CALL_VERB = re.compile(r"\b(?:verb|name)\s*[:=]\s*['\"]([A-Za-z0-9_-]+)['\"]", re.I)
 SYNTHETIC_CODEX_USER_PREFIXES = (
     "The following is the Codex agent history",
@@ -332,7 +376,7 @@ def transcript_is_carr(recs):
     """
     for rec in recs:
         name, value = tool(rec)
-        if name.startswith(("mcp__carr__", "mcp__carr_records__")):
+        if name.startswith(CARR_MCP_PREFIXES):
             return True
         if name == "functions.exec" and nested_carr_actions(value):
             return True
@@ -402,7 +446,9 @@ def normalized_action(value):
 
 def is_write_action(action):
     """Classify a CARR registry action without treating similar reads as writes."""
-    return action in WRITE_ACTION_EXACT or action.partition("-")[0] in WRITE_ACTION_PREFIXES
+    return (action in WRITE_ACTION_EXACT
+            or action in HUMAN_ONLY_WRITE_ACTION_EXACT
+            or action.partition("-")[0] in WRITE_ACTION_PREFIXES)
 
 
 def nested_carr_actions(value):
@@ -420,7 +466,7 @@ def mutation(name, value):
     cmd = command(value)
     if DEPLOY.search(cmd):
         return True
-    if name.startswith(("mcp__carr__", "mcp__carr_records__")) and write_verb(name, value):
+    if name.startswith(CARR_MCP_PREFIXES) and write_verb(name, value):
         return True
     # In the real Codex JSONL, an in-process MCP invocation is represented as
     # a `functions.exec` custom call whose raw JS visibly contains
@@ -436,7 +482,7 @@ def verification(name, value):
         return True
     # A visible CARR read after an embedded CARR write is fresh evidence even
     # when Codex's outer custom call remains named only `functions.exec`.
-    if name.startswith(("mcp__carr__", "mcp__carr_records__")):
+    if name.startswith(CARR_MCP_PREFIXES):
         return not write_verb(name, value)
     return name == "functions.exec" and any(not is_write_action(action)
                                               for action in nested_carr_actions(value))
@@ -1085,6 +1131,22 @@ def evaluate(recs, ledger=None):
     return True, "terminal completion claim has no fresh verification"
 
 
+def jev_requirements_advisory(payload, recs):
+    """SHADOW ONLY: ops/jev_requirements.py asks Jev whether each requirement
+    of the last human request is met by this turn's diff, records the answer
+    in out/jev-judge.jsonl and returns at most one advisory line. It never
+    decides `blocked`; every failure returns None."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jev_requirements", os.path.join(REPO, "ops", "jev_requirements.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.check(payload, recs)
+    except Exception:
+        return None
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -1100,6 +1162,7 @@ def main():
         session = payload.get("session_id") or payload.get("sessionId")
         ledger = {}
         blocked, reason = evaluate(recs, ledger)
+        advisory = jev_requirements_advisory(payload, recs)
 
         # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
         #
@@ -1127,6 +1190,8 @@ def main():
                 "completion-evidence-gate", reason_class, tokens))
 
         if not blocked:
+            if advisory:
+                print(json.dumps({"systemMessage": advisory}))
             return 0
 
         # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked

@@ -136,17 +136,25 @@ def parse_terminal_result(raw: str, task_id: str, cap: str = "read") -> dict:
         value = json.loads(lines[-1][len(RESULT_PREFIX):])
     except json.JSONDecodeError as exc:
         raise QueueDispatchError("terminal result is not valid JSON") from exc
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not RESULT_FIELDS <= set(value):
         raise QueueDispatchError("terminal result fields are invalid")
-    allowed = [RESULT_FIELDS]
-    if value.get("outcome") == "blocked":
-        allowed.append(RESULT_FIELDS | {"code"})
-    if set(value) not in allowed:
-        if cap == "record-write" and value.get("outcome") == "success" and set(value) == RESULT_FIELDS:
+    # Real sessions add their own detail fields (pr_url, verbs, gaps,
+    # room_seq, ...) next to the required ones: t_24b0a0c6 and t_a4765f1b did
+    # their work and were blocked as result_protocol_error only for that.
+    # Unknown fields are therefore dropped, never validated or forwarded; the
+    # protocol fields themselves stay exact.  ``code`` is a protocol field and
+    # belongs only to a blocked outcome.
+    known = RESULT_FIELDS | {"code"}
+    if cap == "record-write":
+        known |= RECORD_WRITE_EVIDENCE_FIELDS
+    value = {key: item for key, item in value.items() if key in known}
+    if "code" in value and value.get("outcome") != "blocked":
+        raise QueueDispatchError("terminal result fields are invalid")
+    if cap == "record-write" and value.get("outcome") == "success":
+        if not RECORD_WRITE_EVIDENCE_FIELDS <= set(value):
             raise RecordWriteEvidenceMissing("record-write evidence is absent")
-        expected = RESULT_FIELDS | RECORD_WRITE_EVIDENCE_FIELDS
-        if not (cap == "record-write" and value.get("outcome") == "success" and set(value) == expected):
-            raise QueueDispatchError("terminal result fields are invalid")
+    else:
+        value = {key: item for key, item in value.items() if key not in RECORD_WRITE_EVIDENCE_FIELDS}
     if value["v"] != 1 or value["task_id"] != task_id:
         raise QueueDispatchError("terminal result belongs to another task")
     if value["outcome"] not in {"success", "blocked"}:
@@ -210,7 +218,12 @@ class QueueDeskExecutor:
             f"CARR_QUEUE_RESULT and must bind task_id={task_id}. Allowed outcomes: success, blocked. "
             "The JSON object must include the exact field \"v\":1. "
             "Keep summary to one redacted sentence of at most 500 characters. If broader authority is needed, "
-            "return outcome=blocked with code=capability_escalation_required." + evidence
+            "return outcome=blocked with code=capability_escalation_required." + evidence + "\n"
+            "Exact shape: CARR_QUEUE_RESULT "
+            + json.dumps({"v": 1, "task_id": task_id, "outcome": "success",
+                          "summary": "<one sentence>"}, separators=(",", ":"))
+            + "\nThe queue reads only these fields; put PR URLs, verbs, gaps and other detail in the summary "
+            "or in your reply above that line, not in extra JSON fields."
         )
 
     def _retry_or_block(self, task_id: str, code: str, *, now: str | None) -> dict:

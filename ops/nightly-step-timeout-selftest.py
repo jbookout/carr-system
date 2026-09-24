@@ -30,6 +30,7 @@ Run: ./.venv/bin/python ops/nightly-step-timeout-selftest.py
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -277,6 +278,39 @@ for key in overrides:
     check(f"override {key!r} matches a real step",
           f'step "{key}' in nightly,
           "no step label starts with these words — the override is dead")
+
+# ── 11. the exports step outlives the provider warm-up it waits on ──────────
+# THE ONE COUPLING IN THIS FILE THAT CROSSES A LANGUAGE BOUNDARY, and the one
+# that actually broke. exporters/common.py waits up to
+# PROVIDER_WAIT_BUDGET_SECONDS for OneDrive to hydrate six dehydrated
+# placeholders, then exports anyway. If the step's wall clock is SHORTER than
+# that budget, the step is killed before its own fail-open can be reached and
+# no export work is ever attempted.
+#
+# That is not hypothetical. The 900s default was measured in #526 when exports
+# completed in 81s and no warm-up existed; #1070 added the 1200s budget and
+# touched nothing here. Nights 2026-09-18, 09-20 and 09-21 each logged
+# "1200s left before the exports start anyway" followed by "TIMEOUT after 900s"
+# and exit 124. Raising the budget without raising the override re-creates it,
+# so the relationship is asserted rather than left to a comment.
+print("the exports step outlives its provider warm-up")
+budget_match = re.search(
+    r'^PROVIDER_WAIT_BUDGET_SECONDS\s*=\s*float\(os\.environ\.get\(\s*"CARR_PROVIDER_WAIT_SECONDS",\s*([0-9.]+)\s*\)\)',
+    (REPO / "exporters" / "common.py").read_text(), re.M)
+budget = float(budget_match.group(1)) if budget_match else 0.0
+limit = float(subprocess.run(
+    ["/bin/zsh", "-c",
+     f'source {REPO}/bin/step-timeout.zsh && carr_step_timeout_for '
+     f'"exports (6 targets -> OneDrive)"'],
+    capture_output=True, text=True, timeout=60).stdout.strip())
+check("the provider warm-up budget was read, not guessed", budget > 0,
+      "PROVIDER_WAIT_BUDGET_SECONDS did not parse out of exporters/common.py — "
+      "if its shape changed, fix this reader rather than dropping the check")
+check(f"exports limit {limit:g}s exceeds the {budget:g}s warm-up budget",
+      limit > budget,
+      "the step would be killed before the warm-up gives up and exports anyway, "
+      "so no export work would be attempted at all — raise the 'exports' "
+      "override in bin/step-timeout.zsh above CARR_PROVIDER_WAIT_SECONDS")
 
 print()
 if failures:

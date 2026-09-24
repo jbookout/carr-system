@@ -13,31 +13,239 @@
 
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
-  auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
-import { partnerAuthoritySlugForActor } from "./partner-authority.js";
-import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor,
-  verifiedAgentSlugForClient } from "./identity.js";
+  auditIdentity, assertNoCallerAuthorityFields,
+  pgConstraintError, describeConstraint } from "./tools.js";
+import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
+import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
+  personalScopeForActor, verifiedAgentSlugForClient } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
+import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
+import { foundationAssuranceSeatConnection } from
+  "./foundation-assurance-seat-connection.v5.js";
+import { stampedGitSha } from "./build-stamp.js";
+import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
+  opaqueControllerResult, operationIdempotencyKey, ENGINEERING_CONTROLLER_EXECUTOR,
+  ENGINEERING_CONTROLLER_WORKER } from "./authenticated-canonical-ownership.js";
+import { withTrustedCanonicalOwnershipContext } from "./engineering-runtime.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 
+// This route deliberately does not use dispatch()/allowedIn().  Every regular
+// MCP profile inherits read verbs; an ownership controller must inherit none.
+async function controllerBinding(client, actor, name, input) {
+  const operation = name.replace(/^canonical-ownership-/, "");
+  const found = await client.query(
+    `select ops.authenticated_canonical_ownership_controller_binding(
+       $1::uuid,$2::uuid,$3::text,$4::text) as row
+       /* engineering-controller:closed-binding-readback */`,
+    [input.job_id, input.lease_token, ENGINEERING_CONTROLLER_WORKER, operation],
+  );
+  const row = found.rows[0]?.row;
+  if (!row || typeof row !== "object")
+    throw new ToolError({ error: "engineering_controller_binding_unavailable" });
+  const binding = row.binding;
+  if (!binding || binding.executor_actor?.slug !== ENGINEERING_CONTROLLER_EXECUTOR ||
+      binding.envelope_id !== row.envelope_id || !binding.slice_plan ||
+      binding.slice_plan.work_request?.id !== `wr:${row.work_request_id}` ||
+      binding.slice_plan.accepted_plan_revision?.id !== `plan:${row.accepted_plan_id}` ||
+      binding.slice_plan.plan_digest !== binding.plan_digest || actor.slug !== ENGINEERING_CONTROLLER_EXECUTOR)
+    throw new ToolError({ error: "engineering_controller_binding_mismatch" });
+  // The lifecycle definer derives the exact accepted source scope itself.  The
+  // Worker is intentionally not a second source-path projection.
+  return { row, binding };
+}
+
+async function controllerOperation(client, actor, name, input, issuerGeneration) {
+  const resolved = await controllerBinding(client, actor, name, input);
+  const { row, binding } = resolved;
+  const contextBinding = {
+    work_request_id: row.work_request_id, accepted_plan_id: row.accepted_plan_id,
+    envelope_id: row.envelope_id, agent_session_id: row.agent_session_id,
+    attempt: row.attempt, expires_at: row.runtime_expires_at, idempotency_key: input.lease_token,
+    // The request token becomes authority only after the binding query above
+    // proves it equals ops.job.lease_token on this live engineering worker.
+    job_lease_token: input.lease_token,
+  };
+  const result = await withTrustedCanonicalOwnershipContext(client, actor, contextBinding, ToolError, async context => {
+    const stableOperationSubject = name === "canonical-ownership-acquire"
+      ? `${context.binding_id}:${row.attempt}:${input.job_id}`
+      : `${context.binding_id}:${input.prior_operation_key}:${name}`;
+    const operationKey = operationIdempotencyKey(name, stableOperationSubject);
+    let prior = null;
+    if (input.prior_operation_key) {
+      prior = (await client.query(
+        "select ops.read_canonical_ownership_operation($1::uuid) as result /* engineering-controller:ambiguity-readback */",
+        [input.prior_operation_key],
+      )).rows[0]?.result;
+      if (!prior?.ok || prior.lease_id !== input.lease_id ||
+          typeof prior.lease_token !== "string" || !Number.isSafeInteger(Number(prior.fencing_generation)))
+        throw new ToolError({ error: "engineering_controller_prior_operation_unavailable" });
+    }
+    const remainingSeconds = Math.floor((Date.parse(context.expires_at) - Date.now()) / 1000);
+    if (!Number.isSafeInteger(remainingSeconds) || remainingSeconds < 30)
+      throw new ToolError({ error: "engineering_controller_runtime_runway_insufficient" });
+    const lifecycle = name === "canonical-ownership-acquire"
+      ? {
+        operation: "acquire", idempotency_key: operationKey, ttl_seconds: Math.min(900, remainingSeconds),
+      }
+      : name === "canonical-ownership-check"
+        ? { operation: "check", idempotency_key: operationKey, lease_id: input.lease_id,
+          lease_token: prior.lease_token, fencing_generation: Number(prior.fencing_generation) }
+        : name === "canonical-ownership-renew"
+          ? { operation: "renew", idempotency_key: operationKey, lease_id: input.lease_id,
+            lease_token: prior.lease_token, fencing_generation: Number(prior.fencing_generation),
+            ttl_seconds: Math.min(900, remainingSeconds) }
+          : { operation: "release", idempotency_key: operationKey, lease_id: input.lease_id,
+            lease_token: prior.lease_token, fencing_generation: Number(prior.fencing_generation) };
+    const applied = (await client.query(
+      "select ops.canonical_ownership_lifecycle($1::jsonb) as result /* engineering-controller:lifecycle */",
+      [JSON.stringify(lifecycle)],
+    )).rows[0]?.result;
+    // The bounded readback is the ambiguity path: a response loss cannot cause
+    // a second lease operation with freshly chosen authority.
+    const readback = (await client.query(
+      "select ops.read_canonical_ownership_operation($1::uuid) as result /* engineering-controller:operation-readback */",
+      [operationKey],
+    )).rows[0]?.result;
+    const settled = readback?.ok ? readback : applied;
+    return { result: settled, operationKey };
+  });
+  return opaqueControllerResult(name, result.result, result.operationKey, issuerGeneration);
+}
+
+export function ownershipIssuerConnection(env, input) {
+  const mode = env?.CANONICAL_OWNERSHIP_RUNTIME_MODE;
+  if (!new Set(["canary_only", "attended_active"]).has(mode)) return null;
+  if (mode === "canary_only" && env?.CANONICAL_OWNERSHIP_CANARY_JOB_ID !== input.job_id) return null;
+  const generation = input.issuer_generation || Number(env?.CANONICAL_OWNERSHIP_ISSUER_ACTIVE_GENERATION);
+  if (![1, 2].includes(generation)) return null;
+  const connectionString = generation === 1
+    ? env.DATABASE_URL_OWNERSHIP_ISSUER_G1 : env.DATABASE_URL_OWNERSHIP_ISSUER_G2;
+  return connectionString ? { connectionString, generation } : null;
+}
+
+/** The controller's closed MCP surface, called only by index.js's token door. */
+export async function dispatchEngineeringController(request, env, ctx, actor) {
+  if (!isEngineeringControllerActor(actor)) return json({ error: "engineering_controller_auth_refused" }, 401);
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  let rpc;
+  try { rpc = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
+  const reply = result => json({ jsonrpc: "2.0", id: rpc.id, result });
+  if (rpc.method === "initialize") return reply({ protocolVersion: PROTOCOL, capabilities: { tools: {} },
+    serverInfo: { name: "carr-engineering-ownership-controller", version: "1" } });
+  if (rpc.method === "tools/list") return reply({ tools: controllerToolList() });
+  if (rpc.method !== "tools/call") return json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32601, message: "method not found" } });
+  try {
+    const name = rpc.params?.name;
+    const input = controllerOperationInput(name, rpc.params?.arguments);
+    const issuer = ownershipIssuerConnection(env, input);
+    if (!issuer) throw new ToolError({ error: "engineering_controller_issuer_unavailable" });
+    const pool = new Pool({ connectionString: issuer.connectionString });
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local role carr_ownership_issuer /* engineering-controller:issuer-capability */");
+      const result = await controllerOperation(client, actor, name, input, issuer.generation);
+      await client.query("commit");
+      return reply({ content: [{ type: "text", text: JSON.stringify(result) }] });
+    } catch (error) {
+      await client.query("rollback").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+      ctx?.waitUntil?.(pool.end());
+    }
+  } catch (error) {
+    const payload = error instanceof ToolError ? error.payload : (error.payload || { error: "engineering_controller_operation_failed" });
+    return reply({ isError: true, content: [{ type: "text", text: JSON.stringify(payload) }] });
+  }
+}
+
+export const FOUNDATION_ASSURANCE_RUNTIME_BINDING_SCHEMA =
+  "doctorcre-v5-foundation-assurance-runtime-binding.v1";
+const CANONICAL_OWNERSHIP_HOST_VERSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,95}$/;
+
+// This is deployment metadata the Worker received from Cloudflare, not a
+// header, RPC parameter, or tool argument.  The ownership adapter refuses when
+// it is absent: a pool connection that cannot name its configured host cannot
+// be trusted to acquire or renew a canonical ownership lease.
+export function canonicalOwnershipExecutionHost(env) {
+  const version = typeof env?.CF_VERSION_METADATA?.id === "string"
+    ? env.CF_VERSION_METADATA.id.trim() : "";
+  return CANONICAL_OWNERSHIP_HOST_VERSION.test(version)
+    ? `cloudflare-workers:${version}` : null;
+}
+
+// The foundation oracle must prove which deployed Worker is answering before
+// the record layer exposes any material. These values are runtime/provider
+// facts, not caller input: the source comes from the same deploy stamp used by
+// /release and the provider id comes from Cloudflare's immutable metadata
+// binding. Missing values remain null so the SQL boundary can refuse by name.
+export function foundationAssuranceRuntimeBinding(env) {
+  const providerId = typeof env?.CF_VERSION_METADATA?.id === "string"
+    ? env.CF_VERSION_METADATA.id.trim() : "";
+  return Object.freeze({
+    schema_version: FOUNDATION_ASSURANCE_RUNTIME_BINDING_SCHEMA,
+    environment: typeof env?.CARR_ENV === "string" ? env.CARR_ENV : null,
+    source_sha: stampedGitSha(env),
+    provider: "cloudflare-workers",
+    provider_version: providerId || null,
+  });
+}
+
 // Transaction-local actor context for SECURITY DEFINER functions that must
 // derive authorship from the authenticated server principal rather than accept
-// it in a caller payload.  The verified-human setting is deliberately empty
-// for sponsored and machine actors; Tour entrance verification checks it as a
-// second, narrower boundary.
-export async function setWriterActorContext(client, actor) {
+// it in a caller payload. Sponsored actors receive the verified sponsor only
+// for a registry-declared humanOnly act; ordinary writes keep the setting empty
+// so unrelated human-presence gates do not widen.
+export async function setWriterActorContext(client, actor, { partnerAuthorityAct = false } = {}) {
   const authorizationClass = actor?.authorization_class || authorizationClassForActor(actor);
-  const verifiedHumanSlug = actor?.human === true &&
-    authorizationClass === "verified_partner" ? actor.slug : "";
+  // A partner-authority agent is not reclassified as a human: acting_actor_slug
+  // remains the authenticated Codex/Claude/local-machine actor.  The separate
+  // verified-human setting names the server-derived sponsor whose authority
+  // connection this transaction is already using.  This lets SECURITY DEFINER
+  // functions preserve both facts instead of forcing a second interactive
+  // session merely to restate an approval the partner gave in the active task.
+  const verifiedHumanSlug = authorizationClass === "verified_partner"
+    ? actor.slug
+    : (partnerAuthorityAct && canExercisePartnerAuthority(actor)
+        ? partnerAuthoritySlugForActor(actor) : "");
+  const receiptSessionRef = typeof actor?.correlation_id === "string" && actor.correlation_id
+    ? `session:${actor.correlation_id.toLowerCase()}` : null;
+  const tenant = organizationTenantForActor(actor);
+  const executionHost = typeof actor?.execution_host_id === "string" ? actor.execution_host_id : "";
+  // WHOSE PERSONAL ROWS THIS TRANSACTION MAY SEE (migration 0573). The same
+  // server-derived sponsor memory.js already filters by: the verified human
+  // partner, or the verified sponsor of an agent session. Empty for shared-only
+  // machine tokens and on a sponsor error, so row security then shows shared
+  // rows only. Never read from a caller argument. Unlike the verified-human
+  // setting above it is set for every verb, read or write, because reads are
+  // what the memory_item policies fence.
+  const personalScope = personalScopeForActor(actor);
+  const sponsoringHumanSlug = personalScope.status === "personal" ? personalScope.sponsor : "";
+  if (receiptSessionRef === null) {
+    await client.query(
+      "select set_config('carr.acting_actor_slug',$1::text,true), " +
+      "set_config('carr.verified_human_actor_slug',$2::text,true), " +
+      "set_config('carr.organization_tenant_id',$3::text,true), " +
+      "set_config('carr.execution_host_id',$4::text,true), " +
+      "set_config('carr.sponsoring_human_slug',$5::text,true) /* writer-actor-context */",
+      [actor.slug, verifiedHumanSlug, tenant, executionHost, sponsoringHumanSlug],
+    );
+    return;
+  }
   await client.query(
     "select set_config('carr.acting_actor_slug',$1::text,true), " +
-    "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",
-    [actor.slug, verifiedHumanSlug],
+    "set_config('carr.verified_human_actor_slug',$2::text,true), " +
+    "set_config('carr.receipt_session_ref',$3::text,true), " +
+    "set_config('carr.organization_tenant_id',$4::text,true), " +
+    "set_config('carr.execution_host_id',$5::text,true), " +
+    "set_config('carr.sponsoring_human_slug',$6::text,true) /* writer-actor-context */",
+    [actor.slug, verifiedHumanSlug, receiptSessionRef, tenant, executionHost, sponsoringHumanSlug],
   );
 }
 
@@ -67,6 +275,15 @@ const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names 
 export const PROFILES = {
   // Everything. The default, and what both partners' interactive sessions use.
   full: null,
+
+  // Native lifecycle credentials are purpose-bound server-side. They expose
+  // only their own record surface even if a caller asks for ?profile=full.
+  "codex-continuity": new Set([
+    "codex-checkpoint", "codex-read-recovery", "codex-record-event",
+  ]),
+  "claude-continuity": new Set([
+    "claude-checkpoint", "claude-read-recovery", "claude-record-event",
+  ]),
 
   // Reads plus the capture verbs that are safe to run unattended: each one is
   // additive, carries an idempotency key, and cannot destroy or re-point an
@@ -182,7 +399,35 @@ export const PROFILES = {
   // the profile is the whole point, not a suggestion the model could widen by
   // passing a different verb name (callTool's allowedIn() check enforces this
   // at call time, same as every other profile).
-  reviewer: new Set(["record-finding"]),
+  // THE SECOND ENTRY, ADDED 2026-09-13, AND IT IS NARROWER THAN IT LOOKS. The
+  // profile now admits two write verbs rather than one, and the addition is
+  // record-gate-zero-read-only-outcome under Joe's ruling
+  // d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70. This entry is NOT the authority: it
+  // is the blast-radius limiter, and on its own it would admit BOTH reviewer
+  // lanes, because grok-reviewer authenticates through the same door and lands
+  // in the same profile. The authority is the `oracleSeatOnly` gate in
+  // executeRegisteredTool, which reads the staffed seat off the frozen
+  // registration and refuses every lane but that one. Both are kept: the
+  // profile keeps a reviewer out of the other two hundred write verbs, and the
+  // seat gate keeps the wrong reviewer out of this one.
+  reviewer: new Set([
+    "record-finding", "record-gate-zero-read-only-outcome",
+    "produce-foundation-assurance-benchmark-coverage",
+    "produce-assurance-fabric-preactivation-receipt",
+    "produce-foundation-control-plane-preactivation-receipt",
+    "produce-global-execution-contract-receipt",
+    "produce-global-no-phi-boundary-receipt",
+    "produce-global-prompt-injection-boundary-receipt",
+    "produce-global-secrets-boundary-receipt",
+    "produce-global-source-authority-receipt",
+    "record-foundation-assurance-minimum-outcome",
+  ]),
+
+  // The benchmark subject author and independent reviewer are separate
+  // server-locked Codex review-token actors. Each gets only its half of the
+  // exact-digest rail; neither can accept the benchmark or call an oracle.
+  "benchmark-author": new Set(["propose-benchmark-manifest-draft"]),
+  "benchmark-reviewer": new Set(["review-benchmark-manifest-draft"]),
 
   // HERMES (R0 runtime evaluation, 2026-08-16). The write set is EMPTY, which
   // is the whole design: the 2026-08-12 frontier council cleared Hermes for a
@@ -227,8 +472,9 @@ export const PROFILES = {
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
     "record-defect",
-    // A runtime-only door: exact queue receipts, fixed provenance, no raw room prose.
-    "project-room-queue",
+    // Runtime-only dispatch doors. The link's database function independently
+    // requires the server-derived hermes-pilot actor.
+    "project-room-queue", "record-dispatch-link",
   ]),
 
   // HERMES CoS (loop #459). This is a separate server-locked capability door,
@@ -239,7 +485,7 @@ export const PROFILES = {
   "hermes-cos": new Set([
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
-    "record-defect", "project-room-queue", "update-deal", "add-premises",
+    "record-defect", "project-room-queue", "record-dispatch-link", "update-deal", "add-premises",
   ]),
 };
 
@@ -274,8 +520,11 @@ const PROFILE_NOTICE = {
     "server-side by a PROBE_TOKENS bearer, not by ?profile=, and cannot be widened by this token " +
     "under any request. This is the smoke-probe machine actor, never a human seat.</notice>",
   reviewer:
-    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly one write verb, " +
-    "record-finding. Every other write verb refuses with not_in_profile — no advancing a deal, no " +
+    "\n\n<notice>This session runs on the REVIEWER profile: reads, plus exactly two write verbs, " +
+    "record-finding and record-gate-zero-read-only-outcome. The second one additionally refuses every " +
+    "reviewer lane except the one staffed with the DoctorCRE v5 Gate Zero oracle seat, so being in this " +
+    "profile is not by itself permission to call it. Every other write verb refuses with not_in_profile " +
+    "— no advancing a deal, no " +
     "drafting a document, no touching a party or a rule. This profile is locked server-side by a " +
     "REVIEW_TOKENS bearer, not by ?profile=, and cannot be widened by this token under any request. " +
     "This is the Automatic Review Council's Codex-reviewer machine actor, never a human seat. Land " +
@@ -285,13 +534,13 @@ const PROFILE_NOTICE = {
   hermes:
     "\n\n<notice>This session runs on the HERMES profile: every read verb, plus exactly nine " +
     "additive write verbs — log-activity, stamp-touch, add-loop, update-loop, set-next-action, " +
-    "complete-action, add-critical-date, record-finding, record-defect, and one runtime-only " +
-    "shape-checked queue projection door. Every other write verb " +
+    "complete-action, add-critical-date, record-finding, record-defect, and two runtime-only " +
+    "dispatch doors: shape-checked queue projection and a database-restricted dispatch link. Every other write verb " +
     "refuses with not_in_profile: no advancing a deal, no creating a party, no merging, no touching " +
     "a rule, no drafting a client document, and there is no send verb in this system at all. This " +
     "profile is locked server-side by a HERMES_TOKENS bearer, not by ?profile=, and cannot be " +
     "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
-    "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
+    "File what he tells you to file; for anything outside those nine business verbs and two dispatch doors, say what you would have " +
     "written and hand it back for a human.</notice>",
   "hermes-cos":
     "\n\n<notice>This session runs on the HERMES CoS profile: the ordinary Hermes business-write set " +
@@ -324,7 +573,13 @@ function profileFor(request) {
  * voluntary limiter for everyone else and a no-op for these three.
  */
 export function profileForActor(actor, request) {
+  if (actor?.continuity_surface === "codex" && actor?.via === "codex-continuity-token")
+    return "codex-continuity";
+  if (actor?.continuity_surface === "claude" && actor?.via === "claude-continuity-token")
+    return "claude-continuity";
   if (actor?.probe) return "probe";
+  if (actor?.benchmarkAuthor === true && actor?.via === "review-token") return "benchmark-author";
+  if (actor?.benchmarkReviewer === true && actor?.via === "review-token") return "benchmark-reviewer";
   if (actor?.review) return "reviewer";
   if (actor?.hermesCos === true && actor?.via === "hermes-cos-token") return "hermes-cos";
   if (actor?.hermes) return "hermes";
@@ -451,7 +706,9 @@ export async function executeWithTrustedPrincipal(actor, readback, requiredBundl
     }
     throw error;
   }
-  return handler({ ...actor, trusted_principal: trustedPrincipal });
+  // In place, not a copy: identity.js's authentication brand is object identity
+  // (amendment 8, 2026-09-13), so a spread here would strip it.
+  return handler(Object.assign(actor, { trusted_principal: trustedPrincipal }));
 }
 
 // Exported for deterministic no-network identity-gate tests. It remains the
@@ -598,6 +855,20 @@ export async function callTool(env, actor, name, args, profile = "full") {
   const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
+  // THE ORACLE SEAT WRITES ON ITS OWN CREDENTIAL, under standing-rule amendment
+  // 9 (2026-09-14): seat-only write is enforced by connection role, not by a
+  // session setting. `client` above authenticates as the ordinary writer, whose
+  // EXECUTE on ops.gate_zero_record_read_only_outcome migration 0502 revokes; the
+  // seat's own login role holds it and nothing else does. This attaches the door
+  // rather than opening it — nothing connects unless the handler calls it, and a
+  // Worker with no such secret gets null, which the handler refuses by name
+  // instead of silently falling back to the writer connection.
+  if (tool.oracleSeatOnly === true && tool.oracleFamily !== "foundation-assurance")
+    client.seatConnection = gateZeroSeatConnection(env, Pool);
+  if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
+    client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
+  if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
+    client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
@@ -610,8 +881,12 @@ export async function callTool(env, actor, name, args, profile = "full") {
     if (!a.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug,
       hint: "the token authenticates as this actor but no row exists in the actor table — " +
             "provision the actor before any write verb will run" });
-    const actorWithId = { ...actor, id: a.rows[0].id };
-    await setWriterActorContext(client, actorWithId);
+    // In place, not a copy — see executeWithTrustedPrincipal above.
+    const actorWithId = Object.assign(actor, { id: a.rows[0].id });
+    if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
+      client.foundationAssuranceActorSlug = actorWithId.slug;
+    await setWriterActorContext(client, actorWithId,
+      { partnerAuthorityAct: tool.humanOnly === true });
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
     if (principalReadback.rows.length !== 1)
       throw new ToolError({ error: "trusted_database_principal_unavailable" });
@@ -622,6 +897,24 @@ export async function callTool(env, actor, name, args, profile = "full") {
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});
+    // TRANSLATE THE DATABASE'S REFUSAL HERE, WHERE THE CONNECTION IS STILL
+    // OPEN. pgConstraintError has existed and been tested since 2026-08-21 and
+    // until now had no production caller at all: every check, foreign-key,
+    // unique and not-null violation fell through to the outer handler and
+    // reached the caller as `unhandled_verb_failure` with a stack string,
+    // which is the shape that says "the server broke" about an input the
+    // server correctly refused. A tested translator nobody calls is not a
+    // capability, and this is the same failure the judgment-wiring selftest
+    // was written to catch one level up.
+    //
+    // This is also the only place the enrichment can happen: the rollback
+    // above ends the aborted transaction but `client` lives until the finally
+    // below, so the catalog lookup rides the connection that is already here.
+    // By the time the RPC handler's catch sees this, the pool is closed.
+    if (!(e instanceof ToolError)) {
+      const refusal = pgConstraintError(e);
+      if (refusal) throw await describeConstraint(client, refusal);
+    }
     throw e;
   } finally {
     client.release();
@@ -658,7 +951,13 @@ export async function dispatch(request, env, ctx, actor) {
   // The authority class is server-derived from the authenticated actor. The
   // legacy ?profile= remains only a voluntary operational limiter: it can
   // reduce the listed/callable verbs, never select a sponsor or widen humanOnly.
-  const scopedActor = { ...actor,
+  // DECORATED IN PLACE. This used to be `{ ...actor, ... }`, and the copy was
+  // load-bearing in the wrong direction: identity.js's brand is now object
+  // identity (amendment 8), so an actor spread here reaches the verb dispatch
+  // authenticated as nobody. The fields a receipt identity is derived from were
+  // pinned at authentication and are not re-read off this object, so decorating
+  // it cannot move who the actor is either.
+  const scopedActor = Object.assign(actor, {
     authorization_class: authorizationClassForActor(actor),
     organization_tenant_id: organizationTenantForActor(actor),
     operational_profile: profile,
@@ -670,7 +969,8 @@ export async function dispatch(request, env, ctx, actor) {
     // every verb handler — means every write verb's existing withEnvelope()/
     // writeEvent() calls pick it up for free through auditIdentity(actor)
     // (tools.js), with zero change to any individual verb.
-    correlation_id: env.CORRELATION_ID || null };
+    correlation_id: env.CORRELATION_ID || null,
+    execution_host_id: canonicalOwnershipExecutionHost(env) });
   if (request.method !== "POST")
     return json({ error: "method_not_allowed", hint: "MCP streamable HTTP: POST JSON-RPC" }, 405);
 
@@ -793,7 +1093,11 @@ export async function dispatch(request, env, ctx, actor) {
 /** Mounted as OAuthProvider `apiHandler` for /mcp. ctx.props is already authenticated. */
 export const mcpApiHandler = {
   async fetch(request, env, ctx) {
-    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
+    // The grant door, with the server's witness — see index.js's note on the
+    // same call. identity.js brands only when the witness is a credential byte
+    // string it read from the server's own environment at initialisation.
+    const actor = authenticatedIdentity.connectionForGrant(
+      ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS, env.GOOGLE_CLIENT_SECRET);
     // Fails closed: a token whose grant does not name one of the two actors is
     // no better than no token at all.
     if (!actor) {

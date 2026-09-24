@@ -11,8 +11,8 @@ TWO LAYERS, one file:
 
   SOURCE CONTRACT (always, no database) — every table in public+ops with RLS
   enabled must carry a permissive carr_backup SELECT policy with no row filter
-  (USING (true)); and bin/backup-dump.sh must carry --enable-row-security on the
-  pg_dump line. Today ops.work_request is the only RLS table; 0475 adds its
+  (USING (true)); and the bounded guard that owns pg_dump must pass
+  --enable-row-security. Today ops.work_request is the only RLS table; 0475 adds its
   policy. This fails loudly the moment a future migration enables RLS on a
   public/ops table without a carr_backup read-all policy — before it can
   silently shrink the backup.
@@ -43,11 +43,14 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "migrations"
 BACKUP_SCRIPT = ROOT / "bin" / "backup-dump.sh"
+GUARD_SCRIPT = ROOT / "bin" / "backup-guard.py"
 MIGRATION_0475 = MIGRATIONS / "0475_backup_role_work_request_rls_read_policy.sql"
 
 FAIL: list[str] = []
@@ -91,6 +94,14 @@ def check(label: str, condition: bool, detail: str = "") -> None:
         print(f"  FAIL  {label}  {detail}")
 
 
+def conninfo_text(value: str | int | None, name: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"CARR_LOCAL_PG_DSN {name} must be text")
+    return value
+
+
 # ── SOURCE CONTRACT (no database) ────────────────────────────────────────────
 
 def normalized(sql: str) -> str:
@@ -132,12 +143,77 @@ def source_contract() -> None:
         )
 
     script = BACKUP_SCRIPT.read_text(encoding="utf-8")
-    check("bin/backup-dump.sh dumps with --enable-row-security",
-          "--enable-row-security" in script,
+    guard = GUARD_SCRIPT.read_text(encoding="utf-8") if GUARD_SCRIPT.is_file() else ""
+    check("the pg_dump command owner enables row security",
+          "--enable-row-security" in guard,
           "row_security must be on so the carr_backup policy applies instead of the dump erroring")
-    check("the pg_dump invocation itself carries --enable-row-security",
-          re.search(r'"\$PG_DUMP_BIN"[^\n]*--enable-row-security[^\n]*"\$URL"', script) is not None,
-          "the flag must be on the pg_dump command line, not merely mentioned in a comment")
+    check("the routine wrapper invokes the bounded backup guard",
+          "backup-guard.py" in script,
+          "coverage cannot be inferred from migrations alone; every dump must run the guard")
+    check("pg_dump imports the guard's exported snapshot",
+          "--snapshot" in guard,
+          "the guarded census and pg_dump must share the exported snapshot")
+    check("pg_dump emits verbose TOC metadata for observed table-OID equality",
+          "--verbose" in guard,
+          "promotion requires class-1259 TABLE OIDs from the actual dump stream")
+
+
+def require_disposable_local_dsn(dsn: str) -> str:
+    """Refuse any live fixture target that is not literal loopback or owned socket.
+
+    `localhost` is intentionally not accepted: a fixture must name the transport
+    it relies on, and must never inherit a production or tunnelled hostname from
+    an ordinary DATABASE_URL.
+    """
+    from psycopg.conninfo import conninfo_to_dict
+
+    parsed = urlparse(dsn)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise ValueError("CARR_LOCAL_PG_DSN must be a PostgreSQL URI")
+    info = conninfo_to_dict(dsn)
+    if info.get("service") or info.get("servicefile"):
+        raise ValueError("service-based DSNs are not fixture authority")
+    host = conninfo_text(info.get("host"), "host")
+    hostaddr = conninfo_text(info.get("hostaddr"), "hostaddr")
+    port = conninfo_text(info.get("port"), "port")
+    if any("," in value for value in (host, hostaddr, port)):
+        raise ValueError("multi-host DSNs are not permitted")
+    if hostaddr and hostaddr not in {"127.0.0.1", "::1"}:
+        raise ValueError("effective hostaddr is not literal loopback")
+    if host in {"127.0.0.1", "::1"} and (not hostaddr or hostaddr == host):
+        return dsn
+    if host.startswith("/"):
+        resolved = Path(host).resolve(strict=True)
+        st = resolved.stat()
+        if resolved.is_dir() and st.st_uid == os.getuid() and not (st.st_mode & 0o022):
+            return dsn
+    raise ValueError(
+        "CARR_LOCAL_PG_DSN must use literal 127.0.0.1/::1 or an owned, non-writable Unix socket directory"
+    )
+
+
+def local_dsn_contract() -> None:
+    def refused(raw: str) -> bool:
+        try:
+            require_disposable_local_dsn(raw)
+        except (OSError, ValueError):
+            return True
+        return False
+
+    check("live fixture accepts literal IPv4 loopback",
+          require_disposable_local_dsn("postgresql://fixture@127.0.0.1:5432/fixture") != "")
+    check("live fixture rejects localhost, remote query override and service DSNs",
+          refused("postgresql://fixture@localhost:5432/fixture")
+          and refused("postgresql://fixture@127.0.0.1:5432/fixture?host=remote.invalid")
+          and refused("postgresql:///fixture?service=production"))
+    with tempfile.TemporaryDirectory(prefix="carr-backup-role-socket-") as raw:
+        socket_dir = Path(raw)
+        socket_dir.chmod(0o700)
+        dsn = "postgresql:///fixture?host=" + quote(str(socket_dir), safe="")
+        check("live fixture accepts only an owned non-writable Unix socket directory",
+              require_disposable_local_dsn(dsn) == dsn)
+        socket_dir.chmod(0o777)
+        check("live fixture rejects a writable Unix socket directory", refused(dsn))
 
 
 # ── LIVE PROOF (requires a disposable CARR_LOCAL_PG_DSN) ──────────────────────
@@ -310,9 +386,15 @@ def live_proof(dsn: str) -> None:
 
 def main() -> int:
     source_contract()
+    local_dsn_contract()
 
     dsn = os.environ.get("CARR_LOCAL_PG_DSN", "").strip()
-    if dsn.startswith(("postgres://", "postgresql://")):
+    if dsn:
+        try:
+            dsn = require_disposable_local_dsn(dsn)
+        except (OSError, ValueError) as exc:
+            print(f"backup-role-rls-coverage-selftest: REFUSED live fixture: {exc}", file=sys.stderr)
+            return 78
         print("  --    CARR_LOCAL_PG_DSN present: running live disposable-Postgres proof")
         live_proof(dsn)
     else:

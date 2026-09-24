@@ -400,15 +400,20 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.ci_workflow = CI_WORKFLOW_PATH.read_text()
 
     def test_full_strict_jobs_have_current_runtime_headroom(self):
-        ci_checks = self.ci_workflow.split(
-            "\n  checks:\n", 1)[1].split("\n    services:\n", 1)[0]
+        # Since 2026-09-23 the hosted strict run is the `classes` matrix job
+        # (one group per runner, slowest group about 268s plus setup), and
+        # `checks` is only the gate that reports the required context. The
+        # headroom that matters is the class job's; the pilot's verify job
+        # still runs the whole suite in one place and keeps the 30-minute floor.
+        ci_classes = self.ci_workflow.split(
+            "\n  classes:\n", 1)[1].split("\n    services:\n", 1)[0]
         pilot_verify = self.workflow.split(
             "\n  verify:\n", 1)[1].split("\n    permissions:\n", 1)[0]
-        for block in (ci_checks, pilot_verify):
+        for block, floor in ((ci_classes, 20), (pilot_verify, 30)):
             timeout_line = next(
                 line for line in block.splitlines()
                 if "timeout-minutes:" in line)
-            self.assertGreaterEqual(int(timeout_line.split(":", 1)[1]), 30)
+            self.assertGreaterEqual(int(timeout_line.split(":", 1)[1]), floor)
 
     def test_untrusted_pull_request_code_never_gets_write_permissions(self):
         verify_block = self.workflow.split("\n  verify:\n", 1)[1].split("\n  merge:\n", 1)[0]

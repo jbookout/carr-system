@@ -8,6 +8,11 @@ out/
 # so the link itself showed up as untracked in every worktree (2026-08-10).
 out
 mcp-server/.neon
+# ...and the ROOT one, which the Neon CLI writes beside it. 37 bytes, one
+# field, `orgId` — the Neon organisation this checkout talks to, not a
+# credential, and `neonctl` rewrites it on demand. Anchored so it ignores the
+# repo-root file only and leaves the line above doing its own job.
+/.neon
 _to_delete/
 *.bak-*
 
@@ -105,3 +110,14 @@ xcrun_db
 # every run. Same lane as the whisper-server.log entry above.
 tools/doc-convo/assets/render-daemon.log
 tools/doc-convo/assets/.render-daemon.pid
+
+# Local secrets files. No .env file is tracked (checked 2026-09-23); a
+# committed .env.example template, if one is ever added, stays trackable.
+.env
+.env.*
+!.env.example
+
+# Rendered output. output/pdf/CARR-Tour-Packet-reference.pdf was tracked from
+# #793 with no reader anywhere in the tree (untracked 2026-09-23). Rendered
+# output is not source.
+output/

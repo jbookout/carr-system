@@ -333,10 +333,10 @@ class KanbanAdapter:
         ])
 
     def block(self, task_id: str, reason: str, *, kind: str | None = None) -> None:
-        argv = ["hermes", "kanban", "--board", BOARD, "block", task_id]
+        argv = ["hermes", "kanban", "--board", BOARD, "block"]
         if kind:
             argv.extend(["--kind", kind])
-        argv.append(reason)
+        argv.extend([task_id, reason])
         self.command_runner(argv)
 
 

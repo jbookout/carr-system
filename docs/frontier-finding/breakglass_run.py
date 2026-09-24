@@ -220,11 +220,36 @@ def load_snapshot_blocks() -> dict[str, str]:
 
 
 def _rows_to_map(cur) -> dict[str, dict]:
+    rows = cur.fetchall()
+    grouped: dict[str, list[dict]] = {}
+    for identity_key, row in rows:
+        grouped.setdefault(identity_key, []).append(row)
+
+    # Some PostgreSQL catalogs legitimately expose more than one physical row
+    # for the logical identity a reviewed census reports. pg_auth_members is the
+    # production example: the same role/member edge may be granted by distinct
+    # grantors, while the role-authority census deliberately omits grantor from
+    # its logical row. Silently collapsing those rows would lose multiplicity;
+    # refusing makes a faithful pre-activation snapshot impossible. Preserve all
+    # rows instead, with stable receipt-only keys derived from canonical row
+    # content plus an occurrence number. A singleton keeps its reviewed key.
     out: dict[str, dict] = {}
-    for identity_key, row in cur.fetchall():
-        if identity_key in out:
-            raise BundleError(f"snapshot query produced a duplicate identity_key: {identity_key!r}")
-        out[identity_key] = row
+    raw_keys = set(grouped)
+    for identity_key, identity_rows in grouped.items():
+        if len(identity_rows) == 1:
+            out[identity_key] = identity_rows[0]
+            continue
+        ordered = sorted(identity_rows, key=canonical_json)
+        for occurrence, row in enumerate(ordered, start=1):
+            row_digest = hashlib.sha256(canonical_json(row).encode("utf-8")).hexdigest()
+            receipt_key = (
+                f"{identity_key}#duplicate:{occurrence:04d}:sha256:{row_digest}"
+            )
+            if receipt_key in raw_keys or receipt_key in out:
+                raise BundleError(
+                    f"snapshot duplicate disambiguation collided with identity_key: {receipt_key!r}"
+                )
+            out[receipt_key] = row
     return out
 
 

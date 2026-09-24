@@ -41,10 +41,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import openpyxl
 from registry import (REGISTRY_COLUMNS, RETIRED_IDS, id_num, fmt_id, _s)
 
-DEFAULT_RECOVERY_VAULT = (
-    "/Users/booko/Library/CloudStorage/"
-    "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI"
-)
+DEFAULT_RECOVERY_VAULT = os.path.join(
+    os.path.expanduser("~"), "Library", "CloudStorage",
+    "GoogleDrive-joe.bookout.carr.us@gmail.com", "My Drive", "CARR AI")
 
 
 def parse_args(argv):

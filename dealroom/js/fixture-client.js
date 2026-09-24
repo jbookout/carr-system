@@ -7,6 +7,8 @@ import { PHASES } from './client.js';
 
 const LEASE_TTL_MS = 3000;
 const IDEM_TTL_MS = 60 * 60 * 1000;
+/** The cells patch-deal-field bases on; mirrors the record layer's DEAL_ROOM_FIELDS. */
+const BASED_FIELDS = ['phase', 'owner', 'attention', 'next_date', 'operating_state'];
 
 /**
  * @param {Object} [opts]
@@ -147,6 +149,24 @@ export async function createFixtureClient(opts = {}) {
     return e;
   }
 
+  /**
+   * The latest committed event for each editable cell of one deal, as the board
+   * read returns it. Built from the same event log the conflict check consults,
+   * so what a caller sends back as base_event_id is what this client will compare.
+   */
+  function fieldBaseFor(dealId) {
+    const base = {};
+    for (const e of events) {
+      if (e.subject_type !== 'deal' || e.subject_id !== dealId || !e.field) continue;
+      // Only the cells patch-deal-field takes a base for — the record layer's own
+      // DEAL_ROOM_FIELDS. A base for anything else would be meaningless, because
+      // no other field is written through that verb.
+      if (!BASED_FIELDS.includes(e.field)) continue;
+      base[e.field] = { id: e.id, recorded_at: e.recorded_at };
+    }
+    return base;
+  }
+
   function cursorOf(list) {
     if (!list.length) return '0';
     return list[list.length - 1].id;
@@ -238,7 +258,10 @@ export async function createFixtureClient(opts = {}) {
       new_value: value ?? null,
     });
     pushHistory(deal, actor, `${field} ${old ?? '(empty)'} to ${value ?? '(empty)'}`, e.recorded_at);
-    return { status: 'ok', event: e };
+    // The committed event's own identity, named the same way the live answer
+    // names it, so the board advances a cell's base identically in both modes
+    // instead of waiting for the fixture's own changes feed to catch up.
+    return { status: 'ok', event: e, event_id: e.id, event_recorded_at: e.recorded_at };
   }
 
   const client = {
@@ -250,7 +273,10 @@ export async function createFixtureClient(opts = {}) {
       const activeNational = national.filter((d) => d.operating_state === 'active');
       return {
         actor: selfActor,
-        deals: [...deals.values()].map((d) => ({ ...d })),
+        // field_base, the same shape the live read returns: the latest committed
+        // event for each editable cell, from the same pass as the values, so a
+        // first edit has a base here too. A cell with no history has no entry.
+        deals: [...deals.values()].map((d) => ({ ...d, field_base: fieldBaseFor(d.id) })),
         accounts: [{ account_client_id: fixtureAccountId, account_client_ref: 'C-161',
           account_name: 'Musicologie', account_owner: fixtureAccountOwner, open_deals: activeNational.length,
           attention_deals: activeNational.filter((d) => d.attention).length,

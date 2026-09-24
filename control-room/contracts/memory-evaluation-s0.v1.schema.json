@@ -16,6 +16,7 @@
     "writes_records",
     "production_behavior_changes",
     "binding",
+    "record_state_binding",
     "resource_bindings",
     "gate_registry",
     "source_lock",
@@ -37,6 +38,7 @@
     "writes_records": {"const": false},
     "production_behavior_changes": {"const": false},
     "binding": {"$ref": "#/$defs/binding"},
+    "record_state_binding": {"$ref": "#/$defs/record_state_binding"},
     "resource_bindings": {
       "type": "array",
       "minItems": 5,
@@ -107,6 +109,91 @@
         "runbook_content_digest": {"const": "sha256:ad2316cf6c9f28c56f9c19f3033601a78021c3ade5628c2f3ea1d09d4434c718"},
         "slice_ref": {"const": "slice:learning-baseline-contracts-v2"}
       }
+    },
+    "record_state_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["work_request_id", "state_version", "canonical_record_digest", "accepted_resource_revisions"],
+      "properties": {
+        "work_request_id": {"const": "wr:7225c61a-324b-46b4-a234-8aff42f831fd"},
+        "state_version": {"const": 3},
+        "canonical_record_digest": {"const": "sha256:7d3e18d350d0241af9e060fa336fb978b97b5053629a4c60b1a04a09e51b680c"},
+        "accepted_resource_revisions": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "x-carr-unique-by": "resource_ref",
+          "items": {"$ref": "#/$defs/accepted_resource_revision"}
+        }
+      }
+    },
+    "accepted_resource_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource_ref", "revision_ref", "content_digest"],
+      "properties": {
+        "resource_ref": {"enum": ["resource:source-lock", "resource:evaluation-contract", "resource:threat-model", "resource:cost-model", "resource:legacy-inventory"]},
+        "revision_ref": {"const": "revision:3"},
+        "content_digest": {"enum": [
+          "sha256:a4bd7234feadf4556abc10091a6e7464b96fcb8a293fc0dbfce3ad6171a6996d",
+          "sha256:9deb92a11ce6e86c96427b26d53d1600163888d69a6ddc8e4950327e11cf471c",
+          "sha256:f802c5ef05ebb49c64adc28725f544fb2d34c60b4ee63b9cce6ba7c11aefc0ff",
+          "sha256:39c51c478ceff930a43bdb6846c17515c2a6c236603472866c8ad018c4c7604c",
+          "sha256:78d122e08129a489f3f14ef850f890c5a7ba276096924f448eb48f7d8103914a"
+        ]}
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:source-lock"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:a4bd7234feadf4556abc10091a6e7464b96fcb8a293fc0dbfce3ad6171a6996d"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:evaluation-contract"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:9deb92a11ce6e86c96427b26d53d1600163888d69a6ddc8e4950327e11cf471c"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:threat-model"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:f802c5ef05ebb49c64adc28725f544fb2d34c60b4ee63b9cce6ba7c11aefc0ff"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:cost-model"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:39c51c478ceff930a43bdb6846c17515c2a6c236603472866c8ad018c4c7604c"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:legacy-inventory"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:78d122e08129a489f3f14ef850f890c5a7ba276096924f448eb48f7d8103914a"}
+          }
+        }
+      ]
     },
     "resource_binding": {
       "type": "object",

@@ -4,7 +4,62 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-} from "./scac-mutation-registry.v10.generated.js";
+// v65 is the runtime selector after DoctorCRE V5-UX-C02/C06's resource
+// observation store (migration 0579, ops.record_resource_observation --
+// the collector's write door). Its sealed catalog admits the two new
+// verbs, read-resource-dashboard and record-resource-observation, and
+// preserves earlier versions as history; v64 re-digested tools/migrate.py
+// only and registered no verb, so the selector stayed on v63 until now.
+//
+// Superseded note (v63): v63 was the runtime selector after answering Joe (migration 0575,
+// ops.answer_work_request_for_joe -- the sole needs_joe -> triaged transition
+// state-machines.v1.json declares). Its sealed catalog admits the human-only,
+// authority-only answer-work-request-for-joe verb and preserves earlier
+// versions as history; v58-v62 registered no verb, so the selector stayed on
+// v57 until now.
+//
+// Superseded note (v57): v57 was the runtime selector after tour property registration (migration
+// 0565, ops.register_tour_property). Its sealed catalog admits the
+// authority-only register-tour-property verb and preserves earlier versions as
+// history; v50-v56 registered no verb, so the selector stayed on v49 until now.
+//
+// Superseded note (V5-UX-B11): v49 was the runtime selector because it admitted
+// the eight Meeting Mode verbs; v42-v48 registered no verb.
+//
+// Superseded note (B09): v41 was the runtime selector because it admitted the
+// outcome-card read.
+//
+// Superseded note (WR-000119): v35 was the runtime selector because it installed the DISPATCH SPINE --
+// TWO new security-definer WRITE ingresses and TWO new verbs in a NEW family
+// file, plus TWO new relations whose grants move relation_dml, which is why
+// mcp-server/src/tools.js is edited again and every mcp-tool row sourced from
+// it re-digests with the selector.
+//
+// Superseded note (WR-000117): v34 was the selector because it installed the
+// session-identity READ PAIR -- two new security-definer ingresses and two new
+// verbs in a new family file, with no relation and no table grant at all.
+//
+// Superseded note (WR-000116): v33 was the selector because it installed the
+// notification-preference pair in the already-registered notifications family
+// file.
+//
+// Superseded note (WR-000114): v31 was the selector because it installed the three Doc
+// conversation write doors -- create, share/revoke and rename/pin/archive --
+// as new SECURITY DEFINER ingresses, and the selector must name the sealed
+// version that admits them.
+//
+// Superseded note (WR-000111/112/113): v30 was the selector because those
+// requests installed the producer
+// cost ledger, the Doc conversation store and the R03 notification store.
+// The line below is the ONE place the runtime version is chosen.
+// Superseded note (WR-000110): v29 was the selector because that request
+// installed the V5-F02
+// program-controller seams: one new SECURITY DEFINER writer with two grantees,
+// and an edit to engineering-runtime.js that re-digests every mcp-tool row
+// registered from it. Older registries must continue to refuse the new shapes
+// as a contract mismatch: a registry that has not sealed the change does not
+// know it.
+} from "./scac-mutation-registry.v65.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

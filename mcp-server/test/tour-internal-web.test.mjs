@@ -88,7 +88,7 @@ test("static shell has no raw-token persistence/logging and stays in dealroom/to
     readFile(new URL("../../dealroom/tours/index.html", import.meta.url), "utf8"), readFile(new URL("../../dealroom/tours/app.js", import.meta.url), "utf8"),
     readFile(new URL("../../dealroom/tours/app.css", import.meta.url), "utf8"), readFile(new URL("../src/tour-internal-web.js", import.meta.url), "utf8"),
   ]);
-  assert.equal(TOUR_INTERNAL_ASSET_DIRECTORY, "../dealroom/tours");
+  assert.equal(TOUR_INTERNAL_ASSET_DIRECTORY, "../out/doctorcre-artifacts/current/tours");
   assert.match(html, /\/tours\/app\.js/); assert.match(html, /\/tours\/app\.css/); assert.ok(css.length > 300);
   assert.match(js, /new Uint8Array\(32\)/); assert.match(js, /crypto\.getRandomValues/); assert.match(js, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(js, /https:\/\/reports\.doctorcre\.com\/share#token=\$\{raw\}/);

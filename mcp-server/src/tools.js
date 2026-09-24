@@ -9,16 +9,25 @@
 import { doctrineTools } from "./doctrine.js";
 import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
+import { docConversationTools } from "./doc-conversation.js";
+import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
+import { notificationTools } from "./notifications.js";
+import { sessionIdentityTools } from "./session-identity.js";
+import { dispatchSpineTools } from "./dispatch-spine.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
+import { workPortfolioTools } from "./work-portfolio.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
 import { agentProfileTools } from "./agent-profiles.js";
 import { botBriefTools } from "./bot-brief.js";
 import { memoryTools } from "./memory.js";
+import { codexContinuityTools } from "./codex-continuity.js";
+import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
+import { resourceObservationTools } from "./resource-observation.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { tourRightsProjectionTools } from "./tour-rights-projection.js";
 import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
@@ -28,10 +37,28 @@ import { tourSharingTools } from "./tour-sharing.js";
 import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
-import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
-         personalScopeForActor } from "./identity.js";
+import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
+         permittedActionOwnerSlugs, personalScopeForActor } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
+import { assertGateZeroReceipt, deriveGateZeroProducerSeat, gateZeroOracleSeatLane,
+         gateZeroOutcomeCandidateDigest, gateZeroOutcomeDigest,
+         GATE_ZERO_RECEIPT_SCHEMA } from "./gate-zero-outcome-store.v5.js";
+import { GATE_ZERO_WRITER_SECRET_NAME } from "./gate-zero-seat-connection.v5.js";
+import {
+  assertFoundationAssuranceOracleSeat,
+  foundationAssuranceOracleLane,
+} from "./foundation-assurance-minimum-registration.v5.js";
+// THE RECEIPT'S ONE SOURCE. The gate's producer seam is bound to Step A's
+// zero-argument producer, so this is how a receipt enters the write path: by
+// being produced, inside this call, from rows three ruled readers took from
+// three ruled stores. There is no other import that could supply one and no
+// argument that could carry one.
+import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
+import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
+import { modelRoleStoreTools } from "./model-role-store.v5.js";
+import { foundationAssuranceMinimumTools } from
+  "./foundation-assurance-minimum-producer.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -103,6 +130,70 @@ const PG_FAULT_HINT = Object.freeze({
   "42P01": "the statement names a table that does not exist — a migration is missing on this database.",
   "42883": "the statement calls a function that does not exist — a migration is missing on this database.",
 });
+
+// A CHECK THAT SPANS MORE THAN ONE COLUMN REPORTS `column: null`, and 219 of
+// this database's constraints do. Postgres is not being unhelpful -- it cannot
+// name one column for a rule about several -- but the caller is then told that
+// a rule broke without being told which of their inputs broke it, which is the
+// difference between a refusal they can act on and a dead end. Measured
+// 2026-09-18: 219 multi-column constraints, of which 86 leave the field
+// completely unidentifiable and 212 leave the required fix unknowable.
+//
+// The catalog knows the answer. pg_constraint.conkey holds exactly the columns
+// the rule is about, and pg_get_constraintdef prints the rule itself, so one
+// lookup keyed on the constraint name the error already carries turns
+// `column: null` into the list of fields involved plus the condition they must
+// satisfy. That is a read of the system catalogs only -- no row of anyone's
+// data is touched -- and it runs on the connection the failed statement was
+// already using, after its rollback, so it costs no new connection.
+const CONSTRAINT_COLUMNS_SQL = `
+  select t.relname as table_name,
+         pg_get_constraintdef(c.oid) as definition,
+         coalesce(array_agg(a.attname order by a.attname)
+                    filter (where a.attname is not null), '{}') as columns
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    left join pg_attribute a
+      on a.attrelid = c.conrelid and a.attnum = any(c.conkey) and not a.attisdropped
+   where c.conname = $1
+   group by t.relname, c.oid
+   limit 1`;
+
+/** Add the columns and the rule text to a constraint refusal, when we can.
+ *
+ * Deliberately best-effort: the refusal is already correct and already useful
+ * without this, so a catalog lookup that fails must NOT replace a precise
+ * refusal with a database error about the lookup. Any failure returns the
+ * refusal untouched.
+ */
+export async function describeConstraint(client, refusal) {
+  const name = refusal?.payload?.constraint;
+  if (!client || typeof name !== "string" || !name) return refusal;
+  let row;
+  try {
+    const out = await client.query(CONSTRAINT_COLUMNS_SQL, [name]);
+    row = out?.rows?.[0];
+  } catch {
+    return refusal;   // see the doc comment: never trade a good refusal for this
+  }
+  if (!row) return refusal;
+  const columns = Array.isArray(row.columns) ? row.columns : [];
+  if (columns.length === 0) return refusal;
+  refusal.payload.table = refusal.payload.table || row.table_name || null;
+  refusal.payload.columns = columns;
+  refusal.payload.rule = redact(row.definition) || null;
+  // Only overwrite the hint when the original was the unhelpful case: a rule
+  // broke and no field was named. A single-column violation already told the
+  // caller which field, and that hint is better than this one.
+  if (!refusal.payload.column) {
+    refusal.payload.hint =
+      `this rule is about ${columns.length} fields together (${columns.join(", ")}), which is why ` +
+      `no single field is named: the database cannot attribute a multi-column rule to one column. ` +
+      `\`rule\` is the exact condition your values must satisfy. Check the combination, not each ` +
+      `field on its own -- each may be individually valid.`;
+  }
+  return refusal;
+}
 
 export function pgConstraintError(e) {
   const code = e && e.code;
@@ -216,7 +307,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb))
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -282,16 +373,18 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
     cause = "automation_job";
   }
   await client.query(
-    `insert into event (occurred_at, actor_id, verb, subject_type, subject_id, field,
+    `insert into event (occurred_at, recorded_at, actor_id, verb, subject_type, subject_id, field,
        old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
        organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values (coalesce($1::timestamptz, now()), $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+     values (coalesce($1::timestamptz, now()),
+       case when $19::boolean then clock_timestamp() else now() end,
+       $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
      fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
      fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
      identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
-     identity.correlation_id]);
+     identity.correlation_id, fields.recorded_at_after_lock === true]);
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
@@ -612,8 +705,22 @@ export function assertRequiredArgs(schema, args) {
   const required = schema && Array.isArray(schema.required) ? schema.required : null;
   if (!required || !required.length) return args;
   const bag = (args && typeof args === "object" && !Array.isArray(args)) ? args : {};
+  // A field the schema DECLARES nullable (type ["string","null"], or an anyOf /
+  // oneOf branch of type "null") takes null as a real answer: "no appointment",
+  // "no prior route version". Refusing it made such verbs uncallable, since the
+  // key is required AND its only honest value was null (append-tour-route-stop,
+  // append-tour-route-stop-transition, search-tour-properties, 2026-09-23).
+  // Absent keys and "" stay missing for every field.
+  const props = (schema && schema.properties) || {};
+  const nullable = (k) => {
+    const p = props[k];
+    if (!p || typeof p !== "object") return false;
+    if (p.type === "null" || (Array.isArray(p.type) && p.type.includes("null"))) return true;
+    return [p.anyOf, p.oneOf].some((alts) => Array.isArray(alts) && alts.some((a) => a && a.type === "null"));
+  };
   const missing = required.filter((k) => {
     const v = bag[k];
+    if (v === null && nullable(k)) return false;
     return v === undefined || v === null || v === "";
   });
   if (!missing.length) return args;
@@ -1938,7 +2045,12 @@ async function latestFieldConflict(c, dealId, field, baseEventId) {
   return newer.rows[0] || null;
 }
 
-async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb) {
+// `provenance` is optional and defaults to empty: revert-deal-field and
+// resolve-conflict pass nothing and keep automation semantics, which is what
+// they are. patch-deal-field passes the partner's words through when the caller
+// carried them (WR-000109), and never synthesises a cause — writeEvent derives
+// it from the presence of a verbatim quote, and that derivation is the point.
+async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb, provenance = {}) {
   assertDealRoomField(field, value);
   if (field === "operating_state") value = {
     state: value.state,
@@ -1949,7 +2061,9 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     ? await c.query(
       `select jsonb_build_object('state',operating_state,'reason',parking_reason,'note',parking_note) as value
          from deal where id=$1`, [dealId])
-    : await c.query(`select ${field} as value from deal where id=$1`, [dealId]);
+    : await c.query(field === "next_date"
+      ? "select next_date::text as value from deal where id=$1"
+      : `select ${field} as value from deal where id=$1`, [dealId]);
   if (!oldRow.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: dealId });
   if (field === "owner") {
     // deal.owner is the board cache; deal_participant(role=lead) remains the
@@ -1986,11 +2100,50 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
   }
   await writeEvent(c, actor, verb, "deal", dealId, {
     field,
+    // The field lock orders writes by commit. Transaction-start `now()` would
+    // let a writer that waited for the lock sort behind the write it replaced.
+    recorded_at_after_lock: true,
     old: { [field]: oldRow.rows[0].value },
     new: { [field]: value },
+    human_quote: provenance.human_quote || null,
+    agent_rationale: provenance.change_reason || null,
     idempotency_key: idempotencyKey,
   });
-  return { old_value: oldRow.rows[0].value, new_value: value };
+  // The committed identity of the event this write just made, READ BACK from the
+  // record. Nothing here constructs an id: writeEvent's insert carries no
+  // `returning` and is shared by every verb in this file, so it is not this
+  // verb's to change, and the row is found the way any other row is found.
+  //
+  // What makes the read exact is the event's own idempotency_key — one intended
+  // action, one key, one event row — so it names the row written immediately
+  // above and can never name a partner's, which ordering by recorded_at alone
+  // could under a concurrent writer. Same table and same ordering the Deal Room
+  // already uses to find a cell's newest event (revert-deal-field).
+  //
+  // Why the answer needs it: the board's ONLY source of a field base was the
+  // changes feed, which lags a write by up to a poll. A second, different edit to
+  // the same cell inside that window therefore sent a base its own first edit had
+  // already superseded, and the server correctly recorded a conflict — between a
+  // partner and themselves. With the committed id in the answer the client can
+  // advance that cell's base immediately, from the record's own word for it.
+  //
+  // recorded_at is serialized exactly as the changes feed serializes it
+  // (dealroom.js), so the two are directly comparable on the client: a base is
+  // only ever moved forward, never back onto an older event.
+  const committed = (await c.query(
+    `select id, to_jsonb(recorded_at)#>>'{}' as recorded_at from event
+      where subject_type='deal' and subject_id=$1 and field=$2 and idempotency_key=$3
+      order by recorded_at desc, id desc limit 1 /* dealroom:written-event */`,
+    [dealId, field, idempotencyKey]))?.rows?.[0] || null;
+  return {
+    old_value: oldRow.rows[0].value,
+    new_value: value,
+    // Null when this write carried no key to find the row by. A client that gets
+    // no id simply does not advance its base and waits for the feed, which is
+    // exactly the behaviour it had before this existed.
+    event_id: committed?.id ?? null,
+    event_recorded_at: committed?.recorded_at ?? null,
+  };
 }
 
 const FIND_CATCH_UP_QUERY_MAX = 200;
@@ -2814,27 +2967,60 @@ export const TOOLS = {
 
   "deal-room-board": {
     write: false,
-    description: "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. workspace may be team, national_account, or all; no row is duplicated between workspaces.",
+    description: "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. Each record also carries field_base — the latest committed event id and time for every editable cell, read in the same statement as the values, which is what patch-deal-field takes as base_event_id. A cell with no history has no entry. workspace may be team, national_account, or all; no row is duplicated between workspaces.",
     inputSchema: { type: "object", properties: {
       workspace: { type: "string", enum: ["team","national_account","all"], default: "all" },
       account_client_id: { type: "string", description: "optional national-account client uuid" },
     } },
     handler: async (c, actor, args) => {
       const workspace = args.workspace || "all";
+      // field_base: the latest committed event for each EDITABLE cell, read in
+      // the SAME statement as the values it belongs to.
+      //
+      // Why it is here and not a second read: patch-deal-field bases on an event
+      // id, and until now the board had no way to learn one except the changes
+      // feed, which starts at the beginning of the log. So the first edit of a
+      // session to a cell with any history sent no base at all, which this verb's
+      // own concurrency rule treats as "any prior event conflicts" — a refusal
+      // naming a months-old change as concurrent. This closes that.
+      //
+      // ONE STATEMENT is the point, not an economy. A value and its base read in
+      // two statements can straddle a commit, and the dangerous half of that is a
+      // base NEWER than the value shown: the next write would then be accepted
+      // over a value the person never saw. Inside one statement both come from
+      // one snapshot, so a concurrent write is either wholly visible here or
+      // wholly invisible, and a partner's later edit still conflicts.
+      //
+      // One correlated subquery, not one query per deal: the ordering is the
+      // record layer's own (recorded_at desc, id desc), the same pair
+      // latestFieldConflict and revert-deal-field sort by, and a cell that has
+      // never been edited simply has no key — which the client must read as "no
+      // base", never as a base of null-meaning-anything.
       const deals = await c.query(
-        `select id, name, type, phase, owner, attention,
-                to_jsonb(next_date)#>>'{}' as next_date, next_step, market, segment,
-                client_id, client_ref, client_name, account_client_id, account_client_ref,
-                account_name, account_owner, market_agent,
-                to_jsonb(last_touch)#>>'{}' as last_touch,
-                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind,
-                operating_state, parking_reason, parking_note,
-                to_jsonb(parked_at)#>>'{}' as parked_at, parked_by
-           from v_deal_room_board
-          where ($1 = 'all' or workspace_kind = $1)
-            and ($2::uuid is null or account_client_id = $2::uuid)
-          order by attention desc, next_date nulls last, name`,
-        [workspace, args.account_client_id || null]);
+        `select b.id, b.name, b.type, b.phase, b.owner, b.attention,
+                to_jsonb(b.next_date)#>>'{}' as next_date, b.next_step, b.market, b.segment,
+                b.client_id, b.client_ref, b.client_name, b.account_client_id, b.account_client_ref,
+                b.account_name, b.account_owner, b.market_agent,
+                to_jsonb(b.last_touch)#>>'{}' as last_touch,
+                to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
+                b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
+                coalesce((
+                  select jsonb_object_agg(latest.field,
+                           jsonb_build_object('id', latest.id,
+                             'recorded_at', to_jsonb(latest.recorded_at)#>>'{}'))
+                    from (select distinct on (e.field) e.field, e.id, e.recorded_at
+                            from v_deal_room_event e
+                           where e.subject_type='deal' and e.subject_id=b.id
+                             and e.field = any($3::text[])
+                           order by e.field, e.recorded_at desc, e.id desc) latest
+                ), '{}'::jsonb) as field_base
+           from v_deal_room_board b
+          where ($1 = 'all' or b.workspace_kind = $1)
+            and ($2::uuid is null or b.account_client_id = $2::uuid)
+          order by b.attention desc, b.next_date nulls last, b.name
+          /* dealroom:board-field-base */`,
+        [workspace, args.account_client_id || null, [...DEAL_ROOM_FIELDS]]);
       const accounts = await c.query(
         `select account_client_id, account_client_ref, account_name, account_owner,
                 open_deals, attention_deals, overdue_deals, stale_deals,
@@ -3456,6 +3642,9 @@ export const TOOLS = {
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // Legacy phase edits share the Deal Room event stream. Acquire its lock
+      // before versionGuard can lock the deal row, matching Deal Room lock order.
+      if (keys.includes("phase")) await lockDealField(c, s.id, "phase");
       // touchedFields = keys: computed BEFORE the guard so a version bump from
       // some OTHER field can be told apart from a bump on one of THESE fields.
       // See versionGuard's own comment (CONFLICT TIERING, slice S6).
@@ -3466,7 +3655,8 @@ export const TOOLS = {
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
-          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] },
+            recorded_at_after_lock: k === "phase", idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys,
                ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
@@ -3615,7 +3805,9 @@ export const TOOLS = {
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-lead", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
+      await lockDealField(c, s.id, "owner");
       await versionGuard(c, "deal", s.id, args.base_version);
+      const previousOwner = (await c.query("select owner from deal where id=$1", [s.id])).rows[0]?.owner ?? null;
       const na = await c.query("select id from actor where slug=$1", [args.new_lead]);
       const prev = await c.query(
         `update deal_participant set to_at=now() where deal_id=$1 and role='lead' and to_at is null
@@ -3625,7 +3817,9 @@ export const TOOLS = {
         [s.id, na.rows[0].id, actor.id]);
       await c.query("update deal set owner=$1, updated_by=$2 where id=$3", [args.new_lead, actor.id, s.id]);
       await writeEvent(c, actor, "set-lead", "deal", s.id,
-        { old: { lead: prev.rows[0]?.actor_id || null }, new: { lead: args.new_lead }, idempotency_key: args.idempotency_key });
+        { field: "owner", old: { owner: previousOwner, lead: prev.rows[0]?.actor_id || null },
+          new: { owner: args.new_lead, lead: args.new_lead }, recorded_at_after_lock: true,
+          idempotency_key: args.idempotency_key });
       return { ok: true, new_lead: args.new_lead };
     }),
   },
@@ -7431,6 +7625,253 @@ export const TOOLS = {
                  : null };
     }),
   },
+
+  // ===== the Gate Zero read-only outcome (DoctorCRE v5 slice V5-A02, Step B) =====
+  //
+  // ONE VERB, AND IT CARRIES THE FIRST NON-HUMAN, NON-SPONSORED AUTHORITY CLASS
+  // IN THIS REGISTRY. Every write verb before it either gated on a verified
+  // human partner (`humanOnly: true`) or admitted any sponsored agent. This one
+  // is neither: it refuses every actor except the single review-token seat that
+  // holds oracle:gate-producer:gate-zero-read-only, under Joe's 2026-09-13
+  // ruling d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70. The gate is enforced in
+  // executeRegisteredTool through the `oracleSeatOnly` flag AND again inside the
+  // handler through deriveGateZeroProducerSeat AND a third time in SQL by
+  // ops.gate_zero_producer_actor_id() -- three independent derivations of one
+  // fact, because a flag that nothing enforces is a label, which is exactly the
+  // defect WR-000021 found on humanOnly.
+  //
+  // WHY IT IS DEFINED HERE rather than in a store module of its own: the
+  // registry's source locator is part of the runtime mutation contract, and the
+  // contract for this verb should read from the same file every other inline
+  // verb's does. The receipt contract and the seat derivation live in
+  // gate-zero-outcome-store.v5.js, which registers no verb of its own.
+  "record-gate-zero-read-only-outcome": {
+    write: true, humanOnly: false, oracleSeatOnly: true,
+    description: "ORACLE-SEAT-ONLY, AND NOT A HUMAN ACT: record the DoctorCRE v5 Gate Zero read-only outcome as one consumer-gate-receipt.v1, its recomputed digest, the instant it was observed and the seat that produced it. It refuses every actor except the one review-token seat holding oracle:gate-producer:gate-zero-read-only — a partner is refused, a sponsored agent is refused, and a review-token seat on a DIFFERENT lane is refused by name rather than admitted by authority class. That shape exists because r7 registers this producer's role as independent_control_plane_oracle and Joe ruled on 2026-09-13 (decision d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70) that the seat records the row on its own authority with no partner countersign. THE HUMAN ACT IN THIS CHAIN IS UNCHANGED AND IS DOWNSTREAM: accept-benchmark-manifest-draft is still humanOnly and still derives its acceptor from a live verified partner. THE RECEIPT IS PRODUCED IN THIS CALL, NOT SUPPLIED: the verb takes ONE argument, idempotency_key, and invokes the bound producer seam — Step A's zero-argument Gate Zero producer — which derives its own run binding, aims the three ruled evidence readers at it and assembles one consumer-gate-receipt.v1 signed with the identity the server derived for this call. There is no receipt argument and no receipt-shaped argument: any other top-level field is refused as unregistered_operation_fields before the handler runs. NOTHING HERE IS A CALLER'S WORD FOR ANYTHING — the producing seat comes from the frozen registration, the actor from the authenticated bearer match, the three receipt identities from the authenticated call, and the outcome digest is RECOMPUTED by the record layer from the stored receipt, so no caller-supplied digest is accepted and none is sent. What the producer emits is still checked against the closed twenty-one-field r7 schema, against the twelve constants the producer registry fixes, against the closed three-field authenticated-receipt-identity.v1 shape, and against the identity rule that the producer and evaluator are this call while the subject maker is not. A producer refusal records nothing and is reported as gate_zero_outcome_not_produced with the reason the producer gave. RETRYABLE, IMMUTABLE FIRST OUTCOME: any later call for the same candidate returns the row already recorded rather than writing a second one. If the offered receipt differs because its session, instant, evidence or verdict moved, it converges onto that immutable row so the caller can heal a missing audit event; the result explicitly separates recorded and offered digests, statuses and producer reasons. candidate_scoped_digest is informational only; candidate_digest is the row arbiter. It grants no dispatch, activation or execution authority, accepts no benchmark and starts no clock.",
+    // ONE ARGUMENT, AND IT NAMES AN INTENDED ACT RATHER THAN A SUBJECT. The
+    // caller says "record the outcome, once, under this key"; WHAT gets recorded
+    // is produced here. A `receipt` property was in the first draft of this verb
+    // and is deliberately gone: the closed top-level check in mutation-registry.js
+    // refuses any key that is not in this list as `unregistered_operation_fields`,
+    // so `receipt`, `outcome`, `consumer_gate_receipt` and every other
+    // receipt-shaped spelling is refused BEFORE the handler runs.
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        idempotency_key: { type: "string" },
+      },
+      required: ["idempotency_key"],
+    },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "record-gate-zero-read-only-outcome", args, async () => {
+      // ORDER IS DELIBERATE, and it is the same order the record layer uses.
+      //   1. The seat is derived from the LIVE actor and the frozen
+      //      registration. It runs FIRST, so an actor who may not write here
+      //      never reaches a contract check that could tell them about the
+      //      receipt shape.
+      //   2. The receipt is checked against the derived seat.
+      //   3. Only then does anything reach the database, where all three
+      //      derivations happen again as the function owner.
+      const seat = deriveGateZeroProducerSeat(actor);
+
+      // THE RECEIPT IS PRODUCED, NOT RECEIVED (2026-09-13, PR 1014 correction).
+      // `emitGateZeroOutcome` is the gate's bound producer seam: it calls Step
+      // A's zero-argument producer, which derives its own run binding, aims the
+      // three ruled readers at it, applies the three clauses over what came back
+      // and assembles one consumer-gate-receipt.v1 signed with the identity
+      // identity.js derived for THIS call. Nothing is handed in and nothing can
+      // be: the producer's arity is zero and this verb has no receipt argument.
+      //
+      // A REFUSAL IS NOT A ROW. The producer refuses when it cannot authenticate,
+      // when a row its binding stands on is absent, when a ruled seam returned no
+      // row for the address it derived, or when its own falsifiers did not fire.
+      // Each of those is a run that established nothing, so nothing is written
+      // and the reason is reported by name. A clause that was READ and did not
+      // hold is the opposite case: that is a real outcome with `status: "fail"`,
+      // and it is recorded.
+      const emitted = await emitGateZeroOutcome();
+      if (emitted?.decision !== "report" || emitted?.status !== "outcome_produced"
+          || !emitted?.receipt) {
+        throw new ToolError({ error: "gate_zero_outcome_not_produced",
+          reason_id: emitted?.reason_id ?? null,
+          unavailable_because: emitted?.unavailable_because ?? null,
+          decided_by: emitted?.decided_by ?? null,
+          owed_seams: emitted?.owed_seams ?? null,
+          producer_bound: emitted?.producer_bound ?? null,
+          hint: "the Gate Zero producer did not emit an outcome in this call, so there is nothing to record. " +
+                "This is a refusal by the producer over the rows it derived, not a caller error: no receipt " +
+                "argument exists and none would have changed it." });
+      }
+      // CHECKED ANYWAY, against the derived seat and this call's own identity.
+      // The producer already assembled the twenty-one fields, so this cannot be
+      // a caller's malformed object -- which is exactly why it is checked: the
+      // contract is the record layer's, not the producer's, and a producer that
+      // drifted from r7's shape must be refused at the write path rather than
+      // trusted because it is ours.
+      const receipt = assertGateZeroReceipt(emitted.receipt, seat);
+
+      // THE WRITE RUNS ON THE SEAT'S OWN CONNECTION, NOT ON `c` (2026-09-14,
+      // PR 1014 third correction, standing-rule amendment 9).
+      //
+      // `c` is the ordinary writer connection every other verb uses, and that is
+      // exactly why this call may not travel on it. Sol's finding 2: the record
+      // layer's seat test read carr.acting_actor_slug, a GUC any session can set
+      // on itself, so any carr_writer connection could have named the staffed
+      // lane and been believed. Migration 0502 now revokes EXECUTE from
+      // carr_writer, grants it to one capability bundle reachable by one login
+      // role, and derives the seat from session_user. This opens a connection
+      // that AUTHENTICATES as that role, with a secret used for nothing else.
+      //
+      // NO FALLBACK, BY DESIGN. A Worker that carries no such secret refuses here
+      // by name. Falling back to `c` would be a deployment in which the whole
+      // amendment is off and nothing said so — which is the failure this correction
+      // exists to close, not a degradation worth tolerating.
+      if (typeof c.seatConnection !== "function") {
+        throw new ToolError({ error: "gate_zero_seat_connection_unavailable",
+          required_secret: GATE_ZERO_WRITER_SECRET_NAME,
+          hint: "recording a Gate Zero outcome requires the dedicated producer connection. The ordinary " +
+                "writer connection is refused by the record layer and is not used as a fallback: provision " +
+                "the login role and its secret before this verb can record anything." });
+      }
+      // ONE TRANSACTION ON THAT CONNECTION, carrying the write and the readback
+      // together. The readback has to be inside it: on a FIRST call the row is
+      // this transaction's own and is not visible to any other connection until
+      // it commits.
+      const row = await c.seatConnection(async seat => {
+        const recordedId = (await seat.query(
+          `select ops.gate_zero_record_read_only_outcome($1::uuid,$2::jsonb) as id`,
+          [args.idempotency_key, JSON.stringify(receipt)])).rows[0].id;
+
+        // READ THE DIGEST BACK OUT OF THE ROW rather than reporting the one this
+        // process computed. The database recomputes it from the persisted receipt
+        // with ops.gate_zero_outcome_digest(); reporting our own value would let a
+        // caller believe a number the record layer never agreed to. The locally
+        // computed digest is compared, not returned, so a divergence between the
+        // two canonicalizations is a refusal here instead of a silent mismatch
+        // that only surfaces when a benchmark acceptance binds the wrong value.
+        //
+        // THE STORED RECEIPT COMES BACK TOO, AND THE CHECK IS AGAINST IT rather
+        // than against this call's object (PR 1014, second correction). On a
+        // RETRY the row is the earlier run's -- same candidate, different
+        // session_ref, different instants -- so comparing the row's digest with a
+        // digest of THIS call's receipt refused every genuine second call, which
+        // was the gateway half of Sol's finding 3. Recomputing from the persisted
+        // receipt asks the question the check was always meant to ask: do the
+        // record layer's canonical JSON and artifact-trust.js's agree about the
+        // bytes that are actually stored? That holds on a first call and a retry
+        // alike, and it is the stronger of the two readings.
+        return (await seat.query(
+          `select id, outcome_digest, candidate_scoped_digest, candidate_digest, status,
+                  producing_seat_ref, receipt,
+                  to_char(observed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as observed_at,
+                  to_char(recorded_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') as recorded_at
+             from ops.gate_zero_read_only_outcome where id = $1::uuid`,
+          [recordedId])).rows[0];
+      });
+      const localDigest = gateZeroOutcomeDigest(row.receipt);
+      if (row.outcome_digest !== localDigest) {
+        throw new ToolError({ error: "gate_zero_outcome_digest_divergence",
+          recorded: row.outcome_digest, recomputed_here: localDigest,
+          hint: "the record layer's canonical JSON and artifact-trust.js's disagreed about the stored receipt. " +
+                "The recorded value is the database's; this is a contract defect, not a caller error." });
+      }
+      // AND THE TWO CANONICALIZATIONS AGREE ABOUT THE PROJECTION TOO, asked over
+      // the STORED receipt exactly as the full digest above is. This is the same
+      // contract question in the narrower place: does the record layer's
+      // projection-then-canonicalize produce the bytes artifact-trust.js's does?
+      // It is a property of the row alone, so it holds on a first write and on
+      // every retry that converges onto the immutable row.
+      const storedCandidateDigest = gateZeroOutcomeCandidateDigest(row.receipt);
+      if (row.candidate_scoped_digest !== storedCandidateDigest) {
+        throw new ToolError({ error: "gate_zero_outcome_candidate_digest_divergence",
+          recorded: row.candidate_scoped_digest, recomputed_here: storedCandidateDigest,
+          hint: "the record layer's candidate projection and artifact-trust.js's disagreed about the stored " +
+                "receipt. The recorded value is the database's; this is a contract defect, not a caller error." });
+      }
+      // KEEP THE OFFERED RECEIPT SEPARATE FROM THE RECORDED ONE. A normal retry
+      // necessarily carries fresh session and time bytes, and its evidence may
+      // have moved. The record layer returns the immutable row for the candidate
+      // so this outer transaction can heal a missing audit event; these digests
+      // make that convergence visible rather than describing the offered run as
+      // if it had been stored.
+      const offeredDigest = gateZeroOutcomeDigest(receipt);
+      const offeredCandidateDigest = gateZeroOutcomeCandidateDigest(receipt);
+      const convergedOntoRecorded = row.outcome_digest !== offeredDigest;
+
+      // ONE EVENT PER OUTCOME ROW, SERIALIZED ON THE OUTCOME. The retry is
+      // exactly what makes this necessary: it exists to heal a missing event, and
+      // an unguarded insert would instead write a second one every time a call
+      // got past the seat commit.
+      //
+      // THE LOCK BLOCKS, DELIBERATELY. A try-lock let a concurrent retry return
+      // `ok: true` without an event; if the holder then rolled back, the row was
+      // still eventless and only a THIRD call could repair it. That is eventually
+      // healable, not the unconditional second-call healing the refusal requires.
+      // In production the dependency graph has no cycle: each seat transaction
+      // commits before its caller reaches this lock, so a waiter holds no row the
+      // lock owner needs. The former test deadlock came from its harness awaiting
+      // the waiter before committing the owner transaction; the proof now stages
+      // the production order instead of weakening the production invariant.
+      await c.query(
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`gate-zero-outcome-event:${row.id}`]);
+      const eventAlready = await c.query(
+        `select 1 from event
+          where verb = 'record-gate-zero-read-only-outcome'
+            and subject_type = 'gate_zero_outcome' and subject_id = $1::uuid
+          limit 1`, [row.id]);
+      if (!eventAlready.rows.length) {
+        await writeEvent(c, actor, "record-gate-zero-read-only-outcome", "gate_zero_outcome", row.id,
+          { field: "outcome_recorded",
+            new: { outcome_digest: row.outcome_digest,
+                   candidate_scoped_digest: row.candidate_scoped_digest,
+                   candidate_digest: row.candidate_digest,
+                   status: row.status, observed_at: row.observed_at,
+                   producing_seat_ref: row.producing_seat_ref },
+            idempotency_key: args.idempotency_key });
+      }
+
+      return {
+        ok: true, outcome_id: row.id,
+        step_ref: "step:gate-zero-read-only-outcome",
+        gate_id: "gate-zero-read-only-accepted",
+        receipt_schema: GATE_ZERO_RECEIPT_SCHEMA,
+        outcome_digest: row.outcome_digest,
+        // INFORMATIONAL PROJECTION OF THE RECORDED RECEIPT. candidate_digest,
+        // not this value, is the one-row-per-candidate arbiter.
+        candidate_scoped_digest: row.candidate_scoped_digest,
+        candidate_digest: row.candidate_digest,
+        converged_onto_recorded_outcome: convergedOntoRecorded,
+        offered_outcome_digest: offeredDigest,
+        offered_candidate_scoped_digest: offeredCandidateDigest,
+        status: row.status,
+        observed_at: row.observed_at,
+        recorded_at: row.recorded_at,
+        producing_seat_ref: row.producing_seat_ref,
+        producing_seat_charter_decision_ref: seat.charter_decision_ref,
+        producing_seat_staffing_decision_ref: seat.staffing_decision_ref,
+        producer_reason_id: convergedOntoRecorded ? null : emitted.reason_id,
+        receipt_status: row.receipt.status,
+        offered_producer_reason_id: emitted.reason_id,
+        offered_receipt_status: receipt.status,
+        // WHAT THIS ROW IS WORTH, said on the result so a consumer does not read
+        // more into it than it carries.
+        digest_recipe: "canonical-JSON sha256 over the TAGGED two-element array " +
+          "[\"consumer-gate-receipt.v1\", <receipt>], recomputed by the record layer. r7's " +
+          "receipt_payload_digest_rule declares that preimage for this schema (amended 2026-09-13) and states that " +
+          "a plain digest over the receipt alone does not satisfy it. candidate_scoped_digest is the UNTAGGED " +
+          "canonical-JSON sha256 over a projection of the receipt — without observed_at, ttl_expires_at and the " +
+          "per-call session_ref of each of its three identities — because that projection is not a " +
+          "consumer-gate-receipt.v1 and r7's rule does not speak about it. It is an informational comparison aid, " +
+          "not evidence or an admission key; candidate_digest is the one-row-per-candidate arbiter.",
+        effects: Object.freeze({
+          creates_effect: false, clock_started: false, benchmark_accepted: false,
+          note: "recording an outcome binds nothing on its own. Benchmark acceptance reads the current passing " +
+                "outcome and is still humanOnly; the Journey 1 clock still starts at the first passing " +
+                "foundation-assurance-minimum receipt, which this verb neither issues nor reaches.",
+        }),
+      };
+    }),
+  },
 };
 
 // These names describe server-owned authority, never data a tool invocation may
@@ -7464,7 +7905,64 @@ export function assertNoCallerAuthorityFields(args) {
 // registry lookup, human-only, coercion, and handler/envelope gates. Keeping
 // the first gate here makes direct MCP, call-verb recursion, and composites
 // fail closed before a handler or database client can be used.
+// EVERY DECLARED CLOSED VOCABULARY IS ENFORCED HERE, AND THIS IS THE ONLY
+// PLACE THAT ENFORCES IT GENERICALLY.
+//
+// WHY IT EXISTS. There is no JSON-schema validator anywhere in this server --
+// no ajv, no jsonschema -- so an `enum` in an inputSchema was documentation
+// that nothing read. 73 of 89 enum fields were guarded BY HAND in their own
+// handler with one(); the other 16, across 15 verbs, passed whatever they were
+// given straight through to Postgres. Thirteen of the columns behind them
+// carry no check constraint either, so for those the declared vocabulary was
+// enforced at NO layer.
+//
+// THE COST, MEASURED 2026-09-18: v_code_finding.epistemic_status holds
+// 'human_stated', which is not one of the nine values record-finding declares.
+// It is a legitimate value of a DIFFERENT closed vocabulary, event.cause, and
+// nothing anywhere noticed the two being confused. Three of the nine declared
+// values have never been used at all.
+//
+// A HAND-WRITTEN GUARD PER FIELD WOULD CLOSE THE 16 AND NOT THE SEVENTEENTH.
+// The gap reappears the next time someone declares an enum and forgets the
+// one() call, which is precisely how these 16 arose. Reading the schema the
+// verb already publishes closes the class, including for verbs not yet
+// written.
+//
+// THE REFUSAL NAMES THE FIELD AND THE ALLOWED VALUES, which the database
+// cannot do: 219 check constraints span more than one column, so Postgres
+// reports `column: null` and the caller is told a rule broke without being
+// told which of their inputs broke it. This refusal happens BEFORE the
+// database and can say exactly what to send instead.
+function assertDeclaredVocabularies(name, tool, args) {
+  const properties = tool?.inputSchema?.properties;
+  if (!properties || !args || typeof args !== "object" || Array.isArray(args)) return;
+  for (const [field, spec] of Object.entries(properties)) {
+    const allowed = spec?.enum || spec?.items?.enum;
+    if (!Array.isArray(allowed) || allowed.length === 0) continue;
+    const value = args[field];
+    // Absent and null are the field not being sent. Optionality is the
+    // schema's business, and required-field checks already run elsewhere;
+    // this one rules on VALUE only.
+    if (value === undefined || value === null) continue;
+    const sent = spec?.items?.enum && Array.isArray(value) ? value : [value];
+    for (const one of sent) {
+      if (allowed.includes(one)) continue;
+      throw new ToolError({
+        error: "value_not_in_declared_vocabulary",
+        verb: name, field,
+        received: typeof one === "string" ? one : typeof one,
+        allowed,
+        hint: `\`${field}\` is a closed vocabulary on ${name}. Send one of the ` +
+              `values in \`allowed\`. This refusal comes from the verb's own ` +
+              `published schema, before any database write, so nothing was ` +
+              `recorded and nothing needs undoing.`,
+      });
+    }
+  }
+}
+
 export async function assertRegisteredToolInput(name, tool, args = {}) {
+  assertDeclaredVocabularies(name, tool, args);
   try {
     await assertRegisteredOperation(name, tool, args);
   } catch (error) {
@@ -7479,36 +7977,75 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
+  // HUMAN-ONLY MEANS PARTNER AUTHORITY, NOT A SECOND CHAT WINDOW. A verified
+  // partner passes directly. A native Codex/Claude grant or local machine door
+  // passes only when partner-authority.js can derive its sponsor from
+  // server-held identity state and bind it to that sponsor's authority DB
+  // credential. Probe, review, unknown, unverified, and merely caller-claimed
+  // sponsors still refuse before schema validation or database access.
+  //
+  // This restores the useful part of Joe's 2026-08-26 ruling and removes the
+  // WR-000021 overcorrection: the ledger still keeps acting_actor_slug as the
+  // actual machine actor while mcp.js separately records the verified sponsor.
+  // The registry-wide test covers every present and future humanOnly verb.
+  if (tool.humanOnly === true) {
+    const actorClass = authorizationClassForActor(actor);
+    if (actorClass !== "verified_partner" && !canExercisePartnerAuthority(actor))
+      throw new ToolError({ error: "human_only_verb_requires_verified_partner",
+        verb: name, actor_class: actorClass,
+        hint: "this verb records a partner-authority act and requires either the verified partner " +
+              "or a server-verified native/local agent bound to that partner's sponsor-scoped " +
+              "authority connection." });
+  }
+  // ORACLE-SEAT-ONLY IS ENFORCED HERE, AND THIS IS THE ONLY PLACE THAT
+  // ENFORCES IT (2026-09-13, DoctorCRE v5 slice V5-A02 Step B). It is a THIRD
+  // authority shape beside humanOnly and the ordinary sponsored-agent surface,
+  // and it exists because r7 registers a producer whose role is
+  // `independent_control_plane_oracle` and whose seat is a machine: the
+  // independent Codex reviewer lane, whose derived class is `review_agent`.
+  // Joe ruled on 2026-09-13 (decision d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70)
+  // that this seat records the Gate Zero outcome on its own authority, with no
+  // partner countersign.
+  //
+  // IT IS THE MIRROR IMAGE OF humanOnly, not a relaxation of it. humanOnly
+  // refuses every machine; this refuses every human AND every machine but one.
+  // A verified partner is refused here on purpose: a partner signing an
+  // independent oracle's receipt is the exact thing the oracle exists to
+  // prevent, and the partner's own act in this chain sits downstream on the
+  // benchmark manifest, which is still humanOnly.
+  //
+  // THE CLASS IS NOT THE TEST. `grok-reviewer` authenticates through the same
+  // review-token door and derives the same `review_agent` class, so admitting
+  // the class would hand the Gate Zero signature to a lane nobody ruled on.
+  // deriveGateZeroProducerSeat checks the class AND the seat, reading the lane
+  // off the frozen registration's DERIVED holder ref -- so putting that seat
+  // back to unstaffed closes this door too, with nothing else touched.
+  //
+  // ENFORCED IN THREE INDEPENDENT PLACES, deliberately: here, again inside the
+  // handler, and a third time in SQL by ops.gate_zero_producer_actor_id(). The
+  // flag alone would be a label, which is the defect WR-000021 found on
+  // humanOnly between 2026-08-26 and 2026-09-11.
+  if (tool.oracleSeatOnly === true) {
+    const foundation = tool.oracleFamily === "foundation-assurance";
+    const lane = foundation ? foundationAssuranceOracleLane(name) : gateZeroOracleSeatLane();
+    const actorClass = authorizationClassForActor(actor);
+    if (lane === null || actorClass !== "review_agent" || actor?.human === true || actor?.slug !== lane)
+      throw new ToolError({ error: "oracle_seat_verb_requires_the_staffed_seat",
+        verb: name, actor_class: actorClass,
+        seat_staffed: lane !== null,
+        hint: "this verb records an independent control-plane oracle's receipt and refuses every actor except " +
+              "the one review-token seat that holds it — including verified partners, sponsored agents, and a " +
+              "second review-token lane deriving the same authority class. Report what you would have recorded " +
+              "and let the seat run it." });
+    if (foundation) {
+      try { assertFoundationAssuranceOracleSeat(actor, name); }
+      catch (error) {
+        throw new ToolError({ error: error.code || "foundation_assurance_oracle_seat_required",
+          ...(error.detail || {}) });
+      }
+    }
+  }
   await assertRegisteredToolInput(name, tool, args);
-  // RETIRED 2026-08-26 BY JOE'S RULING, and the flag is kept only as a label.
-  // His words: "Nothing is human only from now on. I don't want anything to be
-  // human only in this entire system. I'm so sick of the roadblocks. I'm
-  // literally telling you to do things and I'm getting blocked bc it's human
-  // only. It doesn't make any sense."
-  //
-  // WHAT THE REFUSAL ACTUALLY DID, because it was thinner than it read. It
-  // admitted a verified partner OR any sponsored Codex/Claude session, so an
-  // agent session of Joe's was never turned away by it — review-and-triage,
-  // marked HUMAN-ONLY, went through the connector the same hour this was
-  // written and the ledger recorded actor_slug 'joe'. What it DID refuse was
-  // the local-token door: `./run.sh call <verb>` authenticates as a machine
-  // actor and got authority_connection_unavailable. Same verb, two doors,
-  // opposite answers — that inconsistency is what read as senseless, and it is
-  // why removing this alone was not the whole fix.
-  //
-  // WHAT THIS GIVES UP, stated once so nobody rediscovers it as a surprise.
-  // Two of the forty-four verbs carry real commitment: new-deal writes a deal
-  // into a partner's book, and approve-rule admits a rule that then binds every
-  // future session. Memory correction is a third class. An agent can now do all
-  // of them unsupervised. Joe was told this explicitly before ruling and ruled
-  // anyway; it reopens if an agent-made deal or rule admission ever has to be
-  // reversed. Logged as decision dc57f62d with the full rationale.
-  //
-  // NOT IN SCOPE: the credentialed break-glass path (CARR_BREAK_GLASS with
-  // db-tap) stays separately receipted and outside this change, and the
-  // database grants that stop the job role writing ops.incident.resolved_at
-  // are untouched. Those are enforced elsewhere and were never this gate.
-  void canExercisePartnerAuthority;
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
@@ -7530,6 +8067,29 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // connection or driver fault) still surfaces as-is for the transport's own
   // generic handling.
   try {
+    // THE AUTHENTICATED CALL IS NOT ESTABLISHED HERE ANY MORE (amendment 9,
+    // 2026-09-14). It used to be: this line asked identity.js for THIS actor's
+    // dispatcher and ran the handler inside it. The fifth review round found
+    // what that required identity.js to publish — `dispatchFor(actor)`, a
+    // callable that enters a context — and that a probe composing it with the
+    // equally public review door ran its own code as `review_agent`.
+    //
+    // SO THE ENTRY MOVED INTO identity.js, where the bearer is matched and the
+    // context entered in one module-internal act — and since the sixth
+    // correction round (2026-09-15) what runs inside it is named rather than
+    // handed over: `serveAuthenticatedCall(bearer, correlationId, entryName)`
+    // resolves the name in a frozen map of the server's own entries. No verb
+    // dispatched through this function runs inside that context, including this
+    // one; nothing is threaded through here, so there is nothing here for a
+    // caller to aim.
+    //
+    // WHAT THAT NARROWS, stated rather than discovered later: a verb reached
+    // through any OTHER door — the OAuth grant path, the agent, Hermes,
+    // continuity and local bearers, `./run.sh call`, a direct import — runs with
+    // NO authenticated call at all, so r7's receipt surfaces refuse. That is
+    // correct for the Gate Zero producer, whose candidate is the deployed
+    // Worker's own build stamp (build-stamp.js) and which has nothing to say
+    // about a local checkout.
     return await tool.handler(client, actor, args);
   } catch (e) {
     if (e instanceof ToolError) throw e;
@@ -7545,6 +8105,12 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "doctrine": "mcp-server/src/doctrine.js",
   "situation-retrieval": "mcp-server/src/situation-retrieval.js",
   "investigation": "mcp-server/src/investigation.js",
+  "doc-conversation": "mcp-server/src/doc-conversation.js",
+  "meeting-mode": "mcp-server/src/meeting-mode.js",
+  "notifications": "mcp-server/src/notifications.js",
+  "session-identity": "mcp-server/src/session-identity.js",
+  "dispatch-spine": "mcp-server/src/dispatch-spine.js",
+  "doc-outcome-cards": "mcp-server/src/tools.js",
   "capability-program": "mcp-server/src/capability-program.js",
   "work-shape": "mcp-server/src/work-shape.js",
   "work-request-intake": "mcp-server/src/work-request-intake.js",
@@ -7553,9 +8119,13 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "agent-profile": "mcp-server/src/agent-profiles.js",
   "bot-brief": "mcp-server/src/bot-brief.js",
   "evidence-activation": "mcp-server/src/evidence-activation.js",
+  "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "memory": "mcp-server/src/memory.js",
+  "codex-continuity": "mcp-server/src/codex-continuity.js",
+  "claude-continuity": "mcp-server/src/claude-continuity.js",
   "incident": "mcp-server/src/incident.js",
   "engineering-runtime": "mcp-server/src/engineering-runtime.js",
+  "work-portfolio": "mcp-server/src/work-portfolio.js",
   "tour-rights-projection": "mcp-server/src/tour-rights-projection.js",
   "tour-property-jurisdiction": "mcp-server/src/tour-property-jurisdiction.js",
   "tour-domain": "mcp-server/src/tour-domain.js",
@@ -7563,6 +8133,9 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "tour-map-promotion": "mcp-server/src/tour-map-promotion.js",
   "tour-sharing": "mcp-server/src/tour-sharing.js",
   "tour-artifacts": "mcp-server/src/tour-artifacts.js",
+  "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
+  "model-role-store": "mcp-server/src/model-role-store.v5.js",
+  "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -7712,6 +8285,8 @@ registerTools({
       idempotency_key: { type: "string" }, deal: { type: "string" },
       field: { type: "string", enum: DEAL_ROOM_FIELDS }, value: {},
       base_event_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+      change_reason: { type: "string", description: "why this cell changed; lands on the event as agent_rationale" },
+      human_quote: { type: "string", description: "the partner's verbatim words, when they directed the change" },
     }, required: ["idempotency_key", "deal", "field", "value", "base_event_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "patch-deal-field", args, async () => {
       assertDealRoomField(args.field, args.value);
@@ -7734,7 +8309,8 @@ registerTools({
           value_b: args.value, actor_b: actor.slug } };
       }
       const applied = await applyDealRoomField(c, actor, s.id, args.field, args.value,
-        args.idempotency_key, "patch-deal-field");
+        args.idempotency_key, "patch-deal-field",
+        { change_reason: args.change_reason, human_quote: args.human_quote });
       return { ok: true, deal_id: s.id, field: args.field, ...applied };
     }),
   },
@@ -7772,13 +8348,17 @@ registerTools({
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       if (typeof args.text !== "string" || !args.text.trim()) throw new ToolError({ error: "text_required" });
       assertDealRoomField("next_date", args.next_date ?? null);
+      // The step also changes next_date. Take that cell's lock first so its
+      // field history cannot race a direct date edit or undo.
+      await lockDealField(c, s.id, "next_date");
       await lockDealField(c, s.id, "next_step");
+      const oldDate = (await c.query("select next_date::text as next_date from deal where id=$1", [s.id])).rows[0]?.next_date ?? null;
       const prior = await c.query(
         "select id, text from deal_note where deal_id=$1 and kind='next_step' order by created_at desc, id desc limit 1 /* dealroom:current-step */",
         [s.id],
       );
       const note = await c.query(
-        "insert into deal_note (deal_id, kind, text, actor_id) values ($1,'next_step',$2,$3) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
+        "insert into deal_note (deal_id, kind, text, actor_id, created_at) values ($1,'next_step',$2,$3,clock_timestamp()) returning id, to_jsonb(created_at)#>>'{}' as created_at /* dealroom:add-next-step */",
         [s.id, args.text.trim(), actor.id],
       );
       await c.query(
@@ -7802,6 +8382,14 @@ registerTools({
         field: "next_step",
         old: { next_step: prior.rows[0]?.text ?? null },
         new: { next_step: args.text.trim(), next_date: args.next_date ?? null },
+        recorded_at_after_lock: true,
+        idempotency_key: args.idempotency_key,
+      });
+      await writeEvent(c, actor, "set-next-step", "deal", s.id, {
+        field: "next_date",
+        old: { next_date: oldDate },
+        new: { next_date: args.next_date ?? null },
+        recorded_at_after_lock: true,
         idempotency_key: args.idempotency_key,
       });
       return { ok: true, deal_id: s.id, next_step_id: note.rows[0].id,
@@ -8062,9 +8650,10 @@ registerTools({
     handler: async (c, actor, args) => withEnvelope(c, actor, "revert-deal-field", args, async () => {
       const row = (await c.query(
         `select id,subject_id,field,old_value,new_value from event
-          where id=$1 and subject_type='deal' for update`, [args.event_id])).rows[0];
+          where id=$1 and subject_type='deal'`, [args.event_id])).rows[0];
       if (!row || !DEAL_ROOM_FIELDS.includes(row.field))
         throw new ToolError({ error: "event_not_revertible" });
+      await lockDealField(c, row.subject_id, row.field);
       const latest = (await c.query(
         `select id from event where subject_type='deal' and subject_id=$1 and field=$2
           order by recorded_at desc,id desc limit 1`, [row.subject_id,row.field])).rows[0];
@@ -8080,7 +8669,7 @@ registerTools({
 
   "resolve-conflict": {
     write: true,
-    description: "Resolve an open Deal Room cell conflict in one call by applying value a or b through the normal field patch/event path.",
+    description: "Resolve an open Deal Room cell conflict only while its recorded field value is still current, by applying value a or b through the normal field patch/event path.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, conflict_id: { type: "string" },
       winner: { type: "string", enum: ["a", "b"] },
@@ -8088,7 +8677,7 @@ registerTools({
     handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-conflict", args, async () => {
       if (!['a', 'b'].includes(args.winner)) throw new ToolError({ error: "invalid_winner", allowed: ["a", "b"] });
       const found = await c.query(
-        `select id, deal_id, field, value_a, value_b, status
+        `select id, deal_id, field, value_a, value_b, event_a, status
            from deal_conflict where id=$1 for update /* dealroom:get-conflict */`,
         [args.conflict_id],
       );
@@ -8096,6 +8685,9 @@ registerTools({
       const conflict = found.rows[0];
       if (conflict.status !== "open") throw new ToolError({ error: "conflict_already_resolved", conflict_id: conflict.id });
       await lockDealField(c, conflict.deal_id, conflict.field);
+      if (await latestFieldConflict(c, conflict.deal_id, conflict.field, conflict.event_a))
+        throw new ToolError({ error: "newer_change_exists", conflict_id: conflict.id,
+          hint: "This field changed again after the conflict appeared. Open the deal and review its current value before deciding." });
       const value = args.winner === "a" ? conflict.value_a : conflict.value_b;
       const applied = await applyDealRoomField(c, actor, conflict.deal_id, conflict.field,
         value, args.idempotency_key, "resolve-conflict");
@@ -8543,6 +9135,58 @@ registerTools(situationRetrievalTools({ withEnvelope, writeEvent, ToolError }), 
 // reasoning owner, evidence-only worker packets, explicit branch termination.
 registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "investigation");
 
+// WR-000112: the Doc conversation store. The append is authority-only because
+// ops.append_doc_conversation_turn is granted to carr_authority alone; the read
+// runs on the writer connection because that is the only one that installs the
+// acting-actor context ops.doc_conversation_facts is handed.
+registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "doc-conversation");
+
+// V5-UX-B11: non-recording shared Meeting Mode. The store's definer functions
+// own every transition; an accepted action points at an existing write verb in
+// this registry, looked up at call time, and never runs it in-process.
+registerTools(meetingModeTools({ withEnvelope, writeEvent, ToolError,
+  lookupTool: name => (Object.hasOwn(TOOLS, name) ? TOOLS[name] : null) }), "meeting-mode");
+
+// WR-000113: the R03 notification feed and its acknowledgement receipt.
+// acknowledge-notification writes ops.notification_read and nothing else, which
+// is why a session may never report it as having moved a task.
+registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
+
+// WR-000117: the session-identity read pair. Both verbs are READS on the writer
+// connection -- ops.session_identity_facts and ops.session_dispatch_history
+// derive the acting actor from a context only the writer path installs -- and
+// neither writes a row anywhere, so neither takes the envelope or the event
+// helper.
+registerTools(sessionIdentityTools({ ToolError }), "session-identity");
+
+// WR-000119: the dispatch spine write pair. The OPPOSITE declaration to the
+// read pair above -- both of these carry write: true as well as the writer
+// connection, because ops.record_dispatch_link and ops.acknowledge_dispatch
+// insert and 0531 makes them volatile, so a read-only transaction would fail
+// them. Both take the envelope and the event helper for that reason.
+registerTools(dispatchSpineTools({ withEnvelope, writeEvent, ToolError }), "dispatch-spine");
+
+export function docOutcomeCardsProjection(facts, ErrorType = ToolError) {
+  const states = new Set(["queued", "active", "waiting", "failed", "unknown", "verified"]);
+  if (!facts || facts.ok !== true || facts.schema_version !== "doc-outcome-cards.v2" || !Array.isArray(facts.cards))
+    throw new ErrorType({ error: facts?.reason_id || "doc_outcome_cards_unavailable" });
+  for (const card of facts.cards) {
+    if (!card || !states.has(card.routing_state) || card.session_entry?.auto_launch !== false || !Object.hasOwn(card, "native_task_id"))
+      throw new ErrorType({ error: "doc_outcome_cards_invalid_projection" });
+  }
+  return { ok: true, schema_version: facts.schema_version, as_of: facts.as_of, correlation_version: facts.correlation_version,
+    more: facts.more === true, next_cursor: facts.next_cursor ?? null, cards: facts.cards };
+}
+
+registerTools({
+  "read-doc-outcome-cards": {
+    writerConnection: true,
+    description: "Read actor- and tenant-scoped, page-atomic DoctorCRE outcome cards. The producer derives joins and availability; it never launches a native task.",
+    inputSchema: { type: "object", additionalProperties: false, properties: { cursor: { type: "string", minLength: 1, maxLength: 1000 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, required: [] },
+    handler: async (c, _actor, args) => docOutcomeCardsProjection((await c.query("select ops.read_doc_outcome_cards_successor($1::text,$2::integer) as facts", [args.cursor ?? null, args.limit ?? null])).rows[0]?.facts, ToolError),
+  },
+}, "doc-outcome-cards");
+
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
 registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");
 
@@ -8551,6 +9195,7 @@ registerTools(workShapeTools({ withEnvelope, writeEvent, ToolError }), "work-sha
 
 // Program 6: sourced additive capture and a safe card only. No lifecycle verbs.
 registerTools(workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }), "work-request-intake");
+registerTools(workPortfolioTools({ withEnvelope, writeEvent, ToolError }), "work-portfolio");
 
 // Pure workbook-derived lease economics. No database, model, or write path.
 registerTools(leaseTermComparisonTools({ ToolError }), "lease-term-comparison");
@@ -8561,10 +9206,19 @@ registerTools(partnerRoomTools({ withEnvelope, ToolError }), "partner-room");
 registerTools(agentProfileTools({ withEnvelope, writeEvent, ToolError }), "agent-profile");
 registerTools(botBriefTools({ ToolError, assertNoCallerAuthorityFields }), "bot-brief");
 registerTools(evidenceActivationTools({ withEnvelope, ToolError }), "evidence-activation");
+// DoctorCRE v5 V5-UX-C02/C06: the resource-metering read contract and the
+// one write door the local, credential-less collector uses. See
+// src/resource-observation.v5.js.
+registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-observation");
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.
 registerTools(memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "memory");
+// Native Codex continuity is a separate, bounded surface.  It stores semantic
+// checkpoint revisions and lifecycle receipts; transcript bodies stay local to
+// the Codex adapter and Claude never reaches these verbs through its config.
+registerTools(codexContinuityTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "codex-continuity");
+registerTools(claudeContinuityTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "claude-continuity");
 
 // The operational incident ledger gets a front door (2026-08-23 rules-and-verbs
 // council, item 1 from both chairs). ops.incident has been written by two
@@ -8599,5 +9253,14 @@ registerTools(tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }), 
 registerTools(tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }), "tour-map-promotion");
 registerTools(tourSharingTools({ withEnvelope, writeEvent, ToolError }), "tour-sharing");
 registerTools(tourArtifactTools({ withEnvelope, writeEvent, ToolError }), "tour-artifacts");
+registerTools(benchmarkAcceptanceStoreTools({
+  withEnvelope, writeEvent, ToolError, authenticatedIdentity,
+}),
+  "benchmark-acceptance");
+registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
+  "model-role-store");
+registerTools(foundationAssuranceMinimumTools({
+  withEnvelope, ToolError, authenticatedIdentity,
+}), "foundation-assurance");
 
 Object.freeze(TOOLS);

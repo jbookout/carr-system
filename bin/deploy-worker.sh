@@ -38,13 +38,14 @@
 #   bin/deploy-worker.sh              # preflight, deploy, postflight
 #   bin/deploy-worker.sh --check      # preflight only, ship nothing
 #   bin/deploy-worker.sh --release-sha <full-40-char-sha>
-#       # an approved immutable release when main moves after approval
+#       # an immutable release when main moves after readiness was recorded
 #   bin/deploy-worker.sh --upload-version
 #       # upload a Production candidate without changing traffic
+#       # optional --probe-tokens-file <private JSON> rotates only PROBE_TOKENS
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
-#       # promote that exact approved version to 100% of Production traffic
-#   # Production modes and a standalone staging release require the approval
-#   # preimage inputs:
+#       # promote that exact ready version to 100% of Production traffic
+#   # Production modes and a standalone staging release require the assurance
+#   # plan inputs:
 #       --performance-budget-ref <immutable-ref> --performance-budget-ms <ms>
 #       --recovery-strategy <rollback|forward_fix>
 #       --rollback-plan-ref <immutable-runbook-ref>
@@ -74,6 +75,13 @@
 #      BEING ABSENT IS THE HONEST SIGNAL THAT THIS SCRIPT WAS BYPASSED,
 #      which is exactly what /release reports (see mcp-server/src/release.js
 #      — null value, "not stamped: deployed outside bin/deploy-worker.sh").
+#   1b. THE CANDIDATE MANIFEST IS STAMPED THE SAME WAY (standing-rule
+#      amendment 9, 2026-09-14) — `--var CANDIDATE_MANIFEST:<jcs>` and
+#      `--var CANDIDATE_MANIFEST_DIGEST:<sha256>`, sealed by
+#      mcp-server/bin/seal-candidate-manifest.mjs on the same invocation, for the
+#      same reason and with the same honest absence when this script is
+#      bypassed. The Gate Zero producer binds its candidate to those two stamps
+#      because the deployed Worker cannot read a repository at request time.
 #   2. THE MARKER WRITE IS PART OF THIS SAME STEP (see postflight below) —
 #      it always was, but that only protects a deploy that goes THROUGH this
 #      script. Grep the repo: `wrangler deploy` is also called directly
@@ -111,12 +119,25 @@ PERFORMANCE_BUDGET_MS=""
 RECOVERY_STRATEGY=""
 ROLLBACK_PLAN_REF=""
 REQUESTED_RELEASE_KEY=""
+RELEASE_TEST_EVIDENCE=""
+RELEASE_SECURITY_EVIDENCE=""
+RELEASE_VERIFIER=""
+RELEASE_VERIFIER_EVIDENCE=""
+PROBE_TOKENS_FILE=""
+FOUNDATION_ASSURANCE_STAGING_PROVIDER=""
+FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION=""
+FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT=""
+FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE=""
 RECOVERY_ATTEMPT_ID=""
 RECOVERY_STEP="standalone"
 RECOVERY_PRIOR_RELEASE_KEY=""
 STAGING_RECEIPT_KEY=""
 EXACT_SOURCE_ROOT=""
 EXACT_RUNTIME_LINK=""
+WR95_STAGING_VERSION_JSON=""
+WR95_STAGING_RELEASE_JSON=""
+WR95_FINAL_VERSION_JSON=""
+WR95_SEAL_OUTPUT=""
 # Filled only from the exact immutable release manifest after preflight.
 EXPECTED_PROGRAM6_ACTIONS=""
 
@@ -126,6 +147,12 @@ EXPECTED_PROGRAM6_ACTIONS=""
 # after source and package-lock validation.  One cleanup hook owns all
 # ephemeral files so later receipt-specific traps cannot strand the link.
 cleanup_ephemeral() {
+  for wr95_tmp in "${WR95_STAGING_VERSION_JSON:-}" "${WR95_STAGING_RELEASE_JSON:-}" \
+      "${WR95_FINAL_VERSION_JSON:-}" "${WR95_SEAL_OUTPUT:-}"; do
+    if [ -n "$wr95_tmp" ] && [ -f "$wr95_tmp" ]; then
+      rm -f "$wr95_tmp"
+    fi
+  done
   if [ -n "${STAGING_RECEIPT:-}" ] && [ -e "$STAGING_RECEIPT" ]; then
     rm -f "$STAGING_RECEIPT"
   fi
@@ -171,6 +198,33 @@ while [ "$#" -gt 0 ]; do
     --release-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --release-key needs a canonical key" >&2; exit 64; }
       REQUESTED_RELEASE_KEY="$2"; shift ;;
+    --test-evidence)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --test-evidence needs a reference" >&2; exit 64; }
+      RELEASE_TEST_EVIDENCE="$2"; shift ;;
+    --security-evidence)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --security-evidence needs a reference" >&2; exit 64; }
+      RELEASE_SECURITY_EVIDENCE="$2"; shift ;;
+    --verifier)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --verifier needs an actor slug" >&2; exit 64; }
+      RELEASE_VERIFIER="$2"; shift ;;
+    --verifier-evidence)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --verifier-evidence needs a reference" >&2; exit 64; }
+      RELEASE_VERIFIER_EVIDENCE="$2"; shift ;;
+    --probe-tokens-file)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --probe-tokens-file needs a private JSON path" >&2; exit 64; }
+      PROBE_TOKENS_FILE="$2"; shift ;;
+    --foundation-assurance-staging-provider)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-provider needs an immutable UUID" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_PROVIDER="$2"; shift ;;
+    --foundation-assurance-staging-candidate-operation)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-candidate-operation needs an immutable UUID" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION="$2"; shift ;;
+    --foundation-assurance-staging-replacement-receipt)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-replacement-receipt needs an immutable UUID" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT="$2"; shift ;;
+    --foundation-assurance-staging-replacement-source)
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --foundation-assurance-staging-replacement-source needs a full SHA" >&2; exit 64; }
+      FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE="$2"; shift ;;
     --recovery-attempt-id)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
@@ -205,7 +259,35 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+if [ -n "$PROBE_TOKENS_FILE" ]; then
+  [ "$VERSION_MODE" = "upload" ] || { echo "deploy-worker: probe token rotation requires --upload-version" >&2; exit 64; }
+  "$PY" - "$PROBE_TOKENS_FILE" <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+meta = os.stat(path)
+if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+    raise SystemExit("deploy-worker: probe token file must be an owner-only regular file")
+value = json.load(open(path))
+if set(value) != {"PROBE_TOKENS"}:
+    raise SystemExit("deploy-worker: probe token file may bind only PROBE_TOKENS")
+tokens = json.loads(value["PROBE_TOKENS"])
+if set(tokens) != {"smoke-probe"} or not isinstance(tokens["smoke-probe"], str) or len(tokens["smoke-probe"]) != 64 or any(c not in "0123456789abcdef" for c in tokens["smoke-probe"]):
+    raise SystemExit("deploy-worker: invalid smoke-probe token shape")
+PY
+fi
+
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
+
+# WR126 only ships the inert contract.  A local environment must not turn the
+# issuer planner into a live provisioning or activation path, and the checked
+# Wrangler manifest must carry the same explicit disabled default.  The actual
+# login/secret slots are deliberately not read by this deploy wrapper.
+OWNERSHIP_RUNTIME_MODE="${CARR_CANONICAL_OWNERSHIP_RUNTIME_MODE:-disabled}"
+[ "$OWNERSHIP_RUNTIME_MODE" = "disabled" ] \
+  || fail "canonical ownership issuer runtime is disabled in this source slice."
+grep -Eq '^CANONICAL_OWNERSHIP_RUNTIME_MODE[[:space:]]*=[[:space:]]*"disabled"[[:space:]]*$' \
+  "$WORKER_DIR/wrangler.toml" \
+  || fail "wrangler.toml must keep canonical ownership issuer runtime disabled."
 
 # One builder owns the exact source/environment/assurance preimage for every
 # release-manifest reconstruction.  A caller may supply either the complete
@@ -275,6 +357,42 @@ prepare_typed_recovery_shrink() {
 if [ "$VERSION_MODE" != "ordinary" ] && [ "$TARGET_ENV" != "production" ]; then
   fail "provider-version operations are Production-only; staging is a source rehearsal and receives its own build."
 fi
+# THE UPLOAD FILES ITS OWN RELEASE-CANDIDATE RECORD (standing-rule amendment 9),
+# so what that record needs is checked HERE — before a version exists — rather
+# than after Cloudflare holds an immutable object nobody can account for.
+#
+# WHY THE EVIDENCE REFS ARE REQUIRED RATHER THAN OPTIONAL. ops.release's
+# an_approved_release_carries_its_evidence constraint exempts `candidate` and
+# nothing beyond it. The WR95 path is the sole closed exception: it files the
+# exact candidate first, then 0510 atomically attaches the live-derived evidence
+# ref while inserting the immutable evidence bytes. The maker is NOT among
+# these arguments: migration 0504 derives it from the filing login.
+if [ "$VERSION_MODE" = "upload" ]; then
+  [ -n "$REQUESTED_RELEASE_KEY" ] \
+    || fail "--upload-version files the release-candidate record itself and needs --release-key <canonical key>."
+  [ -n "$RELEASE_SECURITY_EVIDENCE" ] \
+    || fail "--upload-version needs --security-evidence."
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    [ -z "$RELEASE_TEST_EVIDENCE" ] \
+      || fail "WR95 derives --test-evidence from live acquisition; caller evidence is refused."
+    printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" | grep -Eq \
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+      || fail "--foundation-assurance-staging-provider must be a lowercase immutable UUID."
+    printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION" \
+      "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT" | grep -Eqv \
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+      && fail "WR95 live acquisition needs exact staging candidate-operation and replacement-receipt UUIDs."
+    printf '%s\n' "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE" | grep -Eq '^[0-9a-f]{40}$' \
+      || fail "WR95 live acquisition needs the exact staging replacement source SHA."
+  else
+    [ -n "$RELEASE_TEST_EVIDENCE" ] \
+      || fail "--upload-version needs --test-evidence unless WR95 live acquisition is selected."
+  fi
+  if [ -n "$RELEASE_VERIFIER$RELEASE_VERIFIER_EVIDENCE" ]; then
+    [ -n "$RELEASE_VERIFIER" ] && [ -n "$RELEASE_VERIFIER_EVIDENCE" ] \
+      || fail "--verifier and --verifier-evidence are an atomic pair."
+  fi
+fi
 case "$RECOVERY_STEP" in
   standalone)
     [ -z "$RECOVERY_ATTEMPT_ID$RECOVERY_PRIOR_RELEASE_KEY" ] \
@@ -339,6 +457,18 @@ fi
 cd "$REPO"
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 [ -x "$PY" ] || fail "python not found; release truth cannot be checked."
+if [ "$VERSION_MODE" != "promote" ]; then
+  DOCTORCRE_PIN="$SOURCE_ROOT/ops/config/doctorcre-artifact.v1.json"
+  if [ -f "$DOCTORCRE_PIN" ]; then
+    DOCTORCRE_ROOT="$SOURCE_ROOT/out/doctorcre-artifacts"
+    "$PY" "$REPO/tools/release-manifest.py" doctorcre-artifact materialize \
+      --pin "$DOCTORCRE_PIN" --root "$DOCTORCRE_ROOT" \
+      || fail "the exact DoctorCRE artifact could not be verified and materialized."
+    [ -f "$DOCTORCRE_ROOT/current/workspace.html" ] \
+      || fail "the materialized DoctorCRE entrypoint is missing."
+    echo "  OK  DoctorCRE artifact materialized from the exact CARR pin"
+  fi
+fi
 if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBACK_PLAN_REF" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] && [ -n "$PERFORMANCE_BUDGET_MS" ] \
     && [ -n "$RECOVERY_STRATEGY" ] && [ -n "$ROLLBACK_PLAN_REF" ] \
@@ -346,7 +476,7 @@ if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBAC
 fi
 if [ "$TARGET_ENV" = "production" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] \
-    || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required; they are approval inputs, not deploy defaults."
+    || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required readiness inputs."
 fi
 if [ "$TARGET_ENV" = "staging" ] && [ "$RECOVERY_STEP" = "standalone" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] \
@@ -365,6 +495,7 @@ else
 git -C "$REPO" fetch origin main --quiet 2>/dev/null || fail "could not reach origin to verify main."
 
 HEAD_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+HEAD_TREE="$(git -C "$SOURCE_ROOT" rev-parse "${HEAD_SHA}^{tree}")"
 MAIN_SHA="$(git -C "$SOURCE_ROOT" rev-parse origin/main)"
 BRANCH="$(git -C "$SOURCE_ROOT" rev-parse --abbrev-ref HEAD)"
 
@@ -372,14 +503,14 @@ if [ -n "$PINNED_RELEASE" ]; then
   [ "${#PINNED_RELEASE}" -eq 40 ] \
     || fail "--release-sha must be the full immutable 40-character commit SHA."
   PINNED_SHA="$(git -C "$SOURCE_ROOT" rev-parse --verify "${PINNED_RELEASE}^{commit}" 2>/dev/null)" \
-    || fail "approved release SHA does not resolve to a commit."
+    || fail "pinned release SHA does not resolve to a commit."
   [ "$PINNED_RELEASE" = "$PINNED_SHA" ] \
     || fail "--release-sha must be the exact canonical full SHA, not an abbreviation or tag."
   [ "$HEAD_SHA" = "$PINNED_SHA" ] \
-    || fail "checkout HEAD does not equal the approved release SHA."
+    || fail "checkout HEAD does not equal the pinned release SHA."
   git -C "$SOURCE_ROOT" merge-base --is-ancestor "$PINNED_SHA" origin/main \
-    || fail "approved release SHA is not an ancestor of fetched origin/main."
-  echo "  OK  pinned approved release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
+    || fail "pinned release SHA is not an ancestor of fetched origin/main."
+  echo "  OK  pinned release: $PINNED_SHA (ancestor of origin/main $MAIN_SHA)"
 elif [ "$TARGET_ENV" != "production" ]; then
   # STAGING IS FOR CODE THAT IS NOT ON MAIN YET — that is the entire point of
   # having it. Requiring origin/main here would mean the only way to rehearse a
@@ -651,45 +782,55 @@ if [ "$VERSION_MODE" = "promote" ]; then
   echo ""
   echo "== preflight: immutable release truth =="
   set +e
-  RELEASE_BINDING="$("$PY" "$REPO/tools/ops-record.py" release require \
+  RELEASE_BINDING="$("$PY" "$REPO/tools/ops-record.py" release locate \
     --environment production --provider "$PROVIDER" \
     --provider-version-id "$PROVIDER_VERSION_ID")"
   REQUIRE_RC=$?
   set -e
   [ "$REQUIRE_RC" -eq 0 ] \
-    || fail "no live approval binds Production to $PROVIDER:$PROVIDER_VERSION_ID."
+    || fail "no unique recorded candidate binds Production to $PROVIDER:$PROVIDER_VERSION_ID."
   # Production provider lookup returns exactly `<release-key> <git-sha>` so
-  # promotion provenance comes from the approved immutable object, not HEAD.
+  # promotion provenance comes from the recorded immutable object, not HEAD.
   set -- $RELEASE_BINDING
   [ "$#" -eq 2 ] \
     || fail "release truth returned no exact release/SHA binding for $PROVIDER_VERSION_ID."
   RELEASE_KEY="$1"
   HEAD_SHA="$2"
   printf '%s\n' "$HEAD_SHA" | grep -Eq '^[0-9A-Fa-f]{40}$' \
-    || fail "approved release $RELEASE_KEY has no canonical git SHA."
-  echo "  approved release: $RELEASE_KEY"
+    || fail "recorded release $RELEASE_KEY has no canonical git SHA."
+  echo "  recorded release: $RELEASE_KEY"
   echo "  provider version: $PROVIDER_VERSION_ID"
   echo "  recorded git SHA: $HEAD_SHA"
 
-  # The first exact UUID lookup reveals the SHA the approver signed. Recompute
+  # The first exact UUID lookup reveals the SHA the candidate binds. Recompute
   # the evidence from that git object without uploading or building a Worker,
-  # bind the same canonical provider UUID, then ask release truth a second time
-  # with every immutable dimension and the freshly computed plan hash.
+  # bind the same canonical provider UUID, then record technical readiness
+  # using that exact immutable plan if it has not already been recorded.
   PROMOTION_SOURCE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-source-manifest.XXXXXX")"
   PROMOTION_BOUND_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-bound-manifest.XXXXXX")"
   if ! build_release_manifest "$HEAD_SHA" production > "$PROMOTION_SOURCE_MANIFEST"; then
-    fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
+    fail "release evidence cannot be rebuilt from git SHA $HEAD_SHA."
   fi
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
       --manifest "$PROMOTION_SOURCE_MANIFEST" --provider "$PROVIDER" \
       --provider-version-id "$PROVIDER_VERSION_ID" > "$PROMOTION_BOUND_MANIFEST"; then
-    fail "approved provider identity cannot be rebound to recomputed evidence."
+    fail "provider identity cannot be rebound to recomputed evidence."
   fi
   RELEASE_MANIFEST="$PROMOTION_BOUND_MANIFEST"
   RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
     --manifest "$RELEASE_MANIFEST")"
   [ -n "$RELEASE_PLAN_HASH" ] \
     || fail "recomputed provider-bound evidence produced no plan hash."
+  if ! "$PY" "$REPO/tools/ops-record.py" release require \
+      --sha "$HEAD_SHA" --environment production --provider "$PROVIDER" \
+      --provider-version-id "$PROVIDER_VERSION_ID" \
+      --plan-hash "$RELEASE_PLAN_HASH" >/dev/null 2>&1; then
+    RELEASE_READY_IDEMPOTENCY="$("$PY" -c 'import sys,uuid; print(uuid.uuid5(uuid.UUID("b8912ba6-4df7-44f3-9d7c-151edcc4372d"),sys.argv[1]+"\0"+sys.argv[2]))' "$RELEASE_KEY" "$RELEASE_PLAN_HASH")"
+    "$PY" "$REPO/tools/ops-record.py" release ready \
+      --key "$RELEASE_KEY" --plan-hash "$RELEASE_PLAN_HASH" \
+      --idempotency-key "$RELEASE_READY_IDEMPOTENCY" >/dev/null \
+      || fail "technical release readiness needs a fresh typed staging recovery rehearsal; traffic was not changed."
+  fi
   set +e
   RECONFIRMED_BINDING="$("$PY" "$REPO/tools/ops-record.py" release require \
     --sha "$HEAD_SHA" --environment production --provider "$PROVIDER" \
@@ -697,10 +838,15 @@ if [ "$VERSION_MODE" = "promote" ]; then
     --plan-hash "$RELEASE_PLAN_HASH")"
   REQUIRE_RC=$?
   set -e
-  [ "$REQUIRE_RC" -eq 0 ] \
-    || fail "approval no longer matches the recomputed SHA/provider/version plan."
+  if [ "$REQUIRE_RC" -ne 0 ]; then
+    if "$PY" "$REPO/tools/ops-record.py" release reopen \
+        --key "$RELEASE_KEY" --plan-hash "$RELEASE_PLAN_HASH" >/dev/null 2>&1; then
+      fail "readiness became stale. The release is reopened for the typed staging recovery rehearsal; rerun promotion after fresh recovery evidence. Traffic was not changed."
+    fi
+    fail "readiness does not match the recomputed SHA/provider/version plan."
+  fi
   [ "$RECONFIRMED_BINDING" = "$RELEASE_BINDING" ] \
-    || fail "release binding changed between UUID resolution and final approval check."
+    || fail "release binding changed between UUID resolution and final readiness check."
   echo "  recomputed plan: $RELEASE_PLAN_HASH"
 elif [ "$RECOVERY_STEP" != "standalone" ]; then
   echo ""
@@ -727,7 +873,7 @@ elif [ -f "$REPO/tools/release-manifest.py" ]; then
   if [ "$VERSION_MODE" = "upload" ]; then
     [ -n "$RELEASE_PLAN_HASH" ] \
       || fail "the release manifest did not produce a plan hash; version upload refused."
-    echo "  upload may proceed; approval happens only after Cloudflare returns the immutable version id"
+    echo "  upload may proceed; technical readiness binds the immutable version after its evidence is recorded"
   else
     set +e
     RELEASE_KEY="$("$PY" "$REPO/tools/ops-record.py" release require \
@@ -736,11 +882,10 @@ elif [ -f "$REPO/tools/release-manifest.py" ]; then
     REQUIRE_RC=$?
     set -e
     if [ "$REQUIRE_RC" -eq 3 ]; then
-      fail "no live approval for $HEAD_SHA in $TARGET_ENV. The reason and the exact
-commands are printed above. This is P0-1: a production deploy names an approved
-release or it does not happen."
+      fail "no exact release readiness for $HEAD_SHA in $TARGET_ENV. The reason and the exact
+commands are printed above."
     fi
-    [ -n "$RELEASE_KEY" ] && echo "  approved release: $RELEASE_KEY"
+    [ -n "$RELEASE_KEY" ] && echo "  ready release: $RELEASE_KEY"
   fi
 fi
 
@@ -793,14 +938,144 @@ fi
   --release-candidate-count 1 >/dev/null \
   || fail "cloudflare-worker-release metering admission refused."
 
+# THE SEALER IS IMPORTED, NOT EXECUTED, and that is a registry fact rather than a
+# preference: ops/scac-mutation-inventory.mjs enumerates every tracked file with a
+# shebang or a command-line main as a script ENTRYPOINT, and an entrypoint is an
+# ingress whose admission only a sealed registry successor may perform. So
+# mcp-server/bin/seal-candidate-manifest.mjs carries neither, and this one
+# evaluation imports `sealCandidateManifest` and prints the field it is asked for.
+# Every input travels as an environment variable, so no path or revision is ever
+# spliced into the evaluated source.
+seal_candidate_field() {
+  CARR_SEALER="$SEALER" CARR_SEAL_REPO="$SOURCE_ROOT" CARR_SEAL_REV="$HEAD_SHA" \
+  CARR_SEAL_FIELD="$1" node --input-type=module -e '
+    const sealer = await import(new URL("file://" + process.env.CARR_SEALER).href);
+    const sealed = sealer.sealCandidateManifest(process.env.CARR_SEAL_REPO,
+                                                process.env.CARR_SEAL_REV);
+    process.stdout.write(process.env.CARR_SEAL_FIELD === "digest"
+      ? sealed.digest : sealed.manifest_text);
+  '
+}
+
+# ---------- seal the candidate manifest (standing-rule amendment 9) ----------
+#
+# WHY THIS STEP EXISTS. The Gate Zero producer used to derive the candidate it
+# judges by reading `.git` at request time, inside the Worker. The deployed
+# Worker has no checkout — Cloudflare serves the bundled modules over a read-only
+# virtual filesystem and supplies no `.git` — so that derivation could only ever
+# refuse in production. The work belongs where a checkout exists, which is here.
+#
+# WHAT IS STAMPED, and it is stamped exactly the way GIT_SHA already is: two more
+# `--var` values on the SAME wrangler invocation, scoped to this upload, absent
+# from any deploy that bypasses this script. `CANDIDATE_MANIFEST` is the sealed
+# manifest's own JCS text — the candidate tree id, the file count and byte
+# length, the digest of the blob ids the revision sealed, the digest of those
+# blobs' contents, and the environment-manifest and fixture-set digests —
+# and `CANDIDATE_MANIFEST_DIGEST` is its digest, computed by the same recipe. The
+# producer re-digests the manifest and refuses unless the two agree, so a var
+# edited after the seal is a refusal rather than a signature.
+#
+# THE REVISION IS $HEAD_SHA, which is whatever this run is actually deploying:
+# the checkout's own HEAD on an ordinary deploy, and the SHA the approver signed
+# on a promotion. The sealer resolves it in the object store and fails visibly if
+# that object is not present, so a manifest is never sealed for a revision this
+# machine cannot read.
+#
+# SKIPPED ON A PROMOTION, deliberately: an immutable provider promotion uploads
+# no new version, so there is no invocation to stamp — the vars the version
+# carries are the ones its own upload wrote.
+CANDIDATE_MANIFEST=""
+CANDIDATE_MANIFEST_DIGEST=""
+LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=0
+# Both stamp components first entered canonical main in this reviewed commit.
+# Keep independently named boundaries so a future split introduction cannot be
+# collapsed into file absence, which a later source can manufacture by delete.
+BUILD_STAMP_INTRODUCTION_SHA="ab9678a86f427e8f9e5d1f75597a21b920630995"
+CANDIDATE_SEALER_INTRODUCTION_SHA="ab9678a86f427e8f9e5d1f75597a21b920630995"
+exact_source_predates_candidate_stamps() {
+  [ "$HEAD_SHA" != "$BUILD_STAMP_INTRODUCTION_SHA" ] \
+    && [ "$HEAD_SHA" != "$CANDIDATE_SEALER_INTRODUCTION_SHA" ] \
+    && git -C "$SOURCE_ROOT" merge-base --is-ancestor \
+      "$HEAD_SHA" "$BUILD_STAMP_INTRODUCTION_SHA" \
+    && git -C "$SOURCE_ROOT" merge-base --is-ancestor \
+      "$HEAD_SHA" "$CANDIDATE_SEALER_INTRODUCTION_SHA"
+}
+prepare_candidate_stamps() {
+  [ "$VERSION_MODE" != "promote" ] || return 0
+  SEALER="$WORKER_DIR/bin/seal-candidate-manifest.mjs"
+  if [ ! -f "$SEALER" ]; then
+    if [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "staging" ] \
+        && [ "$RECOVERY_STEP" = "prior" ] && [ -n "$EXACT_SOURCE_ROOT" ] \
+        && [ ! -e "$WORKER_DIR/src/build-stamp.js" ] \
+        && exact_source_predates_candidate_stamps; then
+      LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP=1
+      echo "  legacy prior source predates the candidate-stamp contract; candidate stamps omitted"
+      return 0
+    fi
+    fail "the candidate sealer is missing at $SEALER; the Gate Zero producer would ship unable to name its candidate."
+  fi
+  CANDIDATE_MANIFEST="$(seal_candidate_field manifest)" \
+    || fail "could not seal the candidate manifest for $HEAD_SHA."
+  CANDIDATE_MANIFEST_DIGEST="$(seal_candidate_field digest)" \
+    || fail "could not digest the sealed candidate manifest for $HEAD_SHA."
+  [ -n "$CANDIDATE_MANIFEST" ] && [ -n "$CANDIDATE_MANIFEST_DIGEST" ] \
+    || fail "the candidate sealer produced an empty manifest or digest for $HEAD_SHA."
+  echo "  sealed candidate manifest $CANDIDATE_MANIFEST_DIGEST for $HEAD_SHA"
+}
+prepare_candidate_stamps
+
+deploy_staging_worker() {
+  if [ "$LEGACY_PRIOR_WITHOUT_CANDIDATE_STAMP" = "1" ]; then
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --tag "$DEPLOY_TAG"
+  else
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" --tag "$DEPLOY_TAG"
+  fi
+}
+
 # ---------- deploy ----------
 echo ""
 echo "== deploy =="
 cd "$WORKER_DIR"
 # -- provider-version upload --
 if [ "$VERSION_MODE" = "upload" ]; then
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    echo "== WR95 staging evidence target =="
+    WR95_STAGING_VERSION_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-staging-version.XXXXXX")"
+    WR95_STAGING_RELEASE_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-staging-release.XXXXXX")"
+    "$WRANGLER" versions view "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" --env staging --json \
+      > "$WR95_STAGING_VERSION_JSON" 2>/dev/null \
+      || fail "the named staging provider version is unavailable."
+    STAGING_TARGET_HOST="$($PY "$REPO/tools/ops-record.py" staging-target --field host)" \
+      || fail "the canonical staging host is unavailable."
+    curl -fsS --max-time 30 "https://$STAGING_TARGET_HOST/release" \
+      > "$WR95_STAGING_RELEASE_JSON" 2>/dev/null \
+      || fail "the staging release readback is unavailable."
+    "$PY" -c 'import json,sys
+version=json.load(open(sys.argv[1])); live=json.load(open(sys.argv[2])); wanted=sys.argv[3]; sha=sys.argv[4]
+def contains(value, needle):
+  if isinstance(value,dict): return any(contains(v,needle) for v in value.values())
+  if isinstance(value,list): return any(contains(v,needle) for v in value)
+  return value==needle
+if not contains(version,wanted): raise SystemExit("provider detail did not name the exact staging UUID")
+if (live.get("git_sha") or {}).get("value")!=sha or (live.get("worker_version") or {}).get("id")!=wanted or (live.get("env") or {}).get("value")!="staging": raise SystemExit("staging /release binding differs")' \
+      "$WR95_STAGING_VERSION_JSON" "$WR95_STAGING_RELEASE_JSON" \
+      "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" "$HEAD_SHA" \
+      || fail "the named staging provider is not the exact serving source."
+    rm -f "$WR95_STAGING_VERSION_JSON" "$WR95_STAGING_RELEASE_JSON"
+    echo "  verified exact staging provider $FOUNDATION_ASSURANCE_STAGING_PROVIDER"
+  fi
   set +e
-  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA" 2>&1)"
+  if [ -n "$PROBE_TOKENS_FILE" ]; then
+    set -- --secrets-file "$PROBE_TOKENS_FILE"
+  else
+    set --
+  fi
+  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload "$@" --var "GIT_SHA:$HEAD_SHA" \
+    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
   VERSION_UPLOAD_RC=$?
   set -e
   printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
@@ -810,6 +1085,26 @@ if [ "$VERSION_MODE" = "upload" ]; then
     | tail -n 1 | tr 'A-F' 'a-f')"
   [ -n "$PROVIDER_VERSION_ID" ] \
     || fail "Cloudflare uploaded a version but returned no parseable immutable version id; traffic was not changed."
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    WR95_FINAL_VERSION_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-final-version.XXXXXX")"
+    "$WRANGLER" versions view "$PROVIDER_VERSION_ID" --json \
+      > "$WR95_FINAL_VERSION_JSON" 2>/dev/null \
+      || fail "the final uploaded provider version is unavailable for secret-binding verification."
+    "$PY" -c 'import json,sys
+value=json.load(open(sys.argv[1])); wanted=sys.argv[2]
+def bound(v):
+  if isinstance(v,dict):
+    if v.get("name")==wanted and "secret" in str(v.get("type","")).lower(): return True
+    return any(bound(x) for x in v.values())
+  if isinstance(v,list): return any(bound(x) for x in v)
+  return False
+if not bound(value): raise SystemExit("required secret binding is absent")' \
+      "$WR95_FINAL_VERSION_JSON" "DATABASE_URL_FOUNDATION_ASSURANCE_WRITER" \
+      || fail "the final provider version does not carry DATABASE_URL_FOUNDATION_ASSURANCE_WRITER."
+    rm -f "$WR95_FINAL_VERSION_JSON"
+    WR95_FINAL_VERSION_JSON=""
+    echo "  verified final provider secret binding (name/type only)"
+  fi
   BOUND_RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-bound-release-manifest.XXXXXX")"
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
       --manifest "$RELEASE_MANIFEST" --provider "$PROVIDER" \
@@ -820,7 +1115,7 @@ if [ "$VERSION_MODE" = "upload" ]; then
   RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
     --manifest "$RELEASE_MANIFEST")"
   [ -n "$RELEASE_PLAN_HASH" ] \
-    || fail "the provider-bound release manifest has no approval plan hash; traffic was not changed."
+    || fail "the provider-bound release manifest has no plan hash; traffic was not changed."
   echo ""
   echo "uploaded only — Production traffic was not changed"
   echo "  provider: $PROVIDER"
@@ -828,14 +1123,78 @@ if [ "$VERSION_MODE" = "upload" ]; then
   echo "  git SHA: $HEAD_SHA"
   echo "  plan hash: $RELEASE_PLAN_HASH"
   echo ""
-  echo "Record this exact candidate before Joe approves its plan hash:"
-  echo "  .venv/bin/python tools/ops-record.py release candidate --key <key> \\"
-  echo "    --environment production --provider $PROVIDER \\"
-  echo "    --provider-version-id $PROVIDER_VERSION_ID --manifest $RELEASE_MANIFEST ..."
-  echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"
+  # ---------- the release-candidate record (standing-rule amendment 9) ------
+  #
+  # THE WRAPPER FILES IT, NOT A HUMAN RUNNING A PRINTED LINE. What stood here
+  # was an `echo` of the command somebody ought to run next, which made the
+  # record's maker whatever that person typed — and the Gate Zero producer reads
+  # its SUBJECT MAKER out of this row. A printed instruction is not provenance:
+  # the row has to be written by the thing that made the candidate, on a
+  # credential, in the same run that uploaded it.
+  #
+  # THE MAKER IS NOT AN ARGUMENT HERE. tools/ops-record.py refuses --maker
+  # outright and names no maker column in the insert; migration 0504's trigger
+  # records the login role the connection authenticated as and derives the maker
+  # from it, so this wrapper cannot name a maker even by mistake. What it supplies
+  # is the exact target: the key, the environment, the provider and its immutable
+  # version id, and the provider-bound manifest technical readiness will bind.
+  #
+  # The exact carr_jobs service login files it. Migration 0504 records that
+  # login, derives maker_actor=carr_jobs, and correctly reports
+  # maker_authority_verified=false. This row claims no Joe authorship or approval.
+  # The typed readiness receipt later binds independent technical evidence.
+  # Without the scoped service credential, ops-record.py refuses before insert.
+  # The line printed below still reports what the database recorded rather than
+  # what anyone intended.
+  echo "== release candidate record =="
+  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
+    WR95_SEAL_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/wr95-foundation-seal.XXXXXX")"
+    WR95_EVIDENCE_IDEMPOTENCY="$($PY -c 'import sys,uuid; print(uuid.uuid5(uuid.UUID("d5fe8cc5-32f8-4f09-9aa8-f14466b65146"),sys.argv[1]+"\0"+sys.argv[2]))' "$RELEASE_KEY" "$PROVIDER_VERSION_ID")"
+    if ! "$PY" "$REPO/tools/ops-record.py" release candidate \
+      --key "$RELEASE_KEY" --service carr-mcp --environment production \
+      --provider "$PROVIDER" --provider-version-id "$PROVIDER_VERSION_ID" \
+      --manifest "$RELEASE_MANIFEST" \
+      --security-evidence "$RELEASE_SECURITY_EVIDENCE" \
+      ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
+      ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
+      >/dev/null; then
+      fail "the uploaded WR95 version could not be filed as a release candidate; evidence acquisition was not started."
+    fi
+    if ! node "$REPO/mcp-server/bin/seal-foundation-assurance-evidence.mjs" \
+      --source-sha "$HEAD_SHA" --source-tree "$HEAD_TREE" \
+      --staging-provider-version "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" \
+      --final-provider-version "$PROVIDER_VERSION_ID" --release-key "$RELEASE_KEY" \
+      --staging-origin "https://$STAGING_TARGET_HOST" \
+      --staging-candidate-operation-id "$FOUNDATION_ASSURANCE_STAGING_CANDIDATE_OPERATION" \
+      --staging-replacement-receipt-id "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT" \
+      --staging-replacement-source-sha "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE" \
+      --idempotency-key "$WR95_EVIDENCE_IDEMPOTENCY" > "$WR95_SEAL_OUTPUT"; then
+      fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; traffic was not changed and readiness remains impossible."
+    fi
+    RELEASE_TEST_EVIDENCE="$($PY -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x["evidence_ref"])' "$WR95_SEAL_OUTPUT")" \
+      || fail "the WR95 evidence store returned no sealed evidence reference."
+    rm -f "$WR95_SEAL_OUTPUT"
+    WR95_SEAL_OUTPUT=""
+  else
+    "$PY" "$REPO/tools/ops-record.py" release candidate \
+      --key "$RELEASE_KEY" --service carr-mcp --environment production \
+      --provider "$PROVIDER" --provider-version-id "$PROVIDER_VERSION_ID" \
+      --manifest "$RELEASE_MANIFEST" \
+      --test-evidence "$RELEASE_TEST_EVIDENCE" \
+      --security-evidence "$RELEASE_SECURITY_EVIDENCE" \
+      ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
+      ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
+      >/dev/null \
+      || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no readiness can name $PROVIDER_VERSION_ID until the record exists."
+  fi
+  echo "  filed release candidate $RELEASE_KEY for $HEAD_SHA"
+  echo "  test evidence: $RELEASE_TEST_EVIDENCE"
+  echo "  maker: recorded by the database from the filing login, not asserted"
+  echo ""
+  echo "Before promotion, use the typed staging wrapper to record the exact recovery strategy:"
   echo "  rollback: bin/deploy-worker.sh --env staging --recovery-step current_before|prior|current_after ..."
   echo "  forward_fix: bin/deploy-worker.sh --env staging --recovery-step forward_fix --release-key <key> ..."
-  echo "The wrapper, not a generic ops-record run, writes approval-eligible rehearsal evidence."
+  echo "The wrapper writes the typed rehearsal evidence required for readiness."
   exit 0
 fi
 
@@ -1007,10 +1366,12 @@ else
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \
         || fail "deployment already claimed but its exact tag is not serving; refusing redeploy"
-      "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" --tag "$DEPLOY_TAG"
+      deploy_staging_worker
     fi
   else
-    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA"
+    "$WRANGLER" deploy --env "$TARGET_ENV" --var "GIT_SHA:$HEAD_SHA" \
+      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST"
   fi
 fi
 
@@ -1191,6 +1552,9 @@ else
   echo "  promoted immutable $PROVIDER version $PROVIDER_VERSION_ID"
 fi
 echo "  stamped GIT_SHA=$HEAD_SHA into this deploy (see /release)"
+if [ -n "$CANDIDATE_MANIFEST_DIGEST" ]; then
+  echo "  stamped CANDIDATE_MANIFEST_DIGEST=$CANDIDATE_MANIFEST_DIGEST (Gate Zero's candidate)"
+fi
 echo ""
 echo "  Verify live before you walk away: call list-verbs from a session and"
 echo "  confirm it reports $SHIPPING. A deploy that returns success and a"
@@ -1246,6 +1610,34 @@ echo "  because git_sha and schema are IDENTICAL across environments by design."
 # The deploy and the check share ONE correlation id, which is the entire point:
 # a deploy that breaks a read verb now leaves a deployment and a failed check
 # under one id instead of two unrelated facts in two places.
+measure_release_response_ms() {
+  _measure_url="$1"
+  _measure_rows=""
+  for _measure_sample in 1 2 3 4 5; do
+    if ! _measure_row="$(curl -sS -o /dev/null -w '%{time_pretransfer} %{time_total}' \
+        --max-time 30 "$_measure_url")"; then
+      return 1
+    fi
+    _measure_rows="${_measure_rows}${_measure_row}
+"
+  done
+  printf '%s' "$_measure_rows" | "$PY" -c '
+import math
+import sys
+rows = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
+if len(rows) != 5 or any(len(row) != 2 for row in rows):
+    raise SystemExit(2)
+try:
+    values = [(float(total) - float(pretransfer)) * 1000
+              for pretransfer, total in rows]
+except ValueError:
+    raise SystemExit(2)
+if any(not math.isfinite(value) or value <= 0 for value in values):
+    raise SystemExit(2)
+print(max(1, max(round(value) for value in values)))
+'
+}
+
 if [ "$TARGET_ENV" = "production" ] && [ ! -x "$REPO/bin/smoke-and-record.sh" ]; then
   [ "${LIVE_RELEASE_VERIFIED:-0}" = "1" ] || {
     DEPLOYMENT_EVIDENCE_REF="https://api.doctorcre.com/release#not-verified"
@@ -1296,16 +1688,19 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
     # for a deploy shipping 131 to pass the guard and drop ten live verbs.
     #
     # So measure what the budget is actually about: how long production takes to
-    # answer. Slowest of five samples, not the mean — a budget met on average
-    # and blown one call in five is not met. Measured on the same endpoint the
-    # identity read-back already uses, so this adds no new dependency. Real
-    # readings that morning: 101, 156, 187, 446, 589 ms.
-    PERFORMANCE_ELAPSED_MS="$(
-      for _ in 1 2 3 4 5; do
-        curl -s -o /dev/null -w '%{time_total}\n' --max-time 30 "$LIVE_RELEASE_URL" || echo 999
-      done | "$PY" -c 'import sys; print(max(int(float(x) * 1000) for x in sys.stdin.read().split()))'
-    )"
-    echo "  slowest of 5 live requests: ${PERFORMANCE_ELAPSED_MS}ms (suite took ${SUITE_ELAPSED_MS}ms, not gated)"
+    # answer after curl has completed DNS, TCP and TLS setup. Five separate
+    # requests retain independent Worker samples; subtracting time_pretransfer
+    # from time_total removes client connection setup without warming away a
+    # Worker cold start. Slowest of five samples, not the mean — a budget met on
+    # average and blown one call in five is not met. On 2026-09-05 total times
+    # reached 1546ms while the measured response portions were 173-440ms.
+    if ! PERFORMANCE_ELAPSED_MS="$(measure_release_response_ms "$LIVE_RELEASE_URL")"; then
+      DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#performance-sampling-unavailable"
+      DEPLOYMENT_FAILURE_CLASS="performance_gate_unavailable"
+      record_deployment verifying "$CARR_CORRELATION_ID"
+      exit 1
+    fi
+    echo "  slowest of 5 live responses after connection setup: ${PERFORMANCE_ELAPSED_MS}ms (suite took ${SUITE_ELAPSED_MS}ms, not gated)"
     PERFORMANCE_EVIDENCE_REF="$LIVE_RELEASE_URL#performance-$CARR_CORRELATION_ID"
     set +e
     "$PY" "$REPO/ops/performance-budget-gate.py" \

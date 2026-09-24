@@ -56,6 +56,18 @@ def codex_exec(cmd, cwd=REPO):
         "turn_id": "fixture",
     }
 
+
+def direct_exec(cmd, workdir=REPO, cwd=REPO):
+    """Actual nested Codex shell event delivered to the hook runtime."""
+    return {
+        "hook_event_name": "PreToolUse", "cwd": cwd,
+        "model": "gpt-5.6-terra", "permission_mode": "default",
+        "session_id": "guard-selftest", "tool_name": "exec_command",
+        "tool_input": {"cmd": cmd, "workdir": workdir},
+        "tool_use_id": "fixture", "transcript_path": None,
+        "turn_id": "fixture",
+    }
+
 CASES: list[tuple] = []
 
 
@@ -86,6 +98,25 @@ case("gh pr create carrying the Claude Code attribution link",
      bash('gh pr create --title t --body "fix\n\n'
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
+
+# Joe's own private Tailscale tailnet (tailc8cc93.ts.net), added 2026-09-23 so
+# his Mac Studio's local model server ("flash-next") is reachable from his
+# other devices. host_allowlisted does suffix matching, so the one tailnet
+# domain entry covers every device name on it — mac-studio and
+# joes-macbook-pro alike — without opening the broad `ts.net` suffix, which
+# would admit anyone else's tailnet too.
+case("ssh from macbook curling the Studio's tailnet name is allowed",
+     bash("ssh macbook 'curl http://mac-studio.tailc8cc93.ts.net:8000/v1/models'"), ALLOW)
+case("bash curl to the Studio's tailnet name is allowed",
+     bash("curl http://mac-studio.tailc8cc93.ts.net:8000/v1/models"), ALLOW)
+case("bash curl to the macbook's own tailnet name is allowed",
+     bash("curl https://joes-macbook-pro.tailc8cc93.ts.net/x"), ALLOW)
+case("a different tailnet is still blocked",
+     bash("curl https://evil.tailffffff.ts.net/x"), DENY)
+case("the bare ts.net suffix is still blocked",
+     bash("curl https://ts.net/x"), DENY)
+case("a lookalike suffix appending the tailnet name is still blocked",
+     bash("curl https://tailc8cc93.ts.net.evil.com/x"), DENY)
 
 # ── 2. DERIVED list (the B half): client practice sites, from the record ──────
 # THESE CARRY A LONG QUERY ON PURPOSE. A derived host gets the UNCONDITIONAL
@@ -194,6 +225,12 @@ case("Codex non-CARR cwd cannot target CARR", codex_exec(
 case("Codex non-CARR cwd cannot target tilde CARR", codex_exec(
     "const r = await tools.exec_command({cmd: 'rm -rf ~/carr-system/lib'});",
     "/private/tmp"), DENY)
+case("direct Codex exec_command applies the CARR guard", direct_exec(
+    "rm -rf /Users/booko/carr-system/lib"), DENY)
+case("direct Codex exec_command uses tool workdir for scope", direct_exec(
+    "rm -rf /private/tmp/not-carr", workdir="/private/tmp"), ALLOW)
+case("direct non-CARR workdir cannot target CARR", direct_exec(
+    "rm -rf /Users/booko/carr-system/lib", workdir="/private/tmp"), DENY)
 
 # ── DESCRIBING A DESTRUCTIVE COMMAND IS NOT RUNNING ONE ──────────────────────
 #

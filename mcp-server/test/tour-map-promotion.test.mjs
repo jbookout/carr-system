@@ -26,7 +26,7 @@ const args = {
   decision: "approved", reviewed_at: "2026-08-28T12:00:00.000Z",
   decision_reason: "All required map promotion checks passed.",
   brief_version: "tour-map-brief.v1", canonical_dataset_version: "dataset-v7",
-  selected_prototype_id: "carr-map-tour-v1", component_registry_version: "maplibre-6.1.0",
+  selected_prototype_id: "carr-map-tour-v1", component_registry_version: "maplibre-6.4.1",
   route_version: 7,
   provider_rights_receipt_ids: ["40000000-0000-4000-8000-000000000001"],
   mobile_test_evidence: { status: "passed", phone: "passed", ipad: "passed", digest: `sha256:${"1".repeat(64)}` },

@@ -12,7 +12,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|functions\\.exec)$",
+        "matcher": "^(Bash|exec_command|functions\\.exec)$",
         "hooks": [
           {
             "type": "command",
@@ -47,7 +47,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
+        "matcher": "^(Bash|exec_command|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$",
         "hooks": [
           {
             "type": "command",
@@ -57,7 +57,72 @@
         ]
       }
     ],
-    "PostToolUse": [],
+    "PostToolUse": [
+      {
+        "matcher": "^(Write|Edit|MultiEdit|apply_patch|functions\\.(apply_patch|exec))$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/lint-gate.py",
+            "timeout": 40
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -83,7 +148,7 @@
           },
           {
             "type": "command",
-            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py",
+            "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py",
             "timeout": 20
           }
         ]

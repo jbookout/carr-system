@@ -125,6 +125,18 @@ fi
 LOG="$REPO/out/nightly.log"
 mkdir -p "$REPO/out"
 
+# ── WHERE THIS RUN'S LINES BEGIN, so the trim below cannot eat them ──────────
+# The rolling trim at the end of carr_chain_exit keeps the last 2000 lines, and
+# its comment used to say that was "several months". It is not: one chain now
+# emits well over 2000 lines on its own, so the trim was deleting the FIRST half
+# of the very run that had just written it. Measured 2026-09-15: the whole log
+# held 36 timestamped lines, all from 07:14Z onward, and the exports step at
+# 07:05Z — the step that had failed twelve nights running — was gone before
+# anyone could read why. A chain that destroys its own diagnostics is worse than
+# one that keeps none, because the green-looking remainder reads as the whole run.
+LOG_START_LINES=0
+[ -f "$LOG" ] && LOG_START_LINES="$(wc -l < "$LOG" | tr -d ' ')"
+
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" >> "$LOG"; }
 
 # ── THE DEATH THAT LEFT NO LINE (2026-08-23) ─────────────────────────────────
@@ -205,6 +217,24 @@ carr_chain_exit() {             # carr_chain_exit <exit-status>
     print -r -- "nightly receipt: died_before_completion=1 exit=$rc"
     print -r -- "nightly result: chain_failed"
   fi
+  # ── KEEP THIS RUN'S OWN LOG BEFORE THE ROLLING TRIM ────────────────────────
+  # Here rather than at the foot of the script because the foot is only reached
+  # by a chain that completes, and a chain that DIES is exactly the one whose
+  # log is worth keeping. carr_chain_exit runs on both paths.
+  local runlog_dir="$REPO/out/nightly-runs"
+  mkdir -p "$runlog_dir" 2>/dev/null || true
+  if [ -f "$LOG" ] && [ -d "$runlog_dir" ]; then
+    tail -n "+$(( LOG_START_LINES + 1 ))" "$LOG" \
+      > "$runlog_dir/nightly-$(date -u '+%Y%m%dT%H%M%SZ').log" 2>/dev/null || true
+    # Last 14 runs. Bounded on purpose: the point is diagnosing the last two
+    # weeks of nightlies, not keeping an archive nobody prunes.
+    ls -1t "$runlog_dir"/nightly-*.log 2>/dev/null | tail -n +15 | while read -r stale; do
+      rm -f "$stale"
+    done
+  fi
+  # Keep the rolling log from growing without bound. The per-run archive above
+  # is what a diagnosis reads; this file is the recent-history tail.
+  tail -n 2000 "$LOG" > "$LOG.trim" 2>/dev/null && mv "$LOG.trim" "$LOG"
   [ "$LOCK_HELD" -eq 1 ] && carr_release_lock
   return 0
 }
@@ -1009,6 +1039,51 @@ step "rule-admission drift (reports, never admits)" ./.venv/bin/python ops/rule-
 # contract as its siblings: 0 whether or not it finds a miss, 78 = SKIP.
 step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-delivery-shadow-watch.py
 
+# CREDENTIAL HEALTH, added 2026-09-24. Joe is replacing every interactive login
+# CARR depends on with a long-lived scoped token, so the daily question is no
+# longer "did somebody re-authenticate" but "is each credential still good, and
+# how long until it isn't". ops/credential-health.py probes every credential in
+# ops/config/credential-inventory.v1.json (exit status / HTTP status only, never
+# a command's output or a response body beyond one named non-secret field),
+# writes out/credential-health.jsonl, and on a failed or expiring_soon finding
+# files exactly one deduplicated CARR loop per credential through
+# `./run.sh call add-loop` — the SAME finding-channel a human reading
+# `run.sh health` sees under tools/health-check.py's `credentials` section.
+#
+# --nightly IS THE POINT OF THIS COMMENT. Without it this step would exit
+# nonzero on every ordinary finding and redden the whole night for something
+# the loop it just filed already says — the exact "an alarm that fires every
+# day trains people to stop reading alarms" failure the four report-only steps
+# above this one were each written to avoid, and the same shape as
+# ops/rule-admission-drift.py: 0 on a finding, nonzero reserved for the lane
+# itself being unable to run (its inventory unreadable, or zero credentials
+# configured — a real defect, not a credential going stale).
+#
+# THE CREDENTIAL BOUNDARY (bin/routine-credential-env.sh's carr_routine_exec,
+# which every step runs through) strips the child process down to
+# HOME/PATH/LANG/TMPDIR plus the two named database capabilities — never a
+# broader ambient credential set, by design (see that file's own header). An
+# earlier version of this lane read NEON_API_KEY, CARR_MCP_PROBE_TOKEN and
+# CARR_MCP_LOCAL_TOKEN straight from os.environ, so all three read `unknown`
+# under every nightly run and a genuine finding on any of them would have
+# gone unfiled forever (independent review, PR #1218, blocked at aa435a54).
+# Fixed: those three probes now read their tokens file-first, the same way
+# cloudflare-deploy-token and claude-cli-oauth-token-studio always have —
+# straight off their dotenv files in ~/.config/carr/db.env and
+# ~/.config/carr/mcp-tokens.env via HOME, which IS in the stripped set — and
+# fall back to the (here, absent) environment variable only when the file
+# itself doesn't exist. All five file-backed credentials are therefore
+# checked for real under this boundary now; only a credential with no `path`
+# configured at all in the inventory, or one Joe hasn't provisioned as a file
+# on THIS machine yet, can still read `unknown` here — and that unknown now
+# files its own deduplicated loop too, whenever the file it names IS present
+# but couldn't be verified, so a never-checked credential can't stay silent.
+# `run.sh health` run by hand carries the fuller ambient environment and
+# reads all eleven credentials the same way; this nightly step is the same
+# lane, not a second implementation of it.
+step "credential health (reports, never rotates; loops on a finding)" \
+     ./.venv/bin/python ops/credential-health.py --nightly
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
 # This assignment used to sit at the bottom of the portability mirror below, so
@@ -1069,7 +1144,7 @@ BACKUP_RC=$LAST_STEP_RC
 # and swallows the rest of the file. It parsed as an unmatched brace 200 lines
 # later, which is a long way from the cause.
 portability_root="${CARR_EXPORT_HOME:-}"
-[ -n "$portability_root" ] || portability_root="/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
+[ -n "$portability_root" ] || portability_root="$HOME/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
 # THE CAPABILITY THIS STEP WAS PINNED TO IS ONE NO AGENT MAY EVER HOLD, so the
 # step deleted itself quietly. carr_backup's password is deliberately a value
 # nothing here can possess — migration 0119 says so in capitals ("THE PASSWORD IS
@@ -1423,6 +1498,6 @@ else
   print -r -- "nightly result: chain_failed"
 fi
 
-# Keep the log from growing without bound: last 2000 lines is several months.
-tail -n 2000 "$LOG" > "$LOG.trim" && mv "$LOG.trim" "$LOG"
+# The trim moved into carr_chain_exit, which runs on the dead path too, and it
+# now happens AFTER this run has been archived to out/nightly-runs/.
 exit "$rc_total"

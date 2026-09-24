@@ -38,6 +38,16 @@ decision log. The two doors now divide cleanly:
 Both fire once per claim and both stay silent when their own source says
 nothing, so a message carrying neither kind of error passes untouched.
 
+HOW IT SEARCHES, AS OF 2026-09-18. Every commit subject in the window is READ
+by a judgment, one request each, about four seconds and a fraction of a cent,
+and only on a message that already looks like a staleness claim. The stem
+matcher described below stays as the fallback for when that is unavailable, and
+judged_hits() carries the measurement that moved it out of first place: it
+returned nothing for a claim that the shell-command pre-check "has not shipped"
+while the commit "Warn before a shell command runs, in every session" sat in
+the window. Everything from here to the end of this docstring describes that
+fallback, which is unchanged.
+
 WHAT IT SEARCHES. `git log` over the last STALE_WINDOW_DAYS, subject lines only.
 Commit subjects in this repo are written as plain sentences about what changed,
 which is exactly the shape a staleness claim collides with: on 2026-08-14 the
@@ -320,9 +330,47 @@ def match_commits(tokens, commits):
         if score < MIN_SCORE:
             continue
         matched.sort(key=lambda s: -weights[s])
-        scored.append((-score, idx, ", ".join(matched[:3])))
+        # The reason is carried in the hit so the two paths — this matcher and
+        # the judgment in judged_hits — hand the announcement the same shape and
+        # a reader can tell which one spoke.
+        scored.append((-score, idx, "matched on: " + ", ".join(matched[:3])))
     scored.sort()
     return [(commits[i][0], commits[i][1], m) for _, i, m in scored[:MAX_HITS]]
+
+
+def judged_hits(prose, commits):
+    """The commits a judgment reads as answering this claim, or None.
+
+    THE MATCHER BELOW IS NEARLY DEAF, measured 2026-09-18. Asked about a claim
+    that the shell-command pre-check "has not shipped", with a commit reading
+    "Warn before a shell command runs, in every session" sitting in the window,
+    it returned nothing. It wants two rare stems shared with a subject line, and
+    two texts can describe the same thing without sharing two rare words. Its
+    caution is well argued and rarity is still not meaning.
+
+    ops/stale_claim_judge.py reads every commit in the window instead, one
+    request each, about four seconds, a fraction of a cent, and only on a
+    message that already looks like a staleness claim. On the four measured
+    claims it found the refuting commit for both that had one and stayed silent
+    on both that did not.
+
+    None means no judgment could be had, and the caller then uses the matcher —
+    today's behaviour, unchanged. An EMPTY LIST is a real answer and means the
+    window holds nothing, which is the common case and the one this gate must
+    stay silent on.
+    """
+    try:
+        import importlib.util
+        path = os.path.join(REPO, "ops", "stale_claim_judge.py")
+        spec = importlib.util.spec_from_file_location("stale_claim_judge", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.refuting_commits(prose, commits)
+    except Exception as exc:
+        dlog(f"JUDGE-UNAVAILABLE {exc}")
+        return None
 
 
 def main():
@@ -363,10 +411,12 @@ def main():
             dlog(f"ALLOW(already-cited) {cited[0]} {cited[1][:70]}")
             sys.exit(0)
 
-        hits = match_commits(salient_tokens(prose), commits)
+        judged = judged_hits(prose, commits)
+        hits = judged if judged is not None else match_commits(
+            salient_tokens(prose), commits)
         if not hits:
-            # No commit about this subject. Probably a real finding, and
-            # silence is the correct output.
+            # Nothing in the window answers this claim. Probably a real
+            # finding, and silence is the correct output.
             sys.exit(0)
 
         audit({"ts": now(), "hook": "stale-claim-gate", "register": "announce",
@@ -391,9 +441,9 @@ def main():
             "Recent commits about this subject:",
             "",
         ]
-        for h, subject, matched in hits:
+        for h, subject, why in hits:
             lines.append(f"  · {h}  {subject[:150]}")
-            lines.append(f"      matched on: {matched}")
+            lines.append(f"      {why}")
         lines += [
             "",
             "Re-check the CURRENT state, not the artifact you read: run the "

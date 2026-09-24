@@ -68,7 +68,44 @@ test("recursive delegation returns the exact transitive union once", () => {
 });
 
 test("missing, wildcard, cycle, dynamic SQL, opaque, and unintegrated paths default deny", () => {
-  assert.deepEqual(SCAC_EXACT_EFFECT_CONTRACTS, {});
+  assert.deepEqual(Object.keys(SCAC_EXACT_EFFECT_CONTRACTS).sort(), [
+    "db-function-acl:ops.accept_ready_plan_amendment(text,integer,text,uuid):execute",
+    "db-function-acl:ops.acknowledge_ready_plan_amendment(bigint,uuid):execute",
+    "db-function-acl:ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer):execute",
+    "db-function-acl:ops.canonical_ownership_trusted_context():execute",
+    "db-function-acl:ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb):execute",
+    "db-function-acl:ops.discover_ready_plan_amendments(bigint,int):execute",
+    "db-function-acl:ops.effective_ready_plan(text):execute",
+    "db-function-acl:ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid):execute",
+    "db-function-acl:ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid):execute",
+    "db-function-acl:ops.release_canonical_ownership_lease(uuid,uuid,bigint):execute",
+    "db-function-acl:ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer):execute",
+    "mcp-tool:accept-ready-plan-amendment",
+    "mcp-tool:acknowledge-ready-plan-amendment",
+    "mcp-tool:effective-ready-plan",
+    "mcp-tool:propose-ready-plan-amendment",
+    "mcp-tool:ready-plan-amendment-discovery",
+    "worker-route:canonical-ownership",
+    "worker-route:ready-plan-amendment",
+  ]);
+  assert.deepEqual(resolveExactEffects("worker-route:canonical-ownership"), [
+    { kind: "execute", function_signature: "ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer)" },
+    { kind: "execute", function_signature: "ops.canonical_ownership_trusted_context()" },
+    { kind: "execute", function_signature: "ops.check_canonical_ownership_lease(uuid,uuid,bigint,jsonb,jsonb)" },
+    { kind: "execute", function_signature: "ops.mint_canonical_ownership_runtime_session(uuid,uuid,uuid,integer,text,text,timestamptz,uuid)" },
+    { kind: "execute", function_signature: "ops.release_canonical_ownership_lease(uuid,uuid,bigint)" },
+    { kind: "execute", function_signature: "ops.renew_canonical_ownership_lease(uuid,uuid,bigint,integer)" },
+  ]);
+  assert.deepEqual(resolveExactEffects("worker-route:ready-plan-amendment"), [
+    { kind: "execute", function_signature: "ops.accept_ready_plan_amendment(text,integer,text,uuid)" },
+    { kind: "execute", function_signature: "ops.acknowledge_ready_plan_amendment(bigint,uuid)" },
+    { kind: "execute", function_signature: "ops.discover_ready_plan_amendments(bigint,int)" },
+    { kind: "execute", function_signature: "ops.effective_ready_plan(text)" },
+    { kind: "execute", function_signature: "ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid)" },
+  ]);
+  assert.deepEqual(resolveExactEffects("mcp-tool:propose-ready-plan-amendment"), [
+    { kind: "execute", function_signature: "ops.propose_ready_plan_amendment(text,integer,text,text,text,jsonb,text,text,jsonb,jsonb,uuid,uuid)" },
+  ]);
   assert.throws(() => resolveExactEffects("mcp-tool:unknown"),
     error => error instanceof ExactEffectRefusal && error.error === "effect_contract_missing");
   assert.throws(() => immutableExactEffectContracts([
@@ -97,33 +134,41 @@ test("missing, wildcard, cycle, dynamic SQL, opaque, and unintegrated paths defa
 test("trusted principal binds server actor fields to the actual DB session readback", async () => {
   assert.match(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text, /session_user::text/);
   assert.match(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text, /current_user::text/);
+  assert.match(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text,
+    /pg_has_role\(session_user,\s*'carr_writer',\s*'member'\)/);
   assert.match(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text, /pg_backend_pid\(\)/);
   const actor = {
     id: "10000000-0000-4000-8000-000000000001", slug: "joe", display: "Joe Bookout",
     actor_kind: "human", human: true, via: "oauth-google", client_id: "trusted-client", sponsoring_human_slug: null,
     human_slug: null, sponsor_required: false,
   };
-  const readback = { session_principal: "carr_writer", current_principal: "carr_writer",
-    privilege_bundle: "carr_writer", backend_pid: 4123 };
+  const readback = { session_principal: "app_writer", current_principal: "app_writer",
+    privilege_bundle: "carr_writer", member_carr_writer: true, member_carr_jobs: false,
+    member_carr_authority: false, backend_pid: 4123 };
   const bound = await deriveTrustedPrincipalBinding(actor, readback, "carr_writer");
   assert.deepEqual({ ...bound, principal_digest: undefined }, {
     schema_version: "scac-trusted-principal.v1", organization_tenant_id: "carr-internal",
     actor_id: actor.id, actor_slug: "joe", actor_kind: "human", human: true, via: "oauth-google",
     client_id: "trusted-client", sponsoring_human_slug: "joe",
     native_agent_verified: false, authority_sponsor_slug: null,
-    authorization_class: "verified_partner", session_principal: "carr_writer",
+    authorization_class: "verified_partner", session_principal: "app_writer",
     privilege_bundle: "carr_writer", backend_pid: 4123, principal_digest: undefined,
     source: "server_authenticated_actor_plus_database_readback",
     production_enforcement_active: false,
   });
   assert.match(bound.principal_digest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(Object.isFrozen(bound), true);
+  const entered = await executeWithTrustedPrincipal(actor, readback, "carr_writer",
+    trustedActor => trustedActor.trusted_principal);
+  assert.equal(entered.session_principal, "app_writer",
+    "the deployed writer login reaches the handler with its verified bundle binding");
 });
 
 test("caller labels and mismatched or elevated database principals cannot create a binding", async () => {
   const actor = { id: "10000000-0000-4000-8000-000000000001", slug: "joe", actor_kind: "human", human: true };
   const writer = { session_principal: "carr_writer", current_principal: "carr_writer",
-    privilege_bundle: "carr_writer", backend_pid: 9 };
+    privilege_bundle: "carr_writer", member_carr_writer: true, member_carr_jobs: false,
+    member_carr_authority: false, backend_pid: 9 };
   await assert.rejects(deriveTrustedPrincipalBinding(actor, { ...writer, claimed_actor: "dell" },
     "carr_writer"), /open_or_incomplete/);
   await assert.rejects(deriveTrustedPrincipalBinding(actor,
@@ -133,8 +178,18 @@ test("caller labels and mismatched or elevated database principals cannot create
   await assert.rejects(deriveTrustedPrincipalBinding(actor,
     { ...writer, current_principal: "neondb_owner" }, "carr_writer"),
     error => error instanceof ExactEffectRefusal && error.error === "trusted_database_principal_mismatch");
+  await assert.rejects(deriveTrustedPrincipalBinding(actor,
+    { ...writer, session_principal: "app_writer", current_principal: "app_writer",
+      member_carr_writer: false }, "carr_writer"),
+    error => error instanceof ExactEffectRefusal && error.error === "trusted_database_principal_mismatch");
+  await assert.rejects(deriveTrustedPrincipalBinding(actor,
+    { ...writer, session_principal: "app_writer", current_principal: "app_writer",
+      member_carr_authority: true }, "carr_writer"),
+    error => error instanceof ExactEffectRefusal && error.error === "trusted_database_principal_mismatch");
   const joeAuthority = { session_principal: "carr_authority_joe",
-    current_principal: "carr_authority_joe", privilege_bundle: "carr_authority", backend_pid: 10 };
+    current_principal: "carr_authority_joe", privilege_bundle: "carr_authority",
+    member_carr_writer: false, member_carr_jobs: false, member_carr_authority: true,
+    backend_pid: 10 };
   const joe = await deriveTrustedPrincipalBinding(actor, joeAuthority, "carr_authority");
   assert.equal(joe.session_principal, "carr_authority_joe");
   await assert.rejects(deriveTrustedPrincipalBinding(actor, {
@@ -150,7 +205,8 @@ test("dispatch translates principal mismatch before handler entry", async () => 
   const actor = { id: "10000000-0000-4000-8000-000000000001", slug: "joe",
     actor_kind: "human", human: true };
   const wrong = { session_principal: "carr_jobs", current_principal: "carr_jobs",
-    privilege_bundle: "carr_jobs", backend_pid: 9 };
+    privilege_bundle: "carr_jobs", member_carr_writer: false, member_carr_jobs: true,
+    member_carr_authority: false, backend_pid: 9 };
   await assert.rejects(executeWithTrustedPrincipal(actor, wrong, "carr_writer", async () => {
     handlerCalls += 1;
   }), error => error instanceof ToolError &&

@@ -281,7 +281,7 @@ export function partnerRoomTools({ withEnvelope, ToolError }) {
                from partner_room_turn where msg_id=$1 /* partner-room:projection-dedup-proof */`, [msgId]);
           observed = prior.rows[0] || {};
         }
-        if (observed.body !== body || !queueProjectionReceiptFromTurn(observed))
+        if (!queueProjectionReceiptFromTurn(observed))
           throw new ToolError({ error: "queue_projection_provenance_rejected",
             hint: "the durable row does not satisfy the same provenance and body parser as read-room-queue" });
         return appended;

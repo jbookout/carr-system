@@ -10,6 +10,18 @@ import { authorizationClassForActor, organizationTenantForActor } from "./identi
 
 const sharing = tourSharingBrowserAccess({ ToolError });
 
+// Bounded, sanitized diagnostic text for the render-failure log below. Never
+// tour content (property names, addresses, economics), never a URL or a
+// key/token-shaped token, and never long enough to be one even if the
+// stripping above missed it.
+function sanitizedFailureMessage(error) {
+  const raw = typeof error?.message === "string" ? error.message : "";
+  const stripped = raw
+    .replace(/https?:\/\/\S+/gi, "[url]")
+    .replace(/\b[A-Za-z0-9+/_-]{32,}={0,2}\b/g, "[opaque]");
+  return stripped.slice(0, 200);
+}
+
 async function withPool(connectionString, transaction, fn) {
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
@@ -91,12 +103,27 @@ export function projectTourDetail(raw) {
 }
 
 async function invoke({ env, ctx, actor }, verb, args) {
-  const runtimeActor = {
-    ...actor,
+  // In place, not a copy: identity.js's authentication brand is object identity
+  // (amendment 8, 2026-09-13), and a spread here would hand callTool an actor
+  // that authenticates as nobody. Both fields keep whatever the actor already
+  // carried; this only fills them in when the surface arrived without them.
+  const runtimeActor = Object.assign(actor ?? {}, {
     authorization_class: actor?.authorization_class || authorizationClassForActor(actor),
     organization_tenant_id: actor?.organization_tenant_id || organizationTenantForActor(actor),
-  };
-  return toolData(await callTool({ ...env, ctx }, runtimeActor, verb, args));
+  });
+  return toolData(await callTool(toolEnvironment(env, ctx), runtimeActor, verb, args));
+}
+
+// The tool dispatcher needs the Worker's bindings plus this request's ctx. It
+// must NOT be built with a spread: Deal Room hands this leaf a host-scoped env
+// made with Object.create(env) (dealroom-web.js envForDealroomOrigin), whose
+// secrets and bindings live on the PROTOTYPE. An object spread of env copies
+// own properties only, so every browser-session verb reached callTool with no
+// database DSN and failed before its first query (defect 049f269e) while the
+// direct reads in this file, which read env in place, kept working. Inherit
+// from env instead, so lookups still walk to the real bindings.
+export function toolEnvironment(env, ctx) {
+  return Object.assign(Object.create(env ?? null), { ctx });
 }
 
 async function internalRead({ env, actor }, sql, params) {
@@ -172,21 +199,50 @@ export async function runTourPdfRender(context, dependencies = {}) {
   const renderJobId = request.data.render_job_id;
   const resultIdempotencyKey = await derivedIdempotencyUuid("tour-pdf-render-result", context.input.idempotency_key);
   try {
-    const stored = await store(context.env, tenant, renderJobId, prepared);
+    let stored;
+    try {
+      stored = await store(context.env, tenant, renderJobId, prepared);
+    } catch (error) {
+      // storeAndVerifyTourPdf (tour-pdf-service.js) tags its own throws
+      // "store"/"verify"; a test double or an unanticipated throw defaults to
+      // "store", since that is the call site, not the more specific phase
+      // inside it.
+      if (error && typeof error === "object" && typeof error.phase !== "string") error.phase = "store";
+      throw error;
+    }
     const artifactRef = `artifact:tour-pdf:${renderJobId.replaceAll("-", "")}`;
-    const recorded = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
-      idempotency_key: resultIdempotencyKey, render_job_id: renderJobId,
-      status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
-      artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
-      content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,
-      blocking_finding_count: stored.qc.findings.length, qc_run_digest: stored.qcRunDigest,
-    }));
+    let recorded;
+    try {
+      recorded = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
+        idempotency_key: resultIdempotencyKey, render_job_id: renderJobId,
+        status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
+        artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
+        content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,
+        blocking_finding_count: stored.qc.findings.length, qc_run_digest: stored.qcRunDigest,
+      }));
+    } catch (error) {
+      if (error && typeof error === "object" && typeof error.phase !== "string") error.phase = "record";
+      throw error;
+    }
     return recorded.ok ? { ok: true, data: { render_job_id: renderJobId, status: recorded.data.status, qc_run_digest: stored.qcRunDigest } } : recorded;
   } catch (error) {
     // The queue row already exists. Persist one terminal, non-sensitive
     // failure receipt so operators never see an immortal "queued" job.
     const failureClass = error instanceof Error ? error.name : "UnknownError";
     const failureDigest = await sha256Bytes(new TextEncoder().encode(`tour-pdf-render-failure:v1:${failureClass}`));
+    // WHICH phase threw: "store" or "record" from the call-site defaults just
+    // above, refined to "verify" by storeAndVerifyTourPdf itself when the
+    // failure was in readback/QC rather than the initial write. "prepare"
+    // never reaches this catch -- prepare() runs before the job row exists,
+    // so a prepare failure has no render_job_id to attach a failure receipt to.
+    const phase = typeof error?.phase === "string" ? error.phase : "store";
+    const sqlstate = typeof error?.code === "string" && /^[0-9A-Za-z]{5}$/.test(error.code) ? error.code : null;
+    const report = typeof dependencies.reportFailureFn === "function"
+      ? dependencies.reportFailureFn : record => console.error(JSON.stringify(record));
+    try {
+      report({ event: "tour_pdf_render_failure", render_job_id: renderJobId, phase,
+        error_name: failureClass, error_message: sanitizedFailureMessage(error), sqlstate });
+    } catch { /* logging must never itself fail the render */ }
     const failed = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
       idempotency_key: resultIdempotencyKey, render_job_id: renderJobId, status: "failed",
       artifact_ref: null, artifact_digest: null, storage_ref: null,
@@ -194,11 +250,14 @@ export async function runTourPdfRender(context, dependencies = {}) {
       qc_run_digest: failureDigest,
     }));
     if (!failed.ok) return failed;
-    return { ok: false, status: 500, data: { render_job_id: renderJobId, status: "failed" } };
+    return { ok: false, status: 500, data: { render_job_id: renderJobId, status: "failed", phase } };
   }
 }
 
-export function createTourRuntimeAdapters() {
+// `renderDependencies` exists for tests that drive the real browser chain
+// without a database read or a PDF render (and may capture failure records);
+// production passes nothing.
+export function createTourRuntimeAdapters(renderDependencies = {}) {
   return {
     listToursFn: async context => ({ ok: true, data: projectTourLibrary(await internalRead(context,
       "select ops.list_tour_library($1::text,$2::text) as data", [organizationTenantForActor(context.actor)])) }),
@@ -247,11 +306,15 @@ export function createTourRuntimeAdapters() {
     issueShareGrantFn: context => invoke(context, "issue-tour-share-grant", context.input),
     rotateShareGrantFn: context => invoke(context, "rotate-tour-share-grant", context.input),
     revokeShareGrantFn: context => invoke(context, "revoke-tour-share-grant", context.input),
-    renderPdfFn: context => runTourPdfRender(context),
+    renderPdfFn: context => runTourPdfRender(context, renderDependencies),
     readPdfRenderFn: async context => invoke(context, "read-tour-pdf-render", context.input),
     reviewPdfFn: async context => invoke(context, "record-tour-pdf-human-review", context.input),
     previewPdfFn: context => pdfArtifactResponse(context, "review"),
     downloadPdfFn: context => pdfArtifactResponse(context, "download"),
+    // The leaf hands over an already-sanitised record (route, status, error
+    // class, ToolError code; never a message). Workers Logs / tail pick it up.
+    reportFailureFn: renderDependencies.reportFailureFn ||
+      (record => console.error(JSON.stringify(record))),
   };
 }
 

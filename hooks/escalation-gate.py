@@ -89,7 +89,10 @@ LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from conduct_patterns import PROTECTED, HUMAN_WANTS_CHOICE  # noqa: E402
+from conduct_patterns import (  # noqa: E402
+    PROTECTED, HUMAN_WANTS_CHOICE, HUMAN_WANTS_COMMAND, FENCE, BARE_FENCE_CMD,
+    INLINE_CMD, HANDOFF_PROSE, denied_commands, handoff_was_denied,
+)
 
 # ── (1) FACT CAPTURE — only Joe was in the room. Research cannot reach it. ────
 FACT_CAPTURE = re.compile(
@@ -299,6 +302,88 @@ LOOP_REASON = (
 )
 
 
+# ── ATTEMPT FIRST (Joe, 2026-09-23) ───────────────────────────────────────────
+# "if you can run it yourself you should do that before you ever ask me." A
+# question that hands Joe a command is refused here, before he sees it, unless
+# the harness already refused the session that command this turn. This is the
+# preventive twin of conduct-stop-gate.py's command_handoff class, which can
+# only act at Stop, after the prose has been read.
+ATTEMPT_FIRST_REASON = (
+    "ATTEMPT FIRST (Joe, 2026-09-23). This question asks Joe to run a command or "
+    "do a computer action you have not tried. Run it yourself with the Bash tool "
+    "first. Only if the harness refuses it (a classifier or permission denial), "
+    "or it genuinely needs a password, Face ID or a browser sign-in, may you ask "
+    "him, and then say which refusal you hit. His words: \"if you can run it "
+    "yourself you should do that before you ever ask me.\"")
+
+
+def _jev_hands_off():
+    """ops/jev_handoff.hands_off, or None when it cannot load (fail open to
+    the keyword patterns)."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jev_handoff", os.path.join(REPO, "ops", "jev_handoff.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.hands_off
+    except Exception:
+        return None
+
+
+def hands_off_unattempted(blob, human_last, denied, jev=None):
+    """Return the finding name when the question hands Joe an untried command,
+    else None. Keyword patterns first; Jev reads the prose they miss."""
+    if not blob.strip():
+        return None
+    if human_last and HUMAN_WANTS_COMMAND.search(human_last):
+        return None
+    if denied and handoff_was_denied(blob, denied):
+        return None
+    keyword = None
+    if FENCE.search(blob) or BARE_FENCE_CMD.search(blob) or INLINE_CMD.search(blob):
+        keyword = "command"
+    else:
+        for name, pat in HANDOFF_PROSE:
+            if pat.search(blob):
+                keyword = name
+                break
+    if jev is not None:
+        if jev(blob, surface="ask", existing_decision=keyword is not None) and not keyword:
+            return "jev"
+    return keyword
+
+
+def read_turn(path, limit=400):
+    """(records, index just after the last genuine human turn, that turn's text)."""
+    recs = []
+    with open(path, "r", errors="replace") as fh:
+        for line in fh.readlines()[-limit:]:
+            try:
+                recs.append(json.loads(line.strip()))
+            except Exception:
+                continue
+    for i in range(len(recs) - 1, -1, -1):
+        rec = recs[i]
+        if rec.get("type") not in ("user", "human"):
+            continue
+        if rec.get("isMeta") or rec.get("isCompactSummary"):
+            continue
+        msg = rec.get("message") or rec
+        c = msg.get("content")
+        t = c if isinstance(c, str) else "\n".join(
+            b.get("text", "") for b in c
+            if isinstance(b, dict) and b.get("type") == "text"
+        ) if isinstance(c, list) else ""
+        if not t or t.lstrip().startswith((
+                "<system-reminder>", "<task-notification>",
+                "[SYSTEM NOTIFICATION", "<local-command",
+                "<command-name>", "Caveat:")):
+            continue
+        return recs, i + 1, t
+    return recs, 0, ""
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -318,36 +403,30 @@ def main():
         # The human's own last turn, for the "he asked" exemption. Best-effort:
         # if the transcript is unreadable we simply lose one exemption and the
         # other three still apply.
-        human_last = ""
+        human_last, recs, start = "", [], 0
         path = payload.get("transcript_path")
         if path and os.path.exists(path):
             try:
-                with open(path, "r", errors="replace") as fh:
-                    lines = fh.readlines()[-200:]
-                for line in reversed(lines):
-                    try:
-                        rec = json.loads(line.strip())
-                    except Exception:
-                        continue
-                    if rec.get("type") not in ("user", "human"):
-                        continue
-                    if rec.get("isMeta") or rec.get("isCompactSummary"):
-                        continue
-                    msg = rec.get("message") or rec
-                    c = msg.get("content")
-                    t = c if isinstance(c, str) else "\n".join(
-                        b.get("text", "") for b in c
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ) if isinstance(c, list) else ""
-                    if not t or t.lstrip().startswith((
-                            "<system-reminder>", "<task-notification>",
-                            "[SYSTEM NOTIFICATION", "<local-command",
-                            "<command-name>", "Caveat:")):
-                        continue
-                    human_last = t
-                    break
+                recs, start, human_last = read_turn(path)
             except Exception:
                 pass
+
+        if is_ask:
+            blob = question_text(ti)
+            finding = hands_off_unattempted(
+                blob, human_last, denied_commands(recs, start), jev=None if payload.get("session_id") == "selftest" else _jev_hands_off())
+            if finding:
+                audit({
+                    "ts": now(),
+                    "hook": "escalation-gate",
+                    "classes": ["command_handoff"],
+                    "patterns": [f"attempt_first:{finding}"],
+                    "session": payload.get("session_id"),
+                    "excerpt": " ".join(blob.split())[:400],
+                })
+                dlog(f"DENY(attempt_first:{finding}) :: {' '.join(blob.split())[:200]}")
+                print(ATTEMPT_FIRST_REASON, file=sys.stderr)
+                sys.exit(2)
 
         if is_ask:
             # Per-item classification: one fact-capture question must not

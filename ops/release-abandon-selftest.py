@@ -78,11 +78,69 @@ def psql(dsn, *args):
                           capture_output=True, text=True, timeout=1800)
 
 
+# Every ops-record credential is pinned to this disposable cluster. The tool
+# loads a developer's db.env with setdefault, so an unset jobs credential could
+# otherwise send a candidate fixture to Production. Current candidates use the
+# jobs login; historical approval exercises still use Joe's authority login.
+AUTHORITY_DSN: str | None = None
+JOBS_DSN: str | None = None
+
+
+def credential_names() -> tuple[str, ...]:
+    spec = importlib.util.spec_from_file_location("ops_record", REPO / "tools" / "ops-record.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load ops-record credential inventory")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.credential_names()
+
+
 def record(dsn, *args):
+    isolated = {name: dsn for name in credential_names()}
+    isolated["CARR_DB_AUTHORITY_JOE_URL"] = AUTHORITY_DSN or dsn
+    isolated["CARR_DB_JOBS_URL"] = JOBS_DSN or dsn
     return subprocess.run(
         [sys.executable, str(REPO / "tools" / "ops-record.py"), *args],
         capture_output=True, text=True, timeout=300,
-        env={**os.environ, "DATABASE_URL": dsn})
+        env={**os.environ, **isolated})
+
+
+def provision_authority_principal(dsn: str) -> None:
+    """Give this cluster the human authority and service login roles.
+
+    `ops.authority_actor_slug()` maps `session_user` to a partner slug and admits
+    only carr_authority_joe and carr_authority_dell, and EXECUTE on it is granted
+    to the carr_authority bundle — so the role has to exist, have login, and hold
+    that membership for any authority-connection command to work here. Its
+    password is the base DSN's own, so nothing about the throwaway cluster's
+    credentials is written down here.
+
+    Current candidate inserts use carr_jobs; this authority login remains for
+    historical approval fixture commands. Its grants still come from numbered
+    migrations rather than being fabricated by this test.
+    """
+    global AUTHORITY_DSN, JOBS_DSN
+    params = psycopg.conninfo.conninfo_to_dict(dsn)
+    password = params.get("password")
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select 1 from pg_roles where rolname = 'carr_authority_joe'")
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    sql.SQL("create role carr_authority_joe login password {}")
+                       .format(sql.Literal(password)))
+            else:
+                cursor.execute(
+                    sql.SQL("alter role carr_authority_joe login password {}")
+                       .format(sql.Literal(password)))
+            cursor.execute("grant carr_authority to carr_authority_joe")
+            cursor.execute("grant usage on schema ops to carr_authority_joe")
+            cursor.execute(
+                sql.SQL("alter role carr_jobs login password {}")
+                   .format(sql.Literal(password)))
+    AUTHORITY_DSN = psycopg.conninfo.make_conninfo(dsn, user="carr_authority_joe")
+    JOBS_DSN = psycopg.conninfo.make_conninfo(dsn, user="carr_jobs")
 
 
 @contextmanager
@@ -125,30 +183,41 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
 
 
 def _cases(dsn: str) -> None:
+    provision_authority_principal(dsn)
     record(dsn, "sync-registry")
     # Candidate intake verifies every environment before opening the database,
-    # so the abandonment fixtures use one real staging manifest rather than a
-    # synthetic shape that the release door must refuse.
-    mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-manifest.json"
-    staging_built = subprocess.run(
-        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-         "build", "--sha", "HEAD", "--environment", "staging",
-         "--performance-budget-ref", "runbook:worker-performance-v1",
-         "--performance-budget-ms", "1500",
-         "--recovery-strategy", "rollback",
-         "--rollback-plan-ref", "runbook:rollback-worker-v1"],
-        cwd=REPO, capture_output=True, text=True, timeout=300)
-    check("0. canonical staging source manifest builds",
-          staging_built.returncode == 0,
-          (staging_built.stderr or staging_built.stdout).strip()[:160])
-    if staging_built.returncode != 0:
+    # so every abandonment fixture uses a real staging manifest rather than a
+    # synthetic shape that the release door must refuse. Each fixture uses a
+    # distinct repository revision so their immutable source evidence differs.
+    staging_manifests: dict[str, Path] = {}
+    staging_error = ""
+    fixture_keys = ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor")
+    for offset, key in enumerate(fixture_keys, start=1):
+        staging_built = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+             "build", "--sha", f"HEAD~{offset}", "--environment", "staging",
+             "--performance-budget-ref", "runbook:worker-performance-v1",
+             "--performance-budget-ms", "1500",
+             "--recovery-strategy", "rollback",
+             "--rollback-plan-ref", "runbook:rollback-worker-v1"],
+            cwd=REPO, capture_output=True, text=True, timeout=300)
+        if staging_built.returncode != 0:
+            staging_error = (staging_built.stderr or staging_built.stdout).strip()[:160]
+            break
+        manifest_path = (Path(os.environ.get("TMPDIR", "/tmp")) /
+                         f"abandon-manifest-{offset}.json")
+        manifest_path.write_text(staging_built.stdout)
+        staging_manifests[key] = manifest_path
+    check("0. canonical staging source manifests build on distinct revisions",
+          not staging_error and len(staging_manifests) == len(fixture_keys),
+          staging_error)
+    if staging_error or len(staging_manifests) != len(fixture_keys):
         return
-    mpath.write_text(staging_built.stdout)
 
-    for k in ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor"):
-        record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
+    for k in fixture_keys:
+        record(dsn, "release", "candidate", "--key", k,
+               "--manifest", str(staging_manifests[k]),
                "--service", "carr-mcp", "--environment", "staging",
-               "--maker", "selftest", "--maker-verification", "ref",
                "--test-evidence", "ref", "--security-evidence", "ref")
     # Production candidate intake now rebuilds the manifest before it opens a
     # DB connection. Build and bind the fixture through the canonical tool so
@@ -181,9 +250,9 @@ def _cases(dsn: str) -> None:
     production_mpath.write_text(bound.stdout)
     candidate = record(dsn, "release", "candidate", "--key", "rel-shipped",
                        "--manifest", str(production_mpath), "--service", "carr-mcp",
-                       "--environment", "production", "--maker", "selftest",
+                       "--environment", "production",
                        "--provider", PROVIDER, "--provider-version-id", PROVIDER_VERSION,
-                       "--maker-verification", "ref", "--test-evidence", "ref",
+                       "--test-evidence", "ref",
                        "--security-evidence", "ref")
     check("0ab. verified Production candidate reaches the ledger",
           candidate.returncode == 0,

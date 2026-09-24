@@ -51,6 +51,12 @@ import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the mo
 import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
+import verb_io  # noqa: E402 — the ONE path to the record layer; see that module
+
+TOOLS_ROOT = HERE.parent
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+import credential_env  # noqa: E402 — shared long-lived-token loader
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -248,8 +254,13 @@ def dispatch(
     env: dict | None = None,
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
+    cwd: str | None = None,
 ) -> dict:
-    """Send one task to one desk. Raises DeskError when the desk is not usable."""
+    """Send one task to one desk. Raises DeskError when the desk is not usable.
+
+    `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
+    thread and leaves the desk's standing thread untouched: flash-run's escalation gives
+    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
@@ -282,6 +293,10 @@ def dispatch(
         )
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
+    elif cwd:
+        outcome = _to_codex(
+            {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+        )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
@@ -300,6 +315,43 @@ def dispatch(
     }
     _record(results_path, row)
     return row
+
+
+# WR-000119 — THE DESK'S OWN ACKNOWLEDGEMENT, AND ONLY ITS OWN.
+#
+# The stage is a MODULE CONSTANT and not a parameter. A desk observes exactly
+# one thing first-hand: that a turn landed in a window, at a byte offset it can
+# name. Whether the session then TOOK THE TURN UP is the session's own fact and
+# it writes that itself, from inside its own turn -- so there is deliberately no
+# way to reach `acknowledged` through this function, and a caller that wanted to
+# send it would have to write a second one.
+#
+# The evidence is the desk name and the injection offset, both measured, never a
+# guess that "it probably arrived".
+DESK_ACK_STAGE = "received"
+
+
+def acknowledge_received(dispatch_ref: str, *, desk: str, log_offset: int,
+                          injected_at: str | None = None,
+                          call_verb=verb_io._run_verb) -> dict:
+    """Append this desk's `received` acknowledgement for one dispatch.
+
+    ``verb_io._run_verb`` is reused rather than a second subprocess path being
+    invented here: two paths to the record layer would be two places for the
+    identity derivation to drift, and verb_io.py is outside this Work Request's
+    authorized paths, so no public wrapper could be added to it.
+    """
+    if not dispatch_ref:
+        raise DeskError("dispatch_ref_missing",
+                        "an acknowledgement names the dispatch it acknowledges")
+    evidence = f"desk {desk} log offset {int(log_offset)}"
+    if injected_at:
+        evidence = f"{evidence} injected at {injected_at}"
+    return call_verb("acknowledge-dispatch", {
+        "dispatch_ref": dispatch_ref,
+        "stage": DESK_ACK_STAGE,
+        "evidence": evidence,
+    })
 
 
 def dispatch_envelope(
@@ -366,6 +418,7 @@ def desk_start(
     sock_dir: Path | None = None,
     env: dict | None = None,
     seed: str | None = None,
+    token_path: "Path | str | None" = None,
 ) -> dict:
     """Start a Claude session that STAYS, and register it under `name`.
 
@@ -421,9 +474,19 @@ def desk_start(
         f"-p --input-format stream-json --output-format stream-json --verbose "
         f"<&3 >>{shlex.quote(str(log))} 2>&1"
     )
+    # This is the ONE unattended launch of `claude -p` a room-bridge poll cycle
+    # can make (see bridge.py's own header: launchd fires the cycle, no human
+    # is present). The child gets the long-lived login merged into ITS OWN
+    # env only — os.environ itself is never touched — so a keychain entry
+    # that has expired between launchd wakes does not take this desk down.
+    # Absent-safe: with no token configured, this is exactly the env the
+    # caller already passed (or a plain copy of the current environment).
+    child_env, warning = credential_env.claude_child_env(env or None, path=token_path)
+    if warning:
+        print(f"desk_start {name}: {warning}", flush=True)
     proc = subprocess.Popen(
         ["/bin/sh", "-c", shell],
-        env=env or os.environ.copy(),
+        env=child_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

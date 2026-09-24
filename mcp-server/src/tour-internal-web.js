@@ -3,7 +3,7 @@
 // gate: it owns no identity, authority selection, database, routing, or map
 // implementation.
 
-export const TOUR_INTERNAL_ASSET_DIRECTORY = "../dealroom/tours";
+export const TOUR_INTERNAL_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current/tours";
 
 const MAX_BODY_BYTES = 32 * 1024;
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -139,8 +139,38 @@ const SEAMS = {
   "/api/tours/pdf/download": "downloadPdfFn",
 };
 
-function safeFailure(result) {
+// Server-side failure record. The browser still gets only the coarse status,
+// but an operator can now see WHY: the route (from the fixed table above), the
+// status, the caught error's class and its ToolError code. Both are admitted
+// only when they match a bare identifier shape, and the error MESSAGE is never
+// reported: a database driver's message can name hosts, users or databases,
+// and a verb's can echo input. No actor, tenant, body, token or header goes
+// out. This leaf still writes to no log itself; the production adapter
+// supplies `reportFailureFn` and owns the sink.
+//
+// A route can also fail WITHOUT throwing: a seam returns its own {ok:false}
+// (runTourPdfRender's catch persists a "failed" job receipt and returns
+// {ok:false,status:500,...} rather than rethrow). `error` is undefined on that
+// path, so error_class/code stay null -- there is no caught error object to
+// read a class or code off of. That seam still knows WHICH internal phase
+// failed (store, verify, record), and reports it on its own successful {ok:
+// true,...}-shaped `data`; when present and shaped like a bare identifier,
+// surface it here instead of leaving an operator with two nulls.
+const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const FAILURE_PHASE = new Set(["prepare", "store", "verify", "record"]);
+export function tourFailureRecord(pathname, status, error, data) {
+  const errorClass = error === undefined ? null
+    : ERROR_CLASS.test(error?.name || "") ? error.name
+      : ERROR_CLASS.test(error?.constructor?.name || "") ? error.constructor.name : "UnknownError";
+  const code = typeof error?.payload?.error === "string" && ERROR_CODE.test(error.payload.error) ? error.payload.error : null;
+  const record = { event: "tour_internal_failure", route: METHODS.has(pathname) ? pathname : null, status, error_class: errorClass, code };
+  if (error === undefined && typeof data?.phase === "string" && FAILURE_PHASE.has(data.phase)) record.phase = data.phase;
+  return record;
+}
+function safeFailure(result, pathname, error, report) {
   const status = [403, 404, 409].includes(result?.status) ? result.status : 503;
+  if (typeof report === "function") { try { report(tourFailureRecord(pathname, status, error, result?.data)); } catch {} }
   return json({ error: status === 403 ? "forbidden" : status === 404 ? "not_found" : status === 409 ? "conflict" : "tour_unavailable" }, status);
 }
 const CONFLICT_MESSAGES = new Set([
@@ -197,9 +227,9 @@ async function api(request, env, ctx, actor, session, dependencies, pathname) {
   try {
     const result = await dependencies[seamName]({ env, ctx, actor, input });
     if ((pathname === "/api/tours/pdf/preview" || pathname === "/api/tours/pdf/download") && result?.ok && result.response instanceof Response) return result.response;
-    if (!result?.ok || !plain(result.data)) return safeFailure(result);
+    if (!result?.ok || !plain(result.data)) return safeFailure(result, pathname, undefined, dependencies.reportFailureFn);
     return json({ data: result.data, csrf_token: request.method === "GET" ? session.csrfToken : undefined });
-  } catch (error) { return safeFailure(dependencyFailure(error)); }
+  } catch (error) { return safeFailure(dependencyFailure(error), pathname, error, dependencies.reportFailureFn); }
 }
 
 function withSecurityHeaders(response) {

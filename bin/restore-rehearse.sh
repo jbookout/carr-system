@@ -90,6 +90,13 @@ PROD_BRANCH="production"
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
 IDENTITY="${CARR_AGE_IDENTITY:-$HOME/.config/carr/age-key.txt}"
 RESTORE_DB="restore_rehearse"
+# Interpreter for the platform-metering-gate call in phase 0, the one place this
+# script uses "$PY". Prefer the repo venv, fall back to python3: the same
+# two-line idiom bin/deploy-worker.sh uses to invoke the same gate. Under
+# `set -u` an unassigned $PY aborts the run at that call before the gate is
+# consulted.
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 # The tables whose absence means the restore is worthless rather than merely
 # odd. These are the record layer's spine: a dump that comes back without them

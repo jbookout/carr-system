@@ -32,7 +32,7 @@ MANIFEST_SCHEMA = "carr.r03-stage5-settlement-sweep.v1"
 ALLOWLIST_SCHEMA = "carr.settlement-command-pathspec-allowlist.v1"
 RECEIPT_SCHEMA = "carr.settlement-capability-redemption.v1"
 CAPABILITY_KEY = "R03C.settlement-capability.v1"
-CANONICAL_CHECKOUT = Path("/Users/booko/carr-system")
+CANONICAL_CHECKOUT = Path(os.environ.get("CARR_ROOT") or (Path.home() / "carr-system"))
 MAX_FD_BYTES = 8 * 1024 * 1024
 
 

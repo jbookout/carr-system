@@ -10,7 +10,7 @@ const read = file => fs.readFileSync(path.join(root, file), "utf8");
 
 test("production tool registry contains every Tour delivery verb", () => {
   for (const name of [
-    "search-tour-properties", "append-tour-selection-cart-version", "read-tour-selection-cart",
+    "register-tour-property", "search-tour-properties", "append-tour-selection-cart-version", "read-tour-selection-cart",
     "prepare-tour-route-version", "record-tour-map-promotion-receipt", "issue-tour-share-grant", "rotate-tour-share-grant",
     "revoke-tour-share-grant", "read-tour-sharing-library", "request-tour-pdf-render",
     "read-tour-pdf-render", "record-tour-pdf-render-result", "record-tour-pdf-human-review",
@@ -33,7 +33,8 @@ test("Worker production router mounts authenticated Tours and public reports", (
 test("production Tour runtime preserves tool envelopes and digest-only public access", () => {
   const runtime = read("mcp-server/src/tour-runtime.js");
   assert.match(runtime, /authorization_class:\s*actor\?\.authorization_class \|\| authorizationClassForActor\(actor\)/);
-  assert.match(runtime, /callTool\(\{ \.\.\.env, ctx \}, runtimeActor, verb, args\)/);
+  assert.match(runtime, /callTool\(toolEnvironment\(env, ctx\), runtimeActor, verb, args\)/);
+  assert.doesNotMatch(runtime, /\{ \.\.\.env\b/, "a spread drops Deal Room's prototype-held bindings");
   assert.match(runtime, /tourSharingBrowserAccess/);
   assert.match(runtime, /sharing\.exchange/);
   assert.match(runtime, /sharing\.readPacket/);
@@ -67,7 +68,7 @@ test("trusted PDF orchestration records a terminal failure after a queued job", 
       return { ok: true, data: { status: args.status } };
     },
   });
-  assert.deepEqual(result, { ok: false, status: 500, data: { render_job_id: jobId, status: "failed" } });
+  assert.deepEqual(result, { ok: false, status: 500, data: { render_job_id: jobId, status: "failed", phase: "store" } });
   assert.deepEqual(calls.map(call => call.verb), ["request-tour-pdf-render", "record-tour-pdf-render-result"]);
   const failure = calls[1].args;
   assert.equal(failure.status, "failed");

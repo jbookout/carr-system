@@ -40,11 +40,10 @@ is:
     gate baseline. Their branch is merged here and the latch sits on top of it.
     ops/completion-evidence-gate-selftest.py owns the detailed cases; this file
     asserts only that the duplicate is gone end to end.
-  · NOISE IS COUNTED AS REOPENS, not as findings. The four gates that remain
-    demoted still make their findings and still write audit rows. A0c explicitly
-    re-promotes context-handoff as the fourth admitted reopener, at a measured
-    lifecycle threshold. What is being scored is what the session was CHARGED,
-    because that is what the rationing changed.
+  · NOISE IS COUNTED AS REOPENS, not as findings. Context guidance and the four
+    gates that remain demoted still make their findings and still write audit
+    rows. What is being scored is what the session was CHARGED, because that is
+    what the rationing changed.
 
     .venv/bin/python ops/stop-gate-rationing-replay-selftest.py
 """
@@ -297,7 +296,7 @@ def replay_noise(tmp):
 
 
 def replay_demotions(tmp):
-    print("\n  ── four gates announce; context-handoff deliberately reopens")
+    print("\n  ── context guidance and four demoted gates announce")
 
     # loose-work: this session edited a tracked file and left it.
     repo = os.path.join(tmp, "loose")
@@ -336,8 +335,8 @@ def replay_demotions(tmp):
                               "CARR_CONTEXT_STATE": os.path.join(tmp, "ctx-state.json"),
                               "CARR_CONTEXT_HOOK_EVENT": "Stop",
                               "CARR_CONTEXT_AUDIT": "off"})
-    check("context-handoff deliberately reopens at the hard line",
-          verdict == "REOPEN" and "CONTEXT_HANDOFF_REQUIRED" in text,
+    check("context-handoff announces at the hard line without blocking Stop",
+          verdict == "ANNOUNCE" and "context headroom notice" in text,
           f"{verdict}: {text[:160]}")
 
     # unread-artifact: a behavioural claim about a file only ever grepped.
@@ -451,7 +450,7 @@ def main():
         return 1
     print(f"rationing replay ok ({passed} checks) — "
           "5 catches kept, 0 reopens charged for reporting prose, "
-          "1 admitted context reopen, 0 from four still-demoted gates, "
+          "0 context reopens, 0 from four still-demoted gates, "
           "no new blocker without a card")
     return 0
 

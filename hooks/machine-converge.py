@@ -107,21 +107,26 @@ def local_actor_slug():
 
 
 def is_primary():
-    """Same determinant as ops/config-as-code.py's IS_PRIMARY: the owner's
-    identity is read from the ONE place it is written, ops/githooks/pre-push.
-    Unreadable returns False, and False is the safe direction here too — an
-    unidentified machine converges to the repo, it does not sit stale."""
+    """Same determinant as ops/config-as-code.py's IS_PRIMARY, from its one
+    home, lib/machine_role.py: the per-machine marker when present, else git
+    user.email against OWNER_EMAIL. Any failure returns False, the safe
+    direction here too: an unidentified machine converges to the repo."""
     try:
-        with open(os.path.join(REPO, "ops", "githooks", "pre-push"),
-                  encoding="utf-8") as fh:
-            m = re.search(r'^OWNER_EMAIL="([^"]+)"', fh.read(), re.M)
-        owner = m.group(1) if m else ""
-    except OSError:
-        owner = ""
-    if not owner:
+        sys.path.insert(0, REPO)
+        from lib import machine_role
+        return machine_role.is_primary(
+            REPO, git_email=git("config", "user.email").stdout.strip())
+    except Exception:
         return False
-    me = git("config", "user.email").stdout.strip()
-    return me == owner
+
+
+def machine_role_marker():
+    try:
+        sys.path.insert(0, REPO)
+        from lib import machine_role
+        return machine_role.read_marker()
+    except Exception:
+        return None
 
 
 def python_bin():
@@ -195,9 +200,16 @@ def main():
     try:
         if scrubbed_env is None:
             return 0  # cannot pin which repository git would hit — see above
-        slug = local_actor_slug()
-        if slug == "joe" or (not slug and is_primary()):
-            return 0  # the primary machine — deliberate no-op, see docstring
+        # An explicit machine-role marker outranks the actor slug: Joe owns
+        # more than one Mac, and only the one marked primary is the shared
+        # work surface this no-op protects (lib/machine_role.py).
+        marker = machine_role_marker()
+        if marker == "primary":
+            return 0
+        if marker is None:
+            slug = local_actor_slug()
+            if slug == "joe" or (not slug and is_primary()):
+                return 0  # the primary machine — deliberate no-op, see docstring
         converge()
     except Exception:
         pass  # fail-soft: this must never block or fail a session

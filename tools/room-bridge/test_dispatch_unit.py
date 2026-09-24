@@ -308,6 +308,29 @@ def main() -> int:
 
     check("a task reaches codex headless at the desk's model and directory", dispatch_to_codex)
 
+    def per_task_cwd_starts_fresh_and_keeps_the_desk_thread():
+        """flash-run escalation (2026-09-24): Sol works in a throwaway copy per task.
+        A per-task cwd must start a fresh thread there and must not re-pin the desk."""
+        reg.register("sol-fixer", "codex-session", model="gpt-5.1-codex-mini", effort="low",
+                     cwd=str(root), sandbox="workspace-write")
+        reg.remember_thread("sol-fixer", "standing-thread")
+        task_dir = root / "task-copy"
+        task_dir.mkdir(exist_ok=True)
+        before = len(argv_log.read_text().splitlines())
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        out = dispatch.dispatch("sol-fixer", "fix it", registry=reg,
+                                results_path=root / "sol-fixer-results.ndjson",
+                                env=env, cwd=str(task_dir))
+        assert out["status"] == "completed", out
+        argv = json.loads(argv_log.read_text().splitlines()[before])
+        assert "resume" not in argv, argv
+        assert argv[argv.index("-C") + 1] == str(task_dir), argv
+        assert argv[argv.index("-s") + 1] == "workspace-write", argv
+        assert reg.entries()["sol-fixer"].get("thread_id") == "standing-thread"
+
+    check("a per-task cwd starts fresh there and keeps the desk's thread",
+          per_task_cwd_starts_fresh_and_keeps_the_desk_thread)
+
     def codex_out_of_credit_is_its_own_status():
         """Codex prints the limit on stdout and exits 0, so the exit code lies."""
         broke = fake_bin / "codex-broke"
@@ -494,6 +517,84 @@ def main() -> int:
             raise AssertionError("dispatch delivered to a pid socket")
 
     check("dispatch itself will not deliver to a pid socket", refuses_pid_socket_through_dispatch)
+
+    # ---------------------------------------------------------------- WR-000119
+    # The dispatch spine's two call sites, each proved to write only what it
+    # observed first-hand. No record layer is reached: the verb caller is
+    # injected, so what is under test is WHAT each site sends, which is the
+    # whole of the first-hand discipline.
+
+    def bridge_mints_the_link_with_the_turn_it_just_wrote():
+        import bridge  # noqa: PLC0415 — imported here so a bridge import error
+        sent = {}
+
+        def fake_call(verb, args, **kwargs):
+            sent["verb"] = verb
+            sent["args"] = args
+            sent["kwargs"] = kwargs
+            return {"ok": True, "dispatch_ref": args["dispatch_ref"]}
+
+        bridge.record_dispatch_link(
+            turn_msg_id="11111111-1111-4111-8111-111111111111",
+            session_id="claude-desktop-7",
+            work_request_id="22222222-2222-4222-8222-222222222222",
+            dispatch_ref="33333333-3333-4333-8333-333333333333",
+            call_verb=fake_call,
+        )
+        assert sent["verb"] == "record-dispatch-link", sent["verb"]
+        # The three facts the bridge holds at that moment, and no fourth.
+        assert sent["args"]["turn_msg_id"] == "11111111-1111-4111-8111-111111111111"
+        assert sent["args"]["session_id"] == "claude-desktop-7"
+        assert sent["args"]["work_request_id"] == "22222222-2222-4222-8222-222222222222"
+        # NO ACTOR ARGUMENT ANYWHERE. The identity is derived by the Worker.
+        assert "actor" not in sent["args"] and "by_actor" not in sent["args"], sent["args"]
+        # hermes-pilot is reached by the profile selector, not by naming it.
+        assert sent["kwargs"].get("client_profile") == "hermes-projector", sent["kwargs"]
+
+    check("the bridge mints the link with the turn msg_id it just wrote",
+          bridge_mints_the_link_with_the_turn_it_just_wrote)
+
+    def desk_acknowledges_received_and_can_never_send_acknowledged():
+        sent = {}
+
+        def fake_call(verb, args, **kwargs):
+            sent["verb"] = verb
+            sent["args"] = args
+            return {"ok": True}
+
+        dispatch.acknowledge_received(
+            "33333333-3333-4333-8333-333333333333",
+            desk="claude-desk", log_offset=4096,
+            injected_at="2026-09-19T00:00:00Z", call_verb=fake_call,
+        )
+        assert sent["verb"] == "acknowledge-dispatch", sent["verb"]
+        assert sent["args"]["stage"] == "received", sent["args"]
+        # The evidence is MEASURED -- the desk name and the byte offset the turn
+        # landed at -- and never "it probably arrived".
+        assert "claude-desk" in sent["args"]["evidence"], sent["args"]
+        assert "4096" in sent["args"]["evidence"], sent["args"]
+        assert "actor" not in sent["args"], sent["args"]
+        # THE STAGE IS NOT A PARAMETER. There is no argument that could carry
+        # `acknowledged` into this call site at all.
+        assert dispatch.DESK_ACK_STAGE == "received", dispatch.DESK_ACK_STAGE
+        import inspect  # noqa: PLC0415
+        params = inspect.signature(dispatch.acknowledge_received).parameters
+        assert "stage" not in params, sorted(params)
+
+    check("the desk sends stage received and has no way to send acknowledged",
+          desk_acknowledges_received_and_can_never_send_acknowledged)
+
+    def an_acknowledgement_names_the_dispatch_it_acknowledges():
+        try:
+            dispatch.acknowledge_received("", desk="claude-desk", log_offset=0,
+                                          call_verb=lambda *a, **k: {"ok": True})
+        except desks.DeskError as e:
+            assert e.code == "dispatch_ref_missing", e.code
+        else:
+            raise AssertionError("an ack with no dispatch_ref was sent")
+
+    check("an acknowledgement with no dispatch_ref is refused before it is sent",
+          an_acknowledgement_names_the_dispatch_it_acknowledges)
 
     tmp.cleanup()
     print()

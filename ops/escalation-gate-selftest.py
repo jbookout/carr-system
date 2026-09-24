@@ -131,6 +131,57 @@ MULTI_CASES = [
 ]
 
 
+# ── ATTEMPT FIRST (Joe, 2026-09-23): a question may hand Joe a command only
+# after the harness refused the session that command this turn. The real
+# failure: `brew trust` put in front of Joe, then run by the session itself.
+# (name, human_last, attempted command or None, denied?, question, options, expect_deny)
+DENIAL = ("Permission for this action was denied by the Claude Code auto mode "
+          "classifier. Reason: fixture.")
+ATTEMPT_CASES = [
+    ("untried-inline-command", "yes install it", None, False,
+     "Can you run `brew trust --formula ddalcu/mlx-serve/mlx-serve` for me?",
+     ["Done", "Skip"], True),
+    ("untried-fenced-command", "yes install it", None, False,
+     "Please run this:\n```bash\nbrew install mlx-serve\n```",
+     ["Done", "Skip"], True),
+    ("tried-and-refused", "yes install it",
+     "brew trust --formula ddalcu/mlx-serve/mlx-serve", True,
+     "The classifier refused `brew trust --formula ddalcu/mlx-serve/mlx-serve`. Will you run it?",
+     ["Done", "Skip"], False),
+    ("tried-and-succeeded", "yes install it",
+     "brew trust --formula ddalcu/mlx-serve/mlx-serve", False,
+     "Can you run `brew trust --formula ddalcu/mlx-serve/mlx-serve`?",
+     ["Done", "Skip"], True),
+    ("other-command-refused", "yes install it", "git push --force", True,
+     "Can you run `brew install mlx-serve`?", ["Done", "Skip"], True),
+    ("he-asked-how", "how do I install mlx-serve myself?", None, False,
+     "Want the one-liner `brew install mlx-serve` or the app?", ["CLI", "App"], False),
+]
+
+
+def run_attempt_case(human, attempted, denied, question, options):
+    fd, path = tempfile.mkstemp(suffix=".jsonl")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"type": "user", "origin": {"kind": "user"},
+                "message": {"content": [{"type": "text", "text": human}]}}) + "\n")
+            if attempted:
+                fh.write(json.dumps({"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash",
+                     "input": {"command": attempted}}]}}) + "\n")
+                fh.write(json.dumps({"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1",
+                     "content": DENIAL if denied else "ok"}]}}) + "\n")
+        return spawn({"tool_name": "AskUserQuestion", "transcript_path": path,
+                      "session_id": "selftest",
+                      "tool_input": {"questions": [{"question": question, "header": "Q",
+                          "multiSelect": False,
+                          "options": [{"label": o, "description": ""} for o in options]}]}})
+    finally:
+        try: os.unlink(path)
+        except Exception: pass
+
+
 def main():
     if not os.path.exists(HOOK):
         print(f"FAIL: hook not found at {HOOK}"); return 1
@@ -151,6 +202,13 @@ def main():
               f"want={'DENY ' if expect else 'allow'} got={'DENY' if got else 'allow'}")
     for name, human, items, expect in MULTI_CASES:
         got = run_multi_case(human, items)
+        ok = (got == expect)
+        passed, failed = (passed+1, failed) if ok else (passed, failed+1)
+        if not ok: bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:24} "
+              f"want={'DENY ' if expect else 'allow'} got={'DENY' if got else 'allow'}")
+    for name, human, attempted, denied, q, opts, expect in ATTEMPT_CASES:
+        got = run_attempt_case(human, attempted, denied, q, opts)
         ok = (got == expect)
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)
         if not ok: bad.append(name)

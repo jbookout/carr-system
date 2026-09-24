@@ -150,6 +150,21 @@ KNOWN_HOSTS = (
     # strip the link, which quietly drops the attribution it exists to give.
     "arxiv.org", "anthropic.com", "claude.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
+    # TypeSafe, added 2026-09-17 on Joe's ruling. docs.typesafe.ai is the
+    # documentation host and is a plain research read like the row above it;
+    # api.typesafe.ai is the inference endpoint for Jev, a model that takes text
+    # plus typed questions and returns probabilities rather than written text.
+    # Joe ruled the same day that CARR content INCLUDING CLIENT AND DEAL
+    # MATERIAL may be sent there, overruling this session's reading that
+    # third-party client confidentiality was a floor: his reasoning is that the
+    # practice already sends the same material to several model vendors, so
+    # singling this one out protects nothing. That makes api.typesafe.ai a
+    # CONTENT-BEARING host, unlike every research host listed above it, which is
+    # why it is called out here rather than folded into that line. It is listed
+    # in CODE rather than derived from the record because it is fixed
+    # infrastructure somebody decides once, which is what this half of the list
+    # is reserved for.
+    "docs.typesafe.ai", "api.typesafe.ai",
     # blotato.io: the media-upload backend of the ALREADY-SANCTIONED Blotato
     # connector. Its create-post tool takes public mediaUrls, and the only way
     # to get a local PNG there is the presigned PUT its own tool description
@@ -294,6 +309,17 @@ KNOWN_HOSTS = (
     # sign-in is browser OAuth against Joe's own subscription, which runs in his
     # browser rather than through a session's network calls.
     "hermes-agent.nousresearch.com",
+    # tailc8cc93.ts.net: Joe's own private Tailscale tailnet (his MagicDNS
+    # domain), reachable only from devices signed into or shared onto that
+    # tailnet — never public. Added 2026-09-23 so his Mac Studio's local model
+    # server ("flash-next", ds4-server on 127.0.0.1:8000, served tailnet-wide
+    # via `tailscale serve` at http://mac-studio.tailc8cc93.ts.net:8000) is
+    # reachable from his other devices, starting with a test from his MacBook
+    # (joes-macbook-pro.tailc8cc93.ts.net). host_allowlisted does suffix
+    # matching, so this one entry covers every device name on HIS tailnet, and
+    # SSH between his own Macs. Deliberately scoped to this one tailnet, not
+    # the broad `ts.net` suffix: someone else's tailnet must stay blocked.
+    "tailc8cc93.ts.net",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
@@ -312,9 +338,10 @@ def _vault_spellings():
     exists here. Additive on purpose (2026-08-10 audit): the hardcodedは
     pair is kept verbatim so this machine's matching cannot regress, while a second
     machine stops running a vault guard that matches no path it owns."""
+    home = os.path.expanduser("~")
     fixed = (
-        "/Users/booko/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
-        "/Users/booko/My Drive/CARR AI/",
+        home + "/Library/CloudStorage/GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI/",
+        home + "/My Drive/CARR AI/",
     )
     try:
         from gate_paths import vault_roots
@@ -1147,13 +1174,14 @@ def main():
                 log(f"ALLOW(open-read) {host} :: {url[:200]}")
             sys.exit(0)
 
-        # Codex routes its local shell through functions.exec. Normalise the
-        # name so this remains one command policy across both runtimes.
-        if tool == "functions.exec":
+        # Codex may expose the outer functions.exec wrapper or its nested
+        # exec_command. Apply the same shell policy to the literal command.
+        if tool in {"functions.exec", "exec_command"}:
             # The native Bash guard pre-dates Codex and is intentionally global.
             # This new Codex alias is CARR-only so it cannot change Life AI or
             # another repository's workflow merely because they share Codex.
-            cwd = payload.get("cwd") or ""
+            cwd = ((ti.get("workdir") or payload.get("cwd") or "")
+                   if isinstance(ti, dict) else (payload.get("cwd") or ""))
             try:
                 real_cwd = os.path.realpath(os.path.expanduser(cwd))
             except Exception:
@@ -1163,7 +1191,9 @@ def main():
                 # A task rooted elsewhere can still target CARR by absolute
                 # path.  Scope by the target too, otherwise a non-CARR cwd is
                 # an accidental bypass for the very files this guard protects.
-                raw = ti if isinstance(ti, str) else ""
+                raw = (ti if isinstance(ti, str) else
+                       ((ti.get("cmd") or ti.get("code") or "")
+                        if isinstance(ti, dict) else ""))
                 if REPO not in raw and not raw_targets_carr(raw):
                     sys.exit(0)
             tool = "Bash"
@@ -1172,7 +1202,7 @@ def main():
         # Codex's local-function tool passes freeform JavaScript as a string;
         # its embedded exec_command({cmd: ...}) must receive the same command
         # inspection as a native Bash call. A dict remains the Claude shape.
-        cmd = ti.get("command", "") if isinstance(ti, dict) else ti
+        cmd = (ti.get("command") or ti.get("cmd") or "") if isinstance(ti, dict) else ti
         if not isinstance(cmd, str):
             cmd = ""
         if not cmd:

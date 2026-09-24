@@ -115,6 +115,22 @@ CASES = [
     ("named recipient permits delivery", [user("update it"), tool("mcp__carr__update-deal"), tool("Read"), assistant("Delivered to Dell after a fresh read.")], False),
     ("deploy gets checked", [user("release"), tool("Bash", {"command": "npx wrangler deploy"}), assistant("Deployed.")], True),
     ("unrelated historical tool does not matter", [user("status"), tool("Read"), assistant("Done with the explanation.")], False),
+    ("Claude continuity direct write requires evidence", [
+        user("checkpoint this milestone"),
+        tool("mcp__carr-continuity__claude-checkpoint"),
+        assistant("Done."),
+    ], True),
+    ("Claude continuity direct recovery is fresh evidence", [
+        user("checkpoint this milestone"),
+        tool("mcp__carr-continuity__claude-checkpoint"),
+        tool("mcp__carr-continuity__claude-read-recovery"),
+        assistant("Done and verified."),
+    ], False),
+    ("Claude continuity nested write requires evidence", [
+        codex_user("checkpoint this milestone"),
+        codex_tool("exec", 'await tools["mcp__carr-continuity__claude-record-event"]({});'),
+        codex_assistant("Done."),
+    ], True),
     ("Codex nested CARR write requires evidence", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "const row = await tools.mcp__carr__update_deal({ id: 'd1', stage: 'LOI' });"),
@@ -547,6 +563,28 @@ def cancel_capability_session_is_a_write():
     return passed
 
 
+def review_portfolio_revision_is_a_write():
+    """The portfolio's independent review is a write; other review-* stay reads.
+
+    Same shape as the cancel-capability-session pair above. "review" is
+    deliberately NOT a write prefix, because review-memory and review-queue are
+    genuine reads, so the portfolio verb has to earn its classification through
+    an exact WRITE_ACTION_EXACT entry. The negative half is what keeps that
+    honest: if someone ever "fixes" a future review-* write by adding the
+    prefix instead, these reads start reporting as mutations and the gate
+    begins demanding completion evidence for looking something up.
+    """
+    write = mod.is_write_action("review-portfolio-revision")
+    reads = {name: mod.is_write_action(name) for name in
+             ("review-memory", "review-queue", "read-portfolio",
+              "review-something-that-does-not-exist")}
+    passed = write and not any(reads.values())
+    print(f"{'PASS' if passed else 'FAIL'}  review-portfolio-revision classifies as a write "
+          f"without making 'review' a blanket prefix"
+          + ("" if passed else f"; write={write} reads={reads}"))
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -565,11 +603,57 @@ def registry_prefix_coverage():
         return True
     writes = json.loads(result.stdout)
     missing = [name for name in writes if not mod.is_write_action(name)]
-    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find"]
+    # notification-feed and read-doc-conversation are WR-000113/112 READS and must
+    # stay False: a prefix that captured either would make every future read named
+    # the same way a write.
+    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
+             "notification-feed", "read-doc-conversation"]
     false_writes = [name for name in reads if mod.is_write_action(name)]
     ok = not missing and not false_writes
     print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "
           f"{len(writes) - len(missing)}/{len(writes)} writes classified"
+          + (f"; missing={','.join(missing)}" if missing else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
+def r03_notification_classification():
+    """acknowledge-notification is a WRITE_ACTION_EXACT entry; its siblings are reads.
+
+    Positive and negative in one case, because the pair is the point: the entry
+    is EXACT so it covers exactly the one verb that writes a durable receipt,
+    and the two reads named next to it stay unclassified.
+    """
+    positives = ["acknowledge-notification", "add-doc-conversation-turn"]
+    negatives = ["notification-feed", "read-doc-conversation"]
+    missing = [action for action in positives if not mod.is_write_action(action)]
+    false_writes = [action for action in negatives if mod.is_write_action(action)]
+    ok = not missing and not false_writes
+    print(f"{'PASS' if ok else 'FAIL'}  R03 notification and Doc conversation classification"
+          + (f"; missing={','.join(missing)}" if missing else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
+def doc_conversation_write_door_classification():
+    """WR-000114: the three write doors classify as writes; the read still does not.
+
+    Positive and negative in ONE case, added together, because the pair is the
+    point (a policy flip that only moves the positives leaves the negative
+    silently asserting the old world). create-doc-conversation is covered by the
+    EXISTING "create" prefix and is asserted here anyway, so a future narrowing
+    of that prefix fails a case that names this verb. share- and rename- are
+    WRITE_ACTION_EXACT entries rather than new prefixes, so the negatives below
+    include the same two words in READ positions: a "share" or "rename" prefix
+    would turn both of them into writes and fail this case.
+    """
+    positives = ["create-doc-conversation", "share-doc-conversation",
+                 "rename-doc-conversation"]
+    negatives = ["read-doc-conversation", "share-preview", "rename-preview"]
+    missing = [action for action in positives if not mod.is_write_action(action)]
+    false_writes = [action for action in negatives if mod.is_write_action(action)]
+    ok = not missing and not false_writes
+    print(f"{'PASS' if ok else 'FAIL'}  Doc conversation write-door classification"
           + (f"; missing={','.join(missing)}" if missing else "")
           + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
     return ok
@@ -863,8 +947,11 @@ def main():
     outcomes.append(clause_extraction_coverage())
     outcomes.append(floor_preserved())
     outcomes.append(cancel_capability_session_is_a_write())
+    outcomes.append(review_portfolio_revision_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
+    outcomes.append(r03_notification_classification())
+    outcomes.append(doc_conversation_write_door_classification())
     outcomes.append(latch_cases())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1

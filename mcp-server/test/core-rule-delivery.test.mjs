@@ -1,19 +1,4 @@
-// WR-000019 slice S11 (boot diet). Two things standing-context gains here,
-// neither of which may touch what a session actually receives while
-// ops.rule_delivery_policy stays "shadow":
-//
-//   1. A shadow-mode `core_preview` measuring the REAL payload an enforced
-//      boot would send once slice S13 flips the policy row -- CORE rules
-//      (rule-triage.v1.json's `home: "core"` set) in full text, plus the
-//      pack/trigger index.
-//   2. In the (still unreachable in production) enforced branch, a CORE rule
-//      arrives in full text instead of a gist. Non-core rules are unchanged.
-//
-// "1fddcffb" and "4a53ff82" are deliberately the SAME short ids the existing
-// rule-delivery-layers.test.mjs fixture already uses for two Layer 0 rules --
-// both are real ids in the S7 triage's core set (ops/config/rule-triage.v1.json),
-// so this file can exercise the real CORE_RULE_IDS module (mcp-server/src/
-// core-rule-ids.js) rather than a stand-in.
+// Scoped rule delivery keeps Layer 0 concise and retrieves full binding text on demand.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { executeRegisteredTool } from "../src/tools.js";
@@ -57,6 +42,17 @@ function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX } = {}) {
     query: async (sql, params = []) => {
       if (/from v_compiled_rules/i.test(sql))
         return { rows: [...rows(SHARED, false), ...rows(PERSONAL, true)] };
+      if (/with guidance_registry as/i.test(sql)) {
+        const declared = params[5] || [];
+        const deliveryPlan = plan
+          .filter(r => r.scope === "shared" || (params[4] && r.scope === params[4]))
+          .map(r => ({ ...r, selected: r.load_layer === "layer0"
+                       || r.packs.some(p => declared.includes(p)) }));
+        return { rows: [{ state: null, manifest_digest: null,
+          standing_rules: [], projection_summary: [], mode, map_versions: 1,
+          map_digest: "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2",
+          tagged_rules: plan.length, delivery_plan: deliveryPlan, pack_index: packIndex }] };
+      }
       if (/v_guidance_registry_state/i.test(sql)) return { rows: [] };
       if (/with registry as/i.test(sql) && /plan\.rows as delivery_plan/i.test(sql)) {
         const declared = params[1] || [];
@@ -98,20 +94,20 @@ test("1fddcffb and 4a53ff82 really are CORE ids in the shipped triage", () => {
     "347a9ca6 must stay a non-core comparison point for this file to mean anything");
 });
 
-test("enforced mode delivers a CORE Layer 0 rule in full text, not a gist", async () => {
+test("enforced mode keeps CORE Layer 0 rules as gists", async () => {
   const out = await call(client({ mode: "enforced" }));
   const core = out.shared_rules.find(r => r.id === "1fddcffb");
-  assert.ok(core, "the core rule must still be in the Layer 0 boot");
-  assert.ok(core.statement, "a core rule must arrive as full text");
-  assert.equal(core.gist, undefined, "a core rule must not be shaped as a gist");
-  assert.equal(core.taught_by, "Joe Bookout");
+  assert.ok(core && core.gist);
+  assert.equal(core.statement, undefined);
 });
 
-test("a core rule outside Layer 0 still gets full text once its pack is selected", async () => {
+test("a selected CORE pack rule also stays concise until requested by id", async () => {
   const out = await call(client({ mode: "enforced" }), { packs: ["engineering-git"] });
   const core = out.shared_rules.find(r => r.id === "4a53ff82");
-  assert.ok(core && core.statement, "4a53ff82 is core and must be full text once delivered");
-  assert.equal(core.gist, undefined);
+  assert.ok(core && core.gist);
+  assert.equal(core.statement, undefined);
+  const looked = await call(client({ mode: "enforced" }), { rule_ids: ["4a53ff82"] });
+  assert.ok(looked.shared_rules.find(r => r.id === "4a53ff82").statement);
 });
 
 test("a non-core rule stays a gist under enforced mode, core or not notwithstanding", async () => {
@@ -135,32 +131,21 @@ test("detail=full and an explicit rule_ids lookup still override a non-core gist
     "an explicit rule_ids lookup is never scoped away, core or not");
 });
 
-test("shadow mode carries a core_preview measuring the REAL future payload", async () => {
+test("shadow diagnostic reports coverage without duplicating rule text", async () => {
   const out = await call(client({ mode: "shadow" }));
-  assert.ok(out.core_preview, "shadow mode must add the preview");
-  // The whole point: shadow changes NOTHING delivered.
+  assert.ok(out.core_preview);
   assert.equal(out.rule_delivery.enforcing, false);
-  assert.equal(out.shared_rules.find(r => r.id === "1fddcffb").gist !== undefined, true,
-    "the actual delivery in shadow mode must still be the full gist recitation");
-
-  const previewIds = out.core_preview.core_rules.map(r => r.id);
-  assert.ok(previewIds.includes("1fddcffb"));
-  assert.ok(previewIds.includes("4a53ff82"));
-  assert.equal(previewIds.includes("347a9ca6"), false,
-    "a non-core rule must never appear in the core preview");
-  for (const r of out.core_preview.core_rules)
-    assert.ok(r.statement, "every preview rule must be full text, not a gist");
-
   assert.equal(out.core_preview.core_rule_count, CORE_RULE_IDS.length);
-  assert.ok(out.core_preview.pack_index.length > 0);
-  assert.ok(out.core_preview.measured.core_preview_tokens_est > 0);
-  assert.ok(out.core_preview.measured.current_recitation_tokens_est > 0);
+  assert.ok(out.core_preview.core_rules_found > 0);
+  assert.equal(out.core_preview.core_rules, undefined);
+  assert.equal(out.core_preview.pack_index, undefined);
+  assert.equal(out.core_preview.measured, undefined);
 });
 
 test("core_preview is a shadow-only field", async () => {
   const enforced = await call(client({ mode: "enforced" }));
   assert.equal(enforced.core_preview, undefined,
-    "the enforced branch delivers core-full-text directly; it has no separate preview");
+    "the enforced branch has no shadow preview");
 
   const noTags = await call(client({ mode: null }));
   assert.equal(noTags.core_preview, undefined,

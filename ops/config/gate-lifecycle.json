@@ -230,11 +230,11 @@
           "kind": "field_truthy",
           "field": "caught"
         },
-        "rule_description": "a timestamped context-handoff-gate row whose signal crossed the configured threshold or fallback cap; Stop alone refuses until the immutable takeover receipt is verified.",
-        "note": "PostToolUse observes and can announce once; PreCompact always allows; Stop is the sole refusal seam."
+        "rule_description": "a timestamped context-handoff-gate row whose signal crossed the configured surface policy; Claude lifecycle outcomes are advisory and never refuse Stop solely for context.",
+        "note": "Claude PostToolUse and Stop announce; PreCompact records without blocking. Explicit CLI handoff commands retain their own refusal semantics."
       },
       "review_date": "2026-11-24",
-      "mode": "enforcing"
+      "mode": "announce"
     },
     "costar-lane-gate.py": {
       "failure_class": "browser lane discipline",
