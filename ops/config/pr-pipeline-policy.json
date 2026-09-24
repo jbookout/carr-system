@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Tracked kill-switch and repo scope for tools/pr-pipeline/pipeline.py.",
+    "enabled=false here stops every dispatch and every merge on the next tick,",
+    "same as the untracked out/pr-pipeline.disable override file — either gate",
+    "being off is enough, checked in tools/pr_pipeline/pipeline.kill_switch_active.",
+    "Flip enabled to true only as a reviewed change; the untracked override file",
+    "exists for a same-machine emergency stop that needs no review."
+  ],
+  "enabled": false,
+  "repos": [
+    "jbookout/carr-system",
+    "jbookout/doctorcre-app"
+  ]
+}

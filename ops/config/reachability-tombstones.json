@@ -22,6 +22,13 @@
       "marked_on": "2026-09-09",
       "reason": "R07 deliberately ships this LaunchAgent as a disabled, uninstalled, triggerless definition for later review; the accepted source scope forbids adding it to the intended-loaded services manifest or installing/enabling it without a separate exact live-effect packet.",
       "reopen_when": "a separately reviewed and explicitly authorized R07 live-effect packet permits scheduler installation/activation; in that same source change, declare the plist in ops/config/services.json and remove this tombstone."
+    },
+    {
+      "lane": "launchd",
+      "entry": "ops/launchd/com.carr.pr-pipeline.plist",
+      "marked_on": "2026-09-24",
+      "reason": "The scripted review-and-merge pipeline can dispatch reviewer/fixer sessions and squash-merge PRs to main on its own; DEFINITION_ONLY in ops/config-as-code.py until Joe starts the schedule deliberately, the same posture com.carr.repo-hygiene-janitor.plist already takes. Declaring it in ops/config/services.json now (its deploy_mechanism would trip siep11-mutation-registry-local-pg-gate's launchd physical-authority-reference count, which requires a matching ops.service_environment row minted by a SCAC successor migration) is deliberately deferred: the successor-seal queue is linear and already three deep (#1205 v65/v66, #1208 v67, #1211 v68), and this pipeline's own v69 is built on real-Postgres readback only after #1211 merges, per the coordinating session's explicit sequencing.",
+      "reopen_when": "the v69 SCAC successor migration lands (registering pr-pipeline's ops.service_environment row) and, in that same change, this plist is declared in ops/config/services.json and this tombstone is removed."
     }
   ]
 }

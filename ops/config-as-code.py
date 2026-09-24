@@ -278,6 +278,14 @@ SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 # own evidence/approval cutover gates; installing one early would turn a source
 # artifact into an active schedule before those gates pass.
 DEFINITION_ONLY: dict[str, str] = {
+    "com.carr.pr-pipeline.plist":
+        "the scripted review-and-merge pipeline can dispatch reviewer/fixer "
+        "sessions and squash-merge PRs to main on its own; starting that "
+        "schedule is Joe's act, so the definition is written down "
+        "(tools/pr-pipeline/pipeline.py) and left uninstalled until he takes "
+        "it off this list deliberately, the same posture this repo already "
+        "takes for com.carr.repo-hygiene-janitor.plist and took for "
+        "com.carr.gate-zero-canary.plist before its cutover",
     # com.carr.control-plane-tick.plist held here until 2026-08-26: its gate was
     # "accepted shadow/canary evidence and cutover approval". Joe approved the
     # cutover that evening (decision f4af0c87, "Yes I approve cutover") with the
