@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-build-pretour-packet.py, the CARR pre-tour packet in the Hughes format.
+build-pretour-packet.py, the CARR pre-tour packet in the Ferris format.
 
-Dell, 2026-08-21: "use the hughes packet format for river bank."
+Dell, 2026-08-21: "use the ferris packet format for the bank."
 
-The format is the Dr Hughes Pre-Tour Briefing of 2026-08-19: navy masthead, serif
+The format is the Dr Ferris Pre-Tour Briefing of 2026-08-19: navy masthead, serif
 headings, gold accent, a snapshot strip, an at-a-glance comparison table, then one
 numbered card per option carrying a photo, the reasoning, a fact grid, what to confirm
 before signing, our own note, and ruled lines to write on during the tour.
@@ -135,7 +135,7 @@ def facts(rows, limit=None):
     leaves the remaining track painted in line grey, so the card ends in a slab of
     colour hanging off the end of the data.
 
-    Eight of the ten cards in the Hughes packet did this. Padding the row out with
+    Eight of the ten cards in the Ferris packet did this. Padding the row out with
     empty cells restores it: a grid with a few blanks at the end reads as a table
     that ran out of rows, which is what it is.
 
