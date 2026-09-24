@@ -50,6 +50,8 @@ def cmd_register(reg: desks.Registry, args) -> int:
     )
     if args.seat:
         entry = registry_ext.set_seat(args.name, args.seat, path=reg.path)
+    if getattr(args, "room_listen", None):
+        entry = registry_ext.set_room_listen(args.name, args.room_listen, path=reg.path)
     if args.profile:
         entry = registry_ext.set_profile(args.name, args.profile, path=reg.path)
     live = desks.is_live(entry.get("socket", "")) if entry.get("kind") in (
@@ -150,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--permission-mode", default=None,
                    choices=["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"])
     r.add_argument("--seat", default=None, help="the room seat this desk speaks for")
+    r.add_argument("--room-listen", default=None, choices=list(registry_ext.ROOM_LISTEN_MODES),
+                   help="'mention': hear people's turns, and other desks only when @seat-mentioned")
     r.add_argument("--profile", default=None,
                    help="named agent profile this desk carries (builder, designer, "
                         "reviewer, doc) — presentation and routing only, never authority")
