@@ -35,6 +35,16 @@ def load(mode):
     return module
 
 
+def load_default():
+    """Load the hook with CARR_JEV_SUPERVISOR unset, so MODE picks its own
+    default rather than an explicit override -- the case `load()` can't reach."""
+    os.environ.pop("CARR_JEV_SUPERVISOR", None)
+    spec = importlib.util.spec_from_file_location("jev_supervisor_default_test", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def result(check, verdict, advice=""):
     return {"check": check, "verdict": verdict, "confidence": 0.9, "escalate": False,
             "detail": {"advice": advice} if advice else {}}
@@ -109,12 +119,26 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(fake.calls, [])
 
     def test_shadow_mode_runs_checks_but_prints_nothing(self):
+        # Explicit override only, now that advise is the default (Joe,
+        # 2026-09-24, decision 5ec806a4): CARR_JEV_SUPERVISOR=shadow must
+        # still record without ever printing.
         m = load("shadow")
         fake = FakeLibs(verdicts={"triage_failure": "code_bug"})
         m._lib = fake
         code, out = run_main(m, self.failing_bash())
         self.assertEqual((code, out), (0, ""))
         self.assertIn("triage_failure", fake.calls)
+
+    def test_default_mode_is_advise_when_unset(self):
+        m = load_default()
+        self.assertEqual(m.MODE, "advise")
+        fake = FakeLibs(verdicts={"triage_failure": "code_bug", "locate_bug": "line_located"})
+        m._lib = fake
+        code, out = run_main(m, self.failing_bash())
+        self.assertEqual(code, 0)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("advice from triage_failure", ctx)
+        self.assertIn("advice from locate_bug", ctx)
 
     def test_failed_bash_routes_to_triage_and_bug_locator(self):
         m = load("advise")
