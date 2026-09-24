@@ -20,6 +20,7 @@ throwaway sandbox. Every git call here, including the pre-push subprocess
 itself (which shells out to git internally), runs under ops/git_env.py's
 fixture_env(), which also refuses to inherit a real git identity.
 """
+from collections.abc import Callable
 import json
 import os
 import shutil
@@ -83,7 +84,7 @@ def receipts(d):
         return [json.loads(line) for line in fh if line.strip()]
 
 
-CASES = []
+CASES: list[Callable[[], None]] = []
 
 
 def case(fn):
