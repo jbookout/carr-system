@@ -17,8 +17,16 @@ rolled-back transaction on the disposable migration-lane database:
   BEHAVIOUR on public.memory_item, as the real runtime role carr_writer: Joe's
   session sees shared rows and Joe's personal rows, never Dell's; Dell's the
   mirror; a shared-only machine session sees shared rows only; a session
-  cannot insert a personal row owned by another partner; carr_backup, where
-  the role exists, still reads every row so the nightly dump stays complete.
+  cannot insert, or update, a personal row owned by another partner; a login
+  that is a member of carr_writer (the deployed app_writer shape) is fenced
+  the same way; carr_reader sees shared rows rather than failing; carr_backup,
+  where the role exists, still reads every row so the nightly dump stays
+  complete.
+
+  WHAT THIS DOES NOT PROVE. The sponsor is a transaction-local setting the
+  trusted server writes. A session holding a writer or reader login directly
+  can set it itself; the fence is against every query path the runtime owns,
+  not against a person holding a database credential.
 """
 
 from __future__ import annotations
@@ -159,6 +167,44 @@ def main() -> int:
             else:
                 return fail("Dell's session inserted a personal memory owned by Joe")
 
+            # A cross-partner UPDATE (review of PR 1183): Dell's session cannot
+            # even see Joe's personal row, so an update aimed at it touches
+            # nothing rather than editing another partner's memory.
+            cur.execute("update public.memory_item set confidence = 0.9 "
+                        "where statement like %s and owner_actor_id = %s",
+                        (f"{tag}%", actors["joe"]))
+            if cur.rowcount != 0:
+                return fail(f"Dell's session updated {cur.rowcount} of Joe's personal memories")
+
+            cur.execute("reset role")
+
+            # The deployed Worker logs in as app_writer, a MEMBER of
+            # carr_writer, not as carr_writer itself (review of PR 1183). Prove
+            # the fence through that shape: the real app_writer where it exists,
+            # else a login created inside this rolled-back transaction.
+            login = "app_writer"
+            if not cur.execute("select 1 from pg_roles where rolname='app_writer'").fetchone():
+                login = f"rls_gate_login_{uuid.uuid4().hex[:8]}"
+                cur.execute(f"create role {login} login in role carr_writer")
+            grant_settable_runtime_roles(cur, login)
+            set_local_role(cur, login)
+            cur.execute("select set_config(%s, 'joe', true)", (GUC,))
+            observed[f"{login} as joe"] = got = visible()
+            if got != {"shared": 1, "joe": 1, "dell": 0}:
+                return fail(f"{login} (member of carr_writer) as Joe saw {got}")
+            cur.execute("reset role")
+
+            # carr_reader holds actor (id, slug) only. A reader query must see
+            # shared rows, never fail on the policy's own lookup (0574).
+            grant_settable_runtime_roles(cur, "carr_reader")
+            set_local_role(cur, "carr_reader")
+            cur.execute("select set_config(%s, '', true)", (GUC,))
+            try:
+                observed["carr_reader"] = got = visible()
+            except psycopg.errors.InsufficientPrivilege as exc:
+                return fail(f"carr_reader cannot read memory_item at all: {exc}")
+            if got != {"shared": 1, "joe": 0, "dell": 0}:
+                return fail(f"carr_reader with no sponsor saw {got}")
             cur.execute("reset role")
             backup = None
             if cur.execute("select 1 from pg_roles where rolname='carr_backup'").fetchone():

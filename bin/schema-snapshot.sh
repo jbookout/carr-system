@@ -1029,26 +1029,31 @@ if ! "$PG_DUMP" --schema-only --no-owner --no-acl > "$SCHEMA_BODY"; then
   exit 1
 fi
 if ! awk '
-function emit_carr_backup_policy() {
+function emit_carr_backup_policy(policy, table) {
   print "do $carr_backup_snapshot_policy$"
   print "begin"
   print "  if exists (select 1 from pg_roles where rolname = '\''carr_backup'\'') then"
-  print "    create policy carr_backup_full_read on ops.work_request"
+  print "    create policy " policy " on " table
   print "      for select to carr_backup using (true);"
   print "  end if;"
   print "end"
   print "$carr_backup_snapshot_policy$;"
 }
-$0 == "CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO carr_backup USING (true);" {
-  emit_carr_backup_policy()
-  carr_backup_policy_seen = 1
+# EVERY carr_backup read-all policy, not only 0475s. 0573 added one on
+# public.memory_item, and pg_dump rendered it unconditionally, so the portable
+# snapshot named a login a disposable rebuild never mints and CI refused it
+# ("role carr_backup does not exist").
+$0 ~ /^CREATE POLICY [a-z_][a-z0-9_]* ON [a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]* FOR SELECT TO carr_backup USING \(true\);$/ {
+  split($0, words, " ")
+  emit_carr_backup_policy(words[3], words[5])
+  if (words[5] == "ops.work_request") carr_backup_policy_seen = 1
   next
 }
 $0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !carr_backup_policy_seen {
   print "-- Name: work_request carr_backup_full_read; Type: POLICY; Schema: ops; Owner: -"
   print "--"
   print ""
-  emit_carr_backup_policy()
+  emit_carr_backup_policy("carr_backup_full_read", "ops.work_request")
   print ""
   print ""
   print "--"

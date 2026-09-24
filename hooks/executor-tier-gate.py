@@ -119,6 +119,68 @@ def definition_pins_model(subagent_type):
     return False
 
 
+def jev_pick(desc, prompt, subagent_type, chosen):
+    """Jev's cheapest-qualified tier for this spawn, or None. Never raises.
+
+    Loop 615's fifth use (decision 62ceae36). The judgment is logged beside
+    what the session chose, so the acting threshold is calibrated on real
+    spawns before anything enforces on it.
+    """
+    try:
+        # TEST HOOK ONLY (ops/executor-tier-gate-selftest.py), mirroring the
+        # CARR_MIGRATE_PROD_RUN_DOOR precedent: "tier:probability" stands in for
+        # Jev's answer, "none" for an unavailable judge. Never set by a real
+        # session, so the real judge is always the default.
+        stub = os.environ.get("CARR_EXECUTOR_TIER_JEV_STUB")
+        if stub is not None:
+            if stub == "none":
+                return None
+            tier, probability = stub.split(":")
+            order = ("haiku", "sonnet", "opus", "fable")
+            named = next((t for t in order if t in (chosen or "").lower()), None)
+            is_cheaper = named is not None and order.index(tier) < order.index(named)
+            return tier, float(probability), 0.60, is_cheaper
+        # Fixture and CI runs (CARR_HOOK_FIXTURE, set by selftests and the
+        # gates class) never make a live judgment: it would be nondeterministic
+        # and bill every CI run. The gate then behaves exactly as before Jev.
+        if os.environ.get("CARR_HOOK_FIXTURE", "").strip().lower() in ("1", "true", "yes"):
+            return None
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jev_executor_tier", os.path.join(REPO, "ops", "jev_executor_tier.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        rec = module.recommend(desc, prompt, subagent_type)
+        if rec is None:
+            return None
+        tier, probability, probabilities = rec
+        try:
+            judge_spec = importlib.util.spec_from_file_location(
+                "jev_judge", os.path.join(REPO, "ops", "jev_judge.py"))
+            judge = importlib.util.module_from_spec(judge_spec)
+            judge_spec.loader.exec_module(judge)
+            judge.record("executor_tier", (desc or "")[:120],
+                         {"answers": {"tier": probabilities}}, chosen or None,
+                         note={"pick": tier, "probability": probability,
+                               "subagent_type": subagent_type})
+        except Exception:
+            pass
+        return tier, probability, module.ACT_AT, module.cheaper(tier, chosen)
+    except Exception as exc:
+        log(f"JEV(unavailable) {exc}")
+        return None
+
+
+def advise(note):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": note,
+        }
+    }))
+    sys.exit(0)
+
+
 def deny(reason):
     print(json.dumps({
         "hookSpecificOutput": {
@@ -150,8 +212,21 @@ def main():
         subagent_type = ti.get("subagent_type") or ti.get("subagentType") or ""
         desc = ti.get("description") or ""
 
-        # The executor is named on the call. Nothing to do.
+        prompt = ti.get("prompt") or ""
+
+        # The executor is named on the call. Jev may still think it is dearer
+        # than the job needs; that is ADVICE, never a refusal, until the logged
+        # judgments show the threshold can be trusted.
         if isinstance(model, str) and model.strip():
+            pick = jev_pick(desc, prompt, subagent_type, model)
+            if pick and pick[3] and pick[1] >= pick[2]:
+                log(f"ADVISE chosen={model} jev={pick[0]}@{pick[1]:.2f} desc={desc[:80]}")
+                advise(
+                    f"EXECUTOR ADVICE (Jev, loop 615): this spawn names `{model}`, but Jev "
+                    f"puts {pick[1]:.2f} on `{pick[0]}` being the cheapest tier that would still "
+                    "do it correctly. If the task needs the dearer tier for a reason the "
+                    "brief does not show, keep it and say why in the executor line; "
+                    "otherwise respawn on the cheaper tier.")
             sys.exit(0)
 
         if subagent_type in ALWAYS_INHERITS:
@@ -160,7 +235,14 @@ def main():
         if definition_pins_model(subagent_type):
             sys.exit(0)
 
-        log(f"DENY subagent_type={subagent_type or '(none)'} desc={desc[:80]}")
+        pick = jev_pick(desc, prompt, subagent_type, None)
+        jev_line = ""
+        if pick:
+            confident = pick[1] >= pick[2]
+            jev_line = (f"\n\nJEV'S PICK for this task: `{pick[0]}` at {pick[1]:.2f}"
+                        + ("." if confident else
+                           " (below the acting threshold, so treat it as a hint and use the table)."))
+        log(f"DENY subagent_type={subagent_type or '(none)'} jev={pick[0] if pick else '-'} desc={desc[:80]}")
         deny(
             "EXECUTOR NOT NAMED. This Agent call passes no `model`, and "
             f"`{subagent_type or 'the default type'}` has no model pinned in a definition file, "
@@ -177,6 +259,7 @@ def main():
             "If you genuinely want the parent tier, say so by passing it explicitly. The point "
             "is that the tier is a decision someone made, not one nobody noticed. Custom CARR "
             "agents that pin a model in their own frontmatter are exempt and need no parameter."
+            + jev_line
         )
     except Exception as exc:
         log(f"ALLOW(internal-error) {exc}")
