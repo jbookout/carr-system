@@ -673,7 +673,8 @@ class Pipeline:
             try:
                 approval, rule, reviewed_sha = approval_of(
                     gh.comments(number), lane_cfg, head_sha,
-                    covers=lambda r, n=number, h=head_sha, c=commit: self.main_merge_only(repo_dir, n, r, h, c))
+                    # called synchronously inside this iteration, so the closure sees this commit's values
+                    covers=lambda r: self.main_merge_only(repo_dir, number, r, head_sha, commit))
             except Blocked as b:
                 cutover = str(lane_cfg.get("review_required_after") or "")
                 if (b.reason == "no_independent_review" and commit != sha and cutover
