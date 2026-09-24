@@ -25,6 +25,8 @@ import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
+import { parksADecision, classifyLoopText, needsDecider, loopRowText,
+         ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
   opaqueControllerResult, operationIdempotencyKey, ENGINEERING_CONTROLLER_EXECUTOR,
   ENGINEERING_CONTROLLER_WORKER } from "./authenticated-canonical-ownership.js";
@@ -792,6 +794,32 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+  // PORTED VERB GATES (bypass audit C33/C34). The CANONICAL enforcement for
+  // these moved on 2026-09-24 (second Opus re-review) into tools.js's
+  // executeRegisteredTool(): local-verb.mjs's break-glass mode calls
+  // executeRegisteredTool() directly and never reaches this function, so a
+  // check placed only here missed that door. executeRegisteredTool() is the
+  // one function every path (callTool read, callTool write, break-glass)
+  // calls — see its own comment there, and verb-gate-checks.js's header, for
+  // the full parity note.
+  //
+  // The pure gate is ALSO run here, same pattern as assertNoCallerAuthorityFields
+  // a few lines up ("executeRegisteredTool repeats this same pure gate..."):
+  // this callTool() copy is not a second implementation, it is the SAME
+  // imported function, called early so a write-verb call fails before the
+  // writer Pool connects a few lines below, instead of only after — both for
+  // production fail-fast and so this can be asserted in a test with no live
+  // DB. executeRegisteredTool()'s copy is what makes the verdict correct even
+  // when this copy is skipped, i.e. break-glass.
+  if (name === "add-loop") {
+    if (needsDecider(args))
+      throw new ToolError({ error: "capability_no_decider", hint: BLOCKER_DECIDER_REASON });
+    if (parksADecision(args)) {
+      const { allow, why } = classifyLoopText(loopRowText(args));
+      if (!allow)
+        throw new ToolError({ error: "internal_decision_parked", why, hint: ESCALATION_REASON });
+    }
+  }
   if (hermesCosPremisesRefusal(profile, name, args))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "the Hermes CoS door may capture premises against existing party refs only; a human session must create a new party first" });

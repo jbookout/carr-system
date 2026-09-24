@@ -67,6 +67,8 @@ export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 // self-naming failures too; re-exported here so existing imports keep working.
 import { ToolError } from "./tool-error.js";
 export { ToolError };
+import { parksADecision, classifyLoopText, needsDecider, loopRowText,
+         ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 
 // DEFECT 2, HALF (b) (found 2026-08-13, decision 7026246b): a write whose bad
 // input reaches the database raw (an enum this file never learned to validate,
@@ -5491,7 +5493,7 @@ export const TOOLS = {
 
   "teach": {
     write: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
@@ -6530,6 +6532,15 @@ export const TOOLS = {
           throw new ToolError({ error: "blocker_detail_vague", matched: vague[0],
             hint: `"${vague[0]}" names a feeling about time, not a blocker. Say who or what has to happen first — and if nothing has to, do the work now instead of filing this.` });
       }
+      // capability_no_decider and internal_decision_parked (bypass audit
+      // C33/C34, ported from hooks/blocker-decider-gate.py and
+      // hooks/escalation-gate.py) are enforced in this module's
+      // executeRegisteredTool(), before this handler ever runs — see the
+      // comment there for why that placement (the CANONICAL one, since
+      // break-glass bypasses mcp.js's callTool() entirely) is what makes
+      // every door, including break-glass, hit the same check. callTool()
+      // also runs the same imported check earlier, purely as a fail-fast
+      // ahead of its writer-pool connect — see its comment.
 
       // ── THE OWNERSHIP GATE ──────────────────────────────────────────────
       // Refuses a jointly-owned row at the moment it is filed. See LOOP_OWNERS
@@ -7977,6 +7988,28 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
+  // ── PORTED VERB GATES (bypass audit C33/C34, 2026-09-24), MOVED HERE
+  // (Opus re-review, 2026-09-24) from mcp.js's callTool(). callTool() is NOT
+  // the one choke point: mcp-server/local-verb.mjs's BREAK-GLASS mode
+  // (a direct DATABASE_URL connection, used for local/rehearsal calls) calls
+  // executeRegisteredTool() DIRECTLY and never goes through callTool() at
+  // all, so the check placed there missed that door entirely. THIS function
+  // is the actual chokepoint: local-verb.mjs's own comment at its call site
+  // says so ("the one choke point that also applies argument type coercion
+  // and raw-DB-error translation"), and callTool()'s read AND write branches
+  // both call it too. One placement, three doors: callTool() read, callTool()
+  // write, and local-verb.mjs break-glass (both its read and write shapes).
+  // Still purely in memory, before any client.query call in this function —
+  // same testability as the callTool()-level placement had.
+  if (name === "add-loop") {
+    if (needsDecider(args))
+      throw new ToolError({ error: "capability_no_decider", hint: BLOCKER_DECIDER_REASON });
+    if (parksADecision(args)) {
+      const { allow, why } = classifyLoopText(loopRowText(args));
+      if (!allow)
+        throw new ToolError({ error: "internal_decision_parked", why, hint: ESCALATION_REASON });
+    }
+  }
   // HUMAN-ONLY MEANS PARTNER AUTHORITY, NOT A SECOND CHAT WINDOW. A verified
   // partner passes directly. A native Codex/Claude grant or local machine door
   // passes only when partner-authority.js can derive its sponsor from

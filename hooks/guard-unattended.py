@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 import ipaddress
 import os
 import re
+import shlex
 import sys
 from urllib.parse import urlsplit
 
@@ -564,6 +565,16 @@ RULES = [
     (re.compile(r"git\s+reset\s+--hard\b", re.I), "hard reset"),
     (re.compile(r"git\s+(filter-repo|filter-branch)\b", re.I), "history rewrite"),
     (re.compile(r"git\s+clean\s+-[a-zA-Z]*f", re.I), "forced clean"),
+    # 2b. `--no-verify` / core.hooksPath REDESIGNED OUT (2026-09-24, Opus
+    # review, bypass audit C38). These were shell-text regexes over a
+    # locally-run accident-stopper hook (ops/githooks/pre-commit itself says
+    # so: "not a security control: anyone can bypass it with --no-verify").
+    # Jev agreed (0.94) that hosted CI, not this local hook, is what actually
+    # stops a bypass from reaching main — so this file no longer chases every
+    # spelling of a local-only escape hatch. Broad add is different: it is
+    # covered below as a dedicated, argument-aware function rather than a
+    # regex, because AGENTS.md makes a specific, checkable promise about it
+    # (see broad_add_reason()).
     # 3. private key material
     #
     # `\.age\b` REMOVED 2026-08-07, on Joe's ruling: "loosen the gate so the work
@@ -1068,10 +1079,160 @@ def direct_metered_dispatch(cmd):
     return None
 
 
-def check(cmd):
+# bypass audit C53 / AGENTS.md:225, REDESIGNED (2026-09-24, Opus review). The
+# original version was a single regex over the whole `git add` argument list,
+# which denied `git add -A hooks/x.py` (a NAMED path alongside -A) exactly as
+# hard as a bare `git add -A` — a real false positive the replay against
+# 12,145 real commands caught. This version tokenizes the argument list and
+# denies ONLY the bare broad-add forms: `-A`, `--all`, a standalone `.`, the
+# `:/` pathspec-magic form (matches from the worktree root, same reach as
+# `-A`), or a combined short-flag cluster that includes `A` (`-Av`, `-fA`,
+# …), with NO other pathspec token present. `git add -A <paths>` is
+# explicitly allowed; git add's own semantics make that combination
+# redundant, but redundant is not broad.
+#
+# Captures the segment between `git` and `add` (group 1, may hold `-C <dir>`)
+# separately from the segment after `add` (group 2, the add arguments) — a
+# second Opus re-review (2026-09-24) required resolving `git -C <dir> add`'s
+# own directory, not just the session cwd.
+_GIT_ADD = re.compile(r"\bgit\s+([^|;&\n]*?)\badd\b([^|;&\n]*)")
+
+# A combined short-flag cluster: a single dash followed by one or more
+# single-letter flags with no `=` and no second leading dash — `-Av`, `-fA`,
+# `-vfA` are all this shape; `--all` and `-A` alone are handled as exact
+# tokens above. Bare `-` and long options (`--foo`) never match.
+_SHORT_FLAG_CLUSTER = re.compile(r"^-[A-Za-z]{2,}$")
+
+
+def _bare_broad_add(argtext):
+    """True when argtext's only pathspec-shaped tokens are -A/--all/bare '.'/
+    the ':/' pathspec-magic form, or a combined short-flag cluster containing
+    'A', and nothing else names a path. Flags other than -A/--all (or a
+    cluster containing A) are ignored (git add -v -A is still bare); any
+    other non-flag token is a real pathspec and clears the call."""
+    try:
+        tokens = shlex.split(argtext)
+    except ValueError:
+        return False
+    broad_seen = False
+    for tok in tokens:
+        if tok in ("-A", "--all", ".", ":/"):
+            broad_seen = True
+            continue
+        if _SHORT_FLAG_CLUSTER.match(tok):
+            if "A" in tok[1:]:
+                broad_seen = True
+            continue
+        if tok.startswith("-"):
+            continue
+        return False       # any other bare token is a real pathspec
+    return broad_seen
+
+
+def _in_carr_tree(cwd):
+    """cwd is the canonical carr-system checkout or a path under it (which is
+    where this repo's worktrees live, per bin/worktree.sh convention) —
+    same shape as the functions.exec cwd scoping a few lines below in
+    main()."""
+    if not cwd:
+        return False
+    try:
+        real_cwd = os.path.realpath(os.path.expanduser(cwd))
+    except Exception:
+        return False
+    return real_cwd == REPO or real_cwd.startswith(REPO + os.sep)
+
+
+def _strip_matched_quotes(tok):
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("'", '"'):
+        return tok[1:-1]
+    return tok
+
+
+# A single leading `cd <dir> &&` or `cd <dir>;` — not a general shell
+# interpreter, just the one shape the reported false positives/bypasses were
+# built from (`cd /tmp/x && git add -A` from a carr cwd; `cd ~/carr-system &&
+# git add -A` from /tmp). Anything more elaborate (a second cd, a subshell,
+# `cd "$(...)"`) is out of scope, same as the other reported gaps below.
+_LEADING_CD = re.compile(r"^\s*cd\s+(\"[^\"]*\"|'[^']*'|\S+)\s*(?:&&|;)\s*")
+
+
+def _leading_cd_dir(cmd):
+    """Return the directory named by a single leading `cd <dir> &&`/`;`, or
+    None. Operates on the raw command: this is the command's own structure,
+    not prose inside a quote, so it is read before strip_inert_text runs."""
+    m = _LEADING_CD.match(cmd)
+    if not m:
+        return None
+    return _strip_matched_quotes(m.group(1))
+
+
+def _git_dash_c_dir(pre_add_argtext):
+    """Return the directory named by a `-C <dir>` (or `-C<dir>`) flag found
+    before `add` in the same git invocation, or None. `git -C <dir> add ...`
+    runs against <dir>, not the process cwd — ignoring it both denies
+    legitimate use from elsewhere (`git -C /tmp/x add -A` sent from a carr
+    cwd) and misses a real bypass (`git -C ~/carr-system add -A` sent from
+    /tmp)."""
+    try:
+        tokens = shlex.split(pre_add_argtext)
+    except ValueError:
+        return None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "-C":
+            return tokens[i + 1] if i + 1 < len(tokens) else None
+        if tok.startswith("-C") and len(tok) > 2 and not tok.startswith("--"):
+            return tok[2:]
+        i += 1
+    return None
+
+
+def _resolve_dir(candidate, base):
+    """Resolve `candidate` (from a leading cd or a -C flag) against `base`,
+    the same way a shell would resolve a relative directory argument against
+    the current directory."""
+    expanded = os.path.expanduser(candidate)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(base, expanded)
+
+
+def broad_add_reason(cmd, cwd=None):
+    """Return a reason string to deny a bare `git add -A`/`--all`/`.`/`:/`
+    with no pathspec, scoped to the carr-system tree; None otherwise. Text
+    inside quotes, heredocs, or a grep/echo argument is never matched for the
+    add-arguments scan: it runs against strip_inert_text(cmd), the same
+    inert-text stripper every other quote-safe rule in this file uses, not
+    the raw command. The EFFECTIVE directory for the carr-tree scope check is
+    resolved from a leading `cd <dir> &&`/`;` and/or a `-C <dir>` flag on the
+    git invocation itself, not just the session's reported cwd — see
+    _leading_cd_dir / _git_dash_c_dir."""
+    session_cwd = cwd if cwd is not None else os.getcwd()
+    leading_cd = _leading_cd_dir(cmd)
+    base_cwd = _resolve_dir(leading_cd, session_cwd) if leading_cd else session_cwd
+    scanned = strip_inert_text(cmd)
+    for m in _GIT_ADD.finditer(scanned):
+        pre_add, post_add = m.group(1), m.group(2)
+        if not _bare_broad_add(post_add):
+            continue
+        c_dir = _git_dash_c_dir(pre_add)
+        effective_cwd = _resolve_dir(c_dir, base_cwd) if c_dir else base_cwd
+        if _in_carr_tree(effective_cwd):
+            return ("broad add (-A/--all/./:/) — blocked by the CARR unattended guard. "
+                    "Add explicit paths instead: `git add <path> [<path>...]`.")
+    return None
+
+
+def check(cmd, cwd=None):
     """Return a reason string to block, or None to allow."""
     if cmd.strip() in ALLOW_EXACT:
         return None
+
+    reason = broad_add_reason(cmd, cwd)
+    if reason:
+        return reason
 
     reason = delegation_control_plane_write(cmd)
     if reason:
@@ -1208,7 +1369,33 @@ def main():
         if not cmd:
             sys.exit(0)
 
-        reason = check(cmd)
+        # Effective cwd for the broad-add repo scope: the tool_input's own
+        # workdir (Codex), else the payload's cwd (Claude Code sends this for
+        # every Bash call), else this process's own cwd as a last resort.
+        effective_cwd = (
+            (ti.get("workdir") if isinstance(ti, dict) else None)
+            or payload.get("cwd") or os.getcwd())
+
+        reason = check(cmd, effective_cwd)
+
+        # BYPASS AUDIT C33/C34 (2026-09-24), REDESIGNED (2026-09-24, Opus
+        # review). This hook used to re-run the four client verb gates
+        # client-side against a parsed `./run.sh call <verb> '<json>'`
+        # command (hooks/verb_gate_recheck.py, now deleted). A replay of
+        # 12,145 real Bash commands found the shell-text side of that
+        # approach fundamentally leaky (Jev: 0.93) — 62 legitimate commands
+        # would have been falsely denied (`git add -A <paths>`, a grep for
+        # the pattern text, fixture repos in /tmp…), and several trivial
+        # bypasses (a shell variable holding the verb, `$(cat f)` JSON,
+        # calling tools/call-verb.py or mcp-server/local-verb.mjs directly)
+        # could never be closed from Bash-command-text at all — every one of
+        # those doors recurses through the SAME server-side callTool(), so
+        # the checks now live in the verb handlers themselves
+        # (mcp-server/src/verb-gate-checks.js, wired into add-loop's handler
+        # in tools.js) and this hook no longer duplicates them. Jev agreed
+        # (0.94) that hosted CI is what actually stops a local-hook bypass
+        # from reaching main, which is the other reason a client-side
+        # regex recheck was the wrong enforcement point.
 
         # THE SHELL HALF OF rule 76a53dfe. A record refused at the vault must not
         # simply be written somewhere the gate does not look, and a heredoc into
