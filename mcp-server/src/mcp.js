@@ -13,7 +13,7 @@
 
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
-  auditIdentity, assertNoCallerAuthorityFields,
+  auditIdentity, assertNoCallerAuthorityFields, coerceArgsToSchema,
   pgConstraintError, describeConstraint } from "./tools.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
@@ -22,6 +22,7 @@ import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
+import { jevAskBinding, prefetchJevAnswer } from "./jev-call-receipt.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
@@ -880,6 +881,25 @@ export async function callTool(env, actor, name, args, profile = "full") {
 
   // Writes use the routine writer pool except the two authority operations,
   // which receive a separate DB identity and cannot fall back to writer.
+  // ask-jev: THE VENDOR CALL HAPPENS HERE, BEFORE ANY WRITER CONNECTION OR
+  // TRANSACTION EXISTS, so a slow Jev never holds a pooled connection or an
+  // open transaction. The request is checked first (registry contract, the
+  // chokepoint's coercion, and ask-jev's own validation) so an invalid call
+  // never reaches the vendor. The Worker holds the key; with none bound
+  // nothing is prefetched and the handler refuses jev_proxy_unconfigured.
+  // An upstream failure is carried to the handler rather than thrown here, so
+  // a same-key replay still returns its stored response; on a replay the
+  // fresh answer is simply discarded.
+  let jevPrefetched;
+  if (tool.jevProxy === true) {
+    const ask = jevAskBinding(env);
+    if (ask) {
+      const jevArgs = args || {};
+      await assertRegisteredToolInput(name, tool, jevArgs);
+      coerceArgsToSchema(tool.inputSchema, jevArgs);
+      jevPrefetched = await prefetchJevAnswer(jevArgs, ask);
+    }
+  }
   const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
@@ -897,6 +917,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
     client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
   if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
+  // The answer prefetched above, outside the transaction; the handler only
+  // appends the receipt.
+  if (tool.jevProxy === true && jevPrefetched)
+    client.jevPrefetched = jevPrefetched;
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);

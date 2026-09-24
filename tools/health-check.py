@@ -1506,6 +1506,38 @@ def _canonical_health():
             rc = 1
         _section_runtime_guard("credential_health", _section_findings_before, _section_rc_before, rc)
 
+    if CANONICAL_SECTION == "all":
+        # Jev call receipt tamper audit (migrations/0587). The receipt store is
+        # detectable-not-prevented against its database owner; this is the
+        # detection half: a receipt with no matching ask-jev tool_call row, or
+        # an append-only trigger that is not enabled, is a failing line. The
+        # child asks the deployed Worker through `./run.sh call` (no credential
+        # of its own); a Worker that does not serve the verb yet (unknown_tool)
+        # is a skip line, not a failure.
+        try:
+            _rih = os.path.join(REPO_ROOT, "ops", "receipt-integrity-health.py")
+            if not os.path.exists(_rih):
+                print(f"  -- {'jev receipts':<18} ops/receipt-integrity-health.py not present; skipped")
+            else:
+                _venv = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+                _py = _venv if os.path.exists(_venv) else sys.executable
+                _p = subprocess.run([_py, _rih], capture_output=True, text=True, timeout=120,
+                                    stdin=subprocess.DEVNULL)
+                _lines = (_p.stdout or "").strip().splitlines()
+                _first = _lines[0] if _lines else "(no output)"
+                if _first.startswith("SKIP"):
+                    print(f"  -- {'jev receipts':<18} {_first.split(': ', 1)[-1]}")
+                elif _p.returncode == 0:
+                    print(f"  OK {'jev receipts':<18} {_first.split('— ', 1)[-1]}")
+                else:
+                    print(f"  ⚠︎ {'jev receipts':<18} {_first.split('— ', 1)[-1]}")
+                    _canonical_finding("jev_call_receipt_integrity", _first.split("— ", 1)[-1])
+                    rc = 1
+        except Exception as e:
+            print(f"  ⚠︎ {'jev receipts':<18} check failed ({type(e).__name__}: {e})")
+            _canonical_finding("jev_call_receipt_integrity", f"check failed ({type(e).__name__}: {e})")
+            rc = 1
+
     # WHOLE-RUN backstop, alongside the static AST proof in tools/health-
     # check-findings-selftest.py (point 3 of the third round of an
     # independent review of PR #1237: the static check can only prove what
@@ -1530,12 +1562,16 @@ def _canonical_health():
     # ending up 1 with `_FINDINGS` still completely empty, which can only
     # happen if EVERY section that ran passed clean and something set `rc`
     # outside all of them (or a per-section guard call was itself removed).
+    # It also covers the jev receipts check just above, which (like the
+    # sections it follows) is not wrapped in its own `_section_runtime_
+    # guard` call and so relies on this whole-run check as its backstop.
     if rc == 1 and not _FINDINGS:
         _canonical_finding("unrecorded_failure",
                            "rc=1 was set but no finding was recorded anywhere to explain it",
                            hard_error=True)
 
     print(_HEALTH_COMPLETION_MARKER)
+    print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
     return rc
 
 
