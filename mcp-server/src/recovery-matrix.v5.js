@@ -18,7 +18,7 @@
 // WHAT THIS FILE IS NOT. It restores nothing, reads no backup, opens no
 // connection, sends nothing and releases nothing. Every fact it decides on is a
 // TYPED OBSERVATION THE CALLER SUPPLIES — in production, the receipt line
-// bin/restore-rehearse.sh prints (tools/dump-watermark.py computes the exact
+// bin/restore-rehearse.sh prints (tools/restore-watermark.py computes the exact
 // watermark and hash it carries). A `pass` here says the registered checks did
 // not fire on the facts as reported; every result carries V5_NO_EFFECTS.
 //
@@ -31,19 +31,21 @@
 // MEASURED, NEVER CONFIGURED. Every cell is decided from observed instants
 // (produced_at, observed_at, started_at, finished_at). There is no field for a
 // configured retention window or a vendor's advertised RPO; "point-in-time
-// restore is enabled" is not a recovery point, a readback of the latest
-// restorable instant is.
+// restore is enabled" is not a recovery point; a point-in-time branch that
+// provably holds a known write is (bin/pitr-restore-proof.sh).
 //
 // CELLS ARE INDEPENDENT. Each cell reads only its own evidence block. A cell
 // with no evidence is `no_evidence`, which is not a pass, and it changes no
 // other cell. The matrix passes only when every cell passes, and it still
 // reports every cell, so one red cell never hides behind another.
 //
-// THE ADAPTER CELL AND THE BUSINESS DAY. No business-day calendar exists in
-// this repository (holidays are a human ruling). One business day is never
-// SHORTER than 24 wall-clock hours, so an adapter recovery measured at <= 24h
-// passes under any calendar; anything longer is `indeterminate` until a
-// calendar is bound (V5_BUSINESS_DAY_CALENDAR_SEAM). Indeterminate is not pass.
+// THE ADAPTER CELL AND THE BUSINESS DAY. One business day is never SHORTER
+// than 24 wall-clock hours, so an adapter recovery measured at <= 24h passes
+// under any calendar. Longer recoveries are judged against the sealed US
+// federal business calendar (ops/config/business-calendar.us-federal.json):
+// recovered by the same wall-clock time on the next business day. Without the
+// calendar, or outside its covered years, the answer is `indeterminate`, which
+// is not a pass.
 //
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js: a policy
 // answer is RETURNED (decision + stable reason_id); a contract violation THROWS
@@ -78,7 +80,6 @@ export const V5_DAILY_COPY_MAX_AGE_SECONDS = 26 * 60 * 60;
 /** Weekly restore-exercise cadence. */
 export const V5_RESTORE_EXERCISE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 
-export const V5_BUSINESS_DAY_CALENDAR_SEAM = "step:v5-f08-business-day-calendar";
 
 /** Where a restore may land. Production is registered so it can be REFUSED by name. */
 export const V5_RESTORE_TARGET_KINDS = Object.freeze([
@@ -109,11 +110,27 @@ export const V5_RECOVERY_MATRIX_CELLS = Object.freeze([
 
 export const V5_CELL_STATES = Object.freeze(["pass", "fail", "no_evidence", "indeterminate"]);
 
-/** How a recovery point was OBSERVED. Configuration is deliberately absent. */
+/**
+ * How a recovery point was OBSERVED. Configuration is deliberately absent.
+ *
+ * `pitr_branch_proof` (bin/pitr-restore-proof.sh): the provider's history
+ * retention is read back from its API, a disposable branch is created from
+ * production AT a requested past instant T, and a probe row that production
+ * shows last written at least V5_PITR_PROBE_MARGIN_SECONDS before T is read on
+ * that branch. The provider exposes no "latest restorable point" field, so the
+ * point is PROVEN rather than read: what is proven restorable is the probe's
+ * write instant, and exposure is measured from THAT, never from T.
+ */
 export const V5_RECOVERY_POINT_SOURCES = Object.freeze([
-  "pitr_latest_restorable_readback",
+  "pitr_branch_proof",
   "verified_copy_produced_at",
 ]);
+
+/** A probe written this close to T might not have committed by T; it proves nothing. */
+export const V5_PITR_PROBE_MARGIN_SECONDS = 60;
+
+/** Where the point-in-time proof ran. Production is registered so it can be refused by name. */
+export const V5_PITR_PROOF_TARGET_KINDS = Object.freeze(["disposable_branch", "production", "unstated"]);
 
 /** Outbound queue item states at the moment of restore. */
 export const V5_OUTBOUND_ITEM_STATES = Object.freeze([
@@ -316,9 +333,13 @@ export function evaluateRestoreExercise(receiptInput) {
 // Item 5 — the recovery matrix. Four cells, each read from its own block.
 // ---------------------------------------------------------------------------
 
-const MATRIX_KEYS = Object.freeze(["cells", "observed_at"]);
+const MATRIX_KEYS = Object.freeze(["business_calendar", "cells", "observed_at"]);
 const CELL_BLOCK_KEYS = Object.freeze([...V5_RECOVERY_MATRIX_CELLS]);
-const RPO_KEYS = Object.freeze(["recovery_point_at", "source"]);
+const RPO_COPY_KEYS = Object.freeze(["recovery_point_at", "source"]);
+const RPO_PITR_KEYS = Object.freeze([
+  "history_retention_seconds", "probe_committed_at", "probe_present_on_branch", "proof_target_kind",
+  "requested_restorable_point", "retention_read_at", "source",
+]);
 const DAILY_KEYS = Object.freeze(["newest_copy", "restore_exercise"]);
 const NEWEST_COPY_KEYS = Object.freeze([
   "custody_domain", "independent_store_readback_digest", "primary_domain", "produced_at",
@@ -333,13 +354,49 @@ function cell(state, detail) {
 }
 
 function rpoCell(block, observedMs) {
-  closed(block, RPO_KEYS, "cells.record_layer_rpo");
-  enumValue(block.source, V5_RECOVERY_POINT_SOURCES, "cells.record_layer_rpo.source");
-  const pointMs = instant(block.recovery_point_at, "cells.record_layer_rpo.recovery_point_at");
-  if (pointMs > observedMs) return cell("fail", { reason: "recovery_point_after_observation" });
-  const seconds = Math.floor((observedMs - pointMs) / 1000);
-  return cell(seconds <= V5_RPO_MAX_SECONDS ? "pass" : "fail",
-    { measured_seconds: seconds, bound_seconds: V5_RPO_MAX_SECONDS, source: block.source });
+  const at = "cells.record_layer_rpo";
+  if (!isPlainObject(block)) fail("invalid_shape", `${at} must be a plain object`, { path: at });
+  enumValue(block.source, V5_RECOVERY_POINT_SOURCES, `${at}.source`);
+  if (block.source === "verified_copy_produced_at") {
+    closed(block, RPO_COPY_KEYS, at);
+    const pointMs = instant(block.recovery_point_at, `${at}.recovery_point_at`);
+    if (pointMs > observedMs) return cell("fail", { failures: ["recovery_point_after_observation"], source: block.source });
+    const seconds = Math.floor((observedMs - pointMs) / 1000);
+    return cell(seconds <= V5_RPO_MAX_SECONDS ? "pass" : "fail", {
+      failures: seconds <= V5_RPO_MAX_SECONDS ? [] : ["exposure_exceeds_rpo"],
+      measured_seconds: seconds, bound_seconds: V5_RPO_MAX_SECONDS, source: block.source,
+    });
+  }
+  closed(block, RPO_PITR_KEYS, at);
+  enumValue(block.proof_target_kind, V5_PITR_PROOF_TARGET_KINDS, `${at}.proof_target_kind`);
+  if (typeof block.probe_present_on_branch !== "boolean") {
+    fail("invalid_shape", `${at}.probe_present_on_branch must be a boolean`, { path: `${at}.probe_present_on_branch` });
+  }
+  const retention = block.history_retention_seconds;
+  if (!Number.isSafeInteger(retention) || retention < 0) {
+    fail("invalid_shape", `${at}.history_retention_seconds must be a non-negative integer`, { path: `${at}.history_retention_seconds` });
+  }
+  const requestedMs = instant(block.requested_restorable_point, `${at}.requested_restorable_point`);
+  const probeMs = instant(block.probe_committed_at, `${at}.probe_committed_at`);
+  const readMs = instant(block.retention_read_at, `${at}.retention_read_at`);
+  // The proven point is the probe's write instant, never the requested T.
+  const exposure = Math.floor((observedMs - probeMs) / 1000);
+  const failures = [];
+  if (block.proof_target_kind !== "disposable_branch") failures.push("proof_target_not_disposable");
+  if (probeMs > requestedMs - V5_PITR_PROBE_MARGIN_SECONDS * 1000) failures.push("probe_not_before_restorable_point");
+  if (requestedMs > observedMs) failures.push("restorable_point_after_observation");
+  if (!block.probe_present_on_branch) failures.push("probe_absent_on_point_in_time_branch");
+  if (exposure > V5_RPO_MAX_SECONDS) failures.push("exposure_exceeds_rpo");
+  if (retention < exposure) failures.push("retention_does_not_cover_exposure");
+  if (readMs > observedMs || observedMs - readMs > V5_RPO_MAX_SECONDS * 1000) failures.push("retention_readback_stale");
+  return cell(failures.length ? "fail" : "pass", {
+    failures,
+    source: block.source,
+    measured_seconds: exposure,
+    bound_seconds: V5_RPO_MAX_SECONDS,
+    proven_restorable_point: block.probe_committed_at,
+    history_retention_seconds: retention,
+  });
 }
 
 function dailyCopyCell(block, observedMs) {
@@ -389,7 +446,89 @@ function coreRtoCell(block) {
   });
 }
 
-function adapterRtoCell(block) {
+// --- the business calendar (ops/config/business-calendar.us-federal.json) ----
+//
+// The calendar is CONFIG DATA, supplied by the caller and SEALED: its canonical
+// digest must equal V5_BUSINESS_CALENDAR_DIGEST, so a caller cannot add a
+// holiday to stretch a deadline without the change being a visible re-pin here.
+//
+// THE RULE (owner default, reversible): an adapter outage is recovered within
+// one business day when it is recovered no later than the SAME wall-clock time,
+// in the calendar's timezone, on the first business day after the day the
+// outage started. That deadline is never less than 24 hours away, so a
+// recovery inside 24 wall-clock hours passes under any calendar; an outage
+// spanning weekends or holidays is judged on business days.
+
+const CALENDAR_KEYS = Object.freeze([
+  "business_weekdays", "calendar_id", "calendar_kind", "covers_from", "covers_through",
+  "holiday_rule", "holidays", "timezone",
+]);
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+export const V5_BUSINESS_CALENDAR_KIND = "business-calendar.v1";
+/** canonical digest of ops/config/business-calendar.us-federal.json. Re-pin deliberately. */
+export const V5_BUSINESS_CALENDAR_DIGEST =
+  "sha256:74a5a5b2d7b1e71e794d7a0c1ee3fe3062a82533346edb4fe1945817a83b52e0";
+
+export function normalizeBusinessCalendar(calendar) {
+  closed(calendar, CALENDAR_KEYS, "business_calendar");
+  if (calendar.calendar_kind !== V5_BUSINESS_CALENDAR_KIND) {
+    fail("unknown_state", `business_calendar.calendar_kind must be "${V5_BUSINESS_CALENDAR_KIND}"`, { path: "business_calendar.calendar_kind" });
+  }
+  const actual = digest(calendar);
+  if (actual !== V5_BUSINESS_CALENDAR_DIGEST) {
+    fail("business_calendar_digest_moved", "the business calendar is not the pinned calendar; re-pin it deliberately rather than passing a different one",
+      { expected: V5_BUSINESS_CALENDAR_DIGEST, actual });
+  }
+  return calendar;
+}
+
+function zonedParts(ms, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(new Date(ms));
+  const get = type => Number(parts.find(p => p.type === type).value);
+  return { y: get("year"), m: get("month"), d: get("day"), hh: get("hour"), mm: get("minute"), ss: get("second") };
+}
+
+function zoneOffsetMs(ms, timeZone) {
+  const p = zonedParts(ms, timeZone);
+  return Date.UTC(p.y, p.m - 1, p.d, p.hh, p.mm, p.ss) - (ms - (ms % 1000));
+}
+
+/** The UTC instant of a wall-clock time in a timezone (two-pass, DST-safe outside the gap hour). */
+function zonedToUtc(y, m, d, hh, mm, ss, timeZone) {
+  const asUtc = Date.UTC(y, m - 1, d, hh, mm, ss);
+  const first = asUtc - zoneOffsetMs(asUtc, timeZone);
+  return asUtc - zoneOffsetMs(first, timeZone);
+}
+
+function isoDate(y, m, d) {
+  return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+/**
+ * The next-business-day deadline for an outage starting at `startMs`, or null
+ * when any date consulted falls outside the calendar's covered range.
+ */
+export function nextBusinessDayDeadline(startMs, calendar) {
+  const tz = calendar.timezone;
+  const p = zonedParts(startMs, tz);
+  let day = new Date(Date.UTC(p.y, p.m - 1, p.d));
+  for (let i = 0; i < 31; i++) {
+    day = new Date(day.getTime() + 86400000);
+    const date = isoDate(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate());
+    if (date < calendar.covers_from || date > calendar.covers_through) return null;
+    const isoWeekday = ((day.getUTCDay() + 6) % 7) + 1;
+    if (calendar.business_weekdays.includes(isoWeekday) && !(date in calendar.holidays)) {
+      return zonedToUtc(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), p.hh, p.mm, p.ss, tz);
+    }
+  }
+  return null;
+}
+
+function adapterRtoCell(block, calendar) {
   closed(block, ADAPTER_KEYS, "cells.adapter_rto");
   if (!Array.isArray(block.recoveries) || block.recoveries.length === 0) {
     fail("invalid_shape", "cells.adapter_rto.recoveries must be a non-empty array; omit the cell to report no evidence", { path: "cells.adapter_rto.recoveries" });
@@ -402,10 +541,21 @@ function adapterRtoCell(block) {
     const end = instant(rec.recovered_at, `${at}.recovered_at`);
     if (end < start) return { adapter_id: rec.adapter_id, state: "fail", reason: "recovered_before_outage" };
     const seconds = Math.floor((end - start) / 1000);
+    if (seconds <= V5_ADAPTER_RTO_CALENDAR_FREE_BOUND_SECONDS) {
+      return { adapter_id: rec.adapter_id, measured_seconds: seconds, state: "pass" };
+    }
+    if (!calendar) {
+      return { adapter_id: rec.adapter_id, measured_seconds: seconds, state: "indeterminate", reason: "business_calendar_not_supplied" };
+    }
+    const deadline = nextBusinessDayDeadline(start, calendar);
+    if (deadline === null) {
+      return { adapter_id: rec.adapter_id, measured_seconds: seconds, state: "indeterminate", reason: "business_calendar_does_not_cover_dates" };
+    }
     return {
       adapter_id: rec.adapter_id,
       measured_seconds: seconds,
-      state: seconds <= V5_ADAPTER_RTO_CALENDAR_FREE_BOUND_SECONDS ? "pass" : "indeterminate",
+      business_day_deadline: new Date(deadline).toISOString(),
+      state: end <= deadline ? "pass" : "fail",
     };
   });
   const state = perAdapter.some(a => a.state === "fail") ? "fail"
@@ -413,7 +563,7 @@ function adapterRtoCell(block) {
   return cell(state, {
     adapters: perAdapter,
     calendar_free_bound_seconds: V5_ADAPTER_RTO_CALENDAR_FREE_BOUND_SECONDS,
-    business_day_calendar_seam: V5_BUSINESS_DAY_CALENDAR_SEAM,
+    business_calendar_id: calendar ? calendar.calendar_id : null,
   });
 }
 
@@ -421,11 +571,12 @@ const CELL_EVALUATORS = Object.freeze({
   record_layer_rpo: (block, observedMs) => rpoCell(block, observedMs),
   independent_daily_restorable_copy: (block, observedMs) => dailyCopyCell(block, observedMs),
   core_rto: block => coreRtoCell(block),
-  adapter_rto: block => adapterRtoCell(block),
+  adapter_rto: (block, _observedMs, calendar) => adapterRtoCell(block, calendar),
 });
 
 export function evaluateRecoveryMatrix(request) {
-  closed(request, MATRIX_KEYS, "request");
+  closed(request, MATRIX_KEYS, "request", ["cells", "observed_at"]);
+  const calendar = request.business_calendar === undefined ? null : normalizeBusinessCalendar(request.business_calendar);
   const observedMs = instant(request.observed_at, "request.observed_at");
   closed(request.cells, CELL_BLOCK_KEYS, "request.cells", []);
   const cells = {};
@@ -433,7 +584,7 @@ export function evaluateRecoveryMatrix(request) {
     const block = request.cells[name];
     cells[name] = block === undefined || block === null
       ? cell("no_evidence", {})
-      : CELL_EVALUATORS[name](block, observedMs);
+      : CELL_EVALUATORS[name](block, observedMs, calendar);
   }
   const allPass = V5_RECOVERY_MATRIX_CELLS.every(name => cells[name].state === "pass");
   return deepFreeze({
@@ -588,7 +739,12 @@ export function v5RecoveryMatrixPolicyPreimage() {
     requirement_ids: ["Q034"],
     decision_ids: ["Q034.D1"],
     closes_seams: [V5_OUTBOUND_RECONCILIATION_SEAM, V5_RESTORE_AND_RECOVERY_MATRIX_SEAM].sort(),
-    open_seams: [V5_BUSINESS_DAY_CALENDAR_SEAM],
+    business_calendar_digest: V5_BUSINESS_CALENDAR_DIGEST,
+    business_day_rule: "recovered_by_same_wall_clock_time_on_next_business_day",
+    pitr_probe_margin_seconds: V5_PITR_PROBE_MARGIN_SECONDS,
+    pitr_proof_target_kinds: [...V5_PITR_PROOF_TARGET_KINDS].sort(),
+    rpo_measured_from: "proven_probe_write_instant_not_requested_point",
+    retention_must_cover: "measured_exposure",
     // Bound by reference so a change to the admission half moves this digest too.
     backup_quarantine_policy_digest: v5BackupQuarantinePolicyDigest(),
     restore_exercise_receipt_kind: V5_RESTORE_EXERCISE_RECEIPT_KIND,

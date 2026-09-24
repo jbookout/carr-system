@@ -6,17 +6,25 @@
 // refusal asserts the reason id AND the check that decided it, so a request that
 // fails for the wrong reason fails here.
 //
+// The RPO fixtures are shaped exactly like bin/pitr-restore-proof.sh's output,
+// and the adapter tests read the real ops/config/business-calendar.us-federal.json
+// (its digest must equal the module's pin), so the config file is what is tested.
+//
 //   node --test mcp-server/test/recovery-matrix.v5.test.mjs
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+import { digest } from "../src/artifact-trust.js";
 
 import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import {
   V5_RESTORE_EXERCISE_CHECKS,
   V5_RECOVERY_MATRIX_CELLS,
   V5_DEGRADED_MODES,
+  V5_BUSINESS_CALENDAR_DIGEST,
   evaluateRestoreExercise,
   evaluateRecoveryMatrix,
   evaluateOutboundQueueRelease,
@@ -144,11 +152,30 @@ test("item 4: no caller field can skip a check or assert trust", () => {
 
 const OBSERVED = "2026-09-24T12:00:00Z";
 
+// bin/pitr-restore-proof.sh's evidence: branch requested at T = 11:58, probe
+// last written 11:50 and present on that branch, retention read at 11:58:30.
+function pitrProof() {
+  return {
+    source: "pitr_branch_proof",
+    history_retention_seconds: 604800,
+    retention_read_at: "2026-09-24T11:58:30Z",
+    requested_restorable_point: "2026-09-24T11:58:00Z",
+    probe_committed_at: "2026-09-24T11:50:00.123456Z",
+    probe_present_on_branch: true,
+    proof_target_kind: "disposable_branch",
+  };
+}
+
+function rpoOf(mutate) {
+  const m = matrix(); mutate(m.cells.record_layer_rpo);
+  return evaluateRecoveryMatrix(m).cells.record_layer_rpo;
+}
+
 function matrix() {
   return {
     observed_at: OBSERVED,
     cells: {
-      record_layer_rpo: { source: "pitr_latest_restorable_readback", recovery_point_at: "2026-09-24T11:50:00Z" },
+      record_layer_rpo: pitrProof(),
       independent_daily_restorable_copy: {
         newest_copy: {
           custody_domain: "github-actions-artifact",
@@ -171,18 +198,43 @@ test("item 5: every cell passes on measured evidence inside the settled floor", 
   assert.equal(m.decision, "pass");
   assert.deepEqual(m.not_passed, []);
   for (const c of V5_RECOVERY_MATRIX_CELLS) assert.equal(m.cells[c].state, "pass", c);
-  assert.equal(m.cells.record_layer_rpo.measured_seconds, 600);
+  assert.equal(m.cells.record_layer_rpo.measured_seconds, 599);
+  assert.equal(m.cells.record_layer_rpo.proven_restorable_point, "2026-09-24T11:50:00.123456Z");
   assert.equal(m.cells.core_rto.measured_seconds, 1200);
 });
 
-test("item 5: the RPO cell passes at exactly 15 minutes and fails one second later", () => {
-  const at15 = matrix(); at15.cells.record_layer_rpo.recovery_point_at = "2026-09-24T11:45:00Z";
-  assert.equal(evaluateRecoveryMatrix(at15).cells.record_layer_rpo.state, "pass");
-  const over = matrix(); over.cells.record_layer_rpo.recovery_point_at = "2026-09-24T11:44:59Z";
-  assert.equal(evaluateRecoveryMatrix(over).cells.record_layer_rpo.state, "fail");
+test("item 5: RPO is measured from the PROVEN probe write, passes at exactly 15 minutes and fails one second later", () => {
+  assert.equal(rpoOf(b => { b.probe_committed_at = "2026-09-24T11:45:00Z"; }).state, "pass");
+  const over = rpoOf(b => { b.probe_committed_at = "2026-09-24T11:44:59Z"; });
+  assert.equal(over.state, "fail");
+  assert.deepEqual(over.failures, ["exposure_exceeds_rpo"]);
+  // A requested point near now proves nothing more than the probe it found.
+  const tNearNow = rpoOf(b => { b.requested_restorable_point = "2026-09-24T11:59:59Z"; b.probe_committed_at = "2026-09-24T11:44:00Z"; });
+  assert.equal(tNearNow.measured_seconds, 960);
+  assert.equal(tNearNow.state, "fail");
   const nightlyOnly = matrix();
   nightlyOnly.cells.record_layer_rpo = { source: "verified_copy_produced_at", recovery_point_at: "2026-09-24T03:00:00Z" };
   assert.equal(evaluateRecoveryMatrix(nightlyOnly).cells.record_layer_rpo.state, "fail");
+});
+
+test("item 5: the point-in-time proof fails on an absent probe, a probe too close to T, a production target, short retention or a stale readback", () => {
+  const cases = [
+    [b => { b.probe_present_on_branch = false; }, "probe_absent_on_point_in_time_branch"],
+    [b => { b.probe_committed_at = "2026-09-24T11:57:01Z"; }, "probe_not_before_restorable_point"],
+    [b => { b.proof_target_kind = "production"; }, "proof_target_not_disposable"],
+    [b => { b.history_retention_seconds = 300; }, "retention_does_not_cover_exposure"],
+    [b => { b.retention_read_at = "2026-09-24T11:44:59Z"; }, "retention_readback_stale"],
+    [b => { b.retention_read_at = "2026-09-24T12:00:01Z"; }, "retention_readback_stale"],
+    [b => { b.requested_restorable_point = "2026-09-24T12:05:00Z"; }, "restorable_point_after_observation"],
+  ];
+  for (const [mutate, failure] of cases) {
+    const c = rpoOf(mutate);
+    assert.equal(c.state, "fail", failure);
+    assert.ok(c.failures.includes(failure), `${failure} in ${c.failures}`);
+  }
+  // Retention exactly equal to the exposure covers it (the proven point stays in retained history).
+  assert.equal(rpoOf(b => { b.history_retention_seconds = 599; }).state, "pass");
+  assert.throws(() => rpoOf(b => { b.probe_present_on_branch = "yes"; }), e => e.code === "invalid_shape");
 });
 
 test("item 5: a configured setting is not a measurement and the floor cannot be moved", () => {
@@ -203,7 +255,7 @@ test("item 5: cells are independent — a missing or failing cell changes no oth
   assert.deepEqual(m1.not_passed, ["adapter_rto"]);
   for (const c of ["record_layer_rpo", "independent_daily_restorable_copy", "core_rto"]) assert.deepEqual(m1.cells[c], base.cells[c]);
 
-  const badRpo = matrix(); badRpo.cells.record_layer_rpo.recovery_point_at = "2026-09-24T06:00:00Z";
+  const badRpo = matrix(); badRpo.cells.record_layer_rpo.probe_present_on_branch = false;
   const m2 = evaluateRecoveryMatrix(badRpo);
   assert.deepEqual(m2.not_passed, ["record_layer_rpo"]);
   for (const c of ["independent_daily_restorable_copy", "core_rto", "adapter_rto"]) assert.deepEqual(m2.cells[c], base.cells[c]);
@@ -247,7 +299,56 @@ test("item 5: core RTO passes at 4 hours, fails beyond, and a non-exact restore 
   assert.equal(c.restore_exercise_reason, "artifact_hash_mismatch");
 });
 
-test("item 5: an adapter recovery within 24h passes; longer is indeterminate, never pass, until a calendar is bound", () => {
+const CALENDAR = JSON.parse(readFileSync(new URL("../../ops/config/business-calendar.us-federal.json", import.meta.url), "utf8"));
+
+function adapter(start, end, calendar = CALENDAR) {
+  const m = { observed_at: "2026-12-31T00:00:00Z", cells: { adapter_rto: { recoveries: [{ adapter_id: "crm", outage_started_at: start, recovered_at: end }] } } };
+  if (calendar) m.business_calendar = calendar;
+  return evaluateRecoveryMatrix(m).cells.adapter_rto;
+}
+
+test("item 5: the pinned calendar digest is the digest of the config file", () => {
+  assert.equal(V5_BUSINESS_CALENDAR_DIGEST, digest(CALENDAR));
+  assert.equal(CALENDAR.timezone, "America/Chicago");
+  assert.equal(Object.keys(CALENDAR.holidays).length, 33);
+});
+
+test("item 5: adapter recovery is due by the same Central time on the next business day", () => {
+  // Friday 17:00 CDT -> due Monday 17:00 CDT (22:00Z); a weekend never counts.
+  const fri = adapter("2026-09-18T22:00:00Z", "2026-09-21T21:00:00Z");
+  assert.equal(fri.state, "pass");
+  assert.equal(fri.adapters[0].business_day_deadline, "2026-09-21T22:00:00.000Z");
+  assert.equal(adapter("2026-09-18T22:00:00Z", "2026-09-21T22:30:00Z").state, "fail");
+  // Friday before Labor Day: Sat, Sun and the Monday holiday are skipped -> Tuesday.
+  assert.equal(adapter("2026-09-04T15:00:00Z", "2026-09-08T14:59:00Z").state, "pass");
+  assert.equal(adapter("2026-09-04T15:00:00Z", "2026-09-08T15:01:00Z").state, "fail");
+  // Tuesday 10:00 -> Wednesday 11:00: 25 hours between business days fails.
+  assert.equal(adapter("2026-09-22T15:00:00Z", "2026-09-23T16:00:00Z").state, "fail");
+  // DST ends Sunday 2026-11-01: Friday 12:00 CDT (17:00Z) is due Monday 12:00 CST (18:00Z).
+  const dst = adapter("2026-10-30T17:00:00Z", "2026-11-02T17:30:00Z");
+  assert.equal(dst.adapters[0].business_day_deadline, "2026-11-02T18:00:00.000Z");
+  assert.equal(dst.state, "pass");
+  assert.equal(adapter("2026-10-30T17:00:00Z", "2026-11-02T18:30:00Z").state, "fail");
+});
+
+test("item 5: within 24h passes with no calendar; longer is indeterminate without one or outside its years", () => {
+  assert.equal(adapter("2026-09-22T15:00:00Z", "2026-09-23T15:00:00Z", null).state, "pass");
+  const none = adapter("2026-09-18T22:00:00Z", "2026-09-21T21:00:00Z", null);
+  assert.equal(none.state, "indeterminate");
+  assert.equal(none.adapters[0].reason, "business_calendar_not_supplied");
+  const beyond = adapter("2028-12-29T15:00:00Z", "2029-01-02T15:00:00Z");
+  assert.equal(beyond.state, "indeterminate");
+  assert.equal(beyond.adapters[0].reason, "business_calendar_does_not_cover_dates");
+});
+
+test("item 5: a calendar with an extra holiday is not the pinned calendar and cannot be read", () => {
+  const stretched = clone(CALENDAR);
+  stretched.holidays["2026-09-21"] = "made_up_day";
+  assert.throws(() => adapter("2026-09-18T22:00:00Z", "2026-09-22T21:00:00Z", stretched),
+    e => e.code === "business_calendar_digest_moved");
+});
+
+test("item 5: an adapter recovery within 24h passes; longer is indeterminate, never pass, without a calendar", () => {
   const long = matrix();
   long.cells.adapter_rto.recoveries.push({ adapter_id: "drive", outage_started_at: "2026-09-19T17:00:00Z", recovered_at: "2026-09-22T09:00:00Z" });
   const m = evaluateRecoveryMatrix(long);
