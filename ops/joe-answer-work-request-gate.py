@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Rollback-only gate for the needs_joe -> triaged human answer door.
 
 Exercises ops.answer_work_request_for_joe (migration 0575) end to end against
