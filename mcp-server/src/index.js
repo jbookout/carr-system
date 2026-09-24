@@ -93,6 +93,9 @@ import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
 import { readCommandCenterSummary } from "./workspace-command-center.js";
 import { wrapWithCorrelation } from "./correlation.js";
+// The V5-F09 census anchor Durable Object; wrangler.toml binds it by this
+// class name, and the runtime finds it among the main module's exports.
+export { WorkflowCensusAnchor } from "./workflow-census-anchor.js";
 import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
 import { createTourInternalWebHandler } from "./tour-internal-web.js";
 import { createReportsWebHandler, isReportsHostRequest } from "./reports-web.js";

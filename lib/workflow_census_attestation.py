@@ -7,13 +7,26 @@ plus the checked-in attestation config to one verdict.  It performs no I/O.
 negative-path suite drives it directly with forged answers.
 
 WHAT A PASSING VERDICT MEANS, AND ONLY THIS.  The latest census row was recorded
-through the one write door by the named principal at the named server time, it
-extends an unbroken hash chain back to row 1, and none of it has been edited
-since it was recorded.  It does NOT mean the census is TRUE: the scheduler
-observations, acceptance rows and completion evidence inside it are whatever
-the writer read, and the chain is unkeyed, so someone holding the database owner
-role could rewrite history wholesale.  Every output label below is chosen to say
-"attested record", never a health word.
+under the named principal at the named server time; the chain is intact as
+served, from row 1 to that row; every row in it was written under a listed
+principal and a listed database login role; the store's three guard triggers
+are ENABLE ALWAYS; and the chain's head equals the head the Worker recorded in
+the external anchor (a Durable Object, ``mcp-server/src/workflow-census-anchor.js``)
+when it committed that row.
+
+WHAT IT DOES NOT MEAN.
+  * The census is not proven TRUE: the scheduler observations, acceptance rows
+    and completion evidence inside it are whatever the writer read.
+  * An allowlisted principal is not proof that the scheduled writer job wrote
+    the row.  The principal is the actor behind a bearer token, and the local
+    token on the writer's Mac is readable by anything running as that user
+    there; any such process can call the write verb under the same principal.
+  * It is not proof against a COORDINATED rewrite: someone holding the database
+    owner role AND able to deploy Worker code that rewrites the anchor could
+    replace both consistently.  The anchor raises the bar from "database owner"
+    to "database owner plus a Worker deploy", no further.
+Every output label below is chosen to say "attested record", never a health
+word, and the ``claim`` sentence says the three limits out loud.
 
 THE CHAIN, restated from the migration so a reader of this file need not open
 it.  For each row::
@@ -28,9 +41,12 @@ where canonical(x) is ``json.dumps(x, sort_keys=True, separators=(",", ":"),
 ensure_ascii=False)``, byte-equal to the database's ``ops.scac_canonical_json``
 for the value kinds the door admits (no fractional numbers).
 
-THE ORDER OF REFUSALS IS THE ORDER OF TRUST.  A chain that does not verify says
-nothing about who wrote it, so ``chain_break`` is decided before
-``unknown_writer``, and a record whose writer is not listed says nothing about
+THE ORDER OF REFUSALS IS THE ORDER OF TRUST.  Guards that are not enforced
+make the stored chain meaningless, so ``tampered`` (guard_not_enforced) comes
+first after the answer's shape.  A chain that does not verify says nothing about
+who wrote it, so ``chain_break`` is decided before the anchor and before
+``unknown_writer``; a chain that verifies but does not match the anchor is
+``tampered``; a record whose writers are not all listed says nothing about
 freshness, so ``unknown_writer`` is decided before ``stale``.
 
 WHY ``chain_break`` AND NOT ``chain_broken``.  The contract named the reason
@@ -58,7 +74,14 @@ REASON_UNPROVABLE = "handle_integrity_unprovable"
 REASON_CHAIN_BREAK = "chain_break"
 REASON_UNKNOWN_WRITER = "unknown_writer"
 REASON_STALE = "stale"
+REASON_TAMPERED = "tampered"
 REASON_ATTESTED = "census_attested"
+
+# The store's triggers (migration 0595), each of which must be ENABLE ALWAYS
+# ('A').  'O' is what a plain ENABLE TRIGGER leaves after a DISABLE; 'D' is off.
+GUARD_TRIGGERS = ("workflow_census_record_append_only",
+                  "workflow_census_record_chain_guard",
+                  "workflow_census_record_no_truncate")
 
 DISPOSITION_NOT_PROVEN = "not_proven"
 DISPOSITION_ATTESTED = "attested_record_only"
@@ -166,9 +189,23 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
             or isinstance(row_count, bool) or not isinstance(row_count, int)
             or not isinstance(answer.get("truncated"), bool)):
         return refusal(REASON_UNPROVABLE, "server_answer_shape_refused")
+    guards = answer.get("guards")
+    anchor = answer.get("anchor")
+    if not isinstance(guards, dict) or not isinstance(anchor, dict):
+        return refusal(REASON_UNPROVABLE, "server_answer_shape_refused")
+    unenforced = sorted(name for name in GUARD_TRIGGERS if guards.get(name) != "A")
+    if unenforced:
+        return refusal(REASON_TAMPERED, "guard_not_enforced", guards=unenforced)
     if answer["truncated"] or row_count != len(chain) or len(chain) > config["max_chain_rows"]:
         return refusal(REASON_UNPROVABLE, "chain_truncated")
+    anchor_state = anchor.get("state")
+    if anchor_state not in ("present", "absent"):
+        return refusal(REASON_UNPROVABLE, "anchor_unavailable")
     if not chain:
+        if anchor_state == "present":
+            # The Worker anchored a head the database no longer holds.
+            return refusal(REASON_TAMPERED, "chain_missing_behind_anchor",
+                           anchored_seq=anchor.get("seq"))
         return refusal(REASON_UNPROVABLE, "census_absent")
 
     # ---- the chain, row 1 to the latest ---------------------------------------
@@ -218,12 +255,32 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
     if payload_digest != latest["payload_sha256"]:
         return refusal(REASON_CHAIN_BREAK, "payload_digest_mismatch", at_seq=latest["seq"])
 
-    # ---- who wrote the latest row ---------------------------------------------
-    if latest["principal"] not in config["writer_principals"]:
-        return refusal(REASON_UNKNOWN_WRITER, "principal_not_listed", at_seq=latest["seq"])
-    if latest["db_session_principal"] not in config["writer_db_session_principals"]:
-        return refusal(REASON_UNKNOWN_WRITER, "db_session_principal_not_listed",
-                       at_seq=latest["seq"])
+    # ---- the anchor outside the database --------------------------------------
+    if anchor_state != "present":
+        return refusal(REASON_TAMPERED, "anchor_absent", chain_seq=latest["seq"])
+    anchored_seq, anchored_hash = anchor.get("seq"), anchor.get("row_hash")
+    if (isinstance(anchored_seq, bool) or not isinstance(anchored_seq, int)
+            or not isinstance(anchored_hash, str) or not _HEX64.match(anchored_hash)):
+        return refusal(REASON_UNPROVABLE, "anchor_unavailable")
+    if anchored_seq != latest["seq"] or anchored_hash != latest["row_hash"]:
+        if anchored_seq < latest["seq"]:
+            detail = "anchor_behind_chain"
+        elif anchored_seq > latest["seq"]:
+            detail = "chain_behind_anchor"
+        else:
+            detail = "anchor_hash_mismatch"
+        return refusal(REASON_TAMPERED, detail, chain_seq=latest["seq"],
+                       anchored_seq=anchored_seq)
+
+    # ---- who wrote every row ---------------------------------------------------
+    # Every row, not only the latest: a row from an unlisted writer anywhere in
+    # the chain means someone outside the lists wrote to the store.
+    for row in chain:
+        if row["principal"] not in config["writer_principals"]:
+            return refusal(REASON_UNKNOWN_WRITER, "principal_not_listed", at_seq=row["seq"])
+        if row["db_session_principal"] not in config["writer_db_session_principals"]:
+            return refusal(REASON_UNKNOWN_WRITER, "db_session_principal_not_listed",
+                           at_seq=row["seq"])
 
     # ---- how old it is, on the server's clock ---------------------------------
     latest_time = previous_time
@@ -238,9 +295,11 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
         "available": True,
         "reason": REASON_ATTESTED,
         "item_disposition": DISPOSITION_ATTESTED,
-        "claim": (f"recorded by {latest['principal']} at {latest['recorded_at']} through the "
-                  "one write door and unedited since; the scheduler observations and "
-                  "acceptance rows inside it are not proven true"),
+        "claim": (f"recorded under principal {latest['principal']} at server time "
+                  f"{latest['recorded_at']}; chain intact as served and matches the external "
+                  "anchor; not proof that the scheduled writer job wrote it, not proof that "
+                  "the observations inside it are true, and not proof against a coordinated "
+                  "database-owner plus anchor rewrite"),
         "attestation": {
             "principal": latest["principal"],
             "db_session_principal": latest["db_session_principal"],
@@ -249,6 +308,7 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
             "row_hash": latest["row_hash"],
             "payload_sha256": latest["payload_sha256"],
             "server_now": answer["server_now"],
+            "anchored_at": anchor.get("anchored_at"),
             "age_seconds": age,
             "freshness_window_seconds": window,
         },

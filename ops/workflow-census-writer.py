@@ -11,8 +11,9 @@ WHAT IT DOES, in order, once per run:
      over those rows plus the checked-in workflow manifest.
   3. Records the result through ``./run.sh call record-workflow-census`` -- the
      one write door, reached through the deployed Worker, which stamps the
-     principal and the server time and extends the database hash chain
-     (migration 0595).  This script supplies neither.
+     principal and the server time, extends the database hash chain
+     (migration 0595) and then advances the external anchor to the new head.
+     This script supplies neither the principal nor the time.
 
 WHAT IT DOES NOT CLAIM.  The Completion Register (ops.completion_projection)
 needs a server-derived tenant this tap does not carry, so completion is passed
@@ -132,8 +133,26 @@ def build_census(rows: dict, *, now: datetime) -> dict:
 
 
 def record_census(census: dict) -> dict:
-    """Append through the one write door.  The child carries no DATABASE_URL."""
+    """Append through the one write door, and see the external anchor advanced.
+
+    The Worker advances the census anchor (a Durable Object outside the
+    database) after the row commits.  If that advance fails the verb says
+    ``workflow_census_anchor_not_advanced`` with the row already committed; the
+    SAME idempotency key is sent once more, which replays the row and
+    re-advances the anchor.  A second failure exits non-zero, so the run is
+    recorded as failed and the reader shows the mismatch until the next run.
+    """
     args = {"idempotency_key": f"workflow-census-writer:{uuid.uuid4()}", "census": census}
+    try:
+        return _record_once(args)
+    except WriterRefusal as refusal:
+        if "workflow_census_anchor_not_advanced" not in str(refusal):
+            raise
+    return _record_once(args)
+
+
+def _record_once(args: dict) -> dict:
+    """One call of the write door.  The child carries no DATABASE_URL."""
     child_env = {"HOME": os.environ.get("HOME", ""), "PATH": os.environ.get("PATH", ""),
                  "LANG": os.environ.get("LANG", "C")}
     try:
@@ -151,6 +170,8 @@ def record_census(census: dict) -> dict:
         raise WriterRefusal("write_door_answer_unparseable") from None
     if not isinstance(answer, dict) or answer.get("ok") is not True or not answer.get("row_hash"):
         raise WriterRefusal(f"write_door_refused: {json.dumps(answer)[:300]}")
+    if answer.get("anchor") not in ("advanced", "replayed"):
+        raise WriterRefusal(f"anchor_unconfirmed: {json.dumps(answer.get('anchor'))[:100]}")
     return answer
 
 

@@ -20,27 +20,38 @@ read-workflow-census``, the same credential-less door every script on this Mac
 uses) and recomputes every hash itself in ``lib/workflow_census_attestation``.
 
 WHEN IT ANSWERS ``available: true``, and only then, all of these hold:
+  * the store's three guard triggers are ENABLE ALWAYS, as the server reports;
   * the chain verifies from row 1 to the latest row (seq, prev_hash, row_hash,
     the latest payload's digest, non-decreasing server times);
-  * the latest row's principal AND its database session role are on the writer
-    lists in ``ops/config/workflow-census-attestation.v1.json`` -- config-as-code,
-    never the caller and never the server;
+  * the chain's head equals the head the Worker recorded in the external anchor
+    (a Durable Object outside the database) when it committed that row;
+  * EVERY row's principal AND database session role are on the writer lists in
+    ``ops/config/workflow-census-attestation.v1.json`` -- config-as-code, never
+    the caller and never the server;
   * the latest row is younger than that file's freshness window, measured on the
-    SERVER's clock from the same answer.
-Otherwise it fails closed: ``handle_integrity_unprovable`` (today's reason: no
-answer, a malformed answer, an empty or truncated chain, missing config),
+    DATABASE's clock (``server_now`` from the same answer), never this Mac's.
+Otherwise it fails closed: ``handle_integrity_unprovable`` (no answer, a
+malformed answer, an empty or truncated chain, an unreachable anchor, missing
+config), ``tampered`` (guards not enforced, or chain and anchor disagree),
 ``chain_break``, ``unknown_writer`` or ``stale``, always with disposition
 ``not_proven`` and a short ``detail``.  Unprovable never reads as proven.
 
 WHAT ``available: true`` CLAIMS, AND THE LABELS ARE CHOSEN SO IT CANNOT SAY
 MORE.  Reason ``census_attested``, disposition ``attested_record_only``, and a
-``claim`` sentence: recorded by <principal> at <server time> through the one
-write door and unedited since; the scheduler observations and acceptance rows
-inside it are not proven true.  The chain is unkeyed and the writer token is
-shared by every session on the writer's Mac, so this is an attestation of the
-RECORD, not of the world -- Jev scored soundness against in-process forgery at
-0.64 for exactly that reason.  The A01 label route
+``claim`` sentence: recorded under principal <X> at server time <T>; chain
+intact as served and matches the external anchor; not proof that the scheduled
+writer job wrote it (the principal is a bearer token's actor, and the local
+token on the writer's Mac is readable by anything running as that user), not
+proof that the observations inside it are true, and not proof against a
+coordinated database-owner plus anchor rewrite.  The A01 label route
 (``lib/assurance_health_sources``) still derives no health label from it.
+
+ONE RE-READ, FOR ONE RACE.  The read verb reads the anchor before the chain, so
+a census write that commits between the two leaves the chain one row ahead of
+the anchor it was served beside.  On exactly that detail
+(``anchor_behind_chain``) the route pauses and asks once more; a real rewrite
+does not go away on a second read, so the re-read cannot turn tampering into
+an attestation.
 
 THE THREAT THIS DOES NOT CLOSE, NAMED.  A caller that rewrites this process's
 code (rebinding ``subprocess.run``, or the verifier) can still forge what this
@@ -55,9 +66,11 @@ unavailable answer, so it opens nothing.
 """
 from __future__ import annotations
 
+import functools as _functools
 import json as _json
 import os as _os
 import subprocess as _subprocess
+import time as _time
 from pathlib import Path as _Path
 from types import MappingProxyType as _MappingProxyType
 from typing import Any as _Any, Callable as _Callable, Mapping as _Mapping
@@ -115,8 +128,18 @@ def _server_census_answer(max_rows: int) -> tuple[_Any, str | None]:
         return None, "server_answer_unparseable"
 
 
+def _one_verdict(transport: _Callable[[int], tuple[_Any, str | None]],
+                 config: _Mapping[str, _Any]) -> dict[str, _Any]:
+    answer, failure = transport(config["max_chain_rows"])
+    if failure is not None:
+        return _attestation.refusal(_attestation.REASON_UNPROVABLE, failure)
+    return _attestation.verify_census_chain(answer, config)
+
+
 def _census_answer(transport: _Callable[[int], tuple[_Any, str | None]],
-                   config_source: _Callable[[], _Mapping[str, _Any]]) -> _Mapping[str, _Any]:
+                   config_source: _Callable[[], _Mapping[str, _Any]],
+                   pause: _Callable[[], None] = _functools.partial(_time.sleep, 2.0),
+                   ) -> _Mapping[str, _Any]:
     """One answer from one transport and one config.  Never raises."""
     try:
         try:
@@ -125,11 +148,10 @@ def _census_answer(transport: _Callable[[int], tuple[_Any, str | None]],
             verdict = _attestation.refusal(_attestation.REASON_UNPROVABLE,
                                            "attestation_config_unavailable")
         else:
-            answer, failure = transport(config["max_chain_rows"])
-            if failure is not None:
-                verdict = _attestation.refusal(_attestation.REASON_UNPROVABLE, failure)
-            else:
-                verdict = _attestation.verify_census_chain(answer, config)
+            verdict = _one_verdict(transport, config)
+            if verdict.get("detail") == "anchor_behind_chain":
+                pause()
+                verdict = _one_verdict(transport, config)
     except Exception:
         verdict = _attestation.refusal(_attestation.REASON_UNPROVABLE, "route_fault")
     return _freeze({"schema_version": SCHEMA_VERSION, **verdict})

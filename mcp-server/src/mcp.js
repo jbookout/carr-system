@@ -25,6 +25,7 @@ import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
+import { anchorCommittedCensusWrite, readWorkflowCensusAnchor } from "./workflow-census-anchor.js";
 import { parksADecision, classifyLoopText, needsDecider, loopRowText,
          ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
@@ -859,6 +860,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
             return run;
           }
         : null,
+      // The V5-F09 census read returns the external anchor beside the chain;
+      // attached for that verb only, and read-only (GET of the stored head).
+      workflowCensusAnchor: name === "read-workflow-census"
+        ? () => readWorkflowCensusAnchor(env) : undefined,
     };
     // Record AFTER the response is ready, via ctx.waitUntil, so recording never
     // adds latency to the read the caller is waiting on. ok/errorKind are
@@ -922,6 +927,13 @@ export async function callTool(env, actor, name, args, profile = "full") {
       tool.authorityOnly ? "carr_authority" : "carr_writer",
       fullActor => executeRegisteredTool(client, fullActor, name, args || {}));
     await client.query("commit");
+    // V5-F09 CENSUS ANCHOR, AFTER COMMIT (workflow-census-anchor.js). The
+    // committed head goes to the Durable Object outside the database, so a
+    // later wholesale rewrite of the table no longer matches it. A failed
+    // advance is reported by name: the row is committed, and re-sending the
+    // same idempotency_key replays it and re-advances the anchor.
+    if (name === "record-workflow-census")
+      return await anchorCommittedCensusWrite(env, result, payload => new ToolError(payload));
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});

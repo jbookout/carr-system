@@ -355,11 +355,12 @@ def workflow_truth_checks(manifest) -> None:
 _HEALTH_PROBE = r"""
 import json, runpy, subprocess, sys
 
-REPO, fixture, tap = sys.argv[1], sys.argv[2], sys.argv[3]
+REPO, fixture, tap, census = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 sys.path.insert(0, REPO)
 sys.path.insert(0, REPO + "/tools")
 
 ROWS = None if tap == "-" else tap
+CENSUS = None if census == "-" else census
 
 
 class _Refused:
@@ -377,6 +378,9 @@ def _run(*args, **kwargs):
     statement = kwargs.get("input") or ""
     if ROWS is not None and "acceptance_rows" in statement:
         return _Answered(ROWS + "\n")
+    argv = args[0] if args else kwargs.get("args")
+    if CENSUS is not None and isinstance(argv, list) and "read-workflow-census" in argv:
+        return _Answered(CENSUS)
     return _Refused()
 
 
@@ -391,7 +395,8 @@ print("PROBE_EXIT=%d" % code)
 """
 
 
-def _health_surface(fixture: dict, *, tap_rows: dict | None = None) -> tuple[int, str]:
+def _health_surface(fixture: dict, *, tap_rows: dict | None = None,
+                    census_answer: dict | None = None) -> tuple[int, str]:
     """Run the real health surface hermetically; return (exit code, output)."""
     with tempfile.TemporaryDirectory(prefix="workflow-truth-health-") as td:
         fixture_path = Path(td) / "fixture.json"
@@ -400,8 +405,10 @@ def _health_surface(fixture: dict, *, tap_rows: dict | None = None) -> tuple[int
         probe_path.write_text(_HEALTH_PROBE, encoding="utf-8")
         proc = subprocess.run(
             [sys.executable, str(probe_path), str(REPO), str(fixture_path),
-             "-" if tap_rows is None else json.dumps(tap_rows)],
-            cwd=REPO, text=True, capture_output=True, timeout=120)
+             "-" if tap_rows is None else json.dumps(tap_rows),
+             "-" if census_answer is None else json.dumps(census_answer)],
+            cwd=REPO, text=True, capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_WORKFLOW_CENSUS_OFFLINE"})
     out = proc.stdout + proc.stderr
     code = 0
     for line in out.splitlines():
@@ -453,6 +460,38 @@ def health_truth_checks(live) -> None:
                       ("evidence-backed operational", "false-operational",
                        "evidence-run eligible only")),
           out)
+
+    # ---- a TAMPERED census store is the one census finding, and it is red -----
+    from lib import workflow_census_attestation as census_att
+    guards = {name: "A" for name in census_att.GUARD_TRIGGERS}
+    payload = {"schema_version": "control-plane-workflow-truth.v1", "rows": [], "summary": {}}
+    head = {"seq": 1, "recorded_at": "2026-09-24T04:10:00.000000Z", "principal": "joe-local",
+            "db_session_principal": "carr_writer", "prev_hash": None,
+            "payload_sha256": census_att.sha256_hex(census_att.canonical_json(payload))}
+    head["row_hash"] = census_att.row_hash(head)
+    served: dict = {"ok": True, "schema_version": "workflow-census-chain.v1",
+              "server_now": "2026-09-24T05:10:00.000000Z", "row_count": 1, "truncated": False,
+              "chain": [head], "latest_payload": payload, "guards": guards,
+              "anchor": {"state": "present", "seq": 1, "row_hash": head["row_hash"],
+                         "anchored_at": "2026-09-24T04:10:00.100Z"}}
+    code, out = _health_surface(_carried(live), census_answer=served)
+    check("control: a genuine, anchored census prints ATTESTED and raises no finding",
+          code == 0 and "workflow census   ATTESTED" in out and "CANONICAL_FINDING" not in out, out)
+    code, out = _health_surface(
+        _carried(live), census_answer={**served, "guards": {**guards,
+                                       "workflow_census_record_chain_guard": "O"}})
+    check("a census store guard that is not ENABLE ALWAYS is a red health finding",
+          code == 1 and "CANONICAL_FINDING workflow_census_guards" in out
+          and "workflow_census_record_chain_guard" in out, out)
+    code, out = _health_surface(
+        _carried(live), census_answer={**served, "anchor": {**served["anchor"], "row_hash": "f" * 64}})
+    check("a census chain that no longer matches its external anchor is a red health finding",
+          code == 1 and "CANONICAL_FINDING workflow_census_anchor" in out
+          and "anchor_hash_mismatch" in out, out)
+    code, out = _health_surface(
+        _carried(live), census_answer={**served, "anchor": {"state": "unavailable"}})
+    check("an unreachable anchor is unavailable, not a finding",
+          code == 0 and "anchor_unavailable" in out and "CANONICAL_FINDING" not in out, out)
 
     # ---- the distinction that section used to print, where it is decided -----
     eligible = [row for row in live["rows"]

@@ -5,7 +5,8 @@
 // TWO VERBS, ONE STORE (migrations/0595_workflow_census_store.sql):
 //   record-workflow-census  write: append one census snapshot to the chain
 //   read-workflow-census    read:  the chain's metadata, the latest payload,
-//                                  and the server clock
+//                                  the server clock, the guards' enabled
+//                                  state, and the external anchor's head
 //
 // WHAT THE CALLER CANNOT SUPPLY. Neither the principal nor the time. The
 // write door reads the principal from carr.acting_actor_slug, which mcp.js
@@ -15,6 +16,12 @@
 // This module passes the census and an idempotency key, nothing else. The
 // break-glass door (local-verb.mjs) never sets the actor setting, so a
 // break-glass call reaches the door and is refused there by name.
+//
+// THE EXTERNAL ANCHOR (workflow-census-anchor.js). mcp.js advances it after
+// the write commits; the read handler reads it BEFORE the chain, through
+// c.workflowCensusAnchor, which mcp.js attaches for this verb only. A path
+// that attaches nothing (break-glass, a test double) answers
+// {state: "unavailable"}, and the reader fails closed on that.
 //
 // WHAT THE READ VERB DOES NOT DO. It does not say the chain is sound. The
 // reader recomputes every hash itself and applies the writer allowlist and the
@@ -48,6 +55,8 @@ const DOOR_REFUSALS = Object.freeze([
   "workflow_census_key_reuse",
   "workflow_census_time_regression_refused",
   "workflow_census_chain_splice_refused",
+  "workflow_census_principal_forged",
+  "workflow_census_session_principal_forged",
   "idempotency_key_required",
 ]);
 
@@ -112,7 +121,7 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
 
     "read-workflow-census": {
       write: false,
-      description: "Read the V5-F09 workflow census chain: every row's seq, recorded_at, principal, db_session_principal, prev_hash, payload_sha256 and row_hash (oldest first, bounded by max_rows with truncated set when longer), the latest census payload, and the server clock (server_now). Verifies nothing itself: a consumer recomputes the chain and applies its own writer allowlist and freshness window.",
+      description: "Read the V5-F09 workflow census chain: every row's seq, recorded_at, principal, db_session_principal, prev_hash, payload_sha256 and row_hash (oldest first, bounded by max_rows with truncated set when longer), the latest census payload, the server clock (server_now), each store trigger's enabled state (guards), and the head recorded by the external anchor outside the database (anchor). Verifies nothing itself: a consumer recomputes the chain, compares its head with the anchor, and applies its own writer allowlist and freshness window.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -125,9 +134,16 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
         if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > READ_MAX_ROWS_LIMIT)
           throw new ToolError({ error: "workflow_census_max_rows_invalid",
             hint: `max_rows must be an integer 1..${READ_MAX_ROWS_LIMIT}` });
+        // Anchor FIRST, chain second: a write that commits in between leaves the
+        // chain ahead of the anchor, which the reader refuses and re-reads,
+        // rather than an anchor ahead of the chain it was read beside.
+        const anchor = typeof c.workflowCensusAnchor === "function"
+          ? await c.workflowCensusAnchor()
+          : { state: "unavailable", detail: "anchor_not_bound" };
         const row = (await c.query("select ops.read_workflow_census($1) as result", [maxRows])).rows[0];
         const result = typeof row?.result === "string" ? JSON.parse(row.result) : row?.result;
-        if (!isPlainObject(result) || !Array.isArray(result.chain) || typeof result.server_now !== "string")
+        if (!isPlainObject(result) || !Array.isArray(result.chain) || typeof result.server_now !== "string"
+            || !isPlainObject(result.guards))
           throw new ToolError({ error: "workflow_census_unavailable" });
         return {
           ok: true,
@@ -137,6 +153,8 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
           truncated: result.truncated === true,
           chain: result.chain,
           latest_payload: result.latest_payload ?? null,
+          guards: result.guards,
+          anchor: isPlainObject(anchor) ? anchor : { state: "unavailable", detail: "anchor_state_invalid" },
         };
       },
     },

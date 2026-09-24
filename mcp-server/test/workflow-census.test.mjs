@@ -57,6 +57,8 @@ class CensusFake {
         chain: this.rows.map(({ payload, key, replayed, ...rest }) => ({ ...rest, seq: Number(rest.seq),
           db_session_principal: "carr_writer" })),
         latest_payload: this.rows.at(-1)?.payload ?? null,
+        guards: { workflow_census_record_append_only: "A", workflow_census_record_chain_guard: "A",
+          workflow_census_record_no_truncate: "A" },
       } }] };
     }
     throw new Error(`CensusFake: unhandled query: ${sql}`);
@@ -122,6 +124,9 @@ test("read-workflow-census returns the chain as served, bounded by max_rows", as
   assert.deepEqual(out.latest_payload, CENSUS);
   const read = c.calls.find(call => call.sql.startsWith("select ops.read_workflow_census"));
   assert.deepEqual(read.params, [20000]);
+  assert.equal(out.guards.workflow_census_record_chain_guard, "A");
+  assert.deepEqual(out.anchor, { state: "unavailable", detail: "anchor_not_bound" },
+    "a client with no anchor attached answers unavailable, which the reader refuses");
   const bad = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", { max_rows: 0 }));
   assert.equal(bad.error, "workflow_census_max_rows_invalid");
   assert.equal(c.calls.filter(call => call.sql.startsWith("select ops.read_workflow_census")).length, 1,
@@ -130,6 +135,32 @@ test("read-workflow-census returns the chain as served, bounded by max_rows", as
 
 test("read-workflow-census refuses a malformed store answer instead of passing it on", async () => {
   const c = new CensusFake({ readResult: { chain: "not-a-list" } });
+  const payload = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", {}));
+  assert.equal(payload.error, "workflow_census_unavailable");
+});
+
+test("read-workflow-census reads the anchor before the chain and returns it as served", async () => {
+  const c = new CensusFake();
+  await executeRegisteredTool(c, AGENT, "record-workflow-census", { idempotency_key: "k-x", census: structuredClone(CENSUS) });
+  const order = [];
+  const inner = c.query.bind(c);
+  c.query = async (text, params) => {
+    if (text.includes("read_workflow_census")) order.push("chain");
+    return inner(text, params);
+  };
+  c.workflowCensusAnchor = async () => {
+    order.push("anchor");
+    return { state: "present", seq: 1, row_hash: "1".repeat(64), anchored_at: "2026-09-24T09:10:01.000Z" };
+  };
+  const out = await executeRegisteredTool(c, AGENT, "read-workflow-census", {});
+  assert.deepEqual(order, ["anchor", "chain"]);
+  assert.deepEqual(out.anchor, { state: "present", seq: 1, row_hash: "1".repeat(64),
+    anchored_at: "2026-09-24T09:10:01.000Z" });
+});
+
+test("read-workflow-census refuses a store answer with no guard report", async () => {
+  const c = new CensusFake({ readResult: { schema_version: "workflow-census-chain.v1",
+    server_now: "2026-09-24T10:00:00.000000Z", row_count: 0, truncated: false, chain: [], latest_payload: null } });
   const payload = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", {}));
   assert.equal(payload.error, "workflow_census_unavailable");
 });

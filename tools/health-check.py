@@ -284,8 +284,16 @@ def _canonical_workflow_truth():
     and that route still derives none.
 
     WHAT IT SAYS OTHERWISE.  One UNAVAILABLE line with the reason
-    (handle_integrity_unprovable, chain_break, unknown_writer or stale), its
-    short detail, and the not_proven disposition.
+    (handle_integrity_unprovable, tampered, chain_break, unknown_writer or stale),
+    its short detail, and the not_proven disposition.
+
+    THE ONE CASE THAT IS A FINDING, AND TURNS HEALTH RED.  ``tampered``: the
+    store's guard triggers are not ENABLE ALWAYS (someone disabled them, or
+    re-enabled them as ordinary triggers), or the chain's head does not match the
+    external anchor the Worker recorded at commit.  Either is a fault in the
+    store, not a standing fact about the repository, so it prints a
+    CANONICAL_FINDING naming the guards or the two heads and returns True.
+    Every other reason stays a plain UNAVAILABLE line.
     """
     print("Workflow truth — census route: server-attested store, chain recomputed on this side")
     try:
@@ -295,7 +303,7 @@ def _canonical_workflow_truth():
         # Deliberately no exception text: this line is swept for privileged words
         # by ops/assurance-health-selftest.py, and a traceback is caller content.
         print("  -- workflow census   UNAVAILABLE — the census route module is absent")
-        return
+        return False
     census = workflow_truth_census()
     if census["available"] is True:
         facts = census["attestation"]
@@ -303,9 +311,20 @@ def _canonical_workflow_truth():
         print(f"  -- chain seq {facts['seq']}; age {facts['age_seconds']}s of a "
               f"{facts['freshness_window_seconds']}s window; "
               f"{len(census['census']['rows'])} workflow row(s) recorded")
-        return
+        return False
     print(f"  -- workflow census   UNAVAILABLE — {census['reason']} ({census['detail']}); "
           f"item carried as {census['item_disposition']}")
+    if census["reason"] != "tampered":
+        return False
+    if census["detail"] == "guard_not_enforced":
+        _canonical_finding("workflow_census_guards",
+                           "store trigger(s) not ENABLE ALWAYS: "
+                           + ", ".join(census.get("guards") or ()))
+    else:
+        _canonical_finding("workflow_census_anchor",
+                           f"{census['detail']}: chain head seq {census.get('chain_seq')}, "
+                           f"external anchor seq {census.get('anchored_seq')}")
+    return True
 
 
 def _canonical_assurance_health():
@@ -1110,10 +1129,11 @@ def _canonical_health():
             else:
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
-        # NEITHER OF THE TWO CENSUS SECTIONS CAN TURN THIS PROCESS RED, and
-        # neither returns a code: both report that their route cannot be proven,
-        # which is a standing fact about this repository rather than a fault of
-        # today's run. The fixture door is the one caller-fed path and it is
+        # THE CENSUS SECTIONS DO NOT TURN THIS PROCESS RED FOR "CANNOT BE PROVEN",
+        # which is a standing fact rather than a fault of today's run. The one
+        # exception is a TAMPERED census store (guards off, or chain and external
+        # anchor disagree): _canonical_workflow_truth prints that as a finding and
+        # returns True, and that alone sets rc. The fixture door is the one caller-fed path and it is
         # labelled as a test door.
         #
         # THE ALARM BELOW IS THE EXCEPTION AND IT IS NOT FED BY ANY OF THAT. It
@@ -1122,7 +1142,8 @@ def _canonical_health():
         # condition on this slice that still turns health red. It runs on the
         # fixture path too, because a caller must not be able to quiet it by
         # choosing a door.
-        _canonical_workflow_truth()
+        if _canonical_workflow_truth():
+            rc = 1
         if _canonical_contradiction_alarm():
             rc = 1
         if CANONICAL_FIXTURE:
