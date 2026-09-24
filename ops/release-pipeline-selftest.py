@@ -384,6 +384,101 @@ class StopOnFailure(Base):
         self.assertEqual(self.fx.records()[-1]["step"], "verify-live")
 
 
+STANDING = ("  CANONICAL_FINDING export_receipt — LATEST FAILED vendors.xlsx (latest status failed)\n"
+            "  CANONICAL_FINDING rule_enforcement — 98 active rule gaps\n")
+
+
+class HealthRunner(FakeRunner):
+    """./run.sh health answers per run: `baseline` then `after`, each (rc, out)."""
+
+    def __init__(self, baseline, after, **kw):
+        super().__init__(**kw)
+        self.health = {"health-baseline": baseline, "health": after}
+
+    def run(self, argv, *, cwd, log, env, timeout=3600):
+        res = super().run(argv, cwd=cwd, log=log, env=env, timeout=timeout)
+        name = self.calls[-1][0]
+        return rp.Result(*self.health[name]) if name in self.health else res
+
+
+class HealthDiff(Base):
+    """09fc3cf775bd (2026-09-24): promotion and the /release readback passed,
+    then `./run.sh health` exited 1 on machine-wide findings no release causes."""
+
+    def tick(self, runner, verbs=None, **commit):
+        self.fx.commit(commit or {"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner.live = live
+        pipe = self.fx.pipeline(runner, live=live, verbs=verbs)
+        real_git = pipe.git
+        # the fake release worktree does not exist: its snapshot is unchanged
+        pipe.git = lambda *a, cwd=None: "" if a[:2] == ("status", "--porcelain") else real_git(*a, cwd=cwd)
+        return pipe.tick(["worker"])
+
+    def test_standing_findings_do_not_fail_a_release(self):
+        runner = HealthRunner((1, STANDING), (1, STANDING))
+        self.assertEqual(self.tick(runner), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+        names = runner.names()
+        self.assertLess(names.index("health-baseline"), names.index("staging-prepare"))
+        self.assertEqual(names[-1], "health")
+
+    def test_a_finding_the_release_added_fails_it(self):
+        added = "  CANONICAL_FINDING job_stuck — calendar-fetch-daily running 3h\n"
+        verbs: list = []
+        runner = HealthRunner((1, STANDING), (1, STANDING + added), pending=2)
+        self.assertEqual(self.tick(runner, verbs, **{"migrations/0600_x.sql": "select 1;"}), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"]), ("failed", "health"))
+        self.assertIn("job_stuck — calendar-fetch-daily running 3h", rec["detail"])
+        self.assertNotIn("vendors.xlsx", rec["detail"])
+        # migrations applied, but the Worker carrying them was proven live first
+        self.assertIn("migrate-apply", runner.names())
+        self.assertIs(rec["db_ahead_of_worker"], False)
+        self.assertNotIn("db_ahead_of_worker: true", verbs[0][1]["body"])
+
+    def test_health_that_breaks_without_a_finding_fails(self):
+        runner = HealthRunner((1, STANDING), (1, "Traceback (most recent call last):\n"))
+        self.assertEqual(self.tick(runner), 1)
+        self.assertEqual(self.fx.records()[-1]["step"], "health")
+
+    def test_unreadable_baseline_falls_back_to_the_exit_code(self):
+        self.assertEqual(self.tick(HealthRunner((2, "boom"), (1, STANDING))), 1)
+        self.assertEqual(self.fx.records()[-1]["step"], "health")
+
+    def test_unreadable_baseline_and_clean_health_ships(self):
+        self.assertEqual(self.tick(HealthRunner((2, "boom"), (0, ""))), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+    def test_schema_snapshot_pr_opens_before_health_and_is_restored(self):
+        runner = HealthRunner((0, ""), (1, "Traceback\n"), pending=1)
+        order: list[str] = []
+        self.fx.commit({"migrations/0600_x.sql": "select 1;"})
+        live = {"sha": self.fx.base}
+        runner.live = live
+        pipe = self.fx.pipeline(runner, live=live)
+        real_git = pipe.git
+
+        def git(*args, cwd=None):
+            if args[:2] == ("status", "--porcelain"):
+                return " M db/schema.sql"
+            if args[0] == "checkout":
+                order.append("restore")
+                return ""
+            return real_git(*args, cwd=cwd)
+        pipe.git = git  # type: ignore[method-assign]
+        pipe.schema_followup = lambda wt, sha: order.append("schema-pr") or "https://x/pull/1"
+        orig_run = runner.run
+
+        def run(argv, **kw):
+            if argv == ["./run.sh", "health"] and kw["log"].stem.endswith("-health"):
+                order.append("health")
+            return orig_run(argv, **kw)
+        runner.run = run  # type: ignore[method-assign]
+        self.assertEqual(pipe.tick(["worker"]), 1)
+        self.assertEqual(order, ["schema-pr", "restore", "health"])
+
+
 class StagingGuard(Base):
     def test_failed_staging_never_promotes(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})

@@ -29,15 +29,29 @@ TWO LANES, one tick:
           (mcp-server/, migrations/, dealroom/, the DoctorCRE artifact pin), less
           test-only and doc-only files. Sequence, all non-interactive (stdin is
           /dev/null for every child):
-            1 release worktree at S (+ .venv link, npm ci in mcp-server)
+            1 release worktree at S (+ .venv link, npm ci in mcp-server),
+              then a ./run.sh health BASELINE there
             2 tools/staging-project-replacement.py prepare --apply --local-checks-green
             3 tools/provision-staging-app-writer.py --apply
             4 bin/migrate-prod.sh (dry) and, only when it lists pending, --apply
             5 bin/deploy-worker.sh --upload-version  (verifier bound HERE)
             6 bin/deploy-worker.sh --env staging --recovery-step forward_fix
             7 bin/deploy-worker.sh --promote-version <id from step 5>
-            8 live /release reads back S, ./run.sh health
+            8 live /release reads back S
             9 a db/schema.sql follow-up PR when step 4 applied anything
+           10 ./run.sh health again; only a finding the baseline lacked fails
+
+HEALTH IS A DIFF, NOT AN EXIT CODE. ./run.sh health exits 1 on ANY canonical
+finding on this machine: a failed export receipt, a missed calendar fetch, rule
+gaps, a credential due for rotation. None of those is caused or cured by a
+Worker release, so gating on its exit code failed every release (09fc3cf775bd,
+2026-09-24, after promotion had already succeeded). The release-scoped checks
+are promotion's own golden suite, smoke and performance gate plus the /release
+readback; health then asks only "did this release ADD a finding?". A health run
+that fails without printing any finding is the check itself breaking, and fails.
+If the baseline itself could not be read, any nonzero exit after release fails.
+The snapshot PR runs BEFORE the second health run so a health failure can no
+longer strand production's db/schema.sql off main.
   app     the DoctorCRE app (its own repository). Released when its origin/main
           moves by anything other than docs/tests: `npm ci` and
           `npm run release:production` from a clean detached origin/main
@@ -63,8 +77,9 @@ one credential that FAILS rather than holds: a missing tokens.env or key, or a
 token wrangler rejects, stops the lane at step `credential-missing` and
 dispatches, instead of wrangler falling back to its interactive OAuth login. An unexpected error before
 any step ran is recorded and dispatched without burning the SHA; after a step
-ran it is a failure like any other. A failure after migrate-apply records
-db_ahead_of_worker: true and says so to the fix session. A missing credential or capability files one
+ran it is a failure like any other. A failure after migrate-apply and before
+the /release readback proves the new Worker live records db_ahead_of_worker:
+true and says so to the fix session. A missing credential or capability files one
 CARR loop naming it exactly (once per name), because no retry can supply it.
 
 REVIEW EVIDENCE. Both repositories are public, so any comment is untrusted until
@@ -646,6 +661,20 @@ class Pipeline:
         res.log = str(log)
         return res
 
+    def health(self, name: str, wt: Path) -> tuple[int, str, set[str] | None]:
+        """One `./run.sh health` in the release worktree, where a nonzero exit
+        is normal (see HEALTH IS A DIFF). Returns (rc, log, findings); findings
+        is None when it exited nonzero without printing any finding."""
+        if self.dry_run:
+            self.out(f"  [dry-run] (cd {wt}) ./run.sh health  ({name})")
+            return 0, "", set()
+        log = self.run_dir / f"{len(self.executed) + 1:02d}-{name}.log"
+        self.out(f"  -> {name}: ./run.sh health")
+        self.executed.append(name)
+        res = self.runner.run(["./run.sh", "health"], cwd=wt, log=log, env=self.env, timeout=900)
+        found = health_findings(res.out)
+        return res.rc, str(log), (None if res.rc != 0 and not found else found)
+
     # -- evidence -----------------------------------------------------------
     def batch_commits(self, repo_dir: Path, base: str, sha: str) -> list[str]:
         return self.git("rev-list", "--first-parent", f"{base}..{sha}", cwd=repo_dir).split()
@@ -1102,6 +1131,7 @@ class Pipeline:
         self.add_worktree("worktree", self.repo, wt, sha)
         self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
         self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
+        _, _, health_before = self.health("health-baseline", wt)
 
         # 2-3. staging replacement and app writer
         op = str(uuid.uuid4())
@@ -1157,15 +1187,29 @@ class Pipeline:
             live = self.http(lane_cfg["live_release_url"])
             if (live.get("git_sha") or {}).get("value") != sha:
                 raise StepFailed("verify-live", 1, "", "production /release does not serve the released SHA")
-        self.step("health", ["./run.sh", "health"], wt, timeout=900)
+            self.db_ahead_of_worker = False   # the Worker that ships these migrations is live
 
-        # 9. the schema snapshot goes back to main through its own PR
+        # 9. the schema snapshot goes back to main through its own PR, before
+        # health, so a health failure cannot strand it
         schema_pr = None
         if self.dry_run:
             self.out("  [dry-run] when migrate-apply ran and db/schema.sql changed: branch from origin/main, "
                      "commit db/schema.sql, push, gh pr create (the merge pipeline merges it)")
         elif pending and self.git("status", "--porcelain", "db/schema.sql", cwd=wt):
             schema_pr = self.schema_followup(wt, sha)
+            # the PR carries it now; left modified here it is a loose-work
+            # finding the baseline lacked
+            self.git("checkout", "--", "db/schema.sql", cwd=wt)
+
+        # 10. health: only a finding the baseline lacked fails the release
+        rc, log, health_after = self.health("health", wt)
+        if health_after is None:
+            raise StepFailed("health", rc, log, "health exited nonzero without printing a finding")
+        added = sorted(health_after - health_before) if health_before is not None else (
+            sorted(health_after) if rc else [])
+        if added:
+            raise StepFailed("health", rc or 1, log,
+                             f"{len(added)} finding(s) the baseline lacked: " + "; ".join(added)[:600])
         if not self.dry_run:
             self.remove_worktrees()
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
@@ -1249,6 +1293,14 @@ def parse_json_field(text: str, field: str, step: str) -> str:
             if isinstance(obj, dict) and isinstance(obj.get(field), str):
                 return obj[field]
     raise StepFailed(step, 1, "", f"no {field} in output")
+
+
+FINDING_RE = re.compile(r"^\s*CANONICAL_FINDING\s+(\S.*?)\s*$", re.M)
+
+
+def health_findings(text: str) -> set[str]:
+    """The `CANONICAL_FINDING <key> — <detail>` lines tools/health-check.py prints."""
+    return {m.group(1) for m in FINDING_RE.finditer(text or "")}
 
 
 def parse_provider_version(res: Result) -> str:
