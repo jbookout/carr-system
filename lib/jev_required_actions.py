@@ -495,8 +495,20 @@ def refusal_reason_is_real(residual):
     return normalized not in REFUSAL_REASON_STOPLIST
 
 
+# A refusal reason that claims Jev could not be reached (bypass hunt, PR #1224).
+# Such a refusal is FALSE when the same turn shows Jev answering, so it does not
+# satisfy the facet then; see evaluate_required_actions.
+OUTAGE_REASON_RE = re.compile(r"\b(unreachable|unavailable|down|402)\b", re.I)
+
+
 def refused_facets_in_texts(texts):
-    """Lower-cased facet names named by a real `JEV-REFUSED: ...` line:
+    """The set of facets named by a real refusal (see refusals_in_texts)."""
+    return set(refusals_in_texts(texts))
+
+
+def refusals_in_texts(texts):
+    """{facet: [reason, ...]} for every facet (lower-cased) named by a real
+    `JEV-REFUSED: ...` line:
     outside a fenced/inline-code/quoted span, on a non-blockquoted line, with
     a non-trivial reason remaining after every facet-name token on that line
     is accounted for.
@@ -511,7 +523,7 @@ def refused_facets_in_texts(texts):
     issuing it) never counts, even though _strip_noise's fence/inline-
     code/dquote stripping does not itself catch a blockquote.
     """
-    out = set()
+    out = {}
     for value in texts or ():
         cleaned = _strip_noise(value)
         for line in cleaned.splitlines():
@@ -531,7 +543,9 @@ def refused_facets_in_texts(texts):
             residual = re.sub(r"\b(and|or)\b", " ", residual, flags=re.I)
             if not refusal_reason_is_real(residual):
                 continue
-            out.update(facets_here)
+            reason = " ".join(residual.split())
+            for facet in facets_here:
+                out.setdefault(facet, []).append(reason)
     return out
 
 
@@ -737,6 +751,29 @@ def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=No
     return covered
 
 
+def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None):
+    """Every successful (ok true) receipt bound to this session and this turn's
+    window, whatever facets it names: evidence that Jev answered this turn."""
+    if boundary_ts is None or not session_id:
+        return []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
+    rows = []
+    for row in call_rows:
+        if row.get("session") != session_id and row.get("session_id") != session_id:
+            continue
+        if row.get("ok") is not True:
+            continue
+        row_dt = _parse_ts(row.get("ts"))
+        if row_dt is None:
+            continue
+        delta = (row_dt - boundary_ts).total_seconds()
+        if -CALL_CLOCK_SKEW_SECONDS <= delta <= upper:
+            rows.append(row)
+    return rows
+
+
 def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None):
     """(covered facets, the receipt rows that credited at least one of them)."""
     if not required or boundary_ts is None or not session_id:
@@ -876,11 +913,25 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     if not required:
         return {"status": "none", "required": [], "missing": [],
                 "refused": [], "turn_key": turn_key}
-    refused = refused_facets_in_texts(window_texts)
+    refusals = refusals_in_texts(window_texts)
     boundary_ts = turn_boundary_timestamp(recs)
     call_rows = load_jev_call_receipts(jev_calls_path)
     called, credited = credited_calls_this_turn(
         call_rows, session_id, boundary_ts, required, now=now)
+    # FALSE-OUTAGE REFUSALS (bypass hunt, PR #1224). A refusal whose every
+    # reason claims Jev was unreachable/unavailable/down/402 does not satisfy
+    # its facet when this turn shows Jev answering: a successful receipt in
+    # this session's turn window, or the prompt's own advisory (readable, so
+    # not "unavailable" — which it always is on this path, since required
+    # facets come only from a readable advisory). Refusals giving any other
+    # reason still count. The facet then stays missing and the gate names the
+    # contradiction.
+    answered = answered_calls_this_turn(call_rows, session_id, boundary_ts, now=now)
+    jev_answered = {"advisory_answered": True, "receipts_ok": len(answered)}
+    contradicted = sorted(
+        facet for facet, reasons in refusals.items()
+        if reasons and all(OUTAGE_REASON_RE.search(r) for r in reasons))
+    refused = {f for f in refusals if f not in contradicted}
     missing = set(missing_facets(required, refused, called))
     if ("semantic_creation" in required and "semantic_creation" not in refused
             and "semantic_creation" not in called
@@ -889,6 +940,8 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     return {"status": "required", "required": required,
             "missing": sorted(missing), "refused": sorted(refused),
             "turn_key": turn_key,
+            "contradicted_refusals": [f for f in contradicted if f in missing],
+            "jev_answered": jev_answered,
             "credited_receipts": [
                 {k: row.get(k) for k in ("ts", "session", "facets", "question_ids")}
                 for row in credited]}

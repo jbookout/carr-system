@@ -116,6 +116,7 @@ sys.path.insert(0, REPO)
 from lib.jev_required_actions import (  # noqa: E402
     current_turn_slice, evaluate_required_actions, jev_calls_log_mentions,
     unexplained_receipts)
+from lib.transcript_read import load_transcript  # noqa: E402
 
 
 def _canonical_repo_root(fallback):
@@ -1241,6 +1242,16 @@ def jev_required_actions_check(session, recs):
     reason = (f"this turn's Jev build advisory required {missing}, and the turn shows "
               "neither a Jev call (ops/typesafe_client.py) nor a named refusal "
               f"(\"JEV-REFUSED: <facet> <reason>\") for it")
+    contradicted = result.get("contradicted_refusals") or []
+    if contradicted:
+        answered = result.get("jev_answered") or {}
+        evidence = "this turn's own build advisory came back from Jev"
+        if answered.get("receipts_ok"):
+            evidence += f", and {answered['receipts_ok']} Jev call(s) this turn succeeded"
+        reason += (f". CONTRADICTION: the refusal for {', '.join(contradicted)} says Jev was "
+                   f"unreachable or unavailable, but {evidence}, so it does not count. Call "
+                   "Jev for it now; if that call really fails too, this reopen is latched "
+                   "for the turn and will not repeat")
     return True, reason, identity
 
 
@@ -1282,8 +1293,12 @@ def main():
         path = payload.get("transcript_path") or payload.get("transcriptPath")
         if not path or not os.path.exists(path):
             return 0
-        with open(path, errors="replace") as fh:
-            recs = [json.loads(line) for line in fh if line.strip()]
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        recs = load_transcript(path, hook="completion-evidence-gate",
+                               session=payload.get("session_id") or payload.get("sessionId"),
+                               log_path=JEV_LOG)
         if not payload_is_carr(payload, recs):
             return 0
         session = payload.get("session_id") or payload.get("sessionId")

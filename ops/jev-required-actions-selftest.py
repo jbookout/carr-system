@@ -513,9 +513,11 @@ def evaluate_required_actions_shapes():
 # ---------------------------------------------------------------------------
 
 def run_gate(records, session, state, env_extra=None):
+    """A str item in `records` is written RAW (a tamper line); anything else
+    is written as one JSON object per line."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
         for row in records:
-            fh.write(json.dumps(row) + "\n")
+            fh.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
         path = fh.name
     try:
         hook = os.path.join(REPO, "hooks", "completion-evidence-gate.py")
@@ -679,7 +681,7 @@ def post_reopen_turn_with_refusal_after_the_reopen_passes():
             build_advisory_attachment(["architecture_or_design"], receipt_id="reopen-2", when=1),
             assistant("First pass.", 2),
             stop_feedback("p-reopen-2", when=3),
-            assistant("JEV-REFUSED: architecture_or_design Jev was unreachable this turn.", 4),
+            assistant("JEV-REFUSED: architecture_or_design the partner already settled this design in the prompt.", 4),
         ]
         blocked, _ = run_gate(records, "jev-post-reopen-refusal", state)
         ok = not blocked
@@ -867,7 +869,7 @@ def replay_refusal_before_notification_still_counts_end_to_end():
     with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
         records = [real_human_prompt("P1", 0),
                    real_advisory(["diagnosis"], "r-refuse-early", 1),
-                   assistant("JEV-REFUSED: diagnosis TypeSafe returned HTTP 402, no credits", 2),
+                   assistant("JEV-REFUSED: diagnosis the partner already diagnosed this in the prompt", 2),
                    real_task_notification("N1", 60),
                    real_advisory([], "r-refuse-early-n", 61),
                    assistant("Background task done.", 62)]
@@ -1079,7 +1081,7 @@ def mixed_claim_reopen_with_refused_facet_names_only_the_claim():
     """The converse: the facet IS refused, so the claim reopen must not gain a
     Jev section (no spurious second reason)."""
     recs = _unverified_done_claim(["diagnosis"], "r-mixed-refused")
-    recs.insert(-1, assistant("JEV-REFUSED: diagnosis TypeSafe returned HTTP 402, no credits", 3))
+    recs.insert(-1, assistant("JEV-REFUSED: diagnosis the partner already diagnosed this in the prompt", 3))
     with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
         blocked, reason = run_gate_stubbed(recs, "s-mixed-refused", state, None)
     ok = (blocked is True and "COMPLETION EVIDENCE GATE" in reason
@@ -1152,6 +1154,164 @@ def latched_claim_does_not_hide_missing_facet():
     return ok
 
 
+# ---------------------------------------------------------------------------
+# bypass hunt on 54b308fb: transcript tamper and false-outage refusals
+# ---------------------------------------------------------------------------
+
+def _tamper_events(session):
+    log = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
+    events = []
+    try:
+        with open(log) as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("session") == session and row.get("event") == "transcript_tamper":
+                    events.append(row)
+    except OSError:
+        pass
+    return events
+
+
+def tamper_line_does_not_switch_the_stop_gate_off():
+    """One non-JSON line (and one JSON non-object line) appended to the
+    session's own transcript used to raise inside main(), which returned 0:
+    every Stop check passed. Now the lines are skipped and logged, and the
+    missing facet still reopens."""
+    ok = True
+    for label, junk in (("non-JSON", "this is not json {"), ("non-object JSON", "5")):
+        session = f"s-tamper-{label.replace(' ', '-')}-{os.getpid()}"
+        with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+            records = [real_human_prompt("P1", 0),
+                       real_advisory(["diagnosis"], f"r-tamper-{label}", 1),
+                       assistant("Here is the diagnosis.", 2),
+                       junk]
+            blocked, reason = run_gate(records, session, state,
+                                       env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": "/nonexistent.jsonl"})
+        events = _tamper_events(session)
+        this_ok = (blocked is True and "JEV REQUIRED ACTIONS" in reason and len(events) == 1
+                   and events[0]["hook"] == "completion-evidence-gate"
+                   and events[0]["skipped_lines"] == 1)
+        ok = ok and this_ok
+        print(f"  {'PASS' if this_ok else 'FAIL'}  {label} tamper line: blocked={blocked}, "
+              f"tamper events={len(events)}")
+    print(f"{'PASS' if ok else 'FAIL'}  tamper: a bad transcript line no longer switches the Stop "
+          "gate off, and is logged as transcript_tamper")
+    return ok
+
+
+def tamper_line_does_not_switch_the_agent_facet_check_off():
+    """The executor-tier gate read the transcript the same way; a bad line
+    made its required-facets check fail open, so a brief omitting the facet
+    was allowed. Now it is still refused."""
+    session = f"s-tamper-agent-{os.getpid()}"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
+        for row in (real_human_prompt("P1", 0),
+                    real_advisory(["architecture_or_design"], "r-tamper-agent", 1)):
+            fh.write(json.dumps(row) + "\n")
+        fh.write("not json at all\n")
+        path = fh.name
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(REPO, "hooks", "executor-tier-gate.py")],
+            text=True, capture_output=True, timeout=60,
+            input=json.dumps({"tool_name": "Agent", "session_id": session,
+                              "transcript_path": path,
+                              "tool_input": {"description": "sweep the logs", "model": "sonnet",
+                                             "prompt": "count the DENY lines in the log"}}))
+    finally:
+        os.unlink(path)
+    out = {}
+    for line in proc.stdout.splitlines():
+        try:
+            out = json.loads(line)
+        except ValueError:
+            continue
+    decision = (out.get("hookSpecificOutput") or {}).get("permissionDecision")
+    text = (out.get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+    events = _tamper_events(session)
+    ok = (decision == "deny" and "JEV REQUIRED ACTIONS NOT NAMED" in text and len(events) == 1
+          and events[0]["hook"] == "executor-tier-gate")
+    print(f"{'PASS' if ok else 'FAIL'}  tamper: a bad transcript line no longer switches the Agent "
+          f"brief facet check off (decision={decision}, tamper events={len(events)})")
+    return ok
+
+
+def tolerant_reader_skips_and_logs():
+    """lib/transcript_read.py, which all four gates that used the throwing
+    list-comprehension parse now share (completion-evidence, executor-tier,
+    map-architecture, rule-pack-drift)."""
+    try:
+        from lib.transcript_read import load_transcript
+    except ImportError:
+        print("FAIL  tamper: lib/transcript_read.py is missing")
+        return False
+    with tempfile.TemporaryDirectory(prefix="jev-tamper-") as d:
+        path = os.path.join(d, "t.jsonl")
+        log = os.path.join(d, "log.jsonl")
+        with open(path, "w") as fh:
+            fh.write('{"type": "user"}\n\nnot json\n[1, 2]\n{"type": "assistant"}\n')
+        recs = load_transcript(path, hook="h", session="s", log_path=log)
+        rows = [json.loads(line) for line in open(log)]
+        quiet = load_transcript(path, hook="h", session="selftest", log_path=log)
+        rows_after = [json.loads(line) for line in open(log)]
+    ok = ([r["type"] for r in recs] == ["user", "assistant"] and len(rows) == 1
+          and rows[0]["event"] == "transcript_tamper" and rows[0]["first_line_numbers"] == [3, 4]
+          and len(quiet) == 2 and len(rows_after) == 1)
+    print(f"{'PASS' if ok else 'FAIL'}  tamper: the shared reader keeps good records, skips a "
+          "non-JSON and a non-object line, and logs one transcript_tamper row")
+    return ok
+
+
+def false_outage_refusal_does_not_satisfy_when_jev_answered():
+    """A refusal claiming Jev was unreachable/unavailable/down/402 no longer
+    satisfies the facet when this turn shows Jev answering (the prompt's own
+    advisory, or a successful receipt). The gate reopens and names the
+    contradiction. A refusal giving another reason still passes."""
+    session = "s-false-outage"
+    ok = True
+    for label, line, calls, expect_block in (
+            ("outage claim, advisory answered", "JEV-REFUSED: diagnosis Jev is unreachable (HTTP 402)",
+             [], True),
+            ("outage claim, a call succeeded", "JEV-REFUSED: diagnosis TypeSafe is down right now",
+             [call_row(question_ids=["other"], when=1, session=session)], True),
+            ("402 claim", "JEV-REFUSED: diagnosis the vendor returned 402 for this call", [], True),
+            ("other reason", "JEV-REFUSED: diagnosis the partner already diagnosed it in the prompt",
+             [], False)):
+        path = write_jev_calls_file(calls)
+        try:
+            with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+                records = [real_human_prompt("P1", 0),
+                           real_advisory(["diagnosis"], f"r-outage-{label}", 1),
+                           assistant(line, 2)]
+                blocked, reason = run_gate(records, session, state,
+                                           env_extra={"CARR_JEV_CALLS_LOG_OVERRIDE": path})
+        finally:
+            os.unlink(path)
+        this_ok = (blocked is expect_block
+                   and (not expect_block or "CONTRADICTION" in reason))
+        ok = ok and this_ok
+        print(f"  {'PASS' if this_ok else 'FAIL'}  {label}: blocked={blocked}, "
+              f"names contradiction={'CONTRADICTION' in reason}")
+    lib = evaluate_required_actions(
+        [real_human_prompt("P1", 0), real_advisory(["diagnosis"], "r-lib-outage", 1)],
+        ["JEV-REFUSED: diagnosis Jev unavailable, the call timed out",
+         "JEV-REFUSED: diagnosis Jev unavailable again on the retry"],
+        "/nonexistent.jsonl", "s1", [])
+    mixed = evaluate_required_actions(
+        [real_human_prompt("P1", 0), real_advisory(["diagnosis"], "r-lib-mixed", 1)],
+        ["JEV-REFUSED: diagnosis Jev unavailable, the call timed out",
+         "JEV-REFUSED: diagnosis the partner diagnosed it himself in the prompt"],
+        "/nonexistent.jsonl", "s1", [])
+    ok = ok and lib["contradicted_refusals"] == ["diagnosis"] and lib["missing"] == ["diagnosis"] \
+        and mixed["missing"] == [] and mixed["contradicted_refusals"] == []
+    print(f"{'PASS' if ok else 'FAIL'}  false outage: an outage-reason refusal is contradicted when "
+          "Jev answered this turn; a refusal with another reason still counts")
+    return ok
+
+
 def main():
     outcomes = [
         lib_reads_real_shape(),
@@ -1201,6 +1361,10 @@ def main():
         mixed_requirement_reopen_carries_missing_facet(),
         latched_claim_does_not_hide_missing_facet(),
         mixed_claim_reopen_with_refused_facet_names_only_the_claim(),
+        tamper_line_does_not_switch_the_stop_gate_off(),
+        tamper_line_does_not_switch_the_agent_facet_check_off(),
+        tolerant_reader_skips_and_logs(),
+        false_outage_refusal_does_not_satisfy_when_jev_answered(),
     ]
     print(f"jev-required-actions-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1

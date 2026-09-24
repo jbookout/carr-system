@@ -82,11 +82,13 @@ except Exception:                       # a missing meter must not change a verd
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
 turn_required_facets = None  # type: Optional[Callable[[Any], Any]]
+load_transcript = None  # type: Optional[Callable[..., Any]]
 prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
 prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
 try:                                    # same fail-open posture as jev_pick below
     from lib.jev_required_actions import (
         prompt_names_facet, prompt_names_not_applicable, turn_required_facets)
+    from lib.transcript_read import load_transcript
 except Exception:
     pass
 
@@ -205,7 +207,7 @@ def missing_required_actions_in_prompt(payload, prompt):
     parent and never reached the subagent that would actually do the work.
     """
     if (turn_required_facets is None or prompt_names_not_applicable is None
-            or prompt_names_facet is None):
+            or prompt_names_facet is None or load_transcript is None):
         return []
     if prompt_names_not_applicable(prompt):
         return []
@@ -213,8 +215,13 @@ def missing_required_actions_in_prompt(payload, prompt):
         path = payload.get("transcript_path") or payload.get("transcriptPath")
         if not path or not os.path.exists(path):
             return []
-        with open(path, errors="replace") as fh:
-            recs = [json.loads(line) for line in fh if line.strip()]
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        recs = load_transcript(
+            path, hook="executor-tier-gate",
+            session=payload.get("session_id") or payload.get("sessionId"),
+            log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
         # The genuine human prompt's own advisory only (round 4): advisories
         # carried by folded notifications are not consulted.
         required, _turn_key = turn_required_facets(recs)
