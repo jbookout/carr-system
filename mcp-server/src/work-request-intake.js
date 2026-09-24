@@ -189,6 +189,16 @@ function validate(args, ToolError) {
   }
 }
 
+// The exact subset of control-room/contracts/work-request-projection.v1.json's
+// crosswalk that ops.work_request_card can ever return a row for. Never
+// invents a mapping: every value here is copied from that contract's
+// "crosswalk" array, not derived or guessed.
+const CARD_PROJECTION_STATE = Object.freeze({
+  captured: "queued", triaged: "queued", ready: "queued",
+  needs_joe: "needs_answer",
+  declined: "declined", superseded: "declined",
+});
+
 function sourceProjection(row) {
   return { label: row.doctrine_source_label || row.source_ref || null,
     freshness: row.source_current === false ? "stale" : "current",
@@ -658,7 +668,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     },
     "work-request-card": {
       write: false,
-      description: "Read one same-tenant safe Work Request card, live or withdrawn. The card names the current or stale source, one human review label, and — for a request withdrawn in error — why it was withdrawn, when it closed, and the request that replaced it. It offers no executable actions.",
+      description: "Read one same-tenant safe Work Request card, live, waiting on Joe, or withdrawn. The card names the current or stale source, one human review label, and — for a request withdrawn in error — why it was withdrawn, when it closed, and the request that replaced it. A needs_joe card carries the same base_version and acceptance_criteria answer-work-request-for-joe requires. It offers no executable actions.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
       }, required: ["work_request"] },
@@ -672,9 +682,9 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         // work_request_not_found would make the withdrawal capability erase the
         // one thing it exists to write, and it would say "not found" about a row
         // the database returned. ops.work_request_card admits the two terminal
-        // states as of 0426, so this list has to as well or the SQL widening is
-        // dead code.
-        if (!row || !["captured", "triaged", "ready", "declined", "superseded"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
+        // states as of 0426 and needs_joe as of 0577, so this list has to admit
+        // exactly those or the SQL widening is dead code.
+        if (!row || !["captured", "triaged", "ready", "needs_joe", "declined", "superseded"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
         const triaged = ["triaged", "ready"].includes(row.state);
         // Withdrawal is CAPTURED-ONLY: branch 3 of work_request_sourced_capture_
         // shape requires triage_classification, triaged_by_actor_id and
@@ -698,13 +708,22 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           acting_identity: acting,
           acceptance_criteria: row.acceptance_criteria, state: row.state, version: Number(row.version),
           // DERIVED FROM THE CROSSWALK, not hardcoded. work-request-projection
-          // .v1.json maps captured/triaged/ready to queued and BOTH terminals to
-          // declined — superseded-projects-as-declined is that contract's
-          // declared judgment call, made because doctrine grants the projection
-          // seven states and superseded is not one of them. A withdrawn card that
-          // still read "queued" would tell a requester their closed record is
-          // waiting in line.
-          projection_state: withdrawn ? "declined" : "queued", source: sourceProjection(row),
+          // .v1.json's crosswalk (control-room/contracts) maps every state this
+          // card can return: captured/triaged/ready to queued, needs_joe to
+          // needs_answer ("a named human decision is outstanding"), and BOTH
+          // terminals to declined — superseded-projects-as-declined is that
+          // contract's declared judgment call, made because doctrine grants the
+          // projection seven states and superseded is not one of them. A
+          // withdrawn card that still read "queued" would tell a requester their
+          // closed record is waiting in line; a needs_joe card that read
+          // "queued" would hide that someone is actively waiting on a decision.
+          projection_state: CARD_PROJECTION_STATE[row.state],
+          // A general (needs_joe) row never had a doctrine source to begin with
+          // (work_request_sourced_capture_shape's general branch requires
+          // doctrine_section_id null), so sourceProjection's "stale" reading
+          // would misreport absence as staleness. Same null-when-absent shape
+          // as plan/shape below.
+          source: row.doctrine_section_id ? sourceProjection(row) : null,
           triage: triaged ? { classification: row.triage_classification, human_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at } : null,
           plan: row.plan_hash ? { plan_ref: row.plan_ref || null, plan_hash: row.plan_hash, runbook_ref: row.runbook_ref || null,
@@ -732,8 +751,11 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           // of a human as work, which is the queue-pollution the withdrawal verbs
           // exist to end. The two terminals keep separate labels because the
           // canonical record keeps them separate even where the projection does
-          // not.
-          next_human_action: withdrawn ? { label: row.state === "superseded" ? "Superseded" : "Declined", effect: "none" } : row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
+          // not. needs_joe gets its own label rather than falling to the
+          // captured/triaged default below: it was never captured-and-untriaged,
+          // it is the one state answer-work-request-for-joe (0575) exists to
+          // resolve, and "Review and triage" would misname the actual next step.
+          next_human_action: withdrawn ? { label: row.state === "superseded" ? "Superseded" : "Declined", effect: "none" } : row.state === "needs_joe" ? { label: "Answer for Joe", effect: "none" } : row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
           actions: [] };
       },
     },
