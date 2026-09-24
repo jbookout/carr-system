@@ -413,7 +413,8 @@ const asHistory = history => history.map(h => (h && typeof h === "object" && "re
 // release_history defaults to an explicit empty list; `history: null` omits it.
 function opRequest(kind, { aggregate = countyAggregate(), receipt, ledger, counterpart, corp, history = [] } = {}) {
   const request = { tenant: ORGANIZATION_TENANT_ID, artifact: artifactOf(aggregate, corp ?? corporate()),
-    context: CONTEXT, route_receipts: [receipt ?? expert(aggregate)], operation: { kind }, now: NOW };
+    context: CONTEXT, route_receipts: [receipt ?? expert(aggregate)], operation: { kind }, recipient_class: "internal",
+    now: NOW };
   if (ledger !== undefined) request.ledger = ledger;
   if (counterpart !== undefined) request.counterpart = counterpart;
   if (history !== null) request.release_history = Array.isArray(history) ? asHistory(history) : history;
@@ -556,6 +557,7 @@ function proposalRequest(proposalOverrides = {}, aggregate = zip3Aggregate(), re
       ...proposalOverrides,
     },
     release_history: [],
+    recipient_class: "internal",
     now: NOW,
   };
 }
@@ -1247,7 +1249,7 @@ test("N2: a cell visible in one release is subtracted from the other's suppresse
   refuses(op("view_native_precision", { aggregate: a, ledger: ledgerFor(a), history: [b] }),
     "suppressed_residual_recovered_by_release");
   const bLedger = emptyPrivacyBudgetLedger(conform({ artifact: b.artifact, receipts: b.route_receipts }).ledger_key);
-  const reverse = PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, artifact: b.artifact,
+  const reverse = PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, recipient_class: "internal", artifact: b.artifact,
     context: CONTEXT, route_receipts: b.route_receipts, ledger: bLedger, operation: { kind: "rank_units" },
     release_history: [released({ artifact: artifactOf(a), route_receipts: [expert(a)] })], now: NOW });
   refuses(reverse, "suppressed_residual_recovered_by_release");
@@ -1295,7 +1297,7 @@ test("N2/N3 (attack2): two plain queries on two releases, and a suppressed cell 
     { unit_id: "56001", period: "2025-Q1", patient_count: 40, suppressed: false }] });
   const b = secondArtifact([{ unit_id: "56001", period: "2025-Q1", patient_count: 43, suppressed: false }]);
   const bLedger = emptyPrivacyBudgetLedger(conform({ artifact: b.artifact, receipts: b.route_receipts }).ledger_key);
-  refuses(PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, artifact: b.artifact,
+  refuses(PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, recipient_class: "internal", artifact: b.artifact,
     context: CONTEXT, route_receipts: b.route_receipts, ledger: bLedger, operation: { kind: "view_native_precision" },
     release_history: [released({ artifact: artifactOf(a), route_receipts: [expert(a)] })], now: NOW }),
   "difference_below_floor");
@@ -1508,7 +1510,7 @@ test("H2 (attack4): history is scoped to the recipient, across dataset refreshes
   const b = refreshed(bAgg);
   const bConform = conform({ artifact: b.artifact, receipts: b.route_receipts });
   assert.equal(bConform.decision, "conforms");
-  const viewB = history => PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, artifact: b.artifact,
+  const viewB = history => PINNED.evaluateAggregateOperation({ tenant: ORGANIZATION_TENANT_ID, recipient_class: "internal", artifact: b.artifact,
     context: CONTEXT, route_receipts: b.route_receipts, ledger: emptyPrivacyBudgetLedger(bConform.ledger_key),
     operation: { kind: "view_native_precision" }, release_history: history, now: NOW });
   // A under D1 is in B's recipient-scoped history; 80 - 65 - 11 = 4 is refused.
@@ -1662,4 +1664,220 @@ test("L2: proposals take the release history, and cannot describe change between
   ]) {
     assert.equal(propose({ statement }).decision, "proposal_pending_review", statement);
   }
+});
+
+// ===========================================================================
+// Round 4 (P1, M1, F7, C1, wording): joint bounds across releases, recipient
+// class, released priors and the county list, cell capacity.
+// ===========================================================================
+
+const q1 = (unit, count) => ({ unit_id: unit, period: "2025-Q1", patient_count: count, suppressed: count === null });
+const q2 = (unit, count) => ({ unit_id: unit, period: "2025-Q2", patient_count: count, suppressed: count === null });
+// View `current` with `prior` as its only released history (and the reverse).
+function jointView(current, prior) {
+  const b = secondArtifact(prior.cells, { published_total: prior.published_total });
+  return op("view_native_precision", { aggregate: current, ledger: ledgerFor(current), history: [b] });
+}
+
+test("P1 (attack5): nested suppressed sets recover a cell exactly, in both directions", () => {
+  // A: 56001 = 50, X and Y suppressed, total 63 (X + Y = 13).
+  // B: 56001 = 50, 56003 = 30, X, Y and Z suppressed, total 97 (X + Y + Z = 17), so Z = 4.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 63 });
+  const b = countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null), q1("56007", null),
+    q1("56009", null)], published_total: 97 });
+  assert.equal(conformExpert(a).decision, "conforms");
+  assert.equal(conformExpert(b).decision, "conforms");
+  for (const [current, prior] of [[b, a], [a, b]]) {
+    const r = jointView(current, prior);
+    refuses(r, "suppressed_cell_bounded_across_releases");
+    assert.equal(r.exposure, "complementary_suppression_missing");
+    assert.equal(r.unit_id, "56009");
+  }
+});
+
+test("P1: three-cell nested groups keep the floor and the interval width", () => {
+  // A: Q1 X + Y = 15. B adds three Q2 cells to the same suppressed set.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null)], published_total: 65 });
+  // B also shows a Q2 cell of 30, so the totals themselves differ by at least the floor.
+  const bWith = group => countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null),
+    q2("56001", 30), q2("56003", null), q2("56005", null), q2("56007", null)], published_total: 95 + group });
+  // The three extra cells sum to 9: below the floor.
+  let r = jointView(bWith(9), a);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.exposure, "complementary_suppression_residual_below_floor");
+  // Sum 29: each of the three is 9 or 10.
+  r = jointView(bWith(29), a);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.exposure, "suppressed_cells_interval_too_narrow");
+  // Sum 25: each of 5..10, and the pair clears.
+  assert.equal(jointView(bWith(25), a).decision, "within_budget");
+  // A group sum below one per cell cannot be the same data: a revision, not a leak.
+  const revised = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null),
+    q1("56007", null), q2("56001", 30)], published_total: 94 });
+  assert.equal(conformExpert(revised).decision, "conforms");
+  assert.equal(jointView(revised, a).decision, "within_budget");
+});
+
+test("P1: partially overlapping suppressed sets narrow a cell below the interval width", () => {
+  // A: X + Y + Z = 20; B: X + Y + W = 28. Alone each keeps >= 3 values per cell;
+  // together W - Z = 8, so Z is 1 or 2 and W is 9 or 10.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null), q1("56007", null)],
+    published_total: 70 });
+  // B also shows a Q2 cell of 30, so the totals themselves differ by at least the floor.
+  const b = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null), q1("56009", null),
+    q2("56001", 30)], published_total: 108 });
+  assert.equal(conformExpert(a).decision, "conforms");
+  assert.equal(conformExpert(b).decision, "conforms");
+  const r = jointView(b, a);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.exposure, "suppressed_cells_interval_too_narrow");
+  // B at 27 (W - Z = 7): Z in 1..3 and W in 8..10 — the pair clears.
+  const b27 = countyAggregate({ cells: b.cells, published_total: 107 });
+  assert.equal(jointView(b27, a).decision, "within_budget");
+  // attack5 P2 (X + Y = 18 and X + W = 12): every cell keeps three values.
+  const p2a = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null)], published_total: 68 });
+  const p2b = countyAggregate({ cells: [q1("56001", 50), q1("56003", 20), q1("56005", null), q1("56009", null)],
+    published_total: 82 });
+  assert.equal(jointView(p2b, p2a).decision, "within_budget");
+  // Identical releases combine to nothing new.
+  assert.equal(jointView(a, a).decision, "within_budget");
+});
+
+test("M1: operations and proposals take a recipient class; only internal proceeds", () => {
+  for (const recipient_class of ["client", "public"]) {
+    for (const kind of ["export_sealed_artifact", "view_native_precision"]) {
+      const r = PINNED.evaluateAggregateOperation({ ...opRequest(kind, { ledger: ledgerFor() }), recipient_class });
+      refuses(r, "recipient_class_not_permitted");
+      assert.equal(r.recipient_class, recipient_class);
+      assert.equal(r.decision_ref, "decision:4ab3933e");
+      assert.equal(r.map_contract, J302.V5_J302_EXPORT_PROMOTION_REQUIREMENT.map_contract);
+      assert.equal(r.owed_seam, J302.V5_J302_RECIPIENT_CLASS_SEAM);
+      assert.ok(!r.next_ledger);
+    }
+    const p = PINNED.evaluateDerivedStrategyProposal({ ...proposalRequest(), recipient_class });
+    assert.equal(p.decision, "refuse");
+    assert.equal(p.reason_id, "recipient_class_not_permitted");
+    assert.equal(p.is_fact, false);
+  }
+  throwsCode(() => PINNED.evaluateAggregateOperation({ ...opRequest("rank_units", { ledger: ledgerFor() }),
+    recipient_class: "partner" }), "unknown_recipient_class");
+  const missing = opRequest("rank_units", { ledger: ledgerFor() });
+  delete missing.recipient_class;
+  throwsCode(() => PINNED.evaluateAggregateOperation(missing), "missing_field");
+  // An internal export is still only an internal sealed artifact, and names
+  // the human promotion receipt it owes before any client or public use.
+  const exp = op("export_sealed_artifact", { ledger: ledgerFor() });
+  assert.equal(exp.decision, "within_budget");
+  assert.equal(exp.export_audience, "internal_only");
+  assert.deepEqual(exp.owed_human_promotion_receipt, {
+    method_id: "human_promotion_receipt", verb: "record-tour-map-promotion-receipt",
+    map_contract: J302.V5_J302_EXPORT_PROMOTION_REQUIREMENT.map_contract,
+    required_before: ["client_use", "public_use"] });
+  assert.equal(op("view_native_precision", { ledger: ledgerFor() }).owed_human_promotion_receipt, undefined);
+  assert.ok(v5J302PolicyPreimage().seams.includes(J302.V5_J302_RECIPIENT_CLASS_SEAM));
+  assert.deepEqual(v5J302PolicyPreimage().permitted_recipient_classes, ["internal"]);
+});
+
+test("F7 (attack5): a released prior naming a county later dropped from the list is still read", () => {
+  const narrow = pinnedKernel(POPULATION, { county_fips_codes: { status: "pinned", codes: ["56001", "56003", "56005"] } });
+  const current = countyAggregate({ cells: [q1("56001", 40), q1("56003", 25)], published_total: null });
+  const prior = secondArtifact(countyAggregate().cells, { published_total: 105 }); // names 56007
+  const r = narrow.evaluateAggregateOperation(opRequest("view_native_precision",
+    { aggregate: current, ledger: ledgerFor(current), history: [prior] }));
+  assert.equal(r.decision, "within_budget");
+  // Its cells still count: a prior 56001 = 43 is three away from 40.
+  const close = secondArtifact([q1("56001", 43), q1("56007", 30)]);
+  refuses(narrow.evaluateAggregateOperation(opRequest("view_native_precision",
+    { aggregate: current, ledger: ledgerFor(current), history: [close] })), "difference_below_floor");
+  // The state prefix is structure and still binds a released prior.
+  const badState = secondArtifact([q1("99001", 40)]);
+  const r2 = narrow.evaluateAggregateOperation(opRequest("view_native_precision",
+    { aggregate: current, ledger: ledgerFor(current), history: [badState] }));
+  refuses(r2, "release_history_entry_unreadable");
+  assert.equal(r2.entry_reason_id, "cell_not_a_valid_county_fips");
+  // The artifact being operated on is still held to the current list.
+  refuses(narrow.evaluateAggregateOperation(opRequest("view_native_precision", { ledger: ledgerFor() })),
+    "route_not_conforming");
+});
+
+test("C1: history capacity is counted in cells as well as entries", () => {
+  assert.equal(J302.V5_J302_RELEASE_HISTORY_STORE_CONTRACT.max_cells, 250000);
+  const cellsOf = n => Array.from({ length: n }, (_, i) => ({ unit_id: ["56001", "56003", "56005", "56007", "56009"][i % 5],
+    period: `${3000 + Math.floor(i / 5)}-Q1`, patient_count: 20, suppressed: false }));
+  const big = secondArtifact(cellsOf(5000)); // no period shared with the current artifact
+  const atCap = op("view_native_precision", { ledger: ledgerFor(), history: Array(50).fill(big) });
+  assert.equal(atCap.decision, "within_budget");
+  assert.equal(atCap.releases_checked, 50);
+  const over = op("view_native_precision", { ledger: ledgerFor(), history: [...Array(50).fill(big),
+    secondArtifact(cellsOf(1))] });
+  assert.equal(over.decision, "unavailable");
+  assert.equal(over.reason_id, "release_history_over_kernel_capacity");
+  assert.equal(over.cells_presented, 250001);
+  assert.equal(over.max_cells, 250000);
+  assert.equal(over.owed_seam, J302.V5_J302_RELEASE_HISTORY_STORE_SEAM);
+});
+
+test("L2b (attack5): more change wordings are differences in words", () => {
+  for (const statement of [
+    "Unit 480 went from 137 to 140.",
+    "Unit 480 added 3 patients.",
+    "Unit 480 has 3 new patients this cycle.",
+    "Unit 480 now carries 140, not 137.",
+    "Unit 480 moved by two.",
+    "Unit 480 reached 140.",
+  ]) {
+    const p = propose({ statement });
+    assert.equal(p.reason_id, "proposal_describes_change_between_releases", statement);
+  }
+  for (const statement of [
+    "Unit 480 was 2x unit 481 in 2025.",
+    "Unit 480 carries the largest aggregate count in the artifact year.",
+  ]) {
+    assert.equal(propose({ statement }).decision, "proposal_pending_review", statement);
+  }
+});
+
+test("P1: the joint equations substitute cells the other release shows, and leave a fully shown release alone", () => {
+  // A suppresses Q, X and Y (total 93: Q + X + Y = 43). B shows Q = 30 and
+  // suppresses X, Y and Z (X + Y + Z = 17), plus an unrelated Q2 cell. With
+  // Q substituted, A says X + Y = 13, so Z = 4.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null), q1("56007", null)],
+    published_total: 93 });
+  const b = countyAggregate({ cells: [q1("56001", 50), q1("56003", 30), q1("56005", null), q1("56007", null),
+    q1("56009", null), q2("56001", 30)], published_total: 127 });
+  assert.equal(conformExpert(a).decision, "conforms");
+  assert.equal(conformExpert(b).decision, "conforms");
+  const r = jointView(a, b);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.unit_id, "56009");
+  // A prior that suppresses nothing but carries a total and a stricter floor
+  // (20) combines with nothing: the current residual of 38 over two cells is
+  // judged at its own floor, not re-judged at 20.
+  const current = countyAggregate({ published_total: 103 });
+  const strictPrior = secondArtifact([q1("56001", 40)], { published_total: 40,
+    source_privacy_threshold: { minimum_cell_count: 20, declared_by: "synthetic-source-privacy-office" } });
+  assert.equal(op("view_native_precision", { aggregate: current, ledger: ledgerFor(current),
+    history: [strictPrior] }).decision, "within_budget");
+});
+
+test("P1: overlapping sets of different sizes are not nested, and joint propagation can pin a cell exactly", () => {
+  // A: X + Y = 15; B: Y + Z + W = 18 (plus an unrelated shown Q2 cell). Not nested:
+  // no group sum follows, and every cell keeps three or more values.
+  const a = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null)], published_total: 65 });
+  const b = countyAggregate({ cells: [q1("56001", 50), q1("56005", null), q1("56007", null), q1("56009", null),
+    q2("56001", 30)], published_total: 98 });
+  assert.equal(conformExpert(b).decision, "conforms");
+  assert.equal(jointView(b, a).decision, "within_budget");
+  // Found by exhaustive search over five cells: A: V + X + Y = 11 and
+  // B: V + X + Z + W = 30. Their difference Z + W - Y = 19 forces Y = 1 and
+  // Z = W = 10 once every cell is at most 10.
+  const pa = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null), q1("56007", null)],
+    published_total: 61 });
+  const pb = countyAggregate({ cells: [q1("56001", 50), q1("56003", null), q1("56005", null), q1("56009", null),
+    q2("56003", null), q2("56001", 30)], published_total: 110 });
+  assert.equal(conformExpert(pa).decision, "conforms");
+  assert.equal(conformExpert(pb).decision, "conforms");
+  const r = jointView(pb, pa);
+  refuses(r, "suppressed_cell_bounded_across_releases");
+  assert.equal(r.exposure, "suppressed_cells_pinned_by_residual");
 });

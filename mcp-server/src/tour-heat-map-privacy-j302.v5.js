@@ -298,6 +298,12 @@ export const V5_J302_RELEASE_HISTORY_STORE_SEAM =
   "seam:v5-j302:release-history-store";
 export const V5_J302_MAX_RELEASE_HISTORY = 512;
 /**
+ * Capacity is counted in cells, not only entries: 512 entries of 5,000 cells
+ * each cost seconds of synchronous CPU. Above either cap the kernel answers
+ * `unavailable`; the store splits or refuses, never truncates.
+ */
+export const V5_J302_MAX_RELEASE_HISTORY_CELLS = 250000;
+/**
  * What the release-history store owes. History is every prior release to the
  * RECIPIENT, across every dataset and environment, because a dataset refresh
  * or a staging copy handed to the same recipient subtracts just as well. Each
@@ -315,6 +321,7 @@ export const V5_J302_RELEASE_HISTORY_STORE_CONTRACT = deepFreeze({
   may_drop_or_truncate: false,
   over_capacity: "refuse_never_drop_or_truncate",
   max_entries: V5_J302_MAX_RELEASE_HISTORY,
+  max_cells: V5_J302_MAX_RELEASE_HISTORY_CELLS,
   empty_list_means: "store_attests_no_prior_release_to_this_recipient",
 });
 /**
@@ -332,6 +339,24 @@ export const V5_J302_BUDGET_LEDGER_STORE_CONTRACT = deepFreeze({
 });
 export const V5_J302_BUDGET_LEDGER_STORE_SEAM =
   "seam:v5-j302:atomic-privacy-budget-ledger-store";
+/**
+ * Who an operation's output is for. Clients see exactly the Tour PDF fields
+ * (decision 4ab3933e) and no heat-map-derived content is one of them; the map
+ * contract (carr-map-tour-v1) requires a human promotion receipt before any
+ * client or public use. So every operation and proposal names its recipient
+ * class, and only `internal` proceeds. The class is caller-stated here; an
+ * authenticated recipient registry is owed at V5_J302_RECIPIENT_CLASS_SEAM.
+ */
+export const V5_J302_RECIPIENT_CLASSES = deepFreeze(["client", "internal", "public"]);
+export const V5_J302_PERMITTED_RECIPIENT_CLASSES = deepFreeze(["internal"]);
+export const V5_J302_RECIPIENT_CLASS_SEAM = "seam:v5-j302:authenticated-recipient-class-registry";
+/** What an export still owes before it is anything but an internal sealed artifact. */
+export const V5_J302_EXPORT_PROMOTION_REQUIREMENT = deepFreeze({
+  method_id: "human_promotion_receipt",
+  verb: "record-tour-map-promotion-receipt",
+  map_contract: V5_J301_MAP_CONTRACT,
+  required_before: ["client_use", "public_use"],
+});
 export const V5_J302_PROPOSAL_REVIEW_SEAM =
   "seam:v5-j302:human-review-of-derived-strategy-proposal";
 
@@ -744,11 +769,14 @@ function judgeArtifact(rawArtifact, context, now, base, priorRaw, cfg, { asRelea
       if (!V5_J302_STATE_FIPS.includes(cell.unit_id.slice(0, 2))) {
         return { refusal: refusal("cell_not_a_valid_county_fips", base, { cell_index: i }) };
       }
-      if (cfg.county_fips_codes.codes === null) {
+      // A released prior was judged against the list in force when it was
+      // released; a later list change cannot un-release it, so released facts
+      // keep only the structural state-prefix check.
+      if (!asReleased && cfg.county_fips_codes.codes === null) {
         return { refusal: refusal("county_fips_code_list_unknown_denied", base, {
           cell_index: i, county_fips_status: cfg.county_fips_codes.status }) };
       }
-      if (!cfg.county_fips_codes.codes.includes(cell.unit_id.slice(0, 5))) {
+      if (!asReleased && !cfg.county_fips_codes.codes.includes(cell.unit_id.slice(0, 5))) {
         return { refusal: refusal("cell_not_a_valid_county_fips", base, { cell_index: i }) };
       }
     }
@@ -1376,8 +1404,21 @@ export function admitAggregateHeatMapArtifact(request) {
 
 const OPERATION_REQUEST_KEYS = Object.freeze([
   "tenant", "artifact", "context", "route_receipts", "ledger", "operation", "counterpart",
-  "release_history", "now",
+  "release_history", "recipient_class", "now",
 ]);
+
+/** Refuses any recipient class but internal. Returns a refusal, or null. */
+function judgeRecipientClass(raw, cfg, base) {
+  const recipient_class = assertEnum(raw, V5_J302_RECIPIENT_CLASSES, "request.recipient_class",
+    "unknown_recipient_class");
+  if (!V5_J302_PERMITTED_RECIPIENT_CLASSES.includes(recipient_class)) {
+    return refusal("recipient_class_not_permitted", base, {
+      recipient_class, decision_ref: cfg.client_visibility_decision_ref, map_contract: V5_J301_MAP_CONTRACT,
+      owed_seam: V5_J302_RECIPIENT_CLASS_SEAM,
+    });
+  }
+  return null;
+}
 const OPERATION_KEYS = Object.freeze(["kind"]);
 const COUNTERPART_KEYS = Object.freeze(["artifact", "route_receipts"]);
 const RELEASE_ENTRY_KEYS = Object.freeze(["tenant", "recipient_id", "environment", "artifact", "route_receipts"]);
@@ -1444,7 +1485,8 @@ export function evaluateAggregateOperation(request) {
 function operationWith(request, cfg) {
   assertObject(request, "request");
   assertClosedKeys(request, OPERATION_REQUEST_KEYS, "request");
-  assertRequiredKeys(request, ["tenant", "artifact", "context", "route_receipts", "operation", "now"], "request");
+  assertRequiredKeys(request, ["tenant", "artifact", "context", "route_receipts", "operation", "recipient_class",
+    "now"], "request");
   assertTenant(request.tenant, "request.tenant");
   const operation = assertObject(request.operation, "request.operation");
   assertClosedKeys(operation, OPERATION_KEYS, "request.operation");
@@ -1453,6 +1495,8 @@ function operationWith(request, cfg) {
   const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null, operation_kind: kind,
     next_ledger: null, compare_and_swap: null };
 
+  const classRefusal = judgeRecipientClass(request.recipient_class, cfg, base);
+  if (classRefusal) return classRefusal;
   if (V5_J302_REIDENTIFYING_OPERATIONS.includes(kind)) {
     return refusal("reidentifying_operation_refused", base);
   }
@@ -1531,6 +1575,11 @@ function operationWith(request, cfg) {
     },
     releases_checked: history.checked,
     atomic_store_seam: V5_J302_BUDGET_LEDGER_STORE_SEAM,
+    ...(budgetClass === "export" ? {
+      export_audience: "internal_only",
+      owed_human_promotion_receipt: { ...V5_J302_EXPORT_PROMOTION_REQUIREMENT,
+        required_before: [...V5_J302_EXPORT_PROMOTION_REQUIREMENT.required_before] },
+    } : {}),
     ledger_written: false,
   });
 }
@@ -1575,6 +1624,16 @@ function judgeReleaseHistory(raw, cfg, core, routed) {
     return { result: outcome({ decision: "unavailable", reason_id: "release_history_over_kernel_capacity",
       ...routed, owed_seam: V5_J302_RELEASE_HISTORY_STORE_SEAM, releases_presented: history.length,
       max_entries: V5_J302_MAX_RELEASE_HISTORY }) };
+  }
+  // Count cells before reading any entry: the cap bounds the work itself.
+  const cellsPresented = history.reduce((sum, entry) => {
+    const cells = entry?.artifact?.aggregate?.cells;
+    return sum + (Array.isArray(cells) ? cells.length : 0);
+  }, 0);
+  if (cellsPresented > V5_J302_MAX_RELEASE_HISTORY_CELLS) {
+    return { result: outcome({ decision: "unavailable", reason_id: "release_history_over_kernel_capacity",
+      ...routed, owed_seam: V5_J302_RELEASE_HISTORY_STORE_SEAM, cells_presented: cellsPresented,
+      max_cells: V5_J302_MAX_RELEASE_HISTORY_CELLS }) };
   }
   for (const [i, prior] of history.entries()) {
     const judged = judgeAgainstRelease(cfg, core, routed, prior, `request.release_history[${i}]`);
@@ -1641,6 +1700,8 @@ const cellKey = cell => `${cell.unit_id}\u0000${cell.period ?? ""}`;
  *      exposure rule as one artifact, applied to the remainder). Checked in
  *      both directions.
  *   3. Both published totals: their difference is itself a group.
+ *   4. Both totals together (jointSuppressionExposure): nested or overlapping
+ *      suppressed sets combine into equations no single release shows.
  */
 function pairExposure(a, b, minimum, routed, minimumValues) {
   const bIndex = new Map(b.cells.map(c => [cellKey(c), c]));
@@ -1679,6 +1740,115 @@ function pairExposure(a, b, minimum, routed, minimumValues) {
     if (difference > 0 && difference < minimum) {
       return refusal("published_total_difference_below_floor", routed, { minimum_cell_count: minimum });
     }
+    const joint = jointSuppressionExposure(a, b, minimum, minimumValues);
+    if (joint) {
+      return refusal("suppressed_cell_bounded_across_releases", routed, { ...joint, minimum_cell_count: minimum });
+    }
+  }
+  return null;
+}
+
+/**
+ * The residual equation of release x, after substituting cells y shows:
+ * { vars: Set of cell keys still suppressed, total: their sum }.
+ */
+function residualEquation(x, y) {
+  const yIndex = new Map(y.cells.map(c => [cellKey(c), c]));
+  const vars = new Set();
+  let total = x.published_total;
+  for (const cell of x.cells) {
+    if (!cell.suppressed) { total -= cell.patient_count; continue; }
+    const other = yIndex.get(cellKey(cell));
+    if (other && !other.suppressed) total -= other.patient_count;
+    else vars.add(cellKey(cell));
+  }
+  return { vars, total };
+}
+
+/**
+ * Interval constraint propagation over signed unit-coefficient equations
+ * sum(coef * v) = total, integer variables, to a fixpoint. Returns the bounds
+ * Map, or null when the system has no solution inside the starting bounds.
+ */
+function propagateBounds(equations, start) {
+  const bounds = new Map([...start].map(([v, b]) => [v, [...b]]));
+  for (let round = 0; round < 64; round++) {
+    let changed = false;
+    for (const { terms, total } of equations) {
+      let minSum = 0;
+      let maxSum = 0;
+      for (const [v, c] of terms) {
+        const [lo, hi] = bounds.get(v);
+        minSum += c > 0 ? lo : -hi;
+        maxSum += c > 0 ? hi : -lo;
+      }
+      for (const [v, c] of terms) {
+        const [lo, hi] = bounds.get(v);
+        const restMin = minSum - (c > 0 ? lo : -hi);
+        const restMax = maxSum - (c > 0 ? hi : -lo);
+        // c * v = total - rest
+        const a1 = (total - restMax) * c;
+        const a2 = (total - restMin) * c;
+        const nlo = Math.max(lo, Math.min(a1, a2));
+        const nhi = Math.min(hi, Math.max(a1, a2));
+        if (nlo > nhi) return null;
+        if (nlo !== lo || nhi !== hi) { bounds.set(v, [nlo, nhi]); changed = true; }
+      }
+    }
+    if (!changed) break;
+  }
+  return bounds;
+}
+
+/**
+ * What two releases' totals reveal TOGETHER. Each release with a total gives
+ * one equation over its still-suppressed cells; their difference is a third.
+ * A cell suppressed in both is assumed to hold the same count in both, as an
+ * adversary would assume; when no single count per cell satisfies both
+ * releases (a revision), the equations are not combined.
+ *   - Nested sets: the cells one release suppresses beyond the other form a
+ *     group whose sum is the residual difference; the single-release rule
+ *     (one cell exact, floor, protection-interval width) applies to it.
+ *   - All-primary bounds [1, floor-1], when that hypothesis is feasible: each
+ *     cell must keep at least `minimumValues` possible values.
+ * Returns { exposure, unit_id? } or null.
+ */
+function jointSuppressionExposure(a, b, minimum, minimumValues) {
+  const ea = residualEquation(a, b);
+  const eb = residualEquation(b, a);
+  if (ea.vars.size === 0 || eb.vars.size === 0) return null; // pairExposure step 2 owns these
+  const unitOf = key => key.split("\u0000")[0];
+  for (const [small, large] of [[ea, eb], [eb, ea]]) {
+    if (![...small.vars].every(v => large.vars.has(v))) continue;
+    const extra = [...large.vars].filter(v => !small.vars.has(v));
+    const groupSum = large.total - small.total;
+    // Fewer than one per extra cell cannot be the same data: a revision.
+    if (groupSum < extra.length) continue;
+    const exposure = suppressionExposure(extra.length, groupSum, minimum, minimumValues);
+    if (exposure) return { exposure, unit_id: unitOf(extra[0]) };
+  }
+  const union = new Set([...ea.vars, ...eb.vars]);
+  const terms = eq => new Map([...eq.vars].map(v => [v, 1]));
+  const difference = new Map();
+  for (const v of union) {
+    const c = (eb.vars.has(v) ? 1 : 0) - (ea.vars.has(v) ? 1 : 0);
+    if (c !== 0) difference.set(v, c);
+  }
+  const equations = [
+    { terms: terms(ea), total: ea.total },
+    { terms: terms(eb), total: eb.total },
+    { terms: difference, total: eb.total - ea.total },
+  ].filter(eq => eq.terms.size > 0);
+  const top = minimum - 1;
+  const primary = propagateBounds(equations, new Map([...union].map(v => [v, [1, top]])));
+  // No solution: some cell is a large complementary suppression, or the data
+  // changed between releases (a revision), and equations that disagree reveal
+  // nothing jointly.
+  if (primary === null) return null;
+  for (const [v, [lo, hi]] of primary) {
+    const values = hi - lo + 1;
+    if (values <= 1) return { exposure: "suppressed_cells_pinned_by_residual", unit_id: unitOf(v) };
+    if (values < minimumValues) return { exposure: "suppressed_cells_interval_too_narrow", unit_id: unitOf(v) };
   }
   return null;
 }
@@ -1690,9 +1860,11 @@ function pairExposure(a, b, minimum, routed, minimumValues) {
 // ---------------------------------------------------------------------------
 
 const PROPOSAL_REQUEST_KEYS = Object.freeze([
-  "tenant", "artifact", "context", "route_receipts", "proposal", "release_history", "now",
+  "tenant", "artifact", "context", "route_receipts", "proposal", "release_history", "recipient_class", "now",
 ]);
-const PROPOSAL_REQUIRED_KEYS = Object.freeze(["tenant", "artifact", "context", "route_receipts", "proposal", "now"]);
+const PROPOSAL_REQUIRED_KEYS = Object.freeze([
+  "tenant", "artifact", "context", "route_receipts", "proposal", "recipient_class", "now",
+]);
 export const V5_J302_PROPOSAL_KEYS = Object.freeze([
   "proposal_kind", "statement", "cited_unit_ids", "confidence", "evidence_ref", "proposed_by",
 ]);
@@ -1721,7 +1893,7 @@ const SPELLED_DIGITS = new RegExp(`\\b${DIGIT_WORD}(?:[\\s,-]+${DIGIT_WORD}){4,}
 // releases written in words. It needs a change word AND either a quantity
 // (other than the artifact's own unit ids and four-digit years) or a
 // reference to another release or period.
-const CHANGE_WORD = /\b(?:rose|risen|rises?|grew|grown|grows?|increas\w*|decreas\w*|declin\w*|dropp?\w*|fell|fall(?:s|en)?|gain\w*|lost|loses?|up|down|above|below|more|fewer|less|higher|lower|chang\w*|delta|differ\w*|shift\w*|jump\w*|climb\w*|swung|swings?|doubled|tripled|quadrupled|halved)\b/i;
+const CHANGE_WORD = /\b(?:rose|risen|rises?|grew|grown|grows?|increas\w*|decreas\w*|declin\w*|dropp?\w*|fell|fall(?:s|en)?|gain\w*|lost|loses?|up|down|above|below|more|fewer|less|higher|lower|chang\w*|delta|differ\w*|shift\w*|jump\w*|climb\w*|swung|swings?|doubled|tripled|quadrupled|halved|went|goes|gone|added|adds|new|now|moved|reached)\b/i;
 const CHANGE_QUANTITY = new RegExp(`\\d|%|\\bpercent\\b|\\b(?:${DIGIT_WORD.slice(3, -1)}|ten|eleven|twelve|dozen|half|double|doubled|twice|triple|tripled|quadrupled|halved)\\b`, "i");
 const RELEASE_REFERENCE = /\b(?:releases?|released|last|prior|previous|earlier|since|before|compared|versus|vs\.?|than|ago)\b/i;
 function statementDescribesChange(statement, units) {
@@ -1775,6 +1947,11 @@ function proposalWith(request, cfg) {
   assertTenant(request.tenant, "request.tenant");
   const proposal = assertObject(request.proposal, "request.proposal");
   const base = { tenant: ORGANIZATION_TENANT_ID, route: null, receipt_id: null };
+  const classRefusal = judgeRecipientClass(request.recipient_class, cfg, base);
+  if (classRefusal) {
+    const { effects: _e, admission: _a, independent_issuance: _i, route_receipt_step: _r, ...fields } = classRefusal;
+    return proposalOutcome(fields);
+  }
   // No declared proposal key contains a widening fragment (asserted by the
   // suite), so every key is scanned and none needs an exemption.
   for (const key of Object.keys(proposal)) {
@@ -1963,8 +2140,12 @@ export function v5J302PolicyPreimage() {
     release_history_store_contract: { ...V5_J302_RELEASE_HISTORY_STORE_CONTRACT,
       spans: [...V5_J302_RELEASE_HISTORY_STORE_CONTRACT.spans] },
     kernel_minimum_protection_interval_values: V5_J302_KERNEL_MINIMUM_PROTECTION_INTERVAL_VALUES,
+    recipient_classes: [...V5_J302_RECIPIENT_CLASSES],
+    permitted_recipient_classes: [...V5_J302_PERMITTED_RECIPIENT_CLASSES],
+    export_promotion_requirement: { ...V5_J302_EXPORT_PROMOTION_REQUIREMENT,
+      required_before: [...V5_J302_EXPORT_PROMOTION_REQUIREMENT.required_before] },
     seams: [V5_J302_BUDGET_LEDGER_STORE_SEAM, V5_J302_PROPOSAL_REVIEW_SEAM,
-      V5_J302_RECEIPT_RETRIEVAL_SEAM, V5_J302_RELEASE_HISTORY_STORE_SEAM].sort(),
+      V5_J302_RECEIPT_RETRIEVAL_SEAM, V5_J302_RECIPIENT_CLASS_SEAM, V5_J302_RELEASE_HISTORY_STORE_SEAM].sort(),
   };
 }
 
