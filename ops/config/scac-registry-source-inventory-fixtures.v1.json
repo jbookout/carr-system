@@ -69384,6 +69384,53 @@
       ],
       "expected_count": 895,
       "expected_sha256": "0f658b5611a928f7d62b543db05695ae530708e3810c5e7bc44ac925db736fa8"
+    },
+    {
+      "version": "v67",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "launchd-workflow:com.carr.timebomb-audit",
+          "ingress_kind": "workflow_entrypoint",
+          "operation": "ops/launchd/com.carr.timebomb-audit.plist",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/launchd/com.carr.timebomb-audit.plist",
+          "schema_digest": "0370aaad831dc867c093c809ba286b19a4a8647f1bda91053b2b38fb6427e245",
+          "handler_digest": "0370aaad831dc867c093c809ba286b19a4a8647f1bda91053b2b38fb6427e245",
+          "launchd_label": "com.carr.timebomb-audit",
+          "trigger_contract_digest": "8b6657537fda34b52d6f017e9d88a7b1812db9ef119c2fd89751cda2f03ad498",
+          "environment_contract_digest": "6126611ef8dd60c6083432ddab69e5b119ff29e6de9a1e63f0e46a4d25813806",
+          "program_arguments_digest": "f9146aa12fa86dfc8e03c3d196bb9eb819488e6440ccdc4b04f2b433fcda90c3",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "launchd_user_session_and_declared_environment",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [
+            "argument:{{REPO}}/.venv/bin/python",
+            "executable:/bin/zsh",
+            "script:bin/run-scheduled.sh",
+            "script:ops/timebomb-audit.py"
+          ],
+          "request_shape": "launchd_trigger_arguments_environment_source_bound",
+          "idempotency_mode": "delegated_entrypoint_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "physical_authority_refs": [
+            "ops.service_environment:timebomb-audit:production"
+          ],
+          "physical_authority_catalog_digests": {
+            "services": "sha256:49805e36ccf62e693f2e6a04205d1ee9d86af2423481b1b2045560bf2505e9de",
+            "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+          },
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 896,
+      "expected_sha256": "943f3c4480e617a4c2e0b9583bccd38fc5bece3a4c4bdc1ad8da95043203d7e4"
     }
   ],
   "current_source_review": {
