@@ -71,7 +71,7 @@ end tell
 '''
 
 # THE MAILBOX IS ADDRESSED BY INDEX, never by name: Mail nests mailboxes inside
-# folders, so `mailbox "Ryan Francis" of account X` raises -1728 for every child
+# folders, so `mailbox "Ryan Fielding" of account X` raises -1728 for every child
 # folder — which on Joe's account is most of them. Each property is one bulk
 # read; the repeat loops below walk LOCAL lists, never the Mail object model.
 EXTRACT_SCRIPT = '''
