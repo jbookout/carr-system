@@ -91,6 +91,12 @@ def policy_vault():
 
 def run(command, vault, home_repo, cwd=None):
     """Drive the gate over one shell command. Returns (exit_code, stderr)."""
+    rc, _out, err = run_full(command, vault, home_repo, cwd)
+    return rc, err
+
+
+def run_full(command, vault, home_repo, cwd=None):
+    """Drive the gate over one shell command. Returns (exit_code, stdout, stderr)."""
     payload = json.dumps({
         "tool_name": "Bash",
         "tool_input": {"command": command},
@@ -100,7 +106,7 @@ def run(command, vault, home_repo, cwd=None):
     env.pop("CARR_ALLOW_FOREIGN_REPO", None)
     p = subprocess.run([sys.executable, GATE], input=payload, capture_output=True,
                        text=True, env=env)
-    return p.returncode, p.stderr
+    return p.returncode, p.stdout, p.stderr
 
 
 def git(repo, *args):
@@ -233,6 +239,33 @@ def main():
         for label, cmd in allowed:
             rc, err = run(cmd.replace("{deals}", deals), vault, home)
             check(f"allowed: {label}", rc == 0, f"exit {rc}: {err[:160]}")
+
+        # ── THE JEV RECEIPT LEDGER: WARNED, NEVER BLOCKED (PR #1224 round 3) ─
+        # ops/typesafe_client.py's ask() is the only legitimate writer of
+        # out/jev-calls.jsonl and writes it from inside Python, so any shell
+        # command that writes the file is a forged receipt or a mistake. The
+        # gate warns loudly (decision d47931da: detectable, not prevented).
+        ledger = f"{home}/out/jev-calls.jsonl"
+        for label, cmd in [
+            ("append redirect onto the ledger", f"echo '{{\"ok\": true}}' >> {ledger}"),
+            ("tee -a onto the ledger", f"echo x | tee -a {ledger}"),
+            ("python append onto the ledger",
+             f'python3 -c \'open("{ledger}","a").write("x")\''),
+            ("inline write in a command naming the ledger by variable",
+             'python3 -c \'p="out/jev-calls.jsonl"; open(p,"a").write("x")\''),
+        ]:
+            rc, out, _ = run_full(cmd, vault, home)
+            check(f"WARNED (allowed): {label}",
+                  rc == 0 and "JEV RECEIPT LEDGER WRITE DETECTED" in out, f"exit {rc}: {out[:160]}")
+        for label, cmd in [
+            ("tail of the ledger", f"tail -5 {ledger}"),
+            ("grep of the ledger", f"grep -c ok {ledger} 2>&1"),
+            ("a script that calls ask() without naming the ledger",
+             "./.venv/bin/python ops/some_jev_caller.py > /tmp/answers.json"),
+        ]:
+            rc, out, _ = run_full(cmd, vault, home)
+            check(f"not warned: {label}",
+                  rc == 0 and "JEV RECEIPT LEDGER" not in out, f"exit {rc}: {out[:160]}")
 
         # ── FAIL OPEN ───────────────────────────────────────────────────────
         rc, _ = run("", vault, home)
