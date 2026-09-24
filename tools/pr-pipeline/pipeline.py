@@ -163,6 +163,24 @@ completion is bound only to the fixer's own dispatch_seq and can never be
 mistaken for, or substituted as, the review round's completion, whichever
 actor happens to be running either session.
 
+RESIDUAL RISK, stated rather than hidden: `hermes kanban complete`/
+`request-review` (`tools/room-bridge/kanban_adapter.py`'s `KanbanAdapter.
+complete`/`request_review`, around lines 321-331) take only a `task_id` and a
+`summary` — they do not check that the calling process is the one that
+actually claimed and ran that task. Any LOCAL process with the `hermes` CLI
+on PATH, the task_id (public via `read-room-queue`), and the dispatch's
+`key=` (readable from the room turn this pipeline itself posted) could shell
+out to `hermes kanban complete` directly and post a fabricated verdict —
+without ever touching `add-room-turn` or the `hermes-pilot` credential this
+module's forged-completion-turn defense depends on. This is accepted for now
+because such a process already runs as, or alongside, Joe's own authenticated
+`gh` login on his machine — the same trust boundary every other write this
+pipeline makes (`gh pr merge`, `gh pr comment`) already sits inside — not
+because the gap is unreal. The planned follow-up is to require the task's
+claim lease (already recorded by Hermes at claim time, per `retry_attempt`'s
+use of it above) on `complete`/`request-review`, so only the process that
+actually claimed and ran a task can close it out.
+
 KNOWN LIMITATION, stated rather than hidden: `read_room_queue()` filters out
 `archived` tasks entirely (`partner-room.js`'s `readRoomQueue`), so a
 completion this pipeline has not yet read before Hermes archives the task is
