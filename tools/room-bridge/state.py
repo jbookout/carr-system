@@ -61,6 +61,7 @@ SHAPE, persisted as JSON:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 DELIVERED_CAP = 4000  # per desk; oldest dropped first — a dedup memory, not an audit log
@@ -198,6 +199,22 @@ def is_echo(turn: dict, desk_seat: str) -> bool:
     return str(turn.get("seat") or "") == str(desk_seat or "")
 
 
+def is_unaddressed_desk_turn(turn: dict, desk_seat: str, desk_seats: dict[str, str]) -> bool:
+    """A turn spoken by ANOTHER desk reaches this desk only when it names this
+    desk's seat as a whole-word @-mention. Turns from people fan out as before.
+
+    WHY, found live 2026-09-24: with flash and codex both seated, each desk's
+    reply was routed to the other and answered, about once a minute, until a
+    seat was stopped. is_echo only stops a desk hearing itself; two desks need
+    this second guard or any reply can start a loop.
+    """
+    speaker = str(turn.get("seat") or "")
+    if speaker not in set(desk_seats.values()):
+        return False
+    mention = re.compile(r"(?<![\w@])@" + re.escape(str(desk_seat)) + r"(?![\w-])")
+    return not mention.search(str(turn.get("body") or ""))
+
+
 def already_delivered(state: dict, desk_name: str, msg_id: str) -> bool:
     return msg_id in _desk_slot(state, desk_name)["delivered"]
 
@@ -242,6 +259,8 @@ def route_turn(state: dict, turn: dict, desk_seats: dict[str, str]) -> list[str]
     queued_onto: list[str] = []
     for name, seat in desk_seats.items():
         if is_echo(turn, seat):
+            continue
+        if is_unaddressed_desk_turn(turn, seat, desk_seats):
             continue
         if already_delivered(state, name, msg_id):
             continue
