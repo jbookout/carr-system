@@ -58,7 +58,7 @@ TREE = ast.parse(SOURCE, filename=str(HEALTH_CHECK_PATH))
 STRUCTURAL_KEYS = {
     "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
-    "credential_health",
+    "credential_health", "unrecorded_failure",
 }
 
 
@@ -138,28 +138,112 @@ def _is_return_one(stmt: ast.stmt) -> bool:
             and stmt.value.value == 1)
 
 
+def _branch_always_finds(stmts: list) -> bool:
+    """Whether this straight-line statement list is GUARANTEED to make a
+    finding call every time it runs — used to decide whether an `if`
+    propagates to a later sibling (see `_if_always_finds`)."""
+    for s in stmts:
+        if _propagates_finding_call(s):
+            return True
+        if isinstance(s, ast.If) and _if_always_finds(s):
+            return True
+    return False
+
+
+def _if_always_finds(node: ast.If) -> bool:
+    """Whether EVERY path through this `if`/`elif`/`else` chain makes a
+    finding call — i.e. it is safe to treat as "found something" for a
+    LATER sibling statement, same as a for-loop is. Two ways an `if` earns
+    this:
+
+    1. Its own `test` expression itself contains a finding/delegate call
+       (e.g. `if _canonical_contradiction_alarm(): rc = 1`) — the test is
+       evaluated every time this statement is reached, whichever way it
+       comes out, so a call inside it always happens.
+    2. It has a real `else` (or an `elif` chain that ends in one — a bare
+       `if` with no `else` can never qualify, since the false path
+       guarantees nothing), and EVERY leaf branch (recursively, through any
+       `elif`) independently guarantees a finding call.
+
+    A lone `if X: _canonical_finding(...)` with no `else` does NOT
+    propagate: reaching it with X false calls nothing. This is why a
+    'four independent un-elsed `if`s covering one OR'd guard' pattern
+    still needs a code-level for-loop rewrite, not a smarter checker —
+    proving that kind of disjunctive coverage statically is out of scope
+    here, and out of scope for real code review too."""
+    test_hit = _contains_finding_call(node.test)
+    if test_hit:
+        return True
+    if not node.orelse:
+        return False
+    return _branch_always_finds(node.body) and _branch_always_finds(node.orelse)
+
+
+def _propagates_finding_call(stmt: ast.stmt) -> bool:
+    """Whether a finding call found in/around `stmt` should count toward a
+    LATER SIBLING statement at the SAME block level — point 3 of the third
+    round of an independent review of PR #1237: the check must be per
+    BRANCH, not per section.
+
+    A `for`/`while`/`with` body runs unconditionally once its own header is
+    reached, so a finding call anywhere inside one (even nested one level
+    deeper, e.g. `for x in bad: if cond(x): _canonical_finding(...)`) is
+    propagated — this is the documented, legitimate "a for-loop reports one
+    finding per bad item, followed by a sibling `if bad: rc = 1`" pattern,
+    where the loop's own condition and the sibling `if`'s condition are
+    drawn from the same accumulator.
+
+    An `if` propagates ONLY when `_if_always_finds` proves every path
+    through it makes a finding call (see that function) — a lone `if` whose
+    single branch happens to call a finding does NOT propagate, because
+    that branch's own condition is no guarantee about a later, unrelated
+    statement's condition. This is exactly the bug a planted `rc = 1` after
+    `_canonical_workflow_truth()` exposed: an EARLIER, unrelated `if`
+    branch's finding call had satisfied the old check for the rest of the
+    whole top-level section, when in reality that branch might not have
+    executed at all.
+
+    A bare `try` (no matching structural guarantee) is likewise NOT
+    propagated — its body may not finish if an exception fires partway
+    through, so nothing inside it is guaranteed either."""
+    if isinstance(stmt, (ast.For, ast.While, ast.With, ast.AsyncFor, ast.AsyncWith)):
+        return _contains_finding_call(stmt)
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        return _contains_finding_call(stmt)
+    if isinstance(stmt, ast.If):
+        return _if_always_finds(stmt)
+    return False
+
+
 def _check_block(body: list, errors: list, where: str, seen_finding: bool = False) -> bool:
     """Every `rc = 1` / `return 1` reachable from THIS statement list must be
     preceded by at least one `_canonical_finding(...)` call reachable from an
-    earlier point in the same enclosing scope — including a finding call made
-    by an earlier SIBLING statement's own nested block (e.g. a for-loop that
-    reports one finding per bad item, followed by a sibling `if bad: rc = 1`
-    that itself calls no finding function). `seen_finding` is the state
-    carried in from the enclosing block, and recursion into a nested body
-    passes the CURRENT running state rather than resetting it, so that
-    inherited case is not a false positive. Returns the updated state (not
-    used by callers today, but keeps the function honest about what it
-    tracks)."""
+    earlier point on the SAME control-flow path — including a finding call
+    made by an earlier SIBLING `for`/`while`/`with` statement's own nested
+    block (see `_propagates_finding_call`), but NEVER a finding call made
+    inside an earlier sibling `if`/`try` branch, since that branch's own
+    condition is no guarantee about a later, different statement's
+    condition (point 3 of the third round of review — "per branch, not per
+    section"). `seen_finding` is the state carried in from the enclosing
+    block, and recursion into a nested body passes the CURRENT running
+    state rather than resetting it, so an inherited for/while case is not a
+    false positive; an inherited if/try case never contributes at all (see
+    `_propagates_finding_call`). Returns the updated state (not used by
+    callers today, but keeps the function honest about what it tracks)."""
     for stmt in body:
         if _is_rc_one_assign(stmt) or _is_return_one(stmt):
             if not seen_finding:
                 errors.append(f"{where}:{stmt.lineno}: rc=1/return 1 with no preceding "
                               f"_canonical_finding(...) call in the same or an enclosing block")
-        if _contains_finding_call(stmt):
+        if _propagates_finding_call(stmt):
             seen_finding = True
         # Recurse into this statement's own nested blocks so a violation
         # buried inside an `if`/`for`/`try` is still caught, carrying the
-        # running seen_finding state in (see docstring).
+        # running seen_finding state in (see docstring). This recursion is
+        # independent of whether `stmt` itself propagates to the OUTER
+        # loop's `seen_finding` above — an `if`'s own body/orelse are still
+        # checked against whatever was true BEFORE the `if`, they just
+        # don't feed anything back out to their siblings.
         for field in ("body", "orelse", "finalbody"):
             nested = getattr(stmt, field, None)
             if isinstance(nested, list) and nested and all(isinstance(x, ast.stmt) for x in nested):
@@ -228,13 +312,14 @@ class FindingFunctions(unittest.TestCase):
         subjects = {row["subject"] for row in self.ns["_FINDINGS"]}
         self.assertEqual(subjects, {"a.xlsx", "b.xlsx"})
 
-    def test_hard_error_and_time_rolling_require_consensus_across_merges(self):
-        # AND, not OR (point 4 of the second round of review of PR #1237): a
-        # merged (key, subject) only keeps a flag when EVERY contributing
-        # call agreed on it. Two calls that both agree stay flagged; one
-        # dissenting call clears it for the whole merged row, rather than
-        # one hard_error=True call permanently painting every later, calmer
-        # call for the same pair within the same run.
+    def test_hard_error_ors_and_time_rolling_ands_across_merges(self):
+        # Point 4 of the THIRD round of review of PR #1237, correcting the
+        # second round's overcorrection: hard_error merges with OR (one
+        # hard_error=True contributor makes the merged row hard_error, and
+        # a later calmer call for the same pair must not launder that
+        # away), while time_rolling still merges with AND (it only means
+        # "every contributor agrees this pair is clock-driven"; one
+        # non-rolling contributor is real news and must not be excused).
         self.finding("x", "first", subject="s", hard_error=True, time_rolling=True)
         self.finding("x", "second", subject="s", hard_error=True, time_rolling=True)
         row = self.ns["_FINDINGS"][0]
@@ -242,10 +327,14 @@ class FindingFunctions(unittest.TestCase):
         self.assertTrue(row["time_rolling"])
         self.assertEqual(row["count"], 2)
 
-        self.finding("y", "first", subject="s", hard_error=False, time_rolling=True)
-        self.finding("y", "second", subject="s", hard_error=True, time_rolling=False)
+        # A dissenting hard_error=False call does NOT clear an earlier
+        # hard_error=True for the same pair.
+        self.finding("y", "first", subject="s", hard_error=True, time_rolling=False)
+        self.finding("y", "second", subject="s", hard_error=False, time_rolling=True)
         row_y = next(r for r in self.ns["_FINDINGS"] if r["key"] == "y")
-        self.assertFalse(row_y["hard_error"])
+        self.assertTrue(row_y["hard_error"])
+        # But a dissenting time_rolling=False call DOES clear a merged
+        # time_rolling — not every contributor agreed it was clock noise.
         self.assertFalse(row_y["time_rolling"])
         self.assertEqual(row_y["count"], 2)
 
@@ -338,6 +427,67 @@ class Rc1AlwaysFindsSomething(unittest.TestCase):
                          "\n".join(errors_good) or
                          "a new top-level section that DOES call _canonical_finding before its "
                          "rc=1 was wrongly flagged")
+
+    def test_mutation_an_unrelated_if_branch_does_not_cover_a_later_sibling(self):
+        # Point 3 of the THIRD round of review: the check must be per
+        # BRANCH, not per section. The round-2 mutation test proved
+        # cross-TOP-LEVEL-STATEMENT leaks were fixed; this proves the same
+        # kind of leak WITHIN one top-level statement, across two sibling
+        # `if`s that test unrelated conditions, is also caught — this is
+        # exactly the shape of "a planted rc=1 inside the jobs section
+        # after _canonical_workflow_truth() still passes" from the
+        # reviewer's mut3 probe: an earlier, unrelated conditional finding
+        # call must not excuse a later, different conditional's rc=1.
+        src_bad = (
+            "def f():\n"
+            "    if section:\n"
+            "        if some_earlier_condition():\n"
+            "            _canonical_finding('a', 'a')\n"
+            "        _canonical_workflow_truth()\n"
+            "        if some_unrelated_condition():\n"
+            "            rc = 1\n"
+        )
+        fn_bad = ast.parse(src_bad).body[0]
+        errors_bad: list = []
+        _check_function_top_level_isolated(fn_bad, errors_bad, "f")
+        self.assertNotEqual(errors_bad, [],
+                            "an earlier, unrelated if branch's finding call must not cover a "
+                            "later sibling if's rc=1")
+
+        # The two legitimate propagating shapes must still pass: a for-loop
+        # feeding a sibling if (the original documented pattern), and an
+        # if/else where EVERY leaf branch calls a finding (so the branch
+        # is provably unavoidable, not merely possible).
+        # Both legitimate patterns are tested nested inside one common
+        # enclosing statement — same as the real code (both live inside one
+        # `if CANONICAL_SECTION in (...):` block) — since round 2's
+        # per-top-level isolation deliberately does NOT thread seen_finding
+        # between statements that are themselves top-level siblings of the
+        # function; only nesting inside a shared enclosing block does.
+        src_good_for = (
+            "def f():\n"
+            "    if section:\n"
+            "        for item in bad:\n"
+            "            _canonical_finding('a', 'a')\n"
+            "        if bad:\n"
+            "            rc = 1\n"
+        )
+        errors_good_for: list = []
+        _check_function_top_level_isolated(ast.parse(src_good_for).body[0], errors_good_for, "f")
+        self.assertEqual(errors_good_for, [])
+
+        src_good_ifelse = (
+            "def f():\n"
+            "    if section:\n"
+            "        if cond:\n"
+            "            _canonical_finding('a', 'a')\n"
+            "        else:\n"
+            "            _canonical_finding('b', 'b')\n"
+            "        rc = 1\n"
+        )
+        errors_good_ifelse: list = []
+        _check_function_top_level_isolated(ast.parse(src_good_ifelse).body[0], errors_good_ifelse, "f")
+        self.assertEqual(errors_good_ifelse, [])
 
     def test_business_count_keys_are_not_hard_error(self):
         # The other half of the same contract: a count that can legitimately

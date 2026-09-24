@@ -515,7 +515,7 @@ class HealthGate(Base):
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         rec = self.fx.records()[-1]
         self.assertEqual(rec["step"], "health")
-        self.assertIn("no new finding to explain it", rec.get("detail", ""))
+        self.assertIn("no finding at all", rec.get("detail", ""))
 
     def test_B_and_E_an_unavailable_baseline_is_a_pre_promote_block_not_a_failure(self):
         # B: the baseline must be taken before any --apply step; E: an
@@ -543,7 +543,7 @@ class HealthGate(Base):
         for later in ("staging-prepare", "staging-app-writer", "migrate-plan",
                       "migrate-apply", "upload", "staging", "promote", "health"):
             self.assertNotIn(later, runner.names())
-        self.assertEqual(runner.names(), ["wrangler-auth", "worktree", "health-baseline"])
+        self.assertEqual(runner.names(), ["wrangler-auth", "worktree", "venv-link", "health-baseline"])
 
     def test_B_baseline_runs_in_the_worktree_before_every_apply_step(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
@@ -577,6 +577,29 @@ class HealthGate(Base):
         # and neither one is the pipeline's own repo checkout — it is a
         # dedicated release worktree.
         self.assertNotEqual(runner.cwds["health-baseline"], str(self.fx.repo))
+
+    def test_point1_the_baselines_worktree_has_a_linked_venv(self):
+        # Point 1 (BLOCKER) of the third round of review, reproduced with a
+        # real run: venv-link must run BEFORE the health baseline, or
+        # `./run.sh health` in the worktree falls back to the bare Homebrew
+        # python3 (no psycopg, no openpyxl) and every worker release blocks
+        # on a source_unreadable hard_error. "worktree" then "venv-link"
+        # then "health-baseline", in that order, every time.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        names = runner.names()
+        self.assertLess(names.index("worktree"), names.index("venv-link"))
+        self.assertLess(names.index("venv-link"), names.index("health-baseline"))
+        # FakeRunner does not touch the filesystem, so the real proof of a
+        # working link is the venv-link argv itself: `ln -s <repo>/.venv
+        # <worktree>/.venv`, with the LINK TARGET sitting directly inside
+        # the exact folder the baseline read then runs in.
+        venv_link_argv = next(argv for name, argv in runner.calls if name == "venv-link")
+        self.assertEqual(venv_link_argv[0], "ln")
+        self.assertTrue(venv_link_argv[-1].endswith("/.venv"))
+        self.assertEqual(str(Path(venv_link_argv[-1]).parent), runner.cwds["health-baseline"])
 
     def test_B_baseline_runs_before_migrate_apply_when_a_migration_is_pending(self):
         # The probe's original concern named migrate-apply specifically ("the

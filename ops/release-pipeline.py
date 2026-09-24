@@ -760,24 +760,33 @@ class Pipeline:
         new = health_regression([] if not baseline_complete else baseline_findings, findings)
         # Belt-and-suspenders for point A ("a nonzero health exit with no new
         # finding line now passes... any rc != 0 must fail") and point 3 of
-        # the second round of review (the AST check that was supposed to
-        # guarantee every rc=1 path records a finding was vacuous — a single
-        # earlier finding call anywhere in the function satisfied it for
-        # every later, unrelated section too; tools/health-check-findings-
-        # selftest.py now checks each top-level section on its own and a
-        # mutation test proves it catches a planted unrecorded red). This
-        # backstop stays as a hard runtime guard against a FUTURE rc=1 path
-        # shipping without a finding call regardless: a CLEAN baseline
-        # (rc=0) followed by a DIRTY live read (rc!=0) that health_regression
-        # found no new finding for is never a pass, even if OTHER, unrelated
-        # findings were recorded during the same run — scoped to "baseline
-        # was clean," not "live recorded nothing at all," so it can still
-        # never re-fail pure standing debt (baseline and live both rc=1 on
-        # the same findings) that the whole redesign exists to let pass.
-        if not new and baseline_rc == 0 and res.rc != 0:
-            new = [f"./run.sh health exited {res.rc} against a clean (rc=0) baseline but "
-                  f"health_regression found no new finding to explain it — treated as "
-                  f"unavailable, never a pass"]
+        # the second AND third rounds of review.
+        #
+        # The pipeline-side condition here is deliberately narrow — "live
+        # recorded NOTHING at all," not "baseline was clean" — because a
+        # REAL baseline is essentially always rc=1 (98 standing rule gaps on
+        # a normal day), so a condition keyed on `baseline_rc == 0` almost
+        # never fired in production; that was the bug the third round of
+        # review caught with a real run. tools/health-check.py now carries
+        # its OWN runtime self-check (`_canonical_health`'s trailing
+        # `if rc == 1 and not _FINDINGS:`): whenever `rc` ends up 1 with
+        # NOTHING recorded to explain it, health-check.py itself records an
+        # `unrecorded_failure` hard_error finding — which health_regression
+        # above already fails on unconditionally, live or baseline, via its
+        # own hard_error rule. So THIS backstop only needs to catch the case
+        # health-check.py's self-check cannot see: the `--findings-json`
+        # payload never landing at all (a crash between the happy path and
+        # `_write_findings_json`, or between `sys.exit` and this reading it)
+        # — `complete` already guards that above, so by the time we reach
+        # here `findings` is a genuine reflection of what ran. This stays as
+        # a hard runtime guard against a FUTURE path in that file shipping
+        # without ANY finding call at all, belt-and-suspenders alongside
+        # tools/health-check-findings-selftest.py's static, per-BRANCH proof
+        # (point 3 of the third round: "per branch, not per section") and
+        # its mutation tests.
+        if not new and res.rc != 0 and not findings:
+            new = [f"./run.sh health exited {res.rc} but recorded no finding at all "
+                  f"to explain it — treated as unavailable, never a pass"]
         if new:
             n = len(self.executed) + 1
             findings_log = self.run_dir / f"{n:02d}-health-new-findings.log"
@@ -789,6 +798,40 @@ class Pipeline:
             raise StepFailed("health", res.rc or 1, str(findings_log),
                               "new canonical finding(s) since the pre-promote baseline: "
                               + "; ".join(new))
+
+    def health_preflight(self, sha: str) -> int:
+        """Real evidence for point 1 (BLOCKER) of the third round of an
+        independent review of PR #1237: a fake-runner selftest cannot prove
+        `./run.sh health` actually succeeds against the linked venv, because
+        the fake runner never executes anything. This checks out a REAL,
+        throwaway release worktree at `sha` (no --apply, no promote — the
+        exact same "checkout, venv-link, health read" prefix release_worker
+        runs before it ever mutates anything), runs the REAL `./run.sh
+        health --findings-json` subprocess twice (mirroring the baseline and
+        the post-promote read, both against the same folder, per point 1 of
+        the SECOND round of review), prints what each one found, and always
+        removes the worktree before returning — this command mutates nothing
+        beyond that throwaway checkout, so it is safe to run against
+        production data as a preflight.
+        """
+        wt = self.store.root / "worktrees" / f"preflight-{sha[:12]}"
+        self.add_worktree("preflight", self.repo, wt, sha, mark_mutated=False)
+        try:
+            self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
+            baseline_res, baseline_findings, baseline_complete = self.health_read("health-baseline", wt)
+            self.out(f"  health-baseline: rc={baseline_res.rc} complete={baseline_complete} "
+                     f"findings={len(baseline_findings)} "
+                     f"hard_error={[f['key'] for f in baseline_findings if f.get('hard_error')]}")
+            live_res, live_findings, live_complete = self.health_read("health", wt)
+            self.out(f"  health (post):   rc={live_res.rc} complete={live_complete} "
+                     f"findings={len(live_findings)} "
+                     f"hard_error={[f['key'] for f in live_findings if f.get('hard_error')]}")
+        finally:
+            self.remove_worktrees()
+        ok = baseline_complete and live_complete and not any(
+            f.get("hard_error") for f in baseline_findings)
+        self.out("  health-preflight: " + ("OK" if ok else "FAILED — see rc/findings above"))
+        return 0 if ok else 1
 
     # -- evidence -----------------------------------------------------------
     def batch_commits(self, repo_dir: Path, base: str, sha: str) -> list[str]:
@@ -1273,6 +1316,17 @@ class Pipeline:
         # does not by itself burn the SHA the way a real --apply step would.
         self.add_worktree("worktree", self.repo, wt, sha, mark_mutated=False)
 
+        # venv-link BEFORE the baseline (point 1, BLOCKER, of the third
+        # round of an independent review of PR #1237): it is a symlink only
+        # — no production state, no network, nothing that widens what a
+        # clean Blocked hold is allowed to be — but without it `./run.sh
+        # health` in the worktree falls back to the bare Homebrew python3,
+        # which has neither psycopg nor openpyxl, so EVERY baseline read a
+        # source_unreadable hard_error and every worker release blocked
+        # before promote. Linking the venv first gives the baseline read
+        # the same interpreter the rest of this lane already relies on.
+        self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
+
         # Health baseline, read INSIDE that same worktree (points B/E of the
         # first review round: before staging-prepare/staging-app-writer/
         # migrate-apply — every --apply step — so a release's OWN migration
@@ -1291,7 +1345,6 @@ class Pipeline:
             # yet"; treat it like every other real failure.
             self.mutated = True
 
-        self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
         self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
 
         # 2-3. staging replacement and app writer
@@ -1515,13 +1568,20 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
 
     `time_rolling` findings (a job's MISSING DUE date, an export crossing
     the 26h STALE clock, a rolling 24h gate-block window) are excused from
-    the "new pair" check — a (key, subject) can legitimately first appear
-    purely because wall-clock time passed, not because of anything this
-    release did — but they are NOT excused from a rising count: point 4 of
-    the second round of review found that a rolling finding whose count
-    climbed was being waved through entirely. Only a FALL (or no change) in
-    a rolling finding's count is treated as clock noise; a rise still fails,
-    the same as any other finding.
+    the "new pair" check WHEN THE BASELINE ALREADY HAD SOME ENTRY for that
+    (key, subject) — a (key, subject) whose subject is the stable job/target
+    identifier can legitimately RISE in count purely because wall-clock time
+    passed, not because of anything this release did, so only a FALL (or no
+    change) is treated as clock noise; a rise against an EXISTING baseline
+    entry still fails, the same as any other finding (point 4 of the second
+    round of review). But a (key, subject) pair with NO baseline entry AT
+    ALL is excused entirely, not compared against an implicit zero (point 2
+    of the THIRD round of review): a rolling finding that is appearing for
+    the very first time — a job crossing its due window today, an export
+    just now going STALE — has nothing to regress against, and comparing it
+    to a phantom baseline count of 0 turned "first time this ever happened"
+    into "count rose from 0, therefore new regression," which defeated the
+    entire point of excusing clock-driven findings.
 
     Note for a reader of a failing gate: `count` accumulates by (key,
     subject) within one run (see tools/health-check.py's `_canonical_
@@ -1529,6 +1589,14 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
     wider aggregate subject can cancel out in the total and never surface
     here (point 6) — a caller who needs finer resolution than that should
     split the subject by rule id rather than read the aggregate as exact.
+    This applies with extra force to `job_missing_due`, whose subject is
+    the job's definition key alone: several DIFFERENT missing due-windows
+    for the same job accumulate onto ONE (key, subject) count, so a truly
+    new missed window and an old one simply aging forward are not
+    distinguishable from the count alone. Telling those apart needs a
+    window-level identity this schema does not carry today; that is a
+    known scoping limit of the (key, subject, count) aggregate, not
+    something this diff can fix by comparing counts more cleverly.
     """
     baseline_by_key_subject = {(row["key"], row["subject"]): row for row in baseline}
     bad = []
@@ -1540,16 +1608,19 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
             bad.append(f"{row['key']}[{row['subject']}]: hard_error — {detail}")
             continue
         prior = baseline_by_key_subject.get((row["key"], row["subject"]))
-        prior_count = prior.get("count", 0) if prior else 0
         if row.get("time_rolling"):
-            if row.get("count", 0) > prior_count:
-                bad.append(f"{row['key']}[{row['subject']}]: time_rolling count {prior_count} -> "
-                           f"{row.get('count')} — {detail}")
+            if prior is None:
+                # First appearance of a clock-driven finding: nothing to
+                # regress against (point 2, third round of review).
+                continue
+            if row.get("count", 0) > prior.get("count", 0):
+                bad.append(f"{row['key']}[{row['subject']}]: time_rolling count "
+                           f"{prior.get('count')} -> {row.get('count')} — {detail}")
             continue
         if prior is None:
             bad.append(f"{row['key']}[{row['subject']}]: new — {detail}")
-        elif row.get("count", 0) > prior_count:
-            bad.append(f"{row['key']}[{row['subject']}]: count {prior_count} -> "
+        elif row.get("count", 0) > prior.get("count", 0):
+            bad.append(f"{row['key']}[{row['subject']}]: count {prior.get('count')} -> "
                        f"{row.get('count')} — {detail}")
     return bad
 
@@ -1608,8 +1679,10 @@ def clear_failed(store: Store, lane: str, sha: str, reason: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", nargs="?", default="tick", choices=("tick", "report", "clear-failed"))
-    ap.add_argument("--sha", help="clear-failed: the exact failed SHA being cleared")
+    ap.add_argument("command", nargs="?", default="tick",
+                    choices=("tick", "report", "clear-failed", "health-preflight"))
+    ap.add_argument("--sha", help="clear-failed: the exact failed SHA being cleared; "
+                    "health-preflight: the sha to check out (defaults to origin/main)")
     ap.add_argument("--reason", help="clear-failed: why a retry of the same SHA is now right")
     ap.add_argument("--dry-run", action="store_true", help="print the exact commands; execute no deploy")
     ap.add_argument("--lane", choices=("worker", "app"), action="append")
@@ -1625,6 +1698,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "report":
         print(report(Store(REPO / cfg.get("state_dir", "out/release-pipeline")), args.date))
         return 0
+    if args.command == "health-preflight":
+        # Always a REAL run — --dry-run would defeat the entire point (point
+        # 1, BLOCKER, of the third round of review: proving the venv-linked
+        # `./run.sh health` actually works, which only a real subprocess
+        # execution can show).
+        pipe = Pipeline(cfg, dry_run=False)
+        sha = args.sha or pipe.git("rev-parse", "origin/main", cwd=pipe.repo)
+        return pipe.health_preflight(sha)
     pipe = Pipeline(cfg, dry_run=args.dry_run)
     return pipe.tick(args.lane or ["worker", "app"])
 

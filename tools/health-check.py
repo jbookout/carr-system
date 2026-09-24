@@ -1021,13 +1021,18 @@ def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, ti
     for row in _FINDINGS:
         if row["key"] == key and row["subject"] == subject:
             row["count"] += count
-            # AND, not OR (point 4 of the second round of review): a merged
-            # occurrence only keeps a flag when EVERY call that contributed
-            # to this (key, subject) agreed on it. An OR let one hard_error
-            # or time_rolling call permanently paint the whole accumulated
-            # row that way even after a later, calmer call for the same
-            # pair disagreed within the same run — AND requires consensus.
-            row["hard_error"] = row["hard_error"] and bool(hard_error)
+            # hard_error merges with OR (point 4 of the THIRD round of
+            # review, correcting the second round's overcorrection): a
+            # (key, subject) that had EVEN ONE hard_error contributor this
+            # run really is broken — that must never be diluted back to
+            # False just because a later, calmer call for the same pair
+            # merged in. time_rolling still merges with AND: it only means
+            # "this pair changes on the clock alone," which is true only
+            # when EVERY contributing call agrees — one non-rolling
+            # contributor is real, non-clock news for that pair and must
+            # not be laundered into "reported but never diffed" by a
+            # rolling sibling call.
+            row["hard_error"] = row["hard_error"] or bool(hard_error)
             row["time_rolling"] = row["time_rolling"] and bool(time_rolling)
             return
     _FINDINGS.append({"key": key, "subject": subject, "detail": detail, "count": count,
@@ -1267,14 +1272,23 @@ def _canonical_health():
             print(f"  {'OK' if not rule_gaps else '⚠︎'} active-rule-gaps      "
                   f"{rule_gaps} active admitted rules unenforced{_carried}")
             if gate_failures or never_reviewed or stale or rule_gaps:
-                if gate_failures:
-                    _canonical_finding("doctrine_gate", f"{gate_failures} failures in 24h", count=gate_failures, time_rolling=True)
-                if never_reviewed:
-                    _canonical_finding("doctrine_review", f"{never_reviewed} never reviewed", count=never_reviewed)
-                if stale:
-                    _canonical_finding("doctrine_stale", f"{stale} stale sections", count=stale, time_rolling=True)
-                if rule_gaps:
-                    _canonical_finding("rule_enforcement", f"{rule_gaps} active rule gaps", count=rule_gaps)
+                # A `for` loop, not four independent sibling `if`s (point 3
+                # of the third round of review of PR #1237: the AST check is
+                # now per BRANCH, not per section — four separate un-elsed
+                # `if`s can never be PROVEN, statement by statement, to
+                # collectively cover the OR'd guard above them, even though
+                # they do here. A `for` loop's body is understood to run
+                # unconditionally once reached, same as the documented
+                # "for-loop reports one finding per bad item" pattern, so
+                # this is both simpler to read and directly verifiable.
+                for _count, _key, _detail, _time_rolling in (
+                    (gate_failures, "doctrine_gate", f"{gate_failures} failures in 24h", True),
+                    (never_reviewed, "doctrine_review", f"{never_reviewed} never reviewed", False),
+                    (stale, "doctrine_stale", f"{stale} stale sections", True),
+                    (rule_gaps, "rule_enforcement", f"{rule_gaps} active rule gaps", False),
+                ):
+                    if _count:
+                        _canonical_finding(_key, _detail, count=_count, time_rolling=_time_rolling)
                 rc = 1
 
         p = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
@@ -1358,17 +1372,43 @@ def _canonical_health():
                     # ops/credential-health.py's first line, when it needs
                     # attention, is "N of M credential(s) need attention
                     # (failed=F expiring_soon=E unverifiable=U
-                    # unconfigured=C ok=O)". A credential that only expires
-                    # soon is not a structural check failure — it is a
-                    # counted finding, same as any other standing-debt count
-                    # (point 2 of the second round of review). An actual
-                    # `failed` probe, or a line that does not match this
-                    # module's own summary shape at all (a crash, a format
-                    # this file has never seen), stays hard_error — this can
-                    # never let a REAL failure through as a mere count.
-                    _m = re.search(r"failed=(\d+)\s+expiring_soon=(\d+)", _detail)
-                    if _m and int(_m.group(1)) == 0 and int(_m.group(2)) > 0:
-                        _canonical_finding("credential_health", _detail, count=int(_m.group(2)))
+                    # unconfigured=C ok=O)". Point 5 of the third round of
+                    # review: each non-ok status is its OWN (key, subject),
+                    # not one bundled "credential_health" finding — a rise
+                    # in any ONE status (say expiring_soon 1 -> 2, while
+                    # failed stays 0) must show as a regression on its own
+                    # subject, not get averaged away inside one shared
+                    # count. `failed` is the only one that stays hard_error
+                    # — an actually-broken credential, unlike one that is
+                    # merely expiring, unverifiable, or unconfigured, which
+                    # are counted findings same as any other standing-debt
+                    # count (point 2 of the second round of review). A line
+                    # that does not match this module's own summary shape
+                    # at all (a crash, a format this file has never seen)
+                    # falls back to one hard_error finding on an empty
+                    # subject — this can never let a REAL failure through
+                    # as a mere count just because it didn't parse.
+                    _m = re.search(r"failed=(\d+)\s+expiring_soon=(\d+)\s+unverifiable=(\d+)\s+"
+                                   r"unconfigured=(\d+)", _detail)
+                    if _m:
+                        _failed, _expiring, _unverifiable, _unconfigured = (int(g) for g in _m.groups())
+                        # A `for` loop, not four independent sibling `if`s —
+                        # same reasoning as the doctrine/rule-gaps section
+                        # above (point 3 of the third round of review): a
+                        # `for` loop's body is understood to run
+                        # unconditionally once reached, so this is directly
+                        # verifiable by the AST check, where four un-elsed
+                        # sibling `if`s covering this dict's guaranteed
+                        # match are not.
+                        for _count, _subject, _hard in (
+                            (_failed, "failed", True),
+                            (_expiring, "expiring_soon", False),
+                            (_unverifiable, "unverifiable", False),
+                            (_unconfigured, "unconfigured", False),
+                        ):
+                            if _count:
+                                _canonical_finding("credential_health", _detail, subject=_subject,
+                                                   count=_count, hard_error=_hard)
                     else:
                         _canonical_finding("credential_health", _detail, hard_error=True)
                     rc = 1
@@ -1376,6 +1416,21 @@ def _canonical_health():
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
             _canonical_finding("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
             rc = 1
+
+    # Runtime self-check, alongside the static AST proof in tools/health-
+    # check-findings-selftest.py (point 3 of the third round of an
+    # independent review of PR #1237: the static check can only prove what
+    # its own control-flow model understands — the per-branch fix closes
+    # the gap the reviewer found, but a runtime backstop against a FUTURE
+    # gap costs nothing here). If `rc` ended up 1 but nothing at all was
+    # recorded to explain it, that IS itself an unrecorded failure: record
+    # it as one, hard_error, so ops/release-pipeline.py's health gate (which
+    # treats any hard_error as an unconditional live failure regardless of
+    # the baseline) fails on it rather than silently promoting past it.
+    if rc == 1 and not _FINDINGS:
+        _canonical_finding("unrecorded_failure",
+                           "rc=1 was set but no finding was recorded anywhere to explain it",
+                           hard_error=True)
 
     print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
     return rc
