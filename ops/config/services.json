@@ -433,6 +433,26 @@
     },
 
     {
+      "key": "release-pipeline",
+      "name": "Scripted release pipeline (Worker + DoctorCRE app)",
+      "purpose": "Decisions 17ef11fa/b729859d: release is script-triggered. Every 15 minutes compares each lane's origin/main with the last SHA it released and, when the batch touches release paths, runs the sanctioned manual release sequence unattended from a detached worktree at the exact SHA (staging replacement, staging app writer, migrate-prod, deploy-worker upload/staging/promote, live readback, health; npm run release:production for the app). Stops on any nonzero exit, records the step and log, never retries that SHA, and enqueues a repo-write Model Room diagnosis session to fix forward by PR. Kill switch: ops/config/release-pipeline.v1.json enabled, or ~/.config/carr/release-pipeline.off. See ops/release-pipeline.py.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "ops/release-pipeline.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.release-pipeline.plist",
+          "expected_cadence_seconds": 3600,
+          "cadence_grace_seconds": 5400,
+          "notes": "Wakes every 900s; bin/run-scheduled.sh --heartbeat-interval 3600 throttles SUCCEEDED rows to one an hour, and every failure (a stopped release, or exit 3 for a missing unattended credential) is recorded immediately. Grace covers the ops-spool flush delay, as for room-bridge. What shipped, failed or blocked is in out/release-pipeline/releases.jsonl; `ops/release-pipeline.py report --date D` prints it for a daily note."
+        }
+      ]
+    },
+
+    {
       "key": "canonical-dirty-watchdog",
       "name": "Canonical checkout dirty/staleness watchdog",
       "purpose": "WR-000040 AC-FRESH, the alarm half. Observes the canonical checkout ALONE — it never calls the fast-forward and never reads anything the fast-forward wrote — so it still pages when that agent is unloaded, its program is missing, or the machine slept through every window. Pages on an unobservable repository, tracked dirt, a branch other than main, staleness past the 24h bar, canonical holding commits origin/main does not have, and an unverifiable fetch. Untracked paths are counted and named, never alarmed: AC-CLEAN routes those to Joe per path.",
