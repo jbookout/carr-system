@@ -28,7 +28,13 @@ confirms it.
    addresses to the loopback Call Mode service.
 4. A no-tools local model receives only the local transcript and that exact
    index. Its strict JSON output may reference only IDs in the index. Ambiguous
-   references become review questions, never guessed writes.
+   references become review questions, never guessed writes. The default
+   model is the resident Flash Next server (Qwen3.8 Flash Next, already
+   running on loopback for the Model Room flash desk; this workflow only ever
+   calls it and never starts, stops, or restarts it). When that server is
+   unreachable, processing falls back to a bundled local Qwen2.5 1.5B model
+   served by a private, bounded `llama-server` child this workflow does start
+   and stop itself.
 5. A deterministic validator rejects invented IDs, recipients not attached to
    the deal, unsupported phase values, oversized evidence, and malformed tasks
    or drafts.

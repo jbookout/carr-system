@@ -530,6 +530,104 @@ class PostCallTests(unittest.TestCase):
     def test_post_call_model_port_cannot_collide_with_quill_services(self) -> None:
         self.assertNotIn(post_call.LLAMA_PORT, {8596, 8597})
 
+    class _FakeOpenerResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> "PostCallTests._FakeOpenerResponse":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    class _FakeOpener:
+        """A minimal fake for urllib.request.urlopen: never touches a real socket.
+
+        Distinguishes the /v1/models health probe (called with a bare URL
+        string) from a /v1/chat/completions POST (called with a
+        urllib.request.Request) so both paths in resident_flash_distiller can
+        be exercised without a subprocess or a network call.
+        """
+
+        def __init__(self, health_ok: bool = True, chunk_contents: list[str] | None = None) -> None:
+            self.health_ok = health_ok
+            self.chunk_contents = list(chunk_contents or [])
+            self.calls: list[str] = []
+
+        def __call__(self, target: object, timeout: float | None = None) -> "PostCallTests._FakeOpenerResponse":
+            if isinstance(target, str):
+                self.calls.append(target)
+                if not self.health_ok:
+                    raise OSError("connection refused")
+                return PostCallTests._FakeOpenerResponse(b"{}")
+            full_url = target.full_url  # type: ignore[attr-defined]
+            self.calls.append(full_url)
+            content = self.chunk_contents.pop(0)
+            outer = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": content}}]}
+            return PostCallTests._FakeOpenerResponse(json.dumps(outer).encode())
+
+    def _fake_opener(self, health_ok: bool = True, chunk_contents: list[str] | None = None) -> "PostCallTests._FakeOpener":
+        return PostCallTests._FakeOpener(health_ok=health_ok, chunk_contents=chunk_contents)
+
+    def test_resident_flash_distiller_calls_the_fixed_loopback_endpoint_and_parses_json(self) -> None:
+        content = json.dumps(self.output())
+        opener = self._fake_opener(chunk_contents=[content])
+        result = post_call.resident_flash_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": [{"speaker": "Joe", "text": "Call Vendor A"}]}}, opener=opener)
+        self.assertEqual(result["joe_tasks"][0]["title"], "Call vendor")
+        self.assertEqual(opener.calls[0], f"{post_call.FLASH_SERVER_URL}/v1/models")
+        self.assertTrue(opener.calls[1].startswith(post_call.FLASH_SERVER_URL))
+        self.assertIn("/v1/chat/completions", opener.calls[1])
+
+    def test_resident_flash_distiller_sends_model_and_disables_thinking(self) -> None:
+        captured: dict[str, object] = {}
+        real_request = post_call.urllib.request.Request
+
+        def spying_request(url, data=None, headers=None, method=None):
+            payload = json.loads(data)
+            captured["model"] = payload.get("model")
+            captured["chat_template_kwargs"] = payload.get("chat_template_kwargs")
+            return real_request(url, data=data, headers=headers, method=method)
+
+        opener = self._fake_opener(chunk_contents=[json.dumps(self.output())])
+        with patch.object(post_call.urllib.request, "Request", spying_request):
+            post_call.resident_flash_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": [{"speaker": "Joe", "text": "Call Vendor A"}]}}, opener=opener)
+        self.assertEqual(captured["model"], post_call.FLASH_SERVER_MODEL)
+        self.assertEqual(captured["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_resident_flash_distiller_fails_closed_when_the_resident_server_is_unreachable(self) -> None:
+        opener = self._fake_opener(health_ok=False)
+        with self.assertRaises(post_call.DistillerUnavailable):
+            post_call.resident_flash_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}}, opener=opener)
+
+    def test_resident_flash_distiller_never_starts_or_stops_a_process(self) -> None:
+        import inspect
+        self.assertNotIn("popen", inspect.signature(post_call.resident_flash_distiller).parameters)
+
+    def test_default_distiller_falls_back_to_llama_only_when_the_resident_server_is_unreachable(self) -> None:
+        with patch.object(post_call, "resident_flash_distiller", side_effect=post_call.DistillerUnavailable("down")) as resident, \
+             patch.object(post_call, "llama_distiller", return_value=self.output()) as llama:
+            result = post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+        resident.assert_called_once()
+        llama.assert_called_once()
+        self.assertEqual(result["joe_tasks"][0]["title"], "Call vendor")
+
+    def test_default_distiller_prefers_the_resident_server_and_never_falls_back_on_a_content_failure(self) -> None:
+        with patch.object(post_call, "resident_flash_distiller", return_value=self.output()) as resident, \
+             patch.object(post_call, "llama_distiller") as llama:
+            post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+        resident.assert_called_once()
+        llama.assert_not_called()
+
+        with patch.object(post_call, "resident_flash_distiller", side_effect=post_call.ContractError("bad json")) as resident, \
+             patch.object(post_call, "llama_distiller") as llama:
+            with self.assertRaises(post_call.ContractError):
+                post_call.default_distiller({"session": self.session.name, "context": self.context, "transcript": {"segments": []}})
+        resident.assert_called_once()
+        llama.assert_not_called()
+
     def test_long_transcript_is_split_on_segments_and_merged_without_a_real_model(self) -> None:
         transcript = {"segments": [{"speaker": "Joe", "text": "x" * 14000}, {"speaker": "Dell", "text": "y" * 14000}, {"speaker": "Joe", "text": "z" * 14000}]}
         chunks = post_call.transcript_chunks(transcript, limit=25000)
