@@ -27,19 +27,26 @@ test("0577 widens ops.work_request_card to admit needs_joe without changing its 
   // there is no doctrine source to be current or stale against.
   assert.match(migration,
     /coalesce\(s\.status='active' and s\.current_revision_id=w\.doctrine_revision_id, false\)/);
-  // The row-level tenant check admits organization_tenant_id IS NULL -- the
-  // exact relaxation current-work-item's own query already uses for a general
-  // row (work-request-intake.js).
-  assert.match(migration,
-    /\(w\.organization_tenant_id is null or w\.organization_tenant_id='carr-internal'\) and w\.ref=p_work_request/);
-  // The visibility gate admits a row with no doctrine document at all.
-  assert.match(migration, /\(d\.visibility is null or d\.visibility='shared'\)/);
-  // needs_joe admission is scoped to doctrine_section_id IS NULL, not to the
-  // state name alone -- program6-human-triage-gate.py and program6-sourced-
-  // routine-gate.py both force a SOURCED row into needs_joe via a deliberate
-  // constraint bypass and require the card to still refuse it.
-  assert.match(migration, /\(w\.state<>'needs_joe' or w\.doctrine_section_id is null\)/);
   // Grants are re-issued identically, never widened to a new role.
   assert.match(migration, /grant execute on function ops\.work_request_card\(text,text\) to carr_reader,carr_writer;/);
   assert.doesNotMatch(migration, /to carr_reader,carr_writer,carr_jobs|to carr_authority|to public/);
+});
+
+test("0577 admits ONLY the general needs_joe row shape, never a general row in any other state", () => {
+  // The exact single predicate the fix landed on: sourced/program rows pass
+  // through their original condition (doctrine_section_id present, document
+  // shared); a general row passes ONLY when it is needs_joe. No independent
+  // OR anywhere in the WHERE clause admits a general row outside needs_joe --
+  // an earlier draft's plain "organization_tenant_id is null or ..." /
+  // "d.visibility is null or ..." widenings did exactly that (a general
+  // captured row would have passed, and the handler would then hand it
+  // "Review and triage", which review-and-triage refuses outright because it
+  // is sourced-only) and the fixed predicate below is what closes it.
+  assert.match(migration,
+    /and \(\(w\.doctrine_section_id is not null and d\.visibility='shared' and w\.state<>'needs_joe'\)\s*\n\s*or \(w\.state='needs_joe' and w\.doctrine_section_id is null\)\);/);
+  // The old two-predicate shape (independently OR-relaxed visibility, and a
+  // state-name-only needs_joe guard) must be gone, not merely joined by a
+  // third predicate -- otherwise the leak the review caught is still live.
+  assert.doesNotMatch(migration, /\(d\.visibility is null or d\.visibility='shared'\)/);
+  assert.doesNotMatch(migration, /\(w\.state<>'needs_joe' or w\.doctrine_section_id is null\)/);
 });

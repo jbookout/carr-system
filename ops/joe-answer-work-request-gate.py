@@ -41,9 +41,9 @@ def expect_refusal(cur, sql: str, params: tuple, label: str) -> None:
     raise RuntimeError(f"{label} was accepted")
 
 
-def insert_needs_joe(cur, token: str, criteria):
+def insert_general(cur, token: str, state: str, criteria):
     """A GENERAL (non-sourced, non-program) Work Request planted directly in
-    needs_joe.
+    the given state.
 
     ops.work_request_sourced_capture_shape (0426) admits three row shapes, and
     a general row (branch 1) is the one whose columns are ALL simply absent:
@@ -55,16 +55,54 @@ def insert_needs_joe(cur, token: str, criteria):
     incomplete SOURCED or PROGRAM row and the CHECK refuses it outright. This
     door is explicitly scoped to general/program rows (see 0575's header), so
     the fixture is a plain insert, not a call through
-    ops.capture_sourced_work_request.
+    ops.capture_sourced_work_request. Branch 1 names no state restriction at
+    all, so a general row may legally sit in any state -- captured included,
+    which is exactly what proves 0577's card scoping: a general row outside
+    needs_joe must still be refused.
     """
     return cur.execute(
         """insert into ops.work_request
              (ref,state,title,desired_outcome,acceptance_criteria,requester_actor,owner_actor,origin_ref)
            values ('WR-' || lpad(nextval('ops.work_request_ref_seq')::text,6,'0'),
-                   'needs_joe','Joe answer gate fixture','Decide the routing',%s,
+                   %s,'Joe answer gate fixture','Decide the routing',%s,
                    'joe','joe',%s)
            returning id,ref,version""",
-        (Jsonb(criteria), f"joe-answer-gate:{token}"),
+        (state, Jsonb(criteria), f"joe-answer-gate:{token}"),
+    ).fetchone()
+
+
+def insert_needs_joe(cur, token: str, criteria):
+    return insert_general(cur, token, "needs_joe", criteria)
+
+
+def insert_program(cur, token: str, state: str, criteria):
+    """A PROGRAM Work Request (branch 2 of work_request_sourced_capture_shape):
+    organization_tenant_id='carr-internal', a named program_key/program_ordinal,
+    no doctrine linkage, requester and owner both 'joe'. Branch 2 also names no
+    state restriction, so a program row may sit in 'ready' -- the shape 0577's
+    card fix must refuse for lacking a shared doctrine document, the same as
+    every other program-row state outside needs_joe (which a program row can
+    never legally reach in the first place, since branch 2 forbids
+    doctrine_section_id, matching general rows on that one point).
+    """
+    # ops.work_request_shape_gate() (0132) refuses an INSERT directly into
+    # 'ready' with no shape_disposition, and work_request_shape_disposition_
+    # complete requires shape_fixed_surface_ref, shape_rationale,
+    # shape_decided_by_actor_id and shape_decided_at all set together once
+    # shape_disposition='not_required' -- the same complete shape
+    # engineering-claim-local-pg-gate.py's own fixture carries.
+    return cur.execute(
+        """insert into ops.work_request
+             (ref,state,title,desired_outcome,acceptance_criteria,requester_actor,owner_actor,
+              origin_ref,organization_tenant_id,program_key,program_ordinal,shape_disposition,
+              shape_fixed_surface_ref,shape_rationale,shape_decided_by_actor_id,shape_decided_at)
+           values ('WR-' || lpad(nextval('ops.work_request_ref_seq')::text,6,'0'),
+                   %s,'Joe answer gate fixture','Decide the routing',%s,
+                   'joe','joe',%s,'carr-internal','carr-ai-engineering-suite-v1',1,'not_required',
+                   'fixture:joe-answer-gate-program', 'fixture currentness acceptance',
+                   (select id from public.actor where slug='joe' and active and kind='human'), now())
+           returning id,ref,version""",
+        (state, Jsonb(criteria), f"joe-answer-gate:{token}"),
     ).fetchone()
 
 
@@ -192,7 +230,38 @@ def main() -> int:
             if stored != ("triaged", "Go with option B.", dell[0], version + 1):
                 return fail(f"answer widened Work Request state or attribution: {stored}")
 
-        print("PASS: needs_joe -> triaged is authority-bound, scope-and-evidence-checked, and idempotent")
+            # ops.work_request_card (0577) admits ONLY the general needs_joe
+            # row shape -- never a general row in any other state, and never a
+            # program row lacking a shared doctrine document. Proved directly
+            # against the real predicate, under carr_reader, the role the card
+            # is actually granted to.
+            general_captured_id, general_captured_ref, _ = insert_general(cur, f"{token}-general-captured", "captured", criteria)
+            program_ready_id, program_ready_ref, _ = insert_program(cur, f"{token}-program-ready", "ready", criteria)
+            set_local_role(cur, "carr_reader")
+            general_captured_card = cur.execute(
+                "select * from ops.work_request_card(%s,%s)", (general_captured_ref, "carr-internal")
+            ).fetchone()
+            program_ready_card = cur.execute(
+                "select * from ops.work_request_card(%s,%s)", (program_ready_ref, "carr-internal")
+            ).fetchone()
+            # empty_ref stayed in needs_joe throughout this gate -- every call
+            # against it above was refused (scope_confirmed never true when it
+            # was tried, and it carries no acceptance_criteria), so it is still
+            # the exact general needs_joe row the card must still return.
+            needs_joe_card = cur.execute(
+                "select ref,state,version,acceptance_criteria from ops.work_request_card(%s,%s)",
+                (empty_ref, "carr-internal"),
+            ).fetchone()
+            cur.execute("reset role")
+            if general_captured_card is not None:
+                return fail(f"a general captured row was returned by the card: {general_captured_card}")
+            if program_ready_card is not None:
+                return fail(f"a program ready row lacking a shared doctrine document was returned by the card: {program_ready_card}")
+            if not needs_joe_card or needs_joe_card[:3] != (empty_ref, "needs_joe", empty_version) or needs_joe_card[3] != []:
+                return fail(f"the general needs_joe row itself was not returned correctly by the card: {needs_joe_card}")
+
+        print("PASS: needs_joe -> triaged is authority-bound, scope-and-evidence-checked, and idempotent; "
+              "the card admits only the general needs_joe row shape")
         return 0
     except Exception as exc:
         return fail(str(exc))

@@ -19,39 +19,67 @@
 -- carrying organization_tenant_id='carr-internal' and a doctrine_section_id
 -- pointing at a real, shared doctrine_section/doctrine_document pair. A
 -- general row's organization_tenant_id and doctrine_section_id are NULL by
--- the same CHECK constraint's first branch. So three things move together,
--- not one:
+-- the same CHECK constraint's first branch.
 --
---   * the doctrine_section / doctrine_document joins become LEFT joins, so a
---     general row's absent source does not eliminate the row entirely;
+-- ONLY THE GENERAL needs_joe ROW SHAPE IS WIDENED, not "any row with no
+-- doctrine section, in any state". An earlier draft of this migration
+-- relaxed the tenant and visibility checks with plain OR-widenings
+-- (organization_tenant_id IS NULL, d.visibility IS NULL) independently of
+-- state, which admitted a general row in ANY of the five pre-existing
+-- states too -- a general captured row, for instance, which review-and-
+-- triage refuses outright because it is sourced-only. The final admission
+-- predicate is instead one exclusive disjunction with no independent OR
+-- anywhere else in the WHERE clause:
+--
+--   (w.doctrine_section_id is not null and d.visibility='shared')
+--   or (w.state='needs_joe' and w.doctrine_section_id is null)
+--
+-- The first arm is EXACTLY the original sourced/program-row admission
+-- (doctrine_section_id populated, document shared) with the join widened
+-- from INNER to LEFT so it still evaluates rather than eliminating the row
+-- outright; the second arm admits ONLY a general row (no doctrine section)
+-- and ONLY in needs_joe. No other combination of doctrine-section-presence
+-- and state passes. Two supporting changes travel with it:
+--
+--   * the doctrine_section / doctrine_document joins become LEFT joins, so
+--     the first arm above can evaluate d.visibility without eliminating a
+--     general row before the WHERE clause is reached;
 --   * source_current is coalesced to false rather than left to evaluate
---     against a null doctrine_section, so a card with no source reads as
---     "not current" rather than an ambiguous null;
---   * the row-level tenant check admits organization_tenant_id IS NULL,
---     mirroring the identical relaxation current-work-item's own query
---     already uses for the same reason (work-request-intake.js, "organization_
---     tenant_id is null or organization_tenant_id = $1");
---   * the visibility gate admits d.visibility IS NULL (no doctrine document
---     to have a visibility at all) alongside the existing 'shared' case;
---   * needs_joe admission is further scoped to doctrine_section_id IS NULL --
---     never merely to the state name. ops.work_request_sourced_capture_shape
---     (0426) already keeps a REAL sourced row out of needs_joe, but
---     program6-human-triage-gate.py and program6-sourced-routine-gate.py both
---     prove the card's own defense independently of that CHECK by forcing a
---     sourced row into needs_joe through a deliberate constraint bypass and
---     asserting the card still refuses it. A state-name-only widening would
---     have surfaced that manufactured row, because a sourced row's
---     doctrine_section_id is populated and the LEFT JOIN above no longer
---     excludes it on that basis alone.
+--     against a null doctrine_section, so a needs_joe card with no source
+--     reads as "not current" rather than an ambiguous null.
 --
--- Every one of these only WIDENS what the function returns for a row shape
--- (general, needs_joe) it previously could not return under ANY state list.
--- No existing sourced or program row's projection changes: for those rows
--- doctrine_section_id is always populated, so the joins still resolve a real
--- row, source_current's coalesce is a no-op (the expression it wraps was
--- already boolean, never null, when s exists), and the tenant/visibility
--- relaxations are pure OR-widenings over conditions those rows already
--- satisfied on the non-null side.
+-- THE FIRST ARM ALSO EXCLUDES needs_joe EXPLICITLY, not only implicitly
+-- through the second arm's shape. Without "and w.state<>'needs_joe'" on the
+-- first arm, a REAL sourced row illegally forced into needs_joe -- which
+-- program6-human-triage-gate.py and program6-sourced-routine-gate.py both
+-- manufacture on purpose, by disabling the sourced-row CHECK and immutability
+-- trigger and setting state='needs_joe' directly, then asserting the card
+-- still refuses it -- would still satisfy "doctrine_section_id is not null
+-- and d.visibility='shared'" on its own, since that manufactured row keeps
+-- its real doctrine linkage and the outer state list already admits
+-- needs_joe. A first cut of this predicate that omitted the extra state
+-- exclusion passed every ordinary case but reopened exactly that hole, and
+-- both gates caught it on the next disposable-PostgreSQL run. With the
+-- exclusion, the two arms partition the six admitted states cleanly: the
+-- first is "one of the five original states, with real shared doctrine,
+-- never needs_joe"; the second is "needs_joe, with no doctrine at all". A
+-- row can satisfy at most one arm, and the manufactured bypass row satisfies
+-- neither.
+--
+-- Every existing sourced or program row's projection is completely
+-- unchanged: for those rows doctrine_section_id is always populated, so the
+-- first arm is exactly the original admission condition, and source_current's
+-- coalesce is a no-op (the expression it wraps was already boolean, never
+-- null, when s exists).
+--
+-- The row-level tenant check (further down, unchanged in shape from the
+-- earlier draft: "organization_tenant_id is null or organization_tenant_id
+-- ='carr-internal'") stays permissive on the null side, because a general
+-- row's organization_tenant_id is NULL by the same CHECK constraint's first
+-- branch. It no longer does any of the actual scoping work, though: the
+-- doctrine-section/state predicate above is what refuses every general row
+-- except needs_joe, so this check merely admits the tenant value every row
+-- that already passed that predicate necessarily carries.
 --
 -- Signature and grants are unchanged: create or replace is used rather than
 -- drop-then-create because the return table's columns are identical to
@@ -213,8 +241,8 @@ create or replace function ops.work_request_card(p_work_request text, p_organiza
    where p_organization_tenant_id='carr-internal'
      and (w.organization_tenant_id is null or w.organization_tenant_id='carr-internal') and w.ref=p_work_request
      and w.state in ('captured','triaged','ready','needs_joe','declined','superseded')
-     and (w.state<>'needs_joe' or w.doctrine_section_id is null)
-     and (d.visibility is null or d.visibility='shared');
+     and ((w.doctrine_section_id is not null and d.visibility='shared' and w.state<>'needs_joe')
+          or (w.state='needs_joe' and w.doctrine_section_id is null));
 $$;
 
 grant execute on function ops.work_request_card(text,text) to carr_reader,carr_writer;
