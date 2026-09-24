@@ -12,6 +12,7 @@ import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
 import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
+import { deliveryCadenceA05Tools } from "./delivery-cadence-a05-tools.js";
 import { sessionIdentityTools } from "./session-identity.js";
 import { dispatchSpineTools } from "./dispatch-spine.js";
 import { capabilityProgramTools } from "./capability-program.js";
@@ -2949,7 +2950,29 @@ export const TOOLS = {
         renewals.reason = "source_unavailable";
         renewals.items = [];
       }
-      const sections = { today, claim_card: claimCard, deals, loops, renewals };
+      // V5-A05's morning approval batch: unread notifications minted by
+      // raise-delivery-cadence-alert (producer 'v5-a05-delivery-cadence'),
+      // for the authenticated sponsor's own actor. This is the "morning
+      // approval batch goes through the existing morning brief and
+      // notification feed" wiring -- no separate queue is built; a batched
+      // item is simply an unread notification from this producer, surfaced
+      // here AND reachable through notification-feed like any other.
+      const assuranceCadence = await section(async () => {
+        const rows = await c.query(
+          `select n.id as notification_id, n.reason, n.severity, n.subject_type, n.subject_ref,
+                  n.deep_link, n.created_at, s.signal_kind as reason_id
+             from ops.notification n
+             join signal_event s on s.id = n.event_ref and n.event_source = 'signal_event'
+             left join ops.notification_read r
+               on r.notification_id = n.id and r.recipient_actor = n.recipient_actor
+            where n.recipient_actor = (select id from actor where slug = $1 and active)
+              and s.producer = 'v5-a05-delivery-cadence'
+              and r.notification_id is null
+            order by n.created_at desc
+            limit 50`, [scope.sponsor]);
+        return { items: rows.rows };
+      });
+      const sections = { today, claim_card: claimCard, deals, loops, renewals, assurance_cadence: assuranceCadence };
       return {
         state: Object.values(sections).some((value) => value.state === "unavailable")
           ? "unavailable"
@@ -8141,6 +8164,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "doc-conversation": "mcp-server/src/doc-conversation.js",
   "meeting-mode": "mcp-server/src/meeting-mode.js",
   "notifications": "mcp-server/src/notifications.js",
+  "delivery-cadence-a05": "mcp-server/src/delivery-cadence-a05-tools.js",
   "session-identity": "mcp-server/src/session-identity.js",
   "dispatch-spine": "mcp-server/src/dispatch-spine.js",
   "doc-outcome-cards": "mcp-server/src/tools.js",
@@ -9184,6 +9208,7 @@ registerTools(meetingModeTools({ withEnvelope, writeEvent, ToolError,
 // acknowledge-notification writes ops.notification_read and nothing else, which
 // is why a session may never report it as having moved a task.
 registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
+registerTools(deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }), "delivery-cadence-a05");
 
 // WR-000117: the session-identity read pair. Both verbs are READS on the writer
 // connection -- ops.session_identity_facts and ops.session_dispatch_history

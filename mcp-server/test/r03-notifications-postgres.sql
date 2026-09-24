@@ -15,7 +15,7 @@
 \set ON_ERROR_STOP on
 
 do $wr113_grants$
-declare v_mint text := 'ops.mint_notification(text,uuid,text,text,text,text,text,text,text)';
+declare v_mint text := 'ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean)';
         v_feed text := 'ops.notification_feed_facts(timestamptz,integer)';
         v_ack  text := 'ops.acknowledge_notification(uuid,uuid)';
         v_bad text;
