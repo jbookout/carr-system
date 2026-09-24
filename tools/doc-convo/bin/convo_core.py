@@ -7,6 +7,7 @@ import os
 import pathlib
 import socket as socketlib
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -16,6 +17,11 @@ from typing import IO
 import speak
 
 TOOL = pathlib.Path(__file__).resolve().parent.parent
+TOOLS_ROOT = TOOL.parent
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+import credential_env  # noqa: E402 — shared long-lived-token loader
+
 RIG = TOOL.parent / "dictation-rig"
 WHISPER = "/opt/homebrew/bin/whisper-cli"
 MODEL = pathlib.Path.home() / ".cache/whisper-cpp/models/ggml-large-v3-turbo.bin"
@@ -82,9 +88,18 @@ class BrainProcess:
         ]
         if SESSION_FILE.exists():
             cmd += ["--resume", SESSION_FILE.read_text().strip()]
+        # doc-engine (ops/launchd/com.carr.doc-engine.plist) runs this
+        # unattended, with no interactive session to refresh a keychain
+        # login. Merge the long-lived Claude login into THIS child's env
+        # only; os.environ is left untouched. Absent-safe: with no token
+        # configured this is exactly the current-process environment, same
+        # as before.
+        child_env, warning = credential_env.claude_child_env()
+        if warning:
+            print(f"doc-convo brain: {warning}", flush=True)
         process = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, bufsize=1,
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=child_env,
         )
         self.process = process
         self.system_prompt = system_prompt
