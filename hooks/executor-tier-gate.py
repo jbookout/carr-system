@@ -81,17 +81,21 @@ except Exception:                       # a missing meter must not change a verd
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
+SERVER_READ_BUDGET_SECONDS = 5.0
 binding_required_facets = None  # type: Optional[Callable[..., Any]]
 turn_required_facets = None  # type: Optional[Callable[[Any], Any]]
-fetch_session_receipts = None  # type: Optional[Callable[..., Any]]
+fetch_receipts_for = None  # type: Optional[Callable[..., Any]]
+session_ids_for = None  # type: Optional[Callable[..., Any]]
+server_read_since = None  # type: Optional[Callable[..., Any]]
+chain_view = None  # type: Optional[Callable[..., Any]]
 load_transcript = None  # type: Optional[Callable[..., Any]]
 prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
 prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
 try:                                    # same fail-open posture as jev_pick below
     from lib.jev_required_actions import (
-        binding_required_facets, prompt_names_facet, prompt_names_not_applicable,
-        turn_required_facets)
-    from lib.jev_server_receipts import fetch_session_receipts
+        binding_required_facets, chain_view, prompt_names_facet,
+        prompt_names_not_applicable, server_read_since, turn_required_facets)
+    from lib.jev_server_receipts import fetch_receipts_for, session_ids_for
     from lib.transcript_read import load_transcript
 except Exception:
     pass
@@ -212,7 +216,8 @@ def missing_required_actions_in_prompt(payload, prompt):
     """
     if (binding_required_facets is None or prompt_names_not_applicable is None
             or prompt_names_facet is None or load_transcript is None
-            or fetch_session_receipts is None or turn_required_facets is None):
+            or fetch_receipts_for is None or turn_required_facets is None
+            or session_ids_for is None or server_read_since is None or chain_view is None):
         return []
     if prompt_names_not_applicable(prompt):
         return []
@@ -238,7 +243,12 @@ def missing_required_actions_in_prompt(payload, prompt):
         # A real Claude transcript always carries uuids and always reads the
         # server; a uuid-less fixture with no advisory never reaches the network.
         has_chain = any(isinstance(r, dict) and r.get("uuid") for r in recs)
-        server = (fetch_session_receipts(session)
+        # F4/F6: one 5s budget (this hook has 10s), read by session from this
+        # turn's own start; a read that runs out is the unreachable case.
+        since = server_read_since(chain_view(
+            recs, anchor_tool_use_id=payload.get("tool_use_id"))["recs"])
+        server = (fetch_receipts_for(session_ids_for(session), since,
+                                     budget_seconds=SERVER_READ_BUDGET_SECONDS)
                   if has_chain or turn_required_facets(recs)[0] is not None else None)
         required, _turn_key, info = binding_required_facets(
             recs, server, anchor_tool_use_id=payload.get("tool_use_id"))

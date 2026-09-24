@@ -160,7 +160,7 @@ def _probability(answer: Any) -> float:
 
 
 def advise(partner_request: str, *, client: Any | None = None,
-           timeout: float = 20.0, session_id: str | None = None) -> dict:
+           timeout: float = 14.0, session_id: str | None = None) -> dict:
     """Return one typed, attributable reading of a partner's build request."""
     if not isinstance(partner_request, str) or not partner_request.strip():
         raise AdvisoryUnavailable("partner request is empty")

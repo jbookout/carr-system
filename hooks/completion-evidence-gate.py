@@ -115,9 +115,9 @@ from stop_latch import (  # noqa: E402
 sys.path.insert(0, REPO)
 from lib.jev_required_actions import (  # noqa: E402
     chain_view, current_turn_slice, evaluate_required_actions, full_turn_slice,
-    jev_calls_log_mentions, turn_boundary_timestamp, turn_required_facets,
+    jev_calls_log_mentions, server_read_since, turn_boundary_timestamp, turn_required_facets,
     unexplained_receipts)
-from lib.jev_server_receipts import fetch_session_receipts  # noqa: E402
+from lib.jev_server_receipts import fetch_receipts_for, session_ids_for  # noqa: E402
 from lib.transcript_read import load_transcript  # noqa: E402
 
 
@@ -1196,18 +1196,10 @@ def jev_audit(row):
         pass
 
 
-# How far before the trusted turn boundary the server read starts: the
-# UserPromptSubmit hook's own advisory call can complete a little before the
-# prompt record is stamped, and lib/jev_required_actions.py binds it by digest.
-SERVER_READ_LOOKBACK_SECONDS = 3600
-
-
-def _since(boundary_ts):
-    if boundary_ts is None:
-        return None
-    from datetime import timedelta
-    return (boundary_ts - timedelta(seconds=SERVER_READ_LOOKBACK_SECONDS)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
+# F4: the Worker read's whole budget. This Stop hook has 15s for everything
+# it does; the read gets 6s of it, and a read that runs out falls through to
+# the unreachable-server verdict (every facet unverified, said loudly).
+SERVER_READ_BUDGET_SECONDS = 6.0
 
 
 def jev_required_actions_check(session, recs, anchor_text=None):
@@ -1238,7 +1230,10 @@ def jev_required_actions_check(session, recs, anchor_text=None):
     # reads the server. A uuid-less transcript with no advisory at all (a
     # hand-built fixture in another gate's selftest) has nothing to verify and
     # never reaches the network.
-    server = (fetch_session_receipts(session, _since(boundary_ts))
+    # F6: read by session (the payload's id, and the environment's if it
+    # differs) from this turn's own start, not the newest N rows.
+    server = (fetch_receipts_for(session_ids_for(session), server_read_since(trusted),
+                                 budget_seconds=SERVER_READ_BUDGET_SECONDS)
               if view["chain"] or turn_required_facets(trusted)[0] is not None else None)
     result = evaluate_required_actions(trusted, texts, JEV_CALLS_LOG, session, written_paths,
                                        server=server, full_turn_recs=full_window)

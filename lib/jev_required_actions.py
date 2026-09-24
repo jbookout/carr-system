@@ -46,8 +46,16 @@ SUCCESSFUL response, and this module matches a required facet against that
 file: same session, a timestamp from this turn's start to now, and a
 question id (or an explicit `facets` list on the call) naming the facet. One
 batched `ask()` still evaluates several facets at once (ops/typesafe_client.py's
-own "ASK TOGETHER" rule) — attribution is per named facet, not automatically
-"any call clears everything".
+own "ASK TOGETHER" rule) — attribution is per named facet.
+
+WHAT A FACET CREDIT PROVES, STATED PLAINLY. A call is credited for every facet
+its caller DECLARES in `facets` (or names in a question id). Nothing checks
+that the questions are really about those facets, so ONE real call that
+declares every facet clears every facet at once. That is the same strength as
+the `JEV-REFUSED: <facet> <reason>` escape hatch: both prove the model made a
+deliberate, recorded choice, not that Jev judged the substance. What the
+server receipt adds is that the choice cost a real Jev round trip the model
+cannot fake by writing a file.
 
 A NAMED REFUSAL is a `JEV-REFUSED: <facet> <reason>` line in assistant text,
 outside a fenced code block, inline-code span, or double-quoted span (so a
@@ -66,21 +74,23 @@ by appending ONE forged record — a fake user prompt, a fake build advisory, or
 a fake out/jev-calls.jsonl receipt plus a fake python tool_use/tool_result
 pair). Both files this module used to trust are writable by the gated model,
 which runs as the same OS user as the hooks. So, when a caller passes
-`server` (lib/jev_server_receipts.fetch_session_receipts's result):
+`server` (lib/jev_server_receipts.fetch_receipts_for's result):
 
-  * a facet counts as CALLED only from a server row: ops/typesafe_client.py's
-    ask() now goes through the Worker's ask-jev verb, which makes the vendor
-    call itself and appends a server-timestamped receipt before answering. A
-    local receipt with no server row is logged as unverified and credits
-    nothing;
+  * a facet counts as CALLED only from a row the Worker's read door returns:
+    ops/typesafe_client.py's ask() now goes through the Worker's ask-jev verb,
+    which makes the vendor call itself and then appends a server-timestamped
+    receipt, and the read door returns only receipts written by the calling
+    principal that have a matching ask-jev tool_call row. A local receipt
+    with no server row is logged as unverified and credits nothing;
   * the REQUIRED facets are recomputed from the server's own build_advisory
     rows — Jev's answers as the Worker recorded them — unioned over this
     turn's window, so an extra advisory the model makes for itself can only
     add a facet, never remove one; the transcript's advisory copy is used only
     when the server has no row for this turn, and is then marked unverified;
-  * when the server cannot be read, nothing is credited and the result says
-    so (`server.status` "unreachable" and its reason): every required facet
-    not named in a refusal is missing, loudly, never silently passed.
+  * when the server cannot be read, answers too slowly for the hook's budget,
+    or hits its row cap, nothing is credited and the result says so
+    (`server.status` "unreachable" and its reason): every required facet not
+    named in a refusal is missing, loudly, never silently passed.
 
 DEFENSE IN DEPTH: THE UUID CHAIN. Claude Code writes every record with a
 parentUuid naming the record IT wrote before (logicalParentUuid across a
@@ -96,13 +106,20 @@ not dropped wholesale; only the records the verdict hinges on are held to the
 chain. Records that look like prompts but sit off the chain are returned as
 orphans for the caller to log.
 
-THE HONEST LIMIT. A model that REWRITES the transcript (not appends) can
-splice a record onto the chain, and can make real ask-jev calls. What it
-cannot do is erase or backdate a server row, so a spliced prompt cannot drop
-the genuine advisory's facets from the union window, and it cannot credit a
-facet without a real Jev call. hooks/gate-integrity.py states the same limit
-for the gates themselves: with OS hardening off by Joe's 2026-08-10 ruling,
-same-uid tampering is detectable, not prevented.
+THE HONEST LIMIT: DETECTABLE, NOT PREVENTED. A model that REWRITES the
+transcript (not appends) can splice a record onto the chain, and can make real
+ask-jev calls. Worse, the model's OS user can read the database owner
+credential (tools/db-tap.py reads it), so it can insert, backdate or delete
+receipt rows, or disable the table's append-only trigger, directly in the
+database. None of that is prevented. It is made DETECTABLE: a receipt inserted
+directly has no matching tool_call row, so the read door never returns it and
+the integrity audit in `./run.sh health` (read-jev-call-receipt-integrity)
+flags it, along with a disabled trigger. A forger who ALSO inserts a matching
+tool_call row by hand is not caught by that cross-check, and a
+disable-then-re-enable between two audits is not seen. Moving that credential out of the model's
+reach is Joe's separate, parked decision. hooks/gate-integrity.py states the
+same posture for the gates themselves: with OS hardening off by Joe's
+2026-08-10 ruling, same-uid tampering is detectable, not prevented.
 
 Fixtures: ops/jev-required-actions-selftest.py, ops/jev-server-receipts-selftest.py
 """
@@ -1177,16 +1194,11 @@ def facets_from_advisory_answers(answers):
     return out
 
 
-def binding_advisory_rows(server_rows, trusted_recs, boundary_ts, now=None):
-    """The server build_advisory rows that bind this turn (see the module
-    docstring): every row whose prompt digest matches this turn's prompt and
-    was recorded after the PREVIOUS genuine prompt, plus every row recorded
-    from this turn's boundary onward that does not match an EARLIER prompt.
-    Returns (rows, unmatched_rows)."""
-    if boundary_ts is None:
-        return [], []
-    if now is None:
-        now = datetime.now(timezone.utc)
+def _binding_bounds(trusted_recs, boundary_ts):
+    """(current digests, earlier digests, lower edge) for binding_advisory_rows.
+    The lower edge is the previous genuine prompt's timestamp; a prompt whose
+    text repeats an earlier one ("continue") shares its digest, so for a
+    repeated text the row must also sit near this turn's own boundary."""
     indices = _genuine_prompt_indices(trusted_recs)
     idx = latest_user_turn_index(trusted_recs)
     current = _prompt_digests(trusted_recs[idx]) if idx >= 0 else set()
@@ -1205,15 +1217,42 @@ def binding_advisory_rows(server_rows, trusted_recs, boundary_ts, now=None):
     # advisory row was one of these). What stays unmatched is a row whose
     # text appears nowhere on the chain: one the model asked for itself.
     earlier |= _chain_prompt_texts(trusted_recs) - current
-    rows, unmatched = [], []
-    upper = now + timedelta(seconds=SERVER_SKEW_SECONDS)
-    # A prompt whose text repeats an earlier one ("continue") shares its
-    # digest; the earlier prompt's row must not bind this turn, so for a
-    # repeated text the row must also sit near this turn's own boundary.
     lower = prev_ts
-    if current & earlier:
+    if boundary_ts is not None and current & earlier:
         near = boundary_ts - timedelta(seconds=ADVISORY_LEAD_SECONDS)
         lower = near if lower is None or near > lower else lower
+    return current, earlier, lower
+
+
+def server_read_since(trusted_recs):
+    """F6: the earliest server time any row this turn's verdict can use was
+    recorded at, as ISO-8601 (None = the session's whole history, only when
+    no earlier genuine prompt bounds it). The gates read the server from here,
+    by session, instead of taking the newest N rows."""
+    boundary_ts = turn_boundary_timestamp(trusted_recs)
+    if boundary_ts is None:
+        return None
+    _current, _earlier, lower = _binding_bounds(trusted_recs, boundary_ts)
+    if lower is None:
+        return None
+    edge = boundary_ts - timedelta(seconds=max(SERVER_SKEW_SECONDS, ADVISORY_LEAD_SECONDS))
+    edge = lower if lower < edge else edge
+    return edge.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def binding_advisory_rows(server_rows, trusted_recs, boundary_ts, now=None):
+    """The server build_advisory rows that bind this turn (see the module
+    docstring): every row whose prompt digest matches this turn's prompt and
+    was recorded after the PREVIOUS genuine prompt, plus every row recorded
+    from this turn's boundary onward that does not match an EARLIER prompt.
+    Returns (rows, unmatched_rows)."""
+    if boundary_ts is None:
+        return [], []
+    if now is None:
+        now = datetime.now(timezone.utc)
+    current, earlier, lower = _binding_bounds(trusted_recs, boundary_ts)
+    rows, unmatched = [], []
+    upper = now + timedelta(seconds=SERVER_SKEW_SECONDS)
     for row in server_rows or ():
         if row.get("purpose") != PURPOSE_BUILD_ADVISORY:
             continue
@@ -1341,7 +1380,7 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     its prompt hash) for callers that need a per-turn latch identity rather
     than a per-session one.
 
-    With `server` (lib/jev_server_receipts.fetch_session_receipts's result)
+    With `server` (lib/jev_server_receipts.fetch_receipts_for's result)
     the verdict is taken against the server's own rows — see the module
     docstring's SERVER-SIDE VERIFICATION. `recs` should then be the
     chain-trusted view (chain_view()["recs"]) and `full_turn_recs` the

@@ -630,6 +630,231 @@ def advisory_builder_asks_as_build_advisory():
                   "prompt under partner_request (the server digests exactly that)")
 
 
+# ---------------------------------------------------------------------------
+# review rework (#1235): time budgets, read window, session ids, in-hook calls
+# ---------------------------------------------------------------------------
+
+def _receipts_lib():
+    import lib.jev_server_receipts as jsr
+    return jsr
+
+
+def _no_fixture():
+    saved = os.environ.pop("CARR_JEV_SERVER_RECEIPTS_FIXTURE", None)
+    return saved
+
+
+def fetch_reads_every_session_id_within_one_budget():
+    jsr = _receipts_lib()
+    saved = _no_fixture()
+    seen = []
+
+    def runner(argv, timeout=None, **_kw):
+        args = json.loads(argv[3])
+        seen.append((args["session_id"], args.get("since"), timeout))
+        return _Proc(0, json.dumps({"ok": True, "server_now": ts(0), "truncated": False,
+                                    "receipts": [{"receipt_id": "same"},
+                                                 {"receipt_id": args["session_id"]}]}))
+    try:
+        got = jsr.fetch_receipts_for(["a", "b"], "2026-09-24T00:00:00.000000Z",
+                                     budget_seconds=5, runner=runner)
+    finally:
+        if saved is not None:
+            os.environ["CARR_JEV_SERVER_RECEIPTS_FIXTURE"] = saved
+    ids = sorted(r["receipt_id"] for r in got.get("receipts") or [])
+    ok = (got["status"] == "ok" and ids == ["a", "b", "same"]
+          and [s[0] for s in seen] == ["a", "b"]
+          and all(s[1] == "2026-09-24T00:00:00.000000Z" for s in seen)
+          and all(0 < s[2] <= 5 for s in seen))
+    return report(ok, "F4/F6: every session id is read from the turn's start within one budget, "
+                      "rows de-duplicated by receipt id")
+
+
+def fetch_partial_slow_or_truncated_is_unreachable():
+    jsr = _receipts_lib()
+    saved = _no_fixture()
+
+    def ok_then_fail(argv, **_kw):
+        if json.loads(argv[3])["session_id"] == "a":
+            return _Proc(0, json.dumps({"ok": True, "receipts": []}))
+        return _Proc(1, "", "could not reach the deployed Worker")
+
+    def slow(argv, timeout=None, **_kw):
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    def truncated(argv, **_kw):
+        return _Proc(0, json.dumps({"ok": True, "receipts": [], "truncated": True}))
+    try:
+        partial = jsr.fetch_receipts_for(["a", "b"], None, budget_seconds=5, runner=ok_then_fail)
+        timed = jsr.fetch_receipts_for(["a"], None, budget_seconds=5, runner=slow)
+        spent = jsr.fetch_receipts_for(["a"], None, budget_seconds=0.1, runner=truncated)
+        capped = jsr.fetch_receipts_for(["a"], None, budget_seconds=5, runner=truncated)
+        empty = jsr.fetch_receipts_for([], None, budget_seconds=5, runner=truncated)
+    finally:
+        if saved is not None:
+            os.environ["CARR_JEV_SERVER_RECEIPTS_FIXTURE"] = saved
+    got = [partial.get("reason"), timed.get("reason"), spent.get("reason"),
+           capped.get("reason"), empty.get("reason")]
+    ok = (all(r.get("status") == "unreachable" for r in (partial, timed, spent, capped, empty))
+          and got == ["worker_unreachable", "server_timeout", "server_timeout",
+                      "server_truncated", "no_session_id"])
+    return report(ok, f"F4: a partial read, a read that runs out of budget, a capped read and "
+                      f"no session id are all UNREACHABLE, never a quiet empty list ({got})")
+
+
+def session_ids_prefer_the_payload():
+    jsr = _receipts_lib()
+    keys = jsr.SESSION_ENV_KEYS
+    saved = {k: os.environ.pop(k, None) for k in keys}
+    try:
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "env-id"
+        both = jsr.session_ids_for("payload-id")
+        same = jsr.session_ids_for("env-id")
+        none_payload = jsr.session_ids_for(None)
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    ok = (both == ["payload-id", "env-id"] and same == ["env-id"]
+          and none_payload == ["env-id"])
+    return report(ok, "resume: the gate reads the hook payload's session id first and the "
+                      "environment's too when it differs (ask() can only see the latter)")
+
+
+def read_window_starts_at_the_turn():
+    from lib.jev_required_actions import server_read_since
+    first = Transcript("since-a")
+    first.prompt(PROMPT, "P1", 0)
+    later = Transcript("since-b")
+    later.prompt("earlier ask", "P0", -3000)
+    later.say("x", -2990)
+    later.prompt(PROMPT, "P1", 0)
+    repeat = Transcript("since-c")
+    repeat.prompt("continue", "P0", -3000)
+    repeat.say("x", -2990)
+    repeat.prompt("continue", "P1", 0)
+    got = [server_read_since(first.recs), server_read_since(later.recs),
+           server_read_since(repeat.recs)]
+    ok = (got[0] is None and got[1] == ts(-3000).replace(".000Z", ".000000Z")
+          and got[2] == ts(-120).replace(".000Z", ".000000Z"))
+    return report(ok, f"F6: the read starts at the previous genuine prompt (a repeated text: "
+                      f"120s before this one), the whole session only on a first turn ({got})")
+
+
+def budgets_sit_under_the_hook_timeouts():
+    with open(os.path.join(REPO, "ops", "config", "hooks.json")) as fh:
+        text = fh.read()
+
+    def hook_timeout(name):
+        cfg = json.loads(text)
+        found = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                if name in json.dumps(node.get("command", "")) and "timeout" in node:
+                    found.append(node["timeout"])
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(cfg)
+        return min(found) if found else None
+
+    def const(path, name):
+        with open(os.path.join(REPO, path)) as fh:
+            for line in fh:
+                if line.startswith(name + " ="):
+                    return float(line.split("=", 1)[1].split("#")[0])
+        return None
+    tsc = _client()
+    import inspect
+    advise_src = open(os.path.join(REPO, "ops", "jev_build_advisory.py")).read()
+    advise_timeout = float(advise_src.split("timeout: float = ", 1)[1].split(",")[0])
+    stop_t, etg_t = hook_timeout("completion-evidence-gate"), hook_timeout("executor-tier-gate")
+    ups_t = hook_timeout("rule-pack-preuse-reselection")
+    stop_b = const("hooks/completion-evidence-gate.py", "SERVER_READ_BUDGET_SECONDS")
+    etg_b = const("hooks/executor-tier-gate.py", "SERVER_READ_BUDGET_SECONDS")
+    ok = (None not in (stop_t, etg_t, ups_t, stop_b, etg_b)
+          and etg_b <= etg_t / 2 and stop_b < 10 <= stop_t
+          and advise_timeout < ups_t and tsc.SERVER_SHARE_OF_TIMEOUT < 1
+          and "timeout" in inspect.signature(tsc.server_ask).parameters)
+    return report(ok, f"F4/F7: Worker reads fit the hooks (executor {etg_b}/{etg_t}s, Stop "
+                      f"{stop_b}/{stop_t}s) and the whole advisory path {advise_timeout}s < "
+                      f"UserPromptSubmit {ups_t}s")
+
+
+def client_server_attempt_shares_the_budget():
+    tsc = _client()
+    seen = {}
+
+    def slow_fail(argv, timeout=None, **_kw):
+        seen["timeout"] = timeout
+        return _Proc(1, "", "could not reach the deployed Worker")
+    raised = False
+    try:
+        tsc.ask("s", {"q": tsc.noul("?")}, timeout=1.0, calls_log=os.devnull,
+                server_runner=slow_fail)
+    except tsc.TypeSafeError:
+        raised = True
+    ok = (raised and seen.get("timeout") is not None
+          and seen["timeout"] <= 1.0 * tsc.SERVER_SHARE_OF_TIMEOUT)
+    return report(ok, f"F7: the server attempt gets at most {tsc.SERVER_SHARE_OF_TIMEOUT:.0%} of "
+                      f"the caller's timeout and the direct fallback only what is left "
+                      f"(server got {seen.get('timeout')}s of 1.0s; out of time raised={raised})")
+
+
+def in_hook_calls_skip_the_server_but_the_advisory_does_not():
+    tsc = _client()
+    calls = []
+
+    def runner(argv, **_kw):
+        calls.append(json.loads(argv[3])["purpose"])
+        return _Proc(0, json.dumps({
+            "ok": True, "receipt_id": "srv-h", "recorded_at": ts(0), "purpose": "build_advisory",
+            "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
+            "prompt_sha256": "b" * 64, "usage": {},
+            "answers": {"q": {"type": "noul", "noul": 0.7}}}))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        return _Resp(json.dumps(
+            {"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.2}}}).encode())
+    original = urllib.request.urlopen
+    setattr(urllib.request, "urlopen", fake_urlopen)
+    original_key = tsc.read_api_key
+    tsc.read_api_key = lambda path=None: "not-a-real-key"
+    saved = os.environ.get(tsc.IN_HOOK_ENV)
+    os.environ[tsc.IN_HOOK_ENV] = "1"
+    log = _write([], ".jsonl")
+    try:
+        direct = tsc.ask("s", {"q": tsc.noul("?")}, calls_log=log, server_runner=runner)
+        advisory = tsc.ask({"partner_request": "x"}, {"q": tsc.noul("?")}, calls_log=log,
+                           server_runner=runner, purpose="build_advisory")
+        with open(log) as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+    finally:
+        setattr(urllib.request, "urlopen", original)
+        tsc.read_api_key = original_key
+        if saved is None:
+            os.environ.pop(tsc.IN_HOOK_ENV, None)
+        else:
+            os.environ[tsc.IN_HOOK_ENV] = saved
+        os.unlink(log)
+    ok = (calls == ["build_advisory"] and "server_receipt" not in direct
+          and advisory.get("server_receipt", {}).get("receipt_id") == "srv-h"
+          and rows and rows[0]["server_error"] == "in_hook_direct")
+    return report(ok, "a hook's own Jev call goes direct and is marked uncredited "
+                      "(in_hook_direct); the build advisory still takes the server path")
+
+
 def main():
     outcomes = [
         forged_user_prompt_is_rejected(),
@@ -652,6 +877,13 @@ def main():
         client_routes_through_the_worker(),
         client_falls_back_visibly(),
         advisory_builder_asks_as_build_advisory(),
+        fetch_reads_every_session_id_within_one_budget(),
+        fetch_partial_slow_or_truncated_is_unreachable(),
+        session_ids_prefer_the_payload(),
+        read_window_starts_at_the_turn(),
+        budgets_sit_under_the_hook_timeouts(),
+        client_server_attempt_shares_the_budget(),
+        in_hook_calls_skip_the_server_but_the_advisory_does_not(),
     ]
     passed = sum(1 for o in outcomes if o)
     print(f"jev-server-receipts-selftest: {passed}/{len(outcomes)} passed")

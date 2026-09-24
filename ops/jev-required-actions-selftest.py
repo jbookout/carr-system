@@ -516,7 +516,7 @@ EMPTY_SERVER = {"status": "ok", "receipts": []}
 
 
 def server_fixture(server):
-    """Write `server` (the object lib/jev_server_receipts.fetch_session_receipts
+    """Write `server` (the object lib/jev_server_receipts.fetch_receipts_for
     would return) to a temp file for CARR_JEV_SERVER_RECEIPTS_FIXTURE, so no
     selftest ever reaches the deployed Worker."""
     fh = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)

@@ -228,10 +228,21 @@ def _session_id():
 # can use too. So the production path no longer calls the vendor from here. It
 # asks the deployed Worker's `ask-jev` verb, which makes the TypeSafe call with
 # the Worker's own secret and appends a server-timestamped receipt to an
-# append-only table (migration 0587) BEFORE it returns the answers. A receipt
-# there exists only because Jev really answered; the model can add rows only by
-# making real Jev calls, and can remove none. lib/jev_required_actions.py
-# credits a required facet only from those rows.
+# append-only table (migration 0587) in a short transaction after the vendor
+# answered, through the same write envelope that records a tool_call row for
+# the same idempotency key. lib/jev_required_actions.py credits a required facet
+# only from rows the Worker's read door returns, and that door returns only
+# receipts matched by their ask-jev tool_call row.
+#
+# DETECTABLE, NOT PREVENTED. The model's OS user can read the database owner
+# credential (tools/db-tap.py), so it can insert, backdate or delete receipt
+# rows, or disable the append-only trigger, directly in the database. None of
+# that is prevented. A receipt inserted alone has no ask-jev tool_call row, so
+# the read door never returns it and the integrity audit in `./run.sh health`
+# (read-jev-call-receipt-integrity) flags it, and a disabled trigger; a forger
+# who also hand-inserts the tool_call row, or disables and re-enables the
+# trigger between audits, is not caught. Moving that credential out of the
+# model's reach is Joe's separate, parked decision.
 #
 # The verb is reached the way every local caller reaches the Worker:
 # mcp-server/local-verb.mjs's zero-install HTTPS path with the LOCAL_TOKENS
@@ -246,8 +257,19 @@ def _session_id():
 # local out/jev-calls.jsonl row records `server_receipt_id: null` and the
 # category of the server failure, never its text.
 SERVER_VERB = "ask-jev"
-SERVER_TIMEOUT_EXTRA_SECONDS = 15.0
 PURPOSES = ("call", "build_advisory")
+# Jev calls a HOOK makes for its own purposes (rule selection, supervisors,
+# code review) are not a session's Jev use and must not cost a hook its time
+# budget, so hooks/hook-meter-run.py marks the process and those calls go to
+# the vendor directly. The UserPromptSubmit build advisory is the exception:
+# it always tries the server, because the gates bind to the server's copy.
+# Setting the marker from a shell only makes that shell's calls uncredited.
+IN_HOOK_ENV = "CARR_JEV_IN_HOOK"
+# The Worker caps its own vendor call at 10s; node's start and the round trip
+# get the rest. The whole server attempt never takes more than this share of
+# the caller's timeout, so a failed attempt still leaves time to go direct.
+SERVER_SHARE_OF_TIMEOUT = 0.7
+MIN_DIRECT_SECONDS = 2.0
 
 
 def _local_verb_script():
@@ -308,7 +330,7 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB,
                     json.dumps(args, ensure_ascii=False)],
                    capture_output=True, text=True,
-                   timeout=float(timeout) + SERVER_TIMEOUT_EXTRA_SECONDS,
+                   timeout=float(timeout),
                    stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, "server_timeout"
@@ -427,15 +449,25 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         )
 
     server_error = None
-    if opener is None and api_key is None:
+    started = time.monotonic()
+    in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
+    if opener is None and api_key is None and not in_hook:
         served, server_error = server_ask(
             state, questions, model=model, facets=facets, purpose=purpose,
-            session_id=session_id or _session_id() or "unbound", timeout=timeout,
-            runner=server_runner)
+            session_id=session_id or _session_id() or "unbound",
+            timeout=float(timeout) * SERVER_SHARE_OF_TIMEOUT, runner=server_runner)
         if served is not None:
             _append_call_receipt(questions, facets, served, calls_log,
                                  session=session_id)
             return served
+        # The direct fallback gets only what is left of the caller's budget
+        # (F7: the UserPromptSubmit hook has 20s for everything it does).
+        timeout = float(timeout) - (time.monotonic() - started)
+        if timeout < MIN_DIRECT_SECONDS:
+            raise TypeSafeError(f"Jev server path failed ({server_error}) and no time is "
+                                "left for a direct call")
+    elif in_hook:
+        server_error = "in_hook_direct"
 
     request = urllib.request.Request(
         endpoint, data=body, method="POST",
