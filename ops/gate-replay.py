@@ -20,8 +20,7 @@ WHAT IT DOES, EVERY RUN, WITH NOTHING COMPUTED FROM A BASE REF:
      the manifest names (any extension, `#` comment lines included), the
      manifest, and the verdict snapshot are scanned with
      ops/business_data_patterns.py: its shape patterns AND the real client
-     roster (a local roster where one exists, the committed salted hashes of
-     it everywhere). Any hit fails. No roster at all fails. The repository is
+     roster where one is available locally. Any hit fails. The repository is
      public.
   2. MANIFEST COVERAGE. ops/config/gate-replay-manifest.json must name every
      hooks/*.py file (gate, helper, or wrapper). Every hook wiring in
@@ -168,8 +167,7 @@ def leak_scan(paths: Iterable[Path]) -> List[str]:
     """
     findings: List[str] = []
     if not bdp.roster():
-        findings.append("no client roster: neither a local roster nor "
-                        "ops/config/client-name-hashes.json could be read")
+        findings.append("no client roster: no local roster could be read")
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8")

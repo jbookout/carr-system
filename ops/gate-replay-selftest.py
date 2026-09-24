@@ -136,8 +136,6 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-leak-") as tmp:
 
 committed = GR.leak_scan(GR.leak_scan_targets(manifest_data=GR.load_manifest()))
 check("every committed fixture, the manifest and the snapshot scan clean", committed == [], committed[:5])
-check("the committed hashed roster loads, so CI checks real names without the roster",
-      len(bdp.load_roster(use_default_plain=False).hashes) > 100)
 
 # THE ROSTER. A plain name matches no regex; only the roster knows it. The
 # name below is invented for this test and is on no roster.
@@ -154,19 +152,12 @@ real_roster = bdp.roster
 with tempfile.TemporaryDirectory(prefix="gate-replay-roster-") as tmp:
     roster_file = Path(tmp) / "roster.txt"
     roster_file.write_text("# test roster\n" + PLANTED_NAME + "\n")
-    plain = bdp.load_roster(extra_plain=[roster_file], hashes_path=Path(tmp) / "none.json",
-                            use_default_plain=False)
-    hashes_file = Path(tmp) / "hashes.json"
-    builder = load("build_client_name_hashes_under_test", REPO / "tools" / "build-client-name-hashes.py")
-    builder.main(["--roster", str(roster_file), "--out", str(hashes_file)])
-    hashed = bdp.load_roster(hashes_path=hashes_file, use_default_plain=False)
-    check("the hash file holds no plaintext name", "quillon" not in hashes_file.read_text().lower())
+    plain = bdp.load_roster(extra_plain=[roster_file], use_default_plain=False)
     for label, text in NAME_SHAPES.items():
         check(f"local roster catches a planted name {label}", plain.hits(text), text)
-        check(f"hashed roster (CI) catches a planted name {label}", hashed.hits(text), text)
-    check("one word of a two-word name alone is not a hit", not hashed.hits("the quillon file"))
+    check("one word of a two-word name alone is not a hit", not plain.hits("the quillon file"))
     try:
-        bdp.roster = lambda: hashed  # type: ignore[assignment]
+        bdp.roster = lambda: plain  # type: ignore[assignment]
         check("find_matches reports a roster name with no other pattern firing",
               bdp.find_matches("met Quillon Barstow") == ["roster_name"],
               bdp.find_matches("met Quillon Barstow"))
@@ -186,7 +177,7 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-roster-") as tmp:
         check("scan targets include every file under the fixture dir and every manifest-named file",
               fixture_dir / "deep" / "extra.yaml" in targets
               and fixture_dir / "../elsewhere.jsonl" in targets, targets)
-        bdp.roster = lambda: bdp.Roster(set(), "", set(), set(), [])  # type: ignore[assignment]
+        bdp.roster = lambda: bdp.Roster(set(), [])  # type: ignore[assignment]
         check("with no roster at all, the scan fails rather than passing blind",
               any("no client roster" in f for f in GR.leak_scan([])))
     finally:
