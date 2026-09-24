@@ -181,9 +181,13 @@ def inspect_session(
         raise ClaudeDesktopError("background_status_invalid", "Claude agent status was not JSON") from exc
     if not isinstance(rows, list):
         raise ClaudeDesktopError("background_status_invalid", "Claude agent status was not a list")
+    matches = [item for item in rows if isinstance(item, dict) and item.get("sessionId") == sid]
+    # Once Claude Desktop (or a terminal) opens the session, the supervisor
+    # lists that client as a second ``kind: interactive`` row with the same
+    # sessionId and no ``state``.  The task's lifecycle is the background row.
     row = next(
-        (item for item in rows if isinstance(item, dict) and item.get("sessionId") == sid),
-        None,
+        (item for item in matches if str(item.get("kind") or "background") == "background"),
+        matches[0] if matches else None,
     )
     if row is None:
         return {"session_id": sid, "state": "unknown", "found": False}
@@ -262,15 +266,128 @@ def read_final_text(
     return typed[-1] if typed else (finals[-1] if finals else None)
 
 
+# Cursor-positioning CSI sequences (CUU/CUD/CUF/CUB/CNL/CPL/CHA/CUP/HVP/VPA).
+# Claude Code's renderer paints only the cells that changed, so a space it
+# can skip is sent as a cursor move, not a space byte.  Captured from the real
+# 2.1.281 CLI: ``Checking\x1b[16Gfor Claude Desktop…``.  Stripping that escape
+# glues the words together; treating it as a gap keeps them readable.
+CURSOR_MOVE = re.compile(rb"\x1b\[[0-9;]*[ABCDEFGHfd]")
+# Charset designation (ESC ( B) and cursor save/restore (ESC 7 / ESC 8), which
+# ANSI_ESCAPE leaves half-stripped.
+TERMINAL_CONTROL = re.compile(rb"\x1b[()*+][0-9A-Za-z]|\x1b[78=>]|[\x00-\x08\x0e-\x1a\x1c-\x1f]")
+DESKTOP_PROGRESS = (
+    b"checkingforclaudedesktop",
+    b"savingsession",
+    b"openingclaudedesktop",
+    b"openinginclaudedesktop",
+    b"sessiontransferredtoclaudedesktop",
+)
+# The /desktop command's own failure copy (Claude Code 2.1.281).  An error
+# state repaints a fresh dialog, so these arrive whole rather than as diffs.
+DESKTOP_ERRORS = (
+    b"couldn'topenclaudedesktop",
+    b"claudedesktopisnotinstalled",
+    b"claudedesktopneedstobeupdated",
+    b"istooold.updateto",
+    b"thedesktopappisrequiredfor/desktop",
+    b"downloadnow?(y/n)",
+)
+# ``claude attach`` refuses a session another client already holds, which is
+# exactly the state /desktop produces: Claude Desktop is showing it.
+ALREADY_OPEN = b"thissessionisrunninginanotherterminal"
+
+
+def _screen_text(raw: bytes) -> bytes:
+    """Collapse raw PTY bytes to lowercase text with no whitespace.
+
+    Matching whitespace-free text makes detection independent of whether the
+    renderer drew a space as a space byte or as a cursor move.
+    """
+    text = CURSOR_MOVE.sub(b" ", raw)
+    text = TERMINAL_CONTROL.sub(b"", text)
+    text = ANSI_ESCAPE.sub(b"", text)
+    return re.sub(rb"\s+", b"", text.replace(b"\xc2\xa0", b" ")).lower()
+
+
+def _list_sessions(claude_bin: str, timeout_s: float = 15.0) -> list | None:
+    try:
+        proc = subprocess.run(
+            [claude_bin, "agents", "--json", "--all"],
+            capture_output=True, text=True, timeout=timeout_s, stdin=subprocess.DEVNULL,
+        )
+        rows = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def _session_holders(rows: list | None, sid: str) -> dict | None:
+    """Summarise who holds ``sid`` according to Claude's own supervisor.
+
+    ``background_pid`` is the live supervisor-hosted process, if any.
+    ``interactive`` is true when another client (Claude Desktop's embedded
+    Claude Code, or a terminal) has the same session open with a live pid;
+    the supervisor lists that client as a separate ``kind: interactive`` row.
+    """
+    if rows is None:
+        return None
+    background_pid = None
+    interactive = False
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("sessionId") or "").lower() != sid:
+            continue
+        pid = row.get("pid")
+        live = isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+        if str(row.get("kind") or "background") == "background":
+            if live:
+                background_pid = pid
+        elif live:
+            interactive = True
+    return {"background_pid": background_pid, "interactive": interactive}
+
+
+def _stop_client(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+
+
 def handoff_to_desktop(
     session_id: str,
     *,
     claude_bin: str = "claude",
     timeout_s: float = 30.0,
     ready_timeout_s: float = 8.0,
+    list_sessions=None,
+    status_poll_s: float = 1.0,
+    settle_s: float = 2.0,
 ) -> dict:
-    """Attach to a completed background session and invoke supported /desktop."""
+    """Attach to a completed background session and invoke supported /desktop.
+
+    Success is decided by Claude's supervisor, not by scraping the TUI: after
+    a successful ``/desktop`` the background process that the attach woke
+    exits (the CLI hands the session over and shuts itself down), and on a
+    machine where Claude Desktop resumes it at once a live ``interactive``
+    row for the same session appears.  Either is a status signal the CLI
+    publishes through ``claude agents --json``.  The PTY text is used only to
+    fail fast on /desktop's own error copy, and as a fallback progress signal
+    when the supervisor listing is unavailable.
+
+    Returns ``{"status": "opened"}`` after a handoff, or
+    ``{"status": "already_open"}`` when the session is already held by
+    another client such as Claude Desktop (``claude attach`` refuses it with
+    "this session is running in another terminal").
+    """
     sid = _session_id(session_id)
+    lister = list_sessions or (lambda: _list_sessions(claude_bin))
+    before = _session_holders(lister(), sid)
+    if before is not None and before["interactive"]:
+        return {"status": "already_open", "session_id": sid}
     # ``claude agents --json`` exposes both the durable UUID and the eight-char
     # agent id, but ``claude attach`` accepts only the latter.
     attach_id = sid[:8]
@@ -289,52 +406,83 @@ def handoff_to_desktop(
         finally:
             os.close(slave)
 
+        def read_available(buffer: bytearray, wait_s: float) -> bool:
+            readable, _, _ = select.select([master], [], [], wait_s)
+            if not readable:
+                return False
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                chunk = b""
+            if chunk:
+                buffer.extend(chunk)
+                if len(buffer) > 262144:
+                    del buffer[:-262144]
+            return bool(chunk)
+
         # A completed agent is briefly woken before the attached prompt accepts
         # input. Wait for the initial transcript repaint to settle; sending the
         # slash command on the first byte loses it during that wake-up.
+        attach_output = bytearray()
         ready_deadline = time.monotonic() + ready_timeout_s
         painted = False
         last_paint_at = 0.0
         while proc.poll() is None and time.monotonic() < ready_deadline:
-            readable, _, _ = select.select([master], [], [], 0.25)
-            if readable:
-                try:
-                    chunk = os.read(master, 65536)
-                except OSError:
-                    chunk = b""
-                if chunk:
-                    painted = True
-                    last_paint_at = time.monotonic()
+            if read_available(attach_output, 0.25):
+                painted = True
+                last_paint_at = time.monotonic()
             elif painted and time.monotonic() - last_paint_at >= 0.75:
                 break
         if proc.poll() is not None:
+            while read_available(attach_output, 0.1):
+                pass
+            if ALREADY_OPEN in _screen_text(bytes(attach_output)):
+                return {"status": "already_open", "session_id": sid}
             raise ClaudeDesktopError("desktop_attach_failed", "Claude attach exited before handoff")
+
+        woken = _session_holders(lister(), sid)
+        woken_pid = (woken or {}).get("background_pid")
         os.write(master, b"/desktop\r")
 
         deadline = time.monotonic() + timeout_s
         output = bytearray()
-        opened = False
-        while proc.poll() is None and time.monotonic() < deadline:
-            readable, _, _ = select.select([master], [], [], 0.25)
-            if readable:
-                try:
-                    chunk = os.read(master, 65536)
-                except OSError:
-                    chunk = b""
-                if chunk:
-                    output.extend(chunk)
-                    if len(output) > 262144:
-                        del output[:-262144]
-                    rendered = ANSI_ESCAPE.sub(b"", bytes(output))
-                    if (b"Checking for Claude Desktop" in rendered
-                            or b"Opening Claude Desktop" in rendered):
-                        opened = True
-                        break
-        if opened:
-            # /desktop transitions the attached client into agent view instead
-            # of exiting. Give the app launch a moment, then close only this
-            # attached client; the durable conversation remains intact.
-            time.sleep(5)
+        next_status_at = time.monotonic() + status_poll_s
+        outcome = None
+        progress = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                while read_available(output, 0.1):
+                    pass
+            else:
+                read_available(output, 0.25)
+            screen = _screen_text(bytes(output))
+            if any(marker in screen for marker in DESKTOP_ERRORS):
+                outcome = "error"
+                break
+            progress = progress or any(marker in screen for marker in DESKTOP_PROGRESS)
+            if time.monotonic() >= next_status_at or proc.poll() is not None:
+                next_status_at = time.monotonic() + status_poll_s
+                holders = _session_holders(lister(), sid)
+                if holders is not None and (
+                    holders["interactive"]
+                    or (woken_pid is not None and holders["background_pid"] != woken_pid)
+                ):
+                    outcome = "opened"
+                    break
+                if progress and (holders is None or woken_pid is None):
+                    # No supervisor pid to watch: fall back to the CLI's own
+                    # progress copy, matched space-insensitively.
+                    outcome = "opened"
+                    break
+            if proc.poll() is not None:
+                outcome = "opened" if proc.returncode == 0 else "exited"
+                break
+        if outcome == "opened":
+            # /desktop moves the attached client on (agent view, or a fresh
+            # prompt in its cwd) instead of exiting. Give the app launch a
+            # moment, then close only this attached client; the durable
+            # conversation remains intact and is now held by Claude Desktop.
+            time.sleep(settle_s)
             try:
                 os.write(master, b"\x03")
             except OSError:
@@ -342,26 +490,16 @@ def handoff_to_desktop(
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=3)
+                _stop_client(proc)
             return {"status": "opened", "session_id": sid}
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
-            raise ClaudeDesktopError("desktop_handoff_timeout", "Claude /desktop did not exit")
-        if proc.returncode != 0:
+        _stop_client(proc)
+        if outcome == "error":
+            raise ClaudeDesktopError("desktop_handoff_failed", "Claude /desktop reported an error")
+        if outcome == "exited":
             raise ClaudeDesktopError(
                 "desktop_handoff_failed", f"Claude /desktop exited {proc.returncode}"
             )
-        return {"status": "opened", "session_id": sid}
+        raise ClaudeDesktopError("desktop_handoff_timeout", "Claude /desktop did not complete")
     finally:
         try:
             os.close(master)

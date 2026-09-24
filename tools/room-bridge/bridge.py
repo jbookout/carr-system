@@ -375,7 +375,7 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
             # completion handling below, which finishes the task with the
             # result already read.
             try:
-                handoff_background(session_id)
+                handed = handoff_background(session_id)
             except claude_desktop_wire.ClaudeDesktopError as exc:
                 add_room_turn(
                     body=json.dumps({"claude_desktop_handoff": {
@@ -384,9 +384,14 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
                 )
             else:
+                # "already_open": Claude Desktop already holds the session
+                # (claude attach refuses it as running in another terminal),
+                # which is the state the handoff exists to reach.
+                status = handed.get("status") if isinstance(handed, dict) else None
                 add_room_turn(
                     body=json.dumps({"claude_desktop_handoff": {
-                        "session_id": session_id, "status": "opened",
+                        "session_id": session_id,
+                        "status": status if status in {"opened", "already_open"} else "opened",
                     }}, separators=(",", ":")),
                     seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
                 )
