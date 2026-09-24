@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -43,6 +45,8 @@ _SPEC.loader.exec_module(rp)
 
 FIXTURE_ENV = fixture_env()
 VERSION = "0f1e2d3c-4b5a-4968-8776-655443322110"
+CF_TOKEN = "cf-selftest-token-must-never-be-echoed-9f8e7d"
+DEPLOY_STEPS = {"wrangler-auth", "upload", "staging", "promote", "app-release"}
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -58,13 +62,18 @@ class FakeRunner:
         self.fail_at, self.pending, self.live = fail_at, pending, live
         self.wrangler_out = wrangler_out
         self.calls: list[tuple[str, list[str]]] = []
+        self.envs: dict[str, dict[str, str]] = {}
 
     def run(self, argv, *, cwd, log, env, timeout=3600):
         stem = log.stem
         name = stem.split("-", 1)[1] if stem[:2].isdigit() else stem
         self.calls.append((name, list(argv)))
+        self.envs[name] = dict(env)
         assert "DATABASE_URL" not in env and not any(k.startswith("CARR_DB_") for k in env), \
             "a credential leaked into a step's environment"
+        assert not any(CF_TOKEN in a for a in argv), "the deploy token reached argv"
+        if name not in DEPLOY_STEPS:
+            assert "CLOUDFLARE_API_TOKEN" not in env, f"the deploy token reached non-deploy step {name}"
         if name == self.fail_at:
             return rp.Result(7, "boom")
         if name == "release-key":
@@ -171,6 +180,7 @@ class Fixture:
         (self.cred / "db.env").write_text(
             "NEON_API_KEY='v'\nCARR_DB_JOBS_URL='v'\nCARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL='v'\n")
         (self.cred / "mcp-tokens.env").write_text("CARR_MCP_PROBE_TOKEN=v\n")
+        (self.cred / "tokens.env").write_text(f"CLOUDFLARE_API_TOKEN={CF_TOKEN}\n")
 
     def commit(self, files: dict[str, str]) -> str:
         for rel, text in files.items():
@@ -756,15 +766,153 @@ class Blockers(Base):
         self.assertEqual(verbs[0][1]["blocker"], "capability")
         self.assertIn("NEON_API_KEY", verbs[0][1]["blocker_detail"])
 
-    def test_unauthenticated_wrangler_stops_before_any_worktree(self):
-        self.fx.commit({"mcp-server/src/a.js": "1"})
+    def test_rejected_token_fails_and_dispatches_before_any_worktree(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
         verbs: list = []
         runner = FakeRunner(wrangler_out="You are not authenticated. Please run `wrangler login`.")
-        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 3)
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
         self.assertEqual(runner.names(), ["wrangler-auth"])
-        self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
-        self.assertEqual(verbs[0][0], "add-loop")
-        self.assertIn("CLOUDFLARE_API_TOKEN", verbs[0][1]["blocker_detail"])
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        self.assertEqual(self.fx.records()[-1]["step"], "credential-missing")
+        self.assertIn("credential rejected", self.fx.records()[-1]["detail"])
+        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+
+
+class DeployCredential(unittest.TestCase):
+    """CLOUDFLARE_API_TOKEN comes from $HOME/.config/carr/tokens.env into the
+    wrangler-running steps' env only. Every case runs under a temporary HOME,
+    so the operator's real credential files are never read."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.home = tmp / "home"
+        self.cred = self.home / ".config" / "carr"
+        self.cred.mkdir(parents=True)
+        self.fx = Fixture(tmp)
+        for name in ("db.env", "mcp-tokens.env"):
+            (self.cred / name).write_text((self.fx.cred / name).read_text())
+        self._home = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        self._home.start()
+        self.lines: list[str] = []
+
+    def tearDown(self):
+        self._home.stop()
+        self._tmp.cleanup()
+
+    def pipeline(self, runner, *, verbs=None, dry_run=False, app=False):
+        cfg = self.fx.config(credential_dir="~/.config/carr")
+        if app:
+            cfg["worker"]["enabled"] = False
+            cfg["app"]["enabled"] = True
+            cfg["app"]["review_required_after"] = "2000-01-01T00:00:00Z"
+        pipe = self.fx.pipeline(runner, cfg=cfg, verbs=verbs, dry_run=dry_run)
+        pipe.out = self.lines.append
+        return pipe
+
+    def write_tokens(self, text: str) -> None:
+        (self.cred / "tokens.env").write_text(text)
+
+    def assert_never_echoed(self):
+        self.assertFalse(any(CF_TOKEN in line for line in self.lines), "token printed")
+        out = self.fx.repo / "out"
+        for f in out.rglob("*") if out.exists() else []:
+            if f.is_file():
+                self.assertNotIn(CF_TOKEN, f.read_text(errors="replace"), f"token written to {f}")
+
+    def test_token_reaches_only_the_wrangler_steps(self):
+        self.write_tokens(f"# deploy\nOTHER=x\nexport CLOUDFLARE_API_TOKEN='{CF_TOKEN}'\n")
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live, cfg=self.fx.config(credential_dir="~/.config/carr"))
+                         .tick(["worker"]), 0)
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
+        for step in ("wrangler-auth", "upload", "staging", "promote"):
+            self.assertEqual(runner.envs[step].get("CLOUDFLARE_API_TOKEN"), CF_TOKEN, step)
+        for step in ("worktree", "npm-ci", "staging-prepare", "migrate-plan"):
+            self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs[step], step)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", rp.child_env({"CLOUDFLARE_API_TOKEN": "x", "HOME": "/h"}))
+        self.assert_never_echoed()
+
+    def _assert_credential_failure(self, verbs, runner, sha):
+        self.assertEqual(runner.calls, [])                       # before wrangler, before any worktree
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"]), ("failed", "credential-missing"))
+        self.assertIn("credential missing: CLOUDFLARE_API_TOKEN", rec["detail"])
+        self.assertIn(str(self.cred / "tokens.env"), rec["detail"])
+        self.assertTrue(rec["dispatched"])
+        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+        self.assertIn("credential-missing", verbs[0][1]["body"])
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        self.assertFalse((self.fx.repo / "out/release-pipeline/worktrees").exists()
+                         and any((self.fx.repo / "out/release-pipeline/worktrees").iterdir()))
+        self.assertTrue(any("credential missing" in line for line in self.lines))
+
+    def test_missing_file_fails_loudly_and_dispatches(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        verbs: list = []
+        runner = FakeRunner()
+        self.assertEqual(self.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        self._assert_credential_failure(verbs, runner, sha)
+
+    def test_file_without_the_key_fails_loudly_and_dispatches(self):
+        self.write_tokens("SOMETHING_ELSE=v\nCLOUDFLARE_API_TOKEN=\n")
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        verbs: list = []
+        runner = FakeRunner()
+        self.assertEqual(self.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        self._assert_credential_failure(verbs, runner, sha)
+
+    def test_app_lane_release_gets_the_token_and_fails_without_it(self):
+        self.write_tokens(f"CLOUDFLARE_API_TOKEN={CF_TOKEN}\n")
+        sha = self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner()
+        pipe = self.pipeline(runner, app=True)
+        live = {"source_commit": self.fx.base, "environment": "production"}
+        pipe.http = lambda _u: live
+        orig = runner.run
+
+        def run(argv, **kw):
+            res = orig(argv, **kw)
+            if argv[:3] == ["npm", "run", "release:production"]:
+                live["source_commit"] = sha
+            return res
+        runner.run = run  # type: ignore[method-assign]
+        self.assertEqual(pipe.tick(["app"]), 0)
+        self.assertEqual(runner.envs["app-release"].get("CLOUDFLARE_API_TOKEN"), CF_TOKEN)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-npm-ci"])
+        self.assert_never_echoed()
+
+        (self.cred / "tokens.env").write_text("")
+        sha2 = self.fx.commit({"src/worker.js": "2"})
+        verbs: list = []
+        runner2 = FakeRunner()
+        pipe2 = self.pipeline(runner2, verbs=verbs, app=True)
+        pipe2.http = lambda _u: live
+        self.assertEqual(pipe2.tick(["app"]), 1)
+        self.assertEqual(runner2.calls, [])
+        self.assertEqual(self.fx.records()[-1]["step"], "credential-missing")
+        self.assertEqual(self.fx.state()["app"]["failed_sha"], sha2)
+        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+
+    def test_dry_run_reports_the_missing_token_and_records_nothing(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        self.assertEqual(self.pipeline(runner, dry_run=True).tick(["worker"]), 0)
+        self.assertEqual(runner.calls, [])
+        self.assertTrue(any("would FAIL here: credential missing" in line for line in self.lines))
+        self.assertEqual(self.fx.records(), [])
+
+    def test_read_env_value(self):
+        f = self.cred / "t.env"
+        f.write_text("A=1\nexport B=\"two\"\nC='3'\nB=last\nD=\n")
+        self.assertEqual(rp.read_env_value(f, "A"), "1")
+        self.assertEqual(rp.read_env_value(f, "B"), "last")
+        self.assertEqual(rp.read_env_value(f, "C"), "3")
+        self.assertIsNone(rp.read_env_value(f, "D"))
+        self.assertIsNone(rp.read_env_value(f, "E"))
+        self.assertIsNone(rp.read_env_value(self.cred / "absent.env", "A"))
 
 
 class DryRun(Base):

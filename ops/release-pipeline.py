@@ -12,8 +12,10 @@ whose header carries the three install commands; installing it is a deliberate
 human act) through bin/run-scheduled.sh, like every other local job.
 
 IT IS A SCRIPT, NOT A MODEL SESSION. Production credentials stay where the
-manual release already reads them (~/.config/carr/db.env, the wrangler login,
-~/.config/carr/mcp-tokens.env), and each step is the SAME sanctioned command the
+manual release already reads them (~/.config/carr/db.env,
+~/.config/carr/mcp-tokens.env), plus CLOUDFLARE_API_TOKEN from
+~/.config/carr/tokens.env, which is loaded into the environment of the
+wrangler-running steps only (never argv, never a log), and each step is the SAME sanctioned command the
 manual release on 2026-09-23 and 2026-09-24 ran, in the same order, from a
 detached release worktree at the exact SHA. The only thing a model ever gets is
 a diagnosis task AFTER a failure, through the Model Room queue, with repo-write
@@ -56,7 +58,10 @@ staging step of the SAME run returned 0.
 BLOCKED IS NOT FAILED. Missing review evidence, a pending or red main canary, or
 a missing unattended credential stops the lane WITHOUT marking the SHA failed,
 so the next tick re-evaluates it; any worktree the run created is removed. The
-wrangler login is checked before any worktree exists. An unexpected error before
+Cloudflare deploy token is checked before any worktree exists, and it is the
+one credential that FAILS rather than holds: a missing tokens.env or key, or a
+token wrangler rejects, stops the lane at step `credential-missing` and
+dispatches, instead of wrangler falling back to its interactive OAuth login. An unexpected error before
 any step ran is recorded and dispatched without burning the SHA; after a step
 ran it is a failure like any other. A failure after migrate-apply records
 db_ahead_of_worker: true and says so to the fix session. A missing credential or capability files one
@@ -141,6 +146,12 @@ BREW_PATH = ("/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:/opt/home
 CHILD_ENV_NAMES = ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL",
                    "SSL_CERT_FILE", "SSL_CERT_DIR")
 
+# The Workers deploy credential. Loaded from its file into the environment of
+# the wrangler-running steps ONLY (never child_env, never argv, never a log
+# line), so no step can fall back to wrangler's interactive OAuth login.
+CLOUDFLARE_TOKEN_NAME = "CLOUDFLARE_API_TOKEN"
+CLOUDFLARE_TOKEN_FILE = "tokens.env"   # under credential_dir
+
 
 # ── results and the command runner seam ───────────────────────────────────────
 
@@ -179,6 +190,26 @@ def child_env(environ: dict[str, str] | None = None) -> dict[str, str]:
     env["HOMEBREW_PREFIX"] = "/opt/homebrew"
     env["NO_COLOR"] = "1"
     return env
+
+
+def read_env_value(path: Path, name: str) -> str | None:
+    """The value of NAME in a NAME=value file (optional `export `, optional
+    matching quotes), or None when the file or the key is absent or empty.
+    The value is returned to the caller only; nothing here prints it."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    value = None
+    for line in text.splitlines():
+        m = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
+        if not m or m.group(1) != name:
+            continue
+        v = m.group(2)
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        value = v or None
+    return value
 
 
 class Runner:
@@ -573,8 +604,11 @@ class Pipeline:
             raise StepFailed(f"git {args[0]}", proc.returncode, "", (proc.stderr or "").strip()[:300])
         return proc.stdout.strip()
 
-    def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600) -> Result:
-        """Run one step, or in dry-run only print it. Nonzero is StepFailed."""
+    def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600,
+             env: dict[str, str] | None = None) -> Result:
+        """Run one step, or in dry-run only print it. Nonzero is StepFailed.
+        `env` replaces the base environment for this step only (the deploy
+        steps pass deploy_env()); only argv is ever echoed or logged."""
         shown = " ".join(argv)
         if self.dry_run:
             self.out(f"  [dry-run] (cd {cwd}) {shown}")
@@ -583,7 +617,8 @@ class Pipeline:
         log = self.run_dir / f"{n:02d}-{name}.log"
         self.out(f"  -> {name}: {shown}")
         self.executed.append(name)
-        res = self.runner.run(argv, cwd=cwd, log=log, env=self.env, timeout=timeout)
+        res = self.runner.run(argv, cwd=cwd, log=log, env=self.env if env is None else env,
+                              timeout=timeout)
         if res.rc != 0:
             raise StepFailed(name, res.rc, str(log))
         res.log = str(log)
@@ -704,15 +739,35 @@ class Pipeline:
                 "test_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['test_evidence_label']}",
                 "security_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['security_evidence_label']}"}
 
+    def deploy_env(self) -> dict[str, str]:
+        """The environment for a wrangler-running step: the base child env
+        plus CLOUDFLARE_API_TOKEN from <credential_dir>/tokens.env. A missing
+        file or key FAILS the step (stop, record, dispatch) instead of letting
+        wrangler fall back to its interactive OAuth login. Only the NAME and
+        the file path ever appear in output."""
+        path = expand(self.cfg.get("credential_dir", "~/.config/carr")) / CLOUDFLARE_TOKEN_FILE
+        token = read_env_value(path, CLOUDFLARE_TOKEN_NAME)
+        if not token:
+            detail = (f"credential missing: {CLOUDFLARE_TOKEN_NAME} is absent from {path}; "
+                      "refusing to fall back to wrangler's interactive OAuth login")
+            if self.dry_run:
+                self.out(f"  [dry-run] a real run would FAIL here: {detail}")
+                return dict(self.env)
+            self.out(f"  !! {detail}")
+            raise StepFailed("credential-missing", 1, "", detail)
+        env = dict(self.env)
+        env[CLOUDFLARE_TOKEN_NAME] = token
+        return env
+
     def wrangler_auth(self, wrangler: Path, cwd: Path) -> None:
-        """Before any worktree exists: a lost login is a hold plus one loop,
-        never a failure and never a half-built worktree."""
-        who = self.step("wrangler-auth", [str(wrangler), "whoami"], cwd, timeout=120)
+        """Before any worktree exists: the deploy token must be present and
+        accepted. Either failure stops the lane and dispatches; neither is a
+        silent hold, because a missing token never heals itself."""
+        who = self.step("wrangler-auth", [str(wrangler), "whoami"], cwd, timeout=120,
+                        env=self.deploy_env())
         if not self.dry_run and "not authenticated" in who.out.lower():
-            raise Blocked("credential_missing",
-                          "wrangler has no usable login for unattended use (OAuth refresh failed); "
-                          "a scoped CLOUDFLARE_API_TOKEN for Workers deploy is needed",
-                          capability="CLOUDFLARE_API_TOKEN")
+            raise StepFailed("credential-missing", 1, who.log,
+                             f"credential rejected: wrangler whoami does not accept {CLOUDFLARE_TOKEN_NAME}")
 
     def add_worktree(self, name: str, repo_dir: Path, wt: Path, sha: str) -> None:
         if wt.exists():
@@ -982,19 +1037,21 @@ class Pipeline:
                                   "--release-key", key, "--test-evidence", ev["test_evidence"],
                                   "--security-evidence", ev["security_evidence"],
                                   "--verifier", ev["verifier"], "--verifier-evidence", ev["verifier_evidence"],
-                                  *budget], wt)
+                                  *budget], wt, env=self.deploy_env())
         version = "<provider version from upload>" if self.dry_run else parse_provider_version(up)
 
         # 6. staging forward-fix rehearsal; promotion is unreachable unless it returned 0
         staging_ok = False
         self.step("staging", ["bin/deploy-worker.sh", "--env", "staging", "--recovery-step", "forward_fix",
-                              "--release-key", key, "--release-sha", sha, *budget], wt)
+                              "--release-key", key, "--release-sha", sha, *budget], wt,
+                  env=self.deploy_env())
         staging_ok = True
 
         # 7. promotion
         if not staging_ok:  # pragma: no cover — structural; StepFailed above already left
             raise StepFailed("promote", 1, "", "staging did not pass")
-        self.step("promote", ["bin/deploy-worker.sh", "--promote-version", version, *budget], wt)
+        self.step("promote", ["bin/deploy-worker.sh", "--promote-version", version, *budget], wt,
+                  env=self.deploy_env())
 
         # 8. live verification
         if self.dry_run:
@@ -1070,7 +1127,8 @@ class Pipeline:
         wt = self.store.root / "worktrees" / f"app-{sha[:12]}"
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
-        self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600)
+        self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600,
+                  env=self.deploy_env())
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")
         else:
