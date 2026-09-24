@@ -21,6 +21,7 @@ import re
 import stat
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -108,29 +109,56 @@ def test_verdict_prose_containing_the_words_is_not_a_verdict():
 
 
 # ───────────────────────── scope ─────────────────────────
+#
+# Every real PR in this repo — agent-opened or Joe's own — is authored under
+# Joe's own `gh` login, so author can never be the Joe-vs-agent discriminator
+# (a fixed defect: an earlier version excluded jbookout outright, which meant
+# it never matched a single real agent PR). These fixtures all use author
+# "jbookout" and isolate branch/label/draft/cross-repo as the actual
+# discriminators.
 
 def test_agent_branch_in_scope():
-    assert p.in_scope({"isDraft": False, "author": {"login": "someone"},
+    assert p.in_scope({"isDraft": False, "isCrossRepository": False, "author": {"login": "jbookout"},
                         "labels": [], "headRefName": "claude/witty-turing-9f3a"})
 
 
-def test_joe_pr_excluded():
-    assert not p.in_scope({"isDraft": False, "author": {"login": "jbookout"},
+def test_worktree_agent_branch_in_scope():
+    assert p.in_scope({"isDraft": False, "isCrossRepository": False, "author": {"login": "jbookout"},
+                        "labels": [], "headRefName": "worktree-agent-a92dfe7b5fe0f41bb"})
+
+
+def test_joe_hand_typed_branch_excluded():
+    # Same author as every agent PR (jbookout); the branch alone is what
+    # marks this as Joe's own work, never an agent's.
+    assert not p.in_scope({"isDraft": False, "isCrossRepository": False, "author": {"login": "jbookout"},
+                            "labels": [], "headRefName": "hotfix/typo-in-readme"})
+
+
+def test_non_allowlisted_author_excluded_even_on_agent_branch():
+    assert not p.in_scope({"isDraft": False, "isCrossRepository": False, "author": {"login": "someone-else"},
+                            "labels": [], "headRefName": "claude/witty-turing-9f3a"})
+
+
+def test_fork_pr_excluded_even_with_agent_branch_and_allowlisted_author():
+    # isCrossRepository=True: a fork's author/branch fields are attacker-
+    # controlled with no access boundary behind them. Never in scope,
+    # whatever else about it looks legitimate.
+    assert not p.in_scope({"isDraft": False, "isCrossRepository": True, "author": {"login": "jbookout"},
                             "labels": [], "headRefName": "claude/witty-turing-9f3a"})
 
 
 def test_hold_label_excluded():
-    assert not p.in_scope({"isDraft": False, "author": {"login": "someone"},
+    assert not p.in_scope({"isDraft": False, "isCrossRepository": False, "author": {"login": "jbookout"},
                             "labels": [{"name": "pipeline:hold"}], "headRefName": "claude/x-1"})
 
 
 def test_non_agent_branch_excluded():
-    assert not p.in_scope({"isDraft": False, "author": {"login": "someone"},
+    assert not p.in_scope({"isDraft": False, "isCrossRepository": False, "author": {"login": "jbookout"},
                             "labels": [], "headRefName": "feature/manual-work"})
 
 
 def test_draft_excluded():
-    assert not p.in_scope({"isDraft": True, "author": {"login": "someone"},
+    assert not p.in_scope({"isDraft": True, "isCrossRepository": False, "author": {"login": "jbookout"},
                             "labels": [], "headRefName": "claude/x-1"})
 
 
@@ -276,6 +304,69 @@ def test_reconcile_sha_is_idempotent_across_repeated_calls():
     assert once == twice
 
 
+def test_reconcile_sha_carries_forward_fix_identity_history():
+    entry = p.fresh_entry("sha1")
+    entry["state"] = "fixing"
+    entry["had_fix_round"] = True
+    entry["last_fix_actor"] = "claude"
+    reset = p.reconcile_sha(entry, "sha2")  # a new push: fresh state, EXCEPT this
+    assert reset["state"] == "needs_review"
+    assert reset["had_fix_round"] is True
+    assert reset["last_fix_actor"] == "claude"
+
+
+def test_fixing_state_escalates_after_timeout_with_no_new_head():
+    entry = p.fresh_entry("sha1")
+    entry["state"] = "fixing"
+    entry["fixing_since"] = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+    d = p.decide(entry, checks_ok=None, mergeable_clean=False, behind=False, verdict=None)
+    assert d.action == "escalate" and d.entry["state"] == "escalated"
+
+
+def test_fixing_state_within_timeout_keeps_waiting():
+    entry = p.fresh_entry("sha1")
+    entry["state"] = "fixing"
+    entry["fixing_since"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    d = p.decide(entry, checks_ok=None, mergeable_clean=False, behind=False, verdict=None)
+    assert d.action is None and d.entry["state"] == "fixing"
+
+
+# ───────────────────────── required checks (CI green) ─────────────────────────
+
+def test_missing_required_check_is_pending_not_green():
+    assert p.required_checks_status([], ["ops/ci.sh --strict"]) is None
+
+
+def test_present_and_successful_required_check_is_green():
+    rollup = [{"name": "ops/ci.sh --strict", "conclusion": "SUCCESS"}]
+    assert p.required_checks_status(rollup, ["ops/ci.sh --strict"]) is True
+
+
+def test_failing_required_check_is_red():
+    rollup = [{"name": "ops/ci.sh --strict", "conclusion": "FAILURE"}]
+    assert p.required_checks_status(rollup, ["ops/ci.sh --strict"]) is False
+
+
+def test_unrelated_red_check_is_ignored():
+    # A red entry on the rollup that nobody requires must never be treated as
+    # CI failure — the exact defect this replaced check_status() for.
+    rollup = [{"name": "local-db-ci --class migration", "conclusion": "FAILURE"},
+             {"name": "ops/ci.sh --strict", "conclusion": "SUCCESS"}]
+    assert p.required_checks_status(rollup, ["ops/ci.sh --strict"]) is True
+
+
+def test_expected_or_pending_required_check_is_pending_not_failed():
+    rollup = [{"name": "ops/ci.sh --strict", "conclusion": ""}]
+    assert p.required_checks_status(rollup, ["ops/ci.sh --strict"]) is None
+    rollup2 = [{"name": "ops/ci.sh --strict", "state": "PENDING"}]
+    assert p.required_checks_status(rollup2, ["ops/ci.sh --strict"]) is None
+
+
+def test_no_required_names_configured_is_never_green():
+    rollup = [{"name": "anything", "conclusion": "SUCCESS"}]
+    assert p.required_checks_status(rollup, []) is None
+
+
 # ───────────────────────── kill switch ─────────────────────────
 
 def test_kill_switch_policy_disabled():
@@ -308,10 +399,14 @@ def test_kill_switch_off_when_neither_gate_trips():
 
 def _make_snapshot(number, head_sha, base="main", status="CLEAN", rollup=None):
     return {
-        "number": number, "state": "OPEN", "isDraft": False,
+        "number": number, "state": "OPEN", "isDraft": False, "isCrossRepository": False,
         "headRefName": f"claude/fixture-{number}", "headRefOid": head_sha,
         "baseRefName": base, "mergeStateStatus": status, "mergeable": "MERGEABLE",
-        "statusCheckRollup": rollup or [{"name": "ci", "conclusion": "SUCCESS"}],
+        # The exact required context for jbookout/carr-system (see
+        # ops/config/pr-pipeline-policy.json's required_checks) — every fixture
+        # in this file uses that repo, so this is what required_checks_status
+        # actually keys on.
+        "statusCheckRollup": rollup or [{"name": "ops/ci.sh --strict", "conclusion": "SUCCESS"}],
         "url": f"https://example.invalid/pull/{number}",
     }
 
@@ -391,7 +486,7 @@ def test_end_to_end_review_dispatch_and_approve_merges():
         kill_file = root / "pr-pipeline.disable"
 
         gh_state = {"repos": {repo: {
-            "open_prs": [{"number": 7, "title": "Add widget", "author": {"login": "agent"},
+            "open_prs": [{"number": 7, "title": "Add widget", "author": {"login": "jbookout"}, "isCrossRepository": False,
                           "headRefName": "claude/fixture-7", "headRefOid": "sha0001",
                           "baseRefName": "main", "labels": [], "isDraft": False,
                           "url": "https://example.invalid/pull/7"}],
@@ -447,7 +542,7 @@ def test_blocked_pr_dispatches_fix_with_repo_write_cap():
         kill_file = root / "pr-pipeline.disable"
 
         gh_state = {"repos": {repo: {
-            "open_prs": [{"number": 8, "title": "Risky change", "author": {"login": "agent"},
+            "open_prs": [{"number": 8, "title": "Risky change", "author": {"login": "jbookout"}, "isCrossRepository": False,
                           "headRefName": "claude/fixture-8", "headRefOid": "sha0002",
                           "baseRefName": "main", "labels": [], "isDraft": False,
                           "url": "https://example.invalid/pull/8"}],
@@ -493,7 +588,7 @@ def test_verdict_comment_pins_reviewed_sha_and_verdict_format():
         assert len(full_sha) == 40
 
         gh_state = {"repos": {repo: {
-            "open_prs": [{"number": 20, "title": "x", "author": {"login": "agent"},
+            "open_prs": [{"number": 20, "title": "x", "author": {"login": "jbookout"}, "isCrossRepository": False,
                           "headRefName": "claude/fixture-20", "headRefOid": full_sha,
                           "baseRefName": "main", "labels": [], "isDraft": False}],
             "snapshots": {"20": _make_snapshot(20, full_sha)},
@@ -543,7 +638,7 @@ def test_kill_switch_prevents_any_dispatch_or_merge():
         policy_file.write_text(json.dumps({"enabled": False, "repos": [repo]}))
         kill_file = root / "pr-pipeline.disable"
         gh_state = {"repos": {repo: {
-            "open_prs": [{"number": 9, "title": "x", "author": {"login": "agent"},
+            "open_prs": [{"number": 9, "title": "x", "author": {"login": "jbookout"}, "isCrossRepository": False,
                           "headRefName": "claude/fixture-9", "headRefOid": "sha0003",
                           "baseRefName": "main", "labels": [], "isDraft": False}],
             "snapshots": {"9": _make_snapshot(9, "sha0003")},
@@ -570,10 +665,10 @@ def test_merge_serialized_to_one_per_tick():
 
         gh_state = {"repos": {repo: {
             "open_prs": [
-                {"number": 10, "title": "a", "author": {"login": "agent"},
+                {"number": 10, "title": "a", "author": {"login": "jbookout"}, "isCrossRepository": False,
                  "headRefName": "claude/fixture-10", "headRefOid": "shaA", "baseRefName": "main",
                  "labels": [], "isDraft": False},
-                {"number": 11, "title": "b", "author": {"login": "agent"},
+                {"number": 11, "title": "b", "author": {"login": "jbookout"}, "isCrossRepository": False,
                  "headRefName": "claude/fixture-11", "headRefOid": "shaB", "baseRefName": "main",
                  "labels": [], "isDraft": False},
             ],
@@ -607,7 +702,7 @@ def test_escalation_calls_add_loop_verb():
         policy_file.write_text(json.dumps({"enabled": True, "repos": [repo]}))
         kill_file = root / "pr-pipeline.disable"
         gh_state = {"repos": {repo: {
-            "open_prs": [{"number": 12, "title": "x", "author": {"login": "agent"},
+            "open_prs": [{"number": 12, "title": "x", "author": {"login": "jbookout"}, "isCrossRepository": False,
                           "headRefName": "claude/fixture-12", "headRefOid": "shaC",
                           "baseRefName": "main", "labels": [], "isDraft": False}],
             "snapshots": {"12": _make_snapshot(12, "shaC")},
@@ -640,11 +735,14 @@ def _fake_read_room(turns: list[dict]):
     return read_room
 
 
-def _reviewing_state(repo: str, number: int, sha: str, *, dispatch_seq: int, dispatch_key: str) -> dict:
+def _reviewing_state(repo: str, number: int, sha: str, *, dispatch_seq: int, dispatch_key: str,
+                     dispatch_target: str = "claude", last_fix_actor=None) -> dict:
     entry = p.fresh_entry(sha)
     entry["state"] = "reviewing"
     entry["dispatch_seq"] = dispatch_seq
     entry["dispatch_key"] = dispatch_key
+    entry["dispatch_target"] = dispatch_target
+    entry["last_fix_actor"] = last_fix_actor
     return {f"{repo}#{number}": entry}
 
 
@@ -667,7 +765,7 @@ def test_scan_room_rejects_turn_at_or_before_dispatch_seq():
         sha = "abc1234" + "0" * 33
         state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1")
         turns = [{
-            "seq": 10, "origin_channel": "mcp", "origin_actor": "hermes-pilot",
+            "seq": 10, "origin_channel": "mcp", "origin_actor": "claude",
             "body": f"CARR-PR-VERDICT: APPROVE pr=5 sha={sha} reviewer=claude key=review-x-1",
         }]
         out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
@@ -680,7 +778,7 @@ def test_scan_room_rejects_wrong_dispatch_key():
         sha = "abc1234" + "0" * 33
         state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1")
         turns = [{
-            "seq": 11, "origin_channel": "mcp", "origin_actor": "hermes-pilot",
+            "seq": 11, "origin_channel": "mcp", "origin_actor": "claude",
             "body": f"CARR-PR-VERDICT: APPROVE pr=5 sha={sha} reviewer=claude key=review-x-OLD",
         }]
         out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
@@ -693,8 +791,45 @@ def test_scan_room_rejects_stale_sha():
         sha = "fee1234" + "0" * 33
         state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1")
         turns = [{
-            "seq": 11, "origin_channel": "mcp", "origin_actor": "hermes-pilot",
+            "seq": 11, "origin_channel": "mcp", "origin_actor": "claude",
             "body": "CARR-PR-VERDICT: APPROVE pr=5 sha=deadbeef0000 reviewer=claude key=review-x-1",
+        }]
+        out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
+        assert "_pending_verdict" not in out["r/x#5"]
+
+
+def test_scan_room_rejects_actor_not_matching_dispatched_target():
+    # origin_channel is genuinely "mcp" and the key/sha/reviewer text is a
+    # byte-perfect match — but this PR was dispatched to claude-desktop, and
+    # the turn's real, server-verified origin_actor is "claude": a different,
+    # otherwise-legitimate mcp actor. This is the exact gap "origin=mcp
+    # matches every seat" left open before the origin_actor check existed.
+    with tempfile.TemporaryDirectory() as d:
+        cursor_path = Path(d) / "cursor.json"
+        sha = "abc1234" + "0" * 33
+        state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1",
+                                 dispatch_target="claude-desktop")
+        turns = [{
+            "seq": 11, "origin_channel": "mcp", "origin_actor": "claude",
+            "body": f"CARR-PR-VERDICT: APPROVE pr=5 sha={sha} reviewer=claude-desktop key=review-x-1",
+        }]
+        out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
+        assert "_pending_verdict" not in out["r/x#5"]
+
+
+def test_scan_room_rejects_last_fix_actor_even_if_otherwise_valid():
+    # "claude" both matches the dispatched target AND is the identity that
+    # pushed the most recent fix for this PR — refused outright, so a fixer
+    # session can never also grade its own fix even if it could otherwise
+    # pass every other check.
+    with tempfile.TemporaryDirectory() as d:
+        cursor_path = Path(d) / "cursor.json"
+        sha = "abc1234" + "0" * 33
+        state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1",
+                                 dispatch_target="claude", last_fix_actor="claude")
+        turns = [{
+            "seq": 11, "origin_channel": "mcp", "origin_actor": "claude",
+            "body": f"CARR-PR-VERDICT: APPROVE pr=5 sha={sha} reviewer=claude key=review-x-1",
         }]
         out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
         assert "_pending_verdict" not in out["r/x#5"]
@@ -706,7 +841,7 @@ def test_scan_room_accepts_a_genuinely_bound_turn():
         sha = "abc1234" + "0" * 33
         state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1")
         turns = [{
-            "seq": 11, "origin_channel": "mcp", "origin_actor": "hermes-pilot",
+            "seq": 11, "origin_channel": "mcp", "origin_actor": "claude",
             "body": f"CARR-PR-VERDICT: APPROVE pr=5 sha={sha} reviewer=claude key=review-x-1",
         }]
         out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
@@ -720,14 +855,109 @@ def test_scan_room_keeps_the_newest_of_two_qualifying_turns_block_overrides_appr
         sha = "abc1234" + "0" * 33
         state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1")
         turns = [
-            {"seq": 11, "origin_channel": "mcp", "origin_actor": "hermes-pilot",
+            {"seq": 11, "origin_channel": "mcp", "origin_actor": "claude",
              "body": f"CARR-PR-VERDICT: APPROVE pr=5 sha={sha} reviewer=claude key=review-x-1"},
-            {"seq": 12, "origin_channel": "mcp", "origin_actor": "hermes-pilot",
+            {"seq": 12, "origin_channel": "mcp", "origin_actor": "claude",
              "body": f"CARR-PR-VERDICT: BLOCK pr=5 sha={sha} reviewer=claude key=review-x-1"},
         ]
         out = p.scan_room_for_verdicts(state, read_room=_fake_read_room(turns), cursor_path=cursor_path)
         pending = out["r/x#5"]["_pending_verdict"]
         assert pending["verdict"] == "BLOCK" and pending["seq"] == 12
+
+
+def test_scan_room_corrupt_cursor_raises():
+    with tempfile.TemporaryDirectory() as d:
+        cursor_path = Path(d) / "cursor.json"
+        cursor_path.write_text("{not json")
+        sha = "abc1234" + "0" * 33
+        state = _reviewing_state("r/x", 5, sha, dispatch_seq=10, dispatch_key="review-x-1")
+        try:
+            p.scan_room_for_verdicts(state, read_room=_fake_read_room([]), cursor_path=cursor_path)
+            assert False, "expected PrPipelineStateError"
+        except p.PrPipelineStateError:
+            pass
+
+
+# ───────────────────────── corrupt state / missing config / head races ─────────────────────────
+
+def test_corrupt_state_file_raises_and_does_not_reset_silently():
+    with tempfile.TemporaryDirectory() as d:
+        state_file = Path(d) / "state.json"
+        state_file.write_text("{not json at all")
+        try:
+            p.load_state(state_file)
+            assert False, "expected PrPipelineStateError"
+        except p.PrPipelineStateError:
+            pass
+
+
+def test_head_moved_between_list_and_snapshot_skips_the_pr_entirely():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        repo = "jbookout/carr-system"
+        state_file = root / "state.json"
+        policy_file = root / "policy.json"
+        policy_file.write_text(json.dumps({"enabled": True, "repos": [repo]}))
+        kill_file = root / "pr-pipeline.disable"
+
+        gh_state = {"repos": {repo: {
+            "open_prs": [{"number": 30, "title": "x", "author": {"login": "jbookout"},
+                          "isCrossRepository": False,
+                          "headRefName": "claude/fixture-30", "headRefOid": "shaOLD",
+                          "baseRefName": "main", "labels": [], "isDraft": False}],
+            # pr_snapshot (a separate gh call) now reports a DIFFERENT, newer
+            # head than list_open_prs did moments earlier — simulating a push
+            # landing in the gap between the two calls.
+            "snapshots": {"30": _make_snapshot(30, "shaNEW")},
+        }}}
+        gh = _FakeGh(gh_state)
+        add_room_turn, room_calls = _fake_room()
+
+        result = p.run_tick(repos=[repo], gh=gh, state_path=state_file, policy_path=policy_file,
+                            kill_switch_path=kill_file,
+                            merge_events_path=root / "merge-events.jsonl",
+                            actions_log_path=root / "actions.jsonl", add_room_turn=add_room_turn)
+        assert not room_calls  # never dispatched against the unreviewed head
+        assert not any(c[0] == "merge" for c in gh.calls)
+        assert any(a.get("action") == "skip_head_moved" for a in result.actions)
+        state = p.load_state(state_file)
+        assert state[f"{repo}#30"]["state"] == "needs_review"  # never advanced
+
+
+def test_stale_verdict_produces_no_comment():
+    # An entry already "approved" at verdict_seq=50 receives a _pending_verdict
+    # at a LOWER seq (a stale/replayed turn) — decide() must leave verdict_seq
+    # unchanged, and run_tick must not post a comment for it.
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        repo = "jbookout/carr-system"
+        state_file = root / "state.json"
+        policy_file = root / "policy.json"
+        policy_file.write_text(json.dumps({"enabled": True, "repos": [repo]}))
+        kill_file = root / "pr-pipeline.disable"
+
+        gh_state = {"repos": {repo: {
+            "open_prs": [{"number": 31, "title": "x", "author": {"login": "jbookout"},
+                          "isCrossRepository": False,
+                          "headRefName": "claude/fixture-31", "headRefOid": "sha0031",
+                          "baseRefName": "main", "labels": [], "isDraft": False}],
+            "snapshots": {"31": _make_snapshot(31, "sha0031", status="BEHIND")},
+        }}}
+        gh = _FakeGh(gh_state)
+        add_room_turn, _ = _fake_room()
+        state = {f"{repo}#31": {**p.fresh_entry("sha0031"), "state": "approved", "verdict_seq": 50,
+                                "reviewer": "claude",
+                                "_pending_verdict": {"verdict": "BLOCK", "reviewer": "claude",
+                                                      "sha": "sha0031", "seq": 10}}}
+        p.save_state(state, state_file)
+
+        p.run_tick(repos=[repo], gh=gh, state_path=state_file, policy_path=policy_file,
+                  kill_switch_path=kill_file, merge_events_path=root / "merge-events.jsonl",
+                  actions_log_path=root / "actions.jsonl", add_room_turn=add_room_turn)
+        assert not any(c[0] == "comment" for c in gh.calls)
+        state = p.load_state(state_file)
+        assert state[f"{repo}#31"]["verdict_seq"] == 50  # stale verdict never applied
+        assert state[f"{repo}#31"]["state"] == "approved"
 
 
 def main() -> int:
