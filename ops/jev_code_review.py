@@ -474,7 +474,7 @@ def review_for_edit(region, payload, client=None, api_key=None, log_path=None):
                       and isinstance(value, (int, float)) and value >= ADVISORY_AT)
     record(dict(subject, would_block=would_block, threshold=SHADOW_BLOCK_AT,
                 task_scores=task_scores),
-           answer, {"advisory_findings": advisory, "effect": "advisory_only"},
+           answer, {"advisory_findings": advisory, "effect": "required"},
            note="agreed" if would_block == bool(advisory) else "disagreed")
     if would_block:
         scores["_would_block"] = top

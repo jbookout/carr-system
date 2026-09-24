@@ -136,7 +136,7 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
         return False
     if (row.get("partner_request_sha256") != prompt_sha256
             or not _nonempty(row.get("model"))
-            or row.get("authority") != "advisory_only"
+            or row.get("authority") != "required"
             or not isinstance(row.get("usage"), dict)):
         return False
     facets = row.get("facets")

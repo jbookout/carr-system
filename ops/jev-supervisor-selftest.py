@@ -208,6 +208,19 @@ class DispatcherTests(unittest.TestCase):
                               env=env, timeout=30)
         self.assertEqual((done.returncode, done.stdout), (0, ""))
 
+    def test_default_mode_is_advise_not_shadow(self):
+        """Decision 0b11c89b (2026-09-24, Joe): the default moved off shadow."""
+        env = dict(os.environ)
+        env.pop("CARR_JEV_SUPERVISOR", None)
+        script = ("import importlib.util, sys\n"
+                 f"spec = importlib.util.spec_from_file_location('m', {HOOK!r})\n"
+                 "m = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(m)\n"
+                 "sys.stdout.write(m.MODE)\n")
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                              env=env, timeout=30)
+        self.assertEqual(done.stdout.strip(), "advise")
+
 
 if __name__ == "__main__":
     unittest.main()

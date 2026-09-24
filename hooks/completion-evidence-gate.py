@@ -111,7 +111,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stop_latch import (  # noqa: E402
     claim_identity, latched, record_fire, record_satisfied)
 
+sys.path.insert(0, REPO)
+from lib.jev_required_actions import evaluate_required_actions  # noqa: E402
+
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
+JEV_LOG = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
 # The FLOOR trigger, kept and widened with the verbs Joe named (finished,
 # landed, phase-complete, ready, live). It is no longer the only trigger: the
 # clause predicate below fires with or without any of these words.
@@ -273,6 +277,12 @@ HUMAN_ONLY_WRITE_ACTION_EXACT = {
 CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
+# Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only. It's in our
+# hard rules or it is supposed to be." A fourth reason class, independent of
+# the claim-set layers above — it fires whenever THIS turn's build advisory
+# required a facet and the turn shows neither a Jev call nor a named refusal,
+# regardless of whether a completion claim was made at all.
+JEV_REQUIRED_REASON = "jev required actions missing"
 
 CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
 NESTED_CARR_CALL = re.compile(
@@ -1131,6 +1141,54 @@ def evaluate(recs, ledger=None):
     return True, "terminal completion claim has no fresh verification"
 
 
+def current_window(recs):
+    """This turn's transcript slice: everything after the last human message.
+
+    Same slicing evaluate() uses internally, exposed here so main() can look
+    at the current turn's Jev evidence without evaluate() needing to hand it
+    out through the ledger out-param.
+    """
+    turns = human_turns(recs)
+    start = (turns[-1] + 1) if turns else 0
+    return recs[start:]
+
+
+def jev_audit(row):
+    if row.get("session") == "selftest":
+        return
+    try:
+        os.makedirs(os.path.dirname(JEV_LOG), exist_ok=True)
+        with open(JEV_LOG, "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
+def jev_required_actions_check(session, recs):
+    """decision 0b11c89b's Stop-side half. Returns (block, reason, identity)
+    with `block` False whenever there is nothing to enforce (no advisory this
+    turn, an unavailable advisory, or a readable advisory with no required
+    actions) or when a fresh check has already been latched.
+    """
+    window = current_window(recs)
+    texts = [text(rec, {"assistant"}) for rec in window]
+    commands = [command(tool(rec)[1]) for rec in window]
+    wrote_a_file = any(file_paths(*tool(rec)) for rec in window)
+    result = evaluate_required_actions(recs, window, texts, commands, wrote_a_file)
+    jev_audit({"ts": now(), "session": session, **result})
+    if result["status"] != "required" or not result["missing"]:
+        return False, "", None
+    identity = claim_identity("completion-evidence-gate", JEV_REQUIRED_REASON,
+                              result["missing"])
+    if latched(session, identity):
+        return False, "", None
+    missing = ", ".join(result["missing"])
+    reason = (f"this turn's Jev build advisory required {missing}, and the turn shows "
+              "neither a Jev call (ops/typesafe_client.py) nor a named refusal "
+              f"(\"JEV-REFUSED: <facet> <reason>\") for it")
+    return True, reason, identity
+
+
 def jev_requirements_advisory(payload, recs):
     """SHADOW ONLY: ops/jev_requirements.py asks Jev whether each requirement
     of the last human request is met by this turn's diff, records the answer
@@ -1190,6 +1248,24 @@ def main():
                 "completion-evidence-gate", reason_class, tokens))
 
         if not blocked:
+            # DECISION 0b11c89b'S STOP-SIDE HALF. Independent of the claim-set
+            # layers above: it fires whenever THIS turn's own build advisory
+            # required a Jev facet and the turn shows neither a call nor a
+            # named refusal, whether or not anything was ever claimed done.
+            jev_blocked, jev_reason, jev_identity = jev_required_actions_check(session, recs)
+            if jev_blocked:
+                record_fire(session, jev_identity)
+                audit({"ts": now(), "hook": "completion-evidence-gate",
+                       "session": session, "reason": jev_reason,
+                       "claim_identity": jev_identity})
+                print(json.dumps({"decision": "block", "reason":
+                    "JEV REQUIRED ACTIONS GATE — " + jev_reason + ".\n"
+                    "Decision 0b11c89b (2026-09-24, Joe): Jev is required, not advisory, for "
+                    "the facets this turn's build advisory names. Either call Jev through "
+                    "ops/typesafe_client.py (noul/choice/ask) for the missing facet(s) before "
+                    "closing, or say so explicitly with a line reading "
+                    "\"JEV-REFUSED: <facet> <reason>\" (for example, Jev unreachable)."}))
+                return 0
             if advisory:
                 print(json.dumps({"systemMessage": advisory}))
             return 0

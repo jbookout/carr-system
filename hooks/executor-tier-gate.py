@@ -58,6 +58,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from typing import Any, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:                                    # telemetry only — never load-bearing
@@ -66,6 +67,17 @@ try:                                    # telemetry only — never load-bearing
 except Exception:                       # a missing meter must not change a verdict
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+find_build_advisory = None  # type: Optional[Callable[[Any], Any]]
+required_facets = None  # type: Optional[Callable[[Any], Any]]
+prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
+prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
+try:                                    # same fail-open posture as jev_pick below
+    from lib.jev_required_actions import (
+        find_build_advisory, prompt_names_facet, prompt_names_not_applicable,
+        required_facets)
+except Exception:
+    pass
 
 # Where a subagent definition may live. Project scope first: that is where the
 # fifteen CARR agents are, and a project definition wins over a user-level one
@@ -171,6 +183,36 @@ def jev_pick(desc, prompt, subagent_type, chosen):
         return None
 
 
+def missing_required_actions_in_prompt(payload, prompt):
+    """The required facets this turn's Jev advisory named that `prompt` does
+    not mention, or [] when nothing is required / the advisory could not be
+    read / the prompt already covers it. Never raises.
+
+    Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only." C07 of
+    the 2026-09-24 bypass audit is this exact gap — no code compared an Agent
+    prompt with the turn's advisory, so a required action stopped at the
+    parent and never reached the subagent that would actually do the work.
+    """
+    if find_build_advisory is None or required_facets is None:
+        return []
+    if prompt_names_not_applicable(prompt):
+        return []
+    try:
+        path = payload.get("transcript_path") or payload.get("transcriptPath")
+        if not path or not os.path.exists(path):
+            return []
+        with open(path, errors="replace") as fh:
+            recs = [json.loads(line) for line in fh if line.strip()]
+        receipt = find_build_advisory(recs)
+        required = required_facets(receipt)
+    except Exception as exc:
+        log(f"JEV-REQUIRED-ACTIONS(unavailable) {exc}")
+        return []
+    if not required:
+        return []
+    return [f for f in required if not prompt_names_facet(prompt, f)]
+
+
 def advise(note):
     print(json.dumps({
         "hookSpecificOutput": {
@@ -213,6 +255,25 @@ def main():
         desc = ti.get("description") or ""
 
         prompt = ti.get("prompt") or ""
+
+        # DECISION 0b11c89b'S PreToolUse HALF, ahead of the tier check below:
+        # a required action that stops at the parent and never reaches the
+        # subagent doing the work is exactly the C07 gap the bypass audit
+        # named. This denies independently of whatever the tier check below
+        # decides.
+        missing = missing_required_actions_in_prompt(payload, prompt)
+        if missing:
+            named = ", ".join(missing)
+            log(f"DENY(jev-required-actions) missing={named} desc={desc[:80]}")
+            deny(
+                "JEV REQUIRED ACTIONS NOT NAMED. This turn's Jev build advisory required "
+                f"{named}, and this Agent prompt names none of them. Decision 0b11c89b "
+                "(2026-09-24, Joe): Jev is required, not advisory, for these facets.\n\n"
+                "FIX: add a line to the prompt for each missing facet (for example, "
+                f"\"{missing[0]}: ...\" naming what Jev judgment the subagent must use and "
+                "consume), or, if none genuinely applies to this subtask, add the line "
+                f"\"Jev required actions: not applicable — <reason>\" to the prompt."
+            )
 
         # The executor is named on the call. Jev may still think it is dearer
         # than the job needs; that is ADVICE, never a refusal, until the logged

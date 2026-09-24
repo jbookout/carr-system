@@ -194,7 +194,12 @@ def advise(partner_request: str, *, client: Any | None = None,
             for facet in FACETS if facets[facet] >= BUILD_ACTION_THRESHOLD
         ],
         "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
-        "authority": "advisory_only",
+        # Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only. It's
+        # in our hard rules or it is supposed to be." lib/rule_delivery_preuse
+        # .py's validate_build_advisory() checks this literal string in
+        # lockstep; hooks/completion-evidence-gate.py's JEV REQUIRED ACTIONS
+        # GATE is what makes "required" mean something rather than a label.
+        "authority": "required",
         "deterministic_exclusions": [
             "arithmetic", "dates_and_counts", "identity", "permissions_and_authority",
             "invariants", "execution", "writes", "completion_proof",

@@ -344,12 +344,12 @@ def code_review(payload):
             if scores.get("_would_block") and not shadow:
                 shadow.append({"path": rel, "question": "task_fit_would_block",
                                "probability": scores["_would_block"],
-                               "effect": "shadow_would_block_advisory_only"})
+                               "effect": "required"})
         hits.sort(key=lambda item: -item[2])
         for rel, name, value in hits:
             receipt["findings"].append({
                 "path": rel, "question": name, "probability": value,
-                "effect": "advisory_only",
+                "effect": "required",
             })
         receipt["findings"].extend(shadow)
         if not receipt["models"]:

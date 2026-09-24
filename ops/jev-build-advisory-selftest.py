@@ -64,7 +64,7 @@ class AdvisoryTests(unittest.TestCase):
                          set(advisory.FACETS) | set(advisory.GUIDANCE_TEXT))
         self.assertEqual(set(result["guidance"]), set(advisory.GUIDANCE_TEXT))
         self.assertEqual(client.state, {"partner_request": "Design and verify the change"})
-        self.assertEqual(result["authority"], "advisory_only")
+        self.assertEqual(result["authority"], "required")
         self.assertIn("permissions_and_authority", result["deterministic_exclusions"])
         self.assertEqual(
             [row["facet"] for row in result["required_actions"]],
