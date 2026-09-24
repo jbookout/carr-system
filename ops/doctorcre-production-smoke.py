@@ -89,6 +89,34 @@ def auth_result(reply: Reply, app: str) -> list[str]:
     return failures
 
 
+_SEMVER_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _contract_result(payload: object, field: str, expected_schema: str) -> str | None:
+    """None if payload[field] is {schema: expected_schema, version: <semver>}.
+
+    The version is intentionally NOT compared against a frozen literal: it is
+    a build number that legitimately advances with every DoctorCRE app
+    release, exactly like source_commit and provider_version_id just above it
+    in app_release_result, which are validated by SHAPE rather than by exact
+    value for the same reason. Freezing this one field to a specific version
+    (as an earlier revision did) meant the smoke check failed the moment the
+    app shipped past that version — a false alarm on every ordinary release,
+    not evidence of a stale or wrong deployment. Only the schema NAME needs an
+    exact match; a schema rename is a real contract break, a version bump is
+    not.
+    """
+    if not isinstance(payload, dict):
+        return f"/app-release {field} is missing"
+    contract = payload.get(field)
+    if (not isinstance(contract, dict) or set(contract) != {"schema", "version"}
+            or contract.get("schema") != expected_schema
+            or not isinstance(contract.get("version"), str)
+            or not re.fullmatch(_SEMVER_RE, contract["version"])):
+        return f"/app-release {field} is not {expected_schema} with a valid semver version"
+    return None
+
+
 def app_release_result(reply: Reply, expected_env: str) -> list[str]:
     failures: list[str] = []
     try:
@@ -107,12 +135,12 @@ def app_release_result(reply: Reply, expected_env: str) -> list[str]:
             r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
             payload.get("provider_version_id", ""), re.IGNORECASE):
         failures.append("/app-release provider_version_id is not an immutable version ID")
-    if not isinstance(payload, dict) or payload.get("carr_contract") != {
-            "schema": "doctorcre-carr-interface.v1", "version": "1.1.0"}:
-        failures.append("/app-release CARR contract is not doctorcre-carr-interface.v1 1.1.0")
-    if not isinstance(payload, dict) or payload.get("route_contract") != {
-            "schema": "doctorcre-app-routes.v1", "version": "1.0.0"}:
-        failures.append("/app-release route contract is not doctorcre-app-routes.v1 1.0.0")
+    carr_failure = _contract_result(payload, "carr_contract", "doctorcre-carr-interface.v1")
+    if carr_failure:
+        failures.append(carr_failure)
+    route_failure = _contract_result(payload, "route_contract", "doctorcre-app-routes.v1")
+    if route_failure:
+        failures.append(route_failure)
     return failures
 
 

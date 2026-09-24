@@ -60,6 +60,53 @@ def main() -> int:
         check(calls == ["https://api.doctorcre.com/release", "https://app.doctorcre.com/app-release", "https://app.doctorcre.com/", "https://dealroom.doctorcre.com/?stale=1"],
               f"unexpected requests: {calls}")
 
+        # A contract version that has advanced past the fixture's is an
+        # ORDINARY app release, not a deployment mismatch: app_release_result
+        # must accept any well-formed semver on the pinned schema rather than
+        # freezing on one literal value (the bug behind PR fixing
+        # doctorcre-production-smoke.py after production legitimately moved
+        # from carr_contract 1.1.0 to 1.25.0 and route_contract 1.0.0 to 1.13.0
+        # without any deployment defect).
+        def newer_contract_reader(url: str, timeout: int = 15) -> Any:
+            calls.append(url)
+            if url.endswith("/release"):
+                return reply(200, {"ok": True, "env": {"value": "production"}, "verb_count": 12})
+            if url.endswith("/app-release"):
+                return reply(200, {
+                    "service": "doctorcre-app",
+                    "environment": "production",
+                    "source_commit": "a" * 40,
+                    "provider_version_id": "12345678-1234-4123-8123-123456789abc",
+                    "carr_contract": {"schema": "doctorcre-carr-interface.v1", "version": "1.25.0"},
+                    "route_contract": {"schema": "doctorcre-app-routes.v1", "version": "1.13.0"},
+                })
+            if url.startswith("https://app.doctorcre.com/"):
+                return reply(302, location="/auth/login?return_to=%2F")
+            return reply(302, location="https://app.doctorcre.com/deals")
+
+        failures = smoke.run("https://api.doctorcre.com", "https://app.doctorcre.com",
+                             wrangler, "production", 10, newer_contract_reader)
+        check(not failures, f"advanced contract version was wrongly rejected: {failures}")
+
+        # The schema NAME is still load-bearing: a rename or malformed version
+        # must still fail the smoke check.
+        check(any("carr_contract" in item for item in smoke.app_release_result(
+            reply(200, {
+                "service": "doctorcre-app", "environment": "production",
+                "source_commit": "a" * 40,
+                "provider_version_id": "12345678-1234-4123-8123-123456789abc",
+                "carr_contract": {"schema": "doctorcre-carr-interface.v2", "version": "1.25.0"},
+                "route_contract": {"schema": "doctorcre-app-routes.v1", "version": "1.13.0"},
+            }), "production")), "a renamed CARR contract schema was accepted")
+        check(any("route_contract" in item for item in smoke.app_release_result(
+            reply(200, {
+                "service": "doctorcre-app", "environment": "production",
+                "source_commit": "a" * 40,
+                "provider_version_id": "12345678-1234-4123-8123-123456789abc",
+                "carr_contract": {"schema": "doctorcre-carr-interface.v1", "version": "1.25.0"},
+                "route_contract": {"schema": "doctorcre-app-routes.v1", "version": "not-a-semver"},
+            }), "production")), "a malformed route contract version was accepted")
+
         def bad_reader(url: str, timeout: int = 15) -> Any:
             if url.endswith("/release"):
                 return reply(200, {"ok": True, "env": {"value": "staging"}, "verb_count": 0})
