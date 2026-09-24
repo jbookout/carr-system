@@ -207,6 +207,16 @@
           "timeout": 15
         }
       ]
+    },
+    {
+      "matcher": "Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/jev-supervisor.py",
+          "timeout": 25
+        }
+      ]
     }
   ],
   "PreCompact": [
@@ -281,6 +291,11 @@
           "type": "command",
           "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py",
           "timeout": 20
+        },
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/jev-supervisor.py",
+          "timeout": 25
         }
       ]
     }
