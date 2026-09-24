@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const migration = readFileSync(new URL("../../migrations/0570_tour_writer_login_membership.sql", import.meta.url), "utf8");
+const migration = readFileSync(new URL("../../migrations/0571_tour_writer_login_membership.sql", import.meta.url), "utf8");
 const body = migration.slice(migration.indexOf("create or replace function ops.tour_server_actor_id"), migration.indexOf("end $$;"));
 
 test("tour actor gate admits writer-bundle logins by membership", () => {

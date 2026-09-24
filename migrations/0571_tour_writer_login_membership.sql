@@ -1,4 +1,4 @@
--- 0570_tour_writer_login_membership.sql
+-- 0571_tour_writer_login_membership.sql
 --
 -- Let the Worker's writer login reach the Tour mutation functions.
 --
@@ -56,11 +56,11 @@ begin
   if def not like '%pg_has_role(session_user,''carr_writer'',''member'')%'
      or def not like '%acting_actor_slug%'
      or def not like '%^carr_authority_%' then
-    raise exception '0570 proof: tour_server_actor_id does not carry the membership branch';
+    raise exception '0571 proof: tour_server_actor_id does not carry the membership branch';
   end if;
   if exists (select 1 from pg_roles where rolname='app_writer')
      and not pg_has_role('app_writer','carr_writer','member') then
-    raise exception '0570 proof: app_writer is not a carr_writer member on this database';
+    raise exception '0571 proof: app_writer is not a carr_writer member on this database';
   end if;
 end $proof$;
 
