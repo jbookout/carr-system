@@ -16,21 +16,31 @@ WHAT IT EXTRACTS, one file per row in ops/fixtures/real-replay/*.jsonl:
     including ones whose content is JSON with a nested "build_receipt".
   - Bash tool_use command strings (message.content[].type == "tool_use",
     name == "Bash"), keeping command + description.
-  - Agent tool_use prompts (name == "Agent"), trimmed to a fixed length.
   - Stop-hook inputs: type == "system", subtype == "stop_hook_summary", and
     attachment.type in ("hook_success", "hook_additional_context") with
     hookName/hookEvent == "Stop".
+  - Agent tool_use prompts are NOT extracted from real transcripts at all
+    (coordinator review, 2026-09-24, repo is public and prompts carry
+    client/deal prose no pattern scan can be trusted to fully catch).
+    ops/fixtures/real-replay/agent-prompts.jsonl is a fixed, hand-written
+    SYNTHETIC_AGENT_PROMPTS set derived from real *structure* only
+    (description + subagent_type + a generic instruction shape).
 
-REDACTION, applied to every string before it is written:
-  - email addresses -> [EMAIL]
-  - hostnames (bare domain-shaped tokens, incl. in URLs) -> [HOST]
-  - secret-shaped tokens (api keys, bearer tokens, generic long hex/base64
-    tokens after a key= or Bearer marker) -> [SECRET]
-  - free-text user prompts are NOT extracted at all (only shapes above are
-    pulled, and Agent prompts are trimmed rather than kept verbatim)
-  Command SHAPE is deliberately preserved: `git add -A`, path arguments, flags
-  are all kept, since the false-denial defect (PR #1225) depended on exact
-  argument shapes surviving redaction.
+DROP-WHOLE-RECORD, checked against ops/business_data_patterns.py's shared
+pattern set, against the RAW source line first (before any extraction) and
+again against every constructed row (belt-and-suspenders): a match drops the
+entire record, never a partial redaction of just the matched span. Patterns
+cover dollar amounts, sq ft / $/SF, street addresses, practice/clinic naming
+("Dr.", DDS, DMD, clinic, dental, practice), lease terms, phone numbers,
+emails, hostnames, secret-shaped strings, UUID-shaped tokens, and CARR client
+reference ids (L-/C-/V-/D- prefixed).
+
+REDACTION (applied on TOP of the drop-whole-record check, to the rows that
+survive it) additionally scrubs, in place, email addresses -> [EMAIL],
+hostnames -> [HOST], and secret-marker tokens -> [SECRET] -- a second layer,
+not a substitute for the drop above. Command SHAPE is deliberately preserved:
+`git add -A`, path arguments, flags are all kept, since the false-denial
+defect (PR #1225) depended on exact argument shapes surviving redaction.
 
 USAGE:
     python3 tools/extract-real-replay.py --out ops/fixtures/real-replay \\
@@ -48,6 +58,9 @@ import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from ops import business_data_patterns  # noqa: E402
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
@@ -126,21 +139,44 @@ def extract_bash(record: dict, out: list):
         })
 
 
-def extract_agent(record: dict, out: list):
-    for item in _tool_uses(record):
-        if item.get("name") != "Agent":
-            continue
-        inp = item.get("input") or {}
-        prompt = inp.get("prompt", "")
-        if not isinstance(prompt, str):
-            prompt = ""
-        trimmed = redact(prompt)[:AGENT_PROMPT_TRIM_CHARS]
-        out.append({
-            "kind": "agent_prompt",
-            "description": redact(inp.get("description", "")) if inp.get("description") else "",
-            "subagent_type": inp.get("subagent_type", ""),
-            "prompt_trimmed": trimmed,
-        })
+# Agent tool_use prompts are NOT extracted from real transcripts at all
+# (coordinator review, 2026-09-24): they carry client/deal context in prose
+# that no pattern scan can be trusted to catch completely, and the gates only
+# need SHAPE, not content. These are a fixed, hand-written set derived from
+# real *structure* (description + subagent_type + a generic instruction
+# shape), never from real prompt text.
+SYNTHETIC_AGENT_PROMPTS = [
+    {
+        "kind": "agent_prompt", "synthetic": True,
+        "description": "Investigate a defect across the codebase",
+        "subagent_type": "general-purpose",
+        "prompt_trimmed": "Investigate defect X across N files in the repo and report the root cause and a fix plan. Under 200 words.",
+    },
+    {
+        "kind": "agent_prompt", "synthetic": True,
+        "description": "Search for a symbol or pattern",
+        "subagent_type": "Explore",
+        "prompt_trimmed": "Find where symbol X is defined and every file that references it; report file paths and line numbers only.",
+    },
+    {
+        "kind": "agent_prompt", "synthetic": True,
+        "description": "Run and validate a test suite",
+        "subagent_type": "general-purpose",
+        "prompt_trimmed": "Run the relevant selftest suite for change Y, fix any failures, and report pass/fail counts and remaining blockers.",
+    },
+    {
+        "kind": "agent_prompt", "synthetic": True,
+        "description": "Draft a PR for a scoped fix",
+        "subagent_type": "general-purpose",
+        "prompt_trimmed": "Implement fix Z on branch B, run the local CI gates class, commit, push, and open a PR with a summary and test plan.",
+    },
+    {
+        "kind": "agent_prompt", "synthetic": True,
+        "description": "Review a diff for correctness",
+        "subagent_type": "general-purpose",
+        "prompt_trimmed": "Review the diff since commit C for correctness bugs and report findings ranked by severity, most severe first.",
+    },
+]
 
 
 def extract_hook_context(record: dict, out: list):
@@ -206,12 +242,24 @@ def extract_stop_hook(record: dict, out: list):
     out.append(row)
 
 
+def _drop_whole_row(row_candidates: list) -> bool:
+    """True if ANY candidate row built from one source record trips a
+    business-data pattern -- the whole record is then dropped, none of its
+    rows are kept. Checked against the JSON-serialized row (post-redaction),
+    never partially redacted through: a match here means drop, not patch."""
+    for row in row_candidates:
+        if business_data_patterns.has_business_data(json.dumps(row, sort_keys=True)):
+            return True
+    return False
+
+
 def run(transcript_glob: str, out_dir: Path, max_bash: int, max_hooks: int, max_agent: int, max_stop: int):
-    bash_rows, hook_rows, agent_rows, stop_rows = [], [], [], []
+    bash_rows, hook_rows, stop_rows = [], [], []
+    dropped = 0
     paths = sorted(glob.glob(transcript_glob))
     for path in paths:
         if (len(bash_rows) >= max_bash and len(hook_rows) >= max_hooks
-                and len(agent_rows) >= max_agent and len(stop_rows) >= max_stop):
+                and len(stop_rows) >= max_stop):
             break
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -219,21 +267,46 @@ def run(transcript_glob: str, out_dir: Path, max_bash: int, max_hooks: int, max_
                     line = line.strip()
                     if not line:
                         continue
+                    # NOTE: the raw transcript line is NOT scanned whole --
+                    # every line carries envelope UUIDs (parentUuid,
+                    # sessionId, message ids) that are routine bookkeeping,
+                    # not business data, and scanning the raw line against
+                    # UUID_RE with no exemption drops essentially every
+                    # record (measured: 46,360 of 46,365 lines on this data
+                    # set). Instead, the DROP check runs against the
+                    # CONSTRUCTED candidate row below -- the actual fields
+                    # this script would write -- which is where a business
+                    # value (a dollar figure inside a Bash command, a client
+                    # ref inside hook advisory text) would actually surface.
                     try:
                         record = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
+                    candidates_bash, candidates_hooks, candidates_stop = [], [], []
                     if len(bash_rows) < max_bash:
-                        extract_bash(record, bash_rows)
+                        extract_bash(record, candidates_bash)
                     if len(hook_rows) < max_hooks:
-                        extract_hook_context(record, hook_rows)
-                    if len(agent_rows) < max_agent:
-                        extract_agent(record, agent_rows)
+                        extract_hook_context(record, candidates_hooks)
                     if len(stop_rows) < max_stop:
-                        extract_stop_hook(record, stop_rows)
+                        extract_stop_hook(record, candidates_stop)
+                    # Belt-and-suspenders: also check the CONSTRUCTED rows
+                    # (post-redaction) -- a match here still means drop the
+                    # row whole, never patch it further.
+                    for bucket_rows, candidates in (
+                        (bash_rows, candidates_bash),
+                        (hook_rows, candidates_hooks),
+                        (stop_rows, candidates_stop),
+                    ):
+                        for row in candidates:
+                            if business_data_patterns.has_business_data(json.dumps(row, sort_keys=True)):
+                                dropped += 1
+                                continue
+                            bucket_rows.append(row)
         except OSError as err:
             print(f"extract-real-replay: skipping {path}: {err}", file=sys.stderr)
             continue
+
+    agent_rows = list(SYNTHETIC_AGENT_PROMPTS)[:max_agent]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written = {}
@@ -249,6 +322,7 @@ def run(transcript_glob: str, out_dir: Path, max_bash: int, max_hooks: int, max_
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
         written[name] = len(rows)
+    print(f"extract-real-replay: dropped {dropped} whole records for business-data patterns", file=sys.stderr)
     return written
 
 
