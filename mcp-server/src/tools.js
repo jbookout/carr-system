@@ -704,8 +704,22 @@ export function assertRequiredArgs(schema, args) {
   const required = schema && Array.isArray(schema.required) ? schema.required : null;
   if (!required || !required.length) return args;
   const bag = (args && typeof args === "object" && !Array.isArray(args)) ? args : {};
+  // A field the schema DECLARES nullable (type ["string","null"], or an anyOf /
+  // oneOf branch of type "null") takes null as a real answer: "no appointment",
+  // "no prior route version". Refusing it made such verbs uncallable, since the
+  // key is required AND its only honest value was null (append-tour-route-stop,
+  // append-tour-route-stop-transition, search-tour-properties, 2026-09-23).
+  // Absent keys and "" stay missing for every field.
+  const props = (schema && schema.properties) || {};
+  const nullable = (k) => {
+    const p = props[k];
+    if (!p || typeof p !== "object") return false;
+    if (p.type === "null" || (Array.isArray(p.type) && p.type.includes("null"))) return true;
+    return [p.anyOf, p.oneOf].some((alts) => Array.isArray(alts) && alts.some((a) => a && a.type === "null"));
+  };
   const missing = required.filter((k) => {
     const v = bag[k];
+    if (v === null && nullable(k)) return false;
     return v === undefined || v === null || v === "";
   });
   if (!missing.length) return args;
