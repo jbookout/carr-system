@@ -268,6 +268,13 @@ def conversational_desk_seats(entries: dict[str, dict]) -> dict[str, str]:
     }
 
 
+def mention_only_desks(entries: dict[str, dict]) -> frozenset[str]:
+    """Desks registered with room_listen="mention": they hear people's turns but
+    hear another desk only when @-mentioned (state.is_unaddressed_desk_turn)."""
+    return frozenset(name for name, entry in entries.items()
+                     if entry.get("room_listen") == "mention")
+
+
 def _elapsed_seconds(iso_ts: str | None, *, now: str | None = None) -> float:
     if iso_ts is None:
         return 0.0
@@ -639,6 +646,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     # it from conversational fan-out prevents ordinary room chatter from
     # creating model sessions or spending tokens.
     desk_seats = conversational_desk_seats(desk_entries)
+    mention_only = mention_only_desks(desk_entries)
 
     # The target catalog is configuration for command ingress, not a reason to
     # stop the conversational bridge.  When it cannot be loaded, only an
@@ -695,7 +703,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             routed[str(t.get("msg_id"))] = []
             queue_events.append({"seq": t.get("seq"), "kind": queued.get("kind")})
             continue
-        routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats)
+        routed[str(t.get("msg_id"))] = state_mod.route_turn(state, t, desk_seats, mention_only=mention_only)
         control = auth_control.parse_control(t)
         if control is not None:
             controls.append(handle_control(

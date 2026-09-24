@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Contract tests for state.route_turn's desk-to-desk loop guard.
+"""Contract tests for mention-only desks in state.route_turn.
 
-Found live 2026-09-24: with two conversational desks seated (flash and codex),
+Found live 2026-09-24: with two auto-answering desks seated (flash and codex),
 every desk reply was routed to the other desk, whose reply was routed back, about
 once a minute ("No further response." / "No action taken.") until one seat was
-stopped. A desk's turn now reaches another desk only when it names that desk's
-seat with an @-mention; turns from people still fan out to every desk.
+stopped. A desk registered room_listen="mention" hears people's turns, and hears
+another desk only when that desk @-mentions its seat. Desks on the default keep
+hearing other desks: desk-to-desk conversation is by design
+(tools/test-room-bridge-state.py pins that).
 """
 
 from __future__ import annotations
@@ -16,48 +18,62 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import bridge  # noqa: E402
 import state as state_mod  # noqa: E402
 
 SEATS = {"flash": "flash", "codex-desk": "codex"}
+QUIET = frozenset({"flash"})
 
 
 def turn(msg_id, seat, body="hello"):
     return {"kind": "turn", "msg_id": msg_id, "seat": seat, "body": body, "seq": 1}
 
 
-def test_human_turn_fans_out_to_every_desk():
+def route(st, t):
+    return sorted(state_mod.route_turn(st, t, SEATS, mention_only=QUIET))
+
+
+def test_human_turn_reaches_every_desk():
+    assert route(state_mod.default_state(), turn("m1", "joe")) == ["codex-desk", "flash"]
+
+
+def test_mention_only_desk_does_not_hear_other_desk():
+    assert route(state_mod.default_state(), turn("m2", "codex", "No action taken.")) == []
+
+
+def test_default_desk_still_hears_other_desks():
+    assert route(state_mod.default_state(), turn("m3", "flash", "done")) == ["codex-desk"]
+
+
+def test_ping_pong_dies_after_one_hop():
+    """Simulate the live loop: each reply becomes the next room turn."""
     st = state_mod.default_state()
-    assert sorted(state_mod.route_turn(st, turn("m1", "joe"), SEATS)) == ["codex-desk", "flash"]
+    frontier = route(st, turn("h1", "joe"))
+    hops = 0
+    while frontier and hops < 10:
+        hops += 1
+        frontier = [d for name in frontier
+                    for d in route(st, turn(f"r{hops}-{name}", SEATS[name], "ack"))]
+    assert hops <= 2, hops
 
 
-def test_desk_reply_does_not_reach_other_desk():
-    st = state_mod.default_state()
-    assert state_mod.route_turn(st, turn("m2", "codex", "No action taken."), SEATS) == []
-    assert state_mod.route_turn(st, turn("m3", "flash", "No further response."), SEATS) == []
-
-
-def test_ping_pong_cannot_start():
-    """Simulate the live loop: each desk's reply becomes the next room turn."""
-    st = state_mod.default_state()
-    routed = state_mod.route_turn(st, turn("h1", "joe"), SEATS)
-    replies = [turn(f"r-{name}", SEATS[name], "ack") for name in routed]
-    second_hop = [d for r in replies for d in state_mod.route_turn(st, r, SEATS)]
-    assert second_hop == []
-
-
-def test_explicit_mention_still_reaches_named_desk_only():
-    st = state_mod.default_state()
-    assert state_mod.route_turn(st, turn("m4", "codex", "@flash please review"), SEATS) == ["flash"]
+def test_explicit_mention_reaches_mention_only_desk():
+    assert route(state_mod.default_state(), turn("m4", "codex", "@flash please review")) == ["flash"]
 
 
 def test_mention_must_be_a_whole_seat_name():
-    st = state_mod.default_state()
-    assert state_mod.route_turn(st, turn("m5", "codex", "@flashy thing"), SEATS) == []
+    assert route(state_mod.default_state(), turn("m5", "codex", "@flashy thing")) == []
 
 
-def test_own_echo_still_suppressed():
+def test_default_mention_only_is_empty():
     st = state_mod.default_state()
-    assert state_mod.route_turn(st, turn("m6", "flash", "@flash note to self"), SEATS) == []
+    assert sorted(state_mod.route_turn(st, turn("m6", "codex"), SEATS)) == ["flash"]
+
+
+def test_bridge_reads_room_listen_from_registry_entries():
+    entries = {"flash": {"room_seat": "flash", "room_listen": "mention"},
+               "codex-desk": {"room_seat": "codex"}}
+    assert bridge.mention_only_desks(entries) == frozenset({"flash"})
 
 
 def main() -> int:

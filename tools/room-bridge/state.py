@@ -200,13 +200,15 @@ def is_echo(turn: dict, desk_seat: str) -> bool:
 
 
 def is_unaddressed_desk_turn(turn: dict, desk_seat: str, desk_seats: dict[str, str]) -> bool:
-    """A turn spoken by ANOTHER desk reaches this desk only when it names this
-    desk's seat as a whole-word @-mention. Turns from people fan out as before.
+    """For a desk registered room_listen="mention": a turn spoken by ANOTHER
+    desk is unaddressed unless it names this desk's seat as a whole-word
+    @-mention. Turns from people are never unaddressed. Desks on the default
+    ("all") keep hearing other desks — desk-to-desk conversation is by design.
 
-    WHY, found live 2026-09-24: with flash and codex both seated, each desk's
-    reply was routed to the other and answered, about once a minute, until a
-    seat was stopped. is_echo only stops a desk hearing itself; two desks need
-    this second guard or any reply can start a loop.
+    WHY, found live 2026-09-24: with flash and codex both seated and both
+    auto-answering, each desk's reply was routed to the other and answered,
+    about once a minute, until a seat was stopped. is_echo only stops a desk
+    hearing itself; a mention-only desk cannot be one half of such a loop.
     """
     speaker = str(turn.get("seat") or "")
     if speaker not in set(desk_seats.values()):
@@ -228,7 +230,8 @@ def mark_delivered(state: dict, desk_name: str, msg_id: str) -> None:
         slot["delivered"] = slot["delivered"][-DELIVERED_CAP:]
 
 
-def route_turn(state: dict, turn: dict, desk_seats: dict[str, str]) -> list[str]:
+def route_turn(state: dict, turn: dict, desk_seats: dict[str, str], *,
+               mention_only: frozenset[str] | set[str] = frozenset()) -> list[str]:
     """Queue one new room turn onto every desk it is eligible for.
 
     desk_seats maps desk name -> the room seat that desk speaks for. A turn is
@@ -260,7 +263,7 @@ def route_turn(state: dict, turn: dict, desk_seats: dict[str, str]) -> list[str]
     for name, seat in desk_seats.items():
         if is_echo(turn, seat):
             continue
-        if is_unaddressed_desk_turn(turn, seat, desk_seats):
+        if name in mention_only and is_unaddressed_desk_turn(turn, seat, desk_seats):
             continue
         if already_delivered(state, name, msg_id):
             continue
