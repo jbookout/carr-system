@@ -190,6 +190,74 @@ def test_done_pending_hands_off_then_finishes_queue() -> None:
     assert state_mod.get_pending(state, "claude-desktop") is None
 
 
+def test_handoff_timeout_after_completion_finishes_and_never_relaunches() -> None:
+    """Defect a2e7dcb5: t_24f60cef completed and posted its answer (seq 43722),
+    then /desktop timed out (seq 43724) and the bridge launched a SECOND
+    session for the same task (seq 43725). The session already completed —
+    read_background_result already returned the real answer — so a handoff
+    failure afterward must mark only the handoff as failed and still finish
+    the task with that result. It must never call fail_pending, which is the
+    path that schedules a retry (a second launch) or blocks the task."""
+    state = state_mod.default_state()
+    state_mod.set_pending(
+        state, "claude-desktop", dispatch_msg_id="dispatch-1", log_offset=0,
+        injected_at="2026-09-24T12:00:00+00:00", source_msg_id="queue:t_24f60cef",
+        source_seq=1, origin_kind="queue", kanban_task_id="t_24f60cef",
+        target="claude-desktop", finish="done", cap="read",
+        transport="claude-desktop", session_id=SID,
+    )
+    finished: list[tuple[dict, str]] = []
+    posted: list[dict] = []
+
+    class Executor:
+        def finish_pending(self, pending: dict, raw_result: str) -> dict:
+            finished.append((pending, raw_result))
+            return {
+                "outcome": "done", "task_id": "t_24f60cef",
+                "completion": {"queue_completion": {
+                    "v": 1, "task_id": "t_24f60cef", "target": "claude-desktop",
+                    "outcome": "success", "summary": "Answered",
+                    "source_seq": 1, "source_msg_id": "queue:t_24f60cef",
+                }},
+            }
+
+        def fail_pending(self, pending: dict, reason: str, *, now=None) -> dict:
+            # This is the retry/relaunch path (queue_dispatch._retry_or_block).
+            # A handoff failure AFTER completion must never take it.
+            raise AssertionError(
+                f"fail_pending must not be called after completion (reason={reason!r})")
+
+    def post(**row) -> None:
+        posted.append(row)
+
+    def handoff(session_id: str) -> dict:
+        raise wire.ClaudeDesktopError("desktop_handoff_timeout", "Claude /desktop did not exit")
+
+    executor = Executor()
+    result = 'Here is the answer\nCARR_QUEUE_RESULT {"v":1}'
+    outcome = bridge.handle_pending(
+        "claude-desktop", "claude", state,
+        add_room_turn=post, log_path=Path("unused"),
+        pending_timeout_s=1800, queue_executor=cast(Any, executor),
+        inspect_background=lambda _sid: {"state": "done", "found": True},
+        read_background_result=lambda _sid: result,
+        handoff_background=handoff,
+    )
+    assert outcome is not None
+    assert outcome["outcome"] == "done"
+    assert finished == [({
+        "origin_kind": "queue", "kanban_task_id": "t_24f60cef", "target": "claude-desktop",
+        "finish": "done", "cap": "read", "source_seq": 1, "source_msg_id": "queue:t_24f60cef",
+        "dispatch_msg_id": "dispatch-1", "injected_at": "2026-09-24T12:00:00+00:00",
+        "transport": "claude-desktop", "session_id": SID, "log_offset": 0,
+    }, result)]
+    handoff_receipt = json.loads(posted[0]["body"])["claude_desktop_handoff"]
+    assert handoff_receipt["status"] == "failed"
+    assert handoff_receipt["code"] == "desktop_handoff_timeout"
+    assert json.loads(posted[1]["body"])["queue_completion"]["task_id"] == "t_24f60cef"
+    assert state_mod.get_pending(state, "claude-desktop") is None
+
+
 def main() -> int:
     check("launch is named, durable, and backgrounded", test_launch_is_named_durable_and_backgrounded)
     check("supervisor status is UUID-bound", test_supervisor_status_is_uuid_bound)
@@ -197,7 +265,9 @@ def main() -> int:
     check("Desktop handoff uses attached PTY slash command", test_desktop_handoff_uses_attached_pty_slash_command)
     check("desktop desk is queue-only and dispatchable", test_registry_dispatch_and_queue_only_fanout)
     check("done background hands off before queue completion", test_done_pending_hands_off_then_finishes_queue)
-    print(f"claude-desktop-wire unit: {6 - len(FAILURES)}/6 passed")
+    check("handoff timeout after completion finishes and never relaunches",
+          test_handoff_timeout_after_completion_finishes_and_never_relaunches)
+    print(f"claude-desktop-wire unit: {7 - len(FAILURES)}/7 passed")
     return 1 if FAILURES else 0
 
 
