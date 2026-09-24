@@ -14,14 +14,23 @@ and owes a forward-only registry successor. Callers are entrypoints that exist.
 The detector is a regex over the whole file and does not know what a docstring
 is, so describe the construct and never spell it.
 
-SHADOW FIRST, AND THAT IS NOT A PHASE — IT IS THE DEFAULT MODE. record() writes
-what the judgment WOULD have decided next to what the existing mechanism DID
-decide, and returns without acting. A caller only moves to acting after the log
-shows agreement on real traffic, with a threshold measured on that traffic
-rather than guessed. This is the same shadow-first discipline rule delivery
-already uses, and it exists because a typed answer guarantees an answer's shape
-and never its truth: a gate that blocks on an unvalidated threshold converts a
-model's uncertainty into a partner's blocked afternoon.
+record() IS THE AUDIT LOG, NOT A WAITING ROOM (Joe, 2026-09-24, decision
+5ec806a4: "every jev check in the system too is not a shadow"). It used to be
+that a caller wrote what the judgment WOULD have decided next to what the
+existing mechanism DID decide, and returned without acting, moving to acting
+only once the log showed agreement on real traffic. That default is retired:
+every Jev check now acts on its own judgment. record() still writes what Jev
+said beside what the caller decided, on every call, acting or not — the log is
+now how each acting use is audited, not a precondition for turning it on. What
+does not change: each acting use keeps its threshold (the value in place when
+it started shadowing is the STARTING point, not re-guessed at the switchover),
+keeps an abstention path (JudgeUnavailable, any other failure, or a low
+confidence falls back to the caller's prior non-Jev behavior, visibly, never
+an affirmative judgment), and keeps recording every judgment through this
+function. This matters because a typed answer guarantees an answer's shape and
+never its truth: a caller that acts on an unvalidated threshold converts a
+model's uncertainty into a partner's blocked afternoon, so the threshold
+still has to come from measurement, just not from a phase gate on this module.
 
 THREE THINGS LEARNED THE EXPENSIVE WAY ON 2026-09-18, all of them shaping the
 interface below:
@@ -86,8 +95,9 @@ from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Shadow observations land here. One JSON object per line, append-only, so a
-# threshold can be measured later from real traffic rather than argued for now.
+# Every judgment lands here, acted on or not. One JSON object per line,
+# append-only, so a threshold can be measured from real traffic rather than
+# argued for, and so an acting caller's decisions stay auditable afterward.
 SHADOW_LOG = os.path.join(REPO, "out", "jev-judge.jsonl")
 
 # Deliberately pessimistic defaults. THEY ARE PLACEHOLDERS: every caller is

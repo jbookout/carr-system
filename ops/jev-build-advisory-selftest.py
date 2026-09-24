@@ -210,7 +210,8 @@ class EditCoverageTests(unittest.TestCase):
             receipt = json.loads(json.loads(out.getvalue())
                                  ["hookSpecificOutput"]["additionalContext"])
             self.assertEqual(receipt["status"], "unavailable")
-            self.assertEqual(receipt["reason"], "RuntimeError")
+            self.assertEqual(receipt["reason"], "outside_repo")
+            self.assertIn("no Jev review may be claimed", receipt["instruction"])
 
 
 if __name__ == "__main__":

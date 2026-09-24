@@ -8,13 +8,18 @@ None of these are things a grep can decide — each is a judgment about whether
 text supports text — so each asks Jev, narrowly, once a cheap deterministic
 trigger says it is worth asking.
 
-SHADOW FIRST. Every check here only REPORTS: {"check", "verdict", "confidence",
-"escalate", "detail"}. Nothing here blocks a turn, deletes a file, or refuses a
-commit. A caller (a hook, a gate, a dispatcher) reads the verdict and decides
-what, if anything, to do about it; ops/jev_judge.record() writes every
-judgment to out/jev-judge.jsonl beside whatever the caller ends up doing, so a
-threshold can be measured on real traffic later instead of guessed now. See
-ops/jev_judge.py for why shadow is the default and not a phase.
+A CHECK, DELIBERATELY, NOT AN ACTING GATE. Every function here only REPORTS:
+{"check", "verdict", "confidence", "escalate", "detail"}. Nothing here blocks a
+turn, deletes a file, or refuses a commit — that stays true after Joe's
+2026-09-24 ruling (decision 5ec806a4, "every jev check in the system too is
+not a shadow") retired shadow as a default holding pattern, because these
+checks were never held back by that default in the first place: a caller (a
+hook, a gate, a dispatcher) reads the verdict and decides what, if anything,
+to do about it, and this module has no acting behaviour of its own to turn
+on. ops/jev_judge.record() still writes every judgment to out/jev-judge.jsonl
+beside whatever the caller ends up doing, so a threshold can be measured on
+real traffic — that discipline is now the permanent audit trail rather than a
+precondition for acting. See ops/jev_judge.py for the current framing.
 
 TALK TO JEV THROUGH ops/jev_judge.py ONLY. Every check builds its questions
 with the typesafe client's noul/choice/score helpers (ops/typesafe_client.py)

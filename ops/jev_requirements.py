@@ -1,17 +1,20 @@
-"""jev_requirements.py — a SHADOW requirement checklist for a turn that changed code.
+"""jev_requirements.py — a requirement checklist for a turn that changed code.
 
 WHY (Joe, 2026-09-23, decision a98c2832: Jev supervision checks). A session can
 finish a turn with a green diff that quietly drops one of the things the human
 asked for. This module asks, once per such turn: for each requirement in the
 human's last request, is it satisfied by what the turn actually changed?
 
-SHADOW, AND ONLY SHADOW. Stop-gate reopening is rationed to three hooks, so this
-never blocks and never reopens a turn. hooks/completion-evidence-gate.py calls
-check() after its own decision is made and ignores the result for that decision;
-the most this module does is return ONE advisory line, which the gate shows only
-when it is not already blocking. Every judgment is recorded to
-out/jev-judge.jsonl through ops/jev_judge.record() under KIND, so a threshold can
-be measured later on real traffic instead of guessed now.
+ACTS BELOW LOW_AT (Joe, 2026-09-24, decision 5ec806a4: "every jev check in the
+system too is not a shadow"). hooks/completion-evidence-gate.py is one of the
+three hooks Stop-gate reopening is rationed to, so it is allowed to reopen a
+turn on this module's word: when check() reports a requirement whose
+probability of being met is below LOW_AT, the gate treats it as an unaccounted
+clause and reopens, UNLESS the close already names that requirement as not
+done. The 0.30-0.5 band stays advisory only, returned as one line the gate
+shows when it is not already blocking. Every judgment, acted on or merely
+advised, is recorded to out/jev-judge.jsonl through ops/jev_judge.record()
+under KIND, so the log is the audit trail rather than a waiting room.
 
 THE LIMITATION, STATED PLAINLY. Jev cannot write text: it answers noul (a yes/no
 probability), choice and score. So Jev cannot split a request into requirements.
@@ -50,7 +53,8 @@ import urllib.request
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 KIND = "requirement_checklist"
-LOW_AT = 0.30
+LOW_AT = 0.30           # below this: unaccounted, the gate reopens the turn
+ADVISORY_AT = 0.50       # [LOW_AT, ADVISORY_AT): reported, never reopens on its own
 BUDGET_SECONDS = 6.0
 MAX_REQUIREMENTS = 12
 MAX_REQUIREMENT_CHARS = 300
@@ -285,20 +289,40 @@ def _question_text(n, requirement):
 
 
 def advisory_line(requirements, probs):
-    low = sorted((p, i) for i, p in enumerate(probs) if p is not None and p < LOW_AT)
-    if not low:
+    """One line for the mid band [LOW_AT, ADVISORY_AT) — reported, never acted
+    on by itself. A probability under LOW_AT is `unmet`, not this."""
+    mid = sorted((p, i) for i, p in enumerate(probs)
+                if p is not None and LOW_AT <= p < ADVISORY_AT)
+    if not mid:
         return None
-    p, i = low[0]
+    p, i = mid[0]
     text = requirements[i]
     text = text if len(text) <= 90 else text[:87] + "..."
-    more = f" (+{len(low) - 1} more under {LOW_AT:.1f})" if len(low) > 1 else ""
-    return f"Jev (shadow): requirement {i + 1} may be unmet (p={p:.2f}): \"{text}\"{more}"
+    more = f" (+{len(mid) - 1} more under {ADVISORY_AT:.1f})" if len(mid) > 1 else ""
+    return f"Jev (advisory): requirement {i + 1} may be unmet (p={p:.2f}): \"{text}\"{more}"
+
+
+def unmet_requirements(requirements, probs):
+    """Requirements whose probability of being met is below LOW_AT, worst
+    first — the caller's candidates for reopening the turn."""
+    return sorted(
+        ({"index": i + 1, "text": requirements[i], "probability": p}
+         for i, p in enumerate(probs) if p is not None and p < LOW_AT),
+        key=lambda item: item["probability"])
 
 
 def check(payload, recs, *, judge_module=None, llm=local_llm_requirements, budget=BUDGET_SECONDS):
-    """Shadow requirement checklist for the last turn. One advisory line or None.
+    """Requirement checklist for the last turn.
 
-    Never raises and never decides anything for the caller.
+    Never raises. Returns None when there is nothing to report, or a dict:
+
+        {"advisory": <str or None>,   # the [LOW_AT, ADVISORY_AT) line, if any
+         "unmet": [{"index", "text", "probability"}, ...]}  # < LOW_AT, worst first
+
+    This module decides nothing by itself: hooks/completion-evidence-gate.py
+    is the one place `unmet` is allowed to reopen a turn (it is one of the
+    three hooks Stop-gate reopening is rationed to), and only when the close
+    does not already name that requirement as not done.
     """
     try:
         deadline = time.monotonic() + budget
@@ -357,6 +381,10 @@ def check(payload, recs, *, judge_module=None, llm=local_llm_requirements, budge
                 probs.append(prob if 0.0 <= prob <= 1.0 else None)
             except Exception:
                 probs.append(None)
-        return advisory_line(requirements, probs)
+        unmet = unmet_requirements(requirements, probs)
+        advisory = advisory_line(requirements, probs)
+        if not unmet and not advisory:
+            return None
+        return {"advisory": advisory, "unmet": unmet}
     except Exception:
         return None
