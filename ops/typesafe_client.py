@@ -239,10 +239,11 @@ def _session_id():
 # rows, or disable the append-only trigger, directly in the database. None of
 # that is prevented. A receipt inserted alone has no ask-jev tool_call row, so
 # the read door never returns it and the integrity audit in `./run.sh health`
-# (read-jev-call-receipt-integrity) flags it, and a disabled trigger; a forger
-# who also hand-inserts the tool_call row, or disables and re-enables the
-# trigger between audits, is not caught. Moving that credential out of the
-# model's reach is Joe's separate, parked decision.
+# (read-jev-call-receipt-integrity) flags it, and a disabled trigger. Not
+# caught: a hand-inserted tool_call twin, a genuine receipt edited, backdated
+# or deleted in place, or a trigger disabled and re-enabled between audits.
+# Moving that credential out of the model's reach is Joe's separate, parked
+# decision.
 #
 # The verb is reached the way every local caller reaches the Worker:
 # mcp-server/local-verb.mjs's zero-install HTTPS path with the LOCAL_TOKENS

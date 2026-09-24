@@ -114,9 +114,11 @@ receipt rows, or disable the table's append-only trigger, directly in the
 database. None of that is prevented. It is made DETECTABLE: a receipt inserted
 directly has no matching tool_call row, so the read door never returns it and
 the integrity audit in `./run.sh health` (read-jev-call-receipt-integrity)
-flags it, along with a disabled trigger. A forger who ALSO inserts a matching
-tool_call row by hand is not caught by that cross-check, and a
-disable-then-re-enable between two audits is not seen. Moving that credential out of the model's
+flags it, along with a disabled trigger. NOT caught: a forger who ALSO
+inserts a matching tool_call row by hand; a genuine receipt edited or
+backdated in place (its tool_call twin still matches, and nothing compares the
+two timestamps); a genuine receipt deleted; and a disable-then-re-enable of the
+trigger between two audits. Moving that credential out of the model's
 reach is Joe's separate, parked decision. hooks/gate-integrity.py states the
 same posture for the gates themselves: with OS hardening off by Joe's
 2026-08-10 ruling, same-uid tampering is detectable, not prevented.
@@ -1226,9 +1228,10 @@ def _binding_bounds(trusted_recs, boundary_ts):
 
 def server_read_since(trusted_recs):
     """F6: the earliest server time any row this turn's verdict can use was
-    recorded at, as ISO-8601 (None = the session's whole history, only when
-    no earlier genuine prompt bounds it). The gates read the server from here,
-    by session, instead of taking the newest N rows."""
+    recorded at, as ISO-8601. None, only when no earlier genuine prompt bounds
+    it, leaves the read verb's own default: 24 hours before the server clock.
+    The gates read the server from here, by session, oldest rows first,
+    instead of taking the newest N rows."""
     boundary_ts = turn_boundary_timestamp(trusted_recs)
     if boundary_ts is None:
         return None
