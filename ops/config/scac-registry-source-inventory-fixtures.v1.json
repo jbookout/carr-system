@@ -69650,8 +69650,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "6b62db10d410f7980eaef1fa76716ea7f37e4bee16d277853af0ef9b46b1a9f0",
-          "handler_digest": "6b62db10d410f7980eaef1fa76716ea7f37e4bee16d277853af0ef9b46b1a9f0",
+          "schema_digest": "b86e7d277bec3273a4b7493296fc2fee79e918076ad980d6273d77e6a585223a",
+          "handler_digest": "b86e7d277bec3273a4b7493296fc2fee79e918076ad980d6273d77e6a585223a",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -69669,7 +69669,7 @@
         }
       ],
       "expected_count": 904,
-      "expected_sha256": "43ecff62942af6d5ec0d7f0f05e83e5aca53707a18014c49f8a17bceba631018"
+      "expected_sha256": "d4045d2e26b2c59fe73d48a3ca76421bb95e8e3a8c91d5354bb5fe2012d12b60"
     }
   ],
   "current_source_review": {
