@@ -824,11 +824,13 @@
   "lib_helpers": [
     "lib/claude_continuity_config.py",
     "lib/claude_rule_delivery_dedupe.py",
+    "lib/jev_required_actions.py",
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",
     "lib/rule_delivery_preuse.py",
     "lib/rule_delivery_shadow.py",
-    "lib/scheduled_run.py"
+    "lib/scheduled_run.py",
+    "lib/transcript_read.py"
   ]
 }

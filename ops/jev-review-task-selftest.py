@@ -125,7 +125,7 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(row["kind"], review.TASK_FIT_KIND)
         self.assertTrue(row["subject_ref"]["would_block"])
         self.assertEqual(row["existing_decision"],
-                         {"advisory_findings": [], "effect": "advisory_only"})
+                         {"advisory_findings": [], "effect": "required"})
         self.assertEqual(row["note"], "disagreed")
 
     def test_low_score_records_no_block(self):
@@ -233,7 +233,7 @@ class HookOutputTests(unittest.TestCase):
         baseline = self.run_hook(low, None)
         self.assertEqual(baseline["status"], "reviewed")
         self.assertTrue(baseline["findings"])
-        self.assertTrue(all(f["effect"] == "advisory_only" for f in baseline["findings"]))
+        self.assertTrue(all(f["effect"] == "required" for f in baseline["findings"]))
         self.assertEqual(self.strip(self.run_hook(low, self.transcript)),
                          self.strip(baseline))
         high = self.run_hook({"task": 0.95, "other": 0.9}, self.transcript)

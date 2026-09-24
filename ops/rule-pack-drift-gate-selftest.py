@@ -999,15 +999,24 @@ with tempfile.TemporaryDirectory() as directory:
 with tempfile.TemporaryDirectory() as directory:
     transcript = Path(directory) / "transcript.jsonl"
     secret = "postgresql://user:SUPER-SECRET@example.invalid/db"  # ci-secret-scan: allow
-    transcript.write_text("{not-json " + secret + "\n", encoding="utf-8")
+    transcript.write_text('{"type": "user"}\n', encoding="utf-8")
+    # A bad transcript LINE no longer reaches this path: lib/transcript_read.py
+    # skips it (PR #1224's tamper fix), so the exception is forced here
+    # instead, carrying the secret in its message, which must still never be
+    # persisted.
+    def _raise_with_secret(*_args, **_kwargs):
+        raise RuntimeError("transcript read failed for " + secret)
     old_log, old_stdin = getattr(gate, "LOG"), sys.stdin
+    old_reader = getattr(gate, "load_transcript")
     setattr(gate, "LOG", str(Path(directory) / "shadow.jsonl"))
+    setattr(gate, "load_transcript", _raise_with_secret)
     sys.stdin = io.StringIO(json.dumps({"transcript_path": str(transcript),
                                         "session_id": "secret-test"}))
     try:
         gate.main()
     finally:
         setattr(gate, "LOG", old_log)
+        setattr(gate, "load_transcript", old_reader)
         sys.stdin = old_stdin
     persisted = Path(directory, "shadow.jsonl").read_text()
     error_row = json.loads(persisted)
@@ -1018,6 +1027,26 @@ with tempfile.TemporaryDirectory() as directory:
               detail=error_row["detail"], map_digest=error_row["map_digest"],
               source_digest=error_row["source_digest"],
               at=gate.stamp(error_row)) == error_row, str(error_row))
+
+# A non-JSON transcript line is SKIPPED, not a gate failure (PR #1224 bypass
+# hunt): before, one appended bad line raised and switched this gate off.
+with tempfile.TemporaryDirectory() as directory:
+    transcript = Path(directory) / "transcript.jsonl"
+    transcript.write_text('{"type": "user"}\n{not-json\n', encoding="utf-8")
+    old_log, old_stdin = getattr(gate, "LOG"), sys.stdin
+    setattr(gate, "LOG", str(Path(directory) / "shadow.jsonl"))
+    sys.stdin = io.StringIO(json.dumps({"transcript_path": str(transcript),
+                                        "session_id": "selftest"}))
+    try:
+        gate.main()
+    finally:
+        setattr(gate, "LOG", old_log)
+        sys.stdin = old_stdin
+    shadow = Path(directory, "shadow.jsonl")
+    rows = [json.loads(line) for line in shadow.read_text().splitlines()] \
+        if shadow.exists() else []
+    check("a bad transcript line is skipped, not recorded as a gate failure",
+          not any(row.get("error") for row in rows), str(rows))
 
 # ── a trigger that ends in punctuation still matches ────────────────────────
 xcom = run([user("pull the metrics from x.com for last week"),
