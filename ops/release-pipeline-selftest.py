@@ -85,33 +85,73 @@ class FakeRunner:
         return [n for n, _ in self.calls]
 
 
+HEAD_DATE = "2026-09-29T00:00:00Z"
+
+
+def approve(pr, *, when="2026-09-30T00:00:00Z", assoc="OWNER", body="Independent review: PASS", cid=None):
+    return {"id": cid or 900 + pr, "body": body, "created_at": when, "author_association": assoc,
+            "user": {"login": "jbookout" if assoc == "OWNER" else "stranger"},
+            "html_url": f"https://github.com/o/r/pull/{pr}#issuecomment-{cid or 900 + pr}"}
+
+
+def pr_head(n: int) -> str:
+    return f"feed{n:036x}"
+
+
 class FakeGitHub:
-    def __init__(self, approve: bool = True, reviewer_line: str = ""):
-        self.approve, self.reviewer_line = approve, reviewer_line
+    """Every PR approved by the owner after its head commit, CI green, canary
+    green on every main commit, app check `test` green — unless overridden."""
+
+    def __init__(self, approve_all: bool = True, comments: dict | None = None, canary: dict | None = None,
+                 red_ci_prs: set | None = None, checks: list | None = None, raise_on: str | None = None):
+        self.approve_all, self.comment_map = approve_all, comments or {}
+        self.canary, self.red_ci_prs = canary, red_ci_prs or set()
+        self.checks = checks if checks is not None else [
+            {"name": "test", "status": "completed", "conclusion": "success"}]
+        self.raise_on = raise_on
+        self.heads: dict[str, int] = {}
+
+    def pr_number(self, sha):
+        return 100 + int(sha[:4], 16) % 800
 
     def pr_for_commit(self, sha):
-        return {"number": 100 + int(sha[:2], 16) % 50, "merged_at": "2026-09-30T00:00:00Z",
-                "head": {"sha": "f" * 40}}
+        if self.raise_on == "pr_for_commit":
+            raise ValueError("malformed GitHub JSON")
+        n = self.pr_number(sha)
+        self.heads[pr_head(n)] = n
+        return {"number": n, "merged_at": "2026-09-30T00:00:00Z", "head": {"sha": pr_head(n)}}
 
-    def runs_for(self, head_sha):
-        return [{"id": 42, "name": "CI", "event": "pull_request", "conclusion": "success",
-                 "status": "completed"}]
+    def commit_date(self, sha):
+        return HEAD_DATE
+
+    def runs_for(self, sha):
+        if sha in self.heads:               # a PR head (see pr_for_commit)
+            pr = self.heads[sha]
+            ok = pr not in self.red_ci_prs
+            return [{"id": 40000 + pr, "name": "CI", "event": "pull_request", "status": "completed",
+                     "conclusion": "success" if ok else "failure"}]
+        if self.canary is None:
+            return [{"id": 7, "name": "main canary", "event": "push", "status": "completed",
+                     "conclusion": "success"}]
+        state = self.canary.get(sha)
+        if state is None:
+            return []
+        status, conclusion = state
+        return [{"id": 7, "name": "main canary", "event": "push", "status": status, "conclusion": conclusion}]
 
     def jobs(self, run_id):
         return [{"name": "ops/ci.sh --strict", "conclusion": "success"},
                 {"name": "ops/ci.sh --strict --only pushfloor unit secret", "conclusion": "success"}]
 
     def comments(self, pr):
-        if not self.approve:
-            return [{"body": "looks fine to me", "html_url": "x"}]
-        return [{"body": "Independent review: PASS\n" + self.reviewer_line,
-                 "html_url": f"https://github.com/o/r/pull/{pr}#issuecomment-9{pr}"}]
-
-    def comment(self, cid):
-        return {}
+        if pr in self.comment_map:
+            return self.comment_map[pr]
+        return [approve(pr)] if self.approve_all else [{"id": 1, "body": "looks fine to me",
+                                                       "created_at": "2026-09-30T00:00:00Z",
+                                                       "author_association": "OWNER", "html_url": "x"}]
 
     def check_runs(self, sha):
-        return [{"name": "test", "status": "completed", "conclusion": "success"}]
+        return self.checks
 
 
 class Fixture:
@@ -145,6 +185,7 @@ class Fixture:
         cfg["local_off_file"] = str(self.tmp / "release-pipeline.off")
         cfg["credential_dir"] = str(self.cred)
         cfg["app"]["enabled"] = False
+        cfg["app"]["repo_path"] = str(self.repo)
         cfg.update(over)
         return cfg
 
@@ -334,21 +375,29 @@ class VerifierIsNotMaker(unittest.TestCase):
     cfg = json.loads((HERE / "config" / "release-pipeline.v1.json").read_text())["worker"]
 
     def test_default_is_the_review_agent(self):
-        self.assertEqual(rp.choose_verifier(self.cfg, {}, "Independent review: PASS"), "claude-review-agent")
+        self.assertEqual(rp.choose_verifier(self.cfg, {}), "claude-review-agent")
 
-    def test_event_and_comment_name_the_reviewer(self):
-        self.assertEqual(rp.choose_verifier(self.cfg, {"reviewer": "Sonnet-Review"}, ""), "sonnet-review")
-        self.assertEqual(rp.choose_verifier(self.cfg, {}, "Independent review: PASS\nVerifier: grok-review\n"),
-                         "grok-review")
+    def test_only_the_merge_event_names_the_reviewer(self):
+        self.assertEqual(rp.choose_verifier(self.cfg, {"reviewer": "Sonnet-Review"}), "sonnet-review")
+
+    def test_comment_text_cannot_name_the_verifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fx = Fixture(Path(tmp))
+            sha = fx.commit({"mcp-server/src/a.js": "1"})
+            n = FakeGitHub().pr_number(sha)
+            gh = FakeGitHub(comments={n: [approve(n, body="Independent review: PASS\nVerifier: joe")]})
+            live = {"sha": fx.base}
+            runner = FakeRunner(live=live)
+            fx.pipeline(runner, github=gh, live=live).tick(["worker"])
+            up = next(a for name, a in runner.calls if name == "upload")
+            self.assertEqual(up[up.index("--verifier") + 1], "claude-review-agent")
 
     def test_maker_humans_pipeline_and_author_are_refused(self):
         for bad in ("carr_jobs", "joe", "Dell", "release-pipeline", "jbookout"):
             with self.assertRaises(rp.Blocked, msg=bad):
-                rp.choose_verifier(self.cfg, {"reviewer": bad}, "")
+                rp.choose_verifier(self.cfg, {"reviewer": bad})
         with self.assertRaises(rp.Blocked):
-            rp.choose_verifier(self.cfg, {"reviewer": "claude-a", "author_actor": "claude-a"}, "")
-        with self.assertRaises(rp.Blocked):
-            rp.choose_verifier(self.cfg, {}, "Independent review: PASS\nVerifier: carr_jobs")
+            rp.choose_verifier(self.cfg, {"reviewer": "claude-a", "author_actor": "claude-a"})
 
     def test_upload_binds_the_verifier_and_its_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,18 +409,195 @@ class VerifierIsNotMaker(unittest.TestCase):
             up = next(a for n, a in runner.calls if n == "upload")
             self.assertEqual(up[up.index("--verifier") + 1], "claude-review-agent")
             self.assertRegex(up[up.index("--verifier-evidence") + 1], r"^github:o/r/pull/\d+#issuecomment-\d+$")
-            self.assertEqual(up[up.index("--test-evidence") + 1],
-                             "github-actions:jbookout/carr-system/runs/42#ops-ci-strict")
+            self.assertRegex(up[up.index("--test-evidence") + 1],
+                             r"^github-actions:jbookout/carr-system/runs/\d+#ops-ci-strict$")
 
     def test_a_merge_without_independent_review_is_blocked_not_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
             fx = Fixture(Path(tmp))
             fx.commit({"mcp-server/src/a.js": "1"})
             runner = FakeRunner()
-            self.assertEqual(fx.pipeline(runner, github=FakeGitHub(approve=False)).tick(["worker"]), 0)
+            self.assertEqual(fx.pipeline(runner, github=FakeGitHub(approve_all=False)).tick(["worker"]), 0)
             self.assertEqual(runner.calls, [])
             self.assertEqual(fx.records()[-1]["reason"], "no_independent_review")
             self.assertNotIn("failed_sha", fx.state().get("worker", {}))
+
+
+class ReviewGate(Base):
+    """B1: the approval must be trusted, the latest verdict, and fresh."""
+
+    def blocked_reason(self, comments_for_head):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        n = FakeGitHub().pr_number(sha)
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner, github=FakeGitHub(comments={n: comments_for_head(n)}))
+                         .tick(["worker"]), 0)
+        self.assertEqual(runner.calls, [])
+        return self.fx.records()[-1]["reason"]
+
+    def test_an_outsider_comment_is_not_an_approval(self):
+        self.assertEqual(self.blocked_reason(lambda n: [approve(n, assoc="NONE")]), "no_independent_review")
+        self.assertEqual(self.blocked_reason(lambda n: [approve(n, assoc="CONTRIBUTOR")]), "no_independent_review")
+
+    def test_a_later_block_overrides_an_earlier_approve(self):
+        self.assertEqual(self.blocked_reason(lambda n: [
+            approve(n, when="2026-09-30T01:00:00Z", cid=1),
+            approve(n, when="2026-09-30T02:00:00Z", cid=2, body="Independent review: BLOCK\nmissing test")]),
+            "review_blocked")
+
+    def test_an_outsider_cannot_override_with_a_later_approve(self):
+        self.assertEqual(self.blocked_reason(lambda n: [
+            approve(n, when="2026-09-30T02:00:00Z", cid=2, body="Independent review: BLOCK"),
+            approve(n, when="2026-09-30T03:00:00Z", cid=3, assoc="NONE")]), "review_blocked")
+
+    def test_an_approval_older_than_the_head_commit_is_stale(self):
+        self.assertEqual(self.blocked_reason(lambda n: [approve(n, when="2026-09-28T00:00:00Z")]),
+                         "review_stale")
+
+    def test_an_older_approval_that_names_the_head_sha_counts(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        n = FakeGitHub().pr_number(sha)
+        head = pr_head(n)
+        gh = FakeGitHub(comments={n: [approve(n, when="2026-09-28T00:00:00Z",
+                                              body=f"Independent review: PASS at {head[:12]}")]})
+        live = {"sha": self.fx.base}
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), github=gh, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+
+class CanaryAndCI(Base):
+    """B2: the nearest canary verdict decides; every release-path PR has green CI."""
+
+    def test_a_docs_only_commit_cannot_hide_a_red_canary(self):
+        code = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.commit({"docs/n.md": "x"})            # canary skipped this one: no run at all
+        runner = FakeRunner()
+        gh = FakeGitHub(canary={code: ("completed", "failure")})
+        self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["reason"], "canary_red")
+
+    def test_no_canary_verdict_anywhere_is_a_hold(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner, github=FakeGitHub(canary={})).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["reason"], "canary_missing")
+
+    def test_a_green_canary_below_a_docs_commit_passes(self):
+        code = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.commit({"docs/n.md": "x"})
+        live = {"sha": self.fx.base}
+        gh = FakeGitHub(canary={code: ("completed", "success")})
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), github=gh, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+    def test_red_ci_on_an_earlier_pr_in_the_batch_holds(self):
+        first = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.commit({"mcp-server/src/b.js": "2"})
+        runner = FakeRunner()
+        gh = FakeGitHub(red_ci_prs={FakeGitHub().pr_number(first)})
+        self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["reason"], "ci_not_green")
+        self.assertIn(f"PR #{FakeGitHub().pr_number(first)}", rec["detail"])
+
+
+class AppLane(Base):
+    """B3: the app lane has a review gate and an empty check list is a hold."""
+
+    def cfg(self):
+        cfg = self.fx.config()
+        cfg["app"]["enabled"] = True
+        return cfg
+
+    def test_empty_app_checks_hold(self):
+        self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner, cfg=self.cfg(), github=FakeGitHub(checks=[]))
+        pipe.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+        self.assertEqual(pipe.tick(["app"]), 0)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["reason"], "checks_missing")
+
+    def test_app_needs_an_approved_pr(self):
+        self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner, cfg=self.cfg(), github=FakeGitHub(approve_all=False))
+        pipe.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+        self.assertEqual(pipe.tick(["app"]), 0)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["reason"], "no_independent_review")
+
+    def test_reviewed_app_change_releases(self):
+        sha = self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner, cfg=self.cfg())
+        live = {"source_commit": self.fx.base, "environment": "production"}
+        pipe.http = lambda _u: live
+        orig = runner.run
+
+        def run(argv, **kw):
+            res = orig(argv, **kw)
+            if argv[:3] == ["npm", "run", "release:production"]:
+                live["source_commit"] = sha
+            return res
+        runner.run = run  # type: ignore[method-assign]
+        self.assertEqual(pipe.tick(["app"]), 0)
+        self.assertEqual(runner.names()[:4], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-release"])
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+
+class Robustness(Base):
+    def test_unexpected_error_before_any_step_is_recorded_not_burned(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        verbs: list = []
+        rc = self.fx.pipeline(FakeRunner(), github=FakeGitHub(raise_on="pr_for_commit"), verbs=verbs).tick(["worker"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.fx.records()[-1]["status"], "error")
+        self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
+        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+
+    def test_unexpected_error_after_a_mutation_is_a_failure(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        orig = runner.run
+
+        def run(argv, **kw):
+            if argv[:2] == ["npm", "ci"]:
+                raise OSError("disk full")
+            return orig(argv, **kw)
+        runner.run = run  # type: ignore[method-assign]
+        self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 1)
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        self.assertEqual(self.fx.records()[-1]["step"], "unexpected")
+
+    def test_failure_after_migrations_says_db_is_ahead(self):
+        self.fx.commit({"migrations/0600_x.sql": "select 1;"})
+        verbs: list = []
+        runner = FakeRunner(pending=2, fail_at="upload")
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        self.assertIn("migrate-apply", runner.names())
+        self.assertIs(self.fx.records()[-1]["db_ahead_of_worker"], True)
+        self.assertIn("db_ahead_of_worker: true", verbs[0][1]["body"])
+
+    def test_failure_before_migrations_does_not_claim_db_ahead(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.pipeline(FakeRunner(fail_at="staging-prepare")).tick(["worker"])
+        self.assertIs(self.fx.records()[-1]["db_ahead_of_worker"], False)
+
+    def test_clear_failed_lets_the_same_sha_run_again(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.pipeline(FakeRunner(fail_at="upload")).tick(["worker"])
+        store = rp.Store(self.fx.repo / "out/release-pipeline")
+        with self.assertRaises(SystemExit):
+            rp.clear_failed(store, "worker", "0" * 40, "wrong sha")
+        rp.clear_failed(store, "worker", sha, "credential restored")
+        self.assertEqual(self.fx.records()[-1]["status"], "failure_cleared")
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
 
 
 class Blockers(Base):
@@ -387,12 +613,13 @@ class Blockers(Base):
         self.assertEqual(verbs[0][1]["blocker"], "capability")
         self.assertIn("NEON_API_KEY", verbs[0][1]["blocker_detail"])
 
-    def test_unauthenticated_wrangler_stops_before_any_staging_step(self):
+    def test_unauthenticated_wrangler_stops_before_any_worktree(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         verbs: list = []
         runner = FakeRunner(wrangler_out="You are not authenticated. Please run `wrangler login`.")
         self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 3)
-        self.assertEqual(runner.names()[-1], "wrangler-auth")
+        self.assertEqual(runner.names(), ["wrangler-auth"])
+        self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
         self.assertEqual(verbs[0][0], "add-loop")
         self.assertIn("CLOUDFLARE_API_TOKEN", verbs[0][1]["blocker_detail"])
 

@@ -55,17 +55,39 @@ staging step of the SAME run returned 0.
 
 BLOCKED IS NOT FAILED. Missing review evidence, a pending or red main canary, or
 a missing unattended credential stops the lane WITHOUT marking the SHA failed,
-so the next tick re-evaluates it. A missing credential or capability files one
+so the next tick re-evaluates it; any worktree the run created is removed. The
+wrangler login is checked before any worktree exists. An unexpected error before
+any step ran is recorded and dispatched without burning the SHA; after a step
+ran it is a failure like any other. A failure after migrate-apply records
+db_ahead_of_worker: true and says so to the fix session. A missing credential or capability files one
 CARR loop naming it exactly (once per name), because no retry can supply it.
+
+REVIEW EVIDENCE. Both repositories are public, so any comment is untrusted until
+proven otherwise. For EVERY commit in the batch: it came from a merged PR; the
+LATEST comment carrying a verdict (first line APPROVE-marker or BLOCK-marker,
+config review_markers/block_markers) from a trusted author (author_association
+OWNER/MEMBER/COLLABORATOR, or a configured login) decides; it must be APPROVE;
+and it must postdate the PR head commit or name the head SHA. Worker lane also:
+every PR in the batch that touches a release path has a green `ops/ci.sh
+--strict` (and secret-class) CI run, and the nearest main-canary verdict along
+the first parent (docs-only pushes skip the canary) is a completed success —
+none found is a hold. App lane: the named required checks (`test`) are present
+and green; an empty check list is a hold.
 
 VERIFIER ≠ MAKER. The database derives the release maker from the filing login
 (carr_jobs) and refuses a verifier equal to it (ops.approve_program5_release,
-ops.record_program5_release_readiness). The verifier here is the independent
-review agent whose approving comment is on the merged PR: its slug comes from the
-merge event (`reviewer`), else a `Verifier: <slug>` line in the comment, else the
-configured default. It is refused if it names the maker, a human partner (the
-review was not a human's and must never be booked as one), this pipeline, the
-GitHub account the comment was posted through, or the merge event's author.
+ops.record_program5_release_readiness). The verifier slug comes ONLY from the
+merge event (`reviewer`) the local review-and-merge pipeline wrote, else the
+configured default (`claude-review-agent`) — never from comment text. It is
+refused if it names the maker, a human partner (the review was not a human's and
+must never be booked as one), this pipeline, the GitHub account comments are
+posted through, or the merge event's author.
+
+CLEARING A FAILURE. A fix merged to main needs nothing: the new SHA is attempted.
+To retry the SAME failed SHA after a fix outside the repository (a restored
+credential, a provider outage), run
+  ops/release-pipeline.py clear-failed --lane worker --sha <sha> --reason "<why>"
+which records the clearance; never hand-edit state.json.
 
 KILL SWITCH. `enabled` in ops/config/release-pipeline.v1.json (a commit), or the
 file ~/.config/carr/release-pipeline.off (this machine, no commit). Per-lane
@@ -213,6 +235,10 @@ class GitHub:
     def comment(self, comment_id: int) -> dict:
         return self.api(f"repos/{self.repo}/issues/comments/{comment_id}") or {}
 
+    def commit_date(self, sha: str) -> str:
+        data = self.api(f"repos/{self.repo}/commits/{sha}") or {}
+        return str(((data.get("commit") or {}).get("committer") or {}).get("date") or "")
+
     def check_runs(self, sha: str) -> list[dict]:
         data = self.api(f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100") or {}
         return list(data.get("check_runs") or [])
@@ -350,13 +376,15 @@ def classify(paths: Iterable[str], lane_cfg: dict) -> tuple[bool, list[str]]:
     return bool(hits), hits
 
 
-def choose_verifier(cfg: dict, event: dict | None, comment_body: str) -> str:
-    """The independent reviewer's slug, or Blocked. Never the maker."""
+def choose_verifier(cfg: dict, event: dict | None) -> str:
+    """The independent reviewer's slug, or Blocked. Never the maker.
+
+    Taken ONLY from the merge event the review-and-merge pipeline wrote on this
+    machine, else the configured default. Never from comment text: the
+    repositories are public, so a comment is not a place an identity can be
+    asserted from."""
     event = event or {}
-    raw = str(event.get("reviewer") or event.get("verifier_actor") or "").strip()
-    if not raw:
-        m = re.search(r"^\s*verifier:\s*([A-Za-z0-9._:-]+)\s*$", comment_body or "", re.I | re.M)
-        raw = m.group(1) if m else str(cfg.get("default_verifier") or "")
+    raw = str(event.get("reviewer") or event.get("verifier_actor") or cfg.get("default_verifier") or "")
     slug = raw.strip().lower()
     if not SLUG_RE.fullmatch(slug):
         raise Blocked("verifier_invalid", f"verifier {raw!r} is not a lowercase actor slug")
@@ -369,9 +397,43 @@ def choose_verifier(cfg: dict, event: dict | None, comment_body: str) -> str:
     return slug
 
 
-def is_approval(body: str, markers: Iterable[str]) -> bool:
+def verdict(body: str, cfg: dict) -> str | None:
+    """'approve', 'block' or None, read from the comment's FIRST line only."""
     first = (body or "").strip().splitlines()[0].strip().lower() if (body or "").strip() else ""
-    return any(first.startswith(m.lower()) for m in markers)
+    if any(first.startswith(m.lower()) for m in cfg.get("block_markers") or []):
+        return "block"
+    if any(first.startswith(m.lower()) for m in cfg.get("review_markers") or []):
+        return "approve"
+    return None
+
+
+def trusted_commenter(comment: dict, cfg: dict) -> bool:
+    """Both repositories are public: anyone can comment on a merged PR. Only a
+    comment from the owner, a member, a collaborator, or a configured login can
+    carry a verdict."""
+    assoc = str(comment.get("author_association") or "").upper()
+    login = str((comment.get("user") or {}).get("login") or "").lower()
+    allowed = {str(x).upper() for x in cfg.get("review_author_associations") or []}
+    logins = {str(x).lower() for x in cfg.get("review_logins") or []}
+    return assoc in allowed or (bool(login) and login in logins)
+
+
+def latest_verdict(comments: list[dict], cfg: dict, head_sha: str, head_date: str) -> dict:
+    """The LATEST trusted comment that carries a verdict decides. It must be
+    APPROVE, and it must postdate the PR's head commit or name its SHA, so an
+    approval of an earlier revision never covers a later push."""
+    carrying = [c for c in comments if trusted_commenter(c, cfg) and verdict(c.get("body", ""), cfg)]
+    if not carrying:
+        raise Blocked("no_independent_review", "no trusted comment carries a review verdict")
+    last = max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
+    if verdict(last.get("body", ""), cfg) != "approve":
+        raise Blocked("review_blocked", f"the latest review verdict is BLOCK ({last.get('html_url')})")
+    body = str(last.get("body") or "")
+    names_head = bool(head_sha) and (head_sha in body or head_sha[:12] in body)
+    if not names_head and not (head_date and str(last.get("created_at") or "") > head_date):
+        raise Blocked("review_stale", f"the approval {last.get('html_url')} predates the PR head "
+                                      f"{head_sha[:12]} and does not name it")
+    return last
 
 
 def evidence_ref_from_url(url: str) -> str:
@@ -389,12 +451,17 @@ def next_release_key(today: str, exists: Callable[[str], bool]) -> str:
     raise Blocked("release_key_exhausted", f"r-{today}-01..99 all exist")
 
 
-def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: str) -> dict:
+def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: str,
+               db_ahead_of_worker: bool = False) -> dict:
     key = f"release-fix-{sha[:8]}"
+    ahead = ("PRODUCTION MIGRATIONS WERE APPLIED in this run before it stopped "
+             "(db_ahead_of_worker: true): the database is ahead of the serving Worker, so the fix "
+             "must keep the new schema working with the currently deployed Worker.\n"
+             if db_ahead_of_worker else "")
     body = (f"@queue enqueue target=claude-desktop cap=repo-write priority=P1 runtime=3h "
             f"key={key} :: Fix forward: {lane} release of {sha[:12]} failed at {step}\n"
             f"The scripted release pipeline (ops/release-pipeline.py) stopped: step `{step}` "
-            f"exited {rc} releasing {sha} ({lane} lane).\n"
+            f"exited {rc} releasing {sha} ({lane} lane).\n{ahead}"
             f"Step log: {log}\nRun record: {record_path}\n"
             "Diagnose from the log and fix forward through an ordinary PR; do not merge it and "
             "do not run any deploy, migration or promotion yourself. This SHA is never retried: "
@@ -435,6 +502,9 @@ class Pipeline:
         self.run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
         self.run_dir = self.store.root / "runs" / self.run_id
         self.executed: list[str] = []   # step names that actually ran, in order
+        self.worktrees: list[tuple[Path, Path]] = []
+        self.db_ahead_of_worker = False
+        self.mutated = False   # set when the first worktree is created; nothing before it writes
 
     # -- plumbing ---------------------------------------------------------
     def _call_verb(self, verb: str, args: dict) -> tuple[bool, Any]:
@@ -479,65 +549,127 @@ class Pipeline:
         return res
 
     # -- evidence -----------------------------------------------------------
-    def worker_evidence(self, lane_cfg: dict, base: str, sha: str) -> dict:
-        gh = self.github_factory(lane_cfg["github_repo"])
+    def batch_commits(self, repo_dir: Path, base: str, sha: str) -> list[str]:
+        return self.git("rev-list", "--first-parent", f"{base}..{sha}", cwd=repo_dir).split()
+
+    def review_evidence(self, gh: Any, lane_cfg: dict, repo_dir: Path, base: str, sha: str) -> dict:
+        """Every commit in the batch came from a merged PR whose latest trusted
+        review verdict is a fresh APPROVE. Returns the head PR's evidence and
+        the PRs that touched a release path (each must have green CI)."""
         events = read_merge_events(self.repo / self.cfg.get("merge_event_file", "out/merge-events.jsonl"))
-        for run in gh.runs_for(sha):
-            if run.get("name") == lane_cfg["canary_workflow_name"]:
-                if run.get("status") != "completed":
-                    raise Blocked("canary_pending", f"main canary on {sha[:12]} has not finished")
-                if run.get("conclusion") not in ("success", "skipped", "neutral"):
-                    raise Blocked("canary_red", f"main canary on {sha[:12]} concluded {run.get('conclusion')}")
-        commits = self.git("rev-list", "--first-parent", f"{base}..{sha}").split() if base else [sha]
-        markers = lane_cfg.get("review_markers") or []
         reviewed: list[int] = []
         pre_pipeline: list[int] = []
+        release_prs: list[dict] = []
         head: dict | None = None
-        for commit in commits:
+        for commit in self.batch_commits(repo_dir, base, sha):
             pr = gh.pr_for_commit(commit)
             if pr is None:
-                raise Blocked("no_pull_request", f"{commit[:12]} reached main without a pull request")
-            number = int(pr["number"])
-            ev = events.get(commit) or {}
-            url, body = "", ""
-            if ev.get("review_comment_url"):
-                m = re.search(r"#issuecomment-(\d+)$", str(ev["review_comment_url"]))
-                c = gh.comment(int(m.group(1))) if m else {}
-                if str(c.get("issue_url", "")).endswith(f"/issues/{number}") and is_approval(c.get("body", ""), markers):
-                    url, body = c.get("html_url", ""), c.get("body", "")
-            if not url:
-                for c in reversed(gh.comments(number)):
-                    if is_approval(c.get("body", ""), markers):
-                        url, body = c.get("html_url", ""), c.get("body", "")
-                        break
-            if not url:
+                raise Blocked("no_pull_request", f"{commit[:12]} reached main without a merged pull request")
+            number, head_sha = int(pr["number"]), str(pr["head"]["sha"])
+            parent = self.git("rev-parse", f"{commit}^1", cwd=repo_dir)
+            touches, _ = classify(self.git("diff", "--name-only", parent, commit, cwd=repo_dir).splitlines(),
+                                  lane_cfg)
+            approval: dict | None
+            try:
+                approval = latest_verdict(gh.comments(number), lane_cfg, head_sha, gh.commit_date(head_sha))
+            except Blocked as b:
                 cutover = str(lane_cfg.get("review_required_after") or "")
-                if commit != sha and cutover and str(pr.get("merged_at") or "") < cutover:
+                if (b.reason == "no_independent_review" and commit != sha and cutover
+                        and str(pr.get("merged_at") or "") < cutover):
                     pre_pipeline.append(number)
-                    continue
-                raise Blocked("no_independent_review",
-                              f"PR #{number} ({commit[:12]}) has no approving independent-review comment")
-            reviewed.append(number)
-            if commit == sha:
-                head = {"pr": number, "head_sha": pr["head"]["sha"], "url": url, "body": body, "event": ev}
-        assert head is not None
-        verifier = choose_verifier(lane_cfg, head["event"], head["body"])
-        ci = [r for r in gh.runs_for(head["head_sha"])
+                    approval = None
+                else:
+                    raise Blocked(b.reason, f"PR #{number} ({commit[:12]}): {b.detail}")
+            if approval is not None:
+                reviewed.append(number)
+            if touches:
+                release_prs.append({"pr": number, "head_sha": head_sha})
+            if commit == sha and approval is not None:
+                head = {"pr": number, "head_sha": head_sha, "url": str(approval.get("html_url") or ""),
+                        "event": events.get(commit) or {}}
+        if head is None:
+            raise Blocked("no_independent_review", f"the head commit {sha[:12]} has no approval")
+        return {"head": head, "prs": reviewed, "pre_pipeline_prs": pre_pipeline, "release_prs": release_prs,
+                "verifier": choose_verifier(lane_cfg, head["event"]),
+                "verifier_evidence": evidence_ref_from_url(head["url"])}
+
+    def canary_green(self, gh: Any, lane_cfg: dict, sha: str) -> None:
+        """main canary skips docs-only pushes, so the newest SHA may have no run.
+        Walk back along the first parent to the nearest commit that HAS a
+        canary verdict and require it to be a completed success. None found in
+        the window is a hold, never a pass."""
+        commits = self.git("rev-list", "--first-parent", "--max-count",
+                           str(lane_cfg.get("canary_lookback", 50)), sha).split()
+        for commit in commits:
+            runs = [r for r in gh.runs_for(commit) if r.get("name") == lane_cfg["canary_workflow_name"]]
+            if not runs:
+                continue
+            if any(r.get("status") != "completed" for r in runs):
+                raise Blocked("canary_pending", f"main canary on {commit[:12]} has not finished")
+            decided = [r for r in runs if r.get("conclusion") not in ("skipped", "neutral", "cancelled")]
+            if not decided:
+                continue
+            latest = max(decided, key=lambda r: int(r.get("id") or 0))
+            if latest.get("conclusion") != "success":
+                raise Blocked("canary_red", f"main canary on {commit[:12]} concluded {latest.get('conclusion')}")
+            return
+        raise Blocked("canary_missing",
+                      f"no main canary verdict within {len(commits)} first-parent commits of {sha[:12]}")
+
+    def ci_run(self, gh: Any, lane_cfg: dict, pr: int, head_sha: str) -> int:
+        ci = [r for r in gh.runs_for(head_sha)
               if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"
               and r.get("conclusion") == "success"]
         if not ci:
-            raise Blocked("ci_not_green", f"PR #{head['pr']} has no successful {lane_cfg['ci_workflow_name']} run")
+            raise Blocked("ci_not_green", f"PR #{pr} has no successful {lane_cfg['ci_workflow_name']} run")
         run_id = max(int(r["id"]) for r in ci)
         jobs = gh.jobs(run_id)
         if not any(j.get("name") == lane_cfg["ci_required_job"] and j.get("conclusion") == "success" for j in jobs):
-            raise Blocked("ci_not_green", f"run {run_id} lacks a green `{lane_cfg['ci_required_job']}`")
+            raise Blocked("ci_not_green", f"PR #{pr} run {run_id} lacks a green `{lane_cfg['ci_required_job']}`")
         if not any("secret" in str(j.get("name", "")) and j.get("conclusion") == "success" for j in jobs):
-            raise Blocked("ci_not_green", f"run {run_id} lacks a green secret-class job")
+            raise Blocked("ci_not_green", f"PR #{pr} run {run_id} lacks a green secret-class job")
+        return run_id
+
+    def worker_evidence(self, lane_cfg: dict, base: str, sha: str) -> dict:
+        gh = self.github_factory(lane_cfg["github_repo"])
+        self.canary_green(gh, lane_cfg, sha)
+        rev = self.review_evidence(gh, lane_cfg, self.repo, base, sha)
+        head = rev["head"]
+        for item in rev["release_prs"]:   # EVERY release-path PR in the batch, not only the newest
+            self.ci_run(gh, lane_cfg, item["pr"], item["head_sha"])
+        run_id = self.ci_run(gh, lane_cfg, head["pr"], head["head_sha"])
         repo_name = lane_cfg["github_repo"]
-        return {"pr": head["pr"], "prs": reviewed, "pre_pipeline_prs": pre_pipeline, "verifier": verifier,
-                "verifier_evidence": evidence_ref_from_url(head["url"]),
+        return {"pr": head["pr"], "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
+                "verifier": rev["verifier"], "verifier_evidence": rev["verifier_evidence"],
                 "test_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['test_evidence_label']}",
                 "security_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['security_evidence_label']}"}
+
+    def wrangler_auth(self, wrangler: Path, cwd: Path) -> None:
+        """Before any worktree exists: a lost login is a hold plus one loop,
+        never a failure and never a half-built worktree."""
+        who = self.step("wrangler-auth", [str(wrangler), "whoami"], cwd, timeout=120)
+        if not self.dry_run and "not authenticated" in who.out.lower():
+            raise Blocked("credential_missing",
+                          "wrangler has no usable login for unattended use (OAuth refresh failed); "
+                          "a scoped CLOUDFLARE_API_TOKEN for Workers deploy is needed",
+                          capability="CLOUDFLARE_API_TOKEN")
+
+    def add_worktree(self, name: str, repo_dir: Path, wt: Path, sha: str) -> None:
+        if wt.exists():
+            raise StepFailed(name, 1, "", f"{wt} already exists; a prior run left it for diagnosis")
+        self.step(name, ["git", "-C", str(repo_dir), "worktree", "add", "--detach", str(wt), sha], repo_dir)
+        self.worktrees.append((repo_dir, wt))
+        self.mutated = True
+
+    def remove_worktrees(self) -> None:
+        """Called on success and on a hold. A failure keeps its worktree for
+        diagnosis; a hold must leave nothing that turns the next tick into a
+        failure."""
+        for repo_dir, wt in reversed(self.worktrees):
+            if wt.exists():
+                self.runner.run(["git", "-C", str(repo_dir), "worktree", "remove", "--force", str(wt)],
+                                cwd=repo_dir, log=self.run_dir / "worktree-cleanup.log", env=self.env, timeout=300)
+        self.worktrees.clear()
 
     def unattended_preflight(self, lane_cfg: dict) -> None:
         """Names only — never a value. A missing name is a Blocked with a
@@ -644,6 +776,7 @@ class Pipeline:
             self.out(f"release-pipeline[{lane}]: BLOCKED {b.reason} — {b.detail}")
             if self.dry_run:
                 return 0
+            self.remove_worktrees()
             row: dict[str, Any] = {"lane": lane, "sha": sha, "from_sha": base, "status": "blocked",
                    "reason": b.reason, "detail": b.detail, "run_id": self.run_id}
             if b.capability:
@@ -659,21 +792,43 @@ class Pipeline:
             self.store.record(row)
             return 3 if b.capability else 0
         except StepFailed as f:
-            self.out(f"release-pipeline[{lane}]: FAILED at {f.step} (exit {f.rc}); log {f.log or '-'}")
+            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail)
+        except Exception as exc:  # noqa: BLE001 — an unexpected error is recorded and dispatched, never lost
+            detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+            self.out(f"release-pipeline[{lane}]: UNEXPECTED {detail}")
             if self.dry_run:
                 return 1
-            lane_state.update({"failed_sha": sha, "failed_step": f.step,
-                               "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
-            self.store.save(state)
-            ok, res = (False, "no SHA") if not sha else self.call_verb(
-                "add-room-turn", queue_turn(lane, sha, f.step, f.rc, f.log, str(self.store.records_path)))
-            self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
-                               "step": f.step, "rc": f.rc, "log": f.log, "detail": f.detail,
-                               "run_dir": str(self.run_dir), "executed": list(self.executed),
-                               "dispatched": ok, "run_id": self.run_id})
-            if not ok:
-                self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
+            if not self.mutated:
+                # Nothing was created or changed yet (a GitHub/HTTP/JSON read failed): record and
+                # dispatch, but do not burn the SHA — the next tick re-reads.
+                ok, _ = (False, "no SHA") if not sha else self.call_verb(
+                    "add-room-turn", queue_turn(lane, sha, "unexpected-before-any-step", 1, "-",
+                                                str(self.store.records_path)))
+                self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "error",
+                                   "detail": detail, "dispatched": ok, "run_id": self.run_id})
+                return 1
+            return self.fail(lane, state, sha, base, "unexpected", 1, "-", detail)
+
+    def fail(self, lane: str, state: dict, sha: str, base: str, step: str, rc: int, log: str,
+             detail: str) -> int:
+        self.out(f"release-pipeline[{lane}]: FAILED at {step} (exit {rc}); log {log or '-'}")
+        if self.dry_run:
             return 1
+        state.setdefault(lane, {}).update({
+            "failed_sha": sha, "failed_step": step,
+            "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
+        self.store.save(state)
+        ok, res = (False, "no SHA") if not sha else self.call_verb(
+            "add-room-turn", queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
+                                        db_ahead_of_worker=self.db_ahead_of_worker))
+        self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
+                           "step": step, "rc": rc, "log": log, "detail": detail,
+                           "db_ahead_of_worker": self.db_ahead_of_worker,
+                           "run_dir": str(self.run_dir), "executed": list(self.executed),
+                           "dispatched": ok, "run_id": self.run_id})
+        if not ok:
+            self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
+        return 1
 
     def dry_tolerant(self, what: str, fn: Callable[[], Any], placeholder: Any) -> Any:
         """In a dry run a stop is REPORTED and the plan still prints, so the
@@ -704,18 +859,13 @@ class Pipeline:
                   "--rollback-plan-ref", lane_cfg["rollback_plan_ref"]]
         cand = lane_cfg["staging_candidate_operation_id"]
 
+        # 0. the unattended Cloudflare login, before anything is created
+        self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
+
         # 1. the release worktree at exactly S
-        if wt.exists():
-            raise StepFailed("worktree", 1, "", f"{wt} already exists; a prior run left it for diagnosis")
-        self.step("worktree", ["git", "-C", str(self.repo), "worktree", "add", "--detach", str(wt), sha], self.repo)
+        self.add_worktree("worktree", self.repo, wt, sha)
         self.step("venv-link", ["ln", "-s", str(self.repo / ".venv"), str(wt / ".venv")], self.repo)
         self.step("npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], mcp, timeout=1800)
-        who = self.step("wrangler-auth", [str(mcp / "node_modules/.bin/wrangler"), "whoami"], mcp)
-        if not self.dry_run and "not authenticated" in who.out.lower():
-            raise Blocked("credential_missing",
-                          "wrangler has no usable login for unattended use (OAuth refresh failed); "
-                          "a scoped CLOUDFLARE_API_TOKEN for Workers deploy is needed",
-                          capability="CLOUDFLARE_API_TOKEN")
 
         # 2-3. staging replacement and app writer
         op = str(uuid.uuid4())
@@ -738,6 +888,8 @@ class Pipeline:
             if self.dry_run:
                 self.out("  [dry-run] next line runs only when migrate-plan lists pending > 0")
             self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
+            if not self.dry_run:
+                self.db_ahead_of_worker = True
 
         # 5. upload the immutable candidate, verifier bound at upload time
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(
@@ -777,7 +929,7 @@ class Pipeline:
         elif pending and self.git("status", "--porcelain", "db/schema.sql", cwd=wt):
             schema_pr = self.schema_followup(wt, sha)
         if not self.dry_run:
-            self.step("worktree-remove", ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(wt)], self.repo)
+            self.remove_worktrees()
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
                 "pr": ev["pr"], "prs": ev["prs"], "verifier": ev["verifier"],
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
@@ -812,22 +964,27 @@ class Pipeline:
         return res.out.strip().splitlines()[-1] if res.out.strip() else branch
 
     def release_app(self, lane_cfg: dict, repo_dir: Path, base: str, sha: str) -> dict:
+        """Same review evidence as the Worker lane; the named required checks
+        must be PRESENT and green (an empty check list is not a pass)."""
         gh = self.github_factory(lane_cfg["github_repo"])
 
         def checks_green() -> None:
             checks = gh.check_runs(sha)
-            pending = [c["name"] for c in checks if c.get("status") != "completed"]
-            red = [c["name"] for c in checks if c.get("status") == "completed"
-                   and c.get("conclusion") not in ("success", "skipped", "neutral")]
-            if pending:
-                raise Blocked("checks_pending", f"{', '.join(pending)} still running on {sha[:12]}")
-            if red:
-                raise Blocked("checks_red", f"{', '.join(red)} not green on {sha[:12]}")
+            for name in lane_cfg.get("required_checks") or ["test"]:
+                runs = [c for c in checks if c.get("name") == name]
+                if not runs:
+                    raise Blocked("checks_missing", f"required check `{name}` has not reported on {sha[:12]}")
+                if any(c.get("status") != "completed" for c in runs):
+                    raise Blocked("checks_pending", f"`{name}` still running on {sha[:12]}")
+                if any(c.get("conclusion") != "success" for c in runs):
+                    raise Blocked("checks_red", f"`{name}` is not green on {sha[:12]}")
         self.dry_tolerant("app checks", checks_green, None)
+        rev = self.dry_tolerant("app review", lambda: self.review_evidence(gh, lane_cfg, repo_dir, base, sha),
+                                {"prs": [], "pre_pipeline_prs": [], "verifier_evidence": "<approval>"})
+        self.out(f"  evidence: PRs {rev['prs']} approved; head approval {rev['verifier_evidence']}")
+        self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
         wt = self.store.root / "worktrees" / f"app-{sha[:12]}"
-        if wt.exists():
-            raise StepFailed("app-worktree", 1, "", f"{wt} already exists; a prior run left it for diagnosis")
-        self.step("app-worktree", ["git", "-C", str(repo_dir), "worktree", "add", "--detach", str(wt), sha], repo_dir)
+        self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
         self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600)
         if self.dry_run:
@@ -836,9 +993,9 @@ class Pipeline:
             live = self.http(lane_cfg["live_release_url"])
             if live.get("source_commit") != sha or live.get("environment") != "production":
                 raise StepFailed("app-verify-live", 1, "", "/app-release does not serve the released SHA")
-            self.step("app-worktree-remove", ["git", "-C", str(repo_dir), "worktree", "remove", "--force", str(wt)],
-                      repo_dir)
-        return {"run_dir": str(self.run_dir)}
+            self.remove_worktrees()
+        return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
+                "review_evidence": rev["verifier_evidence"]}
 
 
 def parse_json_field(text: str, field: str, step: str) -> str:
@@ -874,14 +1031,41 @@ def report(store: Store, day: str) -> str:
     return "\n".join(lines)
 
 
+def clear_failed(store: Store, lane: str, sha: str, reason: str) -> str:
+    """The one sanctioned way to let a failed SHA be attempted again (after a
+    fix outside the repository, such as a restored credential). A fix merged to
+    main needs none of this: the new SHA is attempted on its own."""
+    state = store.load()
+    lane_state = state.get(lane) or {}
+    if not lane_state.get("failed_sha"):
+        return f"release-pipeline[{lane}]: nothing to clear"
+    if lane_state["failed_sha"] != sha:
+        raise SystemExit(f"release-pipeline[{lane}]: failed SHA is {lane_state['failed_sha']}, not {sha}")
+    previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
+    lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
+    state[lane] = lane_state
+    store.save(state)
+    store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason, **{
+        "cleared_" + k: v for k, v in previous.items()}})
+    return f"release-pipeline[{lane}]: cleared failed {sha[:12]} ({previous['failed_step']}); next tick retries it"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("command", nargs="?", default="tick", choices=("tick", "report"))
+    ap.add_argument("command", nargs="?", default="tick", choices=("tick", "report", "clear-failed"))
+    ap.add_argument("--sha", help="clear-failed: the exact failed SHA being cleared")
+    ap.add_argument("--reason", help="clear-failed: why a retry of the same SHA is now right")
     ap.add_argument("--dry-run", action="store_true", help="print the exact commands; execute no deploy")
     ap.add_argument("--lane", choices=("worker", "app"), action="append")
     ap.add_argument("--date", default=dt.date.today().isoformat())
     args = ap.parse_args(argv)
     cfg = load_config()
+    if args.command == "clear-failed":
+        if not args.lane or len(args.lane) != 1 or not args.sha or not args.reason:
+            ap.error("clear-failed needs exactly one --lane, --sha and --reason")
+        print(clear_failed(Store(REPO / cfg.get("state_dir", "out/release-pipeline")),
+                           args.lane[0], args.sha, args.reason))
+        return 0
     if args.command == "report":
         print(report(Store(REPO / cfg.get("state_dir", "out/release-pipeline")), args.date))
         return 0

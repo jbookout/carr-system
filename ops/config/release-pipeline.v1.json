@@ -35,11 +35,40 @@
     "security_evidence_label": "ci-secret-class",
     "review_required_after": "2026-09-25T00:00:00Z",
     "_review_required_after": "PRs merged before this instant predate the independent-review merge pipeline; inside a batch they are listed as pre_pipeline_prs rather than blocking a batch. The HEAD PR of every batch always needs its own approving comment: that is the verifier the database binds.",
-    "review_markers": ["independent review: pass", "approve"],
+    "review_markers": [
+      "independent review: pass",
+      "approve"
+    ],
     "default_verifier": "claude-review-agent",
-    "forbidden_verifiers": ["carr_jobs", "joe", "dell", "release-pipeline", "local-machine", "jbookout"],
-    "required_db_env_names": ["NEON_API_KEY", "CARR_DB_JOBS_URL", "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL"],
-    "required_token_env_names": ["CARR_MCP_PROBE_TOKEN"]
+    "forbidden_verifiers": [
+      "carr_jobs",
+      "joe",
+      "dell",
+      "release-pipeline",
+      "local-machine",
+      "jbookout"
+    ],
+    "required_db_env_names": [
+      "NEON_API_KEY",
+      "CARR_DB_JOBS_URL",
+      "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL"
+    ],
+    "required_token_env_names": [
+      "CARR_MCP_PROBE_TOKEN"
+    ],
+    "block_markers": [
+      "independent review: block",
+      "independent review: fail",
+      "block"
+    ],
+    "review_author_associations": [
+      "OWNER",
+      "MEMBER",
+      "COLLABORATOR"
+    ],
+    "review_logins": [],
+    "canary_lookback": 50,
+    "_review_evidence": "Public repositories: only a comment from an OWNER/MEMBER/COLLABORATOR (or a login in review_logins) carries a verdict; the LATEST verdict decides and must be an APPROVE newer than the PR head commit or naming its SHA. The verifier slug comes from the merge event or default_verifier, never from comment text."
   },
   "app": {
     "enabled": true,
@@ -50,6 +79,35 @@
       "test/**",
       "reports/**"
     ],
-    "live_release_url": "https://app.doctorcre.com/app-release"
+    "live_release_url": "https://app.doctorcre.com/app-release",
+    "review_markers": [
+      "independent review: pass",
+      "approve"
+    ],
+    "block_markers": [
+      "independent review: block",
+      "independent review: fail",
+      "block"
+    ],
+    "review_author_associations": [
+      "OWNER",
+      "MEMBER",
+      "COLLABORATOR"
+    ],
+    "review_logins": [],
+    "review_required_after": "2026-09-25T00:00:00Z",
+    "_review_required_after": "PRs merged before this instant predate the independent-review merge pipeline; inside a batch they are listed as pre_pipeline_prs rather than blocking a batch. The HEAD PR of every batch always needs its own approving comment: that is the verifier the database binds.",
+    "default_verifier": "claude-review-agent",
+    "forbidden_verifiers": [
+      "carr_jobs",
+      "joe",
+      "dell",
+      "release-pipeline",
+      "local-machine",
+      "jbookout"
+    ],
+    "required_checks": [
+      "test"
+    ]
   }
 }
