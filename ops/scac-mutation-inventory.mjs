@@ -2060,8 +2060,39 @@ export function frozenInventory(version) {
 
 export const UNSEALED_INGRESS_KINDS = Object.freeze(new Set(["script-entrypoint", "github-workflow", "launchd-workflow"]));
 
+// Worker routes and side-writes are write entrances into Production, so a NEW
+// one still needs a registry successor: their ingress keys stay bound. Their
+// rows pin the digest of whole server files (mcp.js, index.js), which nothing
+// live reads, so an edit to those files no longer reseals (decision 05e144eb,
+// extended 2026-09-24 when the first sponsor-RLS change touched mcp.js).
+export const KEY_BOUND_INGRESS_KINDS = Object.freeze(new Set(["worker-route", "worker-sidewrite"]));
+
 export function ingressKind(row) {
   return row.ingress_key.split(":")[0];
+}
+
+// An MCP verb row is held to exactly the fields the runtime compares before it
+// admits the verb (mcp-server/src/mutation-registry.js assertRegisteredOperation):
+// its source file name, input-schema digest, and write, human-only and
+// authority flags. The whole-file source digest is not among them, so a
+// comment, a helper or a flag like writerConnection in a verb's file no longer
+// reseals every verb that file holds; a changed schema or flag still does.
+export const MCP_TOOL_BOUND_FIELDS = Object.freeze(
+  ["ingress_key", "source_locator", "schema_digest", "write", "human_only", "authority_only"]);
+
+// The part of an inventory a pull request is held to: script, workflow and
+// launchd rows drop out, worker rows keep only their key, MCP verb rows keep
+// the runtime-enforced contract, every other row kind is compared whole.
+export function boundInventoryRows(rows) {
+  return rows
+    .filter(row => !UNSEALED_INGRESS_KINDS.has(ingressKind(row)))
+    .map(row => {
+      const kind = ingressKind(row);
+      if (KEY_BOUND_INGRESS_KINDS.has(kind)) return { ingress_key: row.ingress_key };
+      if (kind === "mcp-tool")
+        return Object.fromEntries(MCP_TOOL_BOUND_FIELDS.map(field => [field, row[field]]));
+      return row;
+    });
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
@@ -2124,7 +2155,7 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
   // the one next registry version. They remain in fullInventory for audit and
   // in every historical seal; only this current-versus-frozen comparison drops
   // them. Every other row kind still has to match exactly.
-  const bound = rows => rows.filter(row => !UNSEALED_INGRESS_KINDS.has(ingressKind(row)));
+  const bound = boundInventoryRows;
   const currentBound = bound(current);
   const frozenBound = bound(frozen);
   const currentDigest = sourceInventoryFixtureDigest(currentBound);

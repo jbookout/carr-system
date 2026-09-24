@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertCurrentSourceInventoryMatchesFixture,
+  boundInventoryRows,
+  MCP_TOOL_BOUND_FIELDS,
+  sourceInventoryFixtureDigest,
   assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
   canonicalize,
@@ -3218,4 +3221,46 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
   assert.throws(() => assertLegacyLaunchdSource(
     { ...legacySurface, canonical_program_arguments: [...legacySurface.canonical_program_arguments, "--forged"] },
     legacySurface.repo_plist_relpath, plist), /legacy source mismatch/);
+});
+
+test("only verb-contract changes and new write entrances hold a pull request to the frozen frontier", () => {
+  // Decision 05e144eb: scripts, workflows and launchd plists never reseal;
+  // worker routes reseal only when a NEW one appears; everything else is
+  // compared whole.
+  const base = [
+    { ingress_key: "mcp-tool:add-loop", source_locator: "mcp-server/src/tools.js", source_digest: "a",
+      schema_digest: "a", write: true, human_only: false, authority_only: false },
+    { ingress_key: "script-entrypoint:hooks/lint-gate.py", source_digest: "a" },
+    { ingress_key: "github-workflow:.github/workflows/ci.yml", source_digest: "a" },
+    { ingress_key: "launchd-workflow:com.carr.nightly", source_digest: "a" },
+    { ingress_key: "worker-sidewrite:tool-read-call", handler_digest: "a" },
+  ];
+  const digest = rows => sourceInventoryFixtureDigest(boundInventoryRows(rows));
+  const edit = (key, field) => base.map(row => row.ingress_key === key ? { ...row, [field]: "b" } : row);
+  assert.equal(digest(edit("script-entrypoint:hooks/lint-gate.py", "source_digest")), digest(base));
+  assert.equal(digest(edit("github-workflow:.github/workflows/ci.yml", "source_digest")), digest(base));
+  assert.equal(digest(edit("launchd-workflow:com.carr.nightly", "source_digest")), digest(base));
+  assert.equal(digest(edit("worker-sidewrite:tool-read-call", "handler_digest")), digest(base));
+  assert.equal(digest([...base, { ingress_key: "script-entrypoint:ops/new.py", source_digest: "c" }]), digest(base));
+  assert.notEqual(digest([...base, { ingress_key: "worker-route:new-write", handler_digest: "c" }]), digest(base));
+  assert.notEqual(digest(edit("mcp-tool:add-loop", "schema_digest")), digest(base));
+  // The whole-file digest of a verb's source is not what the runtime checks.
+  assert.equal(digest(edit("mcp-tool:add-loop", "source_digest")), digest(base));
+  // Every flag the runtime compares still binds.
+  for (const flag of ["write", "human_only", "authority_only"]) {
+    const flipped = base.map(row => row.ingress_key === "mcp-tool:add-loop" ? { ...row, [flag]: !row[flag] } : row);
+    assert.notEqual(digest(flipped), digest(base), `${flag} must still bind`);
+  }
+  assert.notEqual(digest(edit("mcp-tool:add-loop", "source_locator")), digest(base));
+  assert.notEqual(digest([...base, { ingress_key: "mcp-tool:new-verb", schema_digest: "c" }]), digest(base));
+});
+
+test("the bound MCP fields are exactly what the runtime admission check compares", () => {
+  // If mutation-registry.js starts comparing another field, this list must
+  // grow with it, or a change the server would refuse could merge unsealed.
+  const source = fs.readFileSync(new URL("../src/mutation-registry.js", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export async function assertRegisteredOperation"));
+  const actual = body.slice(body.indexOf("const actual = {"), body.indexOf("};"));
+  const compared = [...actual.matchAll(/^\s+([a-z_]+):/gm)].map(match => match[1]).sort();
+  assert.deepEqual(compared, MCP_TOOL_BOUND_FIELDS.filter(field => field !== "ingress_key").sort());
 });

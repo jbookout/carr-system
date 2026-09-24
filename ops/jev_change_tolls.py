@@ -47,9 +47,11 @@ TOLLS = {
     "inventory_reseal": (
         "The changed files are in `change.files`. Does this change edit an MCP "
         "verb -- its definition, input schema or write/human-only/authority "
-        "flags under mcp-server/src/ -- or a scheduled job definition? Those "
-        "rows are still sealed, because the server refuses a verb whose "
-        "contract drifts from the generated registry. Script entrypoints "
+        "flags under mcp-server/src/ -- a NEW worker route or side-write, or a "
+        "scheduled job definition? Those rows are still sealed, because the "
+        "server refuses a verb whose contract drifts from the generated "
+        "registry. Editing server files such as mcp.js or index.js without "
+        "changing a verb contract needs no seal. Script entrypoints "
         "(hooks/, bin/, tools/, pipelines/, ops/ scripts), GitHub workflows "
         "and launchd plists are NOT sealed any more (decision 05e144eb, "
         "2026-09-24): editing or adding one needs no registry successor.",
@@ -168,6 +170,21 @@ def change(base="origin/main", repo=REPO):
             status, path = parts[0], parts[-1]
         else:
             status, path = row[:2].strip() or "M", row[3:].strip()
+        # A RENAME IS A DELETE PLUS AN ADD. Porcelain prints "R  old -> new"
+        # (and --name-status "R100\told\tnew", whose last column is already
+        # the new path). Taken whole, "old -> new" was named as one path that
+        # does not exist, which the collector selftest's every-named-path-
+        # exists property caught on the first branch that renamed a migration.
+        if status.startswith(("R", "C")):
+            if " -> " in path:
+                old_path, path = path.split(" -> ", 1)
+            elif "\t" in row:
+                old_path = row.split("\t")[1]
+            else:
+                old_path = None
+            if status.startswith("R") and old_path and old_path not in deleted:
+                deleted.append(old_path)
+            status = "A"
         if not path:
             continue
         if status.startswith("D"):
@@ -176,6 +193,15 @@ def change(base="origin/main", repo=REPO):
             target = added if status.startswith(("A", "??")) else edited
         if path not in target:
             target.append(path)
+    # Committed and uncommitted rows are read together, so a file the branch
+    # added in an earlier commit and the working tree has since removed (a
+    # renumbered migration) arrives as both added and deleted. It is gone:
+    # only the deletion is true. The disk settles which way it ended, so a
+    # file deleted in a commit and re-created since stays added.
+    on_disk = {path for path in added + edited + deleted if os.path.exists(os.path.join(repo, path))}
+    added = [path for path in added if path not in deleted or path in on_disk]
+    edited = [path for path in edited if path not in deleted or path in on_disk]
+    deleted = [path for path in deleted if path not in on_disk]
     # Whether a file is an entrypoint is a fact the questions CANNOT see, so
     # it is gathered here for every touched file rather than inferred from a
     # path. Two mistakes in the first version of this function, both of which
