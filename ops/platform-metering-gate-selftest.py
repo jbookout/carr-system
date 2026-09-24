@@ -222,6 +222,7 @@ def main() -> int:
         "ops/p1-rebuild-gate.py",
         "ops/cc-update-audit-shadow-harness.py",
         "bin/restore-rehearse.sh",
+        "bin/pitr-restore-proof.sh",
     }
     branch_patterns = (
         re.compile(r'["\x27]branches["\x27]\s*,\s*["\x27]create["\x27]'),
