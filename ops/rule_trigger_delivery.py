@@ -18,16 +18,17 @@ TWO KINDS OF PROMPT, TWO POLICIES (2026-09-25 design ruling on #1276 review):
     human-prompt verdicts and compiled triggers alone kept 3: a partner does
     not speak in the vocabulary a rule is written in, so the judgment is not
     optional for human prompts. The judgment is:
-      - residual rules (no surface cue signals them) and stale rules (text
-        changed since compile) are ALWAYS judged, on EVERY human prompt —
-        no once-per-session marker, and no skipping a pack that already had a
-        hit (both were in the first cut and both lost deliveries);
-      - the remaining unmatched rules are narrowed by the existing ranking
-        call (ops/jev_rule_select.narrow: one Choice over the roster) to fill
-        the binding capacity;
-      - binding is asked in batched requests of BIND_PER_CALL questions, at
-        most BIND_CALLS of them.
-    HARD BUDGET: MAX_JEV_CALLS = 1 ranking + BIND_CALLS binding = 4 requests
+      - stale rules (text changed since compile) are ALWAYS judged, on EVERY
+        human prompt — no once-per-session marker, no skipping a pack that
+        already had a hit;
+      - every other unmatched rule, residual rules included, is ranked by the
+        existing ranking call (ops/jev_rule_select.narrow: one Choice over the
+        roster) on every human prompt, and the top BIND_TOP_K are judged;
+      - binding is ONE RULE PER REQUEST with the old path's own question.
+        Measured 2026-09-25 on the 15 in-capacity misses of the review set:
+        batched questions scored them 0.23-0.71, the same rules asked one at a
+        time scored 0.76-0.85 on 14 of 15. Batching was the defect.
+    HARD BUDGET: MAX_JEV_CALLS = 1 ranking + BIND_TOP_K binding = 8 requests
     per human prompt, enforced here and counted in the log.
 
 FAIL OPEN, ALWAYS TOWARD DELIVERY. A missing or malformed compiled file or
@@ -65,12 +66,11 @@ DEDUPE_TTL_SECONDS = 2 * 3600
 BIND_AT = 0.75
 MESSAGE_CHARS = 90_000
 
-# THE BUDGET. One ranking request plus at most BIND_CALLS binding requests of
-# BIND_PER_CALL questions each: 21 rules judged per human prompt, the size of
-# the old per-rule path's shortlist, in 4 requests instead of 21.
-BIND_CALLS = 3
-BIND_PER_CALL = 7
-MAX_JEV_CALLS = 1 + BIND_CALLS
+# THE BUDGET. One ranking request plus at most BIND_TOP_K single-rule binding
+# requests. k = 7 is the largest the 8-request cap allows, and the smallest
+# the logged ranks of the review set say reaches 80% recall (k = 6: 77%).
+BIND_TOP_K = 7
+MAX_JEV_CALLS = 1 + BIND_TOP_K
 RUBRIC_CHARS = 150
 STATEMENT_CHARS = 4000
 SITUATION_CHARS = 20_000
@@ -140,17 +140,6 @@ def _matched_probability(text, entry):
     return best
 
 
-def _binding_question(rule_id, client):
-    return client.noul(
-        f"The rule in `rules.{rule_id}` BINDS the moment described in "
-        "`situation`: its own condition is MET right now — the thing it forbids "
-        "is about to happen, or the thing it requires has not been done.",
-        true="The rule's condition is satisfied by this exact moment.",
-        false="The rule concerns different work, OR it is about this kind of "
-              "action but its condition is not met — including a rule the "
-              "session is already complying with. Topic overlap is not binding.")
-
-
 def _log(record, path):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -200,23 +189,45 @@ def _default_rank(text, pool, limit, client):
     return [row["id"] for row in short][:limit], len(made)
 
 
-def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None):
-    """Judge `always` plus the best-ranked of `rules` within MAX_JEV_CALLS.
+def _binding_question(client):
+    """The old path's single-rule question (ops/jev_rule_select), verbatim."""
+    return _sibling("jev_rule_select").binding_question(client)
 
-    Returns (selected rows, report). `always` (residual and stale ids) is
-    judged first and in full up to the binding capacity; the ranking call only
-    fills what capacity is left, and is skipped when nothing is left."""
+
+def _default_bind(subject, questions, client):
+    """One single-rule binding request through ops/jev_judge (logged there)."""
+    return _sibling("jev_rule_select")._sibling("jev_judge").judge(
+        subject, questions, client=client)
+
+
+def _rule_titles():
+    """{rule id: (title, context)} from the old path's corpus loader, so a
+    single-rule question carries exactly what it carried before."""
+    try:
+        return {row["id"]: (row.get("gist") or "", row.get("context") or "")
+                for row in _sibling("jev_rule_select").load_rules()}
+    except Exception:
+        return {}
+
+
+def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, titles=None):
+    """Judge `always` (stale rules) plus the best-ranked of `rules`, one
+    single-rule request each, within MAX_JEV_CALLS.
+
+    Returns (selected rows, report). `always` is judged first, up to
+    BIND_TOP_K; the ranking call fills what is left and is skipped when
+    nothing is left or when the pool already fits."""
     by_id = {rule["id"]: rule for rule in rules}
-    capacity = BIND_CALLS * BIND_PER_CALL
     report = {"calls": 0, "rank_status": "not_needed", "bind_status": "none",
               "judged": [], "overflow": []}
     always = [rule_id for rule_id in always if rule_id in by_id]
-    if len(always) > capacity:
-        report["overflow"] = always[capacity:]
-        always = always[:capacity]
-    room = capacity - len(always)
+    if len(always) > BIND_TOP_K:
+        report["overflow"] = always[BIND_TOP_K:]
+        always = always[:BIND_TOP_K]
+    room = BIND_TOP_K - len(always)
     pool = [rule for rule in rules if rule["id"] not in set(always)]
     ranked = []
+    ranking_model = None
     if room > 0 and pool:
         if len(pool) <= room:
             ranked = [rule["id"] for rule in pool]
@@ -235,36 +246,36 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None):
     selected = {}
     if not to_judge:
         return selected, report
-    if ask is None or client is None:
+    if client is None:
         import sys
         sys.path.insert(0, os.path.join(REPO, "ops"))
-        import typesafe_client as tsc  # noqa: E402
-        ask = ask or tsc.ask
-        client = client or tsc
+        import typesafe_client as client  # noqa: E402
+    titles = _rule_titles() if titles is None else titles
+    question = {"binds": _binding_question(client)}
     failures = 0
-    batches = [to_judge[i:i + BIND_PER_CALL]
-               for i in range(0, len(to_judge), BIND_PER_CALL)][:BIND_CALLS]
-    for batch in batches:
-        state = {"situation": text[:SITUATION_CHARS],
-                 "rules": {rule_id: (by_id[rule_id].get("statement") or "")[:STATEMENT_CHARS]
-                           for rule_id in batch}}
-        questions = {rule_id: _binding_question(rule_id, client) for rule_id in batch}
+    for rule_id in to_judge[:BIND_TOP_K]:
+        rule = by_id[rule_id]
+        title, context = titles.get(rule_id, ("", ""))
+        statement = (rule.get("statement") or "")[:STATEMENT_CHARS]
+        subject = {"situation": text[:SITUATION_CHARS],
+                   "rule_title": title or statement[:RUBRIC_CHARS],
+                   "rule": statement or title,
+                   "rule_context": context}
         report["calls"] += 1
         try:
-            answer = ask(state, questions)
+            answer = (ask(subject, question, rule_id=rule_id) if ask is not None
+                      else _default_bind(subject, question, client))
+            value = float(answer["answers"]["binds"]["noul"])
         except Exception:
             failures += 1
             continue
-        answers = answer.get("answers") or {}
-        for rule_id in batch:
-            value = (answers.get(rule_id) or {}).get("noul")
-            if isinstance(value, (int, float)) and value >= BIND_AT:
-                selected[rule_id] = {
-                    "id": rule_id, "probability": float(value), "ranking_model": None,
-                    "binding_model": answer.get("model") or "jev",
-                    "source": "residual_judged" if rule_id in always else "ranked_judged"}
+        if value >= BIND_AT:
+            selected[rule_id] = {
+                "id": rule_id, "probability": value, "ranking_model": ranking_model,
+                "binding_model": answer.get("model") or "jev",
+                "source": "stale_judged" if rule_id in always else "ranked_judged"}
     report["bind_status"] = ("judged" if not failures else
-                             "partial" if failures < len(batches) else "unavailable")
+                             "partial" if failures < len(to_judge) else "unavailable")
     if report["calls"] > MAX_JEV_CALLS:  # pragma: no cover - guarded by construction
         raise AssertionError("Jev budget exceeded")
     return selected, report
@@ -323,9 +334,7 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
               "judged": [], "overflow": []}
     if human:
         unmatched = [rule for rule in rules if rule["id"] not in selected]
-        always = sorted(rule["id"] for rule in unmatched
-                        if rule["id"] in stale
-                        or (entries.get(rule["id"]) or {}).get("mode") == "residual")
+        always = sorted(rule["id"] for rule in unmatched if rule["id"] in stale)
         judged, report = judge_budgeted(text, unmatched, always, rank=rank, ask=ask,
                                         client=client)
         for rule_id, row in judged.items():

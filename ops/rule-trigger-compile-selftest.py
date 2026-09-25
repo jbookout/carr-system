@@ -7,9 +7,10 @@ no Jev call: every judgment arrives through an injected fake.
   ops/rule_trigger_delivery.py  — a message is matched against them. A machine
                                   envelope stops there (zero Jev requests); a
                                   human prompt then gets one budgeted judgment
-                                  (1 ranking + at most 3 binding requests),
-                                  with residual and stale rules judged on
-                                  every human prompt.
+                                  (1 ranking + single-rule binding requests
+                                  for its top 7, at most 8 requests), with
+                                  stale rules judged and residual rules
+                                  ranked on every human prompt.
   ops/rule-trigger-compile.py --check — the committed compile covers every
                                   current pack-layer rule (this suite runs it,
                                   which is how CI enforces it).
@@ -121,6 +122,7 @@ FILLERS = [{"id": f"ffff{i:04d}", "gist": f"filler {i}", "packs": ["filler-pack"
             "statement": f"Filler rule number {i} about an unrelated topic."}
            for i in range(40)]
 FILLERS[0]["packs"] = ["governance-rules"]  # shares the residual rule's pack
+FILLERS[1]["packs"] = ["vendor-intros"]  # shares the stale-test rule's pack
 ROSTER = RULES + FILLERS
 NOTIFICATION = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
                 "<summary>Agent \"x\" finished with an error, see https://example.com/log"
@@ -128,22 +130,23 @@ NOTIFICATION = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</
 
 
 class Asker:
-    """A binding request: records each batch of rule ids it was asked about."""
+    """A single-rule binding request: records the rule each request was about."""
 
     def __init__(self, value=0.1, fail=False):
         self.calls = []
         self.value = value
         self.fail = fail
 
-    def __call__(self, state, questions, **kwargs):
-        self.calls.append(sorted(questions))
+    def __call__(self, subject, questions, *, rule_id=None, **kwargs):
+        self.calls.append(rule_id)
+        self.subjects = getattr(self, "subjects", []) + [subject]
         if self.fail:
             raise RuntimeError("synthetic outage")
         return {"model": "jev-binder",
                 "answers": {q: {"type": "noul", "noul": self.value} for q in questions}}
 
     def asked(self):
-        return {rule_id for batch in self.calls for rule_id in batch}
+        return set(self.calls)
 
 
 class Ranker:
@@ -155,6 +158,7 @@ class Ranker:
 
     def __call__(self, text, pool, limit, client):
         self.calls += 1
+        self.pools = getattr(self, "pools", []) + [{rule["id"] for rule in pool}]
         if self.fail:
             raise RuntimeError("synthetic outage")
         ids = sorted(rule["id"] for rule in pool)
@@ -207,39 +211,47 @@ def prop_fail_open(rtc_m, rtd_m):
 
 
 def prop_residual_every_human_prompt(rtc_m, rtd_m):
-    """Residual AND stale rules are judged on every human prompt of a session,
-    including one where their pack (or another) already had a trigger hit."""
+    """On every human prompt of a session — including one where their pack
+    already had a trigger hit — stale rules are judged and residual rules are
+    in the ranking. (Always judging residual rules too would spend 3 of the 7
+    single-rule requests every time; measured, that caps recall at 70%.)"""
     stale_doc = compiled_doc()
     stale_doc["rules"]["aaaa0002"]["statement_sha256"] = "0" * 64
     # A reviewed row that puts a hit in the residual rule's own pack.
     same_pack = {"kind": "prompt_regex", "pattern": r"\bnow\b", "packs": ["governance-rules"],
                  "rule_ids": ["ffff0000"], "source": "structural_extra"}
-    asks = []
+    asks, pools = [], []
     with tempfile.TemporaryDirectory() as tmp:
-        table = table_for(stale_doc, tmp, extra=[same_pack])
+        stale_pack = {"kind": "prompt_regex", "pattern": r"\bvendor\b",
+                      "packs": ["vendor-intros"], "rule_ids": ["ffff0001"],
+                      "source": "structural_extra"}
+        table = table_for(stale_doc, tmp, extra=[same_pack, stale_pack])
         for step, text in enumerate(("unrelated words", "other words",
                                      "git push to the vendor now")):
-            ask = Asker(0.1)
-            run(rtd_m, text, tmp, ask=ask, now=1000.0 + step, doc=stale_doc, table=table)
+            ask, rank = Asker(0.1), Ranker()
+            run(rtd_m, text, tmp, ask=ask, rank=rank, now=1000.0 + step, doc=stale_doc,
+                table=table)
             asks.append(ask.asked())
-    return all({"aaaa0003", "aaaa0002"} <= asked for asked in asks)
+            pools.append(set().union(*getattr(rank, "pools", [set()])))
+    return (all("aaaa0002" in asked for asked in asks)
+            and all("aaaa0003" in pool for pool in pools))
 
 
 def prop_budget_cap(rtc_m, rtd_m):
-    """At most MAX_JEV_CALLS requests per human prompt, even with more
-    residual rules than the binding capacity; the excess is reported."""
-    many = [{"id": f"rrrr{i:04d}", "gist": "r", "packs": ["residual-pack"],
-             "statement": f"Residual rule {i}."} for i in range(40)]
-    doc = rtc_m.document([entry(rule, mode="residual") for rule in many] + filler_entries())
+    """At most MAX_JEV_CALLS requests per human prompt, even with more stale
+    rules than BIND_TOP_K; the excess is reported, not silently dropped."""
+    many = [{"id": f"rrrr{i:04d}", "gist": "r", "packs": ["stale-pack"],
+             "statement": f"Stale rule {i}."} for i in range(40)]
+    doc = rtc_m.document(filler_entries())  # the 40 are uncompiled, i.e. stale
     ask, rank = Asker(0.1), Ranker()
     with tempfile.TemporaryDirectory() as tmp:
         run(rtd_m, "anything at all", tmp, ask=ask, rank=rank, doc=doc,
             rules=many + FILLERS, table=table_for(doc, tmp))
         log = [json.loads(line) for line in Path(tmp, "log.jsonl").read_text().splitlines()]
     total = rank.calls + len(ask.calls)
-    capacity = rtd.BIND_CALLS * rtd.BIND_PER_CALL
-    return (total <= 4 and log[-1]["jev_calls"] == total
-            and len(ask.asked()) == capacity and len(log[-1]["overflow"]) == 40 - capacity)
+    k = rtd.BIND_TOP_K
+    return (total <= 8 and log[-1]["jev_calls"] == total
+            and len(ask.asked()) == k and len(log[-1]["overflow"]) == 40 - k)
 
 
 def prop_envelope_zero_calls(rtc_m, rtd_m):
@@ -369,8 +381,8 @@ for name, prop in PROPERTIES.items():
 
 # ---------------------------------------------------------------- direct cases
 
-check("the hard budget is one ranking plus BIND_CALLS binding requests, and is 4",
-      rtd.MAX_JEV_CALLS == 1 + rtd.BIND_CALLS == 4)
+check("the hard budget is one ranking plus BIND_TOP_K single-rule requests, and is 8",
+      rtd.MAX_JEV_CALLS == 1 + rtd.BIND_TOP_K == 8)
 
 with tempfile.TemporaryDirectory() as tmp:
     hit = run(rtd, "please git push this", tmp)
@@ -385,7 +397,7 @@ with tempfile.TemporaryDirectory() as tmp:
     out = run(rtd, "a vendor intro", tmp, doc=stale_doc, ask=ask)
 check("a stale rule is not matched on old triggers; it is judged instead",
       "aaaa0002" in ask.asked()
-      and [r for r in out if r["id"] == "aaaa0002"][0]["source"] == "residual_judged", out)
+      and [r for r in out if r["id"] == "aaaa0002"][0]["source"] == "stale_judged", out)
 
 with tempfile.TemporaryDirectory() as tmp:
     out = run(rtd, "please git push", tmp, ask=Asker(fail=True))
@@ -393,20 +405,22 @@ check("failed binding requests still return what matched",
       ids(out) == ["aaaa0001"], out)
 
 with tempfile.TemporaryDirectory() as tmp:
+    stale_doc = compiled_doc()
+    stale_doc["rules"]["aaaa0002"]["statement_sha256"] = "0" * 64
     ask, rank = Asker(0.1), Ranker(fail=True)
-    run(rtd, "anything", tmp, ask=ask, rank=rank)
+    run(rtd, "anything", tmp, ask=ask, rank=rank, doc=stale_doc)
     row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
-check("a failed ranking still judges residual rules and is counted",
-      "aaaa0003" in ask.asked() and row["rank_status"] == "unavailable"
+check("a failed ranking still judges stale rules and is counted",
+      ask.asked() == {"aaaa0002"} and row["rank_status"] == "unavailable"
       and row["jev_calls"] == 1 + len(ask.calls), row)
 
 with tempfile.TemporaryDirectory() as tmp:
     ask, rank = Asker(0.1), Ranker()
     run(rtd, "anything", tmp, ask=ask, rank=rank)
-check("the ranking fills the binding capacity with its top choices",
-      rank.calls == 1 and len(ask.calls) == rtd.BIND_CALLS
-      and len(ask.asked()) == rtd.BIND_CALLS * rtd.BIND_PER_CALL
-      and all(len(batch) <= rtd.BIND_PER_CALL for batch in ask.calls), ask.calls)
+check("the ranking's top BIND_TOP_K are judged, one rule per request",
+      rank.calls == 1 and len(ask.calls) == rtd.BIND_TOP_K == len(ask.asked())
+      and all(set(subject) == {"situation", "rule_title", "rule", "rule_context"}
+              for subject in ask.subjects), ask.calls)
 
 with tempfile.TemporaryDirectory() as tmp:
     ask, rank = Asker(0.1), Ranker()
@@ -514,17 +528,22 @@ MUTANTS = [
      ('body = re.sub(row["negative_pattern"], " ", body, flags=re.I)', "body = body")),
     ("a missing trigger table still judges a human prompt, within budget", RTD_PATH,
      ("    if human:\n        unmatched", "    if human and rows is not None:\n        unmatched")),
-    # Residual and stale rules dropped from the always-judged set.
+    # Stale rules dropped from the always-judged set.
     ("residual and stale rules are judged on every human prompt", RTD_PATH,
-     ('always = sorted(rule["id"] for rule in unmatched\n',
-      'always = sorted(rule["id"] for rule in []\n')),
-    # The first cut's rule: skip a residual rule whose pack already had a hit.
+     ('always = sorted(rule["id"] for rule in unmatched if rule["id"] in stale)',
+      'always = sorted(rule["id"] for rule in [] if rule["id"] in stale)')),
+    # The first cut's rule: skip a stale rule whose pack already had a hit.
     ("residual and stale rules are judged on every human prompt", RTD_PATH,
-     ('always = sorted(rule["id"] for rule in unmatched\n',
-      'always = sorted(rule["id"] for rule in unmatched if not set(rule["packs"]) & '
-      '{p for s in selected for p in by_id[s]["packs"]}\n')),
+     ('always = sorted(rule["id"] for rule in unmatched if rule["id"] in stale)',
+      'always = sorted(rule["id"] for rule in unmatched if rule["id"] in stale and not '
+      'set(rule["packs"]) & {p for s in selected for p in by_id[s]["packs"]})')),
+    # Residual rules kept out of the ranking (so never judged).
+    ("residual and stale rules are judged on every human prompt", RTD_PATH,
+     ('unmatched = [rule for rule in rules if rule["id"] not in selected]',
+      'unmatched = [rule for rule in rules if rule["id"] not in selected and '
+      '(entries.get(rule["id"]) or {}).get("mode") != "residual"]')),
     ("a human prompt never costs more than MAX_JEV_CALLS requests", RTD_PATH,
-     ("capacity = BIND_CALLS * BIND_PER_CALL", "capacity = BIND_CALLS * BIND_PER_CALL * 10")),
+     ("if len(always) > BIND_TOP_K:", "if False:")),
     ("a machine envelope costs zero Jev requests", RTD_PATH,
      ("human = not (_is_envelope(situation) if envelope is None else envelope)",
       "human = True")),
