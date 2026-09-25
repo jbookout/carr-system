@@ -467,8 +467,20 @@ class QueueService:
                     }}}
                 command = {**command, "target": routed["target"]}
             created = self.adapter.create(command, turn, self.catalog["targets"][command["target"]])
+            # A retried target=auto command re-runs route_auto on every call, so its
+            # idempotency key (from the room message, not the task) can land on an
+            # EXISTING task that was originally routed somewhere else — Flash's
+            # liveness or Jev's decision can differ between the original send and the
+            # retry. On a duplicate FROM AN AUTO ROUTE (routed is not None), the
+            # receipt must report where that existing task actually went, not this
+            # call's freshly recomputed route. An explicit target can never drift this
+            # way — the command names its own target every time — so this stays a
+            # no-op read for every explicit-target create, matching prior behavior.
+            report_target = command["target"]
+            if routed is not None and not created["created"]:
+                report_target = self._existing_task_target(created["task_id"], default=report_target)
             return {"handled": True, "kind": "accepted", "receipt": {"queue_accepted": {
-                **source, "task_id": created["task_id"], "target": command["target"],
+                **source, "task_id": created["task_id"], "target": report_target,
                 **({"route": routed} if routed else {}),
                 "cap": command["cap"], "idempotency_key": command["idempotency_key"],
                 "status": "blocked" if command.get("manual") and created["created"] else
@@ -481,3 +493,22 @@ class QueueService:
 
     def reconcile_disabled_targets(self) -> ReconciliationResult:
         return self.adapter.reconcile_disabled_targets(self.catalog)
+
+    def _existing_task_target(self, task_id: str, *, default: str) -> str:
+        """The target actually bound to an already-existing queue task.
+
+        Best-effort: a fresh read that fails or a body that does not parse as the
+        exact queue envelope falls back to the caller's own default rather than
+        failing the whole receipt over a display fact.
+        """
+        try:
+            payload = self.adapter.show(task_id)
+        except QueueError:
+            return default
+        task = payload.get("task") if isinstance(payload, dict) else None
+        if not isinstance(task, dict):
+            return default
+        meta, error = KanbanAdapter._reconciliation_meta(task)
+        if error is not None or meta is None:
+            return default
+        return meta["target"]

@@ -341,6 +341,28 @@ def probe_live(entry: dict) -> bool:
     return True
 
 
+def _post_queue_completion(terminal: dict, *, add_room_turn, seat: str) -> None:
+    """Post one queue task's bounded typed completion callback into the room.
+
+    Shared by the async pending path (handle_pending) and the synchronous
+    desk path (flash-local completes inline in queue_executor.start()) so
+    both post the exact same callback shape under the exact same dedup key.
+    """
+    completion = terminal.get("completion")
+    if not isinstance(completion, dict):
+        raise queue_dispatch.QueueDispatchError("queue completion callback is absent")
+    task_id = terminal.get("task_id")
+    if not isinstance(task_id, str) or not task_id.startswith("t_"):
+        raise queue_dispatch.QueueDispatchError("queue completion callback identity is invalid")
+    add_room_turn(
+        body=json.dumps(completion, separators=(",", ":")),
+        seat=seat,
+        kind="turn",
+        msg_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"carr:queue-completion:{task_id}")),
+        idempotency_key=f"queue-completion:{task_id}",
+    )
+
+
 def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     log_path: Path, pending_timeout_s: float,
                     scan=scan_for_result, now: str | None = None,
@@ -415,19 +437,7 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
             if queue_executor is None:
                 return {"desk": name, "outcome": "queue_executor_unavailable"}
             terminal = queue_executor.finish_pending(pending, result_text)
-            completion = terminal.get("completion")
-            if not isinstance(completion, dict):
-                raise queue_dispatch.QueueDispatchError("queue completion callback is absent")
-            task_id = terminal.get("task_id")
-            if not isinstance(task_id, str) or not task_id.startswith("t_"):
-                raise queue_dispatch.QueueDispatchError("queue completion callback identity is invalid")
-            add_room_turn(
-                body=json.dumps(completion, separators=(",", ":")),
-                seat=seat,
-                kind="turn",
-                msg_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"carr:queue-completion:{task_id}")),
-                idempotency_key=f"queue-completion:{task_id}",
-            )
+            _post_queue_completion(terminal, add_room_turn=add_room_turn, seat=seat)
             state_mod.clear_pending(state, name)
             return {"desk": name, **{key: value for key, value in terminal.items()
                                      if key != "completion"}}
@@ -817,13 +827,26 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         return dispatch_fn(
                             name, prompt, registry=registry, results_path=results_path)
 
+                    # flash-local has no MCP tools of its own, unlike a codex-session or
+                    # claude-session desk, which post their own reply into the room as
+                    # part of doing the task. Flash's synchronous completion here is the
+                    # ONLY chance its answer has to reach the room, so its reply rides
+                    # along in the completion callback below (finding: PR #1249 review).
+                    is_flash_local = entry.get("kind") == "flash-local"
                     queue_outcome = queue_executor.start(
                         desk_queue_targets[name], dispatch_call=dispatch_queue,
                         desk_busy=state_mod.has_queued(state, name),
                         retry_at=state["queue_retry_at"], now=now_fn(),
                         desk_live=live_by_desk.get(name, True),
                         unavailable_since=state.get("queue_unavailable_since", {}),
+                        include_reply=is_flash_local,
+                        retry_protocol_errors=is_flash_local,
                     )
+                    if is_flash_local and "completion" in queue_outcome:
+                        # Synchronous desks (flash-local) complete inline in start()
+                        # rather than through the pending/handle_pending path, so the
+                        # completion callback has to be posted here instead.
+                        _post_queue_completion(queue_outcome, add_room_turn=add_room_turn, seat=seat)
                     queue_scan_complete = queue_scan_complete and bool(
                         getattr(queue_executor, "last_ready_scan_complete", False))
                     if getattr(queue_executor, "last_ready_scan_complete", False):

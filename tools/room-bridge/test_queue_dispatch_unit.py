@@ -22,6 +22,9 @@ sys.path.insert(0, str(HERE))
 
 import queue_dispatch  # noqa: E402
 import bridge  # noqa: E402
+import desks  # noqa: E402
+import dispatch  # noqa: E402
+import flash_wire  # noqa: E402
 import kanban_adapter  # noqa: E402
 import state as state_mod  # noqa: E402
 
@@ -542,6 +545,17 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertIn("queue_executor.start", source)
         self.assertLess(source.index("state_mod.pop_next_queued"), source.index("queue_executor.start"))
 
+    def test_bridge_posts_flash_locals_synchronous_completion_to_the_room(self):
+        """flash-local completes inline in queue_executor.start() rather than through
+        the pending/handle_pending path (finding 1): pins that run_once actually posts
+        that completion, gated to flash-local only, instead of leaving it unposted."""
+        source = inspect.getsource(bridge.run_once)
+        self.assertIn('entry.get("kind") == "flash-local"', source)
+        self.assertIn("include_reply=is_flash_local", source)
+        self.assertIn("_post_queue_completion(queue_outcome", source)
+        self.assertLess(source.index("queue_outcome = queue_executor.start"),
+                        source.index("_post_queue_completion(queue_outcome"))
+
     def test_dead_socket_waits_without_claim_dispatch_or_retry_then_blocks_once(self):
         adapter = FakeAdapter([task()])
         dispatched = []
@@ -630,6 +644,186 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertIn("queue_scan_complete = False", source)
         self.assertIn("if name in required_queue_desks", source)
         self.assertIn("and required_queue_desks", source)
+
+
+class FlashReplyReachesTheRoomTests(unittest.TestCase):
+    """PR #1249 review finding 1: flash-local has no MCP tools of its own, so unlike a
+    codex-session or claude-session desk (which post their own reply as part of doing
+    the task) its answer was never posted anywhere — only the bounded completion summary
+    was. These tests drive a realistic Flash reply through dispatch.dispatch (the real
+    flash_wire wire, network faked) and queue_dispatch.parse_terminal_result (the real
+    protocol parser) and assert the answer text itself reaches the typed room callback."""
+
+    FLASH_CATALOG = {
+        "v": 1,
+        "targets": {
+            "flash": {"enabled": True, "adapter": "desk", "assignee": "desk:flash-model",
+                      "desk": "flash-model", "capabilities": ["read"], "effective_model": "flash"},
+        },
+    }
+
+    @staticmethod
+    def _flash_task(task_id: str = "t_queue0001") -> dict:
+        meta = {"v": 1, "target": "flash", "cap": "read", "source_seq": 81,
+                "source_msg_id": "11111111-1111-4111-8111-111111111111", "finish": "done"}
+        return {
+            "id": task_id, "title": "Answer this directly", "status": "ready", "created_at": 2,
+            "assignee": "desk:flash-model",
+            "body": f"[CARR_QUEUE_META {json.dumps(meta, separators=(',', ':'))}]\nWhere is loop 640 blocked?",
+        }
+
+    def test_flash_reply_reaches_the_room_as_the_tasks_result(self):
+        answer = "Loop 640 is blocked on the Dell SSH alias; see decision 79110363 for the routing ruling."
+        protocol_line = "CARR_QUEUE_RESULT " + json.dumps(
+            {"v": 1, "task_id": "t_queue0001", "outcome": "success", "summary": "Answered directly."},
+            separators=(",", ":"),
+        )
+
+        def fake_run_turn(task, **_kwargs):
+            return {"status": "completed", "finish": "stop", "result": f"{answer}\n{protocol_line}"}
+
+        real_run_turn = flash_wire.run_turn
+        flash_wire.run_turn = fake_run_turn
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                registry = desks.Registry(Path(tmp) / "desks.json")
+                registry.register("flash-model", "flash-local")
+
+                def dispatch_call(prompt: str) -> dict:
+                    # The real dispatch.dispatch(): resolves the registry entry, guards
+                    # its named model/effort, and calls flash_wire.run_turn(prompt).
+                    return dispatch.dispatch(
+                        "flash-model", prompt, registry=registry,
+                        results_path=Path(tmp) / "results.jsonl",
+                    )
+
+                adapter = FakeAdapter([self._flash_task()])
+                controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+                outcome = controller.start(
+                    "flash", dispatch_call=dispatch_call, include_reply=True, retry_protocol_errors=True,
+                )
+        finally:
+            flash_wire.run_turn = real_run_turn
+
+        self.assertEqual(outcome["outcome"], "done")
+        callback = outcome["completion"]["queue_completion"]
+        self.assertEqual(callback["reply"], answer)
+        self.assertEqual(callback["summary"], "Answered directly.")
+        self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1)
+
+    def test_other_desks_never_get_the_include_reply_treatment(self):
+        """The 'never return model prose' rule is unchanged for a desk with its own MCP
+        tools: without include_reply, no "reply" field is added to the callback."""
+        outcome = queue_dispatch.QueueDeskExecutor(
+            catalog=CATALOG, adapter=FakeAdapter([task()]),
+        ).start("sol", dispatch_call=lambda _prompt: {"status": "completed", "result": result()})
+        self.assertEqual(outcome["outcome"], "done")
+        self.assertNotIn("reply", outcome["completion"]["queue_completion"])
+
+    def test_flash_result_protocol_error_retries_then_blocks_instead_of_blocking_once(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "completed", "result": "no protocol line here"},
+            retry_protocol_errors=True,
+        )
+        self.assertEqual(outcome["outcome"], "retry_scheduled")
+        self.assertFalse(any(call[0] == "block" for call in adapter.calls))
+        self.assertTrue(any(call[0] == "reclaim" for call in adapter.calls))
+
+    def test_without_the_flag_a_protocol_error_still_blocks_once_unchanged(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "completed", "result": "no protocol line here"},
+        )
+        self.assertEqual(outcome["outcome"], "result_protocol_error")
+        self.assertEqual(sum(call[0] == "block" for call in adapter.calls), 1)
+
+    def test_no_answer_gets_its_own_diagnosable_code_not_a_generic_one(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "failed", "detail": "no_answer"},
+        )
+        self.assertEqual(outcome["outcome"], "retry_scheduled")
+        self.assertEqual(outcome["code"], "no_answer")
+        reclaim_reasons = [call[2] if len(call) > 2 else call for call in adapter.calls if call[0] == "reclaim"]
+        self.assertTrue(any("no_answer" in str(reason) for reason in reclaim_reasons))
+
+    def test_dispatch_still_routes_flash_local_desks_to_the_flash_wire(self):
+        """Pins tools/room-bridge/dispatch.py's flash-local branch: a test that fails if
+        it (or its wiring to flash_wire.run_turn) is deleted."""
+        calls: list[str] = []
+        real_run_turn = flash_wire.run_turn
+        flash_wire.run_turn = lambda task, **_kwargs: (calls.append(task) or {
+            "status": "completed", "result": "42",
+        })
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                registry = desks.Registry(Path(tmp) / "desks.json")
+                registry.register("flash-model", "flash-local")
+                row = dispatch.dispatch(
+                    "flash-model", "What is the answer?", registry=registry,
+                    results_path=Path(tmp) / "results.jsonl",
+                )
+        finally:
+            flash_wire.run_turn = real_run_turn
+        self.assertEqual(calls, ["What is the answer?"])
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["result"], "42")
+        self.assertEqual(row["kind"], "flash-local")
+
+
+class FinalCapabilityRecheckTests(unittest.TestCase):
+    """PR #1249 review finding 3: a test that fails if kanban_adapter.py's handle()
+    deletes its final capability recheck on the routed target=auto alias — covering the
+    disabled-fallback case, where the FALLBACK target itself is also disabled or refuses
+    the capability, and the whole command must be rejected rather than created anyway."""
+
+    def test_auto_route_rejected_when_the_fallback_target_is_also_disabled(self):
+        catalog = {
+            "v": 1,
+            "targets": {
+                "flash": {"enabled": False, "adapter": "desk", "assignee": "desk:flash-model",
+                          "desk": "flash-model", "capabilities": ["read"], "effective_model": "flash",
+                          "unavailable_reason": "down for this test"},
+                "claude-desktop": {"enabled": False, "adapter": "desk", "assignee": "desk:claude-desktop",
+                                   "desk": "claude-desktop", "capabilities": ["read", "repo-write"],
+                                   "effective_model": "opus", "unavailable_reason": "down for this test"},
+            },
+        }
+
+        class FakeRouter:
+            def load_policy(self):
+                return {"queue_targets": {"direct": "flash", "fallback": "claude-desktop"}}
+
+            def decide(self, title, body, *, flash_free=True, policy=None):
+                return {"route": "direct", "model": "flash", "effort": "x", "scores": {},
+                        "overflow": False, "jev_error": None}
+
+        class FakeAdapterRefusesCreate:
+            def create(self, *_args, **_kwargs):
+                raise AssertionError("a rejected auto route must never create a Hermes task")
+
+        service = kanban_adapter.QueueService(
+            catalog=catalog, adapter=FakeAdapterRefusesCreate(), router=FakeRouter(),
+            flash_up=lambda: True,
+        )
+        turn = {"body": "@queue enqueue target=auto cap=read :: Shorten this", "msg_id": "m1",
+                "seat": "claude", "sponsor": "joe", "seq": 1, "origin_channel": "mcp", "origin_actor": "claude"}
+        out = service.handle(turn, room="p")
+        self.assertEqual(out["kind"], "rejected")
+        self.assertEqual(out["receipt"]["queue_rejected"]["code"], "auto_route_unavailable")
+
+    def test_handle_still_contains_its_final_capability_recheck(self):
+        """A narrower pin alongside the behavioural test above: greps the actual guard
+        clause so a refactor that quietly drops the recheck (while leaving some OTHER
+        code accidentally passing the behavioural test) still turns this test red."""
+        source = inspect.getsource(kanban_adapter.QueueService.handle)
+        self.assertIn('not entry.get("enabled")', source)
+        self.assertIn('command["cap"] not in entry.get("capabilities", [])', source)
+        self.assertIn("auto_route_unavailable", source)
 
 
 def main() -> int:
