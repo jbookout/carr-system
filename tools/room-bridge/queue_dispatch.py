@@ -181,7 +181,10 @@ def parse_terminal_result(raw: str, task_id: str, cap: str = "read") -> dict:
 
 
 def _bounded_reply(raw_result: str) -> str:
-    """The desk's own prose, redacted of the protocol line, bounded in size.
+    """The desk's own prose: its trailing CARR_QUEUE_RESULT protocol line stripped,
+    the rest truncated at MAX_REPLY_CHARS. Not redaction — nothing here scans for or
+    removes secrets/PII from the model's own text; it is the desk's reply verbatim,
+    just with the protocol line removed and a length bound applied.
 
     Used only for the flash-local desk (see completion_payload's include_reply):
     flash has no MCP tools of its own, so unlike a codex-session or claude-session
@@ -279,7 +282,8 @@ class QueueDeskExecutor:
               now: str | None = None, desk_live: bool = True,
               unavailable_since: dict[str, str] | str | None = None,
               unavailable_wait_s: float = DESK_UNAVAILABLE_WAIT_S,
-              include_reply: bool = False, retry_protocol_errors: bool = False) -> dict:
+              include_reply: bool = False, retry_protocol_errors: bool = False,
+              post_completion=None) -> dict:
         target = self._target(target_alias)
         self.last_ready_task_ids = set()
         self.last_ready_scan_complete = False
@@ -407,11 +411,17 @@ class QueueDeskExecutor:
             code = "no_answer" if detail == "no_answer" else _dispatch_failure_code(status)
             return self._retry_or_block(task_id, code, now=now)
         raw_result = row.get("result")
+        pending = {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
+                   "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
+                   "source_msg_id": parsed["meta"]["source_msg_id"]}
+        clean_result = raw_result if isinstance(raw_result, str) else ""
+        if post_completion is not None:
+            return self.finish_pending_posted(
+                pending, clean_result, post_completion=post_completion,
+                include_reply=include_reply, retry_protocol_errors=retry_protocol_errors, now=now,
+            )
         return self.finish_pending(
-            {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
-             "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
-             "source_msg_id": parsed["meta"]["source_msg_id"]},
-            raw_result if isinstance(raw_result, str) else "",
+            pending, clean_result,
             include_reply=include_reply, retry_protocol_errors=retry_protocol_errors, now=now,
         )
 
@@ -424,7 +434,8 @@ class QueueDeskExecutor:
         claude-session desk has its own MCP tools and posts its own reply into the room
         as part of doing the task, so the "never return model prose" rule holds for it
         unchanged; flash-local has no tools, so its reply would otherwise be lost, and
-        ``include_reply`` is the one bounded, redacted exception carrying it back.
+        ``include_reply`` is the one bounded exception carrying it back — its
+        protocol result line stripped and truncated (_bounded_reply), not redacted.
         """
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
@@ -467,10 +478,47 @@ class QueueDeskExecutor:
 
     def finish_pending(self, pending: dict, raw_result: str, *, include_reply: bool = False,
                        retry_protocol_errors: bool = False, now: str | None = None) -> dict:
+        return self._finish(
+            pending, raw_result, include_reply=include_reply,
+            retry_protocol_errors=retry_protocol_errors, now=now, post_completion=None,
+        )
+
+    def finish_pending_posted(self, pending: dict, raw_result: str, *, post_completion,
+                              include_reply: bool = False, retry_protocol_errors: bool = False,
+                              now: str | None = None) -> dict:
+        """Like finish_pending, but posts the room completion callback BEFORE any Hermes
+        terminal transition, never after.
+
+        Only the synchronous flash-local path (start()) needs this. An async desk's
+        completion carries persisted "pending" state (state.py) across bridge cycles,
+        so if posting failed there after Hermes was already marked terminal, the next
+        cycle's handle_pending() would call finish_pending() again and retry the SAME
+        post under the SAME idempotency key. The synchronous path has no such
+        persisted state — Hermes IS the only durable record of it — so posting after
+        the terminal mutation (finish_pending's order) would lose the reply for good
+        on a post failure, with nothing left to retry it.
+
+        Posting first instead means a failed post (post_completion raises, and the
+        exception propagates to the caller UNCHANGED) leaves the Hermes claim in
+        place — never marked done/blocked/review — so the task stays "running" until
+        Hermes' own release_stale_claims puts it back in the retry phase on its own
+        schedule. That is the SAME recovery authority every other transient dispatch
+        failure in this module already relies on (see the module docstring), not a
+        second local retry ledger.
+        """
+        return self._finish(
+            pending, raw_result, include_reply=include_reply,
+            retry_protocol_errors=retry_protocol_errors, now=now, post_completion=post_completion,
+        )
+
+    def _finish(self, pending: dict, raw_result: str, *, include_reply: bool,
+               retry_protocol_errors: bool, now: str | None, post_completion) -> dict:
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
             raise QueueDispatchError("pending queue task identity is invalid")
         completion = self.completion_payload(pending, raw_result, include_reply=include_reply)
+        if post_completion is not None:
+            post_completion(completion)  # raises straight through, before any Hermes mutation below
 
         def result(outcome: str) -> dict:
             return {"outcome": outcome, "task_id": task_id, "completion": completion}

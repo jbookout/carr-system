@@ -341,17 +341,15 @@ def probe_live(entry: dict) -> bool:
     return True
 
 
-def _post_queue_completion(terminal: dict, *, add_room_turn, seat: str) -> None:
-    """Post one queue task's bounded typed completion callback into the room.
+def _post_completion_payload(completion: dict, *, add_room_turn, seat: str) -> None:
+    """Post one already-built queue completion payload into the room.
 
-    Shared by the async pending path (handle_pending) and the synchronous
-    desk path (flash-local completes inline in queue_executor.start()) so
-    both post the exact same callback shape under the exact same dedup key.
+    The task_id is read back out of the payload itself (queue_completion.task_id)
+    rather than taken as a separate argument, so a caller that has only the
+    payload — like finish_pending_posted's post_completion hook, which runs
+    before the caller ever gets a "terminal" dict back — can still post it.
     """
-    completion = terminal.get("completion")
-    if not isinstance(completion, dict):
-        raise queue_dispatch.QueueDispatchError("queue completion callback is absent")
-    task_id = terminal.get("task_id")
+    task_id = (completion.get("queue_completion") or {}).get("task_id")
     if not isinstance(task_id, str) or not task_id.startswith("t_"):
         raise queue_dispatch.QueueDispatchError("queue completion callback identity is invalid")
     add_room_turn(
@@ -361,6 +359,20 @@ def _post_queue_completion(terminal: dict, *, add_room_turn, seat: str) -> None:
         msg_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"carr:queue-completion:{task_id}")),
         idempotency_key=f"queue-completion:{task_id}",
     )
+
+
+def _post_queue_completion(terminal: dict, *, add_room_turn, seat: str) -> None:
+    """Post one queue task's bounded typed completion callback into the room.
+
+    Used by the async pending path (handle_pending), which already has a full
+    "terminal" dict ({"task_id": ..., "completion": ...}) in hand once
+    finish_pending returns. The synchronous flash-local path posts through
+    _post_completion_payload directly instead — see finish_pending_posted.
+    """
+    completion = terminal.get("completion")
+    if not isinstance(completion, dict):
+        raise queue_dispatch.QueueDispatchError("queue completion callback is absent")
+    _post_completion_payload(completion, add_room_turn=add_room_turn, seat=seat)
 
 
 def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
@@ -794,11 +806,26 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     required_queue_desks = set(desk_queue_targets)
     for name, entry in desk_entries.items():
         seat = entry.get("room_seat")
-        if not seat:
+        # A queue-target desk (e.g. flash-local) is legitimately seatless: it is
+        # deliberately excluded from conversational_desk_seats so ordinary room
+        # chatter never reaches it (Joe 2026-09-24, and PR #1249's own docstring).
+        # Before this fix, "no seat" and "no queue work either" were conflated —
+        # `continue` skipped the ENTIRE per-desk body, including the executor's
+        # start() dispatch call further down, so a seatless queue-target desk's
+        # ready tasks were never claimed or dispatched at all (finding 1, PR
+        # #1254 round 2 review). Only skip a desk that has neither.
+        if not seat and name not in desk_queue_targets:
             continue
+        # post_seat attributes a post when THIS desk has no room identity of its
+        # own — the system seat used everywhere else in this file for a receipt
+        # nobody in the room authored (e.g. desktop-handoff and timeout receipts
+        # above). It is used only for queue-path posts below; the conversational
+        # deliver() path is guarded by `seat` itself (see the assertion below),
+        # since a seatless desk must never answer a conversational room turn.
+        post_seat = seat or "hermes"
         try:
             pending_outcome = handle_pending(
-                name, seat, state, add_room_turn=add_room_turn,
+                name, post_seat, state, add_room_turn=add_room_turn,
                 log_path=desk_state_dir / f"{name}.log",
                 pending_timeout_s=pending_timeout_s,
                 now=now_fn(),
@@ -811,6 +838,14 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             if state_mod.get_pending(state, name) is None:
                 next_queued = state_mod.pop_next_queued(state, name)
                 if next_queued is not None:
+                    # conversational_desk_seats() never routes a room turn to a
+                    # seatless desk, so this should be unreachable for one — but
+                    # a seatless desk answering a human turn is exactly what must
+                    # never happen, so a bug elsewhere fails loudly here instead
+                    # of silently delivering it.
+                    if not seat:
+                        raise queue_dispatch.QueueDispatchError(
+                            f"desk {name!r} popped a conversational turn without a room seat")
                     if name in desk_queue_targets:
                         queue_scan_complete = False
                     delivered.append(deliver(
@@ -831,8 +866,19 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                     # claude-session desk, which post their own reply into the room as
                     # part of doing the task. Flash's synchronous completion here is the
                     # ONLY chance its answer has to reach the room, so its reply rides
-                    # along in the completion callback below (finding: PR #1249 review).
+                    # along in the completion callback (finding: PR #1249 review).
                     is_flash_local = entry.get("kind") == "flash-local"
+
+                    def post_flash_completion(completion: dict) -> None:
+                        # Posted from INSIDE finish_pending_posted, before Hermes is
+                        # marked terminal — see that method's docstring for why a
+                        # failed post must not lose the reply for good (PR #1254
+                        # round 2, finding 3). A raise here propagates up through
+                        # start() unchanged; the per-desk except below (RuntimeError,
+                        # queue_dispatch.QueueDispatchError) catches it so one desk's
+                        # failed post never aborts the cycle for the others.
+                        _post_completion_payload(completion, add_room_turn=add_room_turn, seat=post_seat)
+
                     queue_outcome = queue_executor.start(
                         desk_queue_targets[name], dispatch_call=dispatch_queue,
                         desk_busy=state_mod.has_queued(state, name),
@@ -841,12 +887,8 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         unavailable_since=state.get("queue_unavailable_since", {}),
                         include_reply=is_flash_local,
                         retry_protocol_errors=is_flash_local,
+                        post_completion=post_flash_completion if is_flash_local else None,
                     )
-                    if is_flash_local and "completion" in queue_outcome:
-                        # Synchronous desks (flash-local) complete inline in start()
-                        # rather than through the pending/handle_pending path, so the
-                        # completion callback has to be posted here instead.
-                        _post_queue_completion(queue_outcome, add_room_turn=add_room_turn, seat=seat)
                     queue_scan_complete = queue_scan_complete and bool(
                         getattr(queue_executor, "last_ready_scan_complete", False))
                     if getattr(queue_executor, "last_ready_scan_complete", False):
@@ -942,6 +984,18 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             code = getattr(e, "code", "queue_dispatch_failed")
             errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
             # A queue outage says nothing about whether the named desk is live.
+            registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
+        except RuntimeError as e:
+            # add_room_turn raises a bare RuntimeError on failure (verb_io.py's own
+            # contract). The one place that can fire mid-desk here is the
+            # flash-local completion post (post_flash_completion, above) — Hermes
+            # was never marked terminal for it (finish_pending_posted posts BEFORE
+            # that mutation), so the claim just ages out and Hermes' own recovery
+            # returns the task to its retry phase. This must cost only this desk's
+            # cycle, not the whole bridge run (PR #1254 round 2, finding 3).
+            if name in required_queue_desks:
+                queue_scan_complete = False
+            errors.append({"desk": name, "error": "queue_completion_post_failed", "detail": str(e)[:500]})
             registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
 
     # A complete ready-card scan across every relevant desk makes disappearance
