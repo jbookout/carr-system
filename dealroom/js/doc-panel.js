@@ -21,7 +21,7 @@
  * tab-stop decision reuses workspace-business-model.js's own panelTabTarget
  * rather than a second, drifting implementation of the same rule.
  *
- * THREE FIXES after independent review of PR #1259:
+ * ROUND 2 fixes (independent review of PR #1259 at e9395b51):
  *  - index.html's #dealDialog/#formDialog are native <dialog> elements shown
  *    with showModal(), which makes everything OUTSIDE the dialog's own
  *    subtree inert — including a Doc panel appended to document.body. A
@@ -44,16 +44,68 @@
  *    Each region's prior inert/aria-hidden state is now snapshotted before
  *    Doc changes it, and restored exactly — not forced false — when Doc
  *    stops covering it.
+ *
+ * ROUND 3 fixes (independent review at afc85607 — this round replaces the
+ * round-2 snapshot/restore above with something that tolerates a THIRD
+ * PARTY changing a shared region's inert state while Doc still holds a
+ * snapshot of it, which the round-2 version did not):
+ *  - Doc and the record panel (workspace-business.js) now share ONE
+ *    reference-counted inert registry (inert-registry.js) instead of each
+ *    keeping its own snapshot/restore. A snapshot/restore only remembers
+ *    "what this region looked like before I touched it" — it has no idea
+ *    whether some OTHER, uncoordinated panel also currently needs the same
+ *    region inert, so whichever panel claimed or released SECOND could stomp
+ *    the other's still-active claim, in EITHER order: the reported defect
+ *    was the record panel releasing first and Doc's stale snapshot
+ *    re-claiming on top of it ("Escape kills the page" at 375px on
+ *    business.html); the untested mirror case was Doc claiming a region
+ *    first and later releasing it after the record panel had, in the
+ *    meantime, also independently claimed it. Reference counting removes the
+ *    ordering dependency: a region stays inert while at least one owner
+ *    claims it, and is restored to its true pre-claim baseline only once the
+ *    LAST owner releases it. `claimedByMe` here is just Doc's own
+ *    bookkeeping of which regions it currently holds a claim on, so a host
+ *    switch (relocate()) can release exactly those before moving, fixing
+ *    #dealDetail staying inert after a pinned Doc outlived its dialog.
+ *  - The Doc toggle is now inert (unreachable) whenever another modal is
+ *    covering the page and Doc itself is closed, matching a true modal's
+ *    "nothing outside it is reachable" semantics on business.html, where the
+ *    record panel does not otherwise know the toggle exists to inert it.
+ *  - renderContext() is now re-invoked whenever a host page's notion of the
+ *    open deal changes (see exported refreshDocContext), not only on Doc's
+ *    own open() — a Doc opened before any deal, or pinned across a deal
+ *    dialog closing, no longer shows a stale "Working on" line.
+ *  - Retry no longer reads a single shared mutable "last attempt" slot on
+ *    state, or re-reads source.getContext() at click time. Each failed line's retry
+ *    closure captures its own command/text/context/idempotencyKey at the
+ *    moment IT failed; clicking an older Retry after a newer line has
+ *    already succeeded can never throw and can never write to whatever deal
+ *    happens to be open now instead of the one it actually targets.
  */
 
-import { docPanelModality, escapeShouldClose, parseDocInput, formatReceiptLine } from './doc-panel-model.js';
+import { docPanelModality, escapeShouldClose, parseDocInput, formatReceiptLine, retryContextDriftNote } from './doc-panel-model.js';
 import { panelTabTarget } from './workspace-business-model.js';
 import { runCommand, listCommands } from './commands.js';
+import { claimInert, releaseInert, isClaimedByOther } from './inert-registry.js';
+
+const OWNER = 'doc';
 
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 const PIN_KEY = 'dealroom-doc-pinned';
 
 let source = { getClient: () => null, getContext: () => ({}) };
+let currentRenderContext = null;
+
+/**
+ * Called by a host page whenever ITS notion of "the open deal" changes
+ * (opening a deal, closing its dialog, switching records) so an already-open
+ * Doc panel's "Working on" line stays live instead of only updating the next
+ * time Doc itself is opened. Safe to call when Doc has not mounted yet, or
+ * is currently closed — it just re-renders the (possibly hidden) label.
+ */
+export function refreshDocContext() {
+  currentRenderContext?.();
+}
 
 /**
  * Called by a host page (app.js, workspace-business.js, …) once its client
@@ -124,7 +176,7 @@ function mount() {
 
   document.body.append(toggle, panel);
 
-  const state = { open: false, pinned: readPinned(), lastAttempt: null };
+  const state = { open: false, pinned: readPinned() };
   const dom = {
     toggle, panel,
     title: panel.querySelector('#docPanelTitle'),
@@ -151,31 +203,19 @@ function mount() {
     return (openDialog && openDialog !== panel && !panel.contains(openDialog)) ? openDialog : document.body;
   }
 
-  function relocate() {
-    const host = openDialogHost();
-    if (toggle.parentNode !== host) host.append(toggle, panel);
-  }
-
-  // Relocating alone is not enough: the set of "other regions" to inert is
-  // relative to whatever element toggle/panel currently live in, so a host
-  // change must always be followed by recomputing inert state against the
-  // NEW host — otherwise closing a dialog while Doc is still open at phone
-  // width would move Doc back to document.body without ever making body's
-  // own children inert, breaking the trap.
-  const dialogWatcher = typeof MutationObserver === 'function'
-    ? new MutationObserver(() => { relocate(); applyModality(); })
-    : null;
-  dialogWatcher?.observe(document.documentElement, { attributes: true, attributeFilter: ['open'], subtree: true });
-
   // ------------------------------------------------------- inert background
   //
-  // Snapshot each region's OWN prior inert/aria-hidden state the first time
-  // Doc covers it, and restore exactly that — never a hardcoded false — when
-  // Doc stops covering it, so Doc can never undo another panel's independent
-  // modal state on a region they both happen to reach (e.g. <header
-  // data-panel-background> on business.html, which workspace-business.js's
-  // record panel also manages).
-  const managedRegions = new WeakMap();
+  // Claim/release each region through the shared reference-counted registry
+  // (inert-registry.js) rather than writing `inert`/`aria-hidden` directly —
+  // see that file's own header for why a snapshot/restore approach is not
+  // enough once TWO independently-modal panels (Doc, and the record panel on
+  // business.html) can both reach the same region: whichever one claimed or
+  // released SECOND could stomp the other's still-active claim, in EITHER
+  // order. `claimedByMe` is local bookkeeping only — which regions Doc itself
+  // currently holds a claim on — so a host switch knows what to release
+  // before moving; it carries no state about the region itself (the registry
+  // owns that).
+  const claimedByMe = new Set();
 
   function otherRegions() {
     // The toggle is NOT excluded here (an earlier draft excluded it so it
@@ -187,24 +227,75 @@ function mount() {
     return [...host.children].filter((el) => el !== panel);
   }
 
+  // Called right before Doc moves to a different host (a dialog opening or
+  // closing under it). Everything Doc currently holds a claim on belongs to
+  // the OLD host's subtree; if the claim were left in place across the move,
+  // applyModality would only ever look at the NEW host's children again and
+  // those old regions (e.g. #dealDetail behind a dialog a pinned Doc just
+  // outlived) would stay claimed — and therefore inert — forever, with no
+  // code path left that ever revisits them to release it.
+  function releaseAllManaged() {
+    for (const region of [...claimedByMe]) { releaseInert(region, OWNER); claimedByMe.delete(region); }
+  }
+
+  function relocate() {
+    const host = openDialogHost();
+    if (toggle.parentNode !== host) {
+      releaseAllManaged();
+      host.append(toggle, panel);
+    }
+  }
+
+  // Relocating alone is not enough: the set of "other regions" to inert is
+  // relative to whatever element toggle/panel currently live in, so a host
+  // change must always be followed by recomputing inert state against the
+  // NEW host — otherwise closing a dialog while Doc is still open at phone
+  // width would move Doc back to document.body without ever making body's
+  // own children inert, breaking the trap. Watching `inert` too (not just a
+  // dialog's `open`) makes Doc reactive to a wholly separate modal — the
+  // record panel on business.html — claiming or releasing the page on its
+  // own schedule, which is what lets the toggle's own reachability track it.
+  const dialogWatcher = typeof MutationObserver === 'function'
+    ? new MutationObserver(() => {
+        const priorHost = toggle.parentNode;
+        relocate();
+        applyModality();
+        // A native dialog's own close() frequently resets focus to <body>
+        // rather than restoring it. If that just happened while Doc is
+        // still open (pinned), bring focus back inside Doc instead of
+        // leaving it stranded on <body> — Tab from there would walk into
+        // whatever the closing host left behind, not into Doc.
+        if (state.open && toggle.parentNode !== priorHost) {
+          const strandedOnBody = document.activeElement === document.body
+            || !document.body.contains(document.activeElement);
+          if (strandedOnBody) focusWithoutScrolling(dom.title);
+        }
+      })
+    : null;
+  dialogWatcher?.observe(document.documentElement, { attributes: true, attributeFilter: ['open', 'inert'], subtree: true });
+
   function applyModality() {
     const modal = isModal();
     panel.setAttribute('role', modal ? 'dialog' : 'complementary');
     if (modal) panel.setAttribute('aria-modal', 'true'); else panel.removeAttribute('aria-modal');
-    const shouldCover = modal && state.open;
-    for (const region of otherRegions()) {
-      if (shouldCover) {
-        if (!managedRegions.has(region)) {
-          managedRegions.set(region, { inert: region.inert, ariaHidden: region.getAttribute('aria-hidden') });
-        }
-        region.inert = true;
-        region.setAttribute('aria-hidden', 'true');
-      } else if (managedRegions.has(region)) {
-        const prior = managedRegions.get(region);
-        region.inert = prior.inert;
-        if (prior.ariaHidden === null) region.removeAttribute('aria-hidden');
-        else region.setAttribute('aria-hidden', prior.ariaHidden);
-        managedRegions.delete(region);
+    const shouldCoverForDoc = modal && state.open;
+    const regions = otherRegions();
+    // Some OTHER, uncoordinated modal (the record panel) may already be
+    // covering part of the page. The toggle sits outside that modal's own
+    // reach (it is not `[data-panel-background]`), so without this check it
+    // would stay reachable even while that modal is genuinely up — which is
+    // exactly the gap the round-3 review flagged.
+    const externalModalActive = regions.some((region) => region !== toggle && isClaimedByOther(region, OWNER));
+    for (const region of regions) {
+      const wantsInert = region === toggle
+        ? (shouldCoverForDoc || (externalModalActive && !state.open))
+        : shouldCoverForDoc;
+      if (wantsInert) {
+        claimInert(region, OWNER);
+        claimedByMe.add(region);
+      } else if (claimedByMe.has(region)) {
+        releaseInert(region, OWNER);
+        claimedByMe.delete(region);
       }
     }
   }
@@ -240,6 +331,13 @@ function mount() {
       ? `Working on: ${context.label || context.dealId}.`
       : 'Working on: nothing open yet. Commands that need a record will say so.';
   }
+  // Exposed at module scope (see refreshDocContext below) so a host page can
+  // re-render the label the moment its notion of "the open deal" changes —
+  // not only on Doc's own open(), which is the only place that called this
+  // before. Without it, a Doc opened before any deal, or pinned across a
+  // deal-dialog close, kept showing a stale "Working on" line that no longer
+  // matched the deal commands actually write to.
+  currentRenderContext = renderContext;
 
   function appendLog(text, tone, { retry = null } = {}) {
     const line = document.createElement('p');
@@ -258,24 +356,31 @@ function mount() {
   }
 
   /**
-   * Runs one command attempt. `idempotencyKey`, when supplied, is a RETRY of
-   * the exact same attempt and reuses that key so the server's own
-   * idempotency_key dedupe (mcp-server/src/tools.js withEnvelope) applies —
-   * a retry can never turn into a second write.
+   * Runs one command attempt against a context CAPTURED by the caller — never
+   * re-read from source.getContext() in here. Each failed line's Retry button
+   * closes over its own { command, text, context, idempotencyKey } object
+   * (built below), not a shared mutable slot: clicking an older Retry after a
+   * newer attempt has already succeeded or failed re-runs exactly what THAT
+   * line originally attempted, against the deal that was open when it first
+   * ran, however many other attempts have happened since. `idempotencyKey`,
+   * when supplied, is a RETRY of the exact same attempt and reuses that key
+   * so the server's own idempotency_key dedupe (mcp-server/src/tools.js
+   * withEnvelope) applies — a retry can never turn into a second write, and
+   * an unrelated later success can never make an older retry throw, because
+   * nothing here reads state that a later call could have mutated out from
+   * under it.
    */
-  async function attempt(command, text, idempotencyKey) {
+  async function attempt({ command, text, context, idempotencyKey = null }) {
     const client = source.getClient();
-    const context = source.getContext() || {};
     const receipt = await runCommand(client, command, text, context, idempotencyKey ? { idempotencyKey } : {});
     const { text: line } = formatReceiptLine(receipt);
+    const drift = retryContextDriftNote(context, source.getContext());
+    const fullLine = line + drift;
     if (receipt.status === 'refused' || receipt.status === 'unavailable') {
-      state.lastAttempt = { command, text, idempotencyKey: receipt.idempotencyKey };
-      appendLog(line, receipt.status, {
-        retry: () => attempt(command, text, state.lastAttempt.idempotencyKey),
-      });
+      const captured = { command, text, context, idempotencyKey: receipt.idempotencyKey };
+      appendLog(fullLine, receipt.status, { retry: () => attempt(captured) });
     } else {
-      state.lastAttempt = null;
-      appendLog(line, receipt.status);
+      appendLog(fullLine, receipt.status);
     }
   }
 
@@ -288,7 +393,8 @@ function mount() {
     dom.input.value = '';
     dom.input.disabled = true;
     try {
-      await attempt(command, text, null);
+      const context = source.getContext() || {};
+      await attempt({ command, text, context });
     } finally {
       dom.input.disabled = false;
       dom.input.focus();

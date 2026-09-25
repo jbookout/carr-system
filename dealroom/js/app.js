@@ -1,7 +1,7 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
-import { registerDocPanelSource } from './doc-panel.js';
+import { registerDocPanelSource, refreshDocContext } from './doc-panel.js';
 import { runCommand, buildDealContext } from './commands.js';
 import {
   REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
@@ -1004,20 +1004,25 @@ function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit })
 
 function nextStepForm(dealId) {
   const deal = state.deals.get(dealId);
-  // One idempotency key for the whole time this form stays open. openForm's
-  // dialog does not get recreated between a refused attempt and the user
-  // hitting Submit again — it is the SAME logical attempt, retried — so it
-  // must reuse the same key rather than mint a fresh one per click. A fresh
-  // key would skip the server's own idempotency_key replay
-  // (mcp-server/src/tools.js withEnvelope) and risk a genuine second write
-  // on a retry after what only looked like a failure.
-  const idempotencyKey = uuidv4();
+  // Track the content of the LAST submit attempt (not just "the form is
+  // open"). A retry of an attempt that failed reuses that same attempt's
+  // key, so the server's own idempotency_key replay (mcp-server/src/tools.js
+  // withEnvelope) applies and a retry can never turn into a second write.
+  // But if the user edits the text or date before resubmitting, that is a
+  // genuinely different attempt — reusing the old key would make the server
+  // treat the EDITED content as a replay of the stale one (key_reuse) or,
+  // worse, silently keep the old content. A fresh key is minted only when
+  // what's being submitted differs from what was last attempted.
+  let lastAttempt = null; // { text, next_date, idempotencyKey }
   openForm({ title:`Next step — ${deal.name}`, submit:'Set next step', body:`
     <div class="field"><label for="stepText">What happens next?</label><textarea id="stepText" name="text" required>${esc(deal.next_step || '')}</textarea><small>This becomes a real next action in today’s triage; the prior step stays in history.</small></div>
     <div class="field"><label for="stepDate">When?</label><input id="stepDate" name="next_date" type="date" value="${esc(deal.next_date || '')}"></div>`,
     onSubmit:async (data) => {
       const text = String(data.get('text') || '').trim();
       const next_date = data.get('next_date') || null;
+      const identicalRetry = lastAttempt && lastAttempt.text === text && lastAttempt.next_date === next_date;
+      const idempotencyKey = identicalRetry ? lastAttempt.idempotencyKey : uuidv4();
+      lastAttempt = { text, next_date, idempotencyKey };
       // Same runCommand the Doc panel's `/set_next_step` runs (commands.js),
       // and the SAME buildDealContext() the Doc's context comes from — one
       // code path and one context builder, so this form and Doc cannot drift
@@ -1133,6 +1138,10 @@ async function openDeal(dealId) {
   // would offer commands against a dialog that never showed).
   const detail = await state.client.getDeal(dealId);
   state.docContextDealId = dealId;
+  // A Doc panel already open (pinned, or opened before any deal was) must
+  // pick up the new "working on" deal immediately, not only the next time
+  // Doc itself is opened.
+  refreshDocContext();
   const deal = detail.deal;
   const parked = deal.operating_state === 'parked';
   const html = `<header><div><p class="eyebrow">${esc(deal.account_name || deal.client_name || 'Work record')}</p><h2>${esc(deal.name)}</h2><p class="subhead">${parked ? `${esc(parkingReasonLabel(deal.parking_reason))} · ` : ''}${esc(deal.phase)} · ${esc(deal.market || 'Market not captured')}</p></div><div class="detail-header-actions"><button type="button" class="park-button" data-operating-state="${parked ? 'active' : 'parked'}" data-deal="${esc(deal.id)}">${parked ? 'Restore to active' : 'Park'}</button><button type="button" class="icon-button" data-close-deal aria-label="Close details">×</button></div></header>
@@ -1223,7 +1232,7 @@ function wireEvents() {
   // own light-dismiss — this fires either way, so it is the one place that
   // clears the Doc panel's "working on" context rather than every call site
   // that can close #dealDialog remembering to do it.
-  $('#dealDialog').addEventListener('close', () => { state.docContextDealId = null; });
+  $('#dealDialog').addEventListener('close', () => { state.docContextDealId = null; refreshDocContext(); });
   document.addEventListener('click', async (event) => {
     const workspace = event.target.closest('[data-workspace]');
     if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.deepLinkMine = false; state.query = ''; $('#search').value = ''; render(); return; }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  docPanelModality, escapeShouldClose, parseDocInput, formatReceiptLine,
+  docPanelModality, escapeShouldClose, parseDocInput, formatReceiptLine, retryContextDriftNote,
 } from "../js/doc-panel-model.js";
 
 test("docPanelModality is closed unless open, then follows the same phone-width rule as the record panel", () => {
@@ -45,4 +45,33 @@ test("formatReceiptLine gives every status its own distinct, honest copy", () =>
   assert.equal(conflict.tone, "conflict");
   assert.equal(unavailable.tone, "unavailable");
   assert.equal(refused.tone, "refused");
+});
+
+test("retryContextDriftNote is silent when the captured deal is still the open one", () => {
+  const captured = { dealId: "d1", label: "Acme HQ" };
+  assert.equal(retryContextDriftNote(captured, { dealId: "d1" }), "");
+  assert.equal(retryContextDriftNote(captured, captured), "");
+});
+
+test("retryContextDriftNote is silent when the captured attempt had no deal at all (e.g. add_note with nothing open)", () => {
+  assert.equal(retryContextDriftNote({ dealId: null }, { dealId: "d2" }), "");
+  assert.equal(retryContextDriftNote({}, { dealId: "d2" }), "");
+  assert.equal(retryContextDriftNote(null, { dealId: "d2" }), "");
+});
+
+test("retryContextDriftNote names the captured deal honestly once it is no longer the open one", () => {
+  const captured = { dealId: "d1", label: "Acme HQ" };
+  const note = retryContextDriftNote(captured, { dealId: "d2" });
+  assert.match(note, /Acme HQ/, "must name the deal it actually ran against, not the currently-open one");
+  assert.match(note, /no longer the open record/i);
+});
+
+test("retryContextDriftNote falls back to the raw dealId when no friendly label was captured", () => {
+  const note = retryContextDriftNote({ dealId: "deal-77" }, { dealId: null });
+  assert.match(note, /deal-77/);
+});
+
+test("retryContextDriftNote treats 'nothing currently open' as drift too, when the captured attempt had a real deal", () => {
+  const note = retryContextDriftNote({ dealId: "d1", label: "Acme HQ" }, {});
+  assert.notEqual(note, "", "a captured deal that is no longer open at all must still be flagged, not silently treated as still current");
 });

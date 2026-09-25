@@ -50,6 +50,23 @@ export function parseDocInput(raw) {
 }
 
 /**
+ * A retry (or the original attempt) always runs against the deal it captured
+ * at the moment it was made — never whatever deal happens to be open when
+ * the button is clicked (see doc-panel.js `attempt`). When that captured
+ * deal is no longer the open one, the reader is told plainly rather than
+ * left thinking the line applied to whatever is currently on screen.
+ * @param {{dealId?:string|null, label?:string}} capturedContext the context an attempt/retry actually ran against
+ * @param {{dealId?:string|null}} currentContext the context the panel is showing right now
+ * @returns {string} an empty string, or a parenthetical note to append to the receipt line
+ */
+export function retryContextDriftNote(capturedContext, currentContext) {
+  const captured = capturedContext || {};
+  const current = currentContext || {};
+  if (!captured.dealId || current.dealId === captured.dealId) return '';
+  return ` (ran against ${captured.label || captured.dealId}, no longer the open record)`;
+}
+
+/**
  * Turn a command receipt (see commands.js) into the tone/text a reader sees.
  * No status here is ever silently upgraded to success: unavailable, refused,
  * and conflict each keep their own distinct copy.

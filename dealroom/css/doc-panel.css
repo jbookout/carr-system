@@ -1,7 +1,13 @@
 /* Doc panel (V5-J101). Self-contained: every color falls back through the
    host page's own tokens (workspace.css dark tokens, or app.css's lighter
    --navy/--paper set) so the same file themes correctly on every owned page
-   without assuming which stylesheet loaded first. */
+   without assuming which stylesheet loaded first. The same applies to
+   .visually-hidden: workspace-business.css defines it, but index.html loads
+   only app.css + this file, so the composer's "Tell Doc what to do" label
+   rendered visibly there (round-3 review). Defining it here too means Doc's
+   own markup never depends on which host stylesheet happens to be loaded. */
+.visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
 .doc-toggle{
   position:fixed;right:16px;bottom:16px;z-index:40;
   display:inline-flex;align-items:center;gap:8px;
