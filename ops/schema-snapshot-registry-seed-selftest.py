@@ -166,6 +166,9 @@ RUNTIME_V70 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v70.generat
 RUNTIME_V71 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v71.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V72 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v72.generated.js").read_text(
+    encoding="utf-8"
+)
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -197,7 +200,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 72)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 73)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -476,13 +479,20 @@ assert "SCAC_FULL_SET_SEAL_COUNT=69" in GENERATOR
 assert "ops.scac_mutation_catalog_v70_current()" in GENERATOR
 assert "0589_jev_call_receipt_migrate_py_reseal.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v70"' in RUNTIME_V70
-assert "DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" in GENERATOR
+assert "NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=71" in GENERATOR
 assert "SCAC_VERSION_COUNT=71" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=70" in GENERATOR
 assert "ops.scac_mutation_catalog_v71_current()" in GENERATOR
-assert "0601_deploy_worker_do_migration_reseal.sql" in GENERATOR
+assert "0600_nightly_exports_daytime_retry_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v71"' in RUNTIME_V71
+assert "DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=72" in GENERATOR
+assert "SCAC_VERSION_COUNT=72" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=71" in GENERATOR
+assert "ops.scac_mutation_catalog_v72_current()" in GENERATOR
+assert "0601_deploy_worker_do_migration_reseal.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v72"' in RUNTIME_V72
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=43" in GENERATOR
@@ -664,14 +674,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "70", "71"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "71", "72"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 70
-assert loaded_sql.count("sha256:") == 70
-assert FULL_SET_SEALS["scac-mutation-registry.v70"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 71
+assert loaded_sql.count("sha256:") == 71
+assert FULL_SET_SEALS["scac-mutation-registry.v71"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 

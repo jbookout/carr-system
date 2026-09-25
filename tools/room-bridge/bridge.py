@@ -72,6 +72,7 @@ import claude_desktop_wire  # noqa: E402
 import desks  # noqa: E402
 import dispatch  # noqa: E402
 import execution_contract  # noqa: E402
+import flash_wire  # noqa: E402
 import grammar  # noqa: E402
 import kanban_adapter  # noqa: E402
 import queue_dispatch  # noqa: E402
@@ -330,6 +331,9 @@ def probe_live(entry: dict) -> bool:
     kind = entry.get("kind")
     if kind in ("claude-session", "codex-live"):
         return desks.is_live(entry.get("socket", ""))
+    if kind == "flash-local":
+        # the Flash server is a local process with a health endpoint; a queue task waits while it is down
+        return flash_wire.is_up()
     # claude-desktop and codex-session are durable rather than live
     # (dispatch.py's own framing) —
     # there is no process to probe between dispatches, so "live" here means
@@ -471,7 +475,7 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
         )
         return {"desk": name, "outcome": "delivered_async"}
 
-    if kind in ("codex-session", "codex-live"):
+    if kind in ("codex-session", "codex-live", "flash-local"):
         row = dispatch_fn(name, text, registry=registry, results_path=results_path)
         status = row.get("status")
         if status == "completed":
