@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 checked = 0
@@ -123,7 +124,7 @@ def main() -> int:
                   if s.get("key") == "nightly-exports-daytime-retry"), None)
     ok(entry is not None, "services.json registers a 'nightly-exports-daytime-retry' service")
     if entry:
-        prod = next((e for e in entry.get("environments", [])
+        prod: dict[str, Any] = next((e for e in entry.get("environments", [])
                      if e.get("environment") == "production"), {})
         ok(prod.get("deploy_mechanism") == "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
            "its production deploy_mechanism names the actual plist")
@@ -133,12 +134,20 @@ def main() -> int:
        "not under nightly-record-layer's key (that mismatch was the original bug)")
     # Every early-return branch must call record(), or the job goes quiet on
     # every healthy night and reads permanently stale against its own
-    # registered cadence.
+    # registered cadence — with exactly ONE documented exception: the
+    # "already attempted today's retry and it FAILED" branch deliberately
+    # exits with NO new record() call, so the earlier failed row stays latest
+    # instead of being replaced by a skipped heartbeat (#1241 review R4).
     exit_paths = retry_src.count("exit 0") + retry_src.count('exit "$rc"')
     record_calls = retry_src.count("record ")
-    ok(record_calls >= exit_paths,
-       f"every exit path ({exit_paths}) has a matching record() call ({record_calls}) "
-       "— a SKIP branch with no heartbeat would starve this service's own cadence")
+    exempt_no_heartbeat_exits = 1
+    ok(record_calls >= exit_paths - exempt_no_heartbeat_exits,
+       f"every exit path ({exit_paths}) has a matching record() call ({record_calls}), "
+       f"except the {exempt_no_heartbeat_exits} documented failed-marker exit "
+       "— any OTHER SKIP branch with no heartbeat would starve this service's own cadence")
+    ok('failed:*)' in retry_src and "not overwriting that failure with a skipped heartbeat" in retry_src,
+       "the marker-exists branch distinguishes a prior FAILURE and leaves it as latest "
+       "instead of replacing it with a skipped record()")
 
     # ── the new plist ─────────────────────────────────────────────────────
     plist_path = REPO / "ops" / "launchd" / "com.carr.nightly-exports-daytime-retry.plist"
@@ -148,6 +157,21 @@ def main() -> int:
        "the new plist declares its own label")
     ok("StartCalendarInterval" in plist and "StartInterval" not in plist,
        "it uses StartCalendarInterval, not StartInterval (observed to never fire on this Mac)")
+    # StartCalendarInterval's Hour/Minute are LOCAL time, not UTC (#1241
+    # review R4: the first draft set Hour 16 intending 16:00 UTC/11:00 local
+    # and actually fired at 4pm local). Hour 11 is the corrected value.
+    cal = plist.get("StartCalendarInterval") or [{}]
+    ok(cal[0].get("Hour") == 11, "StartCalendarInterval fires at Hour 11 (local time), not Hour 16")
+
+    # The healthy no-op ("tonight's exports already landed OK") must record
+    # succeeded, not skipped — v_service_environment_health maps skipped to
+    # degraded, which would show this service as degraded every healthy day.
+    ok('record succeeded 0 "tonight' in retry_src,
+       "the healthy no-op path records succeeded, not skipped")
+    # The archive-date keying (not TODAY_UTC) so a late wake still retries.
+    ok("ARCHIVE_DATE" in retry_src and "YESTERDAY_UTC" in retry_src,
+       "the marker and staleness check key off the archive's own embedded date, "
+       "not TODAY_UTC alone, so a Mac asleep through UTC midnight still retries")
 
     # No standalone bin/install-*.sh script for this job: that filename shape
     # trips ops/scac-mutation-inventory.mjs's external_admin classifier (a

@@ -146,7 +146,7 @@
           "deploy_mechanism": "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
           "expected_cadence_seconds": 86400,
           "cadence_grace_seconds": 7200,
-          "notes": "Daily at 16:00 UTC (11:00 local), one fixed calendar fire. A no-op most days (exits immediately once tonight's own nightly-record-layer run already landed exports OK), so absence of a RETRY line in out/nightly.log is the expected common case, not an anomaly — same posture as migrate-prod above."
+          "notes": "Daily at 11:00 local (StartCalendarInterval Hour/Minute are local time, not UTC), one fixed calendar fire. A no-op most days (exits immediately once tonight's own nightly-record-layer run already landed exports OK), so absence of a RETRY line in out/nightly.log is the expected common case, not an anomaly — same posture as migrate-prod above."
         }
       ]
     },

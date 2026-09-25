@@ -32,13 +32,15 @@
     <string>{{REPO}}/bin/nightly-exports-retry.sh</string>
   </array>
 
-  <!-- 16:00 UTC = 11:00 local (matching the ~5h offset the incident report
-       uses for 07:05 UTC / ~2am local) — mid-morning, well inside working
-       hours, with several hours of buffer after the 07:05 UTC nightly run for
-       its own archive to have already landed. -->
+  <!-- StartCalendarInterval's Hour/Minute are LOCAL time, not UTC (the prior
+       draft of this plist got that backwards and set Hour 16, firing at 4pm
+       local instead of the intended mid-morning window). 11:00 local is
+       mid-morning, well inside working hours, with several hours of buffer
+       after the ~07:05 UTC (~2am local) nightly run for its own archive to
+       have already landed. -->
   <key>StartCalendarInterval</key>
   <array>
-    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
   </array>
 
   <key>RunAtLoad</key><false/>

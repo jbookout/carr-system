@@ -42,7 +42,6 @@ mkdir -p "$REPO/out"
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  RETRY  $*" >> "$LOG"; }
 
 TODAY_UTC="$(date -u '+%Y%m%d')"
-MARKER="$REPO/out/.nightly-exports-retry-$TODAY_UTC.done"
 
 # ── LOAD THE LEDGER CREDENTIAL EARLY, BEFORE ANY SKIP BRANCH ─────────────────
 # CARR_DB_EXPORTER_URL (loaded further down, gating the retry attempt itself)
@@ -80,17 +79,6 @@ record() {
       --source-ref bin/nightly-exports-retry.sh --detail "$detail" "$@" >> "$LOG" 2>&1
 }
 
-# ── ONE RETRY A DAY, ON PURPOSE ──────────────────────────────────────────────
-# The plist fires this at one fixed daytime hour. The marker keeps a second,
-# hand-run invocation the same day from spending a second publish for no
-# reason once today's retry has already run (success or failure — a retry
-# that already failed is a fact for a human to read, not a reason to spin).
-if [ -f "$MARKER" ]; then
-  say "SKIP  already attempted the daytime retry today ($MARKER exists)"
-  record skipped 0 "already attempted today"
-  exit 0
-fi
-
 # ── DID TONIGHT'S EXPORT ALREADY LAND CLEAN? ─────────────────────────────────
 # bin/nightly.sh's own step() already wrote the authoritative line for tonight
 # into the per-run archive under out/nightly-runs/. Read that back rather than
@@ -107,28 +95,68 @@ if [ -d "$runlog_dir" ]; then
   latest="$(ls -1t "$runlog_dir"/nightly-*.log(N) 2>/dev/null | head -1)"
 fi
 
-exports_line=""
-latest_is_today=0
-if [ -n "$latest" ]; then
-  case "$(basename "$latest")" in
-    nightly-"$TODAY_UTC"T*) latest_is_today=1 ;;
-  esac
-  # step()'s say() pads each status word differently (OK gets 4 spaces, FAIL/
-  # TIMEOUT/BLOCKED/SKIP get 2) so the label columns line up — matching one
-  # fixed gap would silently miss every status but the one it was tested
-  # against.
-  exports_line="$(grep -E '(OK|FAIL|TIMEOUT|BLOCKED|SKIP)[[:space:]]+exports \(6 targets -> OneDrive\)' "$latest" 2>/dev/null | tail -1)"
-fi
-
-if [ "$latest_is_today" -eq 0 ]; then
-  say "SKIP  no nightly run archived for today ($TODAY_UTC UTC) yet — nothing to retry against"
-  record skipped 0 "no nightly run archived for today yet"
+if [ -z "$latest" ]; then
+  say "SKIP  no nightly run has ever been archived — nothing to retry against"
+  record skipped 0 "no nightly run archived yet"
   exit 0
 fi
 
+# ── KEY "TODAY" ON THE ARCHIVE'S OWN DATE, NOT TODAY_UTC ────────────────────
+# A Mac asleep through the UTC midnight rollover can archive tonight's run
+# under a filename dated either side of "today" by wall-clock UTC. The old
+# TODAY_UTC-only gate skipped a genuine same-night retry whenever that
+# happened (a late wake) — instead, key both the "is this recent enough to be
+# tonight's run" check AND the one-retry-a-day marker off the archive's own
+# embedded date.
+ARCHIVE_DATE="$(basename "$latest" | sed -n 's/^nightly-\([0-9]\{8\}\)T.*/\1/p')"
+if [ -z "$ARCHIVE_DATE" ]; then
+  say "SKIP  latest archive ($latest) has an unrecognized filename — cannot key a marker off its date"
+  record skipped 0 "latest archive filename unrecognized"
+  exit 0
+fi
+YESTERDAY_UTC="$(date -u -v-1d '+%Y%m%d' 2>/dev/null || date -u -d 'yesterday' '+%Y%m%d')"
+case "$ARCHIVE_DATE" in
+  "$TODAY_UTC"|"$YESTERDAY_UTC") ;;
+  *)
+    say "SKIP  latest archive ($latest, $ARCHIVE_DATE) is neither today ($TODAY_UTC) nor yesterday ($YESTERDAY_UTC) UTC — too stale to be tonight's run"
+    record skipped 0 "latest archive too stale to be tonight's run"
+    exit 0
+    ;;
+esac
+MARKER="$REPO/out/.nightly-exports-retry-$ARCHIVE_DATE.done"
+
+# ── ONE RETRY PER ARCHIVED NIGHT, ON PURPOSE ─────────────────────────────────
+# The plist fires this at one fixed daytime hour. The marker keeps a second,
+# hand-run invocation the same night's window from spending a second publish
+# for no reason once that night's retry has already run. If that prior
+# attempt FAILED, a plain "skipped" heartbeat here would replace the failed
+# row with something that reads healthier than reality — so a prior failure
+# is logged and left alone (no new record() call), and the earlier failed row
+# stays latest, rather than being papered over.
+if [ -f "$MARKER" ]; then
+  prior="$(cat "$MARKER" 2>/dev/null)"
+  case "$prior" in
+    failed:*)
+      say "SKIP  already attempted the daytime retry for $ARCHIVE_DATE and it FAILED ($MARKER: $prior) — not overwriting that failure with a skipped heartbeat; the failed row stays latest"
+      exit 0
+      ;;
+    *)
+      say "SKIP  already attempted the daytime retry for $ARCHIVE_DATE ($MARKER: ${prior:-<no recorded outcome>})"
+      record skipped 0 "already attempted the $ARCHIVE_DATE retry"
+      exit 0
+      ;;
+  esac
+fi
+
+# step()'s say() pads each status word differently (OK gets 4 spaces, FAIL/
+# TIMEOUT/BLOCKED/SKIP get 2) so the label columns line up — matching one
+# fixed gap would silently miss every status but the one it was tested
+# against.
+exports_line="$(grep -E '(OK|FAIL|TIMEOUT|BLOCKED|SKIP)[[:space:]]+exports \(6 targets -> OneDrive\)' "$latest" 2>/dev/null | tail -1)"
+
 if print -r -- "$exports_line" | grep -qE '^\S+[[:space:]]+OK[[:space:]]+exports '; then
   say "SKIP  tonight's exports step already landed OK ($latest) — no retry needed"
-  record skipped 0 "tonight's exports step already landed OK"
+  record succeeded 0 "tonight's exports step already landed OK"
   exit 0
 fi
 
@@ -169,8 +197,13 @@ LOCK_HELD=1
 # an earlier call is simply exported again with the same value.
 carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL || true
 if [ -z "${CARR_DB_EXPORTER_URL:-}" ]; then
-  say "SKIP  no exporter credential provisioned on this machine"
-  record skipped 0 "no exporter credential provisioned on this machine"
+  # Tonight's exports step did NOT land OK (we only reach this branch past
+  # that check above) and this machine cannot even attempt the retry — that
+  # is a real, unaddressed failure, not a benign gated-out no-op. Recording
+  # it as `skipped` would hide it from anyone reading the service's health;
+  # `failed` is the honest state.
+  say "SKIP  no exporter credential provisioned on this machine, but tonight's exports step did not land OK — recording FAILED, not skipped"
+  record failed 1 "no exporter credential provisioned on this machine; tonight's exports step did not land OK" --failure-class credential_missing
   exit 0
 fi
 
@@ -204,5 +237,8 @@ if [ "$rc" -ne 0 ]; then
 fi
 record "$state" "$rc" "daytime retry of the nightly exports step" --started-at "$t0" "${fclass[@]}"
 
-touch "$MARKER"
+# The marker carries the OUTCOME, not just "attempted" — a same-day rerun
+# reads this back above to decide whether a failure must stay visible rather
+# than being replaced by a skipped heartbeat.
+print -r -- "$state:$rc" > "$MARKER"
 exit "$rc"
