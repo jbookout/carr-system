@@ -464,6 +464,7 @@ def _finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling
 
 RULE_GAPS_98 = _finding("rule_enforcement", "98 active rule gaps", count=98)
 RULE_GAPS_97 = _finding("rule_enforcement", "97 active rule gaps", count=97)
+RULE_GAPS_99 = _finding("rule_enforcement", "99 active rule gaps", count=99)
 
 
 class HealthCompleteMarkerDoesNotDrift(unittest.TestCase):
@@ -782,14 +783,18 @@ class HealthGate(Base):
         self.assertFalse(rec["log"].endswith("-health.log"))
 
     def test_point4_a_rolling_finding_still_fails_when_its_count_rises(self):
-        # Point 4 of the second round of review: time_rolling excuses a
-        # (key, subject) pair FIRST appearing purely because the clock moved
-        # (see test_D_time_rolling_findings_are_reported_but_never_diffed),
-        # but it must NOT excuse a rising count within that same rolling
-        # finding — only a fall (or no change) is clock noise.
+        # Point 4 of the second round of review, still true today only for a
+        # time_rolling key that is NOT on HEALTH_REGRESSION_FIRST_APPEARANCE_
+        # ALLOWLIST: doctrine_gate stays fully count-sensitive (round 12
+        # left it untouched), so a rising count within an already-present
+        # doctrine_gate finding still fails. (doctrine_stale moved to the
+        # allowlist-only "subject set, never count" rule in round 12 — see
+        # test_round12_allowlisted_existing_subject_count_rise_is_excused
+        # below for its new behavior, and test_round7_doctrine_gate_is_
+        # still_not_on_the_allowlist for confirmation it's excluded.)
         self.fx.commit({"mcp-server/src/a.js": "1"})
-        yesterday = _finding("doctrine_stale", "3 stale sections", count=3, time_rolling=True)
-        today = _finding("doctrine_stale", "5 stale sections", count=5, time_rolling=True)
+        yesterday = _finding("doctrine_gate", "3 failures in 24h", count=3, time_rolling=True)
+        today = _finding("doctrine_gate", "5 failures in 24h", count=5, time_rolling=True)
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
@@ -797,11 +802,56 @@ class HealthGate(Base):
 
     def test_point4_a_rolling_finding_falling_still_passes(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
-        yesterday = _finding("doctrine_stale", "5 stale sections", count=5, time_rolling=True)
-        today = _finding("doctrine_stale", "3 stale sections", count=3, time_rolling=True)
+        yesterday = _finding("doctrine_gate", "5 failures in 24h", count=5, time_rolling=True)
+        today = _finding("doctrine_gate", "3 failures in 24h", count=3, time_rolling=True)
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_round12_allowlisted_existing_subject_count_rise_is_excused(self):
+        # Round 12, point 2: the reviewer refuted the prior rule for an
+        # ALLOWLISTED key. The gate runs once, after promote, and never
+        # retries the SHA — an already-known-broken hourly job whose
+        # job_missing_due count keeps climbing must not fail every release
+        # forever. A subject already present in the baseline is now excused
+        # no matter how far its count rises.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        yesterday = _finding("job_missing_due", "hourly-sync MISSING DUE execution for 09:00",
+                             subject="hourly-sync", time_rolling=True, count=1)
+        today = _finding("job_missing_due", "hourly-sync MISSING DUE execution for 14:00",
+                         subject="hourly-sync", time_rolling=True, count=6)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_round12_allowlisted_new_subject_is_still_a_regression(self):
+        # The other half of round 12, point 2: a subject with NO baseline
+        # entry at all is now the case that fails (reversing round 4's
+        # "first appearance is excused" rule for allowlisted keys
+        # specifically) — a job crossing its due window for the very first
+        # time is new information the release should surface.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        existing = _finding("job_missing_due", "hourly-sync MISSING DUE execution for 09:00",
+                            subject="hourly-sync", time_rolling=True, count=1)
+        new_job = _finding("job_missing_due", "weekly-report MISSING DUE execution for 09-24",
+                           subject="weekly-report", time_rolling=True, count=1)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[existing],
+                            health_findings=[existing, new_job])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("weekly-report", self.fx.records()[-1].get("detail", ""))
+
+    def test_round12_rule_enforcement_count_rise_still_fails(self):
+        # "Keep every other key count-sensitive": rule_enforcement is not
+        # time_rolling at all, so a plain count rise (98 -> 99) still fails
+        # exactly as it always has — round 12 only touches the three
+        # allowlisted time_rolling keys.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[RULE_GAPS_98],
+                            health_findings=[RULE_GAPS_99])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("count 98 -> 99", self.fx.records()[-1].get("detail", ""))
 
     def test_point2r4_a_new_doctrine_gate_finding_with_no_baseline_still_fails(self):
         # Point 2 of round 4 of an independent review of PR #1237:
@@ -820,11 +870,15 @@ class HealthGate(Base):
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         self.assertIn("doctrine_gate", self.fx.records()[-1].get("detail", ""))
 
-    def test_point2r4_allowlisted_keys_still_excuse_a_first_appearance(self):
-        # The other half of point 2, round 4: the allowlist is real, not a
-        # blanket revert — export_receipt (the STALE branch) and
-        # job_missing_due still get excused on a first appearance with no
-        # baseline entry, exactly as before the narrowing.
+    def test_point2r4_allowlisted_keys_now_fail_a_first_appearance(self):
+        # Round 12 REVERSES this rule for an allowlisted key (it read
+        # "...still_excuse_a_first_appearance" through round 11): export_
+        # receipt (the STALE branch) and job_missing_due now FAIL on a
+        # first appearance with no baseline entry, since round 12 treats a
+        # brand-new subject as real new information, not clock noise —
+        # only an ALREADY-PRESENT subject is excused now, regardless of
+        # count (see test_round12_allowlisted_existing_subject_count_rise_
+        # is_excused above).
         self.fx.commit({"mcp-server/src/a.js": "1"})
         stale_export = _finding("export_receipt", "STALE vendors.xlsx (last ok 2026-09-20)",
                                 subject="vendors.xlsx", time_rolling=True)
@@ -833,22 +887,22 @@ class HealthGate(Base):
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[],
                             health_findings=[stale_export, missing_due])
-        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
 
-    def test_round7_doctrine_stale_first_appearance_is_excused(self):
-        # Round 7: doctrine_stale joined HEALTH_REGRESSION_FIRST_APPEARANCE_
-        # ALLOWLIST — it is clock-driven (a section crossing its own
-        # review_after date between the baseline read and the live read),
-        # not caused by this release, so a first appearance with no
-        # baseline entry must be excused exactly like export_receipt's
-        # STALE branch and job_missing_due above.
+    def test_round7_doctrine_stale_first_appearance_now_fails(self):
+        # Round 7 excused doctrine_stale's first appearance as clock noise;
+        # round 12 reverses that for every allowlisted key, doctrine_stale
+        # included — a section crossing review_after for the very first
+        # time, with nothing in the baseline to compare against, is now
+        # treated as new information worth surfacing rather than hidden.
         self.fx.commit({"mcp-server/src/a.js": "1"})
         new_stale = _finding("doctrine_stale", "2 stale sections", count=2,
                              time_rolling=True)
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[],
                             health_findings=[new_stale])
-        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("new subject", self.fx.records()[-1].get("detail", ""))
 
     def test_round7_doctrine_gate_is_still_not_on_the_allowlist(self):
         # Confirms the allowlist addition is scoped to doctrine_stale only:

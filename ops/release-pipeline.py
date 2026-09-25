@@ -1665,6 +1665,21 @@ HEALTH_REGRESSION_EXCLUDED_KEYS = frozenset({"repo_loose_work"})
 # only in the narrower sense that an EXISTING baseline entry's count may
 # rise on the clock (a rolling 24h window aging forward), not in the sense
 # that its first-ever appearance is clock noise.
+#
+# ROUND 12 CORRECTION to the paragraph above: it described a key on this
+# allowlist as "legitimately excused from a same-baseline RISE" while the
+# NULL-baseline case still failed as new — that was backwards, and round 12
+# reverses BOTH halves for a key on this allowlist specifically. The gate
+# runs once, after promote, on a SHA it never retries, so a subject already
+# present in the baseline is now excused no matter how far its count rises
+# (an already-known-broken sub-daily job's job_missing_due count climbing
+# every run must not fail every release forever), while a subject with NO
+# baseline entry at all — the case round 2 through round 11 excused as
+# "nothing to regress against" — is now the one that fails, because a job
+# or section crossing its threshold for the very first time is real new
+# information, not clock noise. `doctrine_gate` still sits OFF this
+# allowlist and is unaffected: it keeps the original count-sensitive rule
+# in full (see health_regression's docstring and the code below).
 HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST = frozenset(
     {"export_receipt", "job_missing_due", "doctrine_stale"})
 
@@ -1681,35 +1696,33 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
     to pass, which is the whole point of diffing against a baseline instead
     of failing on any standing finding.
 
-    `time_rolling` findings (a job's MISSING DUE date, an export crossing
-    the 26h STALE clock, a rolling 24h gate-block window) are excused from
-    the "new pair" check WHEN THE BASELINE ALREADY HAD SOME ENTRY for that
-    (key, subject) — a (key, subject) whose subject is the stable job/target
-    identifier can legitimately RISE in count purely because wall-clock time
-    passed, not because of anything this release did, so only a FALL (or no
-    change) is treated as clock noise; a rise against an EXISTING baseline
-    entry still fails, the same as any other finding (point 4 of the second
-    round of review). But a (key, subject) pair with NO baseline entry AT
-    ALL is excused, not compared against an implicit zero (point 2 of the
-    THIRD round of review) — a rolling finding that is appearing for the
-    very first time — a job crossing its due window today, an export just
-    now going STALE — has nothing to regress against, and comparing it to a
-    phantom baseline count of 0 turned "first time this ever happened" into
-    "count rose from 0, therefore new regression," which defeated the entire
-    point of excusing clock-driven findings — BUT ONLY for a key on
-    `HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST` (point 2 of round 4 of
-    review): `time_rolling=True` marks a whole KEY as one whose COUNT can
-    rise on the clock alone, not that every such key's very first
-    appearance is itself clock noise. `doctrine_gate` is also `time_
-    rolling=True` in tools/health-check.py, but a release that introduces
-    40 gate failures where there were 0 before is a real regression and
-    must still fail — it is deliberately NOT on the allowlist, so a first
-    appearance still falls through to the same "new" treatment as any other
-    finding, below (see `test_point2r4_a_new_doctrine_gate_finding_with_
-    no_baseline_still_fails` in ops/release-pipeline-selftest.py).
-    `doctrine_stale` joined the allowlist in round 7 (see that constant's
-    own comment for why its first appearance IS clock noise, unlike
-    `doctrine_gate`'s).
+    `time_rolling` findings on `HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST`
+    (`export_receipt`'s STALE variant, `job_missing_due`, `doctrine_stale` —
+    confirmed clock-driven, not release-driven) are compared by SUBJECT SET
+    ONLY, never by count (round 12, point 2, overriding the round-2-through-11
+    rule below for these three keys specifically): a subject already present
+    in the baseline is excused NO MATTER HOW ITS COUNT MOVED, because this
+    gate runs once, after promote, on a SHA that is never retried — an
+    already-known-broken sub-daily job whose `job_missing_due` count climbs a
+    little on every single run would otherwise fail every release forever,
+    which is a permanent gate jam, not a useful regression signal. A subject
+    with NO baseline entry at all is still a regression: a job crossing its
+    due window, or a section going STALE, for the very first time is new
+    information worth surfacing, not clock noise to hide. See
+    `HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST`'s own comment for exactly
+    which keys qualify and why; `doctrine_gate` is `time_rolling=True` but
+    deliberately NOT on this allowlist, because a release that introduces 40
+    gate failures where there were 0 before is a real regression and must
+    still fail regardless of whether it lands as a new subject or a count
+    rise on one already present.
+
+    Every OTHER `time_rolling` key (i.e. `doctrine_gate`, the only one today)
+    stays fully count-sensitive, the original round-2/round-4 rule: a
+    (key, subject) pair with NO baseline entry at all still fails as "new"
+    (see `test_point2r4_a_new_doctrine_gate_finding_with_no_baseline_still_
+    fails` in ops/release-pipeline-selftest.py), and a count RISE against an
+    EXISTING baseline entry also still fails — only a FALL (or no change) is
+    excused as clock noise for these non-allowlisted keys.
 
     Note for a reader of a failing gate: `count` accumulates by (key,
     subject) within one run (see tools/health-check.py's `_canonical_
@@ -1737,16 +1750,36 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
             continue
         prior = baseline_by_key_subject.get((row["key"], row["subject"]))
         if row.get("time_rolling"):
+            if row["key"] in HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST:
+                # Round 12, point 2: the reviewer refuted the round-9-through-
+                # 11 rule for an ALLOWLISTED key (only a first appearance was
+                # excused; a count rise on an already-present subject still
+                # failed). The gate runs once, after promote, and never
+                # retries the SHA — so an already-known-broken sub-daily job
+                # (job_missing_due) whose due-window count climbs a little on
+                # EVERY run would fail EVERY release forever, which is a
+                # permanent gate jam, not a regression signal. For these
+                # three confirmed-clock-driven keys, compare only the SET of
+                # subjects against the baseline, never the count: a subject
+                # already present in the baseline — however its count moved,
+                # up or down — is not a regression. A subject with NO
+                # baseline entry at all is still a regression (this reverses
+                # the round-4 "first appearance is excused" rule for these
+                # keys specifically): a job crossing its due window, or a
+                # section going STALE, for the very first time is new
+                # information the release should surface, not clock noise to
+                # hide — only an ALREADY-KNOWN clock-driven finding aging
+                # forward on the same subject is the noise this allowlist
+                # exists to excuse.
+                if prior is None:
+                    bad.append(f"{row['key']}[{row['subject']}]: new subject — {detail}")
+                continue
+            # Every other time_rolling key (doctrine_gate) stays fully
+            # count-sensitive: a release that introduces 40 gate failures
+            # where there were 0 before must still fail, whether that shows
+            # up as a brand-new subject or a rising count on one already
+            # present.
             if prior is None:
-                if row["key"] in HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST:
-                    # First appearance of a clock-driven finding: nothing to
-                    # regress against (point 2, third round of review) —
-                    # narrowed to a confirmed-clock-driven allowlist (point
-                    # 2, round 4 of review): a `time_rolling` key outside
-                    # this allowlist (e.g. `doctrine_gate`) is NOT excused
-                    # merely for having no baseline entry, since it can be a
-                    # genuine new regression, not a clock crossing.
-                    continue
                 bad.append(f"{row['key']}[{row['subject']}]: new — {detail}")
                 continue
             if row.get("count", 0) > prior.get("count", 0):

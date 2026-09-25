@@ -220,81 +220,103 @@ def _allowed_rc_assignment_value(value: ast.AST) -> bool:
 
 
 def _rc_assignment_violations(func: ast.AST) -> list[str]:
-    """Every assignment to (or binding of) `rc` inside `func`, checked
-    against an ALLOWLIST rather than a denylist (round 9 of an independent
-    review of PR #1237). The round-8 check here only forbade a bare literal
-    `1` (or `|= 1`) — a denylist by construction, which meant any OTHER
-    unrecorded write to `rc` (`rc = p.returncode`, `rc = max(rc, 1)`,
-    `rc = 1 if cond else rc`, `rc = rc or 1`, `rc = int(True)`, a tuple
-    target `rc, _z = 1, 0`, or a walrus `(rc := 1)`) got through undetected,
-    both here (the static check never looked at it) and at runtime (none of
-    those paths call `_red()`, so none would record a finding). This walks
-    the whole function and flags any binding of the name `rc` that is not
-    exactly one of the three forms `_allowed_rc_assignment_value` names:
-    a single-target `Assign` whose value passes that check. Everything else
-    — `AugAssign` (`rc += 1`, `rc |= 1`, any operator), a `NamedExpr` walrus
-    binding `rc`, a multi/tuple assignment target that includes `rc`, or a
-    single-target `Assign` whose value is any other shape — is rejected."""
+    """Every binding of the name `rc` inside `func`, checked against an
+    ALLOWLIST rather than a denylist or a list of enumerated statement
+    types (round 12 of an independent review of PR #1237).
+
+    Round 9 converted a literal-only denylist into an allowlist, but round
+    10's implementation still enumerated STATEMENT TYPES one at a time
+    (Assign, AugAssign, AnnAssign, For, With, ...) and only matched a BARE
+    `rc` target within each. That missed every binding where `rc` sits
+    inside a compound target — `for rc, _q in [(1, 0)]:`, a nested tuple
+    `(rc, _q), _w = (1, 0), 0`, `with ctx as (rc, _q):` — because none of
+    those are a bare `ast.Name` directly at the position each enumerated
+    check looked for. Enumerating statement types is the same mistake as
+    the original denylist, one level up: it re-litigates "which syntax
+    shape" instead of asking the one question that actually matters, which
+    is BINDING CONTEXT.
+
+    Python's `ast` module already answers that question uniformly: every
+    name a statement WRITES (assigns, rebinds, or deletes) appears as an
+    `ast.Name` node with `ctx` set to `ast.Store` (write) or `ast.Del`
+    (delete) — never mind whether it sits bare, inside a `Tuple`/`List`
+    target, behind a `Starred` unpack, as a `for`-loop target, as a
+    `with ... as` target, or as a walrus target; `ast.walk` finds all of
+    them regardless of nesting depth, because it recurses through `Tuple`/
+    `List`/`Starred` elements the same as any other expression. So this
+    walks `func` for every `ast.Name(id="rc")` whose `ctx` is `Store` or
+    `Del`, and only exempts the ones that are each independently proven
+    legitimate: the sole, bare target of a single-target `ast.Assign` whose
+    value is one of the three forms `_allowed_rc_assignment_value` names.
+    A `Name` inside ANY compound target (tuple, list, starred, nested) is
+    never exempted, because it can never BE that sole bare target — the
+    exemption check is identity-based (the exact `Name` node object), not
+    string-based, so it cannot be fooled by shape.
+
+    The rest of Python's binding sites do not surface as `ast.Name` nodes
+    at all — `except ... as rc:` and `import ... as rc` bind through a
+    plain string attribute (`ExceptHandler.name`, `alias.asname`), and a
+    `match`/`case` pattern binds through `MatchAs.name`/`MatchStar.name`
+    (also strings). Those four, plus `global rc`/`nonlocal rc` (which bind
+    through `Global.names`/`Nonlocal.names`, string lists), are banned by
+    name directly. Between the `ast.Name`-ctx sweep (which covers every
+    syntax shape for every binding site that produces a `Name` node:
+    `Assign`, `AugAssign`, `AnnAssign`, `NamedExpr`, `For`/`AsyncFor`,
+    comprehension targets, `With`/`AsyncWith`, and `del`) and these five
+    string-based bans, every binding site in Python's grammar that could
+    possibly bind the identifier `rc` is covered — see this file's PR
+    comment for round 12 for the explicit site-by-site enumeration against
+    the `ast` grammar."""
     violations = []
     where = getattr(func, "name", None) or "<mutated>"
+
+    # Pass 1: identify the Name NODE OBJECTS (by identity) that are each
+    # individually the sole, bare target of a single-target Assign whose
+    # value is one of the three allowed forms. Nothing else is ever exempt.
+    exempt_ids: set[int] = set()
     for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            single_rc_target = (len(node.targets) == 1
-                                and isinstance(node.targets[0], ast.Name)
-                                and node.targets[0].id == "rc")
-            touches_rc = single_rc_target or any(
-                isinstance(t, (ast.Tuple, ast.List))
-                and any(isinstance(elt, ast.Name) and elt.id == "rc" for elt in t.elts)
-                for t in node.targets
-            )
-            if not touches_rc:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "rc"
+                and _allowed_rc_assignment_value(node.value)):
+            exempt_ids.add(id(node.targets[0]))
+
+    # Pass 2: every Name(id="rc") in a writing context, minus the exempt set.
+    for node in ast.walk(func):
+        if isinstance(node, ast.Name) and node.id == "rc" and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if id(node) in exempt_ids:
                 continue
-            if not single_rc_target:
-                violations.append(f"{where}:{node.lineno}: rc assigned via a tuple/multiple "
-                                  f"assignment target — not one of the three allowed forms")
-            elif not _allowed_rc_assignment_value(node.value):
-                violations.append(f"{where}:{node.lineno}: rc assignment does not match one "
-                                  f"of the three allowed forms (rc = 0 / rc = _red(...) / "
-                                  f"rc = _canonical_contradiction_alarm() or rc)")
-        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
-                and node.target.id == "rc"):
-            violations.append(f"{where}:{node.lineno}: augmented assignment to rc "
-                              f"({type(node.op).__name__}) is not one of the three allowed forms")
-        elif (isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name)
-                and node.target.id == "rc"):
-            violations.append(f"{where}:{node.lineno}: walrus assignment to rc "
-                              f"is not one of the three allowed forms")
-        # Round 10 of an independent review of PR #1237: the round-9 allowlist
-        # only inspected plain Assign/AugAssign/NamedExpr — every OTHER Python
-        # construct that can bind a name (an annotated assignment, a `for`
-        # loop target, a `with ... as` context-manager target, a `match`
-        # case capture, an `except ... as` handler name, or an `import ... as`
-        # alias) binds `rc` completely unseen by that check, and none of them
-        # go through `_red()`, so a bug hiding behind one of these shapes
-        # would set `rc` red and record nothing. Every one of these forms is
-        # rejected outright if it binds the name `rc` — none of the three
-        # allowed forms can be expressed through them.
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "rc":
-            violations.append(f"{where}:{node.lineno}: annotated assignment to rc "
-                              f"(`rc: ... = ...`) is not one of the three allowed forms")
-        elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name) and node.target.id == "rc":
-            violations.append(f"{where}:{node.lineno}: `for rc in ...:` binds rc as a loop "
-                              f"target — not one of the three allowed forms")
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id == "rc":
-                    violations.append(f"{where}:{node.lineno}: `with ... as rc:` binds rc via "
-                                      f"a context manager — not one of the three allowed forms")
+            ctx_word = "deleted" if isinstance(node.ctx, ast.Del) else "bound"
+            violations.append(f"{where}:{getattr(node, 'lineno', '?')}: rc is {ctx_word} in a "
+                              f"way that is not the sole, bare target of one of the three "
+                              f"allowed assignment forms (a compound/tuple/starred target, a "
+                              f"for-loop or with-statement target that isn't a bare rc, an "
+                              f"augmented or annotated assignment, a walrus, or a delete all "
+                              f"land here)")
         elif isinstance(node, ast.ExceptHandler) and node.name == "rc":
             violations.append(f"{where}:{node.lineno}: `except ... as rc:` binds rc to the "
-                              f"caught exception — not one of the three allowed forms")
-        elif isinstance(node, ast.MatchAs) and node.name == "rc":
+                              f"caught exception via a string attribute, not an ast.Name — "
+                              f"banned directly")
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and getattr(node, "name", None) == "rc":
             violations.append(f"{where}:{node.lineno}: a `match`/`case` pattern captures rc "
-                              f"(`case rc:` or `case ... as rc:`) — not one of the three "
-                              f"allowed forms")
-        elif isinstance(node, ast.alias) and node.asname == "rc":
-            violations.append(f"{where}: `import ... as rc` binds rc via an import alias — "
-                              f"not one of the three allowed forms")
+                              f"(`case rc:`, `case ... as rc:`, or `case [*rc]:`) via a string "
+                              f"attribute, not an ast.Name — banned directly")
+        elif isinstance(node, ast.alias) and (node.asname == "rc"
+                                              or (node.asname is None and node.name == "rc")):
+            violations.append(f"{where}: `import ... as rc` (or a bare `import rc`) binds rc "
+                              f"via an import alias string attribute — banned directly")
+        elif isinstance(node, ast.Global) and "rc" in node.names:
+            violations.append(f"{where}:{node.lineno}: `global rc` binds rc via a string list "
+                              f"attribute — banned directly")
+        elif isinstance(node, ast.Nonlocal) and "rc" in node.names:
+            violations.append(f"{where}:{node.lineno}: `nonlocal rc` binds rc via a string "
+                              f"list attribute — banned directly")
+        elif isinstance(node, ast.arg) and node.arg == "rc":
+            violations.append(f"{where}:{node.lineno}: a function/lambda parameter named rc "
+                              f"binds it via a string attribute (ast.arg.arg), not an ast.Name "
+                              f"— banned directly")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == "rc":
+            violations.append(f"{where}:{node.lineno}: `def rc(...):`/`class rc:` binds rc as "
+                              f"a def/class name via a string attribute — banned directly")
     return violations
 
 
@@ -684,6 +706,41 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
 
     def test_mutation_rc_import_as_is_caught(self):
         self._assert_mutation_caught("import os as rc\n", "import os as rc")
+
+    # ── round 12: compound targets the round-10 statement-type enumeration
+    # never looked inside. Round 10 matched a bare `rc` at the position each
+    # enumerated statement type expected it — `node.target.id == "rc"` for a
+    # `For`, `item.optional_vars.id == "rc"` for a `With`. None of those
+    # checks look INSIDE a Tuple/List/Starred target, so `rc` sitting next to
+    # another name in a compound target passed straight through, both
+    # statically and at runtime. The round-12 rewrite replaces all of that
+    # with a single ast.Name(ctx=Store/Del) sweep that recurses through
+    # compound targets uniformly, so these need no new node-type-specific
+    # branch — they are caught by the SAME sweep as every other binding.
+
+    def test_mutation_rc_tuple_target_in_for_loop_is_caught(self):
+        self._assert_mutation_caught("for rc, _q in [(1, 0)]:\n    pass\n",
+                                     "for rc, _q in [(1, 0)]:")
+
+    def test_mutation_rc_nested_tuple_target_is_caught(self):
+        self._assert_mutation_caught("(rc, _q), _w = (1, 0), 0\n",
+                                     "(rc, _q), _w = (1, 0), 0")
+
+    def test_mutation_rc_with_tuple_target_is_caught(self):
+        self._assert_mutation_caught("with ctx as (rc, _q):\n    pass\n",
+                                     "with ctx as (rc, _q):")
+
+    def test_mutation_rc_starred_target_is_caught(self):
+        self._assert_mutation_caught("*rc, _z = [1, 0]\n", "*rc, _z = [1, 0]")
+
+    def test_mutation_rc_list_target_in_for_loop_is_caught(self):
+        self._assert_mutation_caught("for [rc] in [[1]]:\n    pass\n", "for [rc] in [[1]]:")
+
+    def test_mutation_rc_global_declaration_is_caught(self):
+        self._assert_mutation_caught("def _z():\n    global rc\n    rc = 1\n", "global rc")
+
+    def test_mutation_rc_nonlocal_declaration_is_caught(self):
+        self._assert_mutation_caught("def _z():\n    nonlocal rc\n    rc = 1\n", "nonlocal rc")
 
     def test_shadowing_red_or_alarm_outside_their_def_is_caught(self):
         # Round 10, item 3: banning every unrecorded WRITE to rc is pointless
