@@ -285,14 +285,14 @@ def run(cur: Any) -> str | None:
 
     # --------------------------------------------------------------- ALLOWLIST
     with as_login(cur, READER):
-        for wording, expected in ALLOWED:
-            got = cur.execute("select ops.slice_criterion_allowed_kinds(%s)", (wording,)).fetchone()[0]
-            if got != expected:
-                return f"allowlist: {wording!r} allows {got}, expected {expected}"
-    for subject, slice_id, expected in SUBJECTS:
-        got = cur.execute("select ops.slice_subject_names_slice(%s,%s)", (subject, slice_id)).fetchone()[0]
-        if got is not expected:
-            return f"subject check: {subject!r} naming {slice_id} gave {got}, expected {expected}"
+        for wording, kinds_expected in ALLOWED:
+            kinds_got = cur.execute("select ops.slice_criterion_allowed_kinds(%s)", (wording,)).fetchone()[0]
+            if kinds_got != kinds_expected:
+                return f"allowlist: {wording!r} allows {kinds_got}, expected {kinds_expected}"
+    for subject, slice_id, names_expected in SUBJECTS:
+        names_got = cur.execute("select ops.slice_subject_names_slice(%s,%s)", (subject, slice_id)).fetchone()[0]
+        if names_got is not names_expected:
+            return f"subject check: {subject!r} naming {slice_id} gave {names_got}, expected {names_expected}"
 
     # ------------------------------------------------------------------ CATALOG
     with as_login(cur, READER):
