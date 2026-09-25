@@ -310,10 +310,22 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
     ),
+    # Server-side Jev call log: 0587 installs ops.record_jev_call_receipt and
+    # ops.read_jev_call_receipts (SECURITY DEFINER, EXECUTE to carr_writer /
+    # carr_reader) behind the append-only ops.jev_call_receipt; 0588 seals that
+    # catalog as v69. Same deferred-epoch-trigger shape as the 0580/0581 pair
+    # immediately above -- 0587 applied alone would be refused at commit
+    # ("live SCAC vNN mutation catalog drifted"), so the pair must be one
+    # transaction.
+    (
+        "0587_jev_call_receipt.sql",
+        "0588_jev_call_receipt_scac_successor.sql",
+    ),
     # V5-F09 workflow census store: 0595 installs ops.record_workflow_census
     # (EXECUTE to carr_writer) and ops.read_workflow_census (EXECUTE to
     # carr_reader and carr_writer) behind the append-only, hash-chained
-    # ops.workflow_census_record; 0596 seals that catalog. Same deferred-epoch-
+    # ops.workflow_census_record (plus the carr_authority-only re-anchor door);
+    # 0596 seals that catalog as v71. Same deferred-epoch-
     # trigger shape as the pair above -- 0595 applied alone would be refused at
     # commit, so the pair must be one transaction.
     (
@@ -358,6 +370,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
+    ),
+    (
+        "0587_jev_call_receipt.sql",
+        "0588_jev_call_receipt_scac_successor.sql",
     ),
     (
         "0595_workflow_census_store.sql",
