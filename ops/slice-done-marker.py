@@ -6,7 +6,7 @@ WHY THIS EXISTS (2026-09-25, Joe: "fix the done record issue. If it's not
 firing we need to know why and solve it"). #1245 shipped the Q153 doors
 (register / mark progress / mark complete / read) and nothing ever called
 them: production held 0 registrations, 0 criteria and 0 marks, so every one of
-the 36 catalog slices read marked:false. Migration 0626 gives the automated
+the 36 catalog slices read marked:false. Migration 0628 gives the automated
 seat its own doors and two new server-resolved evidence kinds; this script is
 the process that calls them. The release pipeline runs it after every
 SHIPPED worker release (ops/release-pipeline.py, best-effort), and it runs by

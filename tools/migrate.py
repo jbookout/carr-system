@@ -342,14 +342,24 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0617_delivery_cadence_a05.sql",
         "0618_delivery_cadence_a05_scac_successor.sql",
     ),
-    # DoctorCRE v5 slice done-record: 0626 installs the automated marker's
+    # DoctorCRE V5-F01: 0626 installs the record-source-authority store and
+    # the document derivative registration doors (SECURITY DEFINER, EXECUTE to
+    # carr_reader, carr_writer and the carr_authority group); 0627 seals that
+    # catalog as v77, chained from main's v76 (0625). Same deferred-epoch-
+    # trigger shape as the pairs above: 0626 applied alone would be refused at
+    # commit, so the pair must be one transaction.
+    (
+        "0626_f01_record_source_authority.sql",
+        "0627_f01_record_source_authority_scac_successor.sql",
+    ),
+    # DoctorCRE v5 slice done-record: 0628 installs the automated marker's
     # SECURITY DEFINER doors (catalog registration, allowlisted binding,
-    # release membership, completion proposal, partner confirm, hold); 0627 seals
-    # that catalog as v77, chained from main's v76 (0625). One transaction, so
+    # release membership, completion proposal, partner confirm, hold); 0629 seals
+    # that catalog as v78, chained from main's v77 (0627). One transaction, so
     # production is never left between a drifted live catalog and its seal.
     (
-        "0626_doctorcre_slice_done_marker.sql",
-        "0627_doctorcre_slice_done_marker_scac_successor.sql",
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 
@@ -403,8 +413,12 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0618_delivery_cadence_a05_scac_successor.sql",
     ),
     (
-        "0626_doctorcre_slice_done_marker.sql",
-        "0627_doctorcre_slice_done_marker_scac_successor.sql",
+        "0626_f01_record_source_authority.sql",
+        "0627_f01_record_source_authority_scac_successor.sql",
+    ),
+    (
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 

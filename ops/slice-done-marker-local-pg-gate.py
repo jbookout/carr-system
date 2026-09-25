@@ -2,7 +2,7 @@
 # ci: db-gate
 # doctrine: runbook
 """Rollback-only real-Postgres proof for the slice done-record doors
-(migration 0626), every door call made as a production-shaped login.
+(migration 0628), every door call made as a production-shaped login.
 
 Logins (as ops/workflow-cutover-r02-local-pg-gate.py provisions them):
   carr_authority_joe   member of carr_authority only (partner authority);

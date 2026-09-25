@@ -41,7 +41,7 @@
 // complete are authorityOnly too. A writer login keeps record-workflow-caller
 // and mark-slice-progress (in_progress / blocked only).
 //
-// SLICE DONE-RECORD (migration 0626). The partner doors above stay; beside
+// SLICE DONE-RECORD (migration 0628). The partner doors above stay; beside
 // them the AUTOMATED seat (ops.slice_marker_seat -- the local machine actors
 // the release pipeline and run.sh call act as) gets its own writer doors:
 // register-slice-criteria-from-catalog (criteria read server-side from the
@@ -67,7 +67,7 @@ const CUTOVER_STAGES = Object.freeze([
 const CALLER_KINDS = Object.freeze(["script", "verb", "worker_route", "job_definition", "external"]);
 const CALLER_STATUSES = Object.freeze(["remaining", "done", "blocked", "superseded", "retired"]);
 const SLICE_STATUSES = Object.freeze(["in_progress", "complete", "blocked"]);
-// Slice done-record (migration 0626): the evidence kinds a registered
+// Slice done-record (migration 0628): the evidence kinds a registered
 // criterion may carry, and the allowlisted server-resolved sources a
 // live_check / accepted_record binding may name (the database CHECK pairs
 // each source with its kind). refusal_proof is not offered: no

@@ -218,7 +218,7 @@ class WorkflowCutoverFake {
         held_by_partner: false, latest_mark: null, release_members: [] } }] };
     }
 
-    // 0626 bind doors: nine positional arguments, the seventh being
+    // 0628 bind doors: nine positional arguments, the seventh being
     // bound_member_id. The door refuses a shipped_release naming no member;
     // mirrored here so the verb's refusal envelope is exercised.
     if (sql.includes("ops.bind_slice_criterion_evidence") || sql.includes("ops.rebind_slice_criterion_evidence")) {
@@ -233,7 +233,7 @@ class WorkflowCutoverFake {
         created_at: "2026-09-25T00:00:00Z" }] };
     }
 
-    // 0626 round 3: automation proposes; a partner confirms in a batch.
+    // 0628 round 3: automation proposes; a partner confirms in a batch.
     if (sql.includes("ops.propose_slice_completion")) {
       const [sliceId, receipt, reason] = params;
       this.proposeCalls = [...(this.proposeCalls ?? []), params];
@@ -367,7 +367,7 @@ test("every door that can change what a live workflow may enqueue is authority-o
   }
   for (const name of ["record-workflow-caller", "mark-slice-progress", "workflow-cutover-board", "read-slice-completion"])
     assert.equal(TOOLS[name].authorityOnly, undefined, `${name} should not be authority-only`);
-  // 0626: the partner override doors are authority-only; the automated
+  // 0628: the partner override doors are authority-only; the automated
   // seat's doors ride the writer connection (the database refuses any actor
   // outside ops.slice_marker_seat).
   for (const name of ["rebind-slice-criterion-evidence", "set-slice-mark-hold", "confirm-slice-completions"]) {

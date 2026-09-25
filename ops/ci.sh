@@ -1263,6 +1263,20 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  # V5-F01 record homes, source authority and document identity: both SQL
+  # fixtures (each on its own template copy of this database) and the nine
+  # registered verbs end to end as carr_writer and the authority login. It
+  # commits only into the copies it creates and drops them on the way out.
+  if [ -f mcp-server/test/record-source-authority-live-pg.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_F01_DB_REQUIRED=1 PSQL="$psql_bin" \
+         run_quiet "$LOGDIR/record-source-authority-live-pg.log" \
+         node --test mcp-server/test/record-source-authority-live-pg.v5.test.mjs; then
+      tail -40 "$LOGDIR/record-source-authority-live-pg.log" >&2
+      bad migration "V5-F01 record-source-authority PostgreSQL acceptance failed"
+      return
+    fi
+  fi
+
   # Continuity bindings and append-only records need actual PostgreSQL proof.
   if ! run_quiet "$LOGDIR/codex-continuity-postgres.log" \
        "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
@@ -1674,6 +1688,12 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
+        # A gate may print a `db-gate-proof:` line saying what it actually
+        # exercised (for example how many race scenarios ran). run_quiet keeps
+        # a passing gate's output in its log file, so surface just that line:
+        # a gate that returned 0 without running anything must not be
+        # indistinguishable from one that passed.
+        grep -h '^db-gate-proof:' "$LOGDIR/db-gate-$(basename "$g").log" 2>/dev/null || true
         db_gate_timings="$db_gate_timings $(basename "$g" .py)=$(( $(date +%s) - _gt0 ))s"
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and

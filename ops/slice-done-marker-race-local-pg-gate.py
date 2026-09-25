@@ -2,7 +2,7 @@
 # ci: db-gate
 # doctrine: runbook
 """Two-connection COMMITTED race proof for the slice done-record's per-slice
-lock (migration 0626): a partner hold is never silently overridden by an
+lock (migration 0628): a partner hold is never silently overridden by an
 automated proposal or by a concurrent confirmation.
 
 One transaction cannot prove this: the loser has to observe the winner's
@@ -11,6 +11,16 @@ this commits fixtures, and it runs ONLY on the dedicated disposable carr_ci
 database (local-pg-ci's throwaway cluster, or the hosted CI service
 container); anywhere else it prints NOT RUN. It removes every row and login it
 committed before it exits.
+
+It has to PROVE it ran. A db-gate that returns 0 without doing anything looks
+exactly like one that passed (the hosted log once showed this gate at "=0s"
+and nothing else), so on success it prints
+
+    db-gate-proof: slice-done-marker-race-local-pg-gate race gate ran 6 scenarios (...)
+
+which ops/ci.sh echoes into the lane log, and it fails unless all six
+scenarios actually executed. On a hosted GitHub Actions lane, where the
+disposable database is expected, NOT RUN is a failure, not a pass.
 
 Logins: carr_authority_joe (partner; ops.authority_actor_slug() -> joe), two
 sessions of it, and sdmrace_writer (member of carr_writer only) with the
@@ -55,6 +65,7 @@ SEAT = "joe-local"
 CRITERION = "the race job completes"
 BIND_CRITERION = "staging restore succeeds"
 LOCK_WAIT_SECONDS = 20
+SCENARIOS = ("sequential", "race1", "race2", "race3", "race4", "race5")
 
 
 def one(row: tuple | None) -> tuple:
@@ -143,7 +154,8 @@ def wait_blocked_on_slice_lock(admin: psycopg.Connection, pid: int) -> bool:
     return False
 
 
-def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job_ref: str) -> str | None:
+def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job_ref: str,
+        ran: list[str]) -> str | None:
     receipt = Jsonb([{"criterion": CRITERION, "evidence_ref": job_ref}])
     propose = "select id::text from ops.propose_slice_completion(%s,%s,'race proposal',%s)"
     confirm = "select outcome from ops.confirm_slice_completions(array[%s],'race confirm',%s)"
@@ -176,6 +188,7 @@ def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job
             return f"a proposal made before a hold was confirmed after the release: {got}"
         if complete_count():
             return f"the sequential hold still let a complete mark through: {marks()}"
+        ran.append("sequential")
 
         # ---------------------------------------------------------------- RACE 1
         # A holds (uncommitted, holding the slice lock); the seat proposes.
@@ -189,6 +202,7 @@ def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job
         if outcome[0] != "refused" or "slice_mark_held_by_partner" not in outcome[1]:
             return f"a proposal racing an uncommitted hold was not refused once the hold committed: {outcome}"
         call(part_a, release, (slice_id, uuid.uuid4()))
+        ran.append("race1")
 
         # ---------------------------------------------------------------- RACE 2
         # A pending proposal; A holds (uncommitted); C confirms.
@@ -203,6 +217,7 @@ def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job
         if outcome != ("ok", [("held",)]) or complete_count():
             return f"a confirmation racing an uncommitted hold overrode it: {outcome} / {marks()}"
         call(part_a, release, (slice_id, uuid.uuid4()))
+        ran.append("race2")
 
         # ---------------------------------------------------------------- RACE 3
         # A pending proposal; C confirms (uncommitted); A holds.
@@ -225,15 +240,16 @@ def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job
             return f"the done-state does not report the partner hold as current: {state['latest_mark']}"
         if any(via == "automation" for status, via in marks() if status == "complete"):
             return f"an automated complete mark exists: {marks()}"
+        ran.append("race3")
 
         # ------------------------------------------------------------- RACE 4/5
         bind = ("select id from ops.bind_slice_criterion_evidence(%s,%s,'live_check','staging_restore_only_result',"
                 "null,null,null,'race bind',%s)")
         progress = "select id from ops.mark_slice_progress(%s,'in_progress',%s,'race progress',%s,null)"
         bind_receipt = Jsonb([{"criterion": BIND_CRITERION, "evidence_ref": None}])
-        for label, query, params in (
-                ("bind", bind, (bind_slice, BIND_CRITERION, uuid.uuid4())),
-                ("progress mark", progress, (bind_slice, bind_receipt, uuid.uuid4()))):
+        for scenario, label, query, params in (
+                ("race4", "bind", bind, (bind_slice, BIND_CRITERION, uuid.uuid4())),
+                ("race5", "progress mark", progress, (bind_slice, bind_receipt, uuid.uuid4()))):
             part_a.execute(hold, (bind_slice, uuid.uuid4()))
             racer = Racer(seat, query, params).start()
             blocked = wait_blocked_on_slice_lock(admin, racer.pid)
@@ -244,6 +260,7 @@ def run(dsn: str, admin: psycopg.Connection, slice_id: str, bind_slice: str, job
             if outcome[0] != "refused" or "slice_mark_held_by_partner" not in outcome[1]:
                 return f"the seat's {label} racing an uncommitted hold was not refused once it committed: {outcome}"
             call(part_a, release, (bind_slice, uuid.uuid4()))
+            ran.append(scenario)
         return None
     finally:
         for conn in (seat, part_a, part_c):
@@ -258,9 +275,15 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL is required")
     if not disposable_ci_database(dsn):
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # The hosted lane always provides the disposable database; a NOT RUN
+            # there means the guard or the lane broke, and a silent 0 would hide it.
+            return fail("NOT RUN on the hosted CI lane, where the disposable carr_ci database is expected; "
+                        "a race gate that did not run is not a pass")
         print("slice-done-marker-race-local-pg-gate: NOT RUN — it commits fixtures and requires the dedicated "
               "disposable carr_ci database; the rolled-back slice-done-marker gate still ran")
         return 0
+    ran: list[str] = []
     token = uuid.uuid4().hex[:8]
     slice_id = f"V5-ZR{token}"
     bind_slice = f"V5-ZB{token}"
@@ -296,7 +319,7 @@ def main() -> int:
                 reg.execute("select * from ops.register_slice_checkable_done(%s,%s,%s)",
                             (bind_slice, Jsonb([{"criterion": BIND_CRITERION, "evidence_kind": "unbound"}]), uuid.uuid4()))
                 reg.commit()
-            problem = run(dsn, admin, slice_id, bind_slice, job_ref)
+            problem = run(dsn, admin, slice_id, bind_slice, job_ref, ran)
         except Exception as exc:  # noqa: BLE001 — a gate reports, it never crashes silently
             problem = f"{type(exc).__name__}: {exc}"
         finally:
@@ -328,6 +351,10 @@ def main() -> int:
                 problem = f"the committed race left {leaked} fixture row(s) behind"
     if problem:
         return fail(problem)
+    if tuple(ran) != SCENARIOS:
+        return fail(f"only {len(ran)} of {len(SCENARIOS)} scenarios ran: {ran}")
+    print(f"db-gate-proof: slice-done-marker-race-local-pg-gate race gate ran {len(ran)} scenarios "
+          f"({', '.join(ran)})")
     print("slice-done-marker-race-local-pg-gate: PASS — committed, two logins: a hold committed after a proposal "
           "blocks its confirmation (held, then stale_proposal); a proposal and a confirmation racing an uncommitted "
           "hold wait on the slice lock and are refused/held once it commits; a hold racing a confirmation waits and "

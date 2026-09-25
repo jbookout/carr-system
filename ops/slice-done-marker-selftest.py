@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioural selftest for ops/slice-done-marker.py.
 
-The server is an in-memory fake of the 0626 doors: it keeps registrations,
+The server is an in-memory fake of the 0628 doors: it keeps registrations,
 bindings, release members and append-only marks; derives each criterion's
 allowed kinds from its wording (the same rules as
 ops.slice_criterion_allowed_kinds) and refuses the seat any other kind, any
