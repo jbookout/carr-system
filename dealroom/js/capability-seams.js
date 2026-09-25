@@ -5,10 +5,21 @@
  * instruction for V5-J101 — "choose between typed client seams that show an
  * honest 'unavailable' state and mocks. Never ship mocks as live behaviour."
  *
- * Each function below is the one place the workspace asks "is this capability
- * actually here." It calls the real client if the real client implements the
- * capability, and returns {available:false, capability, reason} — never a
- * fabricated success — when it does not. Nothing in this file invents data.
+ * TWO RULES a seam must follow, both violated in an earlier draft and fixed
+ * after independent review of PR #1259 (a seam is a READ about availability,
+ * never a WRITE that performs the thing it is checking for):
+ *
+ *   1. A capability that happens to share a NAME or a RELATED existing call
+ *      with a not-yet-built slice is not that slice. getDeal() is the
+ *      pre-existing WO-1 Deal Room read, not the V5-F01 canonical
+ *      cross-entity record-home surface — its presence must never be read as
+ *      F01 being available. recordHomeSeam is unconditionally unavailable
+ *      until F01 actually ships a dedicated call.
+ *   2. Checking "can this write happen" must never BE the write. lifecycleSeam
+ *      only inspects whether client.transitionLifecycle exists as a function;
+ *      it never invokes it. (healthSeam and, when F01 ships, recordHomeSeam,
+ *      may safely perform their own real READS — reads have no side effect to
+ *      leak — but no seam here may perform a write.)
  */
 
 /** @typedef {{available:true, capability:string, detail:Object}|{available:false, capability:string, reason:string}} SeamResult */
@@ -18,42 +29,30 @@ function refused(capability, error, fallbackReason) {
 }
 
 /**
- * V5-F01: canonical record-home read. Today's client already exposes
- * getDeal(id) against the WO-1 contract, so this seam is "available" whenever
- * that call answers; it stays honest if a future client drops or renames it.
- * @param {import('./client.js').DealRoomClient|null|undefined} client
- * @param {string} dealId
+ * V5-F01: canonical, cross-entity record-home read. Not built. This always
+ * answers unavailable, regardless of what the client otherwise implements —
+ * deliberately NOT wired to getDeal(), which is a different, already-existing
+ * WO-1 contract call and would misreport F01 as shipped.
+ * @param {import('./client.js').DealRoomClient|null|undefined} _client unused until V5-F01 defines its own call
+ * @param {string} _dealId unused until V5-F01 defines its own call
  * @returns {Promise<SeamResult>}
  */
-export async function recordHomeSeam(client, dealId) {
-  if (typeof client?.getDeal !== 'function')
-    return { available: false, capability: 'V5-F01', reason: 'Canonical record-home read is not deployed yet.' };
-  try {
-    const detail = await client.getDeal(dealId);
-    return { available: true, capability: 'V5-F01', detail };
-  } catch (error) {
-    return refused('V5-F01', error, 'Record-home read failed.');
-  }
+export async function recordHomeSeam(_client, _dealId) {
+  return { available: false, capability: 'V5-F01', reason: 'Canonical record-home read (V5-F01) is not deployed yet.' };
 }
 
 /**
- * V5-J102: typed lifecycle transitions with evidence/conflict handling. The
- * WO-1 client has no such call today — only the generic field patch — so
- * this seam is unavailable until V5-J102 ships, and says exactly that instead
- * of quietly downgrading to the generic patch and calling it the real thing.
+ * V5-J102: typed lifecycle transitions with evidence/conflict handling.
+ * Availability is a pure capability check — presence of the method — and
+ * NEVER invokes it: a seam answering "is this available" must not itself
+ * perform the write it is asking about.
  * @param {import('./client.js').DealRoomClient|null|undefined} client
  * @param {string} dealId
  * @returns {Promise<SeamResult>}
  */
 export async function lifecycleSeam(client, dealId) {
-  if (typeof client?.transitionLifecycle === 'function') {
-    try {
-      const detail = await client.transitionLifecycle({ deal: dealId });
-      return { available: true, capability: 'V5-J102', detail };
-    } catch (error) {
-      return refused('V5-J102', error, 'Lifecycle transition failed.');
-    }
-  }
+  if (typeof client?.transitionLifecycle === 'function')
+    return { available: true, capability: 'V5-J102', detail: { deal: dealId } };
   return {
     available: false, capability: 'V5-J102',
     reason: 'Typed lifecycle transitions are not deployed yet; only field-level writes exist today.',
@@ -62,7 +61,9 @@ export async function lifecycleSeam(client, dealId) {
 
 /**
  * V5-A01: the truthful health projection. Honors an already-implemented
- * client.getHealth() if one exists; otherwise unavailable.
+ * client.getHealth() if one exists; a real read has no side effect to leak,
+ * so — unlike lifecycleSeam — this may safely perform it. Otherwise
+ * unavailable.
  * @param {import('./client.js').DealRoomClient|null|undefined} client
  * @returns {Promise<SeamResult>}
  */

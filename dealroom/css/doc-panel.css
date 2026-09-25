@@ -50,6 +50,11 @@
 .doc-log-ok{color:var(--green,#79dda0)}
 .doc-log-conflict,.doc-log-refused{color:var(--red,#ff8d83)}
 .doc-log-unavailable{color:var(--cyan,#7dd3fc)}
+.doc-log-retry{
+  min-height:26px;margin-left:4px;padding:2px 9px;border-radius:999px;
+  border:1px solid currentColor;background:transparent;color:inherit;
+  font-size:10px;font-weight:800;cursor:pointer;
+}
 
 .doc-panel-form{display:flex;gap:8px}
 .doc-panel-form input{

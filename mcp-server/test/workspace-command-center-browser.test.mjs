@@ -15,6 +15,10 @@
 // dealroom/test and fails if any *.test.mjs file there is not imported below, so the next suite
 // added to that directory cannot silently fall outside the gate the way four did.
 import "../../dealroom/test/boot-mode.test.mjs";
+import "../../dealroom/test/capability-seams.test.mjs";
+import "../../dealroom/test/commands.test.mjs";
+import "../../dealroom/test/doc-panel-model.test.mjs";
+import "../../dealroom/test/doc-panel-static.test.mjs";
 import "../../dealroom/test/lead-board-client.test.mjs";
 import "../../dealroom/test/lead-board-static.test.mjs";
 import "../../dealroom/test/system-work-branding.test.mjs";

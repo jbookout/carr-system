@@ -2,7 +2,7 @@ import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
 import { registerDocPanelSource } from './doc-panel.js';
-import { runCommand } from './commands.js';
+import { runCommand, buildDealContext } from './commands.js';
 import {
   REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
   receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
@@ -1004,16 +1004,31 @@ function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit })
 
 function nextStepForm(dealId) {
   const deal = state.deals.get(dealId);
+  // One idempotency key for the whole time this form stays open. openForm's
+  // dialog does not get recreated between a refused attempt and the user
+  // hitting Submit again — it is the SAME logical attempt, retried — so it
+  // must reuse the same key rather than mint a fresh one per click. A fresh
+  // key would skip the server's own idempotency_key replay
+  // (mcp-server/src/tools.js withEnvelope) and risk a genuine second write
+  // on a retry after what only looked like a failure.
+  const idempotencyKey = uuidv4();
   openForm({ title:`Next step — ${deal.name}`, submit:'Set next step', body:`
     <div class="field"><label for="stepText">What happens next?</label><textarea id="stepText" name="text" required>${esc(deal.next_step || '')}</textarea><small>This becomes a real next action in today’s triage; the prior step stays in history.</small></div>
     <div class="field"><label for="stepDate">When?</label><input id="stepDate" name="next_date" type="date" value="${esc(deal.next_date || '')}"></div>`,
     onSubmit:async (data) => {
       const text = String(data.get('text') || '').trim();
       const next_date = data.get('next_date') || null;
-      // Same runCommand the Doc panel's `/set_next_step` runs (commands.js) —
-      // one code path, so this form and Doc cannot drift into different
-      // receipts for the identical write.
-      const receipt = await runCommand(state.client, 'set_next_step', text, { dealId, nextDate: next_date });
+      // Same runCommand the Doc panel's `/set_next_step` runs (commands.js),
+      // and the SAME buildDealContext() the Doc's context comes from — one
+      // code path and one context builder, so this form and Doc cannot drift
+      // into different receipts, or different next_date handling, for the
+      // identical write. The form always passes an EXPLICIT next_date (the
+      // input is pre-filled with the deal's current value, so "no edit"
+      // still resends it); the Doc composer never overrides it and so
+      // preserves whatever buildDealContext defaults to — the deal's current
+      // date — instead of clearing it.
+      const context = buildDealContext(deal, { nextDate: next_date });
+      const receipt = await runCommand(state.client, 'set_next_step', text, context, { idempotencyKey });
       if (receipt.status !== 'ok') throw new Error(receipt.detail?.reason || 'This next step was not set.');
       const current = confirmLocalWrite(dealId, { next_step:text, next_date });
       showToast(`Next step set on ${current?.name || deal.name}`); renderBoardOnly();
@@ -1113,8 +1128,11 @@ function detailRows(items, renderer, empty='Nothing captured yet.') {
 }
 
 async function openDeal(dealId) {
-  state.docContextDealId = dealId;
+  // Set only AFTER getDeal succeeds: a failed read must never leave the Doc
+  // panel believing a deal is open that the user never actually saw (it
+  // would offer commands against a dialog that never showed).
   const detail = await state.client.getDeal(dealId);
+  state.docContextDealId = dealId;
   const deal = detail.deal;
   const parked = deal.operating_state === 'parked';
   const html = `<header><div><p class="eyebrow">${esc(deal.account_name || deal.client_name || 'Work record')}</p><h2>${esc(deal.name)}</h2><p class="subhead">${parked ? `${esc(parkingReasonLabel(deal.parking_reason))} · ` : ''}${esc(deal.phase)} · ${esc(deal.market || 'Market not captured')}</p></div><div class="detail-header-actions"><button type="button" class="park-button" data-operating-state="${parked ? 'active' : 'parked'}" data-deal="${esc(deal.id)}">${parked ? 'Restore to active' : 'Park'}</button><button type="button" class="icon-button" data-close-deal aria-label="Close details">×</button></div></header>
@@ -1314,10 +1332,11 @@ async function boot() {
   // yields an equivalent receipt").
   registerDocPanelSource({
     getClient: () => state.client,
-    getContext: () => ({
-      dealId: state.docContextDealId,
-      label: state.docContextDealId ? state.deals.get(state.docContextDealId)?.name || state.docContextDealId : null,
-    }),
+    // The SAME buildDealContext() nextStepForm's onSubmit calls, with no
+    // override — so a Doc command that changes the next step defaults to the
+    // deal's CURRENT date and preserves it, exactly like the form's
+    // pre-filled date input does, instead of the two diverging.
+    getContext: () => buildDealContext(state.deals.get(state.docContextDealId)),
   });
   state.boardSync = createBoardSync({
     readBoard: () => state.client.getBoard({ workspace:'all' }),
