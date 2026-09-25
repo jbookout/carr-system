@@ -371,6 +371,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0700_governed_correspondence_store.sql",
         "0701_governed_correspondence_scac_successor.sql",
     ),
+    # DoctorCRE V5-J102: 0704 installs the healthcare CRE lifecycle store
+    # (SECURITY DEFINER, EXECUTE to carr_reader, carr_writer and the
+    # carr_authority group); 0705 seals that catalog as v80, chained from v79
+    # (0701). Same deferred-epoch-trigger shape: the pair is one transaction.
+    (
+        "0704_cre_lifecycle.sql",
+        "0705_cre_lifecycle_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -433,6 +441,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0700_governed_correspondence_store.sql",
         "0701_governed_correspondence_scac_successor.sql",
+    ),
+    (
+        "0704_cre_lifecycle.sql",
+        "0705_cre_lifecycle_scac_successor.sql",
     ),
 )
 
