@@ -4,7 +4,14 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v78 is the runtime selector after the DoctorCRE v5 slice done-record
+// v79 is the runtime selector after DoctorCRE V5-J103's governed
+// correspondence store (migrations 0700-0701). Its sealed catalog admits four
+// new verbs -- correspondence-readiness and read-correspondence-thread (reads),
+// and the humanOnly record- and revoke-correspondence-adapter-consent pair --
+// and preserves earlier versions as history. None of them sends: there is no
+// send verb, and a draft has no destination. It chains over #1265's v78 (0629).
+//
+// Superseded note (v78): v78 was the runtime selector after the DoctorCRE v5 slice done-record
 // (migration 0628, sealed by 0629 over v77). Its sealed catalog admits nine
 // new verbs -- register-slice-criteria-from-catalog,
 // bind-slice-criterion-evidence, record-release-slice-members,
@@ -113,7 +120,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v78.generated.js";
+} from "./scac-mutation-registry.v79.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
