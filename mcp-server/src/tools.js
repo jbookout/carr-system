@@ -1044,7 +1044,14 @@ async function resolveSubject(client, ref) {
 // identifies, and an ambiguous number REFUSES with the candidates listed —
 // ORDER 1's needs_disambiguation behaviour, applied to a surface that is
 // genuinely ambiguous rather than occasionally so.
-async function resolveLoop(client, args) {
+// opts.anyStatus (default false, unchanged behaviour for every existing
+// caller) lets amend-closed-loop resolve a CLOSED row by number too: the
+// default number-lookup is scoped to status='open' because 0112 only
+// guarantees uniqueness there, and every caller before amend-closed-loop only
+// ever needed an open row anyway. amend-closed-loop needs the opposite row —
+// closed — so it opts in rather than the default widening for everyone.
+async function resolveLoop(client, args, opts = {}) {
+  const anyStatus = opts.anyStatus === true;
   if (args.loop_id) {
     const r = await client.query(
       `select li.id, li.kind, li.number, li.status, li.marker, li.due_on,
@@ -1061,11 +1068,12 @@ async function resolveLoop(client, args) {
     `select li.id, li.kind, li.number, li.status, li.marker, li.due_on,
             li.close_outcome, lb.block_key as section, lb.rel_path
        from loop_item li join loop_block lb on lb.id = li.block_id
-      where li.number = $1 and li.status = 'open'
+      where li.number = $1 and (${anyStatus ? "true" : "li.status = 'open'"})
         and ($2::text is null or li.kind = $2)`, [args.number, args.kind || null]);
   if (!r.rows.length)
     throw new ToolError({ error: "loop_not_found", number: args.number, kind: args.kind || null,
-      hint: "only OPEN loops resolve by number; a closed one needs its loop_id" });
+      hint: anyStatus ? "no row, open or closed, carries this number — pass loop_id"
+                       : "only OPEN loops resolve by number; a closed one needs its loop_id" });
   if (r.rows.length > 1)
     throw new ToolError({ error: "needs_disambiguation", number: args.number,
       candidates: r.rows.map(x => ({ loop_id: x.id, kind: x.kind, section: x.section,
@@ -7065,6 +7073,123 @@ export const TOOLS = {
       return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
                ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}),
                moved_to_done_table_in: movedTo, closed_rows_render_in: movedToBlock };
+    }),
+  },
+
+  "amend-closed-loop": {
+    write: true,
+    description: "Correct a CLOSED loop's outcome, append-only — never rewrite history. THE GAP THIS CLOSES: close-loop refuses with loop_not_open on anything already closed, by design (a closed loop is history; open a new one rather than editing the record of what happened) — but that rule has no answer for the outcome text itself being WRONG. Loop c7265238-effe-4166-bc9a-eccc5f389763 was closed with outcome \"x\" by mistake and nothing could fix it (defect a2c04ffa-92d0-4428-b175-32fa3cfb0802): the only paths were a raw table UPDATE, exactly what the record layer exists to prevent, or living with a nonsense outcome forever. This verb is the third path. It NEVER reopens the loop and never rewrites the prior outcome in place — it appends a loop_amendment row (prior outcome, new outcome, reason, server-derived actor) and only then updates loop_item's current projection to match, so the loop's current outcome reads the latest amendment while every prior one stays on the record. Refused on a still-OPEN loop (use update-loop to change it, or close-loop to close it) and on a stale base_version (version_conflict — re-read and re-decide, never auto-retried).",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      loop_id: { type: "string" },
+      number: { type: "string", description: "alternative to loop_id; refuses when ambiguous. Unlike every other loop verb's `number`, this resolves CLOSED rows too, because that is the only kind this verb ever acts on." },
+      kind: { type: "string", enum: LOOP_KINDS, description: "narrows an ambiguous number" },
+      base_version: { type: "integer" },
+      outcome: { type: "string", description: "REQUIRED: the CORRECTED outcome, in your words. Refused under ~10 characters — a placeholder correction ('x', 'n/a', 'fixed') is not a correction, and is exactly the failure mode this verb exists to repair." },
+      reason: { type: "string", description: "REQUIRED: why the recorded outcome is being corrected. Never inferred, never defaulted — the reason is as much a part of the record as the new text." },
+      resolution: { type: "string", enum: ["done", "dropped"], description: "Corrects the loop's resolution alongside its outcome. Omit to leave the resolution exactly as it was closed. Passing 'dropped' with a bookkeeping outcome (opens with RENUMBERED/SUPERSEDED, or names a successor) is held to the same successor rules close-loop enforces: successor_loop is required and must name a different, currently OPEN loop." },
+      successor_loop: { type: "string", description: "Same field, same rule as close-loop's: the open row that now carries the work forward, required whenever the corrected outcome reads as a bookkeeping close. Pass the number as a human would say it ('#213' or '213') or a loop_id." } },
+      required: ["idempotency_key", "outcome", "reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "amend-closed-loop", args, async () => {
+      // Refusals are unconditional and first, exactly like close-loop's own
+      // outcome_required check: a caller who cannot yet say the corrected text
+      // and why should not be able to half-amend the record.
+      const newOutcome = (args.outcome || "").trim();
+      if (!newOutcome)
+        throw new ToolError({ error: "outcome_required",
+          hint: "say what actually came of it — the corrected text, not that it needs correcting" });
+      // "x" is the literal outcome that caused defect a2c04ffa-92d0-4428-b175-32fa3cfb0802.
+      // A length floor cannot judge PROSE, but it can catch a placeholder, and a
+      // placeholder is exactly what got this verb built.
+      if (newOutcome.length < 10)
+        throw new ToolError({ error: "outcome_too_short", got: newOutcome.length, min: 10,
+          hint: "a meaningful correction reads as one — say what actually came of it, at least 10 characters" });
+      const reason = (args.reason || "").trim();
+      if (!reason)
+        throw new ToolError({ error: "reason_required",
+          hint: "say why the recorded outcome is being corrected — required, never inferred" });
+
+      // anyStatus:true is the whole reason this verb needed to extend the seam
+      // rather than call resolveLoop as every other loop verb does: it is the
+      // one verb whose entire purpose is acting on a row every other number
+      // lookup would refuse to find.
+      const cur = await resolveLoop(c, args, { anyStatus: true });
+      await versionGuard(c, "loop_item", cur.id, args.base_version);
+      if (cur.status === "open")
+        throw new ToolError({ error: "loop_open", loop_id: cur.id, status: cur.status,
+          hint: "amend-closed-loop only corrects a CLOSED loop's outcome — this one is still open. " +
+                "Use update-loop to change it, or close-loop to close it." });
+
+      const resolution = args.resolution !== undefined ? args.resolution : cur.status;
+
+      // Identical bookkeeping-close detection to close-loop's own, applied to
+      // the CORRECTED outcome: a correction that turns an outcome into a
+      // renumber/supersede/merge/split declaration is making the same kind of
+      // claim close-loop guards, and deserves the same guard. See close-loop's
+      // own comment for the full history of why this is exact-prefix-or-named-
+      // successor rather than an anywhere-in-prose match.
+      const bookkeeping =
+        /^\s*(renumbered|superseded)\b/i.test(newOutcome) ||
+        /\b(?:superseded\s+by|renumbered\s+(?:to|as)|merged\s+(?:into|with)|split\s+into)\s+(?:open\s+)?(?:loop\s*)?#?\d+/i.test(newOutcome) ||
+        Boolean(args.successor_loop);
+      let successor = null;
+      if (bookkeeping) {
+        if (resolution !== "dropped")
+          throw new ToolError({ error: "bookkeeping_close_is_dropped",
+            hint: "continuing work is not done; correct the resolution to 'dropped' with the successor named" });
+        if (!/^(renumbered|superseded)/i.test(newOutcome))
+          throw new ToolError({ error: "bookkeeping_outcome_prefix",
+            hint: "open a bookkeeping close with RENUMBERED or SUPERSEDED, not an abandonment claim" });
+        if (!args.successor_loop)
+          throw new ToolError({ error: "successor_loop_required",
+            hint: "name the open loop that now carries this work; a bookkeeping close cannot read as abandonment" });
+        const successorRef = String(args.successor_loop).trim();
+        successor = UUID_RE.test(successorRef)
+          ? await resolveLoop(c, { loop_id: successorRef })
+          : await resolveLoop(c, { number: successorRef.replace(/^#/, "") });
+        if (successor.id === cur.id || successor.status !== "open")
+          throw new ToolError({ error: "successor_loop_not_open", successor_loop: args.successor_loop,
+            hint: "the successor must be a different open loop" });
+      }
+
+      // The prior outcome, read from the row this transaction already holds
+      // locked (versionGuard's `for update`) — not from the args, not
+      // reconstructed, the actual current text this amendment is correcting.
+      const priorOutcome = cur.close_outcome || "";
+      const priorResolution = cur.status;
+
+      // APPEND FIRST. The amendment row is the history; the loop_item update
+      // right after it is only the current projection catching up to what the
+      // history now says. Reversing this order would let a crash between the
+      // two leave a projection change with no corresponding record of why.
+      await c.query(
+        `insert into loop_amendment (loop_id, prior_outcome, new_outcome, prior_resolution,
+           new_resolution, reason, actor_id, idempotency_key)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [cur.id, priorOutcome, newOutcome, priorResolution, resolution, reason, actor.id,
+         args.idempotency_key]);
+
+      // The loop's current outcome reads the latest amendment: close_outcome
+      // and outcome (the pair close-loop itself always keeps in sync) are set
+      // to the corrected text, and the row's own version increments via
+      // trg_touch_row exactly as any other loop_item update does. closed_at
+      // and closed_by are deliberately UNTOUCHED — this is a correction to
+      // what was said, not a re-closing of the loop, and the original closer
+      // and closing time stay accurate.
+      await c.query(
+        `update loop_item set close_outcome=$1, outcome=$1, status=$2, updated_by=$3 where id=$4`,
+        [newOutcome, resolution, actor.id, cur.id]);
+
+      await writeEvent(c, actor, "amend-closed-loop", "loop", cur.id,
+        { field: "close_outcome",
+          old: { outcome: priorOutcome, resolution: priorResolution },
+          new: { outcome: newOutcome, resolution, reason,
+                 ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}) },
+          idempotency_key: args.idempotency_key });
+
+      return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
+               prior_outcome: priorOutcome, outcome: newOutcome,
+               ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}) };
     }),
   },
 
