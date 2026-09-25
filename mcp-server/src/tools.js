@@ -59,6 +59,7 @@ import {
 import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
 import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
+import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
@@ -8172,6 +8173,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "tour-artifacts": "mcp-server/src/tour-artifacts.js",
   "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
+  "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
 });
 
@@ -9306,6 +9308,8 @@ registerTools(benchmarkAcceptanceStoreTools({
   "benchmark-acceptance");
 registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
   "model-role-store");
+registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
+  "record-source-authority");
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
 }), "foundation-assurance");

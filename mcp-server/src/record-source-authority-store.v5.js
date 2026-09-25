@@ -474,11 +474,13 @@ export function v5F01ToolRegistrations() {
     handler: handlers[name],
     input_keys: [...OPERATION_SCHEMAS[name].keys],
     required_keys: [...OPERATION_SCHEMAS[name].required],
-    // The parent still has to do all four of these; naming them here keeps the
-    // seam honest rather than implying this module closed them.
+    // Named rather than implied. The numbered migration carrying domain.sql and
+    // the document-source hunk now exists, and recordSourceAuthorityStoreTools
+    // below is the door tools.js registers; the SCAC registry successor is
+    // bound at merge time and acceptance is a separate, human act.
     registered_in_scac: false,
     registered_in_mutation_registry: false,
-    migration_bound: false,
+    migration_bound: true,
     accepted: false,
   })));
 }
@@ -2108,4 +2110,186 @@ for (const [operation, schema] of Object.entries(OPERATION_SCHEMAS)) {
     throw new V5F01StoreError("authority_surface_drift",
       `${operation} does not carry the settled humanOnly/authorityOnly disposition`, { operation });
   }
+}
+
+// ---------------------------------------------------------------------------
+// THE LIVE DOOR: the nine operations as registered MCP verbs.
+//
+// This is the integration tail the description above kept naming as the
+// parent's job. It adds no judgment and no persistence of its own: every verb
+// is the store method above, run unchanged, on the connection mcp.js already
+// opened for that verb — the ordinary writer connection, or the per-partner
+// authority connection for the two authorityOnly verbs — and inside the
+// transaction mcp.js already began. It opens no connection, begins and commits
+// nothing itself, reads no environment and holds no clock.
+//
+// WHAT THE DOOR DOES, and each is a refusal rather than a repair:
+//   * It hands the store a transaction-scoped handle whose `transaction` runs
+//     the body on the SAME client, so the store's BEGIN/COMMIT never nests
+//     inside mcp.js's transaction and a refusal rolls the whole verb back.
+//   * It hands the store the actor mcp.js authenticated, as the only context
+//     key the store accepts. The store re-derives the principal from the
+//     database and refuses on any disagreement; this door cannot widen that.
+//   * Every write runs inside the shared withEnvelope, so the tool_call replay
+//     row and the F01 idempotency row are both keyed by the caller's key.
+//   * A kernel, store or document-source refusal, and a database refusal the
+//     F01 writers raise by name (f01_*), reach the caller as a ToolError that
+//     keeps the stable code. Anything else is rethrown untouched.
+//
+// WHAT IT STILL IS NOT. It installs no policy, invents no field owner, calls
+// no provider, moves no bytes, deletes nothing and activates no connector.
+// ---------------------------------------------------------------------------
+
+export const V5_F01_TOOL_REGISTRATION_SOURCE = "record-source-authority";
+
+const TOOL_DESCRIPTIONS = deepFreeze({
+  "read-record-source-authority":
+    "DoctorCRE v5 F01 read. Return one selected record-authority view — the current field-authority and retention policy, one field's current state, its append-only events, state transitions, mutation receipts, reconciliation items, a stored corporate artifact, its proposal and derivative links and derivative coverage, a document's current identity or its versions, and preservation holds or deletion evaluations — with every digest RECOMPUTED from the committed rows by the database. A corrupt newest row refuses (f01_corrupt_stored_record) rather than falling back to an older healthy one. selector.kind is one of: current_policy, field_state, field_events, state_transitions, mutation_receipts, reconciliation_items, artifact, proposal_links, derivative_links, derivative_coverage, document, document_versions, holds, hold_history, deletion_evaluations.",
+  "register-record-source-authority-policy":
+    "HUMAN-ONLY, AUTHORITY-ONLY. Install one exact version of the F01 source×entity×field authority registry and the retention registry, compare-and-swapped against the prior policy digest (null for the first install). Every field entry must name exactly one owner source, one write direction (inbound/outbound/bidirectional/none), a version comparator, a conflict behaviour (refuse/reconcile) and the human class that resolves its conflicts; missing, duplicate, ambiguous or conflicting entries refuse. NOTHING IS DEFAULTED OR INVENTED: this verb records the owners a partner states and ships none of its own. Runs on the partner's authority connection; the installer is derived from that session, never from the payload.",
+  "record-source-observation":
+    "Judge one source observation of one field against the INSTALLED policy and the stored current state, and persist exactly one of: an accepted transition with its event and mutation receipt, a no-change confirmation, a refusal, or a visible reconciliation item. Stale (older-version) observations, recycled native IDs, a source writing against its registered write direction, a non-owner trying to establish a field, cross-tenant or cross-account evidence, and missing provenance refuse; a same-version or newer conflicting value follows the field's registered conflict behaviour — refuse, or reconcile into a visible item that leaves current state untouched. There is no silent last-write-wins. Refuses with no_installed_policy until a partner installs one.",
+  "record-corporate-artifact":
+    "Persist one immutable, source-agnostic corporate artifact identity (Salesforce export, OneDrive official copy, object-storage bytes, email, etc.) as EVIDENCE, after privacy, provenance, prior-identity and time validation. An artifact is never a fact and never makes a field authoritative; a second identity for the same source bytes refuses as artifact_identity_conflict, and Tour-only evidence is refused as a corporate source by name.",
+  "record-parsed-proposal":
+    "Persist one reviewable proposal parsed from a stored artifact, with a reversible, history-preserving link to it and its derivative-source registration. A proposal never becomes a fact, never advances state, carries no effect authority and always requires human review; an effect-bearing proposal refuses.",
+  "register-derivative-source-link":
+    "Bind one derived record to the exact stored artifact it came from, under the authenticated producer identity, before that derivative is complete. Provenance only: a link never establishes coverage, is never an exhaustive inventory and never permits deletion; a derivative claiming to be its own source, or produced before its source or after now, refuses.",
+  "record-document-identity":
+    "Persist and read back one versioned document identity — Neon operating identity, object-storage draft/sealed bytes, OneDrive official executed copy — with its preparation, delivery, signature, validity, version and filing states and its content hash, compare-and-swapped against the prior document digest (null for version 1). `source` is REQUIRED and states where this version came from: derived from a stored artifact (its derivative link is registered in the same transaction), authored here, or legacy_provenance_unknown with a stated basis — an absent statement is never read as 'no source'. Incoherent states refuse; a fully executed document without a filed official copy is recorded but reported as incomplete_official_filing. Transfers no bytes and sends nothing.",
+  "record-artifact-preservation-hold":
+    "HUMAN-ONLY, AUTHORITY-ONLY. Append one preservation hold (or its release) for one stored artifact, compare-and-swapped against the prior hold digest. A hold never deletes anything; it only blocks a later deletion evaluation.",
+  "evaluate-artifact-deletion":
+    "Evaluate whether one stored artifact MAY be deleted, from the installed retention policy, the server-stamped custody clock, its holds and its registered derivatives, and persist the bounded evaluation or deletion-proof receipt. An active or unknown hold, unknown derivative coverage, a missing proof or an unsatisfied governing constraint refuses. It NEVER deletes bytes and never purges anything.",
+});
+
+const DIGEST_SCHEMA = Object.freeze({ type: "string", pattern: "^sha256:[0-9a-f]{64}$" });
+const PRIOR_DIGEST_SCHEMA = Object.freeze({ type: ["string", "null"] });
+const TOOL_KEY_SCHEMAS = deepFreeze({
+  schema_version: { type: "string" },
+  idempotency_key: { type: "string" },
+  selector: { type: "object" },
+  field_registry: { type: "object" },
+  retention_registry: { type: "object" },
+  field_registry_digest: DIGEST_SCHEMA,
+  retention_registry_digest: DIGEST_SCHEMA,
+  expected_prior_policy_digest: PRIOR_DIGEST_SCHEMA,
+  observation: { type: "object" },
+  artifact: { type: "object" },
+  proposal: { type: "object" },
+  registration: { type: "object" },
+  document: { type: "object" },
+  source: { type: "object" },
+  expected_prior_document_digest: PRIOR_DIGEST_SCHEMA,
+  hold: { type: "object" },
+  expected_prior_hold_digest: PRIOR_DIGEST_SCHEMA,
+  subject: { type: "object" },
+});
+
+const F01_DATABASE_REFUSAL = /^(f01_[a-z0-9_]+)/;
+const F01_ERROR_NAMES = Object.freeze(["V5F01StoreError", "V5F01Error", "V5F01DocumentSourceError"]);
+
+/** The closed JSON schema for one verb, built from the store's own key list. */
+export function v5F01ToolInputSchema(operation) {
+  const schema = OPERATION_SCHEMAS[operation];
+  if (!schema) {
+    throw new V5F01StoreError("unknown_operation", `"${operation}" is not an F01 operation`, { operation });
+  }
+  const properties = {};
+  for (const key of schema.keys) {
+    if (!TOOL_KEY_SCHEMAS[key]) {
+      throw new V5F01StoreError("tool_key_without_schema",
+        `${operation} accepts "${key}" but the door declares no JSON type for it`, { operation, key });
+    }
+    properties[key] = { ...TOOL_KEY_SCHEMAS[key] };
+  }
+  return { type: "object", additionalProperties: false, properties, required: [...schema.required] };
+}
+
+/**
+ * A handle over ONE already-open client whose transaction() runs the body on
+ * that same client. mcp.js owns BEGIN/COMMIT for every verb; a store that
+ * issued its own would commit half a verb, or warn and nest.
+ */
+export function v5F01TransactionScopedHandle(client) {
+  if (!client || typeof client.query !== "function") {
+    throw new V5F01StoreError("database_handle_required", "the verb has no open database client");
+  }
+  const handle = {
+    query: (text, params) => client.query(text, params),
+    transaction: fn => fn(handle),
+  };
+  return handle;
+}
+
+/** Translate an F01 refusal into the tool surface's refusal, keeping its code. */
+export function v5F01ToolRefusal(error, ToolError) {
+  if (error && F01_ERROR_NAMES.includes(error.name) && typeof error.code === "string") {
+    return new ToolError({
+      error: error.code, message: error.message,
+      ...(error.detail !== undefined ? { detail: error.detail } : {}),
+    });
+  }
+  const match = typeof error?.message === "string" ? F01_DATABASE_REFUSAL.exec(error.message) : null;
+  if (match && typeof error?.code === "string") {
+    return new ToolError({ error: match[1], message: error.message, sqlstate: error.code });
+  }
+  return null;
+}
+
+/**
+ * The nine F01 verbs, ready for tools.js's registerTools. `createStore` is
+ * injectable for the offline suite; production uses the store above.
+ */
+export function recordSourceAuthorityStoreTools({
+  withEnvelope, ToolError, createStore = createRecordSourceAuthorityStore,
+} = {}) {
+  if (typeof withEnvelope !== "function" || typeof ToolError !== "function") {
+    throw new V5F01StoreError("tool_wiring_incomplete",
+      "recordSourceAuthorityStoreTools needs the shared withEnvelope and ToolError");
+  }
+  const tools = {};
+  for (const registration of v5F01ToolRegistrations()) {
+    const { name, write, humanOnly, authorityOnly, handler: method } = registration;
+    const run = async (client, actor, args) => {
+      const store = createStore({ db: v5F01TransactionScopedHandle(client) });
+      try {
+        const answer = await store[method](args ?? {}, { actor: { ...(actor ?? {}) } });
+        // THE KERNEL'S V5_NO_EFFECTS SAYS database_writes: 0, which is true of a
+        // pure evaluator and false of a verb that just committed F01 rows. The
+        // door restates the one count that changed and leaves every other
+        // zero — no provider, network, notification, schedule or activation —
+        // exactly as the store reported it.
+        return {
+          ok: answer.decision !== "refuse",
+          ...answer,
+          effects: { ...answer.effects, database_writes: write ? "f01_record_layer_rows_only" : 0 },
+        };
+      } catch (error) {
+        const refusal = v5F01ToolRefusal(error, ToolError);
+        if (refusal) throw refusal;
+        throw error;
+      }
+    };
+    tools[name] = {
+      write,
+      ...(humanOnly ? { humanOnly: true } : {}),
+      ...(authorityOnly ? { authorityOnly: true } : {}),
+      description: TOOL_DESCRIPTIONS[name],
+      inputSchema: v5F01ToolInputSchema(name),
+      handler: write
+        ? async (c, actor, args) => withEnvelope(c, actor, name, args, () => run(c, actor, args))
+        : async (c, actor, args) => run(c, actor, args),
+    };
+  }
+  return tools;
+}
+
+// The door must cover exactly the operations the store serves, each described.
+for (const operation of V5_F01_OPERATIONS) {
+  if (typeof TOOL_DESCRIPTIONS[operation] !== "string") {
+    throw new V5F01StoreError("tool_without_description",
+      `${operation} is served but the door does not describe it`, { operation });
+  }
+  v5F01ToolInputSchema(operation);
 }

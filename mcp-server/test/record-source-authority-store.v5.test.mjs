@@ -16,8 +16,9 @@
 //
 // The things a fake cannot prove — real concurrency, real append-only refusal,
 // real direct-DML refusal, real corrupt-row readback — are the disposable-
-// database gate's job, and ops/record-source-authority-local-pg-gate.py proves
-// them there instead of being asserted twice here.
+// database proof's job, and record-source-authority-live-pg.v5.test.mjs (run by
+// the migration class on its disposable database) proves them there instead of
+// being asserted twice here.
 //
 // NO FIXTURE NAMES A REAL THING. Every account, native id, object key, drive
 // item, digest and retention period below is unmistakably test data, and the
@@ -480,10 +481,10 @@ test("the nine named operations are exactly the proposed tool surface", () => {
   for (const entry of registrations) {
     assert.ok(V5_F01_OPERATIONS.includes(entry.name));
     assert.ok(entry.role.length > 40, entry.name);
-    // The parent still owns all four. Naming them false here is the point.
+    // The migration is bound; the registry successor and acceptance are not.
     assert.equal(entry.registered_in_scac, false);
     assert.equal(entry.registered_in_mutation_registry, false);
-    assert.equal(entry.migration_bound, false);
+    assert.equal(entry.migration_bound, true);
     assert.equal(entry.accepted, false);
   }
 });
