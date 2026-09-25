@@ -601,6 +601,63 @@ sys.stdout.buffer.write(sys.stdin.buffer.read())
     assert not leftovers, f"signal-during-successful-cleanup: private temp file leaked: {leftovers}"
 
 
+def case_primary_error_wins_over_cleanup_signal(root: Path, guard_path: Path = GUARD) -> None:
+    """A primary BackupError from the dump itself must always win over a
+    signal-class exception raised during cleanup of THAT SAME failure.
+
+    This is the mirror image of case_signal_during_successful_dump_cleanup_
+    is_not_swallowed: there the dump succeeds and a cleanup-time signal must
+    surface (nothing primary to lose to). Here the dump already failed on
+    its own (the guard's 'synthetic guard deadline' refusal) and a signal
+    ALSO lands during that failure's cleanup -- encrypted_dump() must still
+    raise the original guard error, not the cleanup-time one, per
+    encrypted_dump()'s own comment: 'a primary BackupError always wins over
+    one raised during cleanup'.
+
+    Uses the refusing FakeGuard from build_hanging_dump_fixture (ack()
+    raises 'synthetic guard deadline' once both children have started) and
+    monkeypatches stop_child to raise a DIFFERENT BackupError('cleanup
+    signal') -- standing in for a real signal landing while cleanup is
+    already unwinding the primary failure. Asserts the propagated error is
+    still the original 'synthetic guard deadline' one (not 'cleanup
+    signal'), and that the private temp file is still gone either way.
+
+    This is exactly what `primary_raised` (set by the `except BaseException`
+    wrapping encrypted_dump()'s try body) exists to guarantee. If that guard
+    were removed -- i.e. `if cleanup_signal is not None and not
+    primary_raised:` weakened to `if cleanup_signal is not None:`, always
+    true -- this fails: the propagated error becomes 'cleanup signal'
+    instead of 'synthetic guard deadline'.
+    """
+    real, out, output, recipient, fake_bin, env_patch, FakeGuard = build_hanging_dump_fixture(
+        root, "primary-wins-over-cleanup-signal", guard_path)
+
+    def stop_child_raises_cleanup_signal(child):
+        raise real.BackupError("cleanup signal")
+
+    raised: BaseException | None = None
+    with mock.patch.dict(os.environ, env_patch), \
+         mock.patch.object(real, "stop_child", stop_child_raises_cleanup_signal):
+        try:
+            real.encrypted_dump(FakeGuard(), output, recipient, str(fake_bin / "pg_dump"), 10000, 0.01)
+        except BaseException as exc:
+            raised = exc
+
+    assert raised is not None, (
+        "primary-wins-over-cleanup-signal: encrypted_dump unexpectedly succeeded"
+    )
+    assert isinstance(raised, real.BackupError), (
+        f"primary-wins-over-cleanup-signal: unexpected exception type: {raised!r}"
+    )
+    assert "synthetic guard deadline" in str(raised), (
+        f"primary-wins-over-cleanup-signal: primary error was replaced by the "
+        f"cleanup-time signal: {raised!r}"
+    )
+
+    leftovers = [p for p in out.iterdir() if p.name.startswith(".") and p.name.endswith(".tmp")]
+    assert not leftovers, f"primary-wins-over-cleanup-signal: private temp file leaked: {leftovers}"
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="carr-backup-wrapper-selftest-") as raw:
         root = Path(raw)
@@ -678,10 +735,12 @@ def main() -> int:
         case_finally_survives_stop_child_raising(root)
         case_stop_child_survives_killpg_permission_error(root)
         case_signal_during_successful_dump_cleanup_is_not_swallowed(root)
+        case_primary_error_wins_over_cleanup_signal(root)
 
     print(
         "backup-dump-selftest: real helper pipeline argv/env, passthrough, failures, "
-        "deadline, floors, survivor, reap-timeout cleanup and signal-safe cleanup passed"
+        "deadline, floors, survivor, reap-timeout cleanup, signal-safe cleanup "
+        "and primary-vs-cleanup-signal precedence passed"
     )
     return 0
 

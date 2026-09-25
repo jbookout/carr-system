@@ -432,6 +432,7 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
     done = threading.Event()
     errors: list[BaseException] = []
     observer = DumpObserver(guard.tables)
+    primary_raised = False
     try:
         with os.fdopen(fd, 'wb') as ciphertext, tempfile.TemporaryFile() as dump_err, tempfile.TemporaryFile() as age_err:
             env, public_connection = dump_connection(guard.dsn)
@@ -486,6 +487,9 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
             os.replace(temporary, output)
             return {'file': str(output), 'bytes': size, 'floor': floor,
                     'table_count': len(observer.seen)}
+    except BaseException:
+        primary_raised = True
+        raise
     finally:
         # Every cleanup step runs, unconditionally, and an ORDINARY failure
         # in one of them may never replace whatever the `try` block above
@@ -504,20 +508,29 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
         # it before SIGKILL is sent, so the child is left unkilled. If that
         # were logged and swallowed like an ordinary cleanup failure, a
         # termination signal arriving after a successful dump would still
-        # report success. So a BackupError/KeyboardInterrupt caught here is
-        # remembered and, once every cleanup step has still been run, is
-        # re-raised — but ONLY when nothing from the `try` block above is
-        # already propagating (sys.exc_info() is empty on the ordinary
-        # return path and while a `raise` from the try body is unwinding):
-        # a primary BackupError always wins over one raised during cleanup.
+        # report success. So a BackupError/KeyboardInterrupt (and, for the
+        # same reason, SystemExit/GeneratorExit -- see cleanup_step) caught
+        # here is remembered and, once every cleanup step has still been
+        # run, is re-raised -- but ONLY when `primary_raised` is False, i.e.
+        # nothing from the `try`/`except BaseException` above is already
+        # propagating: a primary BackupError always wins over one raised
+        # during cleanup. This must be the explicit `primary_raised` flag
+        # set by that `except BaseException`, NOT sys.exc_info(): inside a
+        # finally block, sys.exc_info() also reports an exception a CALLER
+        # is already handling in an enclosing except block, even when this
+        # function's own try body returned cleanly -- so checking it here
+        # would swallow a cleanup signal (and report success) whenever
+        # encrypted_dump() happens to be invoked from inside someone else's
+        # except clause, which has nothing to do with this call's outcome.
         cleanup_failures: list[tuple[str, BaseException]] = []
         cleanup_signal: BaseException | None = None
+        signal_classes = (BackupError, KeyboardInterrupt, SystemExit, GeneratorExit)
 
         def cleanup_step(description: str, action) -> None:
             nonlocal cleanup_signal
             try:
                 action()
-            except (BackupError, KeyboardInterrupt) as exc:
+            except signal_classes as exc:
                 if cleanup_signal is None:
                     cleanup_signal = exc
                 cleanup_failures.append((description, exc))
@@ -535,7 +548,7 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
             print(f'backup-guard: cleanup step failed ({description}): {exc!r}',
                   file=sys.stderr)
 
-        if cleanup_signal is not None and sys.exc_info()[0] is None:
+        if cleanup_signal is not None and not primary_raised:
             raise cleanup_signal
 
 
