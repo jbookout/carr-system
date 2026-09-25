@@ -400,7 +400,13 @@ def main():
     except Exception:
         sys.exit(0)
 
-    code_review(payload)
+    # The receipt half fails open too (ops/lint-gate-selftest.py): a payload
+    # with no session_id, or a tool_input that is not a dict, used to raise
+    # out of here with a traceback and exit 1 -- before the lint ever ran.
+    try:
+        code_review(payload)
+    except Exception as exc:
+        log(f"RECEIPT(internal-error) {type(exc).__name__}: {exc}")
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
