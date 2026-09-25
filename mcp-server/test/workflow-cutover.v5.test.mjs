@@ -243,12 +243,15 @@ class WorkflowCutoverFake {
         proposed_by_actor_slug: "joe-local", created_at: "2026-09-25T00:00:00Z" }] };
     }
     if (sql.includes("ops.confirm_slice_completions")) {
-      const [sliceIds, reason, key] = params;
+      const [sliceIds, reason, key, expectedJson] = params;
       this.confirmCalls = [...(this.confirmCalls ?? []), params];
       if (!reason) throw new Error("reason_required");
+      const expected = expectedJson ? JSON.parse(expectedJson) : {};
       return { rows: [...new Set(sliceIds)].sort().map(sliceId => sliceId === "V5-HELD"
         ? { slice_id: sliceId, outcome: "held", mark_id: null, proposal_id: null, criteria_receipt: null }
-        : { slice_id: sliceId, outcome: "confirmed", mark_id: `mark-${key}`, proposal_id: "p1", criteria_receipt: [] }) };
+        : expected[sliceId] && expected[sliceId] !== "70000000-0000-0000-0000-000000000001"
+          ? { slice_id: sliceId, outcome: "proposal_superseded", mark_id: null, proposal_id: "p1", criteria_receipt: null }
+          : { slice_id: sliceId, outcome: "confirmed", mark_id: `mark-${key}`, proposal_id: "p1", criteria_receipt: [] }) };
     }
     if (sql.includes("ops.pending_slice_completion_proposals")) {
       return { rows: [{ pending: [{ slice_id: "V5-F08", proposal_id: "p1", passes_now: true }] }] };
@@ -620,7 +623,22 @@ test("confirm-slice-completions is one partner act for many slices, with a per-s
   assert.deepEqual(out.results.map(r => [r.slice_id, r.outcome]),
     [["V5-F08", "confirmed"], ["V5-HELD", "held"], ["V5-J303", "confirmed"]]);
   assert.deepEqual(client.confirmCalls[0], [["V5-F08", "V5-HELD", "V5-J303"], "partner confirms the batch",
-    "60000000-0000-0000-0000-000000000043"]);
+    "60000000-0000-0000-0000-000000000043", null]);
+  const pinned = await executeRegisteredTool(client, AUTHORITY_AGENT, "confirm-slice-completions", {
+    idempotency_key: "60000000-0000-0000-0000-000000000045", slice_ids: ["V5-F08", "V5-J303"],
+    reason: "partner confirms what was reviewed",
+    expected_proposal_ids: { "V5-F08": "70000000-0000-0000-0000-000000000001",
+      "V5-J303": "70000000-0000-0000-0000-000000000009" },
+  });
+  assert.deepEqual(pinned.results.map(r => [r.slice_id, r.outcome]),
+    [["V5-F08", "confirmed"], ["V5-J303", "proposal_superseded"]]);
+  assert.equal(client.confirmCalls[1][3], JSON.stringify({ "V5-F08": "70000000-0000-0000-0000-000000000001",
+    "V5-J303": "70000000-0000-0000-0000-000000000009" }));
+  const badPin = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "confirm-slice-completions", {
+    idempotency_key: "60000000-0000-0000-0000-000000000046", slice_ids: ["V5-F08"], reason: "r",
+    expected_proposal_ids: { "V5-F08": "not-a-uuid" },
+  }));
+  assert.ok(badPin, "an expected proposal id must be a uuid");
   const noReason = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "confirm-slice-completions", {
     idempotency_key: "60000000-0000-0000-0000-000000000044", slice_ids: ["V5-F08"],
   }));

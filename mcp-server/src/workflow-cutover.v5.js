@@ -595,22 +595,36 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
 
     "confirm-slice-completions": {
       write: true, authorityOnly: true,
-      description: "Partner authority only: confirm many slices complete in one act. For each slice_id the server takes the latest automated proposal, re-evaluates every criterion against its effective binding NOW, and writes complete only when all still pass. Per-slice outcome: confirmed, held (a partner hold), already_complete, no_proposal, stale_proposal (a mark was written after the proposal; re-propose), not_proven (a criterion no longer resolves), unknown_slice. Nothing is confirmed that is not listed. pending-slice-completion-proposals lists what is waiting. A reason is required. Idempotent on idempotency_key.",
+      description: "Partner authority only: confirm many slices complete in one act. For each slice_id the server takes the latest automated proposal, re-evaluates every criterion against its effective binding NOW, and writes complete only when all still pass. Optional expected_proposal_ids maps a slice_id to the proposal_id the partner reviewed (from pending-slice-completion-proposals); if that slice's latest proposal is a different one it reports proposal_superseded and is not confirmed. Per-slice outcome: confirmed, held (a partner hold), already_complete, no_proposal, proposal_superseded, stale_proposal (a mark was written after the proposal; re-propose), not_proven (a criterion no longer resolves), unknown_slice. Nothing is confirmed that is not listed. pending-slice-completion-proposals lists what is waiting. A reason is required. Idempotent on idempotency_key.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           idempotency_key: { type: "string" },
           slice_ids: { type: "array", minItems: 1, maxItems: 200, items: { type: "string", minLength: 1 } },
           reason: { type: "string", minLength: 1 },
+          expected_proposal_ids: {
+            type: "object", maxProperties: 200,
+            additionalProperties: { type: "string", pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+          },
         },
         required: ["idempotency_key", "slice_ids", "reason"],
       },
       handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-slice-completions", args, async () => {
+        const expected = args.expected_proposal_ids ?? null;
+        if (expected !== null) {
+          const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          if (typeof expected !== "object" || Array.isArray(expected)
+              || Object.values(expected).some(v => typeof v !== "string" || !uuidRe.test(v))) {
+            throw new ToolError({ error: "slice_completion_confirm_refused",
+              detail: "expected_proposal_ids maps each slice_id to a proposal_id uuid" });
+          }
+        }
         let rows;
         try {
           rows = (await c.query(
-            "select * from ops.confirm_slice_completions($1::text[],$2,$3)",
-            [args.slice_ids, args.reason, args.idempotency_key],
+            "select * from ops.confirm_slice_completions($1::text[],$2,$3,$4::jsonb)",
+            [args.slice_ids, args.reason, args.idempotency_key,
+              expected === null ? null : JSON.stringify(expected)],
           )).rows;
         } catch (err) {
           throw new ToolError({ error: "slice_completion_confirm_refused", detail: String(err.message || err) });

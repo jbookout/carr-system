@@ -815,10 +815,14 @@ alter table ops.slice_completion_mark
   add column if not exists confirmed_proposal_id uuid;
 
 -- The terminal state is a partner act, at the table: no door, present or
--- future, can store a complete mark that a partner did not write.
+-- future, can store a complete mark that a partner did not write. NULL-safe
+-- (a complete row with no marked_via is refused, not waved through by a NULL
+-- comparison) and VALID: it is checked against every existing row when it is
+-- added, so the migration refuses rather than grandfathering a complete mark
+-- no partner wrote.
 alter table ops.slice_completion_mark
   add constraint slice_completion_mark_complete_is_partner
-    check (status <> 'complete' or marked_via = 'authority') not valid;
+    check (status <> 'complete' or marked_via is not distinct from 'authority');
 
 -- ===========================================================================
 -- Proposals: automation's last word. A proposal is NOT a mark and changes no
@@ -1342,7 +1346,8 @@ revoke all on function ops.slice_confirm_mark_key(uuid, text) from public;
 create or replace function ops.confirm_slice_completions(
   p_slice_ids text[],
   p_reason text,
-  p_idempotency_key uuid
+  p_idempotency_key uuid,
+  p_expected_proposal_ids jsonb default null
 ) returns table (slice_id text, outcome text, mark_id uuid, proposal_id uuid, criteria_receipt jsonb)
 language plpgsql security definer
 set search_path = pg_catalog, ops
@@ -1357,6 +1362,10 @@ declare
   v_prop ops.slice_completion_proposal%rowtype;
   v_computed jsonb;
   v_row ops.slice_completion_mark%rowtype;
+  v_expected jsonb := '{}'::jsonb;
+  v_expected_id uuid;
+  v_k text;
+  v_v jsonb;
 begin
   v_actor := ops.authority_actor_slug();
   if p_idempotency_key is null then
@@ -1370,6 +1379,23 @@ begin
   end if;
   if p_reason is null or btrim(p_reason) = '' then
     raise exception 'reason_required';
+  end if;
+  -- Optional {slice_id: proposal_id}: what the partner actually reviewed. A
+  -- slice whose latest proposal is no longer that one is not confirmed.
+  if p_expected_proposal_ids is not null and jsonb_typeof(p_expected_proposal_ids) <> 'null' then
+    if jsonb_typeof(p_expected_proposal_ids) <> 'object' then
+      raise exception 'expected_proposal_ids_must_be_an_object';
+    end if;
+    for v_k, v_v in select e.key, e.value from jsonb_each(p_expected_proposal_ids) e loop
+      if jsonb_typeof(v_v) <> 'string'
+         or (v_v #>> '{}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+        raise exception 'expected_proposal_id_not_a_uuid: %', v_k;
+      end if;
+      if not exists (select 1 from unnest(p_slice_ids) x where btrim(x) = btrim(v_k)) then
+        raise exception 'expected_proposal_id_for_unlisted_slice: %', v_k;
+      end if;
+      v_expected := v_expected || jsonb_build_object(btrim(v_k), lower(v_v #>> '{}'));
+    end loop;
   end if;
   -- One fixed order, so two concurrent batches take slice locks alike.
   for v_slice in
@@ -1416,6 +1442,12 @@ begin
       continue;
     end if;
     proposal_id := v_prop.id;
+    v_expected_id := (v_expected ->> v_slice)::uuid;
+    if v_expected_id is not null and v_expected_id is distinct from v_prop.id then
+      outcome := 'proposal_superseded';
+      return next;
+      continue;
+    end if;
     if coalesce(v_latest.mark_seq, 0) > v_prop.basis_mark_seq then
       outcome := 'stale_proposal'; mark_id := v_latest.id;
       return next;
@@ -1445,11 +1477,11 @@ begin
 end;
 $$;
 
-comment on function ops.confirm_slice_completions(text[], text, uuid) is
-  'DoctorCRE v5 partner authority door: confirm many slices complete in one act. Per slice (under the slice lock) it takes the latest automated proposal, re-evaluates every criterion against its effective binding NOW, and writes a complete mark (marked_via authority, actor ops.authority_actor_slug(), confirmed_proposal_id) only when all still pass. Outcomes per slice: confirmed, held, already_complete, no_proposal, stale_proposal (a mark was written after the proposal), not_proven, unknown_slice, idempotency_key_conflict. Idempotent on p_idempotency_key.';
+comment on function ops.confirm_slice_completions(text[], text, uuid, jsonb) is
+  'DoctorCRE v5 partner authority door: confirm many slices complete in one act. Per slice (under the slice lock) it takes the latest automated proposal, re-evaluates every criterion against its effective binding NOW, and writes a complete mark (marked_via authority, actor ops.authority_actor_slug(), confirmed_proposal_id) only when all still pass. Optional p_expected_proposal_ids {slice_id: proposal_id} names the proposal the partner reviewed; if the latest proposal of the slice is a different one it reports proposal_superseded and confirms nothing. Outcomes per slice: confirmed, held, already_complete, no_proposal, proposal_superseded, stale_proposal (a mark was written after the proposal), not_proven, unknown_slice, idempotency_key_conflict. Idempotent on p_idempotency_key.';
 
-revoke all on function ops.confirm_slice_completions(text[], text, uuid) from public;
-grant execute on function ops.confirm_slice_completions(text[], text, uuid) to carr_authority;
+revoke all on function ops.confirm_slice_completions(text[], text, uuid, jsonb) from public;
+grant execute on function ops.confirm_slice_completions(text[], text, uuid, jsonb) to carr_authority;
 
 -- Read: the proposals a partner could confirm now (latest per slice, not
 -- held, not complete, not stale), each with whether it still passes.

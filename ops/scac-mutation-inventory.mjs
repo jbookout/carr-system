@@ -1593,7 +1593,7 @@ export const POST_0627_FORWARD_V77_DB_CATALOG_BASELINE = Object.freeze({
 export const POST_0629_FORWARD_V78_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0627_FORWARD_V77_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v78",
-  secdef_execute: { count: 975, digest: "sha256:c91850fccf7f64202f8e8acfaf87331e824c6ff88aef62e3ed9e156d0bb12f26" },
+  secdef_execute: { count: 975, digest: "sha256:7964b99334d8a156d6736ef5f7fbf4c7181838f86ea2824ee7e4ab008dedb6ad" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

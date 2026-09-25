@@ -321,6 +321,19 @@ def run(cur: Any) -> str | None:
                            values (%s,'complete','[]'::jsonb,'r','joe-local',%s,'automation')""",
                    (SLICE, uuid.uuid4()), "an automation complete row written directly (owner)",
                    match="slice_completion_mark_complete_is_partner")
+    # NULL-safe: a complete row with no marked_via at all is refused too (a
+    # plain `marked_via = 'authority'` CHECK passes on NULL).
+    expect_refusal(cur, """insert into ops.slice_completion_mark (slice_id,status,criteria_receipt,reason,marked_by_actor_slug,
+                                                                  idempotency_key)
+                           values (%s,'complete','[]'::jsonb,'r','joe-local',%s)""",
+                   (SLICE, uuid.uuid4()), "a complete row with NULL marked_via written directly (owner)",
+                   match="slice_completion_mark_complete_is_partner")
+    # VALID, not NOT VALID: the constraint was checked against every existing row.
+    validated = cur.execute("""select convalidated, pg_get_constraintdef(oid) from pg_constraint
+                                where conrelid = 'ops.slice_completion_mark'::regclass
+                                  and conname = 'slice_completion_mark_complete_is_partner'""").fetchone()
+    if not validated or validated[0] is not True or "DISTINCT FROM" not in validated[1].upper():
+        return f"the complete-is-partner CHECK is not a validated NULL-safe constraint: {validated}"
     with as_login(cur, AUTHORITY, SEAT):
         for label, query, params in seat_doors:
             expect_refusal(cur, query, params, f"authority login {label}", match="permission denied")
@@ -486,6 +499,8 @@ def run(cur: Any) -> str | None:
     full = {CRITERIA[0]: mine, CRITERIA[1]: good_job, CRITERIA[2]: mine}
     propose = "select id::text, proposed_by_actor_slug from ops.propose_slice_completion(%s,%s,%s,%s)"
     confirm = "select slice_id, outcome, mark_id::text, proposal_id::text from ops.confirm_slice_completions(%s,%s,%s)"
+    confirm_pinned = ("select slice_id, outcome, mark_id::text, proposal_id::text"
+                      " from ops.confirm_slice_completions(%s,%s,%s,%s)")
 
     def latest() -> tuple:
         return cur.execute("""select status, marked_via, marked_by_actor_slug, confirmed_proposal_id::text
@@ -578,10 +593,24 @@ def run(cur: Any) -> str | None:
         return "a proposal older than the latest mark was confirmed"
     with as_login(cur, WRITER, SEAT):
         p3 = cur.execute(propose, (SLICE, receipt(full), "re-proven", uuid.uuid4())).fetchone()
-    # One partner act, many slices: per-slice outcomes, idempotent replay.
+    # The partner names the proposal it reviewed: an older one (p1, since
+    # superseded by p3) is reported proposal_superseded and confirms nothing.
+    with as_login(cur, AUTHORITY):
+        superseded = cur.execute(confirm_pinned, ([SLICE], "partner confirms what it reviewed", uuid.uuid4(),
+                                                  Jsonb({SLICE: p1[0]}))).fetchall()
+        expect_refusal(cur, confirm_pinned, ([SLICE], "r", uuid.uuid4(), Jsonb({"V5-NOPE": p3[0]})),
+                       "an expected proposal for a slice not in the batch", match="expected_proposal_id_for_unlisted_slice")
+        expect_refusal(cur, confirm_pinned, ([SLICE], "r", uuid.uuid4(), Jsonb({SLICE: "not-a-uuid"})),
+                       "an expected proposal id that is not a uuid", match="expected_proposal_id_not_a_uuid")
+    if [(r[0], r[1], r[2], r[3]) for r in superseded] != [(SLICE, "proposal_superseded", None, p3[0])] \
+            or latest()[0] == "complete":
+        return f"a confirmation naming a superseded proposal was not refused per slice: {superseded} / {latest()}"
+    # One partner act, many slices: per-slice outcomes, idempotent replay. The
+    # slice is pinned to the proposal actually reviewed (p3), which matches.
     batch_key = uuid.uuid4()
     with as_login(cur, AUTHORITY):
-        rows = cur.execute(confirm, ([SLICE, "V5-NOPE", SLICE_PF, SLICE], "partner confirms the batch", batch_key)).fetchall()
+        rows = cur.execute(confirm_pinned, ([SLICE, "V5-NOPE", SLICE_PF, SLICE], "partner confirms the batch", batch_key,
+                                            Jsonb({SLICE: p3[0]}))).fetchall()
         replay = cur.execute(confirm, ([SLICE, "V5-NOPE", SLICE_PF], "partner confirms the batch", batch_key)).fetchall()
         actor = cur.execute("select ops.authority_actor_slug()").fetchone()[0]
     outcomes = {r[0]: r[1] for r in rows}
