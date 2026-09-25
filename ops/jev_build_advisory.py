@@ -18,6 +18,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -159,9 +160,82 @@ def _probability(answer: Any) -> float:
     return value
 
 
+SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
+CACHE_PATH = os.path.join(REPO, "out", "jev-build-advisory-cache.json")
+CACHE_SOURCES = ("ops/jev_build_advisory.py", "ops/typesafe_client.py",
+                 "lib/rule_delivery_preuse.py", "ops/jev_verdict_cache.py")
+_SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S | re.I)
+
+
+def is_machine_envelope(prompt: str) -> bool:
+    """A prompt no partner wrote: a background-task notification, a
+    cross-session message, a Stop-hook reopen, a compaction summary, or text
+    that is nothing but system reminders.
+
+    The prefixes are lib/jev_required_actions.py's CONTINUATION_PREFIXES, the
+    same list the required-actions gate uses to fold such records into the
+    turn they continue, so the advisory and the gate agree by construction on
+    what is not a partner request. Measured 2026-09-25: most prompts in a
+    long orchestration session are task notifications, and Jev was asked for
+    build advice on every one."""
+    from lib.jev_required_actions import CONTINUATION_PREFIXES
+    if not isinstance(prompt, str):
+        return False
+    stripped = prompt.lstrip()
+    if stripped.startswith(CONTINUATION_PREFIXES):
+        return True
+    return bool(stripped) and not _SYSTEM_REMINDER.sub("", stripped).strip()
+
+
+def skipped() -> dict:
+    """The fixed record for a machine envelope: nothing asked, nothing owed."""
+    return {"schema": SKIPPED_SCHEMA, "status": "skipped",
+            "reason": "machine_envelope", "effect": "no_advice_required"}
+
+
+def _cache():
+    path = os.path.join(REPO, "ops", "jev_verdict_cache.py")
+    spec = importlib.util.spec_from_file_location("jev_verdict_cache_build", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load ops/jev_verdict_cache.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def advise(partner_request: str, *, client: Any | None = None,
-           timeout: float = 20.0) -> dict:
-    """Return one typed, attributable reading of a partner's build request."""
+           timeout: float = 20.0, cache_path: str | None = None,
+           now: float | None = None) -> dict:
+    """Return one typed, attributable reading of a partner's build request.
+
+    A machine envelope gets skipped() with no Jev call. A byte-identical
+    request answered inside the cache window is answered from the cache; the
+    cache is on by default only for the real client, and any cache failure
+    simply asks."""
+    if isinstance(partner_request, str) and is_machine_envelope(partner_request):
+        return skipped()
+    if cache_path is None and client is None:
+        cache_path = CACHE_PATH
+    cache = entry_key = None
+    if cache_path and isinstance(partner_request, str):
+        try:
+            cache = _cache()
+            entry_key = cache.key({"request": partner_request,
+                                   "source": cache.source_digest(*CACHE_SOURCES)})
+            cached = cache.get(cache_path, entry_key, now=now)
+            if isinstance(cached, dict) and cached.get("schema") == SCHEMA:
+                return cached
+        except Exception:
+            cache = None
+    result = _advise(partner_request, client=client, timeout=timeout)
+    if cache is not None:
+        cache.put(cache_path, entry_key, result, now=now)
+    return result
+
+
+def _advise(partner_request: str, *, client: Any | None = None,
+            timeout: float = 20.0) -> dict:
+    """One Jev request for a partner's build request."""
     if not isinstance(partner_request, str) or not partner_request.strip():
         raise AdvisoryUnavailable("partner request is empty")
     if len(partner_request) > MAX_MESSAGE_CHARS:

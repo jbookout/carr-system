@@ -80,6 +80,7 @@ nobody can audit afterwards is worse than a shadow one.
 """
 
 import concurrent.futures as cf
+import hashlib
 import importlib.util
 import json
 import os
@@ -90,6 +91,34 @@ CORPUS = os.path.join(REPO, "ops", "config", "rule-selection-corpus.v1.json")
 TRIAGE = os.path.join(REPO, "ops", "config", "rule-triage.v1.json")
 TRIGGERS = os.path.join(REPO, "ops", "config", "rule-jit-triggers.v1.json")
 SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
+
+# THE VERDICT CACHE (2026-09-25, Joe: "dont do that" about ~$15 of Jev in three
+# days). advise() runs at every UserPromptSubmit, and in a long orchestration
+# session most of those are background-task notifications: 514 of 632 that
+# day, each paying 1 ranking + 20 binding requests to re-ask the same rules
+# about the same KIND of moment. So a verdict is kept per session, keyed on
+# (rule id, pack, input class), for CACHE_TTL_SECONDS:
+#
+#   * a machine envelope's class is its shape — task notification of an agent,
+#     a background command or a monitor, by status; a cross-session message;
+#     a system-reminder-only message — so the tenth "agent finished" in half an
+#     hour reuses the verdicts of the first;
+#   * any other text is its own class (whitespace- and case-normalised), so a
+#     partner message is judged fresh unless it is literally a repeat.
+#
+# FAIL OPEN TO DELIVERING. A binding verdict is sticky for the window: once a
+# rule bound a class, it is delivered on every later message of that class
+# until the entry expires. A cache that cannot be read or written asks. Only a
+# judged verdict is stored — a candidate Jev did not answer is never cached,
+# so an outage is not replayed as a "does not bind".
+CACHE_PATH = os.path.join(REPO, "out", "jev-rule-select-cache.json")
+CACHE_SOURCES = ("ops/jev_rule_select.py", "ops/jev_judge.py",
+                 "ops/typesafe_client.py", "ops/jev_verdict_cache.py")
+CACHE_TTL_SECONDS = 30 * 60
+CACHE_MAX_ENTRIES = 4096
+SESSION_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
+                    "CODEX_THREAD_ID")
+MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 
 # MEASURED, not guessed, and the measurement is worth keeping because the first
 # guess was wrong in the unexpected direction. Twenty real moments were sampled
@@ -319,9 +348,68 @@ def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
             for rule_id, _ in ranked[:limit]] or list(rules)
 
 
+_ENVELOPE_STATUS = re.compile(r"<status>\s*(\w+)\s*</status>", re.I)
+_ENVELOPE_SUMMARY = re.compile(r"<summary>\s*(\w+)", re.I)
+_SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S | re.I)
+_CROSS_SESSION = ("Another Claude session sent a message", "<cross-session-message",
+                  "[Cross-session delivery")
+
+
+def input_class(situation):
+    """The class a verdict is reused across. See CACHE_PATH's note.
+
+    A machine envelope is classed by its shape, so "agent X finished" and
+    "agent Y finished" share verdicts; everything else is classed by its own
+    normalised text, so a partner message only reuses a verdict when it is a
+    literal repeat."""
+    text = situation if isinstance(situation, str) else json.dumps(situation, sort_keys=True,
+                                                                     default=str)
+    stripped = text.lstrip()
+    if stripped.startswith("<task-notification>"):
+        summary = _ENVELOPE_SUMMARY.search(stripped)
+        status = _ENVELOPE_STATUS.search(stripped)
+        return "task-notification|{}|{}".format(
+            summary.group(1).lower() if summary else "?",
+            status.group(1).lower() if status else "event")
+    if stripped.startswith(_CROSS_SESSION):
+        return "cross-session-message"
+    if stripped and not _SYSTEM_REMINDER.sub("", stripped).strip():
+        return "system-reminder-only"
+    normal = " ".join(text.lower().split())
+    return "text|" + hashlib.sha256(normal.encode("utf-8")).hexdigest()
+
+
+def _session_id(explicit=None):
+    if explicit:
+        return explicit
+    for name in SESSION_ENV_KEYS:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return "no-session"
+
+
+def _rule_packs(path=MAP):
+    """{rule id: "pack,pack"} from the reviewed map; {} when unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            layers = json.load(handle).get("rule_load_layers") or {}
+        return {rule_id: ",".join(sorted(entry.get("packs") or []))
+                for rule_id, entry in layers.items() if isinstance(entry, dict)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _rule_text(rule):
+    return hashlib.sha256(json.dumps(
+        [rule.get("gist"), rule.get("statement"), rule.get("context")],
+        sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
            client=None, api_key=None, judge=None, workers=WORKERS,
-           shortlist=SHORTLIST):
+           shortlist=SHORTLIST, cache_path=None, cache_ttl=None, now=None,
+           session_id=None, cache_info=None):
     """Rank rules by whether they bind to `situation`.
 
     TWO STAGES. One Choice over the whole roster narrows it to a shortlist,
@@ -333,16 +421,65 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
     The first version judged all 211 rules one at a time. That cost ten times
     the requests for the same answer.
 
+    BOTH STAGES READ THE VERDICT CACHE FIRST (see CACHE_PATH's note): the
+    shortlist per (session, input class), each binding verdict per (session,
+    rule id, pack, input class). The cache is on by default only for the real
+    judge; an injected judge or client caches only when `cache_path` is named,
+    so a test never touches the shared file. `cache_info`, when a dict,
+    receives counts of what was reused and what was asked.
+
     Returns [{"id", "gist", "probability"}] over the floor, longest odds last,
     capped at `limit`. A rule whose request fails is reported with probability
     None rather than dropped, because a silently missing candidate is
     indistinguishable from one that was judged and rejected.
     """
     rules = load_rules() if rules is None else rules
+    if cache_path is None and judge is None and client is None and api_key is None:
+        cache_path = CACHE_PATH
     judge = judge or _sibling("jev_judge")
-    rules = narrow(situation, rules, limit=shortlist, client=client,
-                   api_key=api_key, judge=judge)
+    info = cache_info if isinstance(cache_info, dict) else {}
+    info.update({"rank_reused": False, "verdicts_reused": 0, "verdicts_asked": 0})
+
+    cache = None
+    fresh = {}
+    if cache_path:
+        try:
+            cache = _sibling("jev_verdict_cache")
+            ttl = CACHE_TTL_SECONDS if cache_ttl is None else cache_ttl
+            session = _session_id(session_id)
+            klass = input_class(situation)
+            source = cache.source_digest(*CACHE_SOURCES)
+            packs = _rule_packs()
+            roster = cache.key([[rule.get("id"), rule.get("gist")] for rule in rules])
+            rank_key = cache.key({"session": session, "rank": klass, "roster": roster,
+                                  "shortlist": shortlist, "source": source})
+        except Exception:
+            cache = None
+
+    by_id = {rule["id"]: rule for rule in rules}
+    short = None
+    if cache is not None:
+        cached = cache.get(cache_path, rank_key, ttl=ttl, now=now)
+        if (isinstance(cached, dict) and isinstance(cached.get("ids"), list)
+                and cached["ids"] and all(rule_id in by_id for rule_id in cached["ids"])):
+            short = [{**by_id[rule_id], "ranking_model": cached.get("ranking_model")}
+                     for rule_id in cached["ids"]]
+            info["rank_reused"] = True
+    if short is None:
+        short = narrow(situation, rules, limit=shortlist, client=client,
+                       api_key=api_key, judge=judge)
+        # Only a real ranking is worth keeping; the whole-roster fallback of
+        # an outage is not.
+        if cache is not None and len(short) <= shortlist < len(rules):
+            fresh[rank_key] = {"ids": [rule["id"] for rule in short],
+                               "ranking_model": short[0].get("ranking_model") if short else None}
+
     question = {"binds": binding_question(client)}
+
+    def verdict_key(rule):
+        return cache.key({"session": session, "rule": rule["id"],
+                          "pack": packs.get(rule["id"], ""), "class": klass,
+                          "text": _rule_text(rule), "source": source})
 
     def score(rule):
         # THE STATEMENT IS THE RULE. `gist` stays as the headline because a
@@ -366,21 +503,43 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
         except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
             return {**rule, "probability": None, "binding_model": None}
 
+    reused, to_ask = [], []
+    for rule in short:
+        cached = cache.get(cache_path, verdict_key(rule), ttl=ttl, now=now) \
+            if cache is not None else None
+        if isinstance(cached, dict) and isinstance(cached.get("probability"), (int, float)):
+            reused.append({**rule, "probability": float(cached["probability"]),
+                           "binding_model": cached.get("binding_model")})
+        else:
+            to_ask.append(rule)
+    info["verdicts_reused"] = len(reused)
+    info["verdicts_asked"] = len(to_ask)
+
     # CONCURRENT ON PURPOSE, AND THE REASON IS A MEASUREMENT. One request per
     # rule is the method, but the whole corpus asked serially took well over a
     # minute on the first live run — and this module's stated home is a hook
     # that sits in somebody's way. The requests are independent by construction
     # (no rule's state carries another's), so there is nothing to serialise.
     # The work is entirely network wait, so threads are the right tool.
-    if workers > 1 and len(rules) > 1:
+    if workers > 1 and len(to_ask) > 1:
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            scored = list(pool.map(score, rules))
+            asked = list(pool.map(score, to_ask))
     else:
-        scored = [score(rule) for rule in rules]
+        asked = [score(rule) for rule in to_ask]
+    if cache is not None:
+        for row in asked:
+            if row["probability"] is not None:
+                fresh[verdict_key(row)] = {"probability": row["probability"],
+                                           "binding_model": row.get("binding_model")}
+        if fresh:
+            cache.put_many(cache_path, fresh, ttl=ttl, now=now,
+                           max_entries=CACHE_MAX_ENTRIES)
+    scored = reused + asked
     over = [row for row in scored if row["probability"] is not None
             and row["probability"] >= floor]
     over.sort(key=lambda row: -row["probability"])
     failed = [row for row in scored if row["probability"] is None]
+    info["hit"] = (len(rules) <= shortlist or bool(info["rank_reused"])) and not to_ask
     return over[:limit] + failed
 
 
@@ -409,12 +568,16 @@ def advise(situation, *, log_path=SHADOW_LOG, **kwargs):
     Still logs. A live mechanism that cannot be audited later is worse than a
     shadow one, and the log is how BIND_AT gets re-derived from real traffic.
     """
-    surfaced = select(situation, **kwargs)
+    cache_info = {}
+    surfaced = select(situation, cache_info=cache_info, **kwargs)
     advice = [row for row in surfaced if row.get("probability") is not None]
     unavailable = [row["id"] for row in surfaced
                    if row.get("probability") is None]
     _append(log_path, {
         "mode": "live",
+        "cache_hit": bool(cache_info.get("hit")),
+        "cache": {key: cache_info.get(key) for key in
+                  ("rank_reused", "verdicts_reused", "verdicts_asked")},
         "situation": situation[:600],
         "surfaced": [row["id"] for row in advice],
         "unavailable": unavailable,

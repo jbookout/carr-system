@@ -88,6 +88,65 @@ class AdvisoryTests(unittest.TestCase):
         self.assertNotIn("error", failure)
 
 
+class MachineEnvelopeTests(unittest.TestCase):
+    """Background-task notifications and other machine envelopes get no build
+    advice and no Jev call; a partner request still does."""
+
+    NOTIFICATION = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
+                    "<summary>Agent \"Build X\" finished</summary>\n</task-notification>")
+
+    def test_envelopes_are_skipped_without_asking(self):
+        client = FakeClient()
+        for prompt in (self.NOTIFICATION, "  " + self.NOTIFICATION,
+                       "Another Claude session sent a message:\n<cross-session-message>hi",
+                       "<system-reminder>only a reminder</system-reminder>\n"):
+            result = advisory.advise(prompt, client=client)
+            self.assertEqual(result, advisory.skipped(), prompt[:40])
+        self.assertFalse(hasattr(client, "questions"))
+
+    def test_a_partner_request_is_still_advised(self):
+        client = FakeClient()
+        result = advisory.advise("Please redesign the rule compiler.", client=client)
+        self.assertEqual(result["schema"], "jev-build-advisory/v1")
+        mixed = "<system-reminder>context</system-reminder>\nPlease fix the gate."
+        self.assertFalse(advisory.is_machine_envelope(mixed))
+
+    def test_skipped_receipt_validates_and_requires_nothing(self):
+        from lib.rule_delivery_preuse import validate_build_advisory
+        from lib.jev_required_actions import required_facets
+        self.assertTrue(validate_build_advisory(advisory.skipped(), prompt_sha256="x"))
+        forged = {**advisory.skipped(), "status": "unavailable"}
+        self.assertFalse(validate_build_advisory(forged, prompt_sha256="x"))
+        self.assertEqual(required_facets({"advisory": advisory.skipped()}), [])
+
+    def test_identical_request_is_asked_once_per_window(self):
+        calls = []
+
+        class Counting(FakeClient):
+            def ask(self, state, questions, timeout):
+                calls.append(state)
+                return super().ask(state, questions, timeout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            first = advisory.advise("Same request", client=Counting(), cache_path=cache, now=1000.0)
+            second = advisory.advise("Same request", client=Counting(), cache_path=cache, now=1100.0)
+            advisory.advise("Different request", client=Counting(), cache_path=cache, now=1200.0)
+            self.assertEqual(first, second)
+            self.assertEqual(len(calls), 2)
+            advisory.advise("Same request", client=Counting(), cache_path=cache,
+                            now=1000.0 + 31 * 60)
+            self.assertEqual(len(calls), 3)
+
+    def test_an_unwritable_cache_still_advises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, "file")
+            Path(blocker).write_text("x", encoding="utf-8")
+            result = advisory.advise("Request", client=FakeClient(),
+                                     cache_path=os.path.join(blocker, "c.json"))
+            self.assertEqual(result["schema"], "jev-build-advisory/v1")
+
+
 class EditCoverageTests(unittest.TestCase):
     def test_patch_target_extraction_covers_codex_shapes(self):
         with tempfile.TemporaryDirectory() as tmp:
