@@ -193,6 +193,62 @@ def test_explicit_target_never_consults_the_router():
     assert router.calls == [] and adapter.creates[0][0]["target"] == "flash"
 
 
+class FakeAdapterDuplicate:
+    """create() reports the SECOND call onward as a duplicate of the first, and show()
+    answers with the first call's own body — the existing task's real, immutable target."""
+
+    def __init__(self):
+        self.creates = []
+        self.created = False
+
+    def create(self, command, incoming, target):
+        self.creates.append((command, target))
+        first = not self.created
+        self.created = True
+        return {"task_id": "t_flash0002", "created": first}
+
+    def show(self, task_id):
+        meta = {"v": 1, "target": "flash", "cap": "read", "source_seq": 5,
+                "source_msg_id": "22222222-2222-4222-8222-222222222222", "finish": "done"}
+        body = f"[CARR_QUEUE_META {json.dumps(meta, separators=(',', ':'))}]\nShorten this."
+        return {"task": {"id": task_id, "body": body, "status": "todo"}}
+
+
+class FlippingRouter:
+    """First call: direct (flash). Second call: escalate (claude-desktop) — Flash's own
+    liveness or Jev's decision can differ between an original target=auto send and a
+    retry that reuses the SAME idempotency key, per PR #1249's review finding 4."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def load_policy(self):
+        return POLICY
+
+    def decide(self, task, context="", *, flash_free=True, policy=None):
+        self.calls += 1
+        route = "direct" if self.calls == 1 else "escalate"
+        model = "flash" if route == "direct" else "opus"
+        return {"route": route, "model": model, "effort": "x", "scores": {},
+                "overflow": False, "jev_error": None}
+
+
+def test_retried_auto_command_reports_the_existing_tasks_actual_target():
+    adapter = FakeAdapterDuplicate()
+    router = FlippingRouter()
+    svc = kanban_adapter.QueueService(catalog=CATALOG, adapter=adapter, router=router,
+                                      flash_up=lambda: True)
+    incoming = turn("@queue enqueue target=auto cap=read key=retry-target :: Shorten this.")
+    first = svc.handle(incoming, room="p")
+    replay = svc.handle(incoming, room="p")
+    assert first["receipt"]["queue_accepted"]["target"] == "flash", first
+    assert replay["receipt"]["queue_accepted"]["status"] == "duplicate", replay
+    # The retry's own route_auto call picked escalate -> claude-desktop, but the task
+    # ALREADY EXISTS, on flash: the receipt must report where that existing task really
+    # is, not this call's freshly recomputed (and here, different) route.
+    assert replay["receipt"]["queue_accepted"]["target"] == "flash", replay
+
+
 def test_real_catalog_and_policy_agree():
     catalog = kanban_adapter.load_catalog()
     policy = kanban_adapter._model_router().load_policy()
@@ -215,6 +271,8 @@ def main() -> int:
     check("auto flash route falls back when flash is down", test_auto_flash_route_falls_back_when_flash_is_down)
     check("auto flash route falls back on capability", test_auto_flash_route_falls_back_when_flash_refuses_the_capability)
     check("explicit target never consults the router", test_explicit_target_never_consults_the_router)
+    check("retried auto command reports the existing task's actual target",
+          test_retried_auto_command_reports_the_existing_tasks_actual_target)
     check("real catalog and policy agree", test_real_catalog_and_policy_agree)
     if FAILURES:
         print(f"{len(FAILURES)} flash desk test(s) failed", file=sys.stderr)
