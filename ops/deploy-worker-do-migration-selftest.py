@@ -215,6 +215,20 @@ print("fake ops-record: unexpected " + " ".join(argv), file=sys.stderr); sys.exi
 '''
 
 
+FAKE_RELEASE_MANIFEST = r'''#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_CALLS"], "a") as fh:
+    fh.write(json.dumps(["release-manifest", *argv]) + "\n")
+if argv[:1] == ["bind-provider"]:
+    state = json.load(open(os.environ["FAKE_STATE"]))
+    if state.get("bind_fail"):
+        print("release-manifest: bind-provider refused", file=sys.stderr); sys.exit(1)
+    print("{}"); sys.exit(0)
+print("fake release-manifest: unexpected " + " ".join(argv), file=sys.stderr); sys.exit(2)
+'''
+
+
 def extract_block(source: str) -> str:
     start = source.index("# ---------- pending Durable Object migration (BEGIN do-migration block)")
     end = source.index("# ---------- (END do-migration block) ----------", start)
@@ -223,7 +237,8 @@ def extract_block(source: str) -> str:
 
 def extract_upload_fragment(source: str) -> str:
     start = source.index("  # A pending Durable Object migration would make `versions upload` refuse;")
-    marker = "no parseable immutable version id; traffic was not changed.\"\n  fi\n"
+    marker = ("fail \"the uploaded version could not be bound into its release manifest; "
+              "$DO_TRAFFIC_CLAUSE.\"\n  fi\n")
     return source[start:source.index(marker, start) + len(marker)]
 
 
@@ -254,7 +269,8 @@ def expected_digest(toml_text: str) -> str:
 
 
 def run(source: str, *, tags: list[str], state: dict, toml: str | None = None,
-        state_dir: Path | None = None, locate: str = "override", env_extra: dict | None = None) -> dict:
+        state_dir: Path | None = None, locate: str = "override", env_extra: dict | None = None,
+        block_receipt: str | None = None) -> dict:
     block, fragment = extract_block(source), extract_upload_fragment(source)
     toml = toml if toml is not None else wrangler_toml(tags)
     with tempfile.TemporaryDirectory() as raw:
@@ -275,10 +291,14 @@ def run(source: str, *, tags: list[str], state: dict, toml: str | None = None,
         (tmp / "repo" / "lib").symlink_to(REPO / "lib")
         (tmp / "worker" / "wrangler.toml").write_text(toml, encoding="utf-8")
         for path, body in ((tmp / "bin" / "wrangler", FAKE_WRANGLER), (tmp / "bin" / "curl", FAKE_CURL),
-                           (tmp / "repo" / "tools" / "ops-record.py", FAKE_OPS_RECORD)):
+                           (tmp / "repo" / "tools" / "ops-record.py", FAKE_OPS_RECORD),
+                           (tmp / "repo" / "tools" / "release-manifest.py", FAKE_RELEASE_MANIFEST)):
             path.write_text(body.replace("/usr/bin/env python3", sys.executable, 1), encoding="utf-8")
             path.chmod(0o755)
         tag_dir = state_dir if state_dir is not None else tmp / "tag-receipts"
+        if block_receipt is not None:
+            # a directory where the receipt file must go: the write cannot land
+            (tag_dir / block_receipt).mkdir(parents=True)
         state = {"latest_tag": tags[-1] if tags else None, "live_domains": declared_domains(toml), **state}
         (tmp / "state.json").write_text(json.dumps(state), encoding="utf-8")
         calls = tmp / "calls.jsonl"
@@ -306,6 +326,8 @@ def run(source: str, *, tags: list[str], state: dict, toml: str | None = None,
             "FAKE_STATE": str(tmp / "state.json"), "FAKE_CALLS": str(calls),
             "FAKE_TOKEN": TOKEN, "FAKE_V0": V0, "FAKE_V1": V1, "FAKE_VS": VS,
             "REAL_OPS_RECORD": str(REPO / "tools" / "ops-record.py"),
+            "RELEASE_MANIFEST": str(tmp / "manifest.json"),
+            "FOUNDATION_ASSURANCE_STAGING_PROVIDER": "",
             "GIT_CEILING_DIRECTORIES": str(tmp),
             **(env_extra or {}),
         }
@@ -325,7 +347,7 @@ def run(source: str, *, tags: list[str], state: dict, toml: str | None = None,
         for where in (tag_dir, tmp / "repo" / "out" / "deploy-worker" / "do-migration-tags",
                       tmp / "main" / "out" / "deploy-worker" / "do-migration-tags"):
             if where.is_dir():
-                for f in where.glob("*.json"):
+                for f in (f for f in where.glob("*.json") if f.is_file()):
                     tag_receipts[str(f.relative_to(tmp)) if f.is_relative_to(tmp) else f.name] = \
                         json.loads(f.read_text())
         rows = [json.loads(line) for line in calls.read_text().splitlines() if line.strip()]
@@ -501,7 +523,10 @@ def main() -> int:
              {"toml": wrangler_toml([TAG1], staging_migrations=[(TAG1, "Other0")])},
              "different migration steps", None, None, False),
             ("durable receipt directory unlocatable", {}, {"locate": "none"},
-             "could not be located", None, None, False)]
+             "could not be located", None, None, False),
+            ("durable receipt cannot be written after staging applied the tag", {},
+             {"block_receipt": f"carr-mcp-staging--{TAG1}.json"},
+             "its durable receipt could not be written", True, 0, True)]
     for label, s_state, kwargs, why, moved, s_exit, s_deployed in staging_cases:
         res = run(source, tags=[TAG1], state={"applied_tag": None, **s_state}, **kwargs)
         check(f"S. {label}: refused, traffic not changed, Production untouched",
@@ -516,6 +541,21 @@ def main() -> int:
               and why in (sp.get("reason") or "") and (rc.get("refusal") or "").startswith("staging precheck:")
               and sp.get("tag_moved") is moved and sp.get("deploy_exit") == s_exit
               and res["receipt_valid"] and "DO migration" not in res["out"], json.dumps(rc))
+
+    # F. a failure AFTER the upload branch reports what traffic actually did
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "bind_fail": True})
+    low = res["err"].lower()
+    check("F1. a refusal after Production moved says Production ALREADY serves the migration version",
+          res["rc"] == 1 and "could not be bound into its release manifest" in res["err"]
+          and f"Production ALREADY serves {V0}" in res["err"] and "forward fix only" in res["err"]
+          and len(prod_deploys(res)) == 1, res["all"][-700:])
+    check("F1. ...and never tells the operator traffic was unchanged or Production untouched",
+          "not changed" not in low and "untouched" not in low and "not touched" not in low,
+          res["err"][-700:])
+    res = run(source, tags=[], state={"bind_fail": True})
+    check("F2. the same refusal with no migration says traffic was not changed (nothing moved)",
+          res["rc"] == 1 and "could not be bound into its release manifest; traffic was not changed" in res["err"]
+          and not wrangler_calls(res, "deploy") and "ALREADY" not in res["err"], res["all"][-700:])
 
     # K. staging already carries the tag
     res = run(source, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1})

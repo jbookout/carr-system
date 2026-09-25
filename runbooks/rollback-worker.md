@@ -54,6 +54,62 @@ wrapper's own `out/deploy-worker/do-migration-<sha>.json` lives in the release
 worktree, which the pipeline deletes after the run. Neither `wrangler rollback`
 nor a revert of the `[[migrations]]` entry undoes an applied tag.
 
+### Staging carries the tag but no durable receipt says with which steps
+
+Before Production moves, the wrapper applies the migration to staging. It then
+writes a durable per-tag receipt beside the main checkout, at
+`out/deploy-worker/do-migration-tags/carr-mcp-staging--<tag>.json`, or under
+`$CARR_DO_MIGRATION_STATE_DIR` when that is set. A tag is applied only once,
+so when a later run finds staging already carrying the tag, that receipt is the
+only proof of which steps staging applied. Without it the release refuses
+before staging or Production moves. Two refusals lead here:
+
+- `staging applied <tag>, but its durable receipt could not be written to …`.
+  Staging moved in this run, but the receipt write failed. Production was not
+  touched. Every later run then hits the next refusal.
+- `staging already carries <tag>, but no durable receipt proves it was applied
+  with the steps wrangler.toml declares now`. A partial staging failure, a
+  manual `wrangler deploy --env staging`, or a lost `out/` directory left
+  staging on the tag with no receipt.
+
+**Writing the receipt by hand is safe only when you can prove the steps
+staging applied are the steps `wrangler.toml` declares now.** The receipt's
+`steps_digest` covers the whole `[[migrations]]` list. Prove it this way:
+
+```sh
+cd ~/carr-system
+curl -s https://<staging host>/release        # note git_sha.value and worker_version.id
+git show <staging git_sha>:mcp-server/wrangler.toml > /tmp/staging-wrangler.toml
+./.venv/bin/python ops/worker-do-migration.py target --config /tmp/staging-wrangler.toml --env staging
+./.venv/bin/python ops/worker-do-migration.py target --config mcp-server/wrangler.toml --env staging
+```
+
+Only if the two `steps_digest` values are identical, and the staging `git_sha`
+is a real commit on `main`, record it:
+
+```sh
+DIR="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/out/deploy-worker/do-migration-tags"
+./.venv/bin/python ops/worker-do-migration.py tag-receipt write --dir "$DIR" \
+  --script carr-mcp-staging --tag <tag> --digest <steps_digest> \
+  --sha <staging git_sha> --version-id <staging worker_version.id> --environment staging
+./.venv/bin/python ops/worker-do-migration.py tag-receipt check --dir "$DIR" \
+  --script carr-mcp-staging --tag <tag> --digest <steps_digest>   # must print "match": true
+```
+
+Then let the release pipeline retry.
+
+**It is NOT safe when** any of the following holds:
+- the digests differ;
+- staging was deployed from an uncommitted or unknown tree, so `git_sha` does
+  not name what was applied;
+- you cannot read staging's `/release`;
+- the `[[migrations]]` entry for the tag was edited after staging applied it.
+
+In those cases, never write a receipt to get past the refusal: it would certify
+steps staging never ran. Leave the applied tag's entry exactly as it was
+applied, and put the corrected steps under a **new** `[[migrations]]` tag.
+Every environment then applies the new tag once, with steps that are known.
+
 ## The procedure
 
 ### 1. Find what is serving now, and what preceded it
