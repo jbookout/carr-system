@@ -236,6 +236,20 @@ LOOP_WINDOW = 12
 LOOP_REPEAT_MIN = 3
 STALE_EDIT_CALLS = 25
 EDIT_TOOL_NAMES = {"edit", "write", "notebookedit"}
+
+# THE NO-EDIT TRIGGER RE-ARMS, IT DOES NOT REPEAT (2026-09-25). This check runs
+# on every PostToolUse, and once a stretch passes STALE_EDIT_CALLS it used to
+# stay true on every following call until the next edit, so a long read-heavy
+# stretch asked Jev the same question hundreds of times. Measured on the Studio
+# for 2026-09-24: 15,511 no_edit_in_window asks, 47.2M input tokens, about half
+# of that day's whole Jev spend, against 78 asks for a real repeated call. Now
+# a stretch (identified by the last edit before it) is asked about once when it
+# crosses STALE_EDIT_CALLS and again at each further multiple. When the edit
+# has scrolled out of the transcript tail the count stops growing, so a time
+# re-arm stands in. The repeated-call and repeated-failure triggers are real
+# loop signals and still ask on every occurrence.
+STALE_REARM_SECONDS = 900
+STALE_STATE_DIR = os.path.join(REPO, "out", "jev-session-watch-state")
 FAILURE_MARKERS = re.compile(
     r"Traceback \(most recent call last\)|AssertionError|FAILED |ERROR\b|Error:")
 
@@ -275,7 +289,54 @@ def _calls_since_last_edit(calls):
     return len(calls)
 
 
-def watch_progress(transcript_path, task_text, *, client=None, log_path=None):
+def _last_edit_id(calls):
+    for call in reversed(calls):
+        if (call.get("name") or "").lower() in EDIT_TOOL_NAMES:
+            return call.get("id") or "edit-without-id"
+    return None
+
+
+def _stale_ask_due(transcript_path, calls, stale_edits, *, state_dir=None, now=None):
+    """Should this no-edit stretch be asked about now? Records the ask if so.
+
+    Due when the stretch is new, when it has crossed a further multiple of
+    STALE_EDIT_CALLS since the last ask, or, when its edit is outside the tail
+    and the count can no longer grow, when STALE_REARM_SECONDS have passed.
+    Never raises: an unreadable or unwritable state file means "due", so a
+    storage fault costs an extra ask rather than a silent watch.
+    """
+    import hashlib
+    import time
+
+    now = time.time() if now is None else now
+    folder = state_dir or STALE_STATE_DIR
+    key = hashlib.sha256(os.path.abspath(transcript_path).encode()).hexdigest()[:32]
+    path = os.path.join(folder, key + ".json")
+    edit_id = _last_edit_id(calls)
+    stretch = edit_id or "no-edit-in-tail"
+    bucket = stale_edits // STALE_EDIT_CALLS
+    try:
+        with open(path, encoding="utf-8") as fh:
+            prior = json.load(fh)
+    except (OSError, ValueError):
+        prior = None
+    if isinstance(prior, dict) and prior.get("stretch") == stretch:
+        grew = bucket > int(prior.get("bucket") or 0)
+        aged = edit_id is None and now - float(prior.get("at") or 0) >= STALE_REARM_SECONDS
+        if not (grew or aged):
+            return False
+    try:
+        os.makedirs(folder, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"stretch": stretch, "bucket": bucket, "at": now}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return True
+
+
+def watch_progress(transcript_path, task_text, *, client=None, log_path=None, state_dir=None):
     """Is the agent stuck in a loop, and has recent work drifted from the task?
 
     Deterministic trigger (any one): the same (tool, normalized input) repeats
@@ -303,6 +364,11 @@ def watch_progress(transcript_path, task_text, *, client=None, log_path=None):
         _text, n = repeated_failures[0]
         advice = f"the same failure output has repeated {n}x — you look stuck on this."
     elif stale_edits >= STALE_EDIT_CALLS:
+        if not _stale_ask_due(transcript_path, calls, stale_edits, state_dir=state_dir):
+            return _result(check_id, "ok", None, False,
+                           {"trigger": None, "tool_calls_seen": len(calls),
+                            "stale_already_asked": True,
+                            "calls_since_last_file_edit": stale_edits})
         trigger = "no_edit_in_window"
         advice = f"{stale_edits} tool calls since the last file edit — no visible progress."
 
