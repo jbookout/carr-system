@@ -1660,9 +1660,12 @@ export function mcpInventory(tools = defaultTools) {
 }
 
 const APPLICATION_INGRESSES = [
-  // V5-F09 census anchor: after a record-workflow-census commit, mcp.js writes
-  // the new head (seq, row_hash) to the WorkflowCensusAnchor Durable Object,
-  // outside the database. Administrative: it is the tamper anchor, not a record.
+  // V5-F09 census anchor: the WorkflowCensusAnchor Durable Object, outside the
+  // database. Its writes: record-workflow-census registers the row the door
+  // inserted as a pending head (POST /pending, before commit), then mcp.js
+  // advances the head to it (POST /advance, after commit); the re-anchor verb
+  // applies its receipt (POST /reanchor). All three are this one side-write.
+  // Administrative: it is the tamper anchor, not a record.
   ["worker-sidewrite:workflow-census-anchor", "worker_sidewrite", "mcp-server/src/workflow-census-anchor.js", "administrative_mutation"],
   ["worker-route:ingest", "worker_route", "mcp-server/src/index.js", "record_mutation"],
   ["worker-route:capture", "worker_route", "mcp-server/src/capture.js", "record_mutation"],
