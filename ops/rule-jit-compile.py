@@ -42,7 +42,8 @@ OUTPUT SHAPE (ops/config/rule-jit-triggers.v1.json), one row per trigger:
     "trigger_id":  stable 12-hex id, sha256(kind + "|" + pattern)[:12] —
                    independent of which rules are attached, so it does not
                    change when a rule's home moves or a pack's roster shifts.
-    "kind":        "verb" | "bash_family" | "path_pattern" | "content_regex".
+    "kind":        "verb" | "bash_family" | "path_pattern" | "content_regex"
+                   | "prompt_regex".
     "pattern":     interpretation depends on kind (see the hook for exact
                    matching semantics):
                      verb          — regex tested against payload.tool_name
@@ -55,6 +56,10 @@ OUTPUT SHAPE (ops/config/rule-jit-triggers.v1.json), one row per trigger:
                      content_regex — regex (lookaheads welcome) tested
                                      against a serialized blob of tool_name
                                      plus tool_input, the general fallback
+                     prompt_regex  — regex tested against a partner message
+                                     at UserPromptSubmit only (never a tool
+                                     payload), after masking the row's
+                                     optional `negative_pattern`
     "packs":       pack name(s) this trigger is understood to represent
                    (informational — the delivered rule set is the merge of
                    every trigger a call matches, not scoped per-pack at
@@ -75,6 +80,11 @@ OUTPUT SHAPE (ops/config/rule-jit-triggers.v1.json), one row per trigger:
                                          these are NOT derived from a triage
                                          detector field because gate-home
                                          rules are not triaged for one.
+                   "jev_compiled"      — from ops/config/rule-jev-triggers.v1.json
+                                         (ops/rule-trigger-compile.py): Jev's
+                                         once-per-rule judgment of which cues
+                                         surface it, keyed to the rule's
+                                         statement digest.
   }
 
 DETERMINISM. Same inputs, byte-identical output, every time: rows are sorted
@@ -92,6 +102,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -102,6 +113,7 @@ REPO = Path(__file__).resolve().parent.parent
 TRIAGE_PATH = REPO / "ops" / "config" / "rule-triage.v1.json"
 MAP_PATH = REPO / "ops" / "config" / "rule-enforcement-map.json"
 OUTPUT_PATH = REPO / "ops" / "config" / "rule-jit-triggers.v1.json"
+JEV_PATH = REPO / "ops" / "config" / "rule-jev-triggers.v1.json"
 
 SCHEMA = "rule-jit-triggers/v1"
 MAX_RULES_PER_TRIGGER = 5
@@ -123,6 +135,19 @@ STRUCTURAL_EXTRA_TRIGGERS: tuple[dict[str, Any], ...] = (
         "pattern": "hooks/*.py",
         "packs": ["engineering-git"],
         "rule_ids": ["c0b38d80"],  # RE-BLESS THE GATE BASELINE IN THE SAME COMMIT
+    },
+    # A background agent reporting it finished IS the moment rule 86647daf
+    # names ("the moment any substantive build/change/decision/lesson
+    # finishes"). Replay of 2026-09-25: Jev judged that rule binding on 198
+    # messages, nearly all of them agent-finished notifications, and no word
+    # of its statement appears in one. The envelope is a structural fact, so
+    # it is matched as one. prompt_regex rows run at UserPromptSubmit only.
+    {
+        "kind": "prompt_regex",
+        "pattern": (r"^\s*<task-notification>(?=[\s\S]*<status>completed</status>)"
+                    r"(?=[\s\S]*<summary>Agent\b)"),
+        "packs": ["governance-rules"],
+        "rule_ids": ["86647daf"],
     },
 )
 
@@ -161,7 +186,8 @@ def pack_keyword_pattern(pack: dict, exclude_terms: set[str]) -> str | None:
     return "|".join(parts)
 
 
-def compile_triggers(triage: dict, enforcement_map: dict) -> list[dict[str, Any]]:
+def compile_triggers(triage: dict, enforcement_map: dict,
+                     jev_document: dict | None = None) -> list[dict[str, Any]]:
     rules = triage.get("rules", [])
     by_id = {r["id"]: r for r in rules}
     jit_rules = [r for r in rules if r.get("home") == "jit"]
@@ -246,15 +272,57 @@ def compile_triggers(triage: dict, enforcement_map: dict) -> list[dict[str, Any]
             "source": "structural_extra",
         })
 
-    rows.sort(key=lambda r: (r["kind"], r["pattern"]))
+    # 4. Jev-compiled triggers (ops/rule-trigger-compile.py): one judgment per
+    # rule, made when the rule was taught or changed. prompt_regex rows are
+    # matched against a partner message at UserPromptSubmit; verb,
+    # bash_family and path_pattern rows join the PreToolUse rail as-is.
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in _jev_rows(jev_document):
+        key = (row["kind"], row["pattern"], row.get("negative_pattern", ""))
+        into = merged.setdefault(key, {**row, "rule_ids": []})
+        into["rule_ids"] = sorted(set(into["rule_ids"]) | set(row["rule_ids"]))
+        into["packs"] = sorted(set(into["packs"]) | set(row["packs"]))
+    for (kind, pattern, negative), row in merged.items():
+        row["rule_ids"] = row["rule_ids"][:MAX_RULES_PER_TRIGGER]
+        row["trigger_id"] = trigger_id(kind, pattern if not negative else f"{pattern}\0{negative}")
+        rows.append(row)
+
+    rows.sort(key=lambda r: (r["kind"], r["pattern"], r.get("negative_pattern", "")))
     return rows
 
 
-def build_document(triage: dict, enforcement_map: dict) -> dict[str, Any]:
-    triggers = compile_triggers(triage, enforcement_map)
+def _jev_rows(jev_document: dict | None) -> list[dict[str, Any]]:
+    if not jev_document:
+        return []
+    spec = importlib.util.spec_from_file_location(
+        "rule_trigger_compile", REPO / "ops" / "rule_trigger_compile.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.trigger_rows(jev_document)
+
+
+def load_jev_document() -> dict | None:
+    """The Jev-compiled per-rule triggers, or None when the file is absent.
+    Absent means only the other three sources compile — the run-time side then
+    falls back to judging messages rather than delivering nothing."""
+    if not JEV_PATH.exists():
+        return None
+    return load_json(JEV_PATH)
+
+
+_UNSET: Any = object()
+
+
+def build_document(triage: dict, enforcement_map: dict,
+                   jev_document: Any = _UNSET) -> dict[str, Any]:
+    if jev_document is _UNSET:
+        jev_document = load_jev_document()
+    triggers = compile_triggers(triage, enforcement_map, jev_document)
     seeded = sum(1 for r in triggers if r["source"] == "seeded_detector")
     fallback = sum(1 for r in triggers if r["source"] == "pack_fallback")
     extra = sum(1 for r in triggers if r["source"] == "structural_extra")
+    jev_compiled = sum(1 for r in triggers if r["source"] == "jev_compiled")
     seeded_rule_count = sum(len(r["rule_ids"]) for r in triggers if r["source"] == "seeded_detector")
     return {
         "schema": SCHEMA,
@@ -270,6 +338,8 @@ def build_document(triage: dict, enforcement_map: dict) -> dict[str, Any]:
         "generated_from": {
             "triage_sha256": file_sha256(TRIAGE_PATH),
             "map_sha256": file_sha256(MAP_PATH),
+            **({"jev_triggers_sha256": file_sha256(JEV_PATH)}
+               if jev_document is not None and JEV_PATH.exists() else {}),
         },
         "max_rules_per_trigger": MAX_RULES_PER_TRIGGER,
         "counts": {
@@ -277,6 +347,7 @@ def build_document(triage: dict, enforcement_map: dict) -> dict[str, Any]:
             "seeded_detector_triggers": seeded,
             "pack_fallback_triggers": fallback,
             "structural_extra_triggers": extra,
+            "jev_compiled_triggers": jev_compiled,
             "seeded_detector_rule_ids": seeded_rule_count,
         },
         "triggers": triggers,
