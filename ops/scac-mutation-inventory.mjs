@@ -2329,6 +2329,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V75_VERSION]: "v75",
   [REGISTRY_V76_VERSION]: "v76",
   [REGISTRY_V77_VERSION]: "v77",
+  [REGISTRY_V78_VERSION]: "v78",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2421,7 +2422,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V77_VERSION) {
+  version = REGISTRY_V78_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -16846,6 +16847,16 @@ export function renderAmendClosedLoopRegistrySql(rows,
       `observed_count<>${newCatalogBaseline.relation_dml.count}`)
     .replaceAll(`observed_digest<>'${oldCatalogBaseline.relation_dml.digest}'`,
       `observed_digest<>'${newCatalogBaseline.relation_dml.digest}'`)
+    // ops.scac_reference_monitor_state()'s own grant_state check hardcodes the
+    // runtime_dml_grants entry_count/grant_digest pair (the SAME +1 relation
+    // grant row moves this snapshot too -- see the POST_0702_FORWARD_V78
+    // baseline comment). Left unreplaced, grant_state stays permanently
+    // 'drifted_or_unbound' post-0703 because the live snapshot (313 entries)
+    // never again matches the hardcoded predecessor literal (312).
+    .replaceAll(`(grant_snapshot->>'entry_count')::integer=${oldCatalogBaseline.runtime_dml_grants.count} and`,
+      `(grant_snapshot->>'entry_count')::integer=${newCatalogBaseline.runtime_dml_grants.count} and`)
+    .replaceAll(`grant_snapshot->>'grant_digest'='${oldCatalogBaseline.runtime_dml_grants.digest}'`,
+      `grant_snapshot->>'grant_digest'='${newCatalogBaseline.runtime_dml_grants.digest}'`)
     .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
     .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
     .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,

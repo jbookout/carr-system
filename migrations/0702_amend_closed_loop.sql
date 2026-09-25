@@ -60,3 +60,15 @@ create index loop_amendment_loop_id_idx on public.loop_amendment (loop_id, creat
 -- leak guard"); a read surface for amendment history is a future view, not
 -- this migration's concern.
 grant select, insert on public.loop_amendment to carr_writer;
+
+-- The SIEP-18 reference monitor (0467) requires every relation carrying a
+-- direct INSERT/UPDATE/DELETE/TRUNCATE grant to carr_writer/carr_jobs/
+-- carr_authority to also carry its guard trigger, or ops.scac_reference_
+-- monitor_state() reports guard_state=incomplete and monitor_state=
+-- unavailable. loop_amendment is the first table this PR grants directly, so
+-- it needs both guard triggers exactly like every other direct-grant table
+-- (see ops.v5_a05_cadence_receipt in migration 0617 for the same pair).
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.loop_amendment for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.loop_amendment for each statement execute function ops.scac_reference_monitor_guard();
