@@ -378,6 +378,63 @@ def prop_none_binds_is_ok(rtc_m, rtd_m):
     return row["rank_status"] == "ok" and row["jev_calls"] == 1 and ask.calls == []
 
 
+class SlowTransport:
+    """A binding transport that takes `seconds` of a fake clock per request
+    and says every rule binds, so what was judged before the deadline shows
+    up in the result."""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.now = 0.0
+        self.calls = []
+
+    def clock(self):
+        return self.now
+
+    def __call__(self, subject, questions, *, rule_id=None, **kwargs):
+        self.calls.append(rule_id)
+        self.now += self.seconds
+        return {"answers": {"binds": {"noul": 0.9}}, "model": "slow-stub"}
+
+
+def prop_deadline(rtc_m, rtd_m):
+    """A slow transport: binding stops once the deadline is near, what was
+    judged before it is still returned, and the rest is reported unjudged.
+    At 5 s a request against the 12 s clock: requests start at 0, 5 and 10 s
+    (10 s leaves 2 s, above the 1 s floor); the 4th would start at 15 s."""
+    slow = SlowTransport(5.0)
+    selected, report = rtd_m.judge_budgeted(
+        "anything", ROSTER, [], rank=Ranker(), ask=slow, client=Client, titles={},
+        clock=slow.clock)
+    expected = int((rtd_m.DEADLINE_SECONDS - rtd_m.MIN_CALL_SECONDS) // 5.0) + 1
+    return (len(slow.calls) == expected < rtd_m.BIND_TOP_K
+            and sorted(selected) == sorted(slow.calls) == sorted(report["judged"])
+            and report["deadline_hit"] is True
+            and len(report["unjudged"]) == rtd_m.BIND_TOP_K - expected
+            and report["calls"] == 1 + expected)
+
+
+def prop_deadline_keeps_matches(rtc_m, rtd_m):
+    """A deadline already passed when the judgment starts: no Jev request at
+    all, and the compiled match is still delivered and the log says why."""
+    ask, rank = Asker(0.9), Ranker()
+    with tempfile.TemporaryDirectory() as tmp:
+        # "unrelated topic" overlaps every filler, so the fallback has rules
+        # it would have judged: they must be reported unjudged, not asked.
+        out = rtd_m.advise("please git push this unrelated topic", session_id="s1",
+                           now=1000.0,
+                           triggers_path=table_for(compiled_doc(), tmp),
+                           compiled=compiled_doc(), rules=ROSTER, ask=ask, client=Client,
+                           rank=rank, delivered_cache=os.path.join(tmp, "d.json"),
+                           envelope=False, log_path=os.path.join(tmp, "log.jsonl"),
+                           deadline=0.0)
+        row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
+    return (ids(out) == ["aaaa0001"] and ask.calls == [] and rank.calls == 0
+            and row["deadline_hit"] is True and row["jev_calls"] == 0
+            and row["rank_status"] == "deadline_overlap_fallback"
+            and row["bind_status"] == "deadline" and len(row["unjudged"]) > 0)
+
+
 def prop_dedupe(rtc_m, rtd_m):
     with tempfile.TemporaryDirectory() as tmp:
         first = run(rtd_m, "a vendor intro", tmp)
@@ -426,6 +483,8 @@ PROPERTIES = {
         prop_default_rank,
     "ranking unavailable, binding up: rules are still judged fresh": prop_ranking_fails_binding_up,
     "a none-binds ranking is ok with an empty shortlist": prop_none_binds_is_ok,
+    "binding stops at the deadline and keeps what was judged": prop_deadline,
+    "a passed deadline makes no request and still delivers matches": prop_deadline_keeps_matches,
     "a rule already delivered this session is not resent inside the window": prop_dedupe,
     "no session id means no dedupe and no shared key": prop_no_session_no_pooling,
     "coverage flags a triggered rule with no trigger": prop_coverage_flags_empty_trigger,
@@ -626,6 +685,12 @@ MUTANTS = [
      ("    if not isinstance(probabilities, dict) or not probabilities:",
       "    if not isinstance(probabilities, dict) or not probabilities or "
       "set(probabilities) <= {jrs.NONE_BIND}:")),
+    # The deadline removed from the binding loop.
+    ("binding stops at the deadline and keeps what was judged", RTD_PATH,
+     ("        if left < MIN_CALL_SECONDS:", "        if False:")),
+    # The deadline removed from the ranking request.
+    ("a passed deadline makes no request and still delivers matches", RTD_PATH,
+     ("        elif deadline - clock() < MIN_CALL_SECONDS:", "        elif False:")),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,
      ("if not (isinstance(recent.get(rule_id), (int, float))",
       "if True or not (isinstance(recent.get(rule_id), (int, float))")),
