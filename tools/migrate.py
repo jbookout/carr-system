@@ -361,6 +361,16 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0628_doctorcre_slice_done_marker.sql",
         "0629_doctorcre_slice_done_marker_scac_successor.sql",
     ),
+    # DoctorCRE V5-J103: 0700 installs the governed correspondence store
+    # (adapter consent, read receipts, drafts with no destination) and its
+    # SECURITY DEFINER writers; 0701 seals that catalog as v79, chained from
+    # main's v78 (0629). Same deferred-epoch-trigger shape as the pairs above:
+    # 0700 applied alone would be refused at commit, so the pair must be one
+    # transaction.
+    (
+        "0700_governed_correspondence_store.sql",
+        "0701_governed_correspondence_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -419,6 +429,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0628_doctorcre_slice_done_marker.sql",
         "0629_doctorcre_slice_done_marker_scac_successor.sql",
+    ),
+    (
+        "0700_governed_correspondence_store.sql",
+        "0701_governed_correspondence_scac_successor.sql",
     ),
 )
 
