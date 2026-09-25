@@ -6,7 +6,7 @@
 //
 // Three enforcement points use this rule and must not drift:
 //   1. the database, at seal time and on every client read, through
-//      ops.tour_client_text_violation() (migrations/0591) -- the authority;
+//      ops.tour_client_text_violation() (migrations/0608) -- the authority;
 //   2. the browser share projections in tour-sharing.js;
 //   3. the PDF packet renderer (tour-packet-render.js).
 // The rules below are written in the subset of regex syntax that JavaScript

@@ -1,4 +1,4 @@
--- 0591: V5-J303 client-shared Tours -- one explicit, default-deny client
+-- 0608: V5-J303 client-shared Tours -- one explicit, default-deny client
 -- field allowlist.
 --
 -- Joe's ruling (decision 4ab3933e, 2026-09-24): a client sees exactly what is

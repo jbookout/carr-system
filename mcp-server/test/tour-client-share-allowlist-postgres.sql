@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Disposable proof for 0591 (V5-J303): the client field allowlist and the
+-- Disposable proof for 0608 (V5-J303): the client field allowlist and the
 -- client value rule are enforced by the database, default deny. Every row is
 -- rolled back.
 --
@@ -16,7 +16,7 @@
 --   * a clean seal shares; the list, the PDF render read and the map all carry
 --     only allowlisted material;
 --   * legacy parity: a projection holding a now-internal fact, an unsafe value
---     or a free-text label (sealed before 0591, simulated with triggers
+--     or a free-text label (sealed before 0608, simulated with triggers
 --     suspended) is refused by the list, the PDF render read and the map
 --     alike, and all three come back once it is clean again.
 begin;
@@ -68,7 +68,7 @@ insert into ops.tour_field_assertion(id,organization_tenant_id,property_id,field
 ('b9000000-0000-4000-8000-000000000028','tour-client-share-proof','b1000000-0000-4000-8000-000000000001','size','{"value":"251 555 01 00","unit":"SF"}','b6000000-0000-4000-8000-000000000001','b5000000-0000-4000-8000-000000000001',now()-interval '20 days',now()-interval '20 days',null,'high','public','reviewed',now()-interval '20 days');
 
 -- A second tour whose stop label is free text, not a short marker: a label
--- accepted before 0591 (the acceptance guard is suspended to plant it).
+-- accepted before 0608 (the acceptance guard is suspended to plant it).
 insert into ops.tour(id,organization_tenant_id,tour_name,tour_status,route_version,canonical_dataset_version,subject_type,subject_id,subject_bound_at)
 values('b2000000-0000-4000-8000-000000000002','tour-client-share-proof','Label proof','draft',1,'proof-v1','work','proof',now());
 insert into ops.tour_route_version(id,organization_tenant_id,tour_id,route_version,start_point,end_point,routing_source,routing_request,created_by_actor_id)
@@ -750,10 +750,10 @@ begin
     raise exception 'clean projection judged unsafe';
   end if;
 
-  -- Legacy parity. A projection sealed before 0591 may hold a now-internal
+  -- Legacy parity. A projection sealed before 0608 may hold a now-internal
   -- fact, internal text inside an allowed field, or sit on a free-text stop
   -- label. Plant each in the shared projection with triggers suspended (as a
-  -- pre-0591 seal was), and prove the list, the PDF render read AND the map
+  -- pre-0608 seal was), and prove the list, the PDF render read AND the map
   -- all refuse it -- none trims it -- then undo it and prove all three return.
   for v_legacy in select * from (values
     ('internal access fact',
@@ -805,7 +805,7 @@ end $client_allowlist$;
 -- allowlisted Unicode dashes, quotes and bullets as the connector, the same
 -- characters as phone separators, and the reviewer's link forms. Each
 -- refused string must get exactly the JavaScript rule's reason; each allowed
--- string must pass. 4753 refused, 542 allowed.
+-- string must pass. 4753 refused, 544 allowed.
 do $client_text_generated$
 declare v_case record; v_needle text;
 begin
@@ -5770,6 +5770,8 @@ begin
     'Access via I 165',
     'Access at Exit 353',
     'Suites 250, 300, 4500 total',
+    'Suites 25 , 300 , 4500 total',
+    'Suites 250, 300 -,4500 total',
     'Suites 250 to 300 of 1200 total',
     'Garage closes 2200 nightly',
     'Westgate 2100 Building',

@@ -169,7 +169,7 @@ export function adversarialAllowed() {
     "Access fee $1,500 per month", "Key money $10,000", "Pines 250 Medical Park", "Door to Unit 1200", "Entry at Bldg 300",
     "Gate on Route 181", "Access via I 165", "Access at Exit 353",
     // a comma-space list, words between numbers, a six-letter word before a time, a trigger inside a name
-    "Suites 250, 300, 4500 total", "Suites 250 to 300 of 1200 total", "Garage closes 2200 nightly", "Westgate 2100 Building");
+    "Suites 250, 300, 4500 total", "Suites 25 , 300 , 4500 total", "Suites 250, 300 -,4500 total", "Suites 250 to 300 of 1200 total", "Garage closes 2200 nightly", "Westgate 2100 Building");
   // Every unit, after a code-shaped number, makes a measure.
   for (const unit of ["SF", "RSF", "USF", "sq ft", "sqft", "square feet", "ft", "feet", "foot", "spaces", "space", "stalls", "stall", "acres", "acre", "ac",
     "seats", "seat", "psf", "mo", "yr", "hours", "hrs"]) out.push(`Gate 4411 ${unit}`, `Gate 4411-${unit}`, `Suites 250 - 300 - 4500 ${unit}`);

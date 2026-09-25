@@ -84,7 +84,7 @@ test("the client allowlist is exactly the eight fields on today's Tour PDF and c
 });
 
 test("the JavaScript allowlist and the database allowlist are the same list", () => {
-  const migration = fs.readFileSync(path.join(root, "migrations/0591_tour_client_field_allowlist.sql"), "utf8");
+  const migration = fs.readFileSync(path.join(root, "migrations/0608_tour_client_field_allowlist.sql"), "utf8");
   const body = migration.split(/create or replace function ops\.tour_client_field_keys\(\)/i, 2)[1];
   assert.ok(body, "migration defines ops.tour_client_field_keys()");
   const array = body.match(/array\[([^\]]*)\]::text\[\]/i);
@@ -534,7 +534,7 @@ function sqlBody(migration, fn) {
 }
 
 test("the JavaScript value rule and the database value rule are the same text", () => {
-  const migration = fs.readFileSync(path.join(root, "migrations/0591_tour_client_field_allowlist.sql"), "utf8");
+  const migration = fs.readFileSync(path.join(root, "migrations/0608_tour_client_field_allowlist.sql"), "utf8");
   const rules = sqlBody(migration, "tour_client_text_rules");
   assert.ok(rules, "migration defines ops.tour_client_text_rules()");
   const sqlRules = [...rules.matchAll(/\((\d+), '([a-z_]+)', '([a-z]+)', '((?:[^']|'')*)'\)/g)]
