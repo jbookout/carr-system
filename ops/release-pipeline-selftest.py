@@ -1794,7 +1794,9 @@ class Blockers(Base):
         self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
         self.assertEqual(self.fx.records()[-1]["step"], "credential-missing")
         self.assertIn("credential rejected", self.fx.records()[-1]["detail"])
-        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+        self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn"])
+        self.assertIn("credential rejected", verbs[0][1]["blocker_detail"])
+        self.assertTrue(self.fx.records()[-1]["loop_filed"])
 
 
 class DeployCredential(unittest.TestCase):
@@ -1861,8 +1863,13 @@ class DeployCredential(unittest.TestCase):
         self.assertIn("credential missing: CLOUDFLARE_API_TOKEN", rec["detail"])
         self.assertIn(str(self.cred / "tokens.env"), rec["detail"])
         self.assertTrue(rec["dispatched"])
-        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
-        self.assertIn("credential-missing", verbs[0][1]["body"])
+        self.assertTrue(rec["loop_filed"])
+        self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn"])
+        self.assertEqual(verbs[0][1]["blocker"], "capability")
+        self.assertIn("CLOUDFLARE_API_TOKEN is absent", verbs[0][1]["blocker_detail"])
+        self.assertIn("Joe grants it", verbs[0][1]["blocker_detail"])
+        self.assertIn("chmod 600", verbs[0][1]["body"])
+        self.assertIn("credential-missing", verbs[1][1]["body"])
         self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
         self.assertFalse((self.fx.repo / "out/release-pipeline/worktrees").exists()
                          and any((self.fx.repo / "out/release-pipeline/worktrees").iterdir()))
@@ -1913,7 +1920,16 @@ class DeployCredential(unittest.TestCase):
         self.assertEqual(runner2.calls, [])
         self.assertEqual(self.fx.records()[-1]["step"], "credential-missing")
         self.assertEqual(self.fx.state()["app"]["failed_sha"], sha2)
-        self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+        self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn"])
+
+    def test_missing_token_files_its_loop_once_across_shas(self):
+        verbs: list = []
+        for i in range(2):
+            self.fx.commit({"mcp-server/src/a.js": str(i)})
+            self.assertEqual(self.pipeline(FakeRunner(), verbs=verbs).tick(["worker"]), 1)
+        self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn", "add-room-turn"])
+        self.assertNotIn("loop_filed", self.fx.records()[-1])
+        self.assertIn("CLOUDFLARE_API_TOKEN", self.fx.state()["filed_blockers"])
 
     def test_dry_run_reports_the_missing_token_and_records_nothing(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
