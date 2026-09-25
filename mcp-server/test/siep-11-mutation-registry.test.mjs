@@ -102,7 +102,6 @@ import {
   REGISTRY_V66_VERSION,
   REGISTRY_V69_VERSION,
   REGISTRY_V70_VERSION,
-  REGISTRY_V71_VERSION,
   REGISTRY_V72_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
@@ -356,6 +355,8 @@ const generatedV65 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v65.generated.js", import.meta.url), "utf8");
 const generatedV69 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v69.generated.js", import.meta.url), "utf8");
+const generatedV72 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v72.generated.js", import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
@@ -390,9 +391,13 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // read-resource-dashboard and record-resource-observation.
   // The server-side Jev call log (0587) adds one write and two reads:
   // ask-jev, read-jev-call-receipts and read-jev-call-receipt-integrity.
-  assert.equal(rows.length, 284);
-  assert.equal(rows.filter(row => row.write).length, 200);
-  assert.equal(rows.filter(row => !row.write).length, 84);
+  // DoctorCRE V5-R02 (0602) adds eight writes and two reads: open/advance/
+  // cancel/retire-workflow-cutover-plan, register-slice-checkable-done,
+  // mark-slice-completion, record-workflow-caller, mark-slice-progress,
+  // workflow-cutover-board, read-slice-completion.
+  assert.equal(rows.length, 294);
+  assert.equal(rows.filter(row => row.write).length, 208);
+  assert.equal(rows.filter(row => !row.write).length, 86);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -993,11 +998,14 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // v63 registers answer-work-request-for-joe after v58-v62 registered none.
   // v65 registers the resource-observation pair; v69 registers ask-jev,
   // read-jev-call-receipts and read-jev-call-receipt-integrity after v66-v68
-  // registered none.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
-  const v69SelectorDigest = generatedV69.match(
+  // registered none; v70 and v71 registered none; v72 registers the ten V5-R02
+  // workflow-cutover and slice-completion verbs.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V72_VERSION);
+  const v72SelectorDigest = generatedV72.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v69SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v72SelectorDigest);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV69.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV65.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   const v57SelectorDigest = generatedV57.match(
@@ -1274,7 +1282,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // v22 through all three. v26 DOES register a verb, so the selector moves with
   // it — an unregistered operation is refused at the door, so the runtime has
   // to read the registry that knows record-gate-zero-read-only-outcome.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V72_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1317,7 +1325,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v63GeneratedDigest = generatedV63.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV69.match(
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV72.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV65.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
@@ -1413,7 +1421,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // what assertRegisteredOperation reads, and WR-000109 moved
   // patch-deal-field's schema_digest into v28. A loop still comparing against
   // v27 would assert the superseded contract and fail at the door.
-  const liveRows = frozenInventory(REGISTRY_V69_VERSION);
+  const liveRows = frozenInventory(REGISTRY_V72_VERSION);
   for (const name of Object.keys(TOOLS)) {
     const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
@@ -2548,7 +2556,7 @@ test("the v23 frontier re-digested only source, so it did not move the runtime i
   // verb either, so the import stayed on v22 through v23, v24 and v25, and only
   // moved again at v26 when the Gate Zero outcome verb arrived. What this test
   // records is that v23 was NOT the reason it moved.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V72_VERSION);
   assert.notEqual(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V23_VERSION);
   const v23GeneratedVersion = generatedV23.match(
     /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
@@ -2829,7 +2837,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 78);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0601"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 69);
   assert.equal(paths.length, 147);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain

@@ -907,15 +907,15 @@ if [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" = t ] && [ "$JEV_CALL_REC
   echo "schema-snapshot: nightly exports daytime retry v71 is applied without v70 predecessor" >&2
   exit 1
 fi
-DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0601_deploy_worker_do_migration_reseal.sql')" \
+V5_R02_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0603_doctorcre_r02_scac_successor.sql')" \
   2>/dev/null)"
-case "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" in
+case "$V5_R02_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read deploy-worker DO migration reseal v72 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read V5-R02 v72 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" = t ] && [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: deploy-worker DO migration reseal v72 is applied without v71 predecessor" >&2
+if [ "$V5_R02_REGISTRY_APPLIED" = t ] && [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: V5-R02 v72 is applied without v71 predecessor" >&2
   exit 1
 fi
 
@@ -2349,7 +2349,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                   SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v70'"
                                                                   SCAC_FULL_SET_SEAL_COUNT=70
                                                                   SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v71_current()"
-                                                                  if [ "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" = t ]; then
+                                                                  if [ "$V5_R02_REGISTRY_APPLIED" = t ]; then
                                                                     SCAC_CURRENT_NUMBER=72
                                                                     SCAC_VERSION_COUNT=72
                                                                     SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v72'")"
