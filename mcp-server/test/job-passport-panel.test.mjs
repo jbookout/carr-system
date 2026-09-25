@@ -34,6 +34,57 @@ const engineeringFor = (projection = fixture) => {
   passport.projection_digest = seal(passport);
   return passport;
 };
+// engineering-slice-plan.v2 fixture, derived from the server's own v2 test
+// fixture (mcp-server/test/engineering-runtime.test.mjs designContract/v2Slice):
+// same closed design_contract field set, mirrored here for the browser reader.
+const designContractFor = (slice) => {
+  const depth = ["R0", "R1", "R2", "R3"].includes(slice.risk_class) && slice.concurrency_posture === "parallel_safe"
+    && slice.manual_qa_required === false && slice.release_requirement === "not_required" && slice.dependency_refs.length === 0
+    && slice.declared_resource_refs.length <= 1 && slice.declared_component_refs.length <= 1 && slice.declared_plan_step_refs.length <= 1
+    ? "short" : "full";
+  const redaction = slice.planned_checks.some((check) => check.evidence_requirement === "redacted_evidence_required") ? "redacted_evidence" : "metadata_only";
+  return {
+    contract_version: "engineering-design-contract.v1",
+    rationale: "the closed validator owns this behavior end to end",
+    dependency_rationale: "no accepted predecessor slice is required",
+    code_model_decision: { rationale: "stable enforceable behavior stays deterministic code", selection_basis: ["capability_gain", "quality_gain"], model_judgment_steps: [] },
+    routing: { executor_class: "deterministic_code", adapter_ref: "adapter:codex-desktop", fresh_session_required: true },
+    authority: { capability_profile: "capability:engineering-repository-write", read_only: false, environment: "rehearsal" },
+    isolation: { worktree_required: true, branch_required: true, shared_resource_refs: [] },
+    tests: { planned_check_refs: slice.planned_checks.map((check) => check.check_ref), verification_lanes: slice.manual_qa_required ? ["contract", "manual_qa"] : ["contract"] },
+    review: { independent_review_required: true, reviewer_class: "independent_agent" },
+    failure: { failure_modes: [{ failure_ref: "failure:contract-drift", detection: "the closed validator refuses the plan", compensation: "revise the accepted plan revision before admission" }] },
+    evidence: { redaction_class: redaction, retention: "material_redacted", evidence_refs: [{ ref: "evidence:design", redaction_class: redaction, content_digest: "sha256:" + "a".repeat(64) }] },
+    deployment: { release_requirement: slice.release_requirement, rollback_ref: slice.release_requirement === "required" ? "release:rollback-plan" : null, confirmation_required: !["R0", "R1"].includes(slice.risk_class) },
+    completion: { completion_predicate: "every accepted planned check passes under independent review", verified_by: slice.manual_qa_required ? "independent_review_and_manual_qa" : "independent_review" },
+    seam_decision: { mode: "extend", target_seam_ref: "seam:engineering-runtime", measurement: { basis: "complexity_reduction", note: "extending the proven validator is smaller than a new module" }, new_module_justification: null, replaced_seam_refs: [], residual_authority_refs: [] },
+    full_design_refs: depth === "short" ? null : { design_interview_ref: "interview:v5-f03", authority_envelope_ref: "envelope:v5-f03", failure_model_ref: "failure-model:v5-f03", fixture_refs: ["fixture:v5-f03-boundary"], oracle_ref: "oracle:doctorcre-v5:Q035.D1" },
+    short_template: depth === "full" ? null : { template_ref: "template:short-governed-v1", objective_summary: "one bounded parallel-safe change with no dependencies", verification_ref: "verification:short-governed-v1" },
+  };
+};
+const engineeringForV2 = (projection = fixture) => {
+  const workRequest = { id: projection.work_request_id, state_version: projection.source_state.state_version, canonical_record_digest: projection.source_state.canonical_record_digest };
+  const acceptedPlanRevision = { id: envelope.plan_revision.id, revision: envelope.plan_revision.revision, digest: projection.source_state.plan_revision_digest };
+  const evidence = { ref: "evidence:baseline", redaction_class: "redacted_evidence", content_digest: "sha256:" + "a".repeat(64) };
+  const slice = { slice_ref: "slice:a", ordinal: 1, objective: "Blocked synthetic slice", definition_of_done: "A typed receipt arrives", dependency_refs: [], declared_resource_refs: ["resource:worktree-a"], declared_component_refs: ["component:execution-fabric"], declared_plan_step_refs: ["step:synthetic-read"], baseline_evidence_refs: [evidence], planned_checks: [{ check_ref: "check:synthetic", failure_condition: "missing evidence", evidence_requirement: "redacted_evidence_required" }], scope_boundary: "synthetic fixture", forbidden_change_refs: ["forbidden:authority"], concurrency_posture: "parallel_safe", manual_qa_required: false, risk_class: "R1", release_requirement: "required" };
+  slice.design_contract = designContractFor(slice);
+  const slicePlan = { schema_version: "engineering-slice-plan.v2", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, slices: [slice] };
+  slicePlan.plan_digest = seal(slicePlan);
+  const receiptEvidence = { ref: "evidence:receipt", redaction_class: "redacted_evidence", content_digest: "sha256:" + "a".repeat(64) };
+  const receipt = { schema_version: "engineering-slice-receipt.v1", envelope_digest: seal(envelope), attempt_id: "attempt:a", slice_ref: "slice:a", plan_digest: slicePlan.plan_digest, attribution: { actor_ref: "actor:codex", session_ref: "session:fresh", adapter_ref: "adapter:codex" }, planned_resource_refs: ["resource:worktree-a"], actual_resource_refs: ["resource:worktree-a"], planned_component_refs: ["component:execution-fabric"], actual_component_refs: ["component:execution-fabric"], checks: [{ check_ref: "check:synthetic", state: "passed", evidence_refs: [receiptEvidence] }], outcome: "claimed_complete", artifact_refs: ["artifact:a"], evidence_refs: [receiptEvidence], deviations: [], source_evidence: { worktree_ref: "worktree:isolated", branch_ref: "branch:engineering-passport", source_sha: "0e7279b4", evidence_refs: [receiptEvidence] }, reset_reconstruction: { fresh_session: true, inherited_transcript_used: false, reconstruction_free: true, remediation_action: null }, executor_claim: { claim_state: "executor_claim", claimed_by: "actor:codex", claimed_at: "2026-08-24T12:15:00Z" }, independent_verification_required: true };
+  const passport = { schema_version: "engineering-passport.v1", work_request: workRequest, accepted_plan_revision: acceptedPlanRevision, plan_digest: slicePlan.plan_digest, slice_plan: slicePlan, execution_envelopes: [structuredClone(envelope)], receipts: [receipt], reviewer_facts: [], qa_facts: [], slices: [{ slice_ref: "slice:a", ordinal: 1, dependency_refs: [], state: "claimed", planned_check_refs: ["check:synthetic"], deviation_refs: [], manual_qa_required: false, release_requirement: "required" }], operator_receipt: { what_changed: [], why: "derived from accepted plan and typed receipts", evidence_refs: [receiptEvidence], deviations: [], remaining_risk: ["slice:a"], manual_qa_items: [] }, closure: { work: { state: "unresolved", evidence_refs: [], note: "pending" }, proof: { state: "unresolved", evidence_refs: [], note: "pending" }, explanation: { state: "unresolved", evidence_refs: [], note: "pending" }, release: { state: "unresolved", evidence_refs: [], note: "pending" }, learning: { state: "unresolved", route: null, evidence_refs: [], note: "pending" } }, closure_state: "blocked", stale_conflict: { state: "none", reason: null } };
+  passport.projection_digest = seal(passport);
+  return passport;
+};
+const reseal = (typedPassport) => {
+  delete typedPassport.slice_plan.plan_digest;
+  typedPassport.slice_plan.plan_digest = seal(typedPassport.slice_plan);
+  typedPassport.plan_digest = typedPassport.slice_plan.plan_digest;
+  typedPassport.receipts[0].plan_digest = typedPassport.plan_digest;
+  delete typedPassport.projection_digest;
+  typedPassport.projection_digest = seal(typedPassport);
+  return typedPassport;
+};
 
 export function joined_activation_reliability_wire_and_model_room_path({ db_projection, activation_read_projection, admitted_receipt, observatory_projection }) {
   const canonicalBinding = db_projection?.canonical_binding;
@@ -371,6 +422,43 @@ testCase("Engineering Passport binds to exact Observatory state and withholds st
   const conflictModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2), turn(wrap("engineering_passport", conflict), 3)]);
   assert.equal(conflictModel.passports[0].engineering_passport, null);
   assert.ok(conflictModel.rejected.some((row) => row.reason === "conflicting_engineering_passport"));
+});
+
+testCase("engineering-slice-plan.v1 plans are still accepted exactly as before", () => {
+  const matching = engineeringFor(fixture);
+  const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2)]);
+  assert.deepEqual(model.passports[0].engineering_passport, matching);
+});
+
+testCase("engineering-slice-plan.v2 plans are accepted with a valid design_contract", () => {
+  const matching = engineeringForV2(fixture);
+  const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", matching), 2)]);
+  assert.deepEqual(model.passports[0].engineering_passport, matching);
+});
+
+testCase("engineering-slice-plan.v2 refuses a design_contract with an extra or a missing key", () => {
+  const extra = engineeringForV2(fixture);
+  extra.slice_plan.slices[0].design_contract.unexpected_field = "nope";
+  reseal(extra);
+  const extraModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", extra), 2)]);
+  assert.equal(extraModel.passports[0].engineering_passport, null);
+  assert.ok(extraModel.rejected.some((row) => row.reason === "invalid_engineering_passport"));
+
+  const missing = engineeringForV2(fixture);
+  delete missing.slice_plan.slices[0].design_contract.seam_decision;
+  reseal(missing);
+  const missingModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", missing), 2)]);
+  assert.equal(missingModel.passports[0].engineering_passport, null);
+  assert.ok(missingModel.rejected.some((row) => row.reason === "invalid_engineering_passport"));
+});
+
+testCase("an unknown engineering-slice-plan schema_version is refused", () => {
+  const unknown = engineeringForV2(fixture);
+  unknown.slice_plan.schema_version = "engineering-slice-plan.v3";
+  reseal(unknown);
+  const unknownModel = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", unknown), 2)]);
+  assert.equal(unknownModel.passports[0].engineering_passport, null);
+  assert.ok(unknownModel.rejected.some((row) => row.reason === "invalid_engineering_passport"));
 });
 
 testCase("browser refuses forged or malformed Engineering Passports before paint", () => {
