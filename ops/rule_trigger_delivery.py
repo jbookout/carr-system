@@ -170,20 +170,25 @@ def _is_envelope(text):
 def _default_rank(text, pool, limit, client):
     """(ranked ids, requests made) from ops/jev_rule_select's ranking Choice."""
     jrs = _sibling("jev_rule_select")
-    judge = jrs._sibling("jev_judge")
+    real_judge = jrs._sibling("jev_judge")
     made = []
 
+    # NOT named `judge` out here: the class body below defines a method of
+    # that name, which makes `judge` class-local, so a reference to the outer
+    # module from inside the class raised NameError and every ranking failed
+    # before reaching Jev (found by the 2026-09-25 live replay; the fake
+    # ranker in the selftest hid it, so a test now drives this function).
     class Counting:
-        JudgeUnavailable = getattr(judge, "JudgeUnavailable", RuntimeError)
+        JudgeUnavailable = getattr(real_judge, "JudgeUnavailable", RuntimeError)
 
         @staticmethod
         def judge(*args, **kwargs):
             made.append(1)
-            return judge.judge(*args, **kwargs)
+            return real_judge.judge(*args, **kwargs)
 
         @staticmethod
         def record(*args, **kwargs):
-            return judge.record(*args, **kwargs)
+            return real_judge.record(*args, **kwargs)
 
     roster = [{"id": rule["id"], "gist": (rule.get("statement") or "")[:RUBRIC_CHARS]}
               for rule in pool]

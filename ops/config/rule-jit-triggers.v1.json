@@ -387,6 +387,7 @@
   },
   {
    "kind": "prompt_regex",
+   "negative_pattern": "(?m)^[ \\t]*Last login:[^\\n]*",
    "packs": [
     "joe-comms"
    ],
@@ -395,7 +396,7 @@
     "c66dc739"
    ],
    "source": "prompt_cue",
-   "trigger_id": "622e43d5a88c"
+   "trigger_id": "ab415cbb3d61"
   },
   {
    "kind": "prompt_regex",

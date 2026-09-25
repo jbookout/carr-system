@@ -180,8 +180,12 @@ PROMPT_CUE_TRIGGERS: tuple[dict[str, Any], ...] = (
         "rule_ids": ["57d13061"],
     },
     # "Just click my Carr.us@gmail account. The password is autofilled..."
+    # A pasted terminal banner ("Last login: Thu Sep 24 11:01:21 on ttys001")
+    # is not a login conversation: 2 of this cue's 7 firings on 282 logged
+    # prompts were exactly that, so the banner line is masked first.
     {
         "pattern": r"\b(?:passwords?|log\s?-?ins?|autofill(?:ed)?|auto-filled)\b",
+        "negative_pattern": r"(?m)^[ \t]*Last login:[^\n]*",
         "packs": ["joe-comms"],
         "rule_ids": ["c66dc739"],
     },
@@ -323,14 +327,19 @@ def compile_triggers(triage: dict, enforcement_map: dict,
 
     # 3b. reviewed cues from real partner prompts (human prompts only)
     for cue in PROMPT_CUE_TRIGGERS:
-        rows.append({
-            "trigger_id": trigger_id("prompt_regex", cue["pattern"]),
+        negative = cue.get("negative_pattern")
+        row = {
+            "trigger_id": trigger_id("prompt_regex", cue["pattern"] if not negative
+                                     else f"{cue['pattern']}\0{negative}"),
             "kind": "prompt_regex",
             "pattern": cue["pattern"],
             "packs": list(cue["packs"]),
             "rule_ids": sorted(cue["rule_ids"])[:MAX_RULES_PER_TRIGGER],
             "source": "prompt_cue",
-        })
+        }
+        if negative:
+            row["negative_pattern"] = negative
+        rows.append(row)
 
     # 4. Jev-compiled triggers (ops/rule-trigger-compile.py): one judgment per
     # rule, made when the rule was taught or changed. prompt_regex rows are

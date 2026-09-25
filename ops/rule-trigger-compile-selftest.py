@@ -254,6 +254,63 @@ def prop_envelope_zero_calls(rtc_m, rtd_m):
     return ask.calls == [] and rank.calls == 0 and "aaaa0003" not in ids(out)
 
 
+class ChoiceClient(Client):
+    @staticmethod
+    def choice(instructions, options):
+        return {"type": "choice", "options": options}
+
+
+def prop_default_rank(rtc_m, rtd_m):
+    """The REAL default ranker (jev_rule_select.narrow behind a request
+    counter), driven through advise() with only the judge module stubbed:
+    exactly one ranking request, and its top choices are what gets judged.
+    The injected fake ranker elsewhere in this suite hid a NameError here
+    that made every live ranking fail before reaching Jev."""
+    requests = []
+
+    class StubJudge:
+        JudgeUnavailable = RuntimeError
+
+        @staticmethod
+        def judge(subject, questions, **kwargs):
+            requests.append(sorted(questions))
+            order = sorted(r["id"] for r in ROSTER if r["id"] != "aaaa0001")
+            order.sort(key=lambda rule_id: (rule_id != "ffff0039", rule_id))
+            return {"answers": {"rank": {"probabilities": {
+                rule_id: 1.0 / (i + 1) for i, rule_id in enumerate(order)}}},
+                "model": "stub-ranker"}
+
+        @staticmethod
+        def record(*args, **kwargs):
+            return None
+
+    real_sibling = rtd_m._sibling
+
+    def sibling(name):
+        module = real_sibling(name)
+        if name == "jev_rule_select":
+            inner = module._sibling
+            module._sibling = lambda n: StubJudge if n == "jev_judge" else inner(n)
+        return module
+
+    rtd_m._sibling = sibling
+    try:
+        ask = Asker(0.1)
+        with tempfile.TemporaryDirectory() as tmp:
+            rtd_m.advise("git push please", session_id=None, now=1.0,
+                         triggers_path=table_for(compiled_doc(), tmp), compiled=compiled_doc(),
+                         rules=ROSTER, ask=ask, client=ChoiceClient, rank=None,
+                         delivered_cache=os.path.join(tmp, "d"), envelope=False,
+                         log_path=os.path.join(tmp, "log.jsonl"))
+            row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
+    except Exception:
+        return False
+    finally:
+        rtd_m._sibling = real_sibling
+    return (requests == [["rank"]] and row["rank_status"] == "ranked"
+            and "ffff0039" in ask.asked() and row["jev_calls"] == 1 + len(ask.calls))
+
+
 def prop_dedupe(rtc_m, rtd_m):
     with tempfile.TemporaryDirectory() as tmp:
         first = run(rtd_m, "a vendor intro", tmp)
@@ -298,6 +355,8 @@ PROPERTIES = {
     "residual and stale rules are judged on every human prompt": prop_residual_every_human_prompt,
     "a human prompt never costs more than MAX_JEV_CALLS requests": prop_budget_cap,
     "a machine envelope costs zero Jev requests": prop_envelope_zero_calls,
+    "the real default ranker makes one request and its choices are judged":
+        prop_default_rank,
     "a rule already delivered this session is not resent inside the window": prop_dedupe,
     "no session id means no dedupe and no shared key": prop_no_session_no_pooling,
     "coverage flags a triggered rule with no trigger": prop_coverage_flags_empty_trigger,
@@ -398,6 +457,14 @@ for prompt, rule_id in (
         ("look in my email folder for sapala", "49533583")):
     check(f"committed cue delivers {rule_id} on its logged prompt",
           rule_id in rtd.match(prompt, committed_rows or [], human=True), prompt[:40])
+for banner in ("Last login: Thu Sep 24 11:01:21 on ttys001\nbooko@Joes-MacBook-Pro ~ % ls",
+               "the file to dells computer? or the command\n\n"
+               "Last login: Wed Sep 23 21:20:47 on ttys001\nbooko@J"):
+    check("a pasted terminal login banner does not fire the password cue",
+          "c66dc739" not in rtd.match(banner, committed_rows or [], human=True), banner[:40])
+check("the password cue still fires on a real login mention beside a banner",
+      "c66dc739" in rtd.match("Last login: Thu Sep 24 on ttys001\nit wants my password again",
+                              committed_rows or [], human=True))
 check("committed partner-prompt cues never run on an envelope",
       not any(source == "prompt_cue" for sources in rtd.match(
           NOTIFICATION, committed_rows or [], human=False).values() for source in sources))
@@ -463,6 +530,9 @@ MUTANTS = [
       "human = True")),
     ("a machine envelope costs zero Jev requests", RTD_PATH,
      ('if not human and row.get("source") in HUMAN_ONLY_SOURCES:', "if False:")),
+    # The shadowing bug the 2026-09-25 live replay found, reintroduced.
+    ("the real default ranker makes one request and its choices are judged", RTD_PATH,
+     ('JudgeUnavailable = getattr(real_judge,', 'JudgeUnavailable = getattr(judge,')),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,
      ("if not (isinstance(recent.get(rule_id), (int, float))",
       "if True or not (isinstance(recent.get(rule_id), (int, float))")),
