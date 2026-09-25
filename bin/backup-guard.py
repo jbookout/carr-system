@@ -487,22 +487,41 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
             return {'file': str(output), 'bytes': size, 'floor': floor,
                     'table_count': len(observer.seen)}
     finally:
-        # Every cleanup step runs, unconditionally, and NONE of them may
-        # replace whatever the `try` block above is already propagating (a
-        # BackupError, or a clean return). A bare nested try/finally does
-        # NOT give that guarantee: if one of these steps raises while an
-        # earlier exception is already unwinding, Python has the new
-        # exception replace/mask the original -- exactly the failure mode
-        # this is guarding against, just moved one level up. stop_child()
-        # itself is hardened not to raise (see its own comment), but this
-        # is the second, independent line of defense: even an unexpected
-        # failure here is reported, never raised past this function.
+        # Every cleanup step runs, unconditionally, and an ORDINARY failure
+        # in one of them may never replace whatever the `try` block above
+        # is already propagating (a BackupError, or a clean return). A bare
+        # nested try/finally does NOT give that guarantee: if one of these
+        # steps raises while an earlier exception is already unwinding,
+        # Python has the new exception replace/mask the original -- exactly
+        # the failure mode this is guarding against, just moved one level
+        # up. stop_child() itself is hardened not to raise for ordinary
+        # OS-level failures (see its own comment), but this is the second,
+        # independent line of defense for anything unexpected.
+        #
+        # A SIGNAL is different. main()'s handler turns SIGALRM/SIGTERM/
+        # SIGINT into a raised BackupError/KeyboardInterrupt, and that can
+        # land inside stop_child()'s blocking wait(timeout=2) — interrupting
+        # it before SIGKILL is sent, so the child is left unkilled. If that
+        # were logged and swallowed like an ordinary cleanup failure, a
+        # termination signal arriving after a successful dump would still
+        # report success. So a BackupError/KeyboardInterrupt caught here is
+        # remembered and, once every cleanup step has still been run, is
+        # re-raised — but ONLY when nothing from the `try` block above is
+        # already propagating (sys.exc_info() is empty on the ordinary
+        # return path and while a `raise` from the try body is unwinding):
+        # a primary BackupError always wins over one raised during cleanup.
         cleanup_failures: list[tuple[str, BaseException]] = []
+        cleanup_signal: BaseException | None = None
 
         def cleanup_step(description: str, action) -> None:
+            nonlocal cleanup_signal
             try:
                 action()
-            except BaseException as exc:  # noqa: BLE001 - see comment above
+            except (BackupError, KeyboardInterrupt) as exc:
+                if cleanup_signal is None:
+                    cleanup_signal = exc
+                cleanup_failures.append((description, exc))
+            except Exception as exc:
                 cleanup_failures.append((description, exc))
 
         cleanup_step('stop dump child', lambda: stop_child(dump))
@@ -515,6 +534,9 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
         for description, exc in cleanup_failures:
             print(f'backup-guard: cleanup step failed ({description}): {exc!r}',
                   file=sys.stderr)
+
+        if cleanup_signal is not None and sys.exc_info()[0] is None:
+            raise cleanup_signal
 
 
 def main() -> int:
