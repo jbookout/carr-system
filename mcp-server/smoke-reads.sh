@@ -290,42 +290,43 @@ else
 fi
 
 # --- ORDER 18: the intro graph is reachable under the READER role ---------------
-# 'Jon Shaw' is a real vendor (V-BNK-013) who introduced C-155, a real client.
-# WR-000049: the client's surname is externalized (SMOKE_GRAPH_CLIENT_SURNAME
-# in smoke-reads.local.env, see the fixture note near the top) — the vendor
-# name and the C-155 ref stay, since a vendor is not a client record and a ref
-# is opaque. The surname cannot appear in the parties block (that block
-# matches the query name) nor in the deals block (no deal is named Jon Shaw),
-# so a response to query 'Jon Shaw' that contains it can only have come from
-# the connections block reading v_party_graph. The chain is the probe.
+# The probe queries a real vendor (V-BNK-013) who introduced C-155, a real
+# client. WR-000049: both names are externalized to smoke-reads.local.env
+# (SMOKE_GRAPH_VENDOR_QUERY, SMOKE_GRAPH_CLIENT_SURNAME; see the fixture note
+# near the top) — a counterparty person's name is a client-side record too, and
+# the refs stay because a ref is opaque. The surname cannot appear in the
+# parties block (that block matches the query name) nor in the deals block (no
+# deal carries the vendor's name), so a response to the vendor query that
+# contains it can only have come from the connections block reading
+# v_party_graph. The chain is the probe.
 echo
 # (the result arrives as a JSON string inside the MCP envelope, so the keys are
 #  backslash-escaped on the wire — match them that way, not as bare quotes)
-if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ]; then
-  check "graph probe: find surfaces the Shaw -> client intro" \
-        find '{"query":"Jon Shaw"}' '\\"connections\\"' "$SMOKE_GRAPH_CLIENT_SURNAME"
+if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ] && [ -n "${SMOKE_GRAPH_VENDOR_QUERY:-}" ]; then
+  check "graph probe: find surfaces the V-BNK-013 -> client intro" \
+        find "{\"query\":\"$SMOKE_GRAPH_VENDOR_QUERY\"}" '\\"connections\\"' "$SMOKE_GRAPH_CLIENT_SURNAME"
 else
   echo
-  echo "  SKIP  graph probe (find) — no smoke-reads.local.env (or"
-  echo "        SMOKE_GRAPH_CLIENT_SURNAME); needs a real client's surname."
+  echo "  SKIP  graph probe (find) — no smoke-reads.local.env (or SMOKE_GRAPH_VENDOR_QUERY /"
+  echo "        SMOKE_GRAPH_CLIENT_SURNAME); needs a real vendor and client."
 fi
 
 # --- ORDER 32: the multi-hop half, and the probe is a REAL two-hop chain --------
-# V-ATT-009 Dion Moniz's Links names Jon Shaw; V-BNK-013 Jon Shaw's Links names
-# C-155, the same real client as above. Neither row names the other end, so a
-# response to target C-155 containing 'Dion Moniz' can only have come from the
-# recursive walk joining two separate edges. If the traversal ever breaks,
-# this goes red. (Vendor names and the C-155 ref stay tracked; see above.)
-if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ]; then
-  check "who-do-we-know: the two-hop Moniz -> Shaw -> client path" \
-        who-do-we-know '{"target":"C-155"}' 'Dion Moniz' '\\"hops\\":2'
+# V-ATT-009's Links names V-BNK-013; V-BNK-013's Links names C-155, the same
+# real client as above. Neither row names the other end, so a response to
+# target C-155 containing V-ATT-009's name (SMOKE_GRAPH_TWO_HOP_NAME, local
+# fixture) can only have come from the recursive walk joining two separate
+# edges. If the traversal ever breaks, this goes red. (The refs stay tracked.)
+if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ] && [ -n "${SMOKE_GRAPH_TWO_HOP_NAME:-}" ]; then
+  check "who-do-we-know: the two-hop V-ATT-009 -> V-BNK-013 -> client path" \
+        who-do-we-know '{"target":"C-155"}' "$SMOKE_GRAPH_TWO_HOP_NAME" '\\"hops\\":2'
 else
   echo
   echo "  SKIP  graph probe (who-do-we-know two-hop) — no smoke-reads.local.env"
-  echo "        (or SMOKE_GRAPH_CLIENT_SURNAME); needs a real client's surname."
+  echo "        (or SMOKE_GRAPH_TWO_HOP_NAME / SMOKE_GRAPH_CLIENT_SURNAME)."
 fi
-# The refuse-to-guess half. 'Ric' matches more than one graph node (V-BNK-030 Ric
-# McClanahan and V-BNK-034 Ric Nickelsen), and the verb must hand back candidates
+# The refuse-to-guess half. 'Ric' matches more than one graph node (V-BNK-030 and
+# V-BNK-034 share that first name), and the verb must hand back candidates
 # rather than pick one (amendment 7). needs_disambiguation travels as isError by
 # the ToolError convention, so `check` cannot express this — same bespoke loop the
 # catch-me-up ambiguity probe above uses, and for the same reason.
@@ -390,11 +391,16 @@ fi
 #
 # SAFE TO RUN FOR EVER, for the same reason the write probe is: both keys below
 # are FIXED and the arguments never change, so the pair inserted exactly once in
-# history and replays on every run after. The subject is deliberate too —
-# 'AMA Law Office' is a CLOSED/LOST deal that carried zero next_action rows, and
-# no seeded cadence rule fires on a deal subject, so completing this fixture
-# spawns nothing and displaces no real ball. If a deal-lane on_complete rule is
-# ever seeded, move the fixture rather than deleting this probe.
+# history and replays on every run after. The subject is deliberate too — a
+# CLOSED/LOST deal that carried zero next_action rows, and no seeded cadence
+# rule fires on a deal subject, so completing this fixture spawns nothing and
+# displaces no real ball. If a deal-lane on_complete rule is ever seeded, move
+# the fixture rather than deleting this probe.
+#
+# THE DEAL'S NAME IS A LOCAL FIXTURE (SMOKE_BALL_PROBE_REF in
+# smoke-reads.local.env, WR-000049): it is a real client's deal. The value is
+# spliced into the SAME bytes the frozen strings always carried, so the replay
+# keys still match; with no fixture the path SKIPs rather than guessing.
 #
 # THE TWO ARGUMENT STRINGS BELOW ARE FROZEN. The envelope hashes the arguments
 # with the key, so editing a single character of either JSON body makes every
@@ -404,12 +410,15 @@ echo
 if [ "$PROBE_MODE" -eq 1 ]; then
   echo "  SKIP  completion path — set-next-action and complete-action are outside the"
   echo "        read-only 'probe' profile. Run under a partner's OAuth session to exercise it."
+elif [ -z "${SMOKE_BALL_PROBE_REF:-}" ]; then
+  echo "  SKIP  completion path — no smoke-reads.local.env (or SMOKE_BALL_PROBE_REF);"
+  echo "        the fixture deal is a real client record and is not tracked."
 else
 _c_ok=1; _c_why=""
 for i in $(seq 1 "$REPS"); do
-  call set-next-action '{"idempotency_key":"smoke-ball-probe-permanent","ref":"AMA Law Office","description":"smoke probe fixture — permanent, replayed, never a real ball"}'
+  call set-next-action '{"idempotency_key":"smoke-ball-probe-permanent","ref":"'"$SMOKE_BALL_PROBE_REF"'","description":"smoke probe fixture — permanent, replayed, never a real ball"}'
   if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _c_ok=0; _c_why="the probe fixture ball could not be set"; break; fi
-  call complete-action '{"idempotency_key":"smoke-complete-probe-permanent","ref":"AMA Law Office","outcome":"smoke probe — completed once, replayed for ever after"}'
+  call complete-action '{"idempotency_key":"smoke-complete-probe-permanent","ref":"'"$SMOKE_BALL_PROBE_REF"'","outcome":"smoke probe — completed once, replayed for ever after"}'
   if echo "$RESULT" | grep -q '"error"'; then _c_ok=0; _c_why="transport/protocol error"; break; fi
   if echo "$RESULT" | grep -q '"isError":true'; then _c_ok=0; _c_why="verb returned isError (deployed? resolveSubject under carr_writer?)"; break; fi
   if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _c_ok=0; _c_why="no ok:true in the envelope response"; break; fi
@@ -531,7 +540,7 @@ fi
 # plumbing check, not a data assertion." That is a reasonable contract and it is
 # also exactly how a real bug survived roughly forty migrations.
 #
-# THE BUG. Ask `find` for "Henry Schein" and it answered "Henry Pruett" — a
+# THE BUG. Ask `find` for "Henry Schein" and it answered a lead named Henry — a
 # trigram hit on one word of the query — while 17 real Henry Schein party rows
 # sat in the table untouched. `who-do-we-know "Henry Schein"` went further and
 # replied "No record and no graph node matches that name", which is not a miss,
@@ -802,7 +811,7 @@ fi
 # with no client/lead/vendor row and therefore no business ref. WHO_EDGES filters
 # NULL endpoints out of the walk, correctly — the walker keys on refs — but the
 # verb then answered as though the relationship did not exist. Asking who reaches
-# Heather Lavallo returned Chris Kelly and said nothing about Joe, whose offered
+# V-CPA-036 returned V-CPA-006 and said nothing about Joe, whose offered
 # introduction is sitting in the record.
 #
 # THE FIXTURE IS CHOSEN TO SURVIVE THE REAL FIX. specs/party-graph-ref-fallback.md
@@ -836,9 +845,9 @@ if [ "$CAP_UNWALK" -eq 1 ]; then
   # C-155's unwalkable_edges. The verb REPORTING it is loop #133 working exactly
   # as designed — the suite was failing on correct behaviour, and the fixture's
   # premise ("C-155 has nothing blocked"), not the system, is what expired.
-  # V-BNK-013 (Jon Shaw) is in_graph with one walkable path and an empty list.
+  # V-BNK-013 is in_graph with one walkable path and an empty list.
   # If this check ever fails, read it as "someone recorded a ref-less edge into
-  # Shaw" and re-verify the premise before touching the verb.
+  # V-BNK-013" and re-verify the premise before touching the verb.
   check "…and the list is EMPTY where nothing is blocked, not a hardcoded fixture" \
         who-do-we-know '{"target":"V-BNK-013"}' '\\"unwalkable_edges\\":\[\]'
 fi

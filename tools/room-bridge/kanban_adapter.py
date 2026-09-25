@@ -382,10 +382,55 @@ def bounded_status(payload: object, *, limit: int = 50) -> dict:
     return {"tasks": rows, "truncated": len(rows) >= limit}
 
 
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _model_router():
+    """ops/jev_model_route.py, loaded by path like every ops sibling; paid for only on target=auto."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jev_model_route", REPO / "ops" / "jev_model_route.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _flash_is_up() -> bool:
+    import flash_wire
+    return flash_wire.is_up()
+
+
 class QueueService:
-    def __init__(self, *, catalog: dict | None = None, adapter: KanbanAdapter | None = None):
+    def __init__(self, *, catalog: dict | None = None, adapter: KanbanAdapter | None = None,
+                 router=None, flash_up=None):
         self.catalog = catalog or load_catalog()
         self.adapter = adapter or KanbanAdapter()
+        self._router = router
+        self._flash_up = flash_up
+
+    def route_auto(self, command: dict) -> dict:
+        """Pick the target for a target=auto task. Jev routes it through the Model Room policy
+        (ops/config/model-routes.v1.json); code then checks that the picked target is enabled and accepts the
+        capability, and that Flash is up for a Flash route. Any miss goes to the policy's fallback target, with
+        the reason recorded."""
+        router = self._router or _model_router()
+        policy = router.load_policy()
+        up = (self._flash_up or _flash_is_up)()
+        row = router.decide(command["title"], command.get("body") or "", flash_free=up, policy=policy)
+        targets = policy.get("queue_targets", {})
+        alias = targets.get(row["route"])
+        entry = self.catalog["targets"].get(alias) if alias else None
+        reason = None
+        if not isinstance(entry, dict) or not entry.get("enabled"):
+            reason = "target_unavailable"
+        elif command["cap"] not in entry.get("capabilities", []):
+            reason = "capability_target_refused"
+        elif row.get("overflow"):
+            reason = "flash_busy_or_down"
+        if reason:
+            alias = targets.get("fallback")
+        return {"target": alias, "route": row["route"], "model": row.get("model"), "effort": row.get("effort"),
+                "scores": row.get("scores"), "fallback_reason": reason, "jev_error": row.get("jev_error")}
 
     def handle(self, turn: dict, *, room: str) -> dict:
         parsed = queue_grammar.parse({**turn, "room": room}, self.catalog)
@@ -410,9 +455,33 @@ class QueueService:
                 }}}
             assert parsed.kind == "enqueue" and parsed.value is not None
             command = parsed.value
+            routed = None
+            if command["target"] == queue_grammar.AUTO_TARGET:
+                routed = self.route_auto(command)
+                entry = self.catalog["targets"].get(routed["target"] or "")
+                if not isinstance(entry, dict) or not entry.get("enabled") \
+                        or command["cap"] not in entry.get("capabilities", []):
+                    return {"handled": True, "kind": "rejected", "receipt": {"queue_rejected": {
+                        **source, "code": "auto_route_unavailable", "route": routed,
+                        "reason": "no enabled target accepts this task", "hint": "Name a target explicitly",
+                    }}}
+                command = {**command, "target": routed["target"]}
             created = self.adapter.create(command, turn, self.catalog["targets"][command["target"]])
+            # A retried target=auto command re-runs route_auto on every call, so its
+            # idempotency key (from the room message, not the task) can land on an
+            # EXISTING task that was originally routed somewhere else — Flash's
+            # liveness or Jev's decision can differ between the original send and the
+            # retry. On a duplicate FROM AN AUTO ROUTE (routed is not None), the
+            # receipt must report where that existing task actually went, not this
+            # call's freshly recomputed route. An explicit target can never drift this
+            # way — the command names its own target every time — so this stays a
+            # no-op read for every explicit-target create, matching prior behavior.
+            report_target = command["target"]
+            if routed is not None and not created["created"]:
+                report_target = self._existing_task_target(created["task_id"], default=report_target)
             return {"handled": True, "kind": "accepted", "receipt": {"queue_accepted": {
-                **source, "task_id": created["task_id"], "target": command["target"],
+                **source, "task_id": created["task_id"], "target": report_target,
+                **({"route": routed} if routed else {}),
                 "cap": command["cap"], "idempotency_key": command["idempotency_key"],
                 "status": "blocked" if command.get("manual") and created["created"] else
                           ("created" if created["created"] else "duplicate"),
@@ -424,3 +493,22 @@ class QueueService:
 
     def reconcile_disabled_targets(self) -> ReconciliationResult:
         return self.adapter.reconcile_disabled_targets(self.catalog)
+
+    def _existing_task_target(self, task_id: str, *, default: str) -> str:
+        """The target actually bound to an already-existing queue task.
+
+        Best-effort: a fresh read that fails or a body that does not parse as the
+        exact queue envelope falls back to the caller's own default rather than
+        failing the whole receipt over a display fact.
+        """
+        try:
+            payload = self.adapter.show(task_id)
+        except QueueError:
+            return default
+        task = payload.get("task") if isinstance(payload, dict) else None
+        if not isinstance(task, dict):
+            return default
+        meta, error = KanbanAdapter._reconciliation_meta(task)
+        if error is not None or meta is None:
+            return default
+        return meta["target"]

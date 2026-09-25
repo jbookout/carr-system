@@ -836,7 +836,28 @@ step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetc
 # the cutoff. The seventh was a markdown render, retired with the other 38 and
 # counted as a survivor by mistake. The retired renders stay retired: each still
 # prints RETIRED here rather than being rewritten.
-step "exports (6 targets -> OneDrive)" env CARR_EXPORT_LIVE=1 ./run.sh export
+#
+# ── PRE-PUBLISH WAKE (defect: nightly.exports failed 9/22, 9/23, 9/24; on 9/24
+# it consumed the FULL 1800s exports wall-clock with zero partial output — see
+# out/nightly-runs/nightly-20260924T080221Z.log). Jev at 0.71: the OneDrive
+# File Provider idling overnight. ops/onedrive-prepublish-wake.py does one
+# single-attempt stat+small-read per live export target, bounded ONLY by its
+# own short external wall-clock (see bin/step-timeout.zsh), so a fully dark
+# provider costs at most that budget here rather than eating into the exports
+# step's own, much larger, wait_for_provider() budget below. A cold read here
+# is not a failure and never blocks the exports step from running.
+step "onedrive pre-publish wake" ./.venv/bin/python ops/onedrive-prepublish-wake.py
+#
+# CAFFEINATE (same defect). Runs the exports step under `caffeinate -i -s` so
+# this Mac cannot drop into an idle/system sleep state DURING the publish
+# window — the 02:05 launchd fire lands ten minutes into a scheduled dark
+# wake (see wait_for_provider()'s own header in exporters/common.py), and an
+# idle-related sleep transition mid-publish is exactly the kind of thing that
+# would leave the File Provider unresponsive with no error to catch. `-i`
+# prevents idle sleep, `-s` prevents system sleep while on AC power; both end
+# the instant this one command exits, so nothing outside this step is held
+# awake by it.
+step "exports (6 targets -> OneDrive)" caffeinate -i -s env CARR_EXPORT_LIVE=1 ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 
 # CUTOVER READINESS (Phase 1, 2026-08-13, August 21 cutover). Right after the

@@ -28,6 +28,8 @@ import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
+import { jevCallReceiptTools } from "./jev-call-receipt.js";
+import { workflowCutoverTools } from "./workflow-cutover.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { tourRightsProjectionTools } from "./tour-rights-projection.js";
 import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
@@ -309,7 +311,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -390,7 +392,7 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
-// add-party (kind='org', name='Ruff House Resort') refused twice with
+// add-party (kind='org', name='Wagtail Lodge Resort') refused twice with
 // unique_violation on party_org_identity_uniq while a read-only tap of the same
 // database found zero matching rows — because the collision was with the verb's
 // OWN uncommitted work. The call carried org_name restating the org itself, so
@@ -1201,7 +1203,7 @@ async function validateClaimType(c, slug) {
 // vendor.stage is a FOREIGN KEY into vendor_stage(slug), and until now nothing
 // checked it before the insert — so a plausible label (`prospect`, `Prospect`,
 // `building`) came back as a bare "internal error" naming neither the field nor
-// the options. Measured live 2026-08-10 re-creating Carissa Adams: four calls
+// the options. Measured live 2026-08-10 re-creating Carla Adair: four calls
 // died that way before the pattern was readable. Same failure class as
 // new-lead's stage/lane and update-vendor's category_slug branch.
 //
@@ -2233,7 +2235,7 @@ export const TOOLS = {
          order by merged, similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
       // ORGS AND UNLINKED PEOPLE, GROUPED (0056, 2026-08-02). Until migration 0056
       // v_ref_index held only role records, so 415 org parties were invisible here:
-      // `find "Henry Schein"` returned "Henry Pruett" — a trigram hit on one word —
+      // `find "Henry Schein"` returned "Henry Prescott" — a trigram hit on one word —
       // and none of the 17 rows literally named Henry Schein.
       // GROUPED BY NAME ON PURPOSE. Those 17 rows are one company minted 17 times,
       // once per rep, and listing them raw would spend the whole 10-row budget on
@@ -2577,7 +2579,7 @@ export const TOOLS = {
       // ── walk BACKWARD from the target, following edge direction ──────────
       // Direction is the semantics: an edge A -> B means A can reach B, so the
       // people who get Joe to the target are the ones upstream of it. The
-      // visited-array guard is what keeps the Coleman <-> Nickelsen pair (a real
+      // visited-array guard is what keeps the Colby <-> Nordin pair (a real
       // two-cycle in the book) from generating paths for ever.
       const paths = await c.query(
         `with recursive e as (${WHO_EDGES}),
@@ -4094,7 +4096,7 @@ export const TOOLS = {
       // to go straight into the insert, so a plausible-but-wrong value — `lane:
       // "referral"`, which reads like an obvious lane and is not one — came back as
       // a bare "internal error" with nothing naming the field or the options.
-      // Measured live 2026-08-10 creating Dr. Hyder's lead: three attempts failed
+      // Measured live 2026-08-10 creating Dr. Harlan's lead: three attempts failed
       // opaquely and the bare call succeeded, which tells the caller nothing about
       // WHICH field was wrong. Same failure class as loop #261.
       for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {
@@ -5088,7 +5090,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true,
-    description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
+    description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Hovanian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
       match_basis: { type: "string", description: "The corroborating signal: exact domain, normalized org name, phone, address, or corroborated name plus city. Recorded permanently with the merge." },
@@ -5245,7 +5247,7 @@ export const TOOLS = {
   },
 
   // [0069, loop #199] The case confirm-merge structurally cannot do: two VENDOR
-  // rows riding ONE party. The 8/1-ruled Crowley and Woulston merges executed at
+  // rows riding ONE party. The 8/1-ruled Cromwell and Wexler merges executed at
   // party level and left exactly this behind (V-GC-001+V-GC-013, V-MKT-001+
   // V-MSC-024), and the build sweep found a third pair the loop never named
   // (T-004+T-040). Backlog #119/#120's "executed" claims were true-but-incomplete.
@@ -8153,6 +8155,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "bot-brief": "mcp-server/src/bot-brief.js",
   "evidence-activation": "mcp-server/src/evidence-activation.js",
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
+  "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
+  "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
   "claude-continuity": "mcp-server/src/claude-continuity.js",
@@ -9243,6 +9247,16 @@ registerTools(evidenceActivationTools({ withEnvelope, ToolError }), "evidence-ac
 // one write door the local, credential-less collector uses. See
 // src/resource-observation.v5.js.
 registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-observation");
+// Server-side Jev call log: the Worker calls TypeSafe itself and appends a
+// server-timestamped receipt (migration 0587) before returning the answers, so
+// Jev gates credit only rows the gated model could not forge locally. See
+// src/jev-call-receipt.js.
+registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
+// DoctorCRE V5-R02: workflow cutover, caller migration and retirement
+// readiness. Composes accept-workflow / disable-legacy-schedule rather than
+// duplicating their evidence; retire-workflow-cutover-plan is authority-only.
+// See src/workflow-cutover.v5.js.
+registerTools(workflowCutoverTools({ withEnvelope, ToolError }), "workflow-cutover");
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.
