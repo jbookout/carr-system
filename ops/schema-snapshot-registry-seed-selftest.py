@@ -157,6 +157,15 @@ RUNTIME_V65 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v65.generat
 RUNTIME_V66 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v66.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V69 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v69.generated.js").read_text(
+    encoding="utf-8"
+)
+RUNTIME_V70 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v70.generated.js").read_text(
+    encoding="utf-8"
+)
+RUNTIME_V71 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v71.generated.js").read_text(
+    encoding="utf-8"
+)
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -188,14 +197,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-# v69/v70 are reserved by the not-yet-merged Jev server-log PR (#1235) and
-# never sealed on this branch; v71 (DoctorCRE V5-R02) chains from v68
-# directly (migration 0594) and is the one declared exception to an otherwise
-# dense v1..v68 set. See SEALED_PREDECESSOR_ORDINAL in
-# ops/siep18-reference-monitor-local-pg-gate.py for the matching override.
-assert set(FULL_SET_SEALS) == (
-    {f"scac-mutation-registry.v{version}" for version in range(1, 69)} | {"scac-mutation-registry.v71"}
-)
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 72)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -460,6 +462,27 @@ assert "SCAC_FULL_SET_SEAL_COUNT=65" in GENERATOR
 assert "ops.scac_mutation_catalog_v66_current()" in GENERATOR
 assert "0582_resource_observation_migrate_py_reseal.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v66"' in RUNTIME_V66
+assert "JEV_CALL_RECEIPT_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=69" in GENERATOR
+assert "SCAC_VERSION_COUNT=69" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=68" in GENERATOR
+assert "ops.scac_mutation_catalog_v69_current()" in GENERATOR
+assert "0588_jev_call_receipt_scac_successor.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v69"' in RUNTIME_V69
+assert "JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=70" in GENERATOR
+assert "SCAC_VERSION_COUNT=70" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=69" in GENERATOR
+assert "ops.scac_mutation_catalog_v70_current()" in GENERATOR
+assert "0589_jev_call_receipt_migrate_py_reseal.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v70"' in RUNTIME_V70
+assert "V5_R02_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=71" in GENERATOR
+assert "SCAC_VERSION_COUNT=71" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=70" in GENERATOR
+assert "ops.scac_mutation_catalog_v71_current()" in GENERATOR
+assert "0594_doctorcre_r02_scac_successor.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v71"' in RUNTIME_V71
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=43" in GENERATOR
@@ -636,42 +659,19 @@ loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
     "SCAC_FULL_SET_SQL=\"$(node -e '\n"
 )
 loader_end = GENERATOR.index(
-    "\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\" \"$SCAC_CURRENT_NUMBER\" \"$SCAC_KNOWN_GAP_ORDINALS\")\"",
+    "\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\" \"$SCAC_CURRENT_NUMBER\")\"",
     loader_start,
 )
 loader = GENERATOR[loader_start:loader_end]
-# This loader now runs against the LIVE seals file, which since DoctorCRE
-# V5-R02 (v71) is no longer a dense v1..v68 set: v69/v70 are reserved by the
-# not-yet-merged Jev server-log PR (#1235) and never sealed here, so the full
-# key set is v1..v68 plus v71 (69 keys), in that order. count=68 of
-# current=71 with the v69/v70 gap declared proves the loader still takes a
-# strict PREFIX of the full ordered set (v1..v68, dropping the trailing v71)
-# when asked for fewer than every sealed key.
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"),
-     "68", "71", "69,70"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "70", "71"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 68
-assert loaded_sql.count("sha256:") == 68
-assert "scac-mutation-registry.v71" not in loaded_sql
-# The gap check proves the fourth argv (known-gap ordinals) is what makes the
-# loader accept today's actual, non-dense live file at all -- a silent pass
-# with no gap ordinals declared would mean a real v69/v70 gap could go
-# unnoticed.
-gapless_failure = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"),
-     "69", "71"],
-    capture_output=True,
-    text=True,
-)
-assert gapless_failure.returncode == 2, (
-    "the loader must refuse the live (gapped) seals file when no known-gap "
-    "ordinals are given"
-)
-assert FULL_SET_SEALS["scac-mutation-registry.v67"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 70
+assert loaded_sql.count("sha256:") == 70
+assert FULL_SET_SEALS["scac-mutation-registry.v70"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 

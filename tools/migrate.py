@@ -310,14 +310,23 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
     ),
+    # Server-side Jev call log: 0587 installs ops.record_jev_call_receipt and
+    # ops.read_jev_call_receipts (SECURITY DEFINER, EXECUTE to carr_writer /
+    # carr_reader) behind the append-only ops.jev_call_receipt; 0588 seals that
+    # catalog as v69. Same deferred-epoch-trigger shape as the 0580/0581 pair
+    # immediately above -- 0587 applied alone would be refused at commit
+    # ("live SCAC vNN mutation catalog drifted"), so the pair must be one
+    # transaction.
+    (
+        "0587_jev_call_receipt.sql",
+        "0588_jev_call_receipt_scac_successor.sql",
+    ),
     # DoctorCRE V5-R02: 0593 installs the workflow cutover state machine
     # (Q116), the caller inventory, and the explicit slice-completion marker
-    # (Q153) with their five new SECURITY DEFINER writers; 0594 seals that
-    # catalog as v71 (chained from the last-merged v68, migration 0585 --
-    # v69/v70 are reserved by the not-yet-merged Jev server-log PR #1235, see
-    # ops/siep18-reference-monitor-local-pg-gate.py's SEALED_PREDECESSOR_ORDINAL).
-    # Same deferred-epoch-trigger shape as the pairs above: 0593 applied alone
-    # would be refused at commit, so the pair must be one transaction.
+    # (Q153) with their SECURITY DEFINER writers; 0594 seals that catalog as
+    # v71, chained from v70 (0589). Same deferred-epoch-trigger shape as the
+    # pairs above: 0593 applied alone would be refused at commit, so the pair
+    # must be one transaction.
     (
         "0593_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
         "0594_doctorcre_r02_scac_successor.sql",
@@ -360,6 +369,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0580_resource_observation.sql",
         "0581_resource_observation_scac_successor.sql",
+    ),
+    (
+        "0587_jev_call_receipt.sql",
+        "0588_jev_call_receipt_scac_successor.sql",
     ),
     (
         "0593_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",

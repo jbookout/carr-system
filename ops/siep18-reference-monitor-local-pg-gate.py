@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0580 installs v65 as the live frontier and demotes v64 to sealed history.
+# 0594 installs v71 as the live frontier and demotes v70 to sealed history.
 # Both are pinned: an unreviewed frontier, or a v40 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
@@ -31,19 +31,14 @@ REPO = Path(__file__).resolve().parents[1]
 # check that silently keeps interrogating the superseded frontier.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v71"
 LIVE_REGISTRY_ORDINAL = 71
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v68"
-# Not LIVE_REGISTRY_ORDINAL - 1: v69/v70 are claimed by the not-yet-merged
-# Jev server-log PR (#1235); this successor chains from the last MERGED
-# version, v68 (migration 0585), and claims v71 as the next free registry
-# version per the coordinator's collision check on 2026-09-24. Whichever of
-# #1235 or this PR merges second must rebase its seal onto the other.
-SEALED_PREDECESSOR_ORDINAL = 68
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v70"
+SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:ae8e97f9060fb4bd3e9c8f86f00d580a0c9ffbd92fc84c67b22eae63bc2e6c03"
+    "sha256:e46adc44a22c5d84808239efc456736a789895cba097a4f688d28393dd1f9ce4"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2094, 897)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2110, 900)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0585_release_pipeline_scac_successor.sql"
+    "migrations/0589_jev_call_receipt_migrate_py_reseal.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
     "migrations/0594_doctorcre_r02_scac_successor.sql"
@@ -1299,18 +1294,9 @@ def main() -> int:
                 if 2 <= int(row[0].split("_v")[1].split("_")[0]) <= LIVE_REGISTRY_ORDINAL
             ]
             installed_names = {row[0] for row in installed_catalog_functions}
-            # v69/v70 are declared-absent under this branch's own migration
-            # chain: they belong to the not-yet-merged Jev server-log PR
-            # (#1235), which this successor deliberately does not chain
-            # through (see SEALED_PREDECESSOR_ORDINAL above). Excluding them
-            # here is not "every gap is fine" -- it names the one reviewed gap
-            # this PR creates on purpose; any OTHER missing ordinal between 2
-            # and LIVE_REGISTRY_ORDINAL still fails this check.
-            KNOWN_UNMERGED_ORDINALS = {69, 70}
             expected_current_names = {
                 f"scac_mutation_catalog_v{version}_current"
                 for version in range(2, LIVE_REGISTRY_ORDINAL + 1)
-                if version not in KNOWN_UNMERGED_ORDINALS
             }
             if not expected_current_names.issubset(installed_names):
                 raise RuntimeError(
@@ -1322,15 +1308,13 @@ def main() -> int:
             ]
             # One full role-authority validator per version from v4 to the live
             # frontier: v4-v20 survive under `*_live_at_seal` and the frontier
-            # carries its own `*_current`. Each successor adds exactly one --
-            # except v69/v70, which this branch's chain never installs (see
-            # KNOWN_UNMERGED_ORDINALS above), so they never add a validator.
-            expected_validator_count = LIVE_REGISTRY_ORDINAL - 3 - len(KNOWN_UNMERGED_ORDINALS)
+            # carries its own `*_current`. Each successor adds exactly one.
+            expected_validator_count = LIVE_REGISTRY_ORDINAL - 3
             if len(installed_validators) != expected_validator_count:
                 raise RuntimeError(
                     f"canonical migration chain did not retain the expected "
                     f"{expected_validator_count} role-authority validators "
-                    f"(v4-v{LIVE_REGISTRY_ORDINAL}, less {sorted(KNOWN_UNMERGED_ORDINALS)}): "
+                    f"(v4-v{LIVE_REGISTRY_ORDINAL}): "
                     f"{[row[0] for row in installed_validators]!r}"
                 )
             for function_name, definition, _body in installed_validators:

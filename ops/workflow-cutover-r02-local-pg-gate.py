@@ -144,6 +144,9 @@ def main() -> int:
               if not exists (select 1 from pg_roles where rolname='carr_authority_joe') then create role carr_authority_joe login; end if;
             end $$""")
             cur.execute("grant carr_authority to carr_authority_joe")
+            # The authority login reaches mark_slice_completion (EXECUTE to
+            # carr_writer) through SET ROLE; rolled back with the transaction.
+            cur.execute("grant carr_writer to carr_authority_joe with set true")
             grant_settable_runtime_roles(cur, "carr_authority_joe", "carr_writer", "carr_reader", "carr_jobs")
 
             token = uuid.uuid4().hex[:8]
@@ -183,13 +186,18 @@ def main() -> int:
             # on `v_to_idx <> v_from_idx + 1` alone, which plpgsql evaluates
             # as NULL (falsy) rather than true, silently allowing the
             # "advance". Both layers are real; this proves the outer one.
+            # The advance door is EXECUTE-granted to carr_writer only (0593),
+            # so the refusal is asked as carr_writer: asked as carr_authority
+            # it would stop at "permission denied" and prove nothing.
+            cur.execute("reset session authorization")
+            set_local_role(cur, "carr_writer")
             expect_refusal(
                 cur, "select ops.advance_workflow_cutover_stage(%s,'monitor','ev','trying to un-retire',%s,'joe')",
                 (plan2, uuid.uuid4()),
                 "advancing a retired plan",
                 match="workflow_cutover_plan_not_active",
             )
-            cur.execute("reset session authorization")
+            cur.execute("reset role")
 
             # Directly exercise the array_position-NULL guard itself (the
             # actual mutant named in the review), independent of the
@@ -202,15 +210,14 @@ def main() -> int:
             cur.execute(
                 "update ops.workflow_cutover_plan set status='active' where id=%s", (plan2,)
             )
-            set_local_role(cur, "carr_authority")
-            cur.execute("set session authorization carr_authority_joe")
+            set_local_role(cur, "carr_writer")
             expect_refusal(
                 cur, "select ops.advance_workflow_cutover_stage(%s,'monitor','ev','trying to un-retire again',%s,'joe')",
                 (plan2, uuid.uuid4()),
                 "advancing a plan forced to stage=retired,status=active (the array_position(NULL) mutant)",
                 match="workflow_cutover_plan_stage_not_advanceable",
             )
-            cur.execute("reset session authorization")
+            cur.execute("reset role")
 
             # ================================================================
             # ITEM 3: retire-receipt binding.
@@ -372,18 +379,25 @@ def main() -> int:
             # ITEM 4: slice-completion criteria registry and evidence recompute.
             # ================================================================
             slice_id = f"r02gate-slice-{token}"
-            set_local_role(cur, "carr_authority")
+            # mark_slice_completion is EXECUTE-granted to carr_writer (0593)
+            # and additionally requires an authority session_user for
+            # status=complete, so it is asked as the authority login acting
+            # through SET ROLE carr_writer; register_slice_checkable_done is
+            # granted to carr_authority and is asked through that role.
             cur.execute("set session authorization carr_authority_joe")
+            set_local_role(cur, "carr_writer")
             expect_refusal(
                 cur, "select ops.mark_slice_completion(%s,'complete','[{\"criterion\":\"x\",\"evidence_kind\":\"acceptance\",\"evidence_ref\":\"00000000-0000-0000-0000-000000000000\"}]'::jsonb,'r',%s,'joe')",
                 (f"{slice_id}-unknown", uuid.uuid4()),
                 "marking an unregistered slice_id",
                 match="slice_completion_unknown_slice_id",
             )
+            set_local_role(cur, "carr_authority")
             cur.execute(
                 "select ops.register_slice_checkable_done(%s,array['criterion A','criterion B'],%s,'joe')",
                 (slice_id, uuid.uuid4()),
             )
+            set_local_role(cur, "carr_writer")
             expect_refusal(
                 cur,
                 "select ops.mark_slice_completion(%s,'complete','[{\"criterion\":\"criterion A\",\"evidence_kind\":\"acceptance\",\"evidence_ref\":\"00000000-0000-0000-0000-000000000000\"}]'::jsonb,'r',%s,'joe')",
@@ -395,6 +409,7 @@ def main() -> int:
             insert_job_definition(cur, f"{slice_id}-evwf")
             acc_id = insert_acceptance(cur, f"{slice_id}-evwf", "canary", f"{slice_id}-acc")
             cur.execute("set session authorization carr_authority_joe")
+            set_local_role(cur, "carr_writer")
             expect_refusal(
                 cur,
                 "select ops.mark_slice_completion(%s,'complete',jsonb_build_array("

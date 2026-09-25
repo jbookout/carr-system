@@ -1,6 +1,6 @@
 // DoctorCRE V5-R02 (Workflow cutover, caller migration and retirement
-// readiness). Store: migrations/0590_v5_r02_workflow_cutover_and_caller_
-// inventory.sql.
+// readiness). Store: migrations/0593_doctorcre_r02_workflow_cutover_and_
+// caller_inventory.sql, sealed as SCAC v71 by 0594.
 //
 // Q116 (recovered 2026-09-24): "avoid uncontrolled dual writes, and migrate
 // one workflow at a time. The steps are: read legacy state, build the new
