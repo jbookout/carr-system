@@ -52,14 +52,59 @@ comment on column public.loop_amendment.actor_id is 'Server-derived from the aut
 
 create index loop_amendment_loop_id_idx on public.loop_amendment (loop_id, created_at);
 
+-- Append-only enforcement, the 0511:254-265 / 0519 ops.cost_ledger_rows_
+-- immutable idiom: the grant below already withholds UPDATE/DELETE from
+-- carr_writer, but a grant is a door that can be reopened by a later
+-- migration without anyone noticing this table's own rule. The trigger makes
+-- the rule a property of the TABLE, independent of whatever a future grant
+-- says.
+create or replace function public.loop_amendment_rows_immutable()
+returns trigger language plpgsql as $$ begin
+  raise exception 'loop_amendment rows are append-only — a correction is a new row, never a rewrite of one';
+end $$;
+
+create trigger loop_amendment_immutable before update or delete
+on public.loop_amendment for each row execute function public.loop_amendment_rows_immutable();
+create trigger loop_amendment_no_truncate before truncate
+on public.loop_amendment for each statement execute function public.loop_amendment_rows_immutable();
+
 -- carr_writer gets SELECT + INSERT and nothing else — never UPDATE, never
 -- DELETE: this table is append-only by grant, not merely by convention, the
 -- same discipline 0024 applies to loop_item's own DELETE (never granted,
 -- "a loop is closed, never erased"). carr_reader gets NO base-table grant —
 -- 0024's own guard raises if carr_reader ever gets one ("views-only is the
--- leak guard"); a read surface for amendment history is a future view, not
--- this migration's concern.
+-- leak guard"); read-loop returns amendment history through the read door
+-- instead (see tools.js), never through a grant on this table.
 grant select, insert on public.loop_amendment to carr_writer;
+
+-- READ DOOR, NOT A GRANT. carr_reader gets no base-table access to
+-- loop_amendment (see the grant comment below); read-loop reaches the
+-- amendment trail through this SECURITY DEFINER function instead, the same
+-- shape as search_doctrine_situations (0223) and the program6 sourced-read
+-- functions: EXECUTE is grantable to a role with no SELECT on the table it
+-- reads, because the function runs as its owner, not as the caller. Returns
+-- oldest first — the order a correction history reads in.
+create or replace function public.loop_amendment_history(p_loop_id uuid)
+returns table (
+  id uuid, prior_outcome text, new_outcome text,
+  prior_resolution text, new_resolution text,
+  reason text, actor text, created_at timestamptz
+) language sql stable security definer set search_path = public, pg_temp as $$
+  select a.id, a.prior_outcome, a.new_outcome, a.prior_resolution, a.new_resolution,
+         a.reason, act.slug, a.created_at
+    from public.loop_amendment a
+    join public.actor act on act.id = a.actor_id
+   where a.loop_id = p_loop_id
+   order by a.created_at;
+$$;
+
+-- Default PostgreSQL behavior grants EXECUTE to PUBLIC on a newly created
+-- function unless revoked; explicit revoke-then-grant, exactly the shape
+-- retrieval_visibility_actor_id (0223) uses for its own definer function,
+-- so the two roles named below are the WHOLE access list, not an addition
+-- to an implicit public one.
+revoke all on function public.loop_amendment_history(uuid) from public;
+grant execute on function public.loop_amendment_history(uuid) to carr_reader, carr_writer;
 
 -- The SIEP-18 reference monitor (0467) requires every relation carrying a
 -- direct INSERT/UPDATE/DELETE/TRUNCATE grant to carr_writer/carr_jobs/

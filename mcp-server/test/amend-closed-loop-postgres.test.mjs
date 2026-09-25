@@ -15,8 +15,39 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { TOOLS, ToolError } from "../src/tools.js";
+
+// Planted-bug mutant infrastructure for the concurrency proof below, same
+// shape as amend-closed-loop-mutants.test.mjs's own mutate()/loadMutant() —
+// duplicated rather than imported because that file's real DATABASE_URL-free
+// suite must stay import-side-effect-free, and this one only needs it for
+// ONE mutant that a fake client cannot exercise: removing versionGuard's
+// `for update` is invisible to a single-threaded fake, and only shows up
+// against two REAL concurrent Postgres sessions racing the same row.
+const MUTANT_SRC = fileURLToPath(new URL("../src/", import.meta.url));
+const MUTANT_FILE = "tools.js";
+let mutantWork = null;
+function relinkMutant(source) {
+  return source.replace(/from\s+"\.\/([^"]+)"/g, (_, file) =>
+    `from "${pathToFileURL(join(MUTANT_SRC, file)).href}"`);
+}
+async function loadForUpdateRemovedMutant() {
+  if (!mutantWork) mutantWork = mkdtempSync(join(tmpdir(), "amend-closed-loop-concurrency-mutant-"));
+  const source = readFileSync(join(MUTANT_SRC, MUTANT_FILE), "utf8");
+  const anchor = "for update`, [id]);";
+  const count = source.split(anchor).length - 1;
+  assert.equal(count, 1, `mutant anchor must occur exactly once in ${MUTANT_FILE}`);
+  const mutated = relinkMutant(source.replace(anchor, "`, [id]);"));
+  const path = join(mutantWork, `${Date.now()}-tools.mjs`);
+  writeFileSync(path, mutated);
+  return import(pathToFileURL(path).href);
+}
+test.after(() => { if (mutantWork) rmSync(mutantWork, { recursive: true, force: true }); });
 
 const DSN = process.env.DATABASE_URL || "";
 const REQUIRED = process.env.CARR_AMEND_CLOSED_LOOP_DB_REQUIRED === "1";
@@ -107,6 +138,13 @@ test("DB: an amend appends loop_amendment, updates loop_item's current projectio
   try {
     const { loop_id, version, prior_outcome } = await freshClosedLoop(admin, actor);
 
+    // Captured BEFORE the amend — these two fields belong to the original
+    // close, not the correction, and the reviewer wants exact identity
+    // proven, not merely "still non-null" (which a bug that stamps a new
+    // closed_at/closed_by would still pass).
+    const before = await admin.query(
+      "select closed_at, closed_by from loop_item where id=$1", [loop_id]);
+
     const newOutcome = "Corrected: the card visual system shipped, not the bio-header reminder.";
     const reason = "Original outcome text was pasted from the wrong loop.";
     const result = await call(admin, actor, "amend-closed-loop", {
@@ -123,7 +161,10 @@ test("DB: an amend appends loop_amendment, updates loop_item's current projectio
     assert.equal(row.rows[0].outcome, newOutcome);
     assert.equal(row.rows[0].status, "done", "resolution unchanged when not passed");
     assert.equal(row.rows[0].version, version + 1, "trg_touch_row bumps the version on the projection update");
-    assert.ok(row.rows[0].closed_at, "closed_at is never cleared by an amendment");
+    assert.equal(row.rows[0].closed_at.getTime(), before.rows[0].closed_at.getTime(),
+      "closed_at is EXACTLY unchanged by an amendment, not merely still-present");
+    assert.equal(row.rows[0].closed_by, before.rows[0].closed_by,
+      "closed_by is EXACTLY unchanged by an amendment — the original closer stays the original closer");
 
     const trail = await admin.query(
       "select prior_outcome, new_outcome, reason, actor_id from loop_amendment where loop_id=$1 order by created_at", [loop_id]);
@@ -263,6 +304,163 @@ test("DB: an idempotent replay returns the recorded response and writes no secon
     const row = await admin.query("select version from loop_item where id=$1", [loop_id]);
     assert.equal(row.rows[0].version, version + 1, "the replay must not bump the version a second time");
   } finally {
+    await admin.end();
+  }
+});
+
+test("DB: read-loop surfaces the amendment trail — amended flag, oldest-first amendments, no base-table grant needed", async (t) => {
+  const pg = await database(t); if (!pg) return;
+  const admin = await connect(pg);
+  const actor = await mintActor(admin, `amend-loop-history-read-${randomUUID().slice(0, 8)}`);
+  try {
+    const { loop_id, version: v1 } = await freshClosedLoop(admin, actor, { outcome: "x" });
+
+    const before = await TOOLS["read-loop"].handler(admin, actor, { loop_id });
+    assert.equal(before.amended, false, "an un-amended loop reports amended:false");
+    assert.deepEqual(before.amendments, [], "an un-amended loop's amendment list is empty, not missing");
+
+    const first = await call(admin, actor, "amend-closed-loop", {
+      idempotency_key: randomUUID(), loop_id, base_version: v1,
+      outcome: "First correction of the placeholder outcome.", reason: "placeholder was never real" });
+    const second = await call(admin, actor, "amend-closed-loop", {
+      idempotency_key: randomUUID(), loop_id, base_version: v1 + 1,
+      outcome: "Second correction, now accurate for real.", reason: "first correction still had the wrong PR number" });
+
+    const after = await TOOLS["read-loop"].handler(admin, actor, { loop_id });
+    assert.equal(after.amended, true, "amended flips true once amend-closed-loop has ever run");
+    assert.equal(after.amendments.length, 2);
+    assert.equal(after.amendments[0].prior_outcome, "x", "oldest first: the very first correction reads first");
+    assert.equal(after.amendments[0].new_outcome, "First correction of the placeholder outcome.");
+    assert.equal(after.amendments[0].reason, "placeholder was never real");
+    assert.equal(after.amendments[0].actor, actor.slug, "actor is a slug, not a raw uuid");
+    assert.ok(after.amendments[0].created_at, "each amendment row carries a timestamp");
+    assert.equal(after.amendments[1].prior_outcome, "First correction of the placeholder outcome.");
+    assert.equal(after.amendments[1].new_outcome, "Second correction, now accurate for real.");
+    assert.ok(new Date(after.amendments[0].created_at).getTime() <= new Date(after.amendments[1].created_at).getTime(),
+      "oldest first means row[0].created_at <= row[1].created_at");
+    assert.equal(after.loop.loop_id, first.loop_id, "the loop payload itself is unchanged in shape");
+
+    // THE READER MUST NOT NEED A BASE-TABLE GRANT. Prove the exact privilege
+    // shape the migration comment claims: carr_reader gets EXECUTE on the
+    // definer function and NOTHING on loop_amendment itself — the same style
+    // gate-zero-outcome-role-boundary.test.mjs uses for its own writer/reader
+    // split, checked directly against pg_catalog rather than by opening a
+    // second reader-credentialed connection.
+    const acl = await admin.query(`select
+        has_table_privilege('carr_reader', 'loop_amendment', 'select') as reader_select,
+        has_function_privilege('carr_reader', 'loop_amendment_history(uuid)', 'execute') as reader_execute`);
+    assert.equal(acl.rows[0].reader_select, false,
+      "carr_reader must never get a base-table grant on the append-only loop_amendment table");
+    assert.equal(acl.rows[0].reader_execute, true,
+      "carr_reader must be able to call the SECURITY DEFINER read door read-loop actually uses");
+  } finally {
+    await admin.end();
+  }
+});
+
+test("DB: for update really serializes two concurrent amends against the same base_version — exactly one wins, the other gets version_conflict", async (t) => {
+  const pg = await database(t); if (!pg) return;
+  const a = await connect(pg);
+  const b = await connect(pg);
+  const admin = await connect(pg);
+  const actor = await mintActor(admin, `amend-loop-concurrency-${randomUUID().slice(0, 8)}`);
+  try {
+    const { loop_id, version } = await freshClosedLoop(admin, actor, { outcome: "x" });
+
+    // Two separate sessions, each in its own transaction, racing the SAME
+    // base_version. versionGuard's `select ... for update` is what makes this
+    // safe: the second session's lock acquisition blocks behind the first's
+    // until the first commits (bumping the row's version), so the second
+    // sees the NEW version and gets version_conflict rather than also
+    // succeeding against the stale one it read.
+    await a.query("begin");
+    await b.query("begin");
+    const attemptA = TOOLS["amend-closed-loop"].handler(a, actor, {
+      idempotency_key: randomUUID(), loop_id, base_version: version,
+      outcome: "Session A's correction of the placeholder outcome.", reason: "session A" })
+      .then((r) => { a.query("commit").catch(() => {}); return { ok: true, r }; })
+      .catch((e) => { a.query("rollback").catch(() => {}); return { ok: false, e }; });
+    const attemptB = TOOLS["amend-closed-loop"].handler(b, actor, {
+      idempotency_key: randomUUID(), loop_id, base_version: version,
+      outcome: "Session B's correction of the placeholder outcome.", reason: "session B" })
+      .then((r) => { b.query("commit").catch(() => {}); return { ok: true, r }; })
+      .catch((e) => { b.query("rollback").catch(() => {}); return { ok: false, e }; });
+
+    const [resA, resB] = await Promise.all([attemptA, attemptB]);
+    const outcomes = [resA, resB];
+    const winners = outcomes.filter((o) => o.ok);
+    const losers = outcomes.filter((o) => !o.ok);
+
+    assert.equal(winners.length, 1, "exactly one of the two concurrent same-base_version amends must succeed");
+    assert.equal(losers.length, 1, "the other must be refused, never silently dropped or silently doubled");
+    assert.ok(losers[0].e instanceof ToolError && losers[0].e.payload.error === "version_conflict",
+      "the loser's refusal must be version_conflict specifically");
+
+    const trail = await admin.query(
+      "select prior_outcome, new_outcome from loop_amendment where loop_id=$1 order by created_at", [loop_id]);
+    assert.equal(trail.rows.length, 1,
+      "the lock must produce EXACTLY ONE amendment row, not one per attempt — without `for update` both sessions " +
+      "read the same stale version and both succeed, producing two rows that both record prior_outcome 'x'");
+    assert.equal(trail.rows[0].prior_outcome, "x");
+  } finally {
+    await a.end();
+    await b.end();
+    await admin.end();
+  }
+});
+
+test("DB MUTANT: removing versionGuard's `for update` breaks the concurrency proof above — two rows, both prior_outcome 'x'", async (t) => {
+  const pg = await database(t); if (!pg) return;
+  const mutant = await loadForUpdateRemovedMutant();
+  const a = await connect(pg);
+  const b = await connect(pg);
+  const admin = await connect(pg);
+  const actor = await mintActor(admin, `amend-loop-mutant-concurrency-${randomUUID().slice(0, 8)}`);
+  try {
+    await ensureTeamLoopBlocks(admin, actor);
+    const opened = await mutant.TOOLS["add-loop"].handler(admin, actor, {
+      idempotency_key: randomUUID(), kind: "team_loop", owner: "joe",
+      title: `amend-closed-loop mutant proof ${randomUUID().slice(0, 8)}`, body: "fixture row" });
+    await mutant.TOOLS["close-loop"].handler(admin, actor, {
+      idempotency_key: randomUUID(), loop_id: opened.loop_id, base_version: 1,
+      outcome: "x", resolution: "done" });
+    const loop_id = opened.loop_id;
+    const version = 2;
+
+    await a.query("begin");
+    await b.query("begin");
+    const attemptA = mutant.TOOLS["amend-closed-loop"].handler(a, actor, {
+      idempotency_key: randomUUID(), loop_id, base_version: version,
+      outcome: "Session A's correction of the placeholder outcome.", reason: "session A" })
+      .then((r) => { a.query("commit").catch(() => {}); return { ok: true, r }; })
+      .catch((e) => { a.query("rollback").catch(() => {}); return { ok: false, e }; });
+    const attemptB = mutant.TOOLS["amend-closed-loop"].handler(b, actor, {
+      idempotency_key: randomUUID(), loop_id, base_version: version,
+      outcome: "Session B's correction of the placeholder outcome.", reason: "session B" })
+      .then((r) => { b.query("commit").catch(() => {}); return { ok: true, r }; })
+      .catch((e) => { b.query("rollback").catch(() => {}); return { ok: false, e }; });
+
+    const [resA, resB] = await Promise.all([attemptA, attemptB]);
+    const winners = [resA, resB].filter((o) => o.ok);
+
+    // THE PROOF THAT THE LOCK IS LOAD-BEARING: without `for update`, both
+    // sessions read version=2 before either writes, so BOTH pass versionGuard
+    // and BOTH succeed — the exact bug the reviewer identified. If this
+    // mutant somehow still produced only one winner, the concurrency test
+    // above would not actually be exercising the lock and would need
+    // rethinking; asserting the mutant's broken behavior here is what makes
+    // the real test's green run meaningful instead of coincidental.
+    assert.equal(winners.length, 2,
+      "MUTANT DETECTED CORRECTLY: without `for update` both concurrent same-base_version amends succeed");
+
+    const trail = await admin.query(
+      "select prior_outcome from loop_amendment where loop_id=$1 order by created_at", [loop_id]);
+    assert.equal(trail.rows.length, 2, "the mutant appends two amendment rows, not one");
+    assert.ok(trail.rows.every((r) => r.prior_outcome === "x"),
+      "both rows record the same stale prior_outcome — neither session saw the other's write");
+  } finally {
+    await a.end();
+    await b.end();
     await admin.end();
   }
 });

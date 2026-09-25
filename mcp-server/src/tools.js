@@ -1084,6 +1084,19 @@ async function resolveLoop(client, args, opts = {}) {
   return r.rows[0];
 }
 
+// read-loop's amendment attachment. loop_amendment_history() (migration 0702)
+// is a SECURITY DEFINER function so carr_reader can call it without a
+// base-table grant on loop_amendment — read-loop runs on the reader
+// connection like every other write:false verb, and the append-only table's
+// grant stays exactly select+insert to carr_writer, nothing wider.
+async function withAmendmentHistory(client, loop) {
+  const r = await client.query(
+    `select id, prior_outcome, new_outcome, prior_resolution, new_resolution,
+            reason, actor, to_jsonb(created_at)#>>'{}' as created_at
+       from loop_amendment_history($1)`, [loop.loop_id]);
+  return { loop, amended: r.rows.length > 0, amendments: r.rows };
+}
+
 // Next visible ref for a kind. Numeric part only, because that is the part the
 // files increment; the prefix is the kind's own. Reads the MAX across every row
 // including closed ones, so a number is never reused after a close.
@@ -3207,7 +3220,7 @@ export const TOOLS = {
 
   "read-loop": {
     write: false,
-    description: "Read ONE loop and its current version. THE GAP THIS CLOSES: update-loop and close-loop both refuse without base_version and tell the caller to 'read the record first' — and until this verb existed, nothing could perform that read. The only way to learn a loop's version was to guess, take a version_conflict, and lift the number out of the error message. Pass `number` (the '#142' a human says, with or without the hash) or `loop_id`. A number can repeat across kinds, so an ambiguous number returns the candidates rather than picking one for you.",
+    description: "Read ONE loop and its current version. THE GAP THIS CLOSES: update-loop and close-loop both refuse without base_version and tell the caller to 'read the record first' — and until this verb existed, nothing could perform that read. The only way to learn a loop's version was to guess, take a version_conflict, and lift the number out of the error message. Pass `number` (the '#142' a human says, with or without the hash) or `loop_id`. A number can repeat across kinds, so an ambiguous number returns the candidates rather than picking one for you. Also returns `amended` (true once amend-closed-loop has ever corrected this loop's outcome) and `amendments`, the full correction trail oldest first — each with prior_outcome, new_outcome, prior_resolution, new_resolution, reason, actor and created_at.",
     inputSchema: { type: "object", properties: {
       number: { type: "string", description: "the loop number as a human writes it, with or without the leading #" },
       loop_id: { type: "string", description: "exact uuid; wins over number" },
@@ -3223,7 +3236,7 @@ export const TOOLS = {
       if (args.loop_id) {
         const r = await c.query(`select ${cols} from loop_item where id=$1`, [args.loop_id]);
         if (!r.rows.length) return { error: "not_found", hint: "no loop carries that id" };
-        return { loop: r.rows[0] };
+        return await withAmendmentHistory(c, r.rows[0]);
       }
       const num = String(args.number || "").replace(/^#/, "").trim();
       if (!num) return { error: "need_number_or_id", hint: "pass number (e.g. '142') or loop_id" };
@@ -3239,7 +3252,7 @@ export const TOOLS = {
           hint: "same number in more than one kind — pass kind to narrow",
         };
       }
-      return { loop: r.rows[0] };
+      return await withAmendmentHistory(c, r.rows[0]);
     },
   },
 
@@ -7152,9 +7165,14 @@ export const TOOLS = {
             hint: "the successor must be a different open loop" });
       }
 
-      // The prior outcome, read from the row this transaction already holds
-      // locked (versionGuard's `for update`) — not from the args, not
-      // reconstructed, the actual current text this amendment is correcting.
+      // The prior outcome, read from resolveLoop's row — BEFORE versionGuard's
+      // `for update` lock, not from it. That read is still safe: it is the
+      // version check right above, not the lock itself, that makes it so — a
+      // concurrent amend that changed the row between this read and the lock
+      // moves the version, versionGuard throws version_conflict on the stale
+      // base_version, and this priorOutcome is never written. Not from the
+      // args, not reconstructed either way — the actual current text this
+      // amendment is correcting.
       const priorOutcome = cur.close_outcome || "";
       const priorResolution = cur.status;
 
