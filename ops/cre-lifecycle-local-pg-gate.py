@@ -103,7 +103,8 @@ def principals(base: str) -> Iterator[None]:
                 created.append(login)
             for bundle in ("carr_authority", "carr_writer"):
                 cur.execute("select pg_has_role(%s, %s, 'member')", (login, bundle))
-                if not cur.fetchone()[0]:
+                member = cur.fetchone()
+                if member is None or not member[0]:
                     cur.execute(sql.SQL("grant {} to {}").format(
                         sql.Identifier(bundle), sql.Identifier(login)))
                     granted.append((bundle, login))
@@ -142,10 +143,10 @@ def url_for(dsn: str, login: str | None = None) -> str:
     parts = psycopg.conninfo.conninfo_to_dict(dsn)
     host = parts.get("hostaddr") or parts.get("host") or "127.0.0.1"
     port = parts.get("port") or "5432"
-    user = login or parts.get("user") or ""
-    password = "" if login else (parts.get("password") or "")
+    user = str(login or parts.get("user") or "")
+    password = "" if login else str(parts.get("password") or "")
     auth = quote(user) + (":" + quote(password) if password else "")
-    return f"postgresql://{auth}@{host}:{port}/{quote(parts['dbname'])}"
+    return f"postgresql://{auth}@{host}:{port}/{quote(str(parts['dbname']))}"
 
 
 def main() -> int:
@@ -156,7 +157,8 @@ def main() -> int:
         with principals(base), sibling(base) as dsn:
             with psycopg.connect(dsn) as con, con.cursor() as cur:
                 cur.execute("select to_regprocedure('ops.f01_principal()') is not null")
-                f01_migrated = cur.fetchone()[0]
+                probe = cur.fetchone()
+                f01_migrated = bool(probe and probe[0])
             if not f01_migrated:
                 # Until F01 lands as a numbered migration, its two unnumbered
                 # hunks stand in for it: domain.sql, then the document-source
