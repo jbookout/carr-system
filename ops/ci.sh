@@ -1359,7 +1359,10 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # is a claim about rows and not about a shaper.
   # V5-UX-B11 Meeting Mode joins it: two devices, one row, one acceptance and
   # one processing owner are claims about real locks on separate connections.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode; do
+  # V5-A05 delivery-cadence joins it: the review that shipped it required a
+  # real-DB proof rather than the unit-stub coverage that let the
+  # morning-brief grant gap and the caller-evidence gap both through once.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \

@@ -697,6 +697,19 @@ export function authorityDsnForActor(env, runtimeActor) {
   return partner === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
 }
 
+// The one reader-route decision callTool makes, extracted so a test can hold a
+// verb to it without a live Worker. "reader" is the stateless carr_reader HTTP
+// connection: no transaction, no actor context, and only what carr_reader is
+// granted. A read verb whose SQL is granted to carr_writer/carr_authority only
+// (a SECURITY DEFINER door that raises 42501 for anyone else) must declare
+// writerConnection so it lands on "writer_read_only" instead -- V5-A05's
+// cadence-status missed exactly this and its daily sweep could never succeed.
+export function connectionRouteForTool(tool) {
+  if (!tool.write && !tool.writerConnection) return "reader";
+  if (tool.authorityOnly) return "authority";
+  return tool.writerConnection && !tool.write ? "writer_read_only" : "writer";
+}
+
 export async function executeWithTrustedPrincipal(actor, readback, requiredBundle, handler) {
   let trustedPrincipal;
   try {
@@ -842,7 +855,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.links) && args.links.length)
     throw new ToolError({ error: "not_in_profile", verb: "log-activity (links[])", profile,
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
-  if (!tool.write && !tool.writerConnection) {
+  if (connectionRouteForTool(tool) === "reader") {
     const sql = neon(env.DATABASE_URL_READER);
     // sideWrite is the ONLY way a read verb may write, and it is deliberately
     // awkward: a separate credential, never awaited, failure isolated. A read
