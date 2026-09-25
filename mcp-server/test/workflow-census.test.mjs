@@ -163,7 +163,7 @@ test("the door's anchor refusals come back by name, with the database's detail a
       { idempotency_key: `k-${name}`, census: structuredClone(CENSUS) }));
     assert.equal(payload.error, name);
     assert.equal(payload.detail, detail);
-    assert.match(payload.hint, /reanchor-workflow-census/);
+    assert.match(payload.hint, /record-workflow-census-reanchor/);
   }
 });
 
@@ -181,8 +181,8 @@ test("a retried key is replayed by the envelope without reading the anchor, so a
   assert.equal(c.calls.filter(call => call.sql.includes("ops.record_workflow_census")).length, 1);
 });
 
-test("reanchor-workflow-census is partner-authority only and takes no actor, head or count from the caller", () => {
-  const tool = TOOLS["reanchor-workflow-census"];
+test("record-workflow-census-reanchor is partner-authority only and takes no actor, head or count from the caller", () => {
+  const tool = TOOLS["record-workflow-census-reanchor"];
   assert.equal(tool.write, true);
   assert.equal(tool.humanOnly, true);
   assert.equal(tool.authorityOnly, true);
@@ -191,18 +191,18 @@ test("reanchor-workflow-census is partner-authority only and takes no actor, hea
   assert.equal(TOOLS["record-workflow-census"].authorityOnly, undefined);
 });
 
-test("reanchor-workflow-census refuses the writer's machine actor before any database call", async () => {
+test("record-workflow-census-reanchor refuses the writer's machine actor before any database call", async () => {
   const c = new CensusFake();
-  const payload = await rejected(() => executeRegisteredTool(c, AGENT, "reanchor-workflow-census",
+  const payload = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census-reanchor",
     { idempotency_key: "r-0", reason: "x", accept_head: null }));
   assert.equal(payload.error, "human_only_verb_requires_verified_partner");
   assert.equal(c.calls.length, 0);
 });
 
-test("reanchor-workflow-census passes the anchor it read and the head the partner accepts, and returns the receipt", async () => {
+test("record-workflow-census-reanchor passes the anchor it read and the head the partner accepts, and returns the receipt", async () => {
   const c = new CensusFake({ anchor: { state: "present", seq: 1, row_hash: "1".repeat(64),
     anchored_at: "2026-09-24T09:10:09.000Z", last_reanchor: null } });
-  const out = await executeRegisteredTool(c, JOE, "reanchor-workflow-census",
+  const out = await executeRegisteredTool(c, JOE, "record-workflow-census-reanchor",
     { idempotency_key: "r-1", reason: "writer lost the key of seq 2", accept_head: { seq: 2, row_hash: "2".repeat(64) } });
   const door = c.calls.find(call => call.sql.includes("ops.reanchor_workflow_census"));
   assert.deepEqual(door.params, [1, "1".repeat(64), 2, "2".repeat(64), "writer lost the key of seq 2", "r-1"]);
@@ -213,12 +213,12 @@ test("reanchor-workflow-census passes the anchor it read and the head the partne
   for (const [args, error] of [
     [{ idempotency_key: "r-2", reason: " ", accept_head: null }, "workflow_census_reanchor_reason_required"],
     [{ idempotency_key: "r-3", reason: "x", accept_head: { seq: 2, row_hash: "Z" } }, "workflow_census_anchor_invalid"],
-  ]) assert.equal((await rejected(() => executeRegisteredTool(c, JOE, "reanchor-workflow-census", args))).error, error);
+  ]) assert.equal((await rejected(() => executeRegisteredTool(c, JOE, "record-workflow-census-reanchor", args))).error, error);
   const unread = new CensusFake({ anchor: { state: "unavailable", detail: "anchor_unreachable" } });
-  assert.equal((await rejected(() => executeRegisteredTool(unread, JOE, "reanchor-workflow-census",
+  assert.equal((await rejected(() => executeRegisteredTool(unread, JOE, "record-workflow-census-reanchor",
     { idempotency_key: "r-4", reason: "x", accept_head: null }))).error, "workflow_census_anchor_unavailable");
   const moved = new CensusFake({ doorError: "workflow_census_reanchor_head_moved" });
-  assert.equal((await rejected(() => executeRegisteredTool(moved, JOE, "reanchor-workflow-census",
+  assert.equal((await rejected(() => executeRegisteredTool(moved, JOE, "record-workflow-census-reanchor",
     { idempotency_key: "r-5", reason: "x", accept_head: null }))).error, "workflow_census_reanchor_head_moved");
 });
 

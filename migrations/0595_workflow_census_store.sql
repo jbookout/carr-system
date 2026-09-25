@@ -66,7 +66,7 @@
 --   6. RE-ANCHOR ON THE RECORD. When the two legitimately disagree (the key of
 --      an unanchored row was lost; a database restore), the only way forward
 --      is ops.reanchor_workflow_census (EXECUTE to carr_authority only; the
---      reanchor-workflow-census verb, partner-authority only). It appends a
+--      record-workflow-census-reanchor verb, partner-authority only). It appends a
 --      receipt to ops.workflow_census_reanchor_receipt naming the actor, the
 --      verified partner, the reason, the old (anchored) head, the new
 --      (database) head and how many rows the anchor never vouched for; the

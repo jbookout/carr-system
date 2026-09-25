@@ -38,7 +38,7 @@
 //
 // RE-ANCHOR. When the database and the anchor legitimately disagree (the
 // writer lost the idempotency key of a committed-but-unanchored row; a
-// database restore), the only way forward is the reanchor-workflow-census verb:
+// database restore), the only way forward is the record-workflow-census-reanchor verb:
 // partner-authority only, recorded first as a receipt row in
 // ops.workflow_census_reanchor_receipt (actor, reason, old head, new head,
 // rows re-attested), then applied here as a compare-and-set against the old

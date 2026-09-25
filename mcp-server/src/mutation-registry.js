@@ -8,7 +8,7 @@ import {
 // (migration 0595, ops.record_workflow_census / ops.read_workflow_census behind
 // the append-only, hash-chained ops.workflow_census_record, and
 // ops.reanchor_workflow_census). Its sealed catalog admits the three new verbs,
-// record-workflow-census, read-workflow-census and reanchor-workflow-census,
+// record-workflow-census, read-workflow-census and record-workflow-census-reanchor,
 // and preserves earlier versions as history; v66-v68 registered no verb, so the
 // selector stayed on v65 until now.
 //

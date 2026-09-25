@@ -904,7 +904,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
   // The V5-F09 census write and re-anchor read the external anchor's head
   // before their door, which refuses unless the database head matches it.
-  if (name === "record-workflow-census" || name === "reanchor-workflow-census")
+  if (name === "record-workflow-census" || name === "record-workflow-census-reanchor")
     client.workflowCensusAnchor = () => readWorkflowCensusAnchor(env);
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
@@ -940,7 +940,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       return await anchorCommittedCensusWrite(env, result, payload => new ToolError(payload));
     // The re-anchor receipt is committed first, then applied to the anchor as
     // a compare-and-set on the old head it names.
-    if (name === "reanchor-workflow-census")
+    if (name === "record-workflow-census-reanchor")
       return await applyCommittedCensusReanchor(env, result, payload => new ToolError(payload));
     return result;
   } catch (e) {

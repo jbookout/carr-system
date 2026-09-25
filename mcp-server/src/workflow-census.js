@@ -10,7 +10,7 @@
 //                                    the server clock, the guards' enabled
 //                                    state and function digests, and the
 //                                    external anchor's head
-//   reanchor-workflow-census  partner authority only: record a receipt and
+//   record-workflow-census-reanchor  partner authority only: record a receipt and
 //                                    move the anchor to the database head
 //
 // WHAT THE CALLER CANNOT SUPPLY. Neither the principal nor the time. The
@@ -78,9 +78,9 @@ const DOOR_REFUSALS = Object.freeze([
 const DOOR_HINTS = Object.freeze({
   workflow_census_anchor_gap: "the database holds one committed census row the anchor never took; " +
     "re-send that write's idempotency_key to replay it and advance the anchor, or have a partner " +
-    "re-anchor with reanchor-workflow-census",
+    "re-anchor with record-workflow-census-reanchor",
   workflow_census_tampered: "the database head is not the head the external anchor holds; nothing " +
-    "was appended. Investigate, then a partner may re-anchor with reanchor-workflow-census",
+    "was appended. Investigate, then a partner may re-anchor with record-workflow-census-reanchor",
 });
 
 function doorRefusal(ToolError, error) {
@@ -204,7 +204,7 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
       },
     },
 
-    "reanchor-workflow-census": {
+    "record-workflow-census-reanchor": {
       write: true, humanOnly: true, authorityOnly: true,
       description: "PARTNER AUTHORITY ONLY: move the V5-F09 census anchor (the Durable Object outside the database) to the database's current census head, on the record. Use it only when the two legitimately disagree -- the writer lost the idempotency key of a committed row the anchor never took (anchor_gap), or the database was restored. The server reads the anchor itself; you pass the database head you reviewed and accept (accept_head, from read-workflow-census; null for an empty chain) and a reason. It appends a receipt (actor, verified partner, reason, old anchored head, new head, rows the anchor never vouched for) and then applies it to the anchor as a compare-and-set; the reader shows the latest receipt beside every later attestation. Refuses when the head moved since you reviewed it, when nothing disagrees, and on any writer connection.",
       inputSchema: {
@@ -228,7 +228,7 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
             hint: "accept_head is null or {seq, row_hash} exactly as read-workflow-census served the head" });
         if (typeof args.reason !== "string" || !args.reason.trim())
           throw new ToolError({ error: "workflow_census_reanchor_reason_required" });
-        return withEnvelope(c, actor, "reanchor-workflow-census", args, async () => {
+        return withEnvelope(c, actor, "record-workflow-census-reanchor", args, async () => {
           const head = await anchoredHead(c);
           if (!head)
             throw new ToolError({ error: "workflow_census_anchor_unavailable",

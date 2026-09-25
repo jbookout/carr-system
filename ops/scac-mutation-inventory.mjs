@@ -312,7 +312,7 @@ export const REGISTRY_V68_VERSION = "scac-mutation-registry.v68";
 // ops.reanchor_workflow_census (EXECUTE to carr_authority only), and
 // mcp-server/src/workflow-census.js registers three new verbs,
 // record-workflow-census (write), read-workflow-census (read) and
-// reanchor-workflow-census (humanOnly, authorityOnly write). The census
+// record-workflow-census-reanchor (humanOnly, authorityOnly write). The census
 // anchor's Durable Object write is the worker-sidewrite row
 // workflow-census-anchor. tools/migrate.py
 // is re-digested in the same seal for its (0595, 0596) atomic group, and the

@@ -227,11 +227,11 @@ test("mcp.js anchors the census head, and applies a re-anchor, only after the wr
   const reanchor = source.indexOf("applyCommittedCensusReanchor(env, result");
   assert.ok(commit > 0 && anchor > commit && reanchor > commit, "both anchor calls follow the commit");
   assert.ok(source.slice(commit, anchor).includes('name === "record-workflow-census"'));
-  assert.ok(source.slice(anchor, reanchor).includes('name === "reanchor-workflow-census"'));
+  assert.ok(source.slice(anchor, reanchor).includes('name === "record-workflow-census-reanchor"'));
   assert.equal(source.split("anchorCommittedCensusWrite(").length - 1, 1, "exactly one call site");
   assert.equal(source.split("applyCommittedCensusReanchor(").length - 1, 1, "exactly one call site");
   assert.ok(/workflowCensusAnchor: name === "read-workflow-census"\s*\? \(\) => readWorkflowCensusAnchor\(env\)/
     .test(source), "the read client gets the anchor reader for the census read verb only");
-  assert.ok(/if \(name === "record-workflow-census" \|\| name === "reanchor-workflow-census"\)\s*client\.workflowCensusAnchor = \(\) => readWorkflowCensusAnchor\(env\);/
+  assert.ok(/if \(name === "record-workflow-census" \|\| name === "record-workflow-census-reanchor"\)\s*client\.workflowCensusAnchor = \(\) => readWorkflowCensusAnchor\(env\);/
     .test(source), "the write client gets the anchor reader for the census write and re-anchor only");
 });

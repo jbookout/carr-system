@@ -69552,7 +69552,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/workflow-census.js",
           "schema_digest": "53b98c59f30bfcc74f4350b4b3205fc778f04b94292aae5e2d0db8ce02adb06a",
-          "source_digest": "21c7cfea825ab0a25f486a36fca7c1f9e1561b74ecffc786d51ac85df10bc8ca",
+          "source_digest": "b2a3ba481f1dae746d8d8a7e4e6b49e38c96a4446538fa986737f0f034a968a7",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -69575,7 +69575,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/workflow-census.js",
           "schema_digest": "344a66ad00cb64d56a970aafdf8186d89617df20053e777033cf558c0772623e",
-          "source_digest": "21c7cfea825ab0a25f486a36fca7c1f9e1561b74ecffc786d51ac85df10bc8ca",
+          "source_digest": "b2a3ba481f1dae746d8d8a7e4e6b49e38c96a4446538fa986737f0f034a968a7",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -69597,8 +69597,8 @@
           "operation": "workflow-census-anchor",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/workflow-census-anchor.js",
-          "schema_digest": "ea65e5ac7f33e01ec973606f78451b03f83bb2b3a6c5030358703d1dd98dcb7e",
-          "handler_digest": "ea65e5ac7f33e01ec973606f78451b03f83bb2b3a6c5030358703d1dd98dcb7e",
+          "schema_digest": "42af9ebe80171b2bf9b04ddce4f00ad2466f6c003dc0a5346fe14bc94345f746",
+          "handler_digest": "42af9ebe80171b2bf9b04ddce4f00ad2466f6c003dc0a5346fe14bc94345f746",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -69615,13 +69615,13 @@
           "classification_authorizing": false
         },
         {
-          "ingress_key": "mcp-tool:reanchor-workflow-census",
+          "ingress_key": "mcp-tool:record-workflow-census-reanchor",
           "ingress_kind": "mcp_tool",
-          "operation": "reanchor-workflow-census",
+          "operation": "record-workflow-census-reanchor",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/workflow-census.js",
           "schema_digest": "801617fc6d64a65ca6f4bff443c6f520dd8220162d2b6fa940630594f8bf0d8c",
-          "source_digest": "21c7cfea825ab0a25f486a36fca7c1f9e1561b74ecffc786d51ac85df10bc8ca",
+          "source_digest": "b2a3ba481f1dae746d8d8a7e4e6b49e38c96a4446538fa986737f0f034a968a7",
           "write": true,
           "human_only": true,
           "authority_only": true,
@@ -69639,7 +69639,7 @@
         }
       ],
       "expected_count": 902,
-      "expected_sha256": "a3e0c805cb532660cbd9c9e255bcdac30d397ccb3da198adb55f54de6c7bd8c9"
+      "expected_sha256": "0157d4b1ed031868b5626f93113335b1565b420b1c4ad4fb05fe3884d9b5bed2"
     }
   ],
   "current_source_review": {
