@@ -919,7 +919,7 @@ if [ "$V5_R02_REGISTRY_APPLIED" = t ] && [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGIS
   exit 1
 fi
 DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0605_deploy_worker_do_migration_reseal.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0609_deploy_worker_do_migration_reseal.sql')" \
   2>/dev/null)"
 case "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" in
   t|f) ;;

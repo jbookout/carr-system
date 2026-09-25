@@ -1495,7 +1495,7 @@ export const POST_0603_FORWARD_V72_DB_CATALOG_BASELINE = Object.freeze({
 // Measured on the same lane by drift readback. Source-only re-digest
 // (bin/deploy-worker.sh's Durable Object migration step): only v73's own
 // registration function and its runtime EXECUTE grants move the catalog.
-export const POST_0605_FORWARD_V73_DB_CATALOG_BASELINE = Object.freeze({
+export const POST_0609_FORWARD_V73_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0603_FORWARD_V72_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v73",
   secdef_execute: { count: 918, digest: "sha256:bdddf81e132dc167671e9a25047c625e040633e40d6c9255fb9946d43a1401ef" },
@@ -16249,7 +16249,7 @@ export function renderDeployWorkerDoMigrationResealRegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v73 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0603_FORWARD_V72_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0605_FORWARD_V73_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0609_FORWARD_V73_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V72_VERSION,
     frozenInventory(REGISTRY_V72_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V73_VERSION, rows, newCatalogBaseline);
@@ -17118,9 +17118,9 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v73.generated.js"] =
     renderRuntimeProjection(v73Rows, {
       version: REGISTRY_V73_VERSION,
-      dbCatalogBaseline: POST_0605_FORWARD_V73_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0609_FORWARD_V73_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0605_deploy_worker_do_migration_reseal.sql"] =
+  artifacts["migrations/0609_deploy_worker_do_migration_reseal.sql"] =
     renderDeployWorkerDoMigrationResealRegistrySql(v73Rows,
       artifacts["migrations/0603_doctorcre_r02_scac_successor.sql"]);
 
