@@ -516,12 +516,12 @@ assert "SCAC_FULL_SET_SEAL_COUNT=73" in GENERATOR
 assert "ops.scac_mutation_catalog_v74_current()" in GENERATOR
 assert "0614_journey_one_clock_door_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v74"' in RUNTIME_V74
-assert "F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" in GENERATOR
+assert "DELIVERY_CADENCE_A05_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=75" in GENERATOR
 assert "SCAC_VERSION_COUNT=75" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=74" in GENERATOR
 assert "ops.scac_mutation_catalog_v75_current()" in GENERATOR
-assert "0624_f01_record_source_authority_scac_successor.sql" in GENERATOR
+assert "0618_delivery_cadence_a05_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v75"' in RUNTIME_V75
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR

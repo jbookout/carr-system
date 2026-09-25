@@ -329,6 +329,11 @@ WRITE_ACTION_EXACT = {
                                    # receipt (it never deletes). EXACT rather than a
                                    # prefix: "evaluate" names judgments that are reads
                                    # elsewhere, and as a prefix would capture them.
+    "raise-delivery-cadence-alert",  # V5-A05: persists a durable escalation/quiet-hours
+                                       # alert row the sweep job's own state depends on;
+                                       # "raise" stays exact rather than becoming a prefix,
+                                       # since a future raise-* read must not inherit the
+                                       # class -- same reasoning as report-problem/open-incident.
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.

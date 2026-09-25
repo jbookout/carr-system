@@ -4,11 +4,11 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v75 is the runtime selector after DoctorCRE V5-F01's record homes, source
-// authority and document identity (migrations 0623/0624). Its sealed catalog
-// admits nine new verbs -- read-record-source-authority (a read) and the
-// eight record-source-authority writes, two of them humanOnly and
-// authorityOnly -- and preserves earlier versions as history.
+// v75 is the runtime selector after V5-A05 delivery cadence (migration 0617,
+// cadence receipts, server-derived escalation routing, the held-until-morning
+// queue). Its sealed catalog admits three new verbs -- cadence-status,
+// record-cadence-receipt and raise-delivery-cadence-alert -- and preserves
+// earlier versions as history. It chains over #1262's v74 (migration 0614).
 //
 // Superseded note (v74): v74 was the runtime selector after DoctorCRE V5-M01's live door to the
 // Journey 1 clock runtime (migration 0614). Its sealed catalog admits two new

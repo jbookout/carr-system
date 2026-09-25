@@ -45,7 +45,7 @@
 -- a CI database has no login at all, so a direct login grant would make the
 -- measured catalog depend on which logins happen to exist.
 --
--- The paired SCAC registry successor is 0624 (v75), applied in the same
+-- The paired SCAC registry successor is 0624 (its version is assigned at merge), applied in the same
 -- transaction through tools/migrate.py's atomic group; this file carries no
 -- registry change.
 
