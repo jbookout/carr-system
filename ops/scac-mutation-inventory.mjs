@@ -18074,9 +18074,19 @@ export function renderGeneratedFrontier() {
     renderCreLifecycleRegistrySql(v80Rows,
       artifacts["migrations/0701_governed_correspondence_scac_successor.sql"]);
 
+  const v81Rows = frozenInventory(REGISTRY_V81_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v81.generated.js"] =
+    renderRuntimeProjection(v81Rows, {
+      version: REGISTRY_V81_VERSION,
+      dbCatalogBaseline: POST_0706_FORWARD_V81_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0707_amend_closed_loop_scac_successor.sql"] =
+    renderAmendClosedLoopRegistrySql(v81Rows,
+      artifacts["migrations/0705_cre_lifecycle_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 86 || runtimeCount !== 77 || Object.keys(artifacts).length !== 163)
+  if (migrationCount !== 87 || runtimeCount !== 78 || Object.keys(artifacts).length !== 165)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
