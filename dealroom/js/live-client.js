@@ -274,6 +274,15 @@ export function createLiveClient(opts = {}) {
       return { status: 'ok', deal_id: res.deal_id };
     },
 
+    // V5-F01's live capability read for capability-seams.js's recordHomeSeam.
+    // A pure read of the deployed current policy — no per-deal existence is
+    // required for the answer, so an absent or empty policy is still a real
+    // "deployed" answer, never a fabricated one. dealId travels through
+    // unused today; the read is a capability probe, not a deal lookup.
+    async getRecordHome(_dealId) {
+      return rpc('read-record-source-authority', { selector: { kind: 'current_policy' } });
+    },
+
     async startReview(args) { return write('start-deal-review', args); },
     async reviewDeal(args) { return write('review-deal', args); },
     async endReview(args) { return write('end-deal-review', args); },
