@@ -589,7 +589,7 @@ PYEOF
   # the next tools/somewhere/deeper/test_x.py turns a gate red asking to be
   # decided, rather than sitting in the tree looking like coverage.
   local eligible=""
-  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py \
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py tools/*-selftest.py \
            tools/room-bridge/test_*_unit.py \
            tools/room-bridge/test_activation_reliability.py; do
     [ -f "$t" ] || continue
@@ -783,6 +783,35 @@ PYEOF
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
            failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
+
+  # GATE REPLAY JOINED 2026-09-24 (defect class capability-reported-live-
+  # before-first-human-use: PR #1224's Stop gate never fired on 803 real
+  # receipts, PR #1225's shell regexes were proven only on invented commands).
+  # ops/gate-replay.py RUNS every gate in hooks/ over the committed real
+  # fixtures in ops/fixtures/real-replay/, the way the harness runs it, and
+  # compares every verdict with the committed snapshot there. It computes
+  # nothing from a base ref: it runs everything, every time. It is outside the
+  # loop above for two reasons: it takes about a minute, so it gets its own
+  # timeout, and it may answer 78 (NOT CONFIGURED) on a local interpreter
+  # without requirements.lock, which is announced like any other skip. On a
+  # hosted runner it never answers 78; a missing dependency there is a failure.
+  if [ -f ops/gate-replay.py ]; then
+    "$PY" "$CI_TIMEOUT_HELPER" 900 "$PY" ops/gate-replay.py >"$LOGDIR/gate-gate-replay.log" 2>&1
+    local rrc=$?
+    if [ "$rrc" -eq 78 ]; then
+      skiplist="$skiplist gate-replay.py"
+      printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
+        gate-replay.py "$(tail -1 "$LOGDIR/gate-gate-replay.log" 2>/dev/null)" >&2
+    elif [ "$rrc" -ne 0 ]; then
+      inherited_abort gate-replay "$PY" ops/gate-replay.py
+      failures="$failures gate-replay"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
+    else
+      # A pass prints its invocation count, runtime and verdict totals, so the
+      # hosted log shows the replay ran and how long it took.
+      grep -E '^gate-replay: [0-9]+ invocations|^  verdicts: |^gate-replay: OK' \
+        "$LOGDIR/gate-gate-replay.log" >&2
+    fi
+  fi
 
   # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
   if [ "$(tree_fingerprint)" != "$tree_before" ]; then

@@ -283,7 +283,9 @@ def apply_patch(cwd, patch):
 # before any attempt is a design/judgment call -> the Opus desk, in the background.
 # Why not the Sol room seat (codex-desk): it is read-only on purpose, because it answers
 # partner-room turns inside the canonical checkout, which must stay clean.
-ESCALATION_DESKS = {"code": "sol-fixer", "judgment": "claude-desktop"}
+# The desks come from the Model Room routing policy (ops/config/model-routes.v1.json, read through
+# ops/jev_model_route.desk_for), so this hand-off and the router always name the same desks.
+ESCALATION_DESKS = {kind: _lib("jev_model_route").desk_for(kind) for kind in ("code", "judgment")}
 ESCALATION_FILE_CHARS = 20000
 DIFF_BLOCK = re.compile(r"```(?:diff|patch)\s*\n(.*?)```", re.S)
 
