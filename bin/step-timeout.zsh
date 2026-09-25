@@ -58,6 +58,17 @@ STEP_TIMEOUT_OVERRIDE=(
   # WITHOUT raising this re-creates the bug, so keep this strictly greater than
   # that budget.
   "exports" 1800
+
+  # ops/onedrive-prepublish-wake.py (defect: nightly.exports failed 9/22-9/24,
+  # hanging the FULL 1800s on 9/24 with no partial output — see
+  # out/nightly-runs/nightly-20260924T080221Z.log). This step's only job is a
+  # single stat+small-read PER TARGET to nudge the File Provider awake before
+  # the exports step's own wait_for_provider() begins; it has no internal
+  # retry loop and no internal budget, so it is bounded ENTIRELY by this
+  # external wall-clock. Short on purpose — six single-attempt probes, and a
+  # provider that is genuinely dark should not cost the chain more than this
+  # before the exports step's own, much larger, wait begins.
+  "onedrive pre-publish wake" 120
 )
 
 # carr_step_timeout_for <label> — seconds this step is allowed.

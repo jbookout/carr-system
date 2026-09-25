@@ -69586,6 +69586,51 @@
       ],
       "expected_count": 900,
       "expected_sha256": "e10d7ad3f4ff45515d420fbdf6baeeb0329fa802a7f0fcd103ec8d5e5d27bb10"
+    },
+    {
+      "version": "v71",
+      "upsert": [
+        {
+          "ingress_key": "launchd-workflow:com.carr.nightly-exports-daytime-retry",
+          "ingress_kind": "workflow_entrypoint",
+          "operation": "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
+          "schema_digest": "d686da486cce4d2b838ac0128e632820ebf2016385d496408d720028d1c0b60d",
+          "handler_digest": "d686da486cce4d2b838ac0128e632820ebf2016385d496408d720028d1c0b60d",
+          "launchd_label": "com.carr.nightly-exports-daytime-retry",
+          "trigger_contract_digest": "197e6baa2a99688d363a16fb03dde68badfb9bdf8a1952f884bbd20a95e71a7e",
+          "environment_contract_digest": "128a482994a8493c576420a8f37ec20838f75fe885ab651e229da4ec37c685d2",
+          "program_arguments_digest": "b88872813a90bd2fc8e6bdd30a5bc79e89060893b3533961e3d5d7a3dfec96ac",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "launchd_user_session_and_declared_environment",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [
+            "executable:/bin/zsh",
+            "script:bin/nightly-exports-retry.sh"
+          ],
+          "request_shape": "launchd_trigger_arguments_environment_source_bound",
+          "idempotency_mode": "delegated_entrypoint_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "physical_authority_refs": [
+            "ops.service_environment:nightly-exports-daytime-retry:production"
+          ],
+          "physical_authority_catalog_digests": {
+            "services": "sha256:44fb8f8e1b0c69d3553d652a671ec8ac75dc2c2294cb4904989d451509634b86",
+            "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+          },
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "remove": [],
+      "expected_count": 901,
+      "expected_sha256": "3487f6300e56b9d8a98a83f40c46afb534a24ef22524b81dadb6fd575c785c22"
     }
   ],
   "current_source_review": {
