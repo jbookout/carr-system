@@ -1,6 +1,8 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
+import { registerDocPanelSource } from './doc-panel.js';
+import { runCommand } from './commands.js';
 import {
   REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
   receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
@@ -28,6 +30,10 @@ const POLL_MS = 1400;
 const BOARD_REFRESH_MS = 15000;
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [],
+  // The deal #dealDialog is currently open on, or null. The Doc panel reads
+  // this (via registerDocPanelSource below) to know what a typed command
+  // with no explicit deal id should act on; wireEvents clears it on close.
+  docContextDealId: null,
   // Every displayed value comes from a board snapshot this coordinator applied;
   // the changes feed drives receipts, presence and capture, and asks for a new
   // snapshot, but never writes a value. See board-sync.mjs.
@@ -1003,8 +1009,13 @@ function nextStepForm(dealId) {
     <div class="field"><label for="stepDate">When?</label><input id="stepDate" name="next_date" type="date" value="${esc(deal.next_date || '')}"></div>`,
     onSubmit:async (data) => {
       const text = String(data.get('text') || '').trim();
-      await state.client.setNextStep({ deal:dealId, text, next_date:data.get('next_date') || null, idempotency_key:uuidv4() });
-      const current = confirmLocalWrite(dealId, { next_step:text, next_date:data.get('next_date') || null });
+      const next_date = data.get('next_date') || null;
+      // Same runCommand the Doc panel's `/set_next_step` runs (commands.js) —
+      // one code path, so this form and Doc cannot drift into different
+      // receipts for the identical write.
+      const receipt = await runCommand(state.client, 'set_next_step', text, { dealId, nextDate: next_date });
+      if (receipt.status !== 'ok') throw new Error(receipt.detail?.reason || 'This next step was not set.');
+      const current = confirmLocalWrite(dealId, { next_step:text, next_date });
       showToast(`Next step set on ${current?.name || deal.name}`); renderBoardOnly();
     } });
 }
@@ -1102,6 +1113,7 @@ function detailRows(items, renderer, empty='Nothing captured yet.') {
 }
 
 async function openDeal(dealId) {
+  state.docContextDealId = dealId;
   const detail = await state.client.getDeal(dealId);
   const deal = detail.deal;
   const parked = deal.operating_state === 'parked';
@@ -1189,6 +1201,11 @@ async function finishAgenda(status = 'completed') {
 }
 
 function wireEvents() {
+  // Whatever the dialog closes through — the × button, Escape, the browser's
+  // own light-dismiss — this fires either way, so it is the one place that
+  // clears the Doc panel's "working on" context rather than every call site
+  // that can close #dealDialog remembering to do it.
+  $('#dealDialog').addEventListener('close', () => { state.docContextDealId = null; });
   document.addEventListener('click', async (event) => {
     const workspace = event.target.closest('[data-workspace]');
     if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.deepLinkMine = false; state.query = ''; $('#search').value = ''; render(); return; }
@@ -1290,6 +1307,18 @@ async function boot() {
   badge.title = identity.detail;
   badge.setAttribute('aria-label', identity.detail);
   state.client = await createClient(bootConfig.mode, bootConfig.options);
+  // The Doc panel calls back into THIS module's own client/context instead of
+  // creating a second client, so a command it runs and a command the deal
+  // dialog runs are the same write against the same session (V5-J101
+  // checkable_done: "the same command issued from the UI and from the Doc
+  // yields an equivalent receipt").
+  registerDocPanelSource({
+    getClient: () => state.client,
+    getContext: () => ({
+      dealId: state.docContextDealId,
+      label: state.docContextDealId ? state.deals.get(state.docContextDealId)?.name || state.docContextDealId : null,
+    }),
+  });
   state.boardSync = createBoardSync({
     readBoard: () => state.client.getBoard({ workspace:'all' }),
     readChanges: (cursor) => state.client.getChanges(cursor),
