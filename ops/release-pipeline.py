@@ -1767,7 +1767,21 @@ def health_regression(baseline: list[dict], live: list[dict]) -> tuple[list[str]
     `bad` now that this key is never count-compared, but still relevant to
     reading what `excused` reports.
     """
-    baseline_by_key_subject = {(row["key"], row["subject"]): row for row in baseline}
+    # Round 14 (pre-existing since round 3): keyed by (key, subject) ALONE,
+    # this dict let a time-rolling baseline row and an ordinary live row for
+    # the same (key, subject) match each other as "prior" — e.g. export_
+    # receipt[x.xlsx] STALE (time_rolling=True) at baseline, then LATEST
+    # FAILED (time_rolling=False, not hard_error) after the release: the
+    # live row matched the STALE baseline row, saw an unchanged count (1
+    # against 1), and neither the count-rose check nor the time_rolling
+    # branch fired — the finding vanished from both `bad` and `excused`
+    # with the release never held accountable for it. Keying by (key,
+    # subject, time_rolling) as well closes this: a row can only match a
+    # PRIOR of the same rolling-ness, so a STALE->FAILED transition (or the
+    # reverse) is a genuinely absent baseline entry for that row's own
+    # (key, subject, time_rolling) identity, not a false match.
+    baseline_by_key_subject = {(row["key"], row["subject"], bool(row.get("time_rolling"))): row
+                               for row in baseline}
     bad: list[str] = []
     excused: list[str] = []
     for row in live:
@@ -1777,7 +1791,7 @@ def health_regression(baseline: list[dict], live: list[dict]) -> tuple[list[str]
         if row.get("hard_error"):
             bad.append(f"{row['key']}[{row['subject']}]: hard_error — {detail}")
             continue
-        prior = baseline_by_key_subject.get((row["key"], row["subject"]))
+        prior = baseline_by_key_subject.get((row["key"], row["subject"], bool(row.get("time_rolling"))))
         if row.get("time_rolling"):
             if row["key"] in HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST:
                 # Round 13: these three confirmed-clock-driven keys are OUT

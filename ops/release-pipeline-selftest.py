@@ -877,6 +877,52 @@ class HealthGate(Base):
         self.assertIn("hourly-sync", unattributed[0])
         self.assertIn("time-rolling, not attributed", unattributed[0])
 
+    def test_round14_stale_then_failed_is_not_lost(self):
+        # Round 14 (pre-existing since round 3): the baseline lookup keyed
+        # only by (key, subject) let a time_rolling baseline row match an
+        # ordinary live row for the same (key, subject) as its "prior".
+        # export_receipt[vendors.xlsx] STALE (time_rolling=True) at
+        # baseline, then LATEST FAILED (time_rolling=False, NOT hard_error)
+        # after the release: the live row matched the STALE baseline row,
+        # saw count 1 against 1 (unchanged), and vanished — not a
+        # regression (count didn't rise) and not excused (not time_rolling)
+        # — bad=[] and excused=[]. Keying the baseline lookup by (key,
+        # subject, time_rolling) too means the FAILED live row has no
+        # baseline entry of its OWN rolling-ness to match, so it is
+        # correctly treated as a genuinely new (ordinary) finding and fails
+        # the gate.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        stale = _finding("export_receipt", "STALE vendors.xlsx (last ok 2026-09-20)",
+                         subject="vendors.xlsx", time_rolling=True, count=1)
+        failed = _finding("export_receipt",
+                          "LATEST FAILED vendors.xlsx (latest status error)",
+                          subject="vendors.xlsx", time_rolling=False, count=1)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[stale], health_findings=[failed])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertIn("vendors.xlsx", self.fx.records()[-1].get("detail", ""))
+
+    def test_round14_failed_then_stale_is_excused_not_lost(self):
+        # The reverse of the case above: export_receipt[vendors.xlsx]
+        # LATEST FAILED (ordinary) at baseline, then STALE (time_rolling)
+        # after the release. The live STALE row is on the allowlist, so
+        # round 13's unconditional excuse for allowlisted time_rolling rows
+        # applies regardless of what the baseline held — it is excused, not
+        # silently dropped and not failed, and it shows up in the receipt.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        failed = _finding("export_receipt",
+                          "LATEST FAILED vendors.xlsx (latest status error)",
+                          subject="vendors.xlsx", time_rolling=False, count=1)
+        stale = _finding("export_receipt", "STALE vendors.xlsx (last ok 2026-09-20)",
+                         subject="vendors.xlsx", time_rolling=True, count=1)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[failed], health_findings=[stale])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        unattributed = self.fx.records()[-1].get("health_time_rolling_not_attributed", [])
+        self.assertEqual(len(unattributed), 1)
+        self.assertIn("vendors.xlsx", unattributed[0])
+        self.assertIn("time-rolling, not attributed", unattributed[0])
+
     def test_round12_rule_enforcement_count_rise_still_fails(self):
         # "Keep every other key count-sensitive": rule_enforcement is not
         # time_rolling at all, so a plain count rise (98 -> 99) still fails
