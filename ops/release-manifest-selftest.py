@@ -184,12 +184,17 @@ def main() -> int:
     #    real difference is the precise question, and it keeps the assertion
     #    exactly as strong: a different deployed tree must digest differently.
     other = None
-    for sha in git("log", "-40", "--format=%H", "--", "mcp-server", "dealroom").split():
+    # The Worker artifact digests mcp-server only since the DoctorCRE pin (P2):
+    # dealroom ships as its own pinned artifact. Searching dealroom too let a
+    # dealroom-only branch pick a comparison commit whose Worker tree is
+    # identical, so the assertion failed on a true "same digest" (2026-09-25,
+    # run 36138851445). Compare only the paths the digest actually covers.
+    for sha in git("log", "-40", "--format=%H", "--", "mcp-server").split():
         if sha == head_sha:
             continue
         differs = subprocess.run(
             ("git", "-C", str(REPO), "diff", "--quiet", sha, head_sha,
-             "--", "mcp-server", "dealroom",
+             "--", "mcp-server",
              ":(exclude)mcp-server/.last-deployed-verb-count"))
         if differs.returncode != 0:
             candidate_attempt = run("build", "--sha", sha,

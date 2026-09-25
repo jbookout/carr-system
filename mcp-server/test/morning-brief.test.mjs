@@ -43,6 +43,7 @@ function client({ unavailable = null, accounts = [], renewalState = "ready", ren
         { display_name: "Renewal Safe", city: "Pensacola", est_lease_event: "2027-01-01",
           tier_status: "t1", flag_status: "clear", has_channel: true },
       ] };
+      if (sql.includes("ops.v5_a05_assurance_cadence_batch")) return { rows: [{ batch: [] }] };
       throw new Error(`unexpected query: ${sql}`);
     },
   };
@@ -53,7 +54,8 @@ test("morning-brief derives Joe's sponsor from authenticated context and compose
   const result = await executeRegisteredTool(c, JOE, "morning-brief", {});
   assert.equal(result.state, "ready");
   assert.equal(result.sponsor, "joe");
-  assert.deepEqual(Object.keys(result.sections).sort(), ["claim_card", "deals", "renewals", "today", "loops"].sort());
+  assert.deepEqual(Object.keys(result.sections).sort(),
+    ["claim_card", "deals", "renewals", "today", "loops", "assurance_cadence"].sort());
   assert.equal(result.sections.renewals.state, "ready");
   assert.equal(result.sections.renewals.items[0].display_name, "Renewal Safe");
   const sql = c.queries.map(({ sql }) => sql).join("\n");
