@@ -1351,6 +1351,28 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
   await owner("delete from public.deal where id = $1::uuid", [late]);
   assert.equal((await readiness()).shadow_comparison_clean_run, true,
     "the snapshot the run read is the snapshot again");
+
+  // EACH FAULT ALONE SPOILS A RUN. Every other row matches in each of these, so
+  // the one fault is the only thing standing between the run and "clean".
+  const counts = r => [r.compared_rows, r.matching_rows, r.differing_rows, r.unlinked_rows,
+    r.many_to_one_subjects, r.subjects_without_legacy_row, r.clean];
+  const lone = await legacyRow({ phase: "research" });
+  assert.deepEqual(counts(ok(await as("joe").runMigrationShadow({ idempotency_key: key() }), "unlinked only")),
+    [2, 2, 0, 1, 0, 0, false], "an unlinked row alone spoils the run");
+  await owner("delete from public.deal where id = $1::uuid", [lone]);
+  const twin = await legacyRow({ salesforce_id: sfB, phase: "legal" });
+  assert.deepEqual(counts(ok(await as("joe").runMigrationShadow({ idempotency_key: key() }), "many-to-one only")),
+    [3, 3, 0, 0, 1, 0, false], "two matching legacy rows on one subject alone spoil the run");
+  await owner("delete from public.deal where id = $1::uuid", [twin]);
+  const d3 = await dealWith("lease", ["lease_exec"]);
+  const sfD = `006SYN${RUN}D`;
+  await linkOpportunity(sfD, "deal", d3.deal);
+  assert.deepEqual(counts(ok(await as("joe").runMigrationShadow({ idempotency_key: key() }), "orphan only")),
+    [2, 2, 0, 0, 0, 1, false], "a referenced subject with no legacy row alone spoils the run");
+  const d3legacy = await legacyRow({ salesforce_id: sfD, phase: "legal" });
+  assert.deepEqual(counts(ok(await as("joe").runMigrationShadow({ idempotency_key: key() }), "all resolved")),
+    [3, 3, 0, 0, 0, 0, true]);
+  assert.equal((await readiness()).shadow_comparison_clean_run, true);
   // The same thing from the NEW side: a linked subject moving also stales it.
   ok(await axisCall("joe", d2.deal, "payment_state", "payment_received", "payment",
     (await body("joe", "deal", d2.deal)).state_digest, { payment_level: "partially_paid" }),
@@ -1365,7 +1387,7 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
     "insert into ops.j102_migration_shadow_run (tenant) values ('x')"), /permission denied|j102_/);
   await assert.rejects(sql("joe",
     "delete from ops.j102_migration_shadow_run"), /permission denied|j102_/);
-  await owner("delete from public.deal where id = any($1::uuid[])", [[matching, found]]);
+  await owner("delete from public.deal where id = any($1::uuid[])", [[matching, found, d3legacy]]);
 });
 
 // ===========================================================================
