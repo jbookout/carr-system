@@ -896,15 +896,26 @@ if [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" = t ] && [ "$JEV_CAL
   echo "schema-snapshot: jev call receipt migrate.py reseal v70 is applied without v69 predecessor" >&2
   exit 1
 fi
-DELIVERY_CADENCE_A05_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0598_delivery_cadence_a05_scac_successor.sql')" \
+NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0600_nightly_exports_daytime_retry_scac_successor.sql')" \
   2>/dev/null)"
-case "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" in
+case "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read delivery cadence A05 v71 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read nightly exports daytime retry v71 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" = t ] && [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: delivery cadence A05 v71 is applied without v70 predecessor" >&2
+if [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" = t ] && [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: nightly exports daytime retry v71 is applied without v70 predecessor" >&2
+  exit 1
+fi
+V5_R02_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0603_doctorcre_r02_scac_successor.sql')" \
+  2>/dev/null)"
+case "$V5_R02_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read V5-R02 v72 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$V5_R02_REGISTRY_APPLIED" = t ] && [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: V5-R02 v72 is applied without v71 predecessor" >&2
   exit 1
 fi
 
@@ -2328,7 +2339,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                 SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v69'"
                                                                 SCAC_FULL_SET_SEAL_COUNT=69
                                                                 SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v70_current()"
-                                                                if [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" = t ]; then
+                                                                if [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" = t ]; then
                                                                   SCAC_CURRENT_NUMBER=71
                                                                   SCAC_VERSION_COUNT=71
                                                                   SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v71'")"
@@ -2338,6 +2349,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                   SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v70'"
                                                                   SCAC_FULL_SET_SEAL_COUNT=70
                                                                   SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v71_current()"
+                                                                  if [ "$V5_R02_REGISTRY_APPLIED" = t ]; then
+                                                                    SCAC_CURRENT_NUMBER=72
+                                                                    SCAC_VERSION_COUNT=72
+                                                                    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v72'")"
+                                                                    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v72'")"
+                                                                    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v72.generated.js"
+                                                                    SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v72'"
+                                                                    SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v71'"
+                                                                    SCAC_FULL_SET_SEAL_COUNT=71
+                                                                    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v72_current()"
+                                                                  fi
                                                                 fi
                                                               fi
                                                             fi

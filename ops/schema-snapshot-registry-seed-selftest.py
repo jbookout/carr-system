@@ -163,6 +163,12 @@ RUNTIME_V69 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v69.generat
 RUNTIME_V70 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v70.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V71 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v71.generated.js").read_text(
+    encoding="utf-8"
+)
+RUNTIME_V72 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v72.generated.js").read_text(
+    encoding="utf-8"
+)
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -194,14 +200,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-# v71 (V5-A05, PR #1236) is a plain adjacent successor to v70 (Jev
-# server-side call log #1243, merged to main at 1cc94b84 -- main's newest as
-# of this seal; orchestrator's 2026-09-24 no-pre-assigned-versions ruling).
-# The sealed set is therefore fully contiguous v1..v71, with no gap and no
-# PREDECESSOR_OVERRIDE. bin/schema-snapshot.sh's own bootstrap chain is
-# untouched by this PR and still ends at v70; this seal's snapshot-only
-# bootstrap path is unavailable until that script is regenerated too.
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 72)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 73)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -480,6 +479,20 @@ assert "SCAC_FULL_SET_SEAL_COUNT=69" in GENERATOR
 assert "ops.scac_mutation_catalog_v70_current()" in GENERATOR
 assert "0589_jev_call_receipt_migrate_py_reseal.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v70"' in RUNTIME_V70
+assert "NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=71" in GENERATOR
+assert "SCAC_VERSION_COUNT=71" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=70" in GENERATOR
+assert "ops.scac_mutation_catalog_v71_current()" in GENERATOR
+assert "0600_nightly_exports_daytime_retry_scac_successor.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v71"' in RUNTIME_V71
+assert "V5_R02_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=72" in GENERATOR
+assert "SCAC_VERSION_COUNT=72" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=71" in GENERATOR
+assert "ops.scac_mutation_catalog_v72_current()" in GENERATOR
+assert "0603_doctorcre_r02_scac_successor.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v72"' in RUNTIME_V72
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=43" in GENERATOR
@@ -660,22 +673,15 @@ loader_end = GENERATOR.index(
     loader_start,
 )
 loader = GENERATOR[loader_start:loader_end]
-# v71 (V5-A05, PR #1236) is a plain adjacent successor to v70, so
-# ops/config/scac-registry-full-entry-set-seals.json's key set is now an
-# EXACT contiguous v1..v71 run and the loader's positive path runs for real
-# (previously skipped while a pre-assigned, out-of-sequence v72 key made no
-# "current" value pass -- see the contiguity assertion above). This still
-# does not cover bin/schema-snapshot.sh's own bootstrap chain, which is
-# untouched by this PR and still ends at v70.
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "70", "71"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "71", "72"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 70
-assert loaded_sql.count("sha256:") == 70
-assert FULL_SET_SEALS["scac-mutation-registry.v70"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 71
+assert loaded_sql.count("sha256:") == 71
+assert FULL_SET_SEALS["scac-mutation-registry.v71"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 

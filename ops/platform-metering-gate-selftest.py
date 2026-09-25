@@ -222,10 +222,15 @@ def main() -> int:
         "ops/p1-rebuild-gate.py",
         "ops/cc-update-audit-shadow-harness.py",
         "bin/restore-rehearse.sh",
+        "tools/pitr-restore-proof.py",
     }
+    # A create through the provider's REST API (POST .../branches) is a branch
+    # create exactly as much as a neonctl call is, so it is discovered too.
+    api_branch_create = re.compile(r'["\x27]POST["\x27]\s*,\s*f?["\x27]/projects/\{[^}]+\}/branches["\x27]')
     branch_patterns = (
         re.compile(r'["\x27]branches["\x27]\s*,\s*["\x27]create["\x27]'),
         re.compile(r'\$NEONCTL[^\n]*\bbranches\s+create\b'),
+        api_branch_create,
     )
     discovered_branch_sources = {
         relative
@@ -243,6 +248,9 @@ def main() -> int:
             create_at = source.find('"branches","create"')
         if create_at < 0:
             create_at = source.find('"branches", "create"')
+        if create_at < 0:
+            api_match = api_branch_create.search(source)
+            create_at = api_match.start() if api_match else -1
         authorize_at = source.find("neon-disposable-branch")
         check(f"{relative} admits metered branch work before create",
               authorize_at >= 0 and create_at >= 0 and authorize_at < create_at)
