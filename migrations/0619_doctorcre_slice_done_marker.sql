@@ -1,4 +1,4 @@
--- 0612_doctorcre_slice_done_marker.sql
+-- 0619_doctorcre_slice_done_marker.sql
 --
 -- DoctorCRE v5 slice done-record: make it fire.
 --
@@ -37,22 +37,30 @@
 --         only while that revision is the portfolio's current accepted one
 --         AND ops.portfolio_revision_integrity_error recomputes it intact from
 --         its rows (21 nodes, four children, acyclic, every digest).
---       refusal_proof: source ci_gate, key = the gate that proves the
---         refusal, plus a mandatory write_required_reason. Allowed only where
---         a production negative would itself require a write; the ref is a
---         release_slice_member row, so the gate's code shipped in a complete
---         production release under the CI merge gate. A refusal that commits
---         nothing leaves no server row, so there is no live-probe mode: such a
---         criterion stays unbound until a server-written row exists.
+--       refusal_proof: resolves ONLY against a gate result the server itself
+--         recorded, keyed by the gate key. No such server-recorded gate-result
+--         source exists today, so every bind of this kind is refused
+--         (refusal_proof_has_no_server_gate_source) and the resolver never
+--         passes it: a refusal criterion stays unbound. The kind is kept so the
+--         source can be added later without reshaping the tables.
 --     The server resolves every ref itself; a caller's pass claim is never read.
 --     live_check_source / live_check_key carry the source and key of
 --     live_check, accepted_record and refusal_proof alike.
 --
 --   * An unbound criterion can be bound later, append-only, in
 --     ops.slice_criterion_binding. The automation seat may bind a criterion
---     ONCE; a partner may rebind (or explicitly unbind) at any time, and a
---     partner binding always wins. A wrong automated binding is therefore
---     correctable, never permanent.
+--     ONCE, only to a kind the server derives as allowed for that criterion's
+--     wording (ops.slice_criterion_allowed_kinds), and never while a partner
+--     holds the slice. A partner may rebind (or explicitly unbind) at any
+--     time, and a partner binding always wins.
+--
+--   * A shipped_release binding names ONE release member (one PR) at bind
+--     time, and only that member resolves it. The Worker holds no GitHub
+--     credential, so the server cannot check that a commit is reachable from
+--     main or that its PR carries the slice id; therefore an AUTOMATED
+--     shipped_release binding is only a PROPOSAL: it is never the effective
+--     binding until a partner confirms it (rebind to the same member). The
+--     server also refuses a member whose subject does not name the slice.
 --
 --   * The automated seat (ops.slice_marker_seat: the local machine actors)
 --     may register from the catalog, bind, record release membership and mark
@@ -209,6 +217,7 @@ create table if not exists ops.slice_criterion_binding (
   live_check_source text,
   live_check_key text,
   write_required_reason text,
+  bound_member_id uuid,
   bound_via text not null check (bound_via in ('authority', 'automation')),
   bound_by_actor_slug text not null,
   reason text not null check (btrim(reason) <> ''),
@@ -217,8 +226,10 @@ create table if not exists ops.slice_criterion_binding (
   created_at timestamptz not null default now(),
   foreign key (slice_id, criterion) references ops.slice_checkable_done_registry (slice_id, criterion),
   check (
-    (evidence_kind in ('shipped_release', 'unbound') and live_check_source is null and live_check_key is null
-       and write_required_reason is null)
+    (evidence_kind = 'shipped_release' and live_check_source is null and live_check_key is null
+       and write_required_reason is null and bound_member_id is not null)
+    or (evidence_kind = 'unbound' and live_check_source is null and live_check_key is null
+       and write_required_reason is null and bound_member_id is null)
     -- `is not null` first: a NULL source would make the disjunction NULL,
     -- which a CHECK accepts.
     or (evidence_kind = 'live_check' and live_check_source is not null and write_required_reason is null
@@ -255,13 +266,56 @@ create trigger slice_criterion_binding_append_only
   before update or delete on ops.slice_criterion_binding
   for each row execute function ops.refuse_slice_criterion_binding_rewrite();
 
+-- The kinds the AUTOMATED seat may bind a criterion to, derived server-side
+-- from the criterion's own catalog wording, as 'kind:source' ('kind:' when the
+-- kind has no source). The seat cannot pick a weaker kind than this allows; a
+-- partner rebind is not limited by it. Order matters: the first rule that
+-- matches decides.
+--   restore wording              -> live_check on staging_restore_only_result
+--   refuse / negative / bypass   -> nothing (refusal_proof needs a server-
+--                                   recorded gate result, and none exists)
+--   acyclic (the portfolio graph)-> accepted_record on the portfolio acceptance
+--   zero ... effects             -> live_check portfolio_acceptance_effect_free
+--   runtime / human outcomes     -> nothing (no server row can show them)
+--   anything else                -> shipped_release (a proposal until a partner
+--                                   confirms it)
+create or replace function ops.slice_criterion_allowed_kinds(p_criterion text)
+returns text[]
+language sql immutable
+set search_path = pg_catalog
+as $$
+  select case
+    when p_criterion ~* 'restor' then array['live_check:staging_restore_only_result']
+    when p_criterion ~* '(refus|negative|bypass)' then array[]::text[]
+    when p_criterion ~* 'acyclic' then array['accepted_record:portfolio_revision_acceptance']
+    when p_criterion ~* 'zero' and p_criterion ~* 'effect' then array['live_check:portfolio_acceptance_effect_free']
+    when p_criterion ~* '(observ|pilot|decid|measur|partner|joe|dell|week|month|adopt|survey|feedback|interview|one-use|fresh exact)'
+      then array[]::text[]
+    else array['shipped_release:']
+  end
+$$;
+
+revoke all on function ops.slice_criterion_allowed_kinds(text) from public;
+grant execute on function ops.slice_criterion_allowed_kinds(text) to carr_reader;
+
+-- The one portfolio the catalog's slices belong to. An automated
+-- accepted_record / effect-free binding may name only this portfolio, so the
+-- seat cannot point a criterion at some other accepted portfolio.
+create or replace function ops.slice_catalog_portfolio_ref()
+returns text
+language sql immutable
+set search_path = pg_catalog
+as $$ select 'DoctorCre-v5'::text $$;
+
+revoke all on function ops.slice_catalog_portfolio_ref() from public;
+
 -- The ONE effective binding of a registered criterion.
 create or replace function ops.slice_effective_binding(p_slice_id text, p_criterion text)
 returns table (
   evidence_kind text, workflow_key text, workflow_version integer,
   acceptance_mode text, transition_to_stage text,
   live_check_source text, live_check_key text, write_required_reason text,
-  binding_source text, binding_id uuid
+  bound_member_id uuid, binding_source text, binding_id uuid
 )
 language plpgsql stable
 set search_path = pg_catalog, ops
@@ -278,24 +332,27 @@ begin
   if v_reg.evidence_kind <> 'unbound' then
     return query select v_reg.evidence_kind, v_reg.workflow_key, v_reg.workflow_version,
       v_reg.acceptance_mode, v_reg.transition_to_stage, v_reg.live_check_source, v_reg.live_check_key,
-      v_reg.write_required_reason, 'registration'::text, v_reg.id;
+      v_reg.write_required_reason, null::uuid, 'registration'::text, v_reg.id;
     return;
   end if;
   select * into v_bind from ops.slice_criterion_binding b
    where b.slice_id = p_slice_id and b.criterion = p_criterion and b.bound_via = 'authority'
    order by b.bind_seq desc limit 1;
   if not found then
+    -- An automated shipped_release binding is a PROPOSAL, never effective:
+    -- the server cannot verify the PR, so a partner must confirm it.
     select * into v_bind from ops.slice_criterion_binding b
-     where b.slice_id = p_slice_id and b.criterion = p_criterion and b.bound_via = 'automation';
+     where b.slice_id = p_slice_id and b.criterion = p_criterion and b.bound_via = 'automation'
+       and b.evidence_kind <> 'shipped_release';
   end if;
   if v_bind.id is null then
     return query select 'unbound'::text, null::text, null::integer, null::text, null::text,
-      null::text, null::text, null::text, 'registration'::text, v_reg.id;
+      null::text, null::text, null::text, null::uuid, 'registration'::text, v_reg.id;
     return;
   end if;
   return query select v_bind.evidence_kind, null::text, null::integer, null::text, null::text,
     v_bind.live_check_source, v_bind.live_check_key, v_bind.write_required_reason,
-    ('binding:' || v_bind.bound_via)::text, v_bind.id;
+    v_bind.bound_member_id, ('binding:' || v_bind.bound_via)::text, v_bind.id;
 end;
 $$;
 
@@ -303,7 +360,8 @@ revoke all on function ops.slice_effective_binding(text, text) from public;
 
 create or replace function ops.slice_bind_insert(
   p_slice_id text, p_criterion text, p_kind text, p_source text, p_key text,
-  p_write_required_reason text, p_reason text, p_idempotency_key uuid, p_via text, p_actor text
+  p_write_required_reason text, p_bound_member_id uuid, p_reason text, p_idempotency_key uuid,
+  p_via text, p_actor text
 ) returns ops.slice_criterion_binding
 language plpgsql
 set search_path = pg_catalog, ops
@@ -335,69 +393,92 @@ begin
   if p_reason is null or btrim(p_reason) = '' then
     raise exception 'reason_required';
   end if;
+  if p_kind = 'refusal_proof' then
+    raise exception 'refusal_proof_has_no_server_gate_source: no server-recorded gate result exists to resolve it; the criterion stays unbound';
+  end if;
   if p_via = 'automation' then
-    if p_kind not in ('shipped_release', 'live_check', 'accepted_record', 'refusal_proof') then
-      raise exception 'automation_binding_kind_invalid: %', p_kind;
+    if ops.slice_mark_held(p_slice_id) then
+      raise exception 'slice_mark_held_by_partner: %', p_slice_id;
+    end if;
+    if not (p_kind || ':' || coalesce(p_source, '')) = any (ops.slice_criterion_allowed_kinds(v_reg.criterion)) then
+      raise exception 'automation_binding_kind_not_allowed: % may be bound only to %', v_reg.criterion,
+        coalesce(nullif(array_to_string(ops.slice_criterion_allowed_kinds(v_reg.criterion), ', '), ''), 'nothing (a partner decides)');
+    end if;
+    if p_source in ('portfolio_revision_acceptance', 'portfolio_acceptance_effect_free')
+       and p_key is distinct from ops.slice_catalog_portfolio_ref() then
+      raise exception 'automation_portfolio_key_not_catalog_portfolio: %', coalesce(p_key, '(none)');
     end if;
     if exists (select 1 from ops.slice_criterion_binding
                 where slice_id = p_slice_id and criterion = v_reg.criterion) then
       raise exception 'criterion_already_bound: only a partner may rebind %', v_reg.criterion;
     end if;
   end if;
+  if p_kind = 'shipped_release' then
+    -- One specific PR, named now: a member of THIS slice in a complete
+    -- production release.
+    if p_bound_member_id is null or not exists (
+      select 1 from ops.release_slice_member m join ops.release r on r.id = m.release_id
+       where m.id = p_bound_member_id and m.slice_id = p_slice_id
+         and r.environment = 'production' and r.state = 'complete' and r.git_sha = m.release_git_sha) then
+      raise exception 'shipped_release_binding_requires_this_slice_member: %', coalesce(p_bound_member_id::text, '(none)');
+    end if;
+  elsif p_bound_member_id is not null then
+    raise exception 'bound_member_only_for_shipped_release';
+  end if;
   insert into ops.slice_criterion_binding (
     slice_id, criterion, evidence_kind, live_check_source, live_check_key, write_required_reason,
-    bound_via, bound_by_actor_slug, reason, idempotency_key
+    bound_member_id, bound_via, bound_by_actor_slug, reason, idempotency_key
   ) values (
     p_slice_id, v_reg.criterion, p_kind, p_source, p_key, p_write_required_reason,
-    p_via, p_actor, p_reason, p_idempotency_key
+    p_bound_member_id, p_via, p_actor, p_reason, p_idempotency_key
   ) returning * into v_row;
   return v_row;
 end;
 $$;
 
-revoke all on function ops.slice_bind_insert(text, text, text, text, text, text, text, uuid, text, text) from public;
+revoke all on function ops.slice_bind_insert(text, text, text, text, text, text, uuid, text, uuid, text, text) from public;
 
 -- Automation door: bind an unbound criterion once.
 create or replace function ops.bind_slice_criterion_evidence(
   p_slice_id text, p_criterion text, p_evidence_kind text,
   p_live_check_source text, p_live_check_key text, p_write_required_reason text,
-  p_reason text, p_idempotency_key uuid
+  p_bound_member_id uuid, p_reason text, p_idempotency_key uuid
 ) returns ops.slice_criterion_binding
 language plpgsql security definer
 set search_path = pg_catalog, ops
 as $$
 begin
   return ops.slice_bind_insert(p_slice_id, p_criterion, p_evidence_kind, p_live_check_source,
-    p_live_check_key, p_write_required_reason, p_reason, p_idempotency_key, 'automation', ops.slice_marker_seat_actor());
+    p_live_check_key, p_write_required_reason, p_bound_member_id, p_reason, p_idempotency_key, 'automation', ops.slice_marker_seat_actor());
 end;
 $$;
 
-comment on function ops.bind_slice_criterion_evidence(text, text, text, text, text, text, text, uuid) is
-  'DoctorCRE v5 automation door: bind a criterion registered unbound to shipped_release, live_check, accepted_record or refusal_proof, once. Refused for any actor outside ops.slice_marker_seat, for a criterion bound at registration, and for a criterion already bound (only a partner may rebind).';
+comment on function ops.bind_slice_criterion_evidence(text, text, text, text, text, text, uuid, text, uuid) is
+  'DoctorCRE v5 automation door: bind a criterion registered unbound, once, to a kind ops.slice_criterion_allowed_kinds allows for its wording. A shipped_release binding names one release member of this slice and is only a proposal until a partner confirms it. Refused for any actor outside ops.slice_marker_seat, while a partner holds the slice, for a criterion bound at registration, and for a criterion already bound (only a partner may rebind).';
 
-revoke all on function ops.bind_slice_criterion_evidence(text, text, text, text, text, text, text, uuid) from public;
-grant execute on function ops.bind_slice_criterion_evidence(text, text, text, text, text, text, text, uuid) to carr_writer;
+revoke all on function ops.bind_slice_criterion_evidence(text, text, text, text, text, text, uuid, text, uuid) from public;
+grant execute on function ops.bind_slice_criterion_evidence(text, text, text, text, text, text, uuid, text, uuid) to carr_writer;
 
 -- Partner door: rebind (or explicitly unbind) at any time; always wins.
 create or replace function ops.rebind_slice_criterion_evidence(
   p_slice_id text, p_criterion text, p_evidence_kind text,
   p_live_check_source text, p_live_check_key text, p_write_required_reason text,
-  p_reason text, p_idempotency_key uuid
+  p_bound_member_id uuid, p_reason text, p_idempotency_key uuid
 ) returns ops.slice_criterion_binding
 language plpgsql security definer
 set search_path = pg_catalog, ops
 as $$
 begin
   return ops.slice_bind_insert(p_slice_id, p_criterion, p_evidence_kind, p_live_check_source,
-    p_live_check_key, p_write_required_reason, p_reason, p_idempotency_key, 'authority', ops.authority_actor_slug());
+    p_live_check_key, p_write_required_reason, p_bound_member_id, p_reason, p_idempotency_key, 'authority', ops.authority_actor_slug());
 end;
 $$;
 
-comment on function ops.rebind_slice_criterion_evidence(text, text, text, text, text, text, text, uuid) is
-  'DoctorCRE v5 partner authority door: bind, rebind or explicitly unbind a criterion registered unbound. The latest partner binding is the effective binding, whatever automation bound.';
+comment on function ops.rebind_slice_criterion_evidence(text, text, text, text, text, text, uuid, text, uuid) is
+  'DoctorCRE v5 partner authority door: bind, rebind or explicitly unbind a criterion registered unbound, or confirm an automated shipped_release proposal by rebinding it to the same member. The latest partner binding is the effective binding, whatever automation bound.';
 
-revoke all on function ops.rebind_slice_criterion_evidence(text, text, text, text, text, text, text, uuid) from public;
-grant execute on function ops.rebind_slice_criterion_evidence(text, text, text, text, text, text, text, uuid) to carr_authority;
+revoke all on function ops.rebind_slice_criterion_evidence(text, text, text, text, text, text, uuid, text, uuid) from public;
+grant execute on function ops.rebind_slice_criterion_evidence(text, text, text, text, text, text, uuid, text, uuid) to carr_authority;
 
 -- ===========================================================================
 -- Registration from the catalog (automation)
@@ -530,6 +611,9 @@ begin
     if v_kind = 'transition' and v_el ? 'acceptance_mode' then
       raise exception 'criterion_binding_mixes_evidence_types: %', v_el->>'criterion';
     end if;
+    if v_kind = 'refusal_proof' then
+      raise exception 'refusal_proof_has_no_server_gate_source: %', v_el->>'criterion';
+    end if;
     insert into ops.slice_checkable_done_registry (
       slice_id, criterion, evidence_kind, workflow_key, workflow_version,
       acceptance_mode, transition_to_stage, live_check_source, live_check_key, write_required_reason
@@ -590,6 +674,20 @@ create trigger release_slice_member_append_only
   for each row execute function ops.refuse_release_slice_member_rewrite();
 
 -- p_members: [{"slice_id","commit_sha","pr_number","subject","attribution"}]
+create or replace function ops.slice_subject_names_slice(p_subject text, p_slice_id text)
+returns boolean
+language sql immutable
+set search_path = pg_catalog
+as $$
+  select coalesce(
+    p_subject ~ ('(^|[^A-Za-z0-9-])' || p_slice_id || '($|[^A-Za-z0-9-])')
+    or (substr(p_slice_id, 4) ~ '^([FAS][0-9]{2}|J[0-9]{3})$'
+        and p_subject ~ ('(^|[^A-Za-z0-9-])' || substr(p_slice_id, 4) || '($|[^A-Za-z0-9-])')),
+    false)
+$$;
+
+revoke all on function ops.slice_subject_names_slice(text, text) from public;
+
 create or replace function ops.record_release_slice_members(
   p_release_key text,
   p_members jsonb
@@ -619,6 +717,17 @@ begin
     end if;
     -- Only a slice the catalog names (raises slice_not_in_catalog otherwise).
     perform 1 from ops.slice_catalog_checkable_done(v_el->>'slice_id');
+    -- The subject must NAME the slice: its full id, or (attribution rule A1)
+    -- a bare F/A/S NN or J NNN id as a whole word. The database cannot see git,
+    -- so this does not prove the commit is in the release; that is why an
+    -- automated shipped_release binding stays a proposal until a partner
+    -- confirms it.
+    if not ops.slice_subject_names_slice(v_el->>'subject', v_el->>'slice_id') then
+      raise exception 'member_subject_does_not_name_slice: % / %', v_el->>'slice_id', left(coalesce(v_el->>'subject', ''), 120);
+    end if;
+    if coalesce(v_el->>'commit_sha', '') !~ '^[0-9a-fA-F]{40}$' then
+      raise exception 'member_commit_sha_invalid';
+    end if;
     insert into ops.release_slice_member (
       release_id, release_git_sha, slice_id, commit_sha, pr_number, subject, attribution, recorded_by_actor_slug
     ) values (
@@ -734,7 +843,8 @@ revoke all on function ops.slice_portfolio_acceptance_current(uuid, text) from p
 
 create or replace function ops.slice_evidence_resolves(
   p_slice_id text, p_kind text, p_workflow_key text, p_workflow_version integer,
-  p_acceptance_mode text, p_transition_to_stage text, p_source text, p_key text, p_ref uuid
+  p_acceptance_mode text, p_transition_to_stage text, p_source text, p_key text,
+  p_bound_member_id uuid, p_ref uuid
 ) returns boolean
 language plpgsql stable
 set search_path = pg_catalog, ops
@@ -762,10 +872,11 @@ begin
          and pl.workflow_key = p_workflow_key
          and pl.workflow_version = p_workflow_version
     ) into v;
-  elsif p_kind = 'shipped_release'
-     or (p_kind = 'refusal_proof' and p_source = 'ci_gate') then
-    -- refusal_proof/ci_gate: the gate's code shipped in a complete production
-    -- release, attributed to this slice (so it ran under the CI merge gate).
+  elsif p_kind = 'shipped_release' then
+    -- Only the ONE member named at bind time (when the binding names one).
+    if p_bound_member_id is not null and p_ref <> p_bound_member_id then
+      return false;
+    end if;
     select exists (
       select 1 from ops.release_slice_member m
         join ops.release r on r.id = m.release_id
@@ -802,17 +913,18 @@ begin
            and ops.slice_portfolio_acceptance_effect_count(p_ref) = 0;
     end if;
   end if;
-  -- 'unbound' and any unknown kind/source never resolve.
+  -- 'unbound', refusal_proof (no server-recorded gate-result source exists)
+  -- and any unknown kind/source never resolve.
   return coalesce(v, false);
 end;
 $$;
 
-revoke all on function ops.slice_evidence_resolves(text, text, text, integer, text, text, text, text, uuid) from public;
+revoke all on function ops.slice_evidence_resolves(text, text, text, integer, text, text, text, text, uuid, uuid) from public;
 
 -- The newest server-side row that WOULD resolve a binding, or null. Only
 -- kinds whose rows the server can find on its own have a candidate.
 create or replace function ops.slice_evidence_candidate(
-  p_slice_id text, p_kind text, p_source text, p_key text
+  p_slice_id text, p_kind text, p_source text, p_key text, p_bound_member_id uuid
 ) returns uuid
 language plpgsql stable
 set search_path = pg_catalog, ops
@@ -837,7 +949,9 @@ begin
      where a.portfolio_ref = p_key
        and a.portfolio_revision_id = ops.portfolio_current_accepted_revision(p_key)
      order by a.accepted_at desc limit 1;
-  elsif p_kind = 'shipped_release' or (p_kind = 'refusal_proof' and p_source = 'ci_gate') then
+  elsif p_kind = 'shipped_release' and p_bound_member_id is not null then
+    v := p_bound_member_id;
+  elsif p_kind = 'shipped_release' then
     select m.id into v from ops.release_slice_member m join ops.release r on r.id = m.release_id
      where m.slice_id = p_slice_id and r.environment = 'production' and r.state = 'complete'
        and r.git_sha = m.release_git_sha
@@ -847,7 +961,7 @@ begin
 end;
 $$;
 
-revoke all on function ops.slice_evidence_candidate(text, text, text, text) from public;
+revoke all on function ops.slice_evidence_candidate(text, text, text, text, uuid) from public;
 
 create or replace function ops.slice_completion_evaluate(
   p_slice_id text,
@@ -915,7 +1029,7 @@ begin
        and v_ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then
       v_resolved := ops.slice_evidence_resolves(p_slice_id, v_b.evidence_kind, v_b.workflow_key,
         v_b.workflow_version, v_b.acceptance_mode, v_b.transition_to_stage,
-        v_b.live_check_source, v_b.live_check_key, v_ref::uuid);
+        v_b.live_check_source, v_b.live_check_key, v_b.bound_member_id, v_ref::uuid);
       -- evidence_kind = 'unbound' never resolves.
     end if;
     v_computed := v_computed || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
@@ -976,6 +1090,11 @@ begin
   if ops.slice_mark_held(p_slice_id) then
     raise exception 'slice_mark_held_by_partner: %', p_slice_id;
   end if;
+  -- The actor is the server-derived acting slug ONLY; p_actor_slug (kept for
+  -- the 0602 signature) is never recorded.
+  if v_acting is null then
+    raise exception 'acting_actor_required: the server sets carr.acting_actor_slug for every writer call';
+  end if;
   v_via := case when v_acting is not null and exists (select 1 from ops.slice_marker_seat where actor_slug = v_acting)
                 then 'automation' else 'writer' end;
 
@@ -983,7 +1102,7 @@ begin
     slice_id, status, criteria_receipt, reason, marked_by_actor_slug, idempotency_key, marked_via
   ) values (
     p_slice_id, p_status, ops.slice_completion_evaluate(p_slice_id, p_criteria_receipt),
-    p_reason, coalesce(v_acting, p_actor_slug), p_idempotency_key, v_via
+    p_reason, v_acting, p_idempotency_key, v_via
   ) returning * into v_row;
   return v_row;
 end;
@@ -1161,14 +1280,25 @@ declare
   v_r record;
   v_b record;
   v_candidate uuid;
+  v_catalog jsonb;
 begin
   select * into v_reg from ops.slice_checkable_done_registration where slice_id = p_slice_id;
+  if v_reg.slice_id is null then
+    -- Not registered yet: what the seat WOULD be allowed to bind, per catalog
+    -- criterion (null when the catalog lacks the slice).
+    begin
+      select jsonb_object_agg(c, to_jsonb(ops.slice_criterion_allowed_kinds(c))) into v_catalog
+        from ops.slice_catalog_checkable_done(p_slice_id) x, unnest(x.criteria) c;
+    exception when others then
+      v_catalog := null;
+    end;
+  end if;
   select * into v_latest from ops.slice_completion_mark where slice_id = p_slice_id order by mark_seq desc limit 1;
   if v_reg.slice_id is not null then
     for v_r in select * from ops.slice_checkable_done_registry where slice_id = p_slice_id order by created_at, criterion loop
       select * into v_b from ops.slice_effective_binding(p_slice_id, v_r.criterion);
       v_candidate := ops.slice_evidence_candidate(p_slice_id, v_b.evidence_kind,
-        v_b.live_check_source, v_b.live_check_key);
+        v_b.live_check_source, v_b.live_check_key, v_b.bound_member_id);
       v_criteria := v_criteria || jsonb_build_array(jsonb_build_object(
         'criterion', v_r.criterion,
         'registered_kind', v_r.evidence_kind,
@@ -1180,11 +1310,21 @@ begin
                                      where x.slice_id = p_slice_id and x.criterion = v_r.criterion
                                        and x.bound_via = 'automation'),
         'write_required_reason', v_b.write_required_reason,
+        'bound_member_id', v_b.bound_member_id,
+        'allowed_kinds', to_jsonb(ops.slice_criterion_allowed_kinds(v_r.criterion)),
+        'proposal', (select jsonb_build_object('id', x.id, 'evidence_kind', x.evidence_kind,
+                       'bound_member_id', x.bound_member_id, 'reason', x.reason, 'created_at', x.created_at)
+                       from ops.slice_criterion_binding x
+                      where x.slice_id = p_slice_id and x.criterion = v_r.criterion and x.bound_via = 'automation'
+                        and v_b.binding_source <> 'binding:automation'
+                        and not exists (select 1 from ops.slice_criterion_binding y
+                                         where y.slice_id = x.slice_id and y.criterion = x.criterion
+                                           and y.bound_via = 'authority')),
         'live_check_candidate', v_candidate,
         -- Recomputed now, from the live rows; never read from a mark.
         'candidate_passes', ops.slice_evidence_resolves(p_slice_id, v_b.evidence_kind, v_b.workflow_key,
           v_b.workflow_version, v_b.acceptance_mode, v_b.transition_to_stage,
-          v_b.live_check_source, v_b.live_check_key, v_candidate)
+          v_b.live_check_source, v_b.live_check_key, v_b.bound_member_id, v_candidate)
       ));
     end loop;
   end if;
@@ -1193,6 +1333,7 @@ begin
     'registered', v_reg.slice_id is not null,
     'registered_via', v_reg.registered_via,
     'catalog_revision_id', v_reg.catalog_revision_id,
+    'catalog_allowed_kinds', v_catalog,
     'criteria', v_criteria,
     'held_by_partner', ops.slice_mark_held(p_slice_id),
     'latest_mark', case when v_latest.id is null then null else jsonb_build_object(

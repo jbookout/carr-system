@@ -5,14 +5,19 @@ import {
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
 // v75 is the runtime selector after the DoctorCRE v5 slice done-record's
-// automated marker (migration 0612, sealed by 0613). Its sealed catalog admits
-// seven new verbs -- register-slice-criteria-from-catalog,
+// automated marker (migration 0619, sealed by 0620 over v74). Its sealed
+// catalog admits seven new verbs -- register-slice-criteria-from-catalog,
 // bind-slice-criterion-evidence, record-release-slice-members,
 // auto-mark-slice-completion and list-shipped-releases (writer/reader), and
 // rebind-slice-criterion-evidence and set-slice-mark-hold (authorityOnly) --
-// and register-slice-checkable-done's widened evidence kinds. v73 (the
-// bin/deploy-worker.sh re-digest) registered no verb; v74 is PR #1236's and is
-// not on main.
+// and register-slice-checkable-done's widened evidence kinds.
+//
+// Superseded note (v74): v74 was the runtime selector after DoctorCRE V5-M01's live door to the
+// Journey 1 clock runtime (migration 0614). Its sealed catalog admits two new
+// verbs -- read-journey-one-clock (a read) and advance-journey-one-clock (a
+// writer write that refuses before any query in every deployed Worker) -- and
+// preserves earlier versions as history; v73 (the bin/deploy-worker.sh
+// re-digest) registered no verb, so the selector stayed on v72 until v74.
 //
 // Superseded note (v72): v72 was the runtime selector after DoctorCRE V5-R02 (migration 0602,
 // workflow cutover, caller migration and retirement readiness). Its sealed

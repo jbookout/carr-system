@@ -434,6 +434,28 @@ class Batching(Base):
         self.assertEqual(self.fx.pipeline(FakeRunner(), dry_run=True).tick(["worker"]), 0)
         self.assertEqual(self.fx.slice_marks, [])
 
+    def test_the_real_marker_is_started_detached_and_never_waited_for(self):
+        # Step 10 must not hold the single-run lock: a marker that sleeps is
+        # started in its own session and the call returns before it ends.
+        import time
+        ops = self.fx.repo / "ops"
+        ops.mkdir(exist_ok=True)
+        (ops / "slice-done-marker.py").write_text(
+            "import time, sys\nprint('marker', sys.argv[1:], flush=True)\ntime.sleep(30)\n", encoding="utf-8")
+        pipe = self.fx.pipeline(FakeRunner())
+        pipe.run_dir.mkdir(parents=True, exist_ok=True)
+        t0 = time.monotonic()
+        out = pipe._run_slice_marker("r-2026-09-30-01", "a" * 40)
+        try:
+            self.assertLess(time.monotonic() - t0, 5)
+            self.assertTrue(out["started"])
+            self.assertEqual(out["release_sha"], "a" * 40)
+            self.assertNotIn("rc", out)
+            self.assertEqual(os.getsid(out["pid"]), out["pid"])     # its own session
+        finally:
+            os.kill(out["pid"], 9)
+            os.waitpid(out["pid"], 0)
+
     def test_doc_only_batch_advances_without_release(self):
         latest = self.fx.commit({"docs/n.md": "3", "mcp-server/test/x.test.mjs": "t"})
         runner = FakeRunner()

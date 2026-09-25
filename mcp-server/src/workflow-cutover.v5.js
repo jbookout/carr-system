@@ -41,7 +41,7 @@
 // complete are authorityOnly too. A writer login keeps record-workflow-caller
 // and mark-slice-progress (in_progress / blocked only).
 //
-// SLICE DONE-RECORD (migration 0612). The partner doors above stay; beside
+// SLICE DONE-RECORD (migration 0619). The partner doors above stay; beside
 // them the AUTOMATED seat (ops.slice_marker_seat -- the local machine actors
 // the release pipeline and run.sh call act as) gets its own writer doors:
 // register-slice-criteria-from-catalog (criteria read server-side from the
@@ -64,18 +64,20 @@ const CUTOVER_STAGES = Object.freeze([
 const CALLER_KINDS = Object.freeze(["script", "verb", "worker_route", "job_definition", "external"]);
 const CALLER_STATUSES = Object.freeze(["remaining", "done", "blocked", "superseded", "retired"]);
 const SLICE_STATUSES = Object.freeze(["in_progress", "complete", "blocked"]);
-// Slice done-record (migration 0612): the evidence kinds a registered
+// Slice done-record (migration 0619): the evidence kinds a registered
 // criterion may carry, and the allowlisted server-resolved sources a
-// live_check / accepted_record / refusal_proof binding may name (the database
-// CHECK pairs each source with its kind).
+// live_check / accepted_record binding may name (the database CHECK pairs
+// each source with its kind). refusal_proof is not offered: no
+// server-recorded gate result exists for it to resolve against, so the doors
+// refuse it and such a criterion stays unbound for a partner.
 const REGISTERED_EVIDENCE_KINDS = Object.freeze([
-  "acceptance", "transition", "shipped_release", "live_check", "accepted_record", "refusal_proof", "unbound",
+  "acceptance", "transition", "shipped_release", "live_check", "accepted_record", "unbound",
 ]);
 const LIVE_CHECK_SOURCES = Object.freeze([
   "staging_restore_only_result", "completion_receipt", "job_receipt", "portfolio_acceptance_effect_free",
-  "portfolio_revision_acceptance", "ci_gate",
+  "portfolio_revision_acceptance",
 ]);
-const BINDABLE_KINDS = Object.freeze(["shipped_release", "live_check", "accepted_record", "refusal_proof"]);
+const BINDABLE_KINDS = Object.freeze(["shipped_release", "live_check", "accepted_record"]);
 
 function bindSchema(kinds) {
   return {
@@ -88,6 +90,7 @@ function bindSchema(kinds) {
       live_check_source: { type: ["string", "null"], enum: [...LIVE_CHECK_SOURCES, null] },
       live_check_key: { type: ["string", "null"] },
       write_required_reason: { type: ["string", "null"] },
+      bound_member_id: { type: ["string", "null"] },
       reason: { type: "string", minLength: 1 },
     },
     required: ["idempotency_key", "slice_id", "criterion", "evidence_kind", "reason"],
@@ -145,9 +148,10 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
     let row;
     try {
       row = (await c.query(
-        `select * from ${door}($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `select * from ${door}($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [args.slice_id, args.criterion, args.evidence_kind, args.live_check_source ?? null,
-         args.live_check_key ?? null, args.write_required_reason ?? null, args.reason, args.idempotency_key],
+         args.live_check_key ?? null, args.write_required_reason ?? null, args.bound_member_id ?? null,
+         args.reason, args.idempotency_key],
       )).rows[0];
     } catch (err) {
       throw new ToolError({ error: "slice_criterion_binding_refused", detail: String(err.message || err) });
@@ -156,7 +160,7 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
     return { ok: true, id: row.id, slice_id: row.slice_id, criterion: row.criterion,
       evidence_kind: row.evidence_kind, live_check_source: row.live_check_source,
       live_check_key: row.live_check_key, write_required_reason: row.write_required_reason,
-      bound_via: row.bound_via, created_at: row.created_at };
+      bound_member_id: row.bound_member_id, bound_via: row.bound_via, created_at: row.created_at };
   }
 
   return {
@@ -341,7 +345,7 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
 
     "register-slice-checkable-done": {
       write: true, authorityOnly: true,
-      description: "Q153, partner authority only: register, once, the checkable_done criteria that define 'done' for a slice_id, each with one evidence binding: 'acceptance' (+workflow_key, workflow_version, acceptance_mode: an accepted ops.workflow_acceptance row for exactly that workflow and mode), 'transition' (+workflow_key, workflow_version, transition_to_stage: a cutover transition into that stage on a plan for that workflow), 'shipped_release' (a merged commit attributed to the slice inside a complete production release), 'live_check' (+live_check_source, live_check_key: a success row in that allowlisted receipt source, or portfolio_acceptance_effect_free: a current portfolio acceptance with zero job/capability/envelope rows in its windows), 'accepted_record' (+live_check_source portfolio_revision_acceptance, live_check_key = portfolio_ref: that portfolio's current, intact accepted revision), 'refusal_proof' (+live_check_source ci_gate, live_check_key = the gate, write_required_reason: allowed only where a production negative would itself need a write; resolved as a shipped release member of the slice), or 'unbound' (bound later with rebind-slice-criterion-evidence). Duplicate criteria and a second registration for the same slice_id are refused. Idempotent on idempotency_key. Automation registers from the catalog instead: register-slice-criteria-from-catalog.",
+      description: "Q153, partner authority only: register, once, the checkable_done criteria that define 'done' for a slice_id, each with one evidence binding: 'acceptance' (+workflow_key, workflow_version, acceptance_mode: an accepted ops.workflow_acceptance row for exactly that workflow and mode), 'transition' (+workflow_key, workflow_version, transition_to_stage: a cutover transition into that stage on a plan for that workflow), 'shipped_release' (a merged commit attributed to the slice inside a complete production release), 'live_check' (+live_check_source, live_check_key: a success row in that allowlisted receipt source, or portfolio_acceptance_effect_free: a current portfolio acceptance with zero job/capability/envelope rows in its windows), 'accepted_record' (+live_check_source portfolio_revision_acceptance, live_check_key = portfolio_ref: that portfolio's current, intact accepted revision), or 'unbound' (bound later with rebind-slice-criterion-evidence). Duplicate criteria and a second registration for the same slice_id are refused. Idempotent on idempotency_key. Automation registers from the catalog instead: register-slice-criteria-from-catalog.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -414,7 +418,7 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
 
     "bind-slice-criterion-evidence": {
       write: true,
-      description: "Automated slice-marker seat only: bind ONE criterion that was registered 'unbound' to shipped_release, live_check, accepted_record or refusal_proof (with live_check_source; live_check_key for every source except staging_restore_only_result; write_required_reason for refusal_proof). The seat may bind a criterion once; only a partner may rebind (rebind-slice-criterion-evidence), and a partner binding always wins. A reason is required. Idempotent on idempotency_key.",
+      description: "Automated slice-marker seat only: bind ONE criterion that was registered 'unbound', only to a kind the server derives as allowed from the criterion's wording (done_state.criteria[].allowed_kinds), and never while a partner holds the slice. shipped_release names one release member of this slice (bound_member_id) and stays a proposal until a partner confirms it with rebind-slice-criterion-evidence. refusal_proof is not offered: no server-recorded gate result exists, so a negatives criterion stays unbound for a partner. The seat may bind a criterion once; only a partner may rebind (rebind-slice-criterion-evidence), and a partner binding always wins. A reason is required. Idempotent on idempotency_key.",
       inputSchema: bindSchema(BINDABLE_KINDS),
       handler: async (c, actor, args) => withEnvelope(c, actor, "bind-slice-criterion-evidence", args, async () =>
         bindHandler(c, "ops.bind_slice_criterion_evidence", args)),

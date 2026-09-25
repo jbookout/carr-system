@@ -2,7 +2,7 @@
 # ci: db-gate
 # doctrine: runbook
 """Rollback-only real-Postgres proof for the slice done-record doors
-(migration 0612), every door call made as a production-shaped login.
+(migration 0619), every door call made as a production-shaped login.
 
 Logins (as ops/workflow-cutover-r02-local-pg-gate.py provisions them):
   carr_authority_joe   member of carr_authority only (partner authority);
@@ -18,30 +18,43 @@ Covered:
   AUTHORITY  the seat doors refuse a writer with no acting actor and with a
              non-seat actor (claude); partner-only doors refuse the writer;
              seat-only doors refuse the authority login.
+  ALLOWLIST  ops.slice_criterion_allowed_kinds derives the kinds the seat may
+             bind from the criterion's wording (restore -> staging restore
+             live_check; refusals/negatives -> nothing; acyclicity -> the
+             accepted portfolio record; zero effects -> effect-free live_check;
+             runtime/human outcomes -> nothing; else shipped_release), and the
+             bind door refuses the seat anything else, any refusal_proof, and an
+             accepted-record/effect-free key other than the catalog portfolio.
   CATALOG    registration from the catalog registers exactly the catalog's
              criteria, unbound, and refuses a slice the catalog lacks, a
              second registration and an unrelated idempotency replay.
-  RESOLVER   shipped_release passes only for this slice's member of a
-             COMPLETE PRODUCTION release; live_check(job_receipt) only for a
-             completion receipt of the bound job; unbound never passes, even
-             with a ref that would prove another binding.
-  BINDING    the seat binds a criterion once; a partner rebinds (and
-             unbinds) at any time and wins.
-  MARKER     auto completion refuses while any criterion is unproven and
-             succeeds, marked_via=automation, once all are; a partner hold
-             refuses every non-authority mark until released; a partner's own
-             complete mark holds too.
   MEMBERS    record_release_slice_members refuses a non-complete or staging
-             release and a slice the catalog lacks; members are append-only.
+             release, a slice the catalog lacks, a subject that does not name
+             the slice (the reviewer's "typo fix in README" forge) and an invalid
+             sha; members are append-only.
+  BINDING    a seat shipped_release binding must name one member of THIS slice
+             in a complete production release and is only a PROPOSAL: nothing
+             proves it until a partner confirms it by rebinding; the seat binds
+             a criterion once; a partner rebinds (and unbinds) at any time and
+             wins; a partner hold refuses a seat bind.
+  RESOLVER   shipped_release passes only for the bound member; live_check
+             (job_receipt) only for a completion receipt of the bound job;
+             unbound never passes, even with a ref that would prove another
+             binding.
+  MARKER     auto completion refuses while any criterion is unproven and
+             succeeds, marked_via=automation, once all are; progress records the
+             server-derived actor only (none is refused, a caller slug is
+             ignored); a partner hold refuses every non-authority mark until
+             released; a partner's own complete mark holds too.
   PORTFOLIO  accepted_record passes only for the CURRENT, INTACT accepted
-             revision of the bound portfolio (a real propose / independent
+             revision of the catalog portfolio (a real propose / independent
              review / partner accept through the portfolio doors) and fails the
-             moment a row is tampered with or the key names another portfolio;
+             moment a row is tampered with or the ref names another portfolio;
              live_check portfolio_acceptance_effect_free fails once a job is
-             created in an acceptance window; refusal_proof/ci_gate resolves
-             only as this slice's shipped member. Each kind's CHECK refuses a
-             missing key/source and a refusal_proof with no write_required
-             reason; read_slice_done_state reports candidate_passes from the
+             created in an acceptance window; refusal_proof is refused at
+             registration and at every bind (no server-recorded gate result
+             exists), so a negatives criterion stays unbound until a partner
+             decides it; read_slice_done_state reports candidate_passes from the
              live rows.
 """
 
@@ -72,6 +85,7 @@ SLICE_OTHER = "V5-ZT02"
 SLICE_PF = "V5-ZT03"
 CRITERIA = ["behaviour ships", "live job completes", "runtime outcome observed"]
 PF_CRITERIA = ["counts and acyclicity pass", "write-verb negatives refuse", "acceptance creates zero effects"]
+CATALOG_PORTFOLIO = "DoctorCre-v5"
 PF_CHILDREN = ("foundation-and-control-plane", "assurance-fabric", "product-journeys", "rollout-and-retirement")
 PLACEHOLDER = "sha256:" + "0" * 64
 
@@ -198,13 +212,45 @@ def insert_job_receipt(cur: Any, definition_key: str, kind: str) -> str:
     return rid
 
 
-def member(sha_seed: str, slice_id: str = SLICE) -> dict:
+def member(sha_seed: str, slice_id: str = SLICE, subject: str | None = None) -> dict:
     return {"slice_id": slice_id, "commit_sha": hashlib.sha1(sha_seed.encode()).hexdigest(),
-            "pr_number": 1, "subject": f"{slice_id}: fixture {sha_seed}", "attribution": "explicit"}
+            "pr_number": 1, "subject": subject or f"{slice_id}: fixture {sha_seed}", "attribution": "explicit"}
 
 
 def receipt(refs: dict[str, str | None]) -> Jsonb:
     return Jsonb([{"criterion": c, "evidence_ref": refs.get(c)} for c in CRITERIA])
+
+
+BIND = "select ops.bind_slice_criterion_evidence(%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+REBIND = "select ops.rebind_slice_criterion_evidence(%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+
+
+def bind_args(slice_id: str, criterion: str, kind: str, source: str | None = None, key: str | None = None,
+              write_reason: str | None = None, member_id: str | None = None, reason: str = "r") -> tuple:
+    return (slice_id, criterion, kind, source, key, write_reason, member_id, reason, uuid.uuid4())
+
+
+ALLOWED = [
+    ("staging restore succeeds", ["live_check:staging_restore_only_result"]),
+    ("write-verb negatives refuse", []),
+    ("bypass attempts are refused", []),
+    ("counts and acyclicity pass", ["accepted_record:portfolio_revision_acceptance"]),
+    ("acceptance creates zero effects", ["live_check:portfolio_acceptance_effect_free"]),
+    ("Joe uses it for a week", []),
+    ("pilot outcome observed", []),
+    ("behaviour ships", ["shipped_release:"]),
+    ("live job completes", ["shipped_release:"]),
+]
+
+SUBJECTS = [
+    ("V5-ZT01: fixture", "V5-ZT01", True),
+    ("F03 live admission validators", "V5-F03", True),
+    ("V5-J101 daily workspace (#1259)", "V5-J101", True),
+    ("typo fix in README", "V5-F03", False),
+    ("F031 is another id", "V5-F03", False),
+    ("V5-F03X is another id", "V5-F03", False),
+    ("ZT01 bare ids only for F/A/S/J", "V5-ZT01", False),
+]
 
 
 def run(cur: Any) -> str | None:
@@ -216,8 +262,7 @@ def run(cur: Any) -> str | None:
     # ---------------------------------------------------------------- AUTHORITY
     seat_doors = [
         ("register from catalog", "select * from ops.register_slice_criteria_from_catalog(%s,%s)", (SLICE, uuid.uuid4())),
-        ("bind", "select ops.bind_slice_criterion_evidence(%s,%s,'shipped_release',null,null,null,'r',%s)",
-         (SLICE, CRITERIA[0], uuid.uuid4())),
+        ("bind", BIND, bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=str(uuid.uuid4()))),
         ("record members", "select * from ops.record_release_slice_members(%s,%s)", ("none", Jsonb([member("a")]))),
         ("auto complete", "select ops.auto_mark_slice_completion(%s,%s,'r',%s)", (SLICE, receipt({}), uuid.uuid4())),
     ]
@@ -228,8 +273,7 @@ def run(cur: Any) -> str | None:
                                match="slice_marker_seat_required")
     with as_login(cur, WRITER, SEAT):
         for label, query, params in [
-            ("rebind", "select ops.rebind_slice_criterion_evidence(%s,%s,'unbound',null,null,null,'r',%s)",
-             (SLICE, CRITERIA[0], uuid.uuid4())),
+            ("rebind", REBIND, bind_args(SLICE, CRITERIA[0], "unbound")),
             ("hold", "select ops.set_slice_mark_hold(%s,'hold','blocked','r',%s)", (SLICE, uuid.uuid4())),
             ("partner complete", "select ops.mark_slice_completion(%s,%s,'r',%s)", (SLICE, receipt({}), uuid.uuid4())),
             ("partner register", "select ops.register_slice_checkable_done(%s,'[]'::jsonb,%s)", (SLICE, uuid.uuid4())),
@@ -239,7 +283,25 @@ def run(cur: Any) -> str | None:
         for label, query, params in seat_doors:
             expect_refusal(cur, query, params, f"authority login {label}", match="permission denied")
 
+    # --------------------------------------------------------------- ALLOWLIST
+    with as_login(cur, READER):
+        for wording, expected in ALLOWED:
+            got = cur.execute("select ops.slice_criterion_allowed_kinds(%s)", (wording,)).fetchone()[0]
+            if got != expected:
+                return f"allowlist: {wording!r} allows {got}, expected {expected}"
+    for subject, slice_id, expected in SUBJECTS:
+        got = cur.execute("select ops.slice_subject_names_slice(%s,%s)", (subject, slice_id)).fetchone()[0]
+        if got is not expected:
+            return f"subject check: {subject!r} naming {slice_id} gave {got}, expected {expected}"
+
     # ------------------------------------------------------------------ CATALOG
+    with as_login(cur, READER):
+        pre = cur.execute("select ops.read_slice_done_state(%s)", (SLICE,)).fetchone()[0]
+        nope = cur.execute("select ops.read_slice_done_state('V5-NOPE')").fetchone()[0]
+    if pre["registered"] or pre["catalog_allowed_kinds"] != {
+            CRITERIA[0]: ["shipped_release:"], CRITERIA[1]: ["shipped_release:"], CRITERIA[2]: []} \
+            or nope["catalog_allowed_kinds"] is not None:
+        return f"read_slice_done_state catalog_allowed_kinds wrong before registration: {pre} / {nope}"
     reg_key = uuid.uuid4()
     with as_login(cur, WRITER, SEAT):
         expect_refusal(cur, "select * from ops.register_slice_criteria_from_catalog(%s,%s)", ("V5-NOPE", uuid.uuid4()),
@@ -260,7 +322,8 @@ def run(cur: Any) -> str | None:
         return f"registration audit fields wrong: {reg}"
 
     # ------------------------------------------------------------------ MEMBERS
-    rel_ok = insert_release(cur, f"r-sdm-{token}-ok")
+    rel_ok = f"r-sdm-{token}-ok"
+    insert_release(cur, rel_ok)
     insert_release(cur, f"r-sdm-{token}-cand", state="candidate")
     insert_release(cur, f"r-sdm-{token}-stg", environment="staging")
     with as_login(cur, WRITER, SEAT):
@@ -268,22 +331,32 @@ def run(cur: Any) -> str | None:
             expect_refusal(cur, "select * from ops.record_release_slice_members(%s,%s)", (key, Jsonb([member("a")])),
                            label, match="release_not_complete_production")
         expect_refusal(cur, "select * from ops.record_release_slice_members(%s,%s)",
-                       (f"r-sdm-{token}-ok", Jsonb([member("a", "V5-NOPE")])), "a non-catalog slice",
+                       (rel_ok, Jsonb([member("a", "V5-NOPE")])), "a non-catalog slice",
                        match="slice_not_in_catalog")
+        # The reviewer's forge: a member whose subject never names the slice.
+        expect_refusal(cur, "select * from ops.record_release_slice_members(%s,%s)",
+                       (rel_ok, Jsonb([member("forge", SLICE, "typo fix in README")])),
+                       "a member whose subject does not name the slice", match="member_subject_does_not_name_slice")
+        bad_sha = dict(member("a"), commit_sha="not-a-sha")
+        expect_refusal(cur, "select * from ops.record_release_slice_members(%s,%s)", (rel_ok, Jsonb([bad_sha])),
+                       "a member with an invalid commit sha", match="member_commit_sha_invalid")
         members = cur.execute("select id::text, slice_id from ops.record_release_slice_members(%s,%s)",
-                              (f"r-sdm-{token}-ok", Jsonb([member("a"), member("b", SLICE_OTHER)]))).fetchall()
+                              (rel_ok, Jsonb([member("a"), member("b", SLICE_OTHER)]))).fetchall()
         again = cur.execute("select count(*) from ops.record_release_slice_members(%s,%s)",
-                            (f"r-sdm-{token}-ok", Jsonb([member("a")]))).fetchone()[0]
+                            (rel_ok, Jsonb([member("a")]))).fetchone()[0]
     if len(members) != 2 or again != 2:
         return f"membership recording is not idempotent per (release, slice, commit): {members} / {again}"
     mine = next(m for m, s in members if s == SLICE)
     theirs = next(m for m, s in members if s == SLICE_OTHER)
+    with as_login(cur, WRITER, SEAT):
+        mine2 = cur.execute("select id::text from ops.record_release_slice_members(%s,%s) where commit_sha=%s",
+                            (rel_ok, Jsonb([member("c")]), hashlib.sha1(b"c").hexdigest())).fetchone()[0]
     # A member of a non-complete release, written as owner, must never prove.
     cur.execute("set local session_replication_role=replica")
     cand_id = cur.execute("select id, git_sha from ops.release where release_key=%s", (f"r-sdm-{token}-cand",)).fetchone()
     stale = cur.execute(
         """insert into ops.release_slice_member(release_id,release_git_sha,slice_id,commit_sha,subject,attribution,recorded_by_actor_slug)
-           values (%s,%s,%s,%s,'fixture','explicit','owner') returning id::text""",
+           values (%s,%s,%s,%s,'V5-ZT01: fixture','explicit','owner') returning id::text""",
         (cand_id[0], cand_id[1], SLICE, hashlib.sha1(b"cand").hexdigest())).fetchone()[0]
     cur.execute("set local session_replication_role=origin")
     expect_refusal(cur, "delete from ops.release_slice_member where id=%s", (mine,), "deleting a member (owner)",
@@ -291,16 +364,33 @@ def run(cur: Any) -> str | None:
 
     # ------------------------------------------------------------------ BINDING
     with as_login(cur, WRITER, SEAT):
-        cur.execute("select ops.bind_slice_criterion_evidence(%s,%s,'shipped_release',null,null,null,'ships as source',%s)",
-                    (SLICE, CRITERIA[0], uuid.uuid4()))
-        expect_refusal(cur, "select ops.bind_slice_criterion_evidence(%s,%s,'live_check','job_receipt',%s,null,'flip',%s)",
-                       (SLICE, CRITERIA[0], job_key, uuid.uuid4()), "a second automation binding",
-                       match="criterion_already_bound")
-        expect_refusal(cur, "select ops.bind_slice_criterion_evidence(%s,%s,'live_check',null,null,null,'r',%s)",
-                       (SLICE, CRITERIA[1], uuid.uuid4()), "a live_check binding with no source",
-                       match="slice_criterion_binding")
-        cur.execute("select ops.bind_slice_criterion_evidence(%s,%s,'live_check','job_receipt',%s,null,'job proves it',%s)",
-                    (SLICE, CRITERIA[1], job_key, uuid.uuid4()))
+        for args, label, match in (
+            (bind_args(SLICE, CRITERIA[0], "shipped_release"), "a shipped_release naming no member",
+             "shipped_release_binding_requires_this_slice_member"),
+            (bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=theirs), "another slice's member",
+             "shipped_release_binding_requires_this_slice_member"),
+            (bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=stale), "a member of a candidate release",
+             "shipped_release_binding_requires_this_slice_member"),
+            (bind_args(SLICE, CRITERIA[1], "live_check", "job_receipt", job_key), "a kind the wording does not allow",
+             "automation_binding_kind_not_allowed"),
+            (bind_args(SLICE, CRITERIA[2], "shipped_release", member_id=mine), "shipped_release for a runtime outcome",
+             "automation_binding_kind_not_allowed"),
+            (bind_args(SLICE, CRITERIA[2], "refusal_proof", "ci_gate", "ci", "writes"), "a refusal_proof binding",
+             "refusal_proof_has_no_server_gate_source"),
+        ):
+            expect_refusal(cur, BIND, args, f"seat bind: {label}", match=match)
+        proposed = cur.execute(
+            "select evidence_kind, bound_member_id::text, bound_via from ops.bind_slice_criterion_evidence(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=mine, reason="Jev matched")).fetchone()
+        expect_refusal(cur, BIND, bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=mine2),
+                       "a second automation binding", match="criterion_already_bound")
+    if proposed != ("shipped_release", mine, "automation"):
+        return f"seat shipped_release proposal not recorded with its member: {proposed}"
+    with as_login(cur, AUTHORITY):
+        cur.execute(REBIND, bind_args(SLICE, CRITERIA[1], "live_check", "job_receipt", job_key,
+                                      reason="partner: the job proves it"))
+        expect_refusal(cur, REBIND, bind_args(SLICE, CRITERIA[2], "live_check", "job_receipt", job_key, member_id=mine),
+                       "a member on a non-shipped_release binding", match="bound_member_only_for_shipped_release")
 
     # ----------------------------------------------------------------- RESOLVER
     good_job = insert_job_receipt(cur, job_key, "completion")
@@ -312,8 +402,22 @@ def run(cur: Any) -> str | None:
         by = {el["criterion"]: el["pass"] for el in got}
         return [by[c] for c in CRITERIA]
 
+    # An automated shipped_release binding is only a proposal: nothing proves it.
+    if evaluate({CRITERIA[0]: mine}) != [False, False, False]:
+        return "an unconfirmed automation shipped_release proposal already proved its criterion"
+    with as_login(cur, READER):
+        c0 = cur.execute("select ops.read_slice_done_state(%s)", (SLICE,)).fetchone()[0]["criteria"]
+    c0 = next(c for c in c0 if c["criterion"] == CRITERIA[0])
+    if c0["evidence_kind"] != "unbound" or (c0.get("proposal") or {}).get("bound_member_id") != mine \
+            or c0["candidate_passes"] is not False:
+        return f"read_slice_done_state did not report the pending proposal: {c0}"
+    with as_login(cur, AUTHORITY):
+        cur.execute(REBIND, bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=mine,
+                                      reason="partner confirms the proposed PR"))
+
     cases = [
-        ({CRITERIA[0]: mine}, [True, False, False], "this slice's member of a complete production release"),
+        ({CRITERIA[0]: mine}, [True, False, False], "the confirmed member of a complete production release"),
+        ({CRITERIA[0]: mine2}, [False, False, False], "this slice's other member, not the one bound"),
         ({CRITERIA[0]: theirs}, [False, False, False], "another slice's member"),
         ({CRITERIA[0]: stale}, [False, False, False], "a member of a candidate release"),
         ({CRITERIA[0]: good_job}, [False, False, False], "a job receipt against a shipped_release binding"),
@@ -327,6 +431,14 @@ def run(cur: Any) -> str | None:
         got = evaluate(refs)
         if got != expected:
             return f"resolver: {label}: expected {expected}, got {got}"
+    # The bound member proves only while its release is a complete production one.
+    cur.execute("savepoint sdm_superseded")
+    cur.execute("set local session_replication_role=replica")
+    cur.execute("update ops.release set state='verifying', ended_at=null where release_key=%s", (rel_ok,))
+    cur.execute("set local session_replication_role=origin")
+    if evaluate({CRITERIA[0]: mine}) != [False, False, False]:
+        return "a bound member of a release that is no longer complete still proved its criterion"
+    cur.execute("rollback to savepoint sdm_superseded")
 
     # ------------------------------------------------------------------- MARKER
     full = {CRITERIA[0]: mine, CRITERIA[1]: good_job, CRITERIA[2]: mine}
@@ -338,25 +450,34 @@ def run(cur: Any) -> str | None:
             (SLICE, receipt(full), uuid.uuid4())).fetchone()
     if prog != ("in_progress", "automation", SEAT):
         return f"seat progress mark did not record automation and the server-derived actor: {prog}"
+    # The actor is the server-derived one only: none is refused, a caller slug is ignored.
+    with as_login(cur, WRITER):
+        expect_refusal(cur, "select ops.mark_slice_progress(%s,'in_progress',%s,'r',%s,'joe')",
+                       (SLICE, receipt(full), uuid.uuid4()), "writer progress with no acting actor",
+                       match="acting_actor_required")
+    with as_login(cur, WRITER, "claude"):
+        prog = cur.execute(
+            "select marked_via, marked_by_actor_slug from ops.mark_slice_progress(%s,'in_progress',%s,'r',%s,'joe')",
+            (SLICE, receipt(full), uuid.uuid4())).fetchone()
+    if prog != ("writer", "claude"):
+        return f"writer progress recorded a caller-supplied actor: {prog}"
     # Partner binds the runtime criterion to the job too; partner wins.
     with as_login(cur, AUTHORITY):
-        cur.execute("select ops.rebind_slice_criterion_evidence(%s,%s,'live_check','job_receipt',%s,null,'partner: job proves it',%s)",
-                    (SLICE, CRITERIA[2], job_key, uuid.uuid4()))
+        cur.execute(REBIND, bind_args(SLICE, CRITERIA[2], "live_check", "job_receipt", job_key,
+                                      reason="partner: job proves it"))
     full[CRITERIA[2]] = good_job
     with as_login(cur, WRITER, SEAT):
         done = cur.execute("select status, marked_via, marked_by_actor_slug from ops.auto_mark_slice_completion(%s,%s,'all proven',%s)",
                            (SLICE, receipt(full), uuid.uuid4())).fetchone()
     if done != ("complete", "automation", SEAT):
         return f"auto completion did not mark complete as automation: {done}"
-    # Partner rebind wins over automation: unbinding criterion 0 makes it unprovable.
+    # Partner rebind wins: unbinding criterion 0 makes it unprovable.
     with as_login(cur, AUTHORITY):
-        cur.execute("select ops.rebind_slice_criterion_evidence(%s,%s,'unbound',null,null,null,'partner: not a source criterion',%s)",
-                    (SLICE, CRITERIA[0], uuid.uuid4()))
+        cur.execute(REBIND, bind_args(SLICE, CRITERIA[0], "unbound", reason="partner: not a source criterion"))
     if evaluate(full) != [False, True, True]:
-        return f"a partner unbind did not override the automation binding: {evaluate(full)}"
+        return f"a partner unbind did not override the binding: {evaluate(full)}"
     with as_login(cur, AUTHORITY):
-        cur.execute("select ops.rebind_slice_criterion_evidence(%s,%s,'shipped_release',null,null,null,'partner: restore',%s)",
-                    (SLICE, CRITERIA[0], uuid.uuid4()))
+        cur.execute(REBIND, bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=mine, reason="partner: restore"))
 
     # Partner hold refuses every non-authority mark until released.
     with as_login(cur, AUTHORITY):
@@ -390,6 +511,20 @@ def run(cur: Any) -> str | None:
         expect_refusal(cur, "select ops.mark_slice_progress(%s,'in_progress',%s,'r',%s,'x')", (SLICE, receipt(full), uuid.uuid4()),
                        "seat progress over a partner complete", match="slice_mark_held_by_partner")
 
+    # A partner hold also blocks an automated BIND (on a fresh slice).
+    with as_login(cur, WRITER, SEAT):
+        cur.execute("select * from ops.register_slice_criteria_from_catalog(%s,%s)", (SLICE_OTHER, uuid.uuid4()))
+    with as_login(cur, AUTHORITY):
+        cur.execute("select ops.set_slice_mark_hold(%s,'hold','blocked','partner decides this one',%s)",
+                    (SLICE_OTHER, uuid.uuid4()))
+    with as_login(cur, WRITER, SEAT):
+        expect_refusal(cur, BIND, bind_args(SLICE_OTHER, "other criterion", "shipped_release", member_id=theirs),
+                       "a seat bind over a partner hold", match="slice_mark_held_by_partner")
+    with as_login(cur, AUTHORITY):
+        cur.execute("select ops.set_slice_mark_hold(%s,'release',null,'go ahead',%s)", (SLICE_OTHER, uuid.uuid4()))
+    with as_login(cur, WRITER, SEAT):
+        cur.execute(BIND, bind_args(SLICE_OTHER, "other criterion", "shipped_release", member_id=theirs))
+
     # -------------------------------------------------------------- READ STATE
     with as_login(cur, READER):
         state = cur.execute("select ops.read_slice_done_state(%s)", (SLICE,)).fetchone()[0]
@@ -397,17 +532,18 @@ def run(cur: Any) -> str | None:
     kinds = {c["criterion"]: c["evidence_kind"] for c in state["criteria"]}
     if kinds != {CRITERIA[0]: "shipped_release", CRITERIA[1]: "live_check", CRITERIA[2]: "live_check"} \
             or not state["held_by_partner"] or state["latest_mark"]["marked_via"] != "authority" \
-            or [m["id"] for m in state["release_members"]] != [mine]:
+            or sorted(m["id"] for m in state["release_members"]) != sorted([mine, mine2]):
         return f"read_slice_done_state is wrong: {json.dumps(state)[:600]}"
-    candidates = {c["criterion"]: c["live_check_candidate"] for c in state["criteria"]}
-    if candidates[CRITERIA[1]] != good_job:
-        return f"read_slice_done_state did not name the newest bound job completion: {candidates}"
+    by = {c["criterion"]: c for c in state["criteria"]}
+    if by[CRITERIA[1]]["live_check_candidate"] != good_job or by[CRITERIA[0]]["live_check_candidate"] != mine \
+            or by[CRITERIA[0]]["bound_member_id"] != mine or by[CRITERIA[0]].get("proposal") is not None:
+        return f"read_slice_done_state candidates wrong: {json.dumps(state['criteria'])[:600]}"
     keys = {k for (k,) in listed}
-    if f"r-sdm-{token}-ok" not in keys or f"r-sdm-{token}-cand" in keys or f"r-sdm-{token}-stg" in keys:
+    if rel_ok not in keys or f"r-sdm-{token}-cand" in keys or f"r-sdm-{token}-stg" in keys:
         return f"list_shipped_releases returned the wrong releases: {sorted(keys)[-5:]}"
     expect_refusal(cur, "update ops.slice_criterion_binding set reason='x' where slice_id=%s", (SLICE,),
                    "rewriting a binding (owner)", match="append-only")
-    return portfolio_section(cur, token, f"r-sdm-{token}-ok")
+    return portfolio_section(cur, token, rel_ok, mine)
 
 
 def portfolio_payload(portfolio_ref: str) -> tuple[list, list, list, dict]:
@@ -472,64 +608,72 @@ def accept_portfolio(cur: Any, portfolio: str) -> tuple[str, str]:
     return str(rev), receipt_id
 
 
-def portfolio_section(cur: Any, token: str, release_key: str) -> str | None:
-    portfolio = f"SDM-GATE-{token}"
+def portfolio_section(cur: Any, token: str, release_key: str, zt01_member: str) -> str | None:
+    portfolio = CATALOG_PORTFOLIO
     other = f"SDM-OTHER-{token}"
     counts, negatives, effects = PF_CRITERIA
-    gate_reason = "the negatives are write-verb refusals; exercising them in production would write"
+    if cur.execute("select exists (select 1 from ops.portfolio_revision where portfolio_ref=%s)",
+                   (portfolio,)).fetchone()[0]:
+        return f"this gate needs a database with no {portfolio} portfolio (it proposes one inside the rollback)"
 
-    # Registry CHECK: each kind needs its own source/key; refusal_proof needs a reason.
+    # Registry CHECK (partner registration): each kind needs its own source and
+    # key; refusal_proof is refused outright (no server gate-result source).
     bad = [
         ({"criterion": counts, "evidence_kind": "accepted_record", "live_check_source": "portfolio_revision_acceptance"},
-         "accepted_record with no key"),
+         "accepted_record with no key", "slice_checkable_done_registry_binding_check"),
         ({"criterion": counts, "evidence_kind": "accepted_record", "live_check_source": "ci_gate", "live_check_key": portfolio},
-         "accepted_record on the ci_gate source"),
-        ({"criterion": negatives, "evidence_kind": "refusal_proof", "live_check_source": "ci_gate", "live_check_key": "ci"},
-         "refusal_proof with no write_required_reason"),
+         "accepted_record on the ci_gate source", "slice_checkable_done_registry_binding_check"),
+        ({"criterion": negatives, "evidence_kind": "refusal_proof", "live_check_source": "ci_gate", "live_check_key": "ci",
+          "write_required_reason": "writes"}, "a refusal_proof registration", "refusal_proof_has_no_server_gate_source"),
         ({"criterion": effects, "evidence_kind": "live_check", "live_check_source": "portfolio_acceptance_effect_free"},
-         "effect_free live_check with no key"),
+         "effect_free live_check with no key", "slice_checkable_done_registry_binding_check"),
         ({"criterion": effects, "evidence_kind": "live_check", "live_check_source": "job_receipt", "live_check_key": "x",
-          "write_required_reason": "nope"}, "a live_check carrying a write_required_reason"),
+          "write_required_reason": "nope"}, "a live_check carrying a write_required_reason",
+         "slice_checkable_done_registry_binding_check"),
     ]
     with as_login(cur, AUTHORITY):
-        for element, label in bad:
+        for element, label, match in bad:
             expect_refusal(cur, "select * from ops.register_slice_checkable_done(%s,%s,%s)",
-                           (SLICE_PF, Jsonb([element]), uuid.uuid4()), f"registry: {label}",
-                           match="slice_checkable_done_registry_binding_check")
-        cur.execute("select * from ops.register_slice_checkable_done(%s,%s,%s)", (SLICE_PF, Jsonb([
-            {"criterion": counts, "evidence_kind": "accepted_record",
-             "live_check_source": "portfolio_revision_acceptance", "live_check_key": portfolio},
-            {"criterion": negatives, "evidence_kind": "refusal_proof", "live_check_source": "ci_gate",
-             "live_check_key": "ci:merge-gate", "write_required_reason": gate_reason},
-            {"criterion": effects, "evidence_kind": "live_check",
-             "live_check_source": "portfolio_acceptance_effect_free", "live_check_key": portfolio},
-        ]), uuid.uuid4()))
-
-    # Binding CHECK, on the seat's once-only door.
-    with as_login(cur, WRITER, SEAT):
-        cur.execute("select * from ops.register_slice_criteria_from_catalog(%s,%s)", (SLICE_OTHER, uuid.uuid4()))
-        for kind, source, key, reason, label in (
-            ("refusal_proof", "ci_gate", "ci", None, "refusal_proof with no write_required_reason"),
-            ("accepted_record", "portfolio_revision_acceptance", None, None, "accepted_record with no key"),
-            ("accepted_record", "portfolio_revision_acceptance", portfolio, "r", "accepted_record with a write reason"),
-            ("refusal_proof", "portfolio_revision_acceptance", "ci", "r", "refusal_proof on a portfolio source"),
+                           (SLICE_PF, Jsonb([element]), uuid.uuid4()), f"registry: {label}", match=match)
+        # Binding CHECK, on the partner door (the seat's allowlist refuses first).
+        for args, label, match in (
+            (bind_args(SLICE_OTHER, "other criterion", "accepted_record", "portfolio_revision_acceptance"),
+             "accepted_record with no key", "slice_criterion_binding"),
+            (bind_args(SLICE_OTHER, "other criterion", "accepted_record", "portfolio_revision_acceptance", portfolio, "r"),
+             "accepted_record with a write reason", "slice_criterion_binding"),
+            (bind_args(SLICE_OTHER, "other criterion", "live_check"), "a live_check with no source",
+             "slice_criterion_binding"),
+            (bind_args(SLICE_OTHER, "other criterion", "refusal_proof", "ci_gate", "ci", "writes"),
+             "a partner refusal_proof", "refusal_proof_has_no_server_gate_source"),
+            (bind_args(SLICE_OTHER, "other criterion", "shipped_release"), "a partner shipped_release naming no member",
+             "shipped_release_binding_requires_this_slice_member"),
         ):
-            expect_refusal(cur, "select ops.bind_slice_criterion_evidence(%s,'other criterion',%s,%s,%s,%s,'r',%s)",
-                           (SLICE_OTHER, kind, source, key, reason, uuid.uuid4()), f"binding: {label}",
-                           match="slice_criterion_binding")
-        bound = cur.execute(
-            "select evidence_kind, write_required_reason from ops.bind_slice_criterion_evidence(%s,'other criterion','refusal_proof','ci_gate','ci',%s,'r',%s)",
-            (SLICE_OTHER, gate_reason, uuid.uuid4())).fetchone()
-    if bound != ("refusal_proof", gate_reason):
-        return f"seat refusal_proof binding not recorded with its reason: {bound}"
+            expect_refusal(cur, REBIND, args, f"binding: {label}", match=match)
 
     rev, accepted = accept_portfolio(cur, portfolio)
     other_rev, other_accepted = accept_portfolio(cur, other)
+
+    # The seat registers the slice from the catalog and binds only what the
+    # wording allows, only on the catalog portfolio.
     with as_login(cur, WRITER, SEAT):
+        cur.execute("select * from ops.register_slice_criteria_from_catalog(%s,%s)", (SLICE_PF, uuid.uuid4()))
         pf_member = cur.execute("select id::text from ops.record_release_slice_members(%s,%s) where slice_id=%s",
                                 (release_key, Jsonb([member("pf", SLICE_PF)]), SLICE_PF)).fetchone()[0]
-    zt01_member = cur.execute("select id::text from ops.release_slice_member where slice_id=%s limit 1",
-                              (SLICE,)).fetchone()[0]
+        for args, label, match in (
+            (bind_args(SLICE_PF, counts, "accepted_record", "portfolio_revision_acceptance", other),
+             "accepted_record on another portfolio", "automation_portfolio_key_not_catalog_portfolio"),
+            (bind_args(SLICE_PF, effects, "live_check", "portfolio_acceptance_effect_free", other),
+             "effect-free on another portfolio", "automation_portfolio_key_not_catalog_portfolio"),
+            (bind_args(SLICE_PF, counts, "shipped_release", member_id=pf_member),
+             "shipped_release for an acyclicity criterion", "automation_binding_kind_not_allowed"),
+            (bind_args(SLICE_PF, negatives, "shipped_release", member_id=pf_member),
+             "shipped_release for a negatives criterion", "automation_binding_kind_not_allowed"),
+            (bind_args(SLICE_PF, negatives, "refusal_proof", "ci_gate", "ci:merge-gate", "writes"),
+             "refusal_proof for a negatives criterion", "refusal_proof_has_no_server_gate_source"),
+        ):
+            expect_refusal(cur, BIND, args, f"seat bind: {label}", match=match)
+        cur.execute(BIND, bind_args(SLICE_PF, counts, "accepted_record", "portfolio_revision_acceptance", portfolio))
+        cur.execute(BIND, bind_args(SLICE_PF, effects, "live_check", "portfolio_acceptance_effect_free", portfolio))
 
     def pf_eval(refs: dict[str, str | None]) -> list[bool]:
         got = cur.execute("select ops.slice_completion_evaluate(%s,%s)", (SLICE_PF, Jsonb(
@@ -537,26 +681,38 @@ def portfolio_section(cur: Any, token: str, release_key: str) -> str | None:
         by = {el["criterion"]: el["pass"] for el in got}
         return [by[c] for c in PF_CRITERIA]
 
+    all_refs = {counts: accepted, negatives: pf_member, effects: accepted}
     cases = [
-        ({counts: accepted, negatives: pf_member, effects: accepted}, [True, True, True],
-         "the current intact acceptance, this slice's shipped member, an effect-free acceptance"),
+        (all_refs, [True, False, True], "the current intact acceptance; the negatives stay unbound"),
         ({counts: other_accepted, effects: other_accepted}, [False, False, False],
          "another portfolio's acceptance against this key"),
         ({counts: pf_member, negatives: accepted, effects: pf_member}, [False, False, False],
          "refs swapped across kinds"),
-        ({negatives: zt01_member}, [False, False, False], "another slice's shipped member as the refusal proof"),
         ({counts: rev, effects: rev}, [False, False, False], "the revision id instead of the acceptance receipt"),
     ]
     for refs, expected, label in cases:
         got = pf_eval(refs)
         if got != expected:
             return f"portfolio resolver: {label}: expected {expected}, got {got}"
-
     with as_login(cur, READER):
         live = {c["criterion"]: (c["live_check_candidate"], c["candidate_passes"])
                 for c in cur.execute("select ops.read_slice_done_state(%s)", (SLICE_PF,)).fetchone()[0]["criteria"]}
-    if live != {counts: (accepted, True), negatives: (pf_member, True), effects: (accepted, True)}:
+    if live != {counts: (accepted, True), negatives: (None, False), effects: (accepted, True)}:
         return f"read_slice_done_state candidates/candidate_passes wrong before any effect: {live}"
+    with as_login(cur, WRITER, SEAT):
+        expect_refusal(cur, "select ops.auto_mark_slice_completion(%s,%s,'r',%s)",
+                       (SLICE_PF, Jsonb([{"criterion": c, "evidence_ref": all_refs[c]} for c in PF_CRITERIA]),
+                        uuid.uuid4()), "auto completion with the negatives unbound", match="every_criterion_proven")
+
+    # Only a partner decides the negatives (here: the shipped PR whose CI gate
+    # exercised them).
+    with as_login(cur, AUTHORITY):
+        cur.execute(REBIND, bind_args(SLICE_PF, negatives, "shipped_release", member_id=pf_member,
+                                      reason="partner: the PR's gate exercised the refusals"))
+    if pf_eval(all_refs) != [True, True, True]:
+        return f"the partner-decided negatives did not resolve: {pf_eval(all_refs)}"
+    if pf_eval({negatives: zt01_member}) != [False, False, False]:
+        return "another slice's shipped member proved the negatives"
 
     # An effect created inside an acceptance window fails the effect-free check.
     cur.execute("savepoint sdm_effect")
@@ -564,7 +720,7 @@ def portfolio_section(cur: Any, token: str, release_key: str) -> str | None:
     cur.execute("""insert into ops.job (definition_key,definition_version,idempotency_key,scheduled_for,max_attempts,timeout_seconds)
                    values ('sdm-gate-effect',1,%s,now(),1,30)""", (uuid.uuid4().hex,))
     cur.execute("set local session_replication_role=origin")
-    if pf_eval({counts: accepted, negatives: pf_member, effects: accepted}) != [True, True, False]:
+    if pf_eval(all_refs) != [True, True, False]:
         return "a job created in the acceptance window did not fail portfolio_acceptance_effect_free"
     with as_login(cur, READER):
         live = {c["criterion"]: c["candidate_passes"]
@@ -580,16 +736,13 @@ def portfolio_section(cur: Any, token: str, release_key: str) -> str | None:
     cur.execute("update ops.portfolio_node set budget_ceiling = budget_ceiling + 1 where portfolio_revision_id=%s and ordinal=1",
                 (rev,))
     cur.execute("set local session_replication_role=origin")
-    if pf_eval({counts: accepted, negatives: pf_member, effects: accepted}) != [False, True, False]:
+    if pf_eval(all_refs) != [False, True, False]:
         return "a tampered accepted revision still passed accepted_record"
     cur.execute("rollback to savepoint sdm_tamper")
 
-    # A partner complete through the authority door on all three live proofs.
     with as_login(cur, WRITER, SEAT):
         done = cur.execute("select status, marked_via from ops.auto_mark_slice_completion(%s,%s,'all proven',%s)",
-                           (SLICE_PF, Jsonb([{"criterion": counts, "evidence_ref": accepted},
-                                             {"criterion": negatives, "evidence_ref": pf_member},
-                                             {"criterion": effects, "evidence_ref": accepted}]),
+                           (SLICE_PF, Jsonb([{"criterion": c, "evidence_ref": all_refs[c]} for c in PF_CRITERIA]),
                             uuid.uuid4())).fetchone()
     if done != ("complete", "automation"):
         return f"automation could not complete a slice proven by the new kinds: {done}"
@@ -608,8 +761,9 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 — a gate reports, it never crashes silently
         return fail(f"{type(exc).__name__}: {exc}")
     print("slice-done-marker-local-pg-gate: PASS — seat/partner authority, catalog-only registration, "
-          "server-resolved shipped_release/live_check/accepted_record/refusal_proof/unbound evidence, once-only automation binding with "
-          "partner override, and the partner hold, all under production-shaped logins")
+          "a wording-derived allowlist, forged-subject members refused, seat shipped_release as a partner-confirmed proposal, "
+          "refusal_proof refused, server-resolved live_check/accepted_record/unbound evidence, once-only automation binding with "
+          "partner override, and the partner hold over marks and binds, all under production-shaped logins")
     return 0
 
 

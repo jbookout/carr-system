@@ -45,9 +45,11 @@ TWO LANES, one tick:
             9 a db/schema.sql follow-up PR when step 4 applied anything
            10 after SHIPPED, best-effort: ops/slice-done-marker.py --release-key K
               marks the DoctorCRE v5 slices this release shipped (register from
-              the catalog, bind, gather server-resolved evidence, mark). Its exit
-              is recorded as `slice_marker` in the run record; it never fails,
-              blocks or retries the release it follows.
+              the catalog, bind, gather server-resolved evidence, mark). It is
+              STARTED DETACHED, outside the pipeline's single-run lock: the run
+              records `slice_marker` (pid and log) and returns at once, so a slow
+              marker can never delay the next tick. It never fails, blocks or
+              retries the release it follows.
   app     the DoctorCRE app (its own repository). Released when its origin/main
           moves by anything other than docs/tests: `npm ci` and
           `npm run release:production` from a clean detached origin/main
@@ -648,17 +650,22 @@ class Pipeline:
     def _run_slice_marker(self, release_key: str, sha: str) -> dict:
         """ops/slice-done-marker.py in the pipeline's own checkout, through the
         same run.sh call door and with the same minimal environment as
-        _call_verb: no database or deploy credential reaches it."""
+        _call_verb: no database or deploy credential reaches it.
+
+        STARTED, NEVER WAITED FOR. It runs in its own session, detached from
+        this process, so it outlives the pipeline's single-run lock instead of
+        holding it: a marker that takes minutes can never delay the next tick.
+        Its output goes to the run directory's slice-marker.log."""
         log = self.run_dir / "slice-marker.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         venv = self.repo / ".venv" / "bin" / "python"
         env = {k: v for k, v in self.env.items() if k in ("HOME", "PATH", "LANG")}
-        proc = subprocess.run([str(venv if venv.exists() else sys.executable),
-                               str(self.repo / "ops" / "slice-done-marker.py"), "--release-key", release_key],
-                              cwd=str(self.repo), env=env, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=1800)
-        log.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
-        return {"rc": proc.returncode, "log": str(log), "release_sha": sha}
+        with open(log, "ab") as sink:
+            proc = subprocess.Popen([str(venv if venv.exists() else sys.executable),
+                                     str(self.repo / "ops" / "slice-done-marker.py"), "--release-key", release_key],
+                                    cwd=str(self.repo), env=env, stdin=subprocess.DEVNULL,
+                                    stdout=sink, stderr=subprocess.STDOUT, start_new_session=True)
+        return {"started": True, "pid": proc.pid, "log": str(log), "release_sha": sha}
 
     def mark_slices(self, release_key: str, sha: str) -> dict:
         """Step 10, best-effort. Whatever happens here is recorded and never

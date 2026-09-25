@@ -255,18 +255,23 @@ WRITE_ACTION_EXACT = {
                                   # stage forward (read_legacy..recovery_ready). A durable
                                   # state transition a session could report as done without
                                   # having actually advanced, so it is a write this gate cares
-                                  # about; "advance" has no sibling verb today to justify a
-                                  # blanket prefix.
+                                  # about; "advance" has two siblings now and still no
+                                  # blanket prefix: each advance-* is its own exact entry.
+    "advance-journey-one-clock",  # DoctorCRE V5-M01: appends one Journey 1 clock revision
+                                  # through a server-bound installation. A session could
+                                  # report the clock as started or advanced without it
+                                  # having happened (every deployed Worker refuses it), so
+                                  # it is a write this gate cares about. Exact entry.
     "mark-slice-completion",     # DoctorCRE V5-R02 (Q153): the explicit slice-completion
                                   # marker Joe asked for. "mark" is not generalized into a
                                   # prefix (a future mark-* read must not inherit this class).
     "mark-slice-progress",       # DoctorCRE V5-R02 (Q153): the writer-side in_progress/blocked
                                   # mark beside mark-slice-completion; same exact-entry reasoning.
-    "auto-mark-slice-completion",  # slice done-marker (0612): the automated seat's complete
+    "auto-mark-slice-completion",  # slice done-marker (0619): the automated seat's complete
                                   # mark. Exact entry for mark-slice-completion's reason.
-    "bind-slice-criterion-evidence",    # slice done-marker (0612): binds an unbound criterion
+    "bind-slice-criterion-evidence",    # slice done-marker (0619): binds an unbound criterion
                                   # to server-resolved evidence, once. "bind" is not a prefix.
-    "rebind-slice-criterion-evidence",  # slice done-marker (0612): the partner override of a
+    "rebind-slice-criterion-evidence",  # slice done-marker (0619): the partner override of a
                                   # binding; exact entry, same reasoning.
     "cancel-workflow-cutover-plan",  # DoctorCRE V5-R02: cancels an active cutover plan so it
                                   # stops governing enqueue. Exact entry, like

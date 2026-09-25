@@ -337,8 +337,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     # v75, chained from main's v73 (0609). One transaction, so production is
     # never left between a drifted live catalog and its seal.
     (
-        "0612_doctorcre_slice_done_marker.sql",
-        "0613_doctorcre_slice_done_marker_scac_successor.sql",
+        "0619_doctorcre_slice_done_marker.sql",
+        "0620_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 
@@ -388,8 +388,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0603_doctorcre_r02_scac_successor.sql",
     ),
     (
-        "0612_doctorcre_slice_done_marker.sql",
-        "0613_doctorcre_slice_done_marker_scac_successor.sql",
+        "0619_doctorcre_slice_done_marker.sql",
+        "0620_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 

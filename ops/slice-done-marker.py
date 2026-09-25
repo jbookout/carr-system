@@ -6,7 +6,7 @@ WHY THIS EXISTS (2026-09-25, Joe: "fix the done record issue. If it's not
 firing we need to know why and solve it"). #1245 shipped the Q153 doors
 (register / mark progress / mark complete / read) and nothing ever called
 them: production held 0 registrations, 0 criteria and 0 marks, so every one of
-the 36 catalog slices read marked:false. Migration 0612 gives the automated
+the 36 catalog slices read marked:false. Migration 0619 gives the automated
 seat its own doors and two new server-resolved evidence kinds; this script is
 the process that calls them. The release pipeline runs it after every
 SHIPPED worker release (ops/release-pipeline.py, best-effort), and it runs by
@@ -31,27 +31,30 @@ WHAT ONE RUN DOES, per catalog slice (the catalog is doctrine
   2. Registration. An unregistered slice is registered with
      register-slice-criteria-from-catalog: the server reads the criteria from
      the catalog itself; this script never passes one.
-  3. Binding. Each criterion still unbound (and never bound by a partner) is
-     classified by Jev (semantic_creation): a source behaviour a shipped merge
-     proves -> shipped_release; negatives whose production exercise would
-     itself need a write -> refusal_proof/ci_gate (a shipped change whose CI
-     gate proves the refusals); the restore exercise -> live_check on
-     staging_restore_only_result; the DoctorCre-v5 portfolio's accepted,
-     intact revision -> accepted_record; that acceptance creating no effects
-     -> live_check portfolio_acceptance_effect_free; a runtime outcome with no
-     server-recorded row -> left unbound. Only a confident answer binds (the
-     seat binds a criterion once; a partner can rebind at any time and wins).
-  4. Evidence, per criterion, from LIVE reads only. shipped_release and
-     refusal_proof: Jev evidence_matching picks which shipped member (PR
-     subject and body) implements the criterion, or none. Every other kind:
-     the server's own newest candidate row and its `candidate_passes`, which
-     read-slice-completion recomputes from the live rows on every read. The
-     previous mark is never evidence of anything; the server re-resolves every
-     ref on completion.
+  3. Binding. The KIND is the server's, not this script's: each criterion's
+     done_state carries `allowed_kinds`, derived server-side from its catalog
+     wording (ops.slice_criterion_allowed_kinds), and the bind door refuses
+     anything else. For a criterion still unbound (and never bound by a
+     partner): a live_check / accepted_record kind is bound as allowed; a
+     shipped_release kind is bound only to ONE release member that Jev
+     evidence_matching picks for that exact criterion, and that binding is a
+     PROPOSAL the server never treats as effective until a partner confirms
+     it (the Worker holds no GitHub credential, so the server cannot verify
+     the PR itself). An empty allowlist (refusals, runtime outcomes) binds
+     nothing: the criterion stays unbound for a partner.
+  4. Evidence, per criterion, from LIVE reads only: the server's candidate row
+     and its `candidate_passes`, which read-slice-completion recomputes from
+     the live rows on every read. A pending proposal is reported as the
+     missing fact "awaiting partner confirmation". The previous mark is never
+     evidence of anything; the server re-resolves every ref on completion.
   5. Mark (Jev semantic_creation S1): every criterion has evidence ->
      auto-mark-slice-completion (the server recomputes and may refuse);
-     any criterion still unbound, or a slice parked by Joe -> blocked with the
-     reason; otherwise in_progress naming each missing fact. The previous mark
+     any criterion no kind allows (or a partner unbound), or a slice parked by
+     Joe -> blocked with the reason; otherwise in_progress naming each missing
+     fact (a shipped criterion with no matched change yet, a proposal awaiting
+     partner confirmation, a row that does not pass). --dry-run reads the
+     server's catalog_allowed_kinds for an unregistered slice and reports what
+     it would bind. The previous mark
      is read for one thing only: not re-writing an identical mark. A
      partner-held slice is skipped.
 
@@ -84,33 +87,13 @@ PARKED = {"V5-D03": "parked by Joe", "V5-D04": "parked by Joe"}
 BARE_ID = re.compile(r"(?<![\w-])((?:F|A|S)\d{2}|J\d{3})(?![\w-])")
 PR_NUMBER = re.compile(r"\(#(\d+)\)\s*$")
 NAMESPACE = uuid.UUID("8f0b3a52-5f0e-4c55-9d7c-6b1a0f3e2d11")
-BIND_MIN = 0.75
 MATCH_MIN = 0.70
 OUT_DIR = REPO / "out" / "slice-done-marker"
 
-# The one accepted-record source the server resolves today.
+# The one portfolio the accepted-record sources resolve against.
 PORTFOLIO_REF = "DoctorCre-v5"
-REFUSAL_GATE = "ci:merge-gate"
-REFUSAL_WRITE_REASON = ("Jev semantic_creation: the negatives are refusals of write verbs, so exercising them "
-                        "in production would itself write; the shipped change's CI gate is the proof")
-
-BIND_OPTIONS = {
-    "source_behaviour": "The criterion states behaviour the slice's code, schema or checks implement; a merged, "
-                        "shipped change that implements it is the proof (validations, stored shapes, "
-                        "gates, projections, contracts) and it is NOT a list of negatives that refuse.",
-    "refusal_needs_write": "The criterion is that negative / bypass cases REFUSE, and exercising those negatives "
-                           "against production would itself require calling a write verb; a shipped change "
-                           "whose CI gate runs the negatives is the proof.",
-    "accepted_portfolio_record": "The criterion is proven by the DoctorCre-v5 portfolio's partner-accepted "
-                                 "revision itself: its node/edge/child counts, acyclicity and digests, "
-                                 "recomputed from the stored rows.",
-    "acceptance_effect_free": "The criterion is that accepting the DoctorCre-v5 portfolio created zero jobs, "
-                              "capability sessions or execution effects.",
-    "restore_exercise": "The criterion is proven only by actually performing a database restore from an "
-                        "independent copy and verifying it came back exact.",
-    "runtime_outcome": "The criterion is proven only by a live runtime observation, activation, pilot, partner "
-                       "decision or measured outcome that no shipped code change can show.",
-}
+# Sources whose key is the portfolio ref.
+PORTFOLIO_SOURCES = {"portfolio_revision_acceptance", "portfolio_acceptance_effect_free"}
 
 
 class MarkerError(RuntimeError):
@@ -224,7 +207,8 @@ class Marker:
                                 "body": body[:600]})
         return commits
 
-    def sync_membership(self, catalog_ids: set[str], known: set[tuple[str, str, str]]) -> int:
+    def sync_membership(self, catalog_ids: set[str], known: set[tuple[str, str, str]],
+                        wanted: set[str] | None = None) -> int:
         commits = self.attributed_commits(catalog_ids)
         if not commits:
             return 0
@@ -239,7 +223,8 @@ class Marker:
         by_release: dict[str, list[dict]] = {}
         for c in commits:
             first = next((key for key, shas in reach if c["commit_sha"] in shas), None)
-            if first is None or (first, c["slice_id"], c["commit_sha"]) in known:
+            if first is None or (first, c["slice_id"], c["commit_sha"]) in known \
+                    or (wanted is not None and c["slice_id"] not in wanted):
                 continue
             member = {k: c[k] for k in ("slice_id", "commit_sha", "pr_number", "subject", "attribution")}
             by_release.setdefault(first, []).append(member)
@@ -278,16 +263,6 @@ class Marker:
             prob = answer.get("confidence") or 0.0
         return choice if float(prob) >= floor else None
 
-    def classify(self, item: dict, criteria: list[str]) -> dict[str, str | None]:
-        state = {"slice": {"id": item.get("proposed_id"), "title": item.get("title"),
-                           "kind": item.get("item_kind"), "goal": str(item.get("goal") or "")[:800]},
-                 "criteria": criteria}
-        questions = {f"semantic_creation_bind_{i}": jev_choice(
-            f"How is criterion `criteria[{i}]` of this DoctorCRE v5 slice proven? Choose what would PROVE it, "
-            "not what would help.", BIND_OPTIONS) for i in range(len(criteria))}
-        answers = self._cached_ask("bind", state, questions, ["semantic_creation"])
-        return {c: self._pick(answers.get(f"semantic_creation_bind_{i}"), BIND_MIN) for i, c in enumerate(criteria)}
-
     def match(self, item: dict, criteria: list[str], members: list[dict]) -> dict[str, str | None]:
         opts = {f"m{j}": f"PR #{m.get('pr_number') or '?'}: {m['subject']} -- "
                          f"{getattr(self, '_bodies', {}).get(m['commit_sha'], '')[:300]}"
@@ -314,8 +289,10 @@ class Marker:
         if not state.get("registered"):
             if self.dry_run:
                 self.out(f"  [dry-run] register-slice-criteria-from-catalog {sid}")
+                allowed = state.get("catalog_allowed_kinds") or {}
                 pending = [{"criterion": c, "evidence_kind": "unbound", "binding_source": "registration",
-                             "automation_bound": False} for c in item.get("checkable_done") or []]
+                             "automation_bound": False, "allowed_kinds": allowed.get(c) or []}
+                           for c in item.get("checkable_done") or []]
                 state = {"registered": False, "criteria": pending, "release_members": state.get("release_members", [])}
             else:
                 self.call("register-slice-criteria-from-catalog",
@@ -332,58 +309,68 @@ class Marker:
 
         # Binding: only criteria still unbound, never bound by automation, and
         # not partner-decided (a partner binding reports binding_source
-        # binding:authority -- including an explicit partner unbind).
+        # binding:authority -- including an explicit partner unbind). The kind
+        # is the one the server allows for the wording; nothing else is tried.
+        members = state.get("release_members") or []
+        # (a pending proposal is automation_bound, so it is never re-proposed)
         todo = [c for c in criteria if kinds[c]["evidence_kind"] == "unbound"
                 and not kinds[c].get("automation_bound") and kinds[c].get("binding_source") == "registration"]
-        if todo:
-            decided = self.classify(item, todo)
-            for c in todo:
-                kind = decided.get(c)
-                if kind == "source_behaviour":
-                    self._bind(sid, c, "shipped_release", None, "Jev semantic_creation: source behaviour")
-                elif kind == "refusal_needs_write":
-                    self._bind(sid, c, "refusal_proof", "ci_gate", "Jev semantic_creation: write-requiring negatives",
-                               key=REFUSAL_GATE, write_reason=REFUSAL_WRITE_REASON)
-                elif kind == "restore_exercise":
-                    self._bind(sid, c, "live_check", "staging_restore_only_result",
-                               "Jev semantic_creation: restore exercise")
-                elif kind == "accepted_portfolio_record":
-                    self._bind(sid, c, "accepted_record", "portfolio_revision_acceptance",
-                               "Jev semantic_creation: accepted portfolio record", key=PORTFOLIO_REF)
-                elif kind == "acceptance_effect_free":
-                    self._bind(sid, c, "live_check", "portfolio_acceptance_effect_free",
-                               "Jev semantic_creation: acceptance created no effects", key=PORTFOLIO_REF)
-            if not self.dry_run:
-                state = self.read(sid)
-                kinds = {row["criterion"]: row for row in state.get("criteria", [])}
+        to_ship = [c for c in todo if "shipped_release:" in (kinds[c].get("allowed_kinds") or [])]
+        matched = self.match(item, to_ship, members) if to_ship and members else {}
+        bound_any = False
+        would: dict[str, str] = {}
+        for c in todo:
+            allowed = kinds[c].get("allowed_kinds") or []
+            if "shipped_release:" in allowed:
+                if matched.get(c):
+                    self._bind(sid, c, "shipped_release", None, "Jev evidence_matching: proposed PR, "
+                               "awaiting partner confirmation", member=matched[c])
+                    bound_any = True
+                    would[c] = f"a shipped_release proposal on member {matched[c]}"
+                continue
+            for entry in allowed:
+                kind, _, source = entry.partition(":")
+                self._bind(sid, c, kind, source or None, "server-derived allowed kind",
+                           key=PORTFOLIO_REF if source in PORTFOLIO_SOURCES else None)
+                bound_any = True
+                would[c] = f"{kind} {source}".strip()
+                break
+        if bound_any and not self.dry_run:
+            state = self.read(sid)
+            kinds = {row["criterion"]: row for row in state.get("criteria", [])}
 
-        members = state.get("release_members") or []
-        shipped = [c for c in criteria if kinds[c]["evidence_kind"] in ("shipped_release", "refusal_proof")]
-        matched = self.match(item, shipped, members) if shipped and members else {}
         refs: dict[str, str | None] = {}
         missing: list[str] = []
         unbound: list[str] = []
         for c in criteria:
             k = kinds[c]
             kind = k["evidence_kind"]
-            if kind in ("shipped_release", "refusal_proof"):
-                refs[c] = matched.get(c)
-                if refs[c] is None:
-                    missing.append(f"{c} -> " + ("no shipped merge attributed to this slice is in a complete "
-                                                 "production release" if not members else
-                                                 "no shipped change was matched to this criterion"))
-            elif kind in ("live_check", "accepted_record"):
-                # The server's live recompute of its own newest candidate.
-                cand = k.get("live_check_candidate")
+            cand = k.get("live_check_candidate")
+            if self.dry_run and c in would:
+                refs[c] = None
+                missing.append(f"{c} -> [dry-run] would bind {would[c]}")
+            elif kind in ("shipped_release", "live_check", "accepted_record"):
+                # The server's live recompute of its own candidate.
                 refs[c] = cand if cand and k.get("candidate_passes") is True else None
                 if refs[c] is None:
-                    what = f"{k.get('live_check_source')}" + (f" for {k['live_check_key']}" if k.get("live_check_key") else "")
+                    what = (kind if kind == "shipped_release" else f"{k.get('live_check_source')}"
+                            + (f" for {k['live_check_key']}" if k.get("live_check_key") else ""))
                     missing.append(f"{c} -> " + (f"no {what} row" if not cand else
-                                                 f"the newest {what} row ({cand}) does not pass on a live read"))
+                                                 f"the {what} row ({cand}) does not pass on a live read"))
+            elif kind == "unbound" and k.get("proposal"):
+                refs[c] = None
+                missing.append(f"{c} -> proposed release member {k['proposal'].get('bound_member_id')} "
+                               "awaiting partner confirmation")
+            elif kind == "unbound" and "shipped_release:" in (k.get("allowed_kinds") or []) \
+                    and k.get("binding_source") == "registration":
+                # Still waiting on a shipped change: in progress, not blocked.
+                refs[c] = None
+                missing.append(f"{c} -> no shipped change of this slice was matched to it yet")
             elif kind == "unbound":
                 refs[c] = None
-                unbound.append(f"{c} -> no server-resolvable evidence binding (no server-recorded receipt "
-                               "proves it today; a partner may bind it)")
+                unbound.append(f"{c} -> " + ("unbound by a partner" if k.get("binding_source") == "binding:authority"
+                                             else "no server-resolvable evidence kind for this wording; "
+                                                  "a partner decides"))
             else:
                 refs[c] = None
                 missing.append(f"{c} -> {kind} evidence is partner-registered; the marker does not resolve it")
@@ -408,14 +395,14 @@ class Marker:
         return self._write(sid, state, "in_progress", "missing: " + "; ".join(missing), refs)
 
     def _bind(self, sid: str, criterion: str, kind: str, source: str | None, reason: str, *,
-              key: str | None = None, write_reason: str | None = None) -> None:
+              key: str | None = None, member: str | None = None) -> None:
         if self.dry_run:
             self.out(f"  [dry-run] bind {sid} / {criterion[:60]} -> {kind}" + (f" {source}" if source else ""))
             return
         self.call("bind-slice-criterion-evidence", {
-            "idempotency_key": ikey("bind", sid, criterion, kind, source, key), "slice_id": sid,
+            "idempotency_key": ikey("bind", sid, criterion, kind, source, key, member), "slice_id": sid,
             "criterion": criterion, "evidence_kind": kind, "live_check_source": source,
-            "live_check_key": key, "write_required_reason": write_reason, "reason": reason})
+            "live_check_key": key, "bound_member_id": member, "reason": reason})
 
     def _write(self, sid: str, state: dict, status: str, reason: str, refs: dict[str, str | None]) -> SliceOutcome:
         latest = state.get("latest_mark") or {}
@@ -439,7 +426,7 @@ class Marker:
         for s in wanted:
             for m in self.read(s["proposed_id"]).get("release_members") or []:
                 known.add((m["release_key"], s["proposed_id"], m["commit_sha"]))
-        added = self.sync_membership(ids, known)
+        added = self.sync_membership(ids, known, {s["proposed_id"] for s in wanted})
         self.out(f"slice-done-marker: {added} new release member(s)")
         outcomes = []
         for item in wanted:
@@ -458,7 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
     ap.add_argument("--slices", default="", help="comma-separated slice ids (default: every catalog slice)")
     ap.add_argument("--release-key", default="", help="the release that just shipped (logged)")
-    ap.add_argument("--no-jev", action="store_true", help="bind and match nothing new (cached answers only)")
+    ap.add_argument("--no-jev", action="store_true", help="match nothing new (cached answers only)")
     args = ap.parse_args(argv)
     marker = Marker(call=run_sh_call, git_run=git, ask=None if args.no_jev else jev_ask,
                     dry_run=args.dry_run, cache_path=OUT_DIR / "jev-cache.json")
