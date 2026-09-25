@@ -435,26 +435,25 @@ class Batching(Base):
         self.assertEqual(self.fx.slice_marks, [])
 
     def test_the_real_marker_is_started_detached_and_never_waited_for(self):
-        # Step 10 must not hold the single-run lock: a marker that sleeps is
-        # started in its own session and the call returns before it ends.
-        import time
-        ops = self.fx.repo / "ops"
-        ops.mkdir(exist_ok=True)
-        (ops / "slice-done-marker.py").write_text(
-            "import time, sys\nprint('marker', sys.argv[1:], flush=True)\ntime.sleep(30)\n", encoding="utf-8")
+        # Step 10 must not hold the single-run lock: the marker is started in
+        # its own session, its output goes to the run's log, and nothing waits
+        # on it.
         pipe = self.fx.pipeline(FakeRunner())
-        pipe.run_dir.mkdir(parents=True, exist_ok=True)
-        t0 = time.monotonic()
-        out = pipe._run_slice_marker("r-2026-09-30-01", "a" * 40)
-        try:
-            self.assertLess(time.monotonic() - t0, 5)
-            self.assertTrue(out["started"])
-            self.assertEqual(out["release_sha"], "a" * 40)
-            self.assertNotIn("rc", out)
-            self.assertEqual(os.getsid(out["pid"]), out["pid"])     # its own session
-        finally:
-            os.kill(out["pid"], 9)
-            os.waitpid(out["pid"], 0)
+        started = mock.MagicMock(pid=4242)
+        with mock.patch.object(rp.subprocess, "Popen", return_value=started) as popen, \
+                mock.patch.object(rp.subprocess, "run") as run:
+            out = pipe._run_slice_marker("r-2026-09-30-01", "a" * 40)
+        self.assertEqual(out, {"started": True, "pid": 4242, "release_sha": "a" * 40,
+                               "log": str(pipe.run_dir / "slice-marker.log")})
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0][1:], [str(self.fx.repo / "ops" / "slice-done-marker.py"),
+                                       "--release-key", "r-2026-09-30-01"])
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertIs(kwargs["stdin"], rp.subprocess.DEVNULL)
+        self.assertEqual(set(kwargs["env"]) - {"HOME", "PATH", "LANG"}, set())
+        run.assert_not_called()
+        started.wait.assert_not_called()
+        started.communicate.assert_not_called()
 
     def test_doc_only_batch_advances_without_release(self):
         latest = self.fx.commit({"docs/n.md": "3", "mcp-server/test/x.test.mjs": "t"})
