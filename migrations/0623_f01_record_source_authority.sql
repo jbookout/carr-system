@@ -7,8 +7,8 @@
 -- line is replaced by a comment, because tools/migrate.py applies migrations
 -- through psycopg and psycopg cannot execute a psql meta-command. Nothing else
 -- in either source is edited here. mcp-server/test/record-source-authority-
--- migration.v5.test.mjs re-derives this body from the two sources and fails on
--- any byte of drift, so the reviewed files and the installed file cannot part.
+-- door.v5.test.mjs re-derives this body from the two sources and fails on any
+-- byte of drift, so the reviewed files and the installed file cannot part.
 --
 -- WHY BOTH, AND IN THIS ORDER. The candidate forward-replaces the four-argument
 -- ops.f01_record_document with the six-argument writer that requires a
@@ -5548,8 +5548,9 @@ $f01_authority_group_posture$;
 -- not in CI (no login exists), and 0624's measured baseline would refuse the
 -- production apply. Revoking them makes the catalog the same in both. Schema
 -- USAGE is left alone: it is not F01's to take back. The readback then proves
--- each existing login still reaches the authority writers through membership,
--- which fails the install loudly if a login were ever NOINHERIT.
+-- each existing login is a carr_authority member and still reaches the
+-- authority writers through that membership, and refuses the install if a
+-- login is outside the group or NOINHERIT.
 -- ===========================================================================
 DO $f01_authority_login_direct_grants$
 DECLARE
@@ -5597,9 +5598,14 @@ BEGIN
 
   FOREACH r IN ARRAY ARRAY['carr_authority_joe', 'carr_authority_dell'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN CONTINUE; END IF;
+    -- An authority login that exists but is outside the group would have just
+    -- lost its direct grants above and gained nothing back: it would silently
+    -- stop reaching every F01 authority writer. That is a broken install, not a
+    -- notice, so it refuses and the whole transaction (revokes included) rolls
+    -- back. 0273 and db/schema.sql make every existing login a member.
     IF NOT pg_has_role(r, 'carr_authority', 'MEMBER') THEN
-      RAISE NOTICE 'authority login % is not a carr_authority member, so it reaches no F01 authority writer', r;
-      CONTINUE;
+      RAISE EXCEPTION 'f01_grant_posture_violation: authority login % exists but is not a carr_authority member, so revoking its direct F01 grants would leave it no authority surface', r
+        USING ERRCODE = '42501';
     END IF;
     IF NOT has_function_privilege(r, 'ops.f01_install_policy(jsonb,text,text,text)', 'EXECUTE')
        OR NOT has_function_privilege(r, 'ops.f01_read(text,jsonb)', 'EXECUTE')

@@ -402,6 +402,21 @@ test("F01 on real PostgreSQL: migration, SQL fixtures and the registered verbs",
              from unnest(array['carr_authority_joe','carr_authority_dell']) r`);
         assert.deepEqual(can.rows.map(row => row.can), [true, true],
           "each login still reaches the authority writer through carr_authority");
+
+        // A login that exists outside the group would lose its direct grants
+        // and gain nothing back, so Tail 3 refuses instead of announcing it,
+        // and the transaction leaves the direct grant it found in place.
+        // Membership is cluster-wide, so it is restored before anything else runs.
+        await client.query("grant select on table ops.f01_state_transition to carr_authority_dell");
+        await admin.query("REVOKE carr_authority FROM carr_authority_dell");
+        try {
+          await assert.rejects(client.query(tail3),
+            error => /f01_grant_posture_violation: authority login carr_authority_dell exists but is not a carr_authority member/
+              .test(error.message));
+        } finally {
+          await admin.query("GRANT carr_authority TO carr_authority_dell");
+        }
+        assert.equal(await direct(), 1, "the refused Tail 3 rolled back its revokes");
       } finally {
         await client.end();
       }
