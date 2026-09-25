@@ -127,6 +127,10 @@ SELECTOR_SOURCE_PATHS = (
     "ops/jev_build_advisory.py",
     "ops/jev_judge.py",
     "ops/typesafe_client.py",
+    # The verdict cache and envelope test decide what is reused and skipped,
+    # so a change to either must invalidate old receipts too.
+    "ops/jev_verdict_cache.py",
+    "ops/machine_envelope.py",
 )
 
 

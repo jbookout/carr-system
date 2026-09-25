@@ -373,14 +373,16 @@ def _generalized_receipt(payload: dict, response: dict, trigger_ids: list[str],
     return row
 
 
-def _semantic_adviser(situation: str) -> list[dict]:
+def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dict]:
+    # The verdict cache is keyed on the hook payload's own session_id; with
+    # none it is off (ops/jev_rule_select.py _session_id), never pooled.
     path = REPO / "ops/jev_rule_select.py"
     spec = importlib.util.spec_from_file_location("jev_rule_select_live", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("semantic selector unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.advise(situation)
+    return module.advise(situation, session_id=session_id)
 
 
 def _build_adviser(situation: str) -> dict:
@@ -495,7 +497,8 @@ def _process_prompt(payload: dict, runner: Callable,
     except Exception:
         build = _build_unavailable()
     try:
-        selected = (adviser or _semantic_adviser)(prompt)
+        selected = (adviser(prompt) if adviser
+                    else _semantic_adviser(prompt, payload["session_id"]))
         if not isinstance(selected, list):
             raise RuntimeError("semantic selector returned malformed advice")
         candidate_ids: list[str] = []

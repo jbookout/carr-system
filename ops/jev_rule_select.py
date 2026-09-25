@@ -96,15 +96,17 @@ SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
 # days). advise() runs at every UserPromptSubmit, and in a long orchestration
 # session most of those are background-task notifications: 514 of 632 that
 # day, each paying 1 ranking + 20 binding requests to re-ask the same rules
-# about the same KIND of moment. So a verdict is kept per session, keyed on
-# (rule id, pack, input class), for CACHE_TTL_SECONDS:
+# about the same KIND of moment. So a verdict is kept per session (the hook's
+# own session_id; no session, no cache), keyed on (rule id, pack, input class),
+# for CACHE_TTL_SECONDS:
 #
-#   * a machine envelope's class is its shape — task notification of an agent,
-#     a background command or a monitor, by status; a cross-session message;
-#     a system-reminder-only message — so the tenth "agent finished" in half an
-#     hour reuses the verdicts of the first;
-#   * any other text is its own class (whitespace- and case-normalised), so a
-#     partner message is judged fresh unless it is literally a repeat.
+#   * a prompt that is ENTIRELY machine envelopes (ops/machine_envelope.py) is
+#     classed by its shapes — task notification of an agent, a background
+#     command or a monitor, by status; a cross-session message — so the tenth
+#     "agent finished" in half an hour reuses the verdicts of the first;
+#   * anything with text left over, however it starts, is its own class
+#     (whitespace- and case-normalised), so a partner message is judged fresh
+#     unless it is literally a repeat.
 #
 # FAIL OPEN TO DELIVERING. A binding verdict is sticky for the window: once a
 # rule bound a class, it is delivered on every later message of that class
@@ -113,11 +115,10 @@ SHADOW_LOG = os.path.join(REPO, "out", "jev-rule-select.jsonl")
 # so an outage is not replayed as a "does not bind".
 CACHE_PATH = os.path.join(REPO, "out", "jev-rule-select-cache.json")
 CACHE_SOURCES = ("ops/jev_rule_select.py", "ops/jev_judge.py",
-                 "ops/typesafe_client.py", "ops/jev_verdict_cache.py")
+                 "ops/typesafe_client.py", "ops/jev_verdict_cache.py",
+                 "ops/machine_envelope.py")
 CACHE_TTL_SECONDS = 30 * 60
 CACHE_MAX_ENTRIES = 4096
-SESSION_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
-                    "CODEX_THREAD_ID")
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 
 # MEASURED, not guessed, and the measurement is worth keeping because the first
@@ -348,45 +349,36 @@ def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
             for rule_id, _ in ranked[:limit]] or list(rules)
 
 
-_ENVELOPE_STATUS = re.compile(r"<status>\s*(\w+)\s*</status>", re.I)
-_ENVELOPE_SUMMARY = re.compile(r"<summary>\s*(\w+)", re.I)
-_SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S | re.I)
-_CROSS_SESSION = ("Another Claude session sent a message", "<cross-session-message",
-                  "[Cross-session delivery")
-
-
 def input_class(situation):
     """The class a verdict is reused across. See CACHE_PATH's note.
 
-    A machine envelope is classed by its shape, so "agent X finished" and
-    "agent Y finished" share verdicts; everything else is classed by its own
-    normalised text, so a partner message only reuses a verdict when it is a
-    literal repeat."""
+    A prompt that is ENTIRELY machine envelopes (ops/machine_envelope.py:
+    complete notification / cross-session blocks and nothing else) is classed
+    by its shapes, so "agent X finished" and "agent Y finished" share verdicts.
+    Anything with text left over — a notification followed by a partner
+    instruction, a hand-typed wrapper, "Stop hook feedback: ...", a typed
+    system-reminder — is classed by its own normalised text, so it only reuses
+    a verdict when it is a literal repeat. Classing by prefix pooled those with
+    pure notifications and suppressed rules (2026-09-25 review)."""
     text = situation if isinstance(situation, str) else json.dumps(situation, sort_keys=True,
                                                                      default=str)
-    stripped = text.lstrip()
-    if stripped.startswith("<task-notification>"):
-        summary = _ENVELOPE_SUMMARY.search(stripped)
-        status = _ENVELOPE_STATUS.search(stripped)
-        return "task-notification|{}|{}".format(
-            summary.group(1).lower() if summary else "?",
-            status.group(1).lower() if status else "event")
-    if stripped.startswith(_CROSS_SESSION):
-        return "cross-session-message"
-    if stripped and not _SYSTEM_REMINDER.sub("", stripped).strip():
-        return "system-reminder-only"
+    try:
+        shapes = _sibling("machine_envelope").envelope_shapes(text)
+    except Exception:
+        shapes = None  # cannot tell: treat as text, which never pools
+    if shapes:
+        return "|".join(shapes)
     normal = " ".join(text.lower().split())
     return "text|" + hashlib.sha256(normal.encode("utf-8")).hexdigest()
 
 
 def _session_id(explicit=None):
-    if explicit:
-        return explicit
-    for name in SESSION_ENV_KEYS:
-        value = os.environ.get(name)
-        if value and value.strip():
-            return value.strip()
-    return "no-session"
+    """The hook's own session id, or None. Never the environment, never a
+    shared fallback key: with no session there is no cache, so two sessions
+    can never pool verdicts under one default key."""
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    return None
 
 
 def _rule_packs(path=MAP):
@@ -442,11 +434,11 @@ def select(situation, rules=None, *, floor=BIND_AT, limit=MAX_SURFACED,
 
     cache = None
     fresh = {}
-    if cache_path:
+    session = _session_id(session_id)
+    if cache_path and session:
         try:
             cache = _sibling("jev_verdict_cache")
             ttl = CACHE_TTL_SECONDS if cache_ttl is None else cache_ttl
-            session = _session_id(session_id)
             klass = input_class(situation)
             source = cache.source_digest(*CACHE_SOURCES)
             packs = _rule_packs()

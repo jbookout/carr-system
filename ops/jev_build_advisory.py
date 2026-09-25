@@ -18,7 +18,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import re
 import sys
 from typing import Any
 
@@ -163,28 +162,24 @@ def _probability(answer: Any) -> float:
 SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
 CACHE_PATH = os.path.join(REPO, "out", "jev-build-advisory-cache.json")
 CACHE_SOURCES = ("ops/jev_build_advisory.py", "ops/typesafe_client.py",
-                 "lib/rule_delivery_preuse.py", "ops/jev_verdict_cache.py")
-_SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S | re.I)
+                 "lib/rule_delivery_preuse.py", "ops/jev_verdict_cache.py",
+                 "ops/machine_envelope.py")
 
 
 def is_machine_envelope(prompt: str) -> bool:
-    """A prompt no partner wrote: a background-task notification, a
-    cross-session message, a Stop-hook reopen, a compaction summary, or text
-    that is nothing but system reminders.
-
-    The prefixes are lib/jev_required_actions.py's CONTINUATION_PREFIXES, the
-    same list the required-actions gate uses to fold such records into the
-    turn they continue, so the advisory and the gate agree by construction on
-    what is not a partner request. Measured 2026-09-25: most prompts in a
+    """A prompt that is ENTIRELY machine envelopes — complete background-task
+    notification or cross-session blocks, with any system reminders around
+    them and nothing else. ops/machine_envelope.py holds the definition and
+    why a prefix test was not enough. Measured 2026-09-25: most prompts in a
     long orchestration session are task notifications, and Jev was asked for
     build advice on every one."""
-    from lib.jev_required_actions import CONTINUATION_PREFIXES
-    if not isinstance(prompt, str):
-        return False
-    stripped = prompt.lstrip()
-    if stripped.startswith(CONTINUATION_PREFIXES):
-        return True
-    return bool(stripped) and not _SYSTEM_REMINDER.sub("", stripped).strip()
+    path = os.path.join(REPO, "ops", "machine_envelope.py")
+    spec = importlib.util.spec_from_file_location("machine_envelope_build", path)
+    if spec is None or spec.loader is None:
+        return False  # cannot tell: advise, never skip
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.is_machine_envelope(prompt)
 
 
 def skipped() -> dict:
@@ -224,7 +219,10 @@ def advise(partner_request: str, *, client: Any | None = None,
                                    "source": cache.source_digest(*CACHE_SOURCES)})
             cached = cache.get(cache_path, entry_key, now=now)
             if isinstance(cached, dict) and cached.get("schema") == SCHEMA:
-                return cached
+                # No request was made, so none is reported: the original
+                # call's usage stays with the original call.
+                return {**cached, "usage": {"input_tokens": 0, "output_tokens": 0,
+                                            "cache_hit": True}}
         except Exception:
             cache = None
     result = _advise(partner_request, client=client, timeout=timeout)
