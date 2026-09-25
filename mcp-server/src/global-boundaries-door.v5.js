@@ -494,7 +494,7 @@ export class V5BoundaryDoorRefusal extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Shadow observation. Isolate-local, and it says so. One structured log line
+// Shadow observation. Isolate-local, and it says so. One structured warn-level log line
 // per would-refuse verdict goes to the Worker's logs; counters are surfaced by
 // the read projection. Arguments are never logged, only field paths.
 // ---------------------------------------------------------------------------
@@ -556,10 +556,12 @@ export function resetDoorObservationForTest() {
  * The one call the dispatch seam makes. Evaluates, records, and in enforce
  * mode throws V5BoundaryDoorRefusal. In shadow it NEVER throws: an internal
  * error becomes a door_error count and a log line, and dispatch proceeds.
- * `log` defaults to console.log and exists so tests can capture the line.
+ * `log` defaults to console.warn (stderr under Node, so a local break-glass
+ * run never has a log line mixed into the JSON it prints on stdout; Workers
+ * Logs capture it either way) and exists so tests can capture the line.
  */
 export function passBoundaryDoor({ verb, write, actor, args, now, mode = V5_BOUNDARY_DOOR_MODE,
-  context = V5_CLOUD_DOOR_CONTEXT, log = console.log } = {}) {
+  context = V5_CLOUD_DOOR_CONTEXT, log = console.warn } = {}) {
   let verdict;
   try {
     verdict = evaluateDispatchBoundaries({ verb, write, actor, args, context: { ...context, now }, mode });
