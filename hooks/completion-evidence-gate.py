@@ -334,6 +334,17 @@ WRITE_ACTION_EXACT = {
                                        # "raise" stays exact rather than becoming a prefix,
                                        # since a future raise-* read must not inherit the
                                        # class -- same reasoning as report-problem/open-incident.
+    # V5-J102: the CRE lifecycle writers whose first word is not a write prefix.
+    # Each appends a lifecycle subject or event row (or one shadow run record) a
+    # session could report as done. EXACT, not prefixes: initialize-, open-,
+    # commit-, cancel- and run- would capture future reads named the same way.
+    "initialize-prospect-relationship",
+    "initialize-assignment",
+    "initialize-property-negotiation",
+    "open-cre-assignment",
+    "commit-winning-property",
+    "cancel-pending-deal",
+    "run-migration-shadow",
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
