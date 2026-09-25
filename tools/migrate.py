@@ -331,6 +331,15 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
         "0603_doctorcre_r02_scac_successor.sql",
     ),
+    # DoctorCRE v5 slice done-record: 0612 installs the automated marker's
+    # SECURITY DEFINER doors (catalog registration, binding, release
+    # membership, auto completion, partner hold); 0613 seals that catalog as
+    # v75, chained from main's v73 (0609). One transaction, so production is
+    # never left between a drifted live catalog and its seal.
+    (
+        "0612_doctorcre_slice_done_marker.sql",
+        "0613_doctorcre_slice_done_marker_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -377,6 +386,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
         "0603_doctorcre_r02_scac_successor.sql",
+    ),
+    (
+        "0612_doctorcre_slice_done_marker.sql",
+        "0613_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 

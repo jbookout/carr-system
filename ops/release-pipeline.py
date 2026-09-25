@@ -43,6 +43,11 @@ TWO LANES, one tick:
             7 bin/deploy-worker.sh --promote-version <id from step 5>
             8 live /release reads back S, ./run.sh health
             9 a db/schema.sql follow-up PR when step 4 applied anything
+           10 after SHIPPED, best-effort: ops/slice-done-marker.py --release-key K
+              marks the DoctorCRE v5 slices this release shipped (register from
+              the catalog, bind, gather server-resolved evidence, mark). Its exit
+              is recorded as `slice_marker` in the run record; it never fails,
+              blocks or retries the release it follows.
   app     the DoctorCRE app (its own repository). Released when its origin/main
           moves by anything other than docs/tests: `npm ci` and
           `npm run release:production` from a clean detached origin/main
@@ -600,6 +605,7 @@ class Pipeline:
                  github: Callable[[str], Any] | None = None,
                  http: Callable[[str], Any] = http_json,
                  call_verb: Callable[[str, dict], tuple[bool, Any]] | None = None,
+                 slice_marker: Callable[[str, str], dict] | None = None,
                  dry_run: bool = False, env: dict[str, str] | None = None,
                  today: str | None = None, out: Callable[[str], None] = print):
         self.cfg, self.repo, self.dry_run = cfg, repo, dry_run
@@ -608,6 +614,7 @@ class Pipeline:
         self.github_factory = github or (lambda repo_name: GitHub(repo_name, self.env))
         self.http = http
         self.call_verb = call_verb or self._call_verb
+        self.slice_marker = slice_marker or self._run_slice_marker
         self.today = today or dt.date.today().isoformat()
         self.out = out
         self.store = Store(repo / cfg.get("state_dir", "out/release-pipeline"))
@@ -637,6 +644,31 @@ class Pipeline:
             return True, json.loads(proc.stdout)
         except ValueError:
             return True, proc.stdout.strip()
+
+    def _run_slice_marker(self, release_key: str, sha: str) -> dict:
+        """ops/slice-done-marker.py in the pipeline's own checkout, through the
+        same run.sh call door and with the same minimal environment as
+        _call_verb: no database or deploy credential reaches it."""
+        log = self.run_dir / "slice-marker.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        venv = self.repo / ".venv" / "bin" / "python"
+        env = {k: v for k, v in self.env.items() if k in ("HOME", "PATH", "LANG")}
+        proc = subprocess.run([str(venv if venv.exists() else sys.executable),
+                               str(self.repo / "ops" / "slice-done-marker.py"), "--release-key", release_key],
+                              cwd=str(self.repo), env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=1800)
+        log.write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+        return {"rc": proc.returncode, "log": str(log), "release_sha": sha}
+
+    def mark_slices(self, release_key: str, sha: str) -> dict:
+        """Step 10, best-effort. Whatever happens here is recorded and never
+        raised: the release it follows has already shipped."""
+        try:
+            outcome = self.slice_marker(release_key, sha)
+        except Exception as exc:  # noqa: BLE001 — a marker failure is recorded, never raised
+            outcome = {"rc": None, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        self.out(f"  -> slice-marker: {outcome}")
+        return outcome
 
     def git(self, *args: str, cwd: Path | None = None) -> str:
         proc = subprocess.run(["git", "-C", str(cwd or self.repo), *args], env=self.env,
@@ -1351,6 +1383,8 @@ class Pipeline:
             lane_state.update({"last_released_sha": sha, "failed_sha": None, "failed_step": None,
                                "last_shipped_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
             self.store.save(state)
+            if lane == "worker" and result.get("release_key"):
+                result["slice_marker"] = self.mark_slices(result["release_key"], sha)
             self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "shipped",
                                "run_id": self.run_id, "paths": hits[:50], **result})
             self.out(f"release-pipeline[{lane}]: SHIPPED {sha[:12]}")

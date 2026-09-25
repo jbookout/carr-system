@@ -4,7 +4,17 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v72 is the runtime selector after DoctorCRE V5-R02 (migration 0602,
+// v75 is the runtime selector after the DoctorCRE v5 slice done-record's
+// automated marker (migration 0612, sealed by 0613). Its sealed catalog admits
+// seven new verbs -- register-slice-criteria-from-catalog,
+// bind-slice-criterion-evidence, record-release-slice-members,
+// auto-mark-slice-completion and list-shipped-releases (writer/reader), and
+// rebind-slice-criterion-evidence and set-slice-mark-hold (authorityOnly) --
+// and register-slice-checkable-done's widened evidence kinds. v73 (the
+// bin/deploy-worker.sh re-digest) registered no verb; v74 is PR #1236's and is
+// not on main.
+//
+// Superseded note (v72): v72 was the runtime selector after DoctorCRE V5-R02 (migration 0602,
 // workflow cutover, caller migration and retirement readiness). Its sealed
 // catalog admits ten new verbs -- open-, advance-, cancel- and
 // retire-workflow-cutover-plan, register-slice-checkable-done and
@@ -77,7 +87,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v72.generated.js";
+} from "./scac-mutation-registry.v75.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
