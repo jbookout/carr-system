@@ -266,6 +266,71 @@ class TriageReviewTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "unavailable")
 
 
+class TriageReviewCacheTests(unittest.TestCase):
+    """The Stop hook re-triages an unchanged diff at every Stop; an identical
+    diff and task is asked once per window, and the cache only ever costs an
+    extra ask."""
+
+    DIFF = "diff --git a/src/widgets.py b/src/widgets.py\n@@ -1 +1 @@\n+x = 1\n"
+    HIGH = {jdc._safe_id("src/widgets.py"): {"type": "score", "score": 1.8, "confidence": 0.7}}
+
+    def test_repeated_identical_diff_asks_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            fake = FakeJudge(answers=self.HIGH)
+            first = jdc.triage_review(self.DIFF, "task", judge_module=fake,
+                                      cache_path=cache, now=1000.0)
+            second = jdc.triage_review(self.DIFF, "task", judge_module=fake,
+                                       cache_path=cache, now=1100.0)
+            self.assertEqual(fake.calls, 1)
+            self.assertEqual(len(fake.rows), 1)  # a hit writes no call row
+            self.assertEqual(first, second)
+            self.assertEqual(second["verdict"], "needs_review")
+
+    def test_a_changed_diff_or_task_asks_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            fake = FakeJudge(answers=self.HIGH)
+            jdc.triage_review(self.DIFF, "task", judge_module=fake, cache_path=cache, now=1000.0)
+            jdc.triage_review(self.DIFF + "+y = 2\n", "task", judge_module=fake,
+                              cache_path=cache, now=1001.0)
+            jdc.triage_review(self.DIFF, "another task", judge_module=fake,
+                              cache_path=cache, now=1002.0)
+            self.assertEqual(fake.calls, 3)
+
+    def test_cache_expiry_asks_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            fake = FakeJudge(answers=self.HIGH)
+            jdc.triage_review(self.DIFF, "task", judge_module=fake, cache_path=cache, now=1000.0)
+            jdc.triage_review(self.DIFF, "task", judge_module=fake, cache_path=cache,
+                              now=1000.0 + 31 * 60)
+            self.assertEqual(fake.calls, 2)
+
+    def test_an_unwritable_cache_still_triages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, "file")
+            Path(blocker).write_text("not a directory", encoding="utf-8")
+            fake = FakeJudge(answers=self.HIGH)
+            for step in range(2):
+                result = jdc.triage_review(self.DIFF, "task", judge_module=fake,
+                                           cache_path=os.path.join(blocker, "c.json"),
+                                           now=1000.0 + step)
+                self.assertEqual(result["verdict"], "needs_review")
+            self.assertEqual(fake.calls, 2)
+
+    def test_an_outage_is_never_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            down = FakeJudge(error=RuntimeError("down"))
+            self.assertEqual(jdc.triage_review(self.DIFF, "task", judge_module=down,
+                                               cache_path=cache, now=1000.0)["verdict"],
+                             "unavailable")
+            up = FakeJudge(answers=self.HIGH)
+            jdc.triage_review(self.DIFF, "task", judge_module=up, cache_path=cache, now=1001.0)
+            self.assertEqual(up.calls, 1)
+
+
 # --------------------------------------------------------- #24 fact check
 
 class FactCheckTests(unittest.TestCase):

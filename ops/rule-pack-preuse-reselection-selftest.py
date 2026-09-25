@@ -1050,6 +1050,41 @@ check("semantic rule failure preserves a validated visible build receipt",
       and contract.validate_build_receipt(failed_build_receipt, repo=REPO)
       and "SUPER-SECRET" not in context(failed_semantic_output))
 
+# The verdict cache is keyed on the hook payload's OWN session id — never the
+# environment, never a shared default — so the default adviser must carry it.
+default_adviser_calls: list[tuple] = []
+_real_semantic_adviser = rail._semantic_adviser
+
+
+def recording_adviser(situation: str, session_id: str | None = None) -> list[dict]:
+    default_adviser_calls.append((situation, session_id))
+    return []
+
+
+rail._semantic_adviser = recording_adviser
+try:
+    rail.process(prompt_payload(prompt="hello"), runner=Runner(),
+                 build_adviser=fake_build_adviser)
+finally:
+    rail._semantic_adviser = _real_semantic_adviser
+with tempfile.TemporaryDirectory() as fake_repo:
+    (Path(fake_repo) / "ops").mkdir()
+    (Path(fake_repo) / "ops/jev_rule_select.py").write_text(
+        "SEEN = []\n"
+        "def advise(situation, **kwargs):\n"
+        "    SEEN.append(kwargs)\n"
+        "    return [kwargs]\n", encoding="utf-8")
+    _real_repo = rail.REPO
+    rail.REPO = Path(fake_repo)
+    try:
+        forwarded = _real_semantic_adviser("hello", "session-prompt")
+    finally:
+        rail.REPO = _real_repo
+check("the default adviser receives the hook payload's own session id",
+      default_adviser_calls == [("hello", "session-prompt")]
+      and forwarded == [{"session_id": "session-prompt"}],
+      (default_adviser_calls, forwarded))
+
 check("malformed prompt events fail open before either adapter runs",
       rail.process({"hook_event_name": "UserPromptSubmit", "session_id": "x"},
                    runner=Runner(), adviser=fake_adviser) is None)
