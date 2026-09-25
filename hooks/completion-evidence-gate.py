@@ -320,6 +320,10 @@ WRITE_ACTION_EXACT = {
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
     "record-foundation-assurance-minimum-outcome",
+    "evaluate-artifact-deletion",  # V5-F01: persists one bounded deletion-evaluation
+                                   # receipt (it never deletes). EXACT rather than a
+                                   # prefix: "evaluate" names judgments that are reads
+                                   # elsewhere, and as a prefix would capture them.
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
