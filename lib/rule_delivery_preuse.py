@@ -42,7 +42,7 @@ GENERALIZED_RECEIPT_KEYS = frozenset({
     "map_digest", "source_digest", "identity", "rule_ids", "rules", "rule_delivery",
 })
 TRIGGER_TABLE_RELATIVE = "ops/config/rule-jit-triggers.v1.json"
-TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex"})
+TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex", "prompt_regex"})
 
 # The partner-message sibling. Unlike the two PreToolUse receipts, this one is
 # selected by semantic judgment rather than by a compiled trigger row. Its
@@ -131,6 +131,13 @@ SELECTOR_SOURCE_PATHS = (
     # so a change to either must invalidate old receipts too.
     "ops/jev_verdict_cache.py",
     "ops/machine_envelope.py",
+    # Message-time selection is now a match against Jev's compile-time
+    # judgments, so the matcher, the compiler and both compiled files are
+    # part of what selected a delivered rule.
+    "ops/rule_trigger_delivery.py",
+    "ops/rule_trigger_compile.py",
+    "ops/config/rule-jev-triggers.v1.json",
+    "ops/config/rule-jit-triggers.v1.json",
 )
 
 
@@ -282,8 +289,13 @@ def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
 
 
 def semantic_selector_digest(repo: Path) -> str:
-    """Bind a semantic receipt to every implementation file that judged it."""
-    return digest({relative: file_sha256(repo / relative)
+    """Bind a semantic receipt to every implementation file that judged it.
+
+    An absent file digests as "absent" rather than raising: a missing compiled
+    trigger file is the fail-open case (delivery falls back to judging), and
+    its receipt must still be issuable and verifiable."""
+    return digest({relative: (file_sha256(repo / relative)
+                              if (repo / relative).is_file() else "absent")
                    for relative in SELECTOR_SOURCE_PATHS})
 
 

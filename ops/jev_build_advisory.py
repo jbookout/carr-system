@@ -39,6 +39,10 @@ FACETS = (
     "next_action_priority",
 )
 MAX_MESSAGE_CHARS = 90_000
+# The prompt hook (hooks/rule-pack-preuse-reselection.py) runs this before the
+# rule judgment, inside one 20 s hook timeout: ONE attempt, no rate-limit
+# retries, at most this long. A slower Jev leaves a visible abstention.
+TIMEOUT_SECONDS = 6.0
 
 QUESTION_TEXT = {
     "architecture_or_design":
@@ -199,7 +203,7 @@ def _cache():
 
 
 def advise(partner_request: str, *, client: Any | None = None,
-           timeout: float = 20.0, cache_path: str | None = None,
+           timeout: float = TIMEOUT_SECONDS, cache_path: str | None = None,
            now: float | None = None) -> dict:
     """Return one typed, attributable reading of a partner's build request.
 
@@ -232,7 +236,7 @@ def advise(partner_request: str, *, client: Any | None = None,
 
 
 def _advise(partner_request: str, *, client: Any | None = None,
-            timeout: float = 20.0) -> dict:
+            timeout: float = TIMEOUT_SECONDS) -> dict:
     """One Jev request for a partner's build request."""
     if not isinstance(partner_request, str) or not partner_request.strip():
         raise AdvisoryUnavailable("partner request is empty")
@@ -243,7 +247,8 @@ def _advise(partner_request: str, *, client: Any | None = None,
         response = tsc.ask(
             {"partner_request": partner_request},
             questions(tsc),
-            timeout=timeout,
+            timeout=min(timeout, TIMEOUT_SECONDS),
+            retries=0,
         )
     except Exception as exc:
         raise AdvisoryUnavailable(f"{type(exc).__name__}: Jev unavailable") from None
