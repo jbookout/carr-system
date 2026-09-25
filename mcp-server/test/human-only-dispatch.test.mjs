@@ -91,10 +91,17 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     // V5-F01: installing the field-authority/retention policy and appending a
     // preservation hold are partner acts on the authority connection.
     "record-artifact-preservation-hold",
+    // DoctorCRE V5-J103: a partner's own consent for the local mail and
+    // calendar adapter to READ their own carr.us mailbox, and its withdrawal.
+    "record-correspondence-adapter-consent",
+    // V5-J102: a lifecycle correction rewrites recorded history, so it is a
+    // partner act on the authority connection.
+    "record-lifecycle-correction",
     "record-tour-map-promotion-receipt",
     "record-tour-pdf-human-review",
     "register-record-source-authority-policy",
     "review-and-triage",
+    "revoke-correspondence-adapter-consent",
     "transition-execution-environment-provider",
   ]);
 });

@@ -27,6 +27,7 @@ import {
   V5_J102_EVIDENCE_KINDS,
   V5_J102_FIELD_CLASS_REGISTRY,
   V5_J102_INITIALIZATION_IDS,
+  V5_J102_ACTIVE_NEGOTIATION_STATES,
   V5_J102_INITIALIZED_SUBJECT_KINDS,
   V5_J102_PARTNER_AUTHORED_RECORD_KINDS,
   V5_J102_SETTLED_DECISIONS,
@@ -80,7 +81,7 @@ const AGENT = Object.freeze({
 
 const relationship = (over = {}) => ({
   subject_kind: "relationship", subject_id: "rel-synthetic-1",
-  relationship_state: "prospect", active_engagement_count: 0, ...over,
+  relationship_state: "prospect", active_engagement_count: 0, party_id: null, ...over,
 });
 const engagement = (over = {}) => ({
   subject_kind: "engagement", subject_id: "eng-synthetic-1",
@@ -194,8 +195,14 @@ const evaluate = over => evaluateLifecycleTransition({
   tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW, ...over,
 });
 
+// A property negotiation's initialization needs the store's census of the live
+// siblings; the helper supplies an empty one unless a test names its own.
 const initialize = over => evaluateLifecycleInitialization({
-  tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW, ...over,
+  tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW,
+  ...(over.initialization_id === "initialize-property-negotiation" &&
+      !Object.prototype.hasOwnProperty.call(over, "active_negotiations_for_property")
+    ? { active_negotiations_for_property: [] } : {}),
+  ...over,
 });
 
 const client = (over = {}) =>
@@ -1561,6 +1568,54 @@ test("Q081: migration is never claimed complete, and the missing facts are named
   assert.equal(claimed.migration_complete, false);
 });
 
+test("Q081: a CLEAN shadow run removes only its own missing fact and still retires nobody", () => {
+  const run = over => ({ run_digest: D(7), compared_rows: 3, matching_rows: 3,
+    differing_rows: 0, unlinked_rows: 0, many_to_one_subjects: 0,
+    subjects_without_legacy_row: 0, snapshot_current: true, clean: true, ...over });
+  const clean = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID, latest_shadow_run: run() });
+  assert.equal(clean.shadow_comparison_clean_run, true);
+  assert.equal(clean.may_retire_callers, false, "a clean shadow is not a caller census");
+  assert.equal(clean.migration_complete, false);
+  assert.deepEqual(clean.missing_facts.map(f => f.fact), ["exact_caller_census"]);
+  assert.equal(clean.latest_shadow_run.run_digest, D(7));
+
+  // Each way a run fails to be proof keeps the shadow fact missing.
+  for (const over of [
+    { matching_rows: 2, differing_rows: 1, clean: false },           // a difference
+    { unlinked_rows: 1, clean: false },                              // an unmigrated row
+    { compared_rows: 0, matching_rows: 0, clean: false },            // compared nothing
+    { many_to_one_subjects: 1, clean: false },                       // two legacy rows, one subject
+    { subjects_without_legacy_row: 1, clean: false },                // a referenced subject nobody had
+    { snapshot_current: false },                                     // clean, but over a moved snapshot
+  ]) {
+    const dirty = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID, latest_shadow_run: run(over) });
+    assert.equal(dirty.shadow_comparison_clean_run, false, JSON.stringify(over));
+    assert.deepEqual(dirty.missing_facts.map(f => f.fact),
+      ["exact_caller_census", "shadow_comparison_clean_run"]);
+    assert.equal(dirty.missing_facts[1].produced_by, "ops.j102_run_migration_shadow");
+  }
+
+  // Cleanliness is DERIVED from the counts; a flag that disagrees is refused.
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ unlinked_rows: 4, clean: true }) }),
+  e => e.code === "shadow_run_clean_flag_contradicts_counts");
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ many_to_one_subjects: 2, clean: true }) }),
+  e => e.code === "shadow_run_clean_flag_contradicts_counts");
+  const stale = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ snapshot_current: false }) });
+  assert.equal(stale.latest_shadow_run.clean, true, "the run itself was clean");
+  assert.match(stale.missing_facts[1].why, /snapshot that has since moved/);
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ snapshot_current: undefined }) }));
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ matching_rows: 1 }) }),
+  e => e.code === "shadow_run_counts_inconsistent");
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ run_digest: "not-a-digest" }) }),
+  e => e.code === "invalid_digest");
+});
+
 // --- the whole journey, end to end -----------------------------------------
 
 test("Journey 1 end to end: Prospect through Client, Assignment, multiple LOIs, pending Deal and close", () => {
@@ -1827,7 +1882,7 @@ test("Q069/Q077: an initialized relationship is a PROSPECT, and it is not a Clie
   assert.equal(created.reason_id, "prospect_relationship_initialized");
   assert.deepEqual(created.created_state, {
     subject_kind: "relationship", subject_id: "rel-synthetic-1",
-    relationship_state: "prospect", active_engagement_count: 0,
+    relationship_state: "prospect", active_engagement_count: 0, party_id: null,
   });
   assert.equal(created.establishes_client_status, false);
   assert.equal(created.advances_lifecycle_state, false);
@@ -1949,6 +2004,52 @@ test("Q095: a negotiation is initialized only under an assignment that is still 
     });
     assert.equal(drafted.decision, "allow");
   }
+});
+
+test("OWNER RULING (b): at most one ACTIVE negotiation per assignment and property", () => {
+  const base = {
+    initialization_id: "initialize-property-negotiation",
+    related: { assignment: assignment() },
+    declared: { new_subject_id: "neg-synthetic-9", property_id: "prop-synthetic-1" },
+  };
+  const blocked = initialize({ ...base, active_negotiations_for_property: ["neg-synthetic-1"] });
+  assert.equal(blocked.decision, "refuse");
+  assert.equal(blocked.reason_id, "active_negotiation_exists_for_property");
+  assert.deepEqual(blocked.active_negotiation_ids, ["neg-synthetic-1"]);
+  assert.equal(blocked.created_state, null);
+  // Fail closed: no census, no creation.
+  const blind = evaluateLifecycleInitialization({ tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
+    now: NOW, ...base });
+  assert.equal(blind.decision, "refuse");
+  assert.equal(blind.reason_id, "active_negotiation_census_absent");
+  // An empty census admits; the rule is per PROPERTY, so other properties never count.
+  assert.equal(initialize({ ...base, active_negotiations_for_property: [] }).decision, "allow");
+  // The census is read only where it means something.
+  assert.throws(() => initialize({ initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-9" }, active_negotiations_for_property: [] }),
+  e => e.code === "unknown_field");
+  // The active set excludes dead negotiations and the selected winner.
+  assert.deepEqual([...V5_J102_ACTIVE_NEGOTIATION_STATES],
+    ["loi_drafted", "loi_submitted", "loi_countered", "loi_accepted"]);
+});
+
+test("OWNER RULING (a): a prospect may carry an OPTIONAL CARR party reference", () => {
+  const linked = initialize({ initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-9", party_id: "0b8a3c1e-7d2f-4e5a-9c61-2f3d4e5a6b7c" } });
+  assert.equal(linked.decision, "allow");
+  assert.equal(linked.created_state.party_id, "0b8a3c1e-7d2f-4e5a-9c61-2f3d4e5a6b7c");
+  const unlinked = initialize({ initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-10" } });
+  assert.equal(unlinked.decision, "allow");
+  assert.equal(unlinked.created_state.party_id, null, "optional: a relationship with no known party");
+  // Only the prospect declares a party; any other initialization refuses the key.
+  const misplaced = initialize({ initialization_id: "initialize-assignment",
+    related: { engagement: engagement(), relationship: client() },
+    declared: { new_subject_id: "asg-synthetic-9", party_id: "party-1" } });
+  assert.equal(misplaced.decision, "refuse");
+  assert.equal(misplaced.reason_id, "declared_identifier_not_used");
+  assert.deepEqual(v5J102InitializationContract("initialize-prospect-relationship")
+    .optional_declared_identifiers, ["party_id"]);
 });
 
 test("an initialization accepts IDENTIFIERS and nothing else — a state, an approval or evidence refuses", () => {

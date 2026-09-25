@@ -286,6 +286,7 @@ begin;
 do $proof$
 declare
   v_actor            text;
+  v_sponsor          text;
   v_class            text;
   v_now              text;
   v_behavioural      boolean := false;
@@ -411,6 +412,7 @@ begin
   -- skipped where the answer is no.
   begin
     v_actor := ops.f01_context_actor_slug();
+    v_sponsor := ops.j102_sponsoring_partner();
     v_class := ops.f01_principal() ->> 'authorization_class';
     v_now := ops.f01_now_text();
     v_behavioural := true;
@@ -1044,7 +1046,13 @@ begin
     perform ops.j102_typed_approval('representation_equivalence_approval', 'j102-fixture-approval-1');
     raise exception 'B10: the private approval reader returned instead of refusing';
   exception when insufficient_privilege then
-    if sqlerrm !~ 'j102_typed_approval_unavailable' then
+    -- A missing EXECUTE grant is ALSO SQLSTATE 42501, so it lands in this arm
+    -- and not in `others` below. First execution (2026-09-25, PostgreSQL 17, as
+    -- carr_authority_joe) hit exactly that: the ungranted reader was reported as
+    -- "refused for the wrong reason". Told apart by the engine's own text.
+    if sqlerrm ~ '^permission denied for function' then
+      raise notice 'B10: the approval reader is not executable from this session; its refusal text is checked only where it is reachable.';
+    elsif sqlerrm !~ 'j102_typed_approval_unavailable' then
       raise exception 'B10: the approval reader refused for the wrong reason: %', sqlerrm;
     end if;
   when others then
@@ -1172,7 +1180,7 @@ begin
     'state', v_assignment_state,
     'established_by_transition', 'open-assignment',
     'prior_state_digest', v_placeholder,
-    'updated_by', v_actor, 'updated_at', v_now);
+    'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
   -- THE EVENT IN ITS WHOLE CANONICAL SHAPE, nested detail and all. The writer now
   -- compares every non-identity key of the nested event against the admission
   -- map's template for `assignment_opened` and the cited references against what
@@ -1191,7 +1199,7 @@ begin
     'evidence_references', jsonb_build_array(jsonb_build_object(
       'evidence_kind', 'search_initiation', 'source', 'first_party_record',
       'reference', v_fact_id)),
-    'recorded_by', v_actor, 'recorded_at', v_now);
+    'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
   v_subjects := jsonb_build_array(jsonb_build_object(
     'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
     'tenant', v_tenant, 'record', v_rec, 'record_digest', ops.f01_digest_jsonb(v_rec),
@@ -1281,7 +1289,7 @@ begin
       'state', v_negotiation_state,
       'established_by_transition', 'record-loi-submission',
       'prior_state_digest', null,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     perform ops.j102_apply_transition(
       'record-loi-submission',
       jsonb_build_object(
@@ -1395,7 +1403,7 @@ begin
         'event_kind', 'deal_closed',
         'subject_kind', 'deal', 'subject_id', v_deal_id_c),
       'transition_id', 'open-assignment', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_apply_transition(
       'open-assignment',
       jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
@@ -1421,7 +1429,7 @@ begin
         'event_kind', 'assignment_opened',
         'subject_kind', 'assignment', 'subject_id', v_assignment_id),
       'transition_id', 'commit-winning-property', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_apply_transition(
       'open-assignment',
       jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
@@ -1465,7 +1473,7 @@ begin
         'event_kind', 'assignment_committed',
         'subject_kind', 'assignment', 'subject_id', v_assignment_id),
       'transition_id', 'open-assignment', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_apply_transition(
       'open-assignment',
       jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
@@ -1562,7 +1570,7 @@ begin
         'closing_date', v_now),
       'established_by_transition', 'open-assignment',
       'prior_state_digest', null,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     perform ops.j102_apply_transition(
       'open-assignment',
       jsonb_build_object(
@@ -1589,7 +1597,7 @@ begin
       'state', v_assignment_state || jsonb_build_object('subject_id', v_assignment_id_2),
       'established_by_transition', 'open-assignment',
       'prior_state_digest', v_placeholder,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     perform ops.j102_apply_transition(
       'open-assignment',
       jsonb_build_object(
@@ -1621,7 +1629,7 @@ begin
       'state', v_assignment_state,
       'established_by_transition', 'record-loi-submission',
       'prior_state_digest', null,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     perform ops.j102_apply_transition(
       'record-loi-submission',
       jsonb_build_object(
@@ -1637,14 +1645,14 @@ begin
             'state', v_negotiation_state,
             'established_by_transition', 'record-loi-submission',
             'prior_state_digest', v_placeholder,
-            'updated_by', v_actor, 'updated_at', v_now),
+            'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now),
           'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
             'schema_version', v_subject_schema, 'tenant', v_tenant,
             'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
             'state', v_negotiation_state,
             'established_by_transition', 'record-loi-submission',
             'prior_state_digest', v_placeholder,
-            'updated_by', v_actor, 'updated_at', v_now)),
+            'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now)),
           'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
         jsonb_build_object(
           'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
@@ -1679,14 +1687,14 @@ begin
           'state', v_negotiation_state,
           'established_by_transition', 'record-loi-submission',
           'prior_state_digest', v_placeholder,
-          'updated_by', v_actor, 'updated_at', v_now),
+          'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now),
         'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
           'schema_version', v_subject_schema, 'tenant', v_tenant,
           'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
           'state', v_negotiation_state,
           'established_by_transition', 'record-loi-submission',
           'prior_state_digest', v_placeholder,
-          'updated_by', v_actor, 'updated_at', v_now)),
+          'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now)),
         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
       v_events, v_manifest,
       'j102-fixture-key-a9', v_placeholder,
@@ -1711,7 +1719,7 @@ begin
         'event_kind', 'assignment_opened',
         'subject_kind', 'assignment', 'subject_id', v_assignment_id),
       'transition_id', 'record-loi-submission', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_apply_transition(
       'record-loi-submission',
       jsonb_build_object(
@@ -1727,14 +1735,14 @@ begin
             'state', v_negotiation_state,
             'established_by_transition', 'record-loi-submission',
             'prior_state_digest', v_placeholder,
-            'updated_by', v_actor, 'updated_at', v_now),
+            'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now),
           'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
             'schema_version', v_subject_schema, 'tenant', v_tenant,
             'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
             'state', v_negotiation_state,
             'established_by_transition', 'record-loi-submission',
             'prior_state_digest', v_placeholder,
-            'updated_by', v_actor, 'updated_at', v_now)),
+            'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now)),
           'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
         -- The coupled assignment, provenanced to the transition THIS call
         -- applies. Reusing the open-assignment envelope here would now refuse at
@@ -1749,14 +1757,14 @@ begin
             'state', v_assignment_state,
             'established_by_transition', 'record-loi-submission',
             'prior_state_digest', v_placeholder,
-            'updated_by', v_actor, 'updated_at', v_now),
+            'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now),
           'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
             'schema_version', v_subject_schema, 'tenant', v_tenant,
             'subject_kind', 'assignment', 'subject_id', v_assignment_id,
             'state', v_assignment_state,
             'established_by_transition', 'record-loi-submission',
             'prior_state_digest', v_placeholder,
-            'updated_by', v_actor, 'updated_at', v_now)),
+            'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now)),
           'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
       jsonb_build_array(jsonb_build_object(
         'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
@@ -2145,14 +2153,14 @@ begin
   -- ========================================================================
   v_state := jsonb_build_object(
     'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
-    'relationship_state', 'prospect', 'active_engagement_count', 0);
+    'relationship_state', 'prospect', 'active_engagement_count', 0, 'party_id', null);
   v_rec := jsonb_build_object(
     'schema_version', v_subject_schema, 'tenant', v_tenant,
     'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
     'state', v_state,
     'established_by_transition', 'initialize-prospect-relationship',
     'prior_state_digest', null,
-    'updated_by', v_actor, 'updated_at', v_now);
+    'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
   v_subject_env := jsonb_build_object(
     'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
     'tenant', v_tenant, 'record', v_rec, 'record_digest', ops.f01_digest_jsonb(v_rec),
@@ -2165,7 +2173,7 @@ begin
       'relationship_state', 'prospect'),
     'transition_id', 'initialize-prospect-relationship',
     'evidence_references', '[]'::jsonb,
-    'recorded_by', v_actor, 'recorded_at', v_now);
+    'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
   v_event_env := jsonb_build_object(
     'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
     'tenant', v_tenant, 'record', v_evt, 'record_digest', ops.f01_digest_jsonb(v_evt),
@@ -2241,7 +2249,7 @@ begin
   begin
     v_rec2 := jsonb_set(v_rec, '{state}', jsonb_build_object(
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
-      'relationship_state', 'client', 'active_engagement_count', 1));
+      'relationship_state', 'client', 'active_engagement_count', 1, 'party_id', null));
     perform ops.j102_initialize_subject('initialize-prospect-relationship',
       jsonb_build_object('relationship:' || v_walk_rel_id, null),
       jsonb_build_object(
@@ -2313,7 +2321,7 @@ begin
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
       'state', v_state, 'established_by_transition', 'initialize-assignment',
-      'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+      'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt2 := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2321,7 +2329,7 @@ begin
         'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
         'engagement_id', v_walk_eng_id, 'assignment_phase', 'research'),
       'transition_id', 'initialize-assignment', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_initialize_subject('initialize-assignment',
       jsonb_build_object('assignment:' || v_walk_asg_id, null),
       jsonb_build_object(
@@ -2445,7 +2453,7 @@ begin
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
       'state', v_state, 'established_by_transition', 'initialize-assignment',
-      'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+      'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt2 := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2453,7 +2461,7 @@ begin
         'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
         'engagement_id', v_walk_eng_id, 'assignment_phase', 'research'),
       'transition_id', 'initialize-assignment', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_initialize_subject('initialize-assignment',
       jsonb_build_object('assignment:' || v_walk_asg_id, null,
                          'engagement:' || v_walk_eng_id, null),
@@ -2568,10 +2576,16 @@ begin
         'recorded_at', v_now);
       v_result := ops.f01_record_document(
         v_doc_envelope,
+        -- The envelope repeats the three "claims nothing" flags at ITS level too:
+        -- F01's f01_docsource_claims_nothing constraint reads both, so an
+        -- envelope that states them only inside the record is refused. Found on
+        -- the first run against F01's numbered migration rather than domain.sql.
         jsonb_build_object(
           'schema_version', 'doctorcre-v5-f01-stored-record-envelope.v1',
           'record_kind', 'stored_document_source_provenance', 'tenant', v_tenant,
-          'record', v_prov_record, 'record_digest', ops.f01_digest_jsonb(v_prov_record)),
+          'record', v_prov_record, 'record_digest', ops.f01_digest_jsonb(v_prov_record),
+          'is_exhaustive_inventory', false, 'establishes_coverage', false,
+          'permits_deletion', false),
         -- NO DERIVATIVE LINK. An original names no source, and the writer refuses
         -- a link on a non-derived document by name, so passing one would be
         -- inventing exactly the derivative coverage this fixture must not claim.
@@ -2620,14 +2634,14 @@ begin
     v_rel_digest := ops.j102_subject('relationship', v_walk_rel_id) ->> 'state_digest';
     v_state := jsonb_build_object(
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
-      'relationship_state', 'client', 'active_engagement_count', 1);
+      'relationship_state', 'client', 'active_engagement_count', 1, 'party_id', null);
     v_rec := jsonb_build_object(
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
       'state', v_state,
       'established_by_transition', 'establish-client-and-engagement',
       'prior_state_digest', v_rel_digest,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_rec2 := jsonb_build_object(
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'engagement', 'subject_id', v_walk_eng_id,
@@ -2638,7 +2652,7 @@ begin
         'effective_from', null, 'effective_to', null),
       'established_by_transition', 'establish-client-and-engagement',
       'prior_state_digest', null,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_manifest := jsonb_build_array(jsonb_build_object(
       'evidence_kind', 'signed_engagement_letter', 'source', 'f01_document',
       'reader', 'ops.f01_read.document',
@@ -2659,7 +2673,7 @@ begin
       'evidence_references', jsonb_build_array(jsonb_build_object(
         'evidence_kind', 'signed_engagement_letter', 'source', 'f01_document',
         'reference', v_walk_doc_id)),
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     v_evt2 := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2671,7 +2685,7 @@ begin
       'evidence_references', jsonb_build_array(jsonb_build_object(
         'evidence_kind', 'signed_engagement_letter', 'source', 'f01_document',
         'reference', v_walk_doc_id)),
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     v_result := ops.j102_apply_transition(
       'establish-client-and-engagement',
       jsonb_build_object('relationship:' || v_walk_rel_id, v_rel_digest,
@@ -2729,7 +2743,7 @@ begin
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
       'state', v_state, 'established_by_transition', 'initialize-assignment',
-      'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+      'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2737,7 +2751,7 @@ begin
         'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
         'engagement_id', v_walk_eng_id, 'assignment_phase', 'research'),
       'transition_id', 'initialize-assignment', 'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     v_result := ops.j102_initialize_subject('initialize-assignment',
       jsonb_build_object('assignment:' || v_walk_asg_id, null,
                          'engagement:' || v_walk_eng_id, v_eng_digest,
@@ -2791,7 +2805,7 @@ begin
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
       'state', v_state, 'established_by_transition', 'open-assignment',
-      'prior_state_digest', v_asg_digest, 'updated_by', v_actor, 'updated_at', v_now);
+      'prior_state_digest', v_asg_digest, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2803,7 +2817,7 @@ begin
       'evidence_references', jsonb_build_array(jsonb_build_object(
         'evidence_kind', 'search_initiation', 'source', 'first_party_record',
         'reference', v_walk_fact_id)),
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     v_result := ops.j102_apply_transition(
       'open-assignment',
       jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest,
@@ -2850,7 +2864,7 @@ begin
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'property_negotiation', 'subject_id', v_walk_neg_id,
       'state', v_state, 'established_by_transition', 'initialize-property-negotiation',
-      'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+      'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2860,7 +2874,7 @@ begin
         'negotiation_state', 'loi_drafted'),
       'transition_id', 'initialize-property-negotiation',
       'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_initialize_subject('initialize-property-negotiation',
       jsonb_build_object('property_negotiation:' || v_walk_neg_id, null,
                          'assignment:' || v_walk_asg_id, v_asg_digest),
@@ -2901,7 +2915,7 @@ begin
       'established_by_transition', 'record-loi-submission',
       'prior_state_digest',
         ops.j102_subject('property_negotiation', v_walk_neg_id) ->> 'state_digest',
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_rec2 := jsonb_build_object(
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
@@ -2913,7 +2927,7 @@ begin
         'multi_target_exception_ref', null),
       'established_by_transition', 'record-loi-submission',
       'prior_state_digest', v_asg_digest,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2925,7 +2939,7 @@ begin
       'evidence_references', jsonb_build_array(jsonb_build_object(
         'evidence_kind', 'submitted_loi', 'source', 'f01_document',
         'reference', v_walk_doc_id)),
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     begin
       perform ops.j102_apply_transition(
         'record-loi-submission',
@@ -2974,12 +2988,12 @@ begin
     --      relationship row to point at rather than a placeholder digest.
     v_state := jsonb_build_object(
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_2,
-      'relationship_state', 'prospect', 'active_engagement_count', 0);
+      'relationship_state', 'prospect', 'active_engagement_count', 0, 'party_id', null);
     v_rec := jsonb_build_object(
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_2,
       'state', v_state, 'established_by_transition', 'initialize-prospect-relationship',
-      'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+      'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_evt := jsonb_build_object(
       'schema_version', v_event_schema, 'tenant', v_tenant,
       'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -2988,7 +3002,7 @@ begin
         'relationship_state', 'prospect'),
       'transition_id', 'initialize-prospect-relationship',
       'evidence_references', '[]'::jsonb,
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     perform ops.j102_initialize_subject('initialize-prospect-relationship',
       jsonb_build_object('relationship:' || v_walk_rel_id_2, null),
       jsonb_build_object('schema_version', v_env_schema,
@@ -3026,7 +3040,7 @@ begin
         'schema_version', v_subject_schema, 'tenant', v_tenant,
         'subject_kind', 'assignment', 'subject_id', v_walk_asg_id_2,
         'state', v_state, 'established_by_transition', 'initialize-assignment',
-        'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+        'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
       v_evt2 := jsonb_build_object(
         'schema_version', v_event_schema, 'tenant', v_tenant,
         'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -3034,7 +3048,7 @@ begin
           'subject_kind', 'assignment', 'subject_id', v_walk_asg_id_2,
           'engagement_id', v_walk_eng_id, 'assignment_phase', 'research'),
         'transition_id', 'initialize-assignment', 'evidence_references', '[]'::jsonb,
-        'recorded_by', v_actor, 'recorded_at', v_now);
+        'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
       perform ops.j102_initialize_subject('initialize-assignment',
         jsonb_build_object('assignment:' || v_walk_asg_id_2, null,
                            'engagement:' || v_walk_eng_id, v_eng_digest,
@@ -3067,12 +3081,12 @@ begin
     begin
       v_state := jsonb_build_object(
         'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_3,
-        'relationship_state', 'prospect', 'active_engagement_count', 0);
+        'relationship_state', 'prospect', 'active_engagement_count', 0, 'party_id', null);
       v_rec2 := jsonb_build_object(
         'schema_version', v_subject_schema, 'tenant', v_tenant,
         'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_3,
         'state', v_state, 'established_by_transition', 'initialize-prospect-relationship',
-        'prior_state_digest', null, 'updated_by', v_actor, 'updated_at', v_now);
+        'prior_state_digest', null, 'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
       v_evt2 := jsonb_build_object(
         'schema_version', v_event_schema, 'tenant', v_tenant,
         'event', jsonb_build_object('schema_version', v_ev_schema,
@@ -3081,7 +3095,7 @@ begin
           'relationship_state', 'prospect'),
         'transition_id', 'initialize-prospect-relationship',
         'evidence_references', '[]'::jsonb,
-        'recorded_by', v_actor, 'recorded_at', v_now);
+        'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
       perform ops.j102_initialize_subject('initialize-prospect-relationship',
         jsonb_build_object('relationship:' || v_walk_rel_id_3, null,
                            'relationship:' || v_walk_rel_id_2,
@@ -3148,7 +3162,7 @@ begin
       'evidence_references', jsonb_build_array(jsonb_build_object(
         'evidence_kind', 'search_initiation', 'source', 'first_party_record',
         'reference', v_walk_fact_id)),
-      'recorded_by', v_actor, 'recorded_at', v_now);
+      'recorded_by', v_actor, 'sponsoring_partner', v_sponsor, 'recorded_at', v_now);
     v_events := jsonb_build_array(jsonb_build_object(
       'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
       'tenant', v_tenant, 'record', v_evt, 'record_digest', ops.f01_digest_jsonb(v_evt),
@@ -3178,7 +3192,7 @@ begin
           'pending_deal_id', v_deal_id, 'multi_target_exception_ref', null),
         'established_by_transition', 'open-assignment',
         'prior_state_digest', v_asg_digest,
-        'updated_by', v_actor, 'updated_at', v_now);
+        'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
       perform ops.j102_apply_transition(
         'open-assignment',
         jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest,
@@ -3218,7 +3232,7 @@ begin
         'state', v_state - 'assignment_phase',
         'established_by_transition', 'open-assignment',
         'prior_state_digest', v_asg_digest,
-        'updated_by', v_actor, 'updated_at', v_now);
+        'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
       perform ops.j102_apply_transition(
         'open-assignment',
         jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest,
@@ -3261,7 +3275,7 @@ begin
       'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
       'state', v_state, 'established_by_transition', 'open-assignment',
       'prior_state_digest', v_asg_digest,
-      'updated_by', v_actor, 'updated_at', v_now);
+      'updated_by', v_actor, 'sponsoring_partner', v_sponsor, 'updated_at', v_now);
     v_subjects := jsonb_build_array(jsonb_build_object(
       'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
       'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
