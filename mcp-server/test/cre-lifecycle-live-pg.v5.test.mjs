@@ -1357,6 +1357,19 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
   assert.equal((await readiness()).shadow_comparison_clean_run, true,
     "the snapshot the run read is the snapshot again");
 
+  // AN EDIT TO A COMPARED FIELD of a row the run already compared stales it too:
+  // the run's verdict on that row is no longer a verdict on what the row says.
+  await owner("update public.deal set phase = 'closing' where id = $1::uuid", [matching]);
+  const edited = await readiness();
+  assert.equal(edited.latest_shadow_run.clean, true);
+  assert.equal(edited.latest_shadow_run.snapshot_current, false, "a compared field moved");
+  assert.equal(edited.shadow_comparison_clean_run, false);
+  assertKernelAgrees(edited);
+  await owner("update public.deal set closed_on = '2026-09-01' where id = $1::uuid", [matching]);
+  assert.equal((await readiness()).shadow_comparison_clean_run, false, "closed_on is compared too");
+  await owner("update public.deal set phase = 'legal', closed_on = null where id = $1::uuid", [matching]);
+  assert.equal((await readiness()).shadow_comparison_clean_run, true, "restored, current again");
+
   // EACH FAULT ALONE SPOILS A RUN. Every other row matches in each of these, so
   // the one fault is the only thing standing between the run and "clean".
   const counts = r => [r.compared_rows, r.matching_rows, r.differing_rows, r.unlinked_rows,
@@ -1743,4 +1756,91 @@ test("RULING (c) LIVE: a caller-supplied sponsor is refused, at the store and at
     as("agent_as_dell").initializeProspectRelationship({ idempotency_key: key(),
       declared: { new_subject_id: id("rel") } }),
     e => e?.code === "sponsor_context_mismatch");
+});
+
+/** A store on `name`'s pool whose writer call has its params rewritten by `edit`. */
+function tamperingStoreFor(name, writer, edit) {
+  return createCreLifecycleStore({ db: {
+    async query() { throw new Error("transaction() is always used"); },
+    async transaction(fn) {
+      const client = await (await pool(name)).connect();
+      try {
+        await client.query("BEGIN");
+        const out = await fn({ query: async (text, params) =>
+          client.query(text, writer.test(text) ? edit([...params]) : params) });
+        await client.query("COMMIT");
+        return out;
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+  } });
+}
+
+test("RULING (c) LIVE: a TRANSITION envelope naming another sponsor, digests recomputed, is refused by the SQL writer", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  const invoice = await fact("joe", "invoice", "deal", d.deal, { detail: "synthetic" });
+  let tampered = 0;
+  const store = tamperingStoreFor("agent", /ops\.j102_apply_transition\(/, params => {
+    // $3 is the subject envelopes. Each is re-sealed with a different sponsor, so
+    // every digest the writer checks is honest and only the sponsor lies.
+    const envelopes = JSON.parse(params[2]).map(env => {
+      tampered += 1;
+      return v5J102StoreEnvelope("stored_lifecycle_subject",
+        { ...env.record, sponsoring_partner: "dell" }, { alone_sufficient: false });
+    });
+    params[2] = JSON.stringify(envelopes);
+    return params;
+  });
+  await assert.rejects(
+    store.recordDealAxis({ idempotency_key: key(),
+      subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+      evidence_refs: [{ evidence_kind: "invoice_issued", record_id: invoice }],
+      declared: { axis: "invoice_state" } }, { actor: AGENT }),
+    e => /j102_sponsor_mismatch/.test(String(e?.message)) && e?.code === "42501",
+    "the transition writer re-derives the sponsor and refuses the envelope's claim");
+  assert.ok(tampered > 0, "the tamper actually ran");
+  assert.equal((await body("joe", "deal", d.deal)).state_digest, base, "the deal did not move");
+});
+
+test("RULING (c) LIVE: a PARTNER session whose transaction names a different sponsor is refused", { skip: SKIP }, async () => {
+  if (!pg) pg = (await import("pg")).default;
+  // Joe's own authority login, with the sponsor setting naming Dell: the partner
+  // is their own sponsor, so the database refuses rather than choose.
+  const conflicted = new pg.Pool({ connectionString: DSN.joe, max: 1,
+    options: "-c carr.sponsoring_human_slug=dell" });
+  try {
+    const store = createCreLifecycleStore({ db: {
+      async query() { throw new Error("transaction() is always used"); },
+      async transaction(fn) {
+        const client = await conflicted.connect();
+        try {
+          await client.query("BEGIN");
+          const out = await fn({ query: (t, p) => client.query(t, p) });
+          await client.query("COMMIT");
+          return out;
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally {
+          client.release();
+        }
+      },
+    } });
+    const target = id("rel");
+    await assert.rejects(
+      store.initializeProspectRelationship({ idempotency_key: key(),
+        declared: { new_subject_id: target } }, { actor: JOE }),
+      e => /j102_sponsor_context_conflict/.test(String(e?.message)) && e?.code === "42501");
+    assert.equal(await sponsorOf("relationship", target), undefined, "nothing landed");
+    // The same login with the setting agreeing (or absent) writes normally.
+    const [row] = await sql("joe", "select ops.j102_sponsoring_partner() as s");
+    assert.equal(row.s, "joe");
+  } finally {
+    await conflicted.end();
+  }
 });
