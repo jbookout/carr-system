@@ -330,23 +330,34 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   assert.equal(normalizeClientText("\uff22ayside\u3000Medical Plaza"), "Bayside Medical Plaza");
   // The character allowlist: the review's blocker, displayed as "Gate code
   // 4411" and as an internal note, is refused by its first code point.
-  assert.equal(clientTextViolation("\u202e1144 edoc etaG"), "character:U+202E");
-  assert.equal(clientTextViolation("\u202etegdub no thgit si tneilc :eton lanretnI"), "character:U+202E");
+  assert.equal(clientTextViolation("\u202e1144 edoc etaG"), "character:U+202E at position 1");
+  assert.equal(clientTextViolation("\u202etegdub no thgit si tneilc :eton lanretnI"), "character:U+202E at position 1");
+  // The position finds an invisible character (1-based, in code points).
+  assert.equal(clientTextViolation("Suite\u00ad 210"), "character:U+00AD at position 6");
+  assert.equal(clientTextViolation("\u{1d7d0}\u00e9\u200b"), "character:U+1D7D0 at position 1");
+  assert.equal(clientTextViolation("\u00e9\u00e9\u00e9\u{e0001}"), "character:U+E0001 at position 4");
+  // The Unicode hyphen and non-breaking hyphen read as "-".
+  assert.equal(normalizeClientText("Suites 101\u2010104"), "Suites 101-104");
+  assert.equal(normalizeClientText("2026\u20112027"), "2026-2027");
+  assert.equal(clientTextViolation("251\u2011555\u20110100"), "phone");
   for (const cp of [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f,
     0x00ad, 0x180e, 0x2060, 0x2064, 0xfeff, 0xfe00, 0xfe0f, 0x034f, 0x180b, 0x180d, 0x3164, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x2800,
-    0x0660, 0x06f0, 0x2010, 0x2011, 0x2012, 0x2015, 0x2212, 0x00b7, 0x2027, 0x2043, 0x2044, 0x0300, 0x20e3, 0x2028, 0x1680, 0x00f7,
+    0x0660, 0x06f0, 0x2012, 0x2015, 0x2212, 0x00b7, 0x2027, 0x2043, 0x2044, 0x0300, 0x20e3, 0x2028, 0x1680, 0x00f7,
     0xe0001, 0xe0020, 0xe007f, 0xe0100, 0x1f3e5, 0x1ccf0, 0xa7f1]) {
     const hex = cp.toString(16).toUpperCase().padStart(4, "0");
-    assert.equal(clientTextViolation(`Suite ${String.fromCodePoint(cp)}210`), `character:U+${hex}`, hex);
+    assert.equal(clientTextViolation(`Suite ${String.fromCodePoint(cp)}210`), `character:U+${hex} at position 7`, hex);
   }
   // What the allowlist admits.
   for (const value of ["Caf\u00e9 \u00c5 \u0141\u00f3d\u017a \u017f", "\u201cA\u201d \u2018b\u2019 \u2013 \u2014 \u2022 \u2026 \u00a7 1 \u00b0 \u00b1 \u00d7 2"])
     assert.equal(clientTextViolation(value), null, value);
   // A character newer than PostgreSQL's Unicode version is refused before NFKC
   // could fold it one way here and another way there.
-  assert.equal(firstDisallowedCodePoint("\u{1ccf5}"), "U+1CCF5");
-  assert.equal(firstDisallowedCodePoint("\u2460"), "U+2460");
-  assert.equal(firstDisallowedCodePoint("\u0149"), "U+02BC");
+  assert.equal(firstDisallowedCodePoint("\u{1ccf5}"), "U+1CCF5 at position 1");
+  assert.equal(firstDisallowedCodePoint("\u2460"), "U+2460 at position 1");
+  // The three Latin Extended-A letters whose NFKC leaves the allowlist are
+  // refused as stored, so the position is always one in the stored value.
+  assert.equal(firstDisallowedCodePoint("ab\u0149"), "U+0149 at position 3");
+  assert.equal(firstDisallowedCodePoint("\u013f"), "U+013F at position 1");
   assert.equal(firstDisallowedCodePoint("\uff21\u00a0\u3000"), null);
   // Only a 3-3-4 group joins across wide separators; years and counts do not.
   assert.equal(clientTextViolation("Renovated 2021 - 2026 (12 suites)"), null);
@@ -356,6 +367,19 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   assert.equal(clientTextViolation("251 x 555 x 0100"), "phone");
   // One-character separators join only 3-3-4 groups.
   for (const sep of ["/", "_", ",", "~", "|", ":", "*", "\u2022"]) assert.equal(clientTextViolation(`251${sep}555${sep}0100`), "phone", sep);
+  // The allowlisted symbols join a 3-3-4 group, spaced or not.
+  for (const sep of ["\u00d7", "\u2022", "\u00b1", "\u00b0", "\u00a7", "\u2018", "\u2019", "\u201c", "\u201d", "\"", "'"]) {
+    assert.equal(clientTextViolation(`251${sep}555${sep}0100`), "phone", sep);
+    assert.equal(clientTextViolation(`251 ${sep} 555 ${sep} 0100`), "phone", sep);
+  }
+  // Access codes: a code word next to three or more digits.
+  for (const value of ["Gate #4411", "Gate: 4411#", "Front gate 4411", "PIN 4411", "Code 4411 at front gate", "Combo 4411 (front gate)"])
+    assert.equal(clientTextViolation(value), "access_code", value);
+  for (const value of ["Suite 200", "Door 3", "Gate 2 parking", "garage 250 spaces", "Zip code 36602", "ZIP Code: 32502"])
+    assert.equal(clientTextViolation(value), null, value);
+  // Links: a dotted name followed by a path, ftp://, a bracketed dot.
+  for (const value of ["bit.ly/abc", "goo.gl/x", "ftp://files.example", "landlord[.]com"]) assert.equal(clientTextViolation(value), "url", value);
+  assert.equal(clientTextViolation("$28.50/SF/yr NNN"), null);
   assert.equal(clientTextViolation("Suites 201-204, 1200 SF"), null);
   assert.equal(clientTextViolation("120,000 SF"), null);
   assert.equal(clientTextViolation("Time: 10:30 am tours"), null);
@@ -404,9 +428,9 @@ test("every BMP code point and an astral sample get the same verdict from both e
   }
   const allow = ranges.map(([lo, hi]) => lo === hi ? lo.toString(16) : `${lo.toString(16)}-${hi.toString(16)}`).join(",");
   const full = crypto.createHash("md5").update(verdict.map(([cp, v]) => `${cp.toString(16)}=${v ?? ""}`).join(",")).digest("hex");
-  // Only allowlisted characters (and the spaces and full-width ASCII NFKC
-  // folds into them) are admitted.
-  assert.equal(allow, "20-3f,41-7e,a0,a7,b0-b1,c0-f6,f8-13e,141-148,14a-17f,2000-200a,2013-2014,2018-2019,201c-201d,2022,2026,202f,205f,3000,ff01-ff1f,ff21-ff5e");
+  // Only allowlisted characters (and the spaces, full-width ASCII and Unicode
+  // hyphens the fold maps into them) are admitted.
+  assert.equal(allow, "20-3f,41-7e,a0,a7,b0-b1,c0-f6,f8-13e,141-148,14a-17f,2000-200a,2010-2011,2013-2014,2018-2019,201c-201d,2022,2026,202f,205f,3000,ff01-ff1f,ff21-ff5e");
   const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");
   assert.ok(proof.includes(`if v_allow is distinct from '${allow}' then`), "the proof pins the same allowed set");
   assert.ok(proof.includes(`if md5(v_full) <> '${full}' then`), "the proof pins the same verdict for every swept code point");
@@ -473,13 +497,17 @@ test("the JavaScript value rule and the database value rule are the same text", 
   assert.ok(migration.includes(`select '${CLIENT_TEXT_SUITE_RANGE.pattern}'::text`), "suite range pattern parity");
   assert.ok(migration.includes(`select '${CLIENT_TEXT_DISALLOWED}'::text`), "character allowlist parity");
   assert.ok(migration.includes(`select '${CLIENT_TEXT_DISALLOWED_SOURCE}'::text`), "stored-value allowlist parity");
-  assert.ok(migration.includes(`select '${CLIENT_TEXT_PHONE_JOIN.pattern}'::text`), "3-3-4 phone join pattern parity");
-  // NFKC, then space runs, then the ends: the same order as normalizeClientText.
+  assert.ok(migration.includes(`select '${CLIENT_TEXT_PHONE_JOIN.pattern.replaceAll("'", "''")}'::text`), "3-3-4 phone join pattern parity");
+  // The fold (NFKC, then U+2010 as "-"), then space runs, then the ends: the
+  // same order as normalizeClientText.
+  assert.ok(sqlBody(migration, "tour_client_text_fold").includes("select replace(normalize(p_text, NFKC), chr(8208), '-')"), "fold parity");
   assert.ok(sqlBody(migration, "tour_client_text_normalize").includes(
-    "regexp_replace(regexp_replace(normalize(p_text, NFKC), ' +', ' ', 'g'), '^ | $', '', 'g')"), "normalize parity");
-  // The stored value first, then NFKC(value), each against its set.
-  assert.match(sqlBody(migration, "tour_client_text_violation").replace(/\s+/g, " "),
-    /coalesce\(substring\(p_text from ops\.tour_client_text_disallowed_source_pattern\(\)\), substring\(normalize\(p_text, NFKC\) from ops\.tour_client_text_disallowed_pattern\(\)\)\) bad/);
+    "regexp_replace(regexp_replace(ops.tour_client_text_fold(p_text), ' +', ' ', 'g'), '^ | $', '', 'g')"), "normalize parity");
+  // The stored value first, then the folded text, each against its set, with
+  // the 1-based position of the offending character.
+  const judged = sqlBody(migration, "tour_client_text_violation").replace(/\s+/g, " ");
+  assert.ok(judged.includes("substring(p_text from ops.tour_client_text_disallowed_source_pattern()) sb, substring(f.f from ops.tour_client_text_disallowed_pattern()) fb, f.f from (select ops.tour_client_text_fold(p_text) f) f"), "gates parity");
+  assert.ok(judged.includes("' at position ' || strpos(p_text, c.sb)") && judged.includes("' at position ' || strpos(c.f, c.fb)"), "position parity");
   assert.ok(sqlBody(migration, "tour_client_text_violation").includes("when p_text ~ '[\\u0001-\\u001f\\u007f-\\u009f]' then 'control_character'"), "control parity");
   assert.match(sqlBody(migration, "tour_client_text_violation"), /\(select ops\.tour_client_text_normalize\(p_text\) t\) n\)/);
   const violation = sqlBody(migration, "tour_client_text_violation");

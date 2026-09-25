@@ -11,7 +11,7 @@
 //   3. the PDF packet renderer (tour-packet-render.js).
 // The rules below are written in the subset of regex syntax that JavaScript
 // and PostgreSQL ARE read identically (explicit [^A-Za-z] / [^0-9]
-// boundaries, no \b or \y, lookahead only), and
+// boundaries, no \b or \y, lookahead, and the one lookbehind in access_code), and
 // test/tour-client-share-allowlist.test.mjs asserts the SQL functions carry
 // exactly these strings. The same test and the Postgres proof run one shared
 // corpus of ordinary CRE text and of smuggled contact/access text through both
@@ -47,22 +47,27 @@ export const CLIENT_ROUTE_LABEL_PATTERN = "^[A-Za-z0-9]{1,3}$";
 // overrides and isolates, zero-width and other invisible or default-ignorable
 // characters, variation selectors, tags, fillers, Braille blank, combining
 // marks, other scripts' digits -- is refused, and the refusal names the first
-// such code point ("character:U+202E"). This replaces the earlier denylist of
+// such code point and its position ("character:U+202E at position 1"). This replaces the earlier denylist of
 // invisible characters: a character nobody has thought of yet is refused by
 // default.
 export const CLIENT_TEXT_DISALLOWED =
   "[^ -~\\u00a7\\u00b0\\u00b1\\u00c0-\\u00f6\\u00f8-\\u017f\\u2013\\u2014\\u2018\\u2019\\u201c\\u201d\\u2022\\u2026]";
 // The same set, checked on the value AS STORED, before NFKC, plus the only
-// characters NFKC is trusted to fold into it: the no-break and other Unicode
-// spaces (U+00A0, U+2000-U+200A, U+202F, U+205F, U+3000) and full-width ASCII
-// (U+FF01-U+FF5E). Everything else is refused before NFKC runs. The reason is
+// characters the fold is trusted to map into it: the no-break and other
+// Unicode spaces (U+00A0, U+2000-U+200A, U+202F, U+205F, U+3000), full-width
+// ASCII (U+FF01-U+FF5E) and the Unicode hyphen and non-breaking hyphen
+// (U+2010, U+2011, read as "-"). The three Latin Extended-A letters whose NFKC
+// form leaves the allowlist (U+013F, U+0140, U+0149) are left out, so every
+// character this set admits folds into the allowlist and a refusal's position
+// is always a position in the value as stored. Everything else is refused
+// before NFKC runs. The reason is
 // parity: JavaScript and PostgreSQL ship different Unicode versions, and a
 // character assigned after PostgreSQL's (U+A7F1, U+1CCEB, the outlined digits
 // U+1CCF0-U+1CCF9) folds to ASCII in one engine and not the other. The
 // decompositions of these old characters are frozen by Unicode's stability
 // policy, so both engines read them identically.
 export const CLIENT_TEXT_DISALLOWED_SOURCE =
-  "[^ -~\\u00a0\\u00a7\\u00b0\\u00b1\\u00c0-\\u00f6\\u00f8-\\u017f\\u2000-\\u200a\\u2013\\u2014\\u2018\\u2019\\u201c\\u201d\\u2022\\u2026\\u202f\\u205f\\u3000\\uff01-\\uff5e]";
+  "[^ -~\\u00a0\\u00a7\\u00b0\\u00b1\\u00c0-\\u00f6\\u00f8-\\u013e\\u0141-\\u0148\\u014a-\\u017f\\u2000-\\u200a\\u2010\\u2011\\u2013\\u2014\\u2018\\u2019\\u201c\\u201d\\u2022\\u2026\\u202f\\u205f\\u3000\\uff01-\\uff5e]";
 
 // The dashes that survive the allowlist: ASCII hyphen, en and em dash (the
 // ASCII hyphen last, as a bracket expression needs). NFKC folds the small and
@@ -70,15 +75,19 @@ export const CLIENT_TEXT_DISALLOWED_SOURCE =
 const DASHES = "\\u2013\\u2014-";
 
 // Before the phone rules read a value, a number shaped 3-3-4 is joined across
-// separators of up to five characters of space ( ) . x and any dash (251 . .
-// 555 . . 0100, 251 ( 555 ) 0100, 251 x 555 x 0100), or across one of
+// separators of up to five characters of space ( ) . x, a dash, and the
+// allowlisted symbols x (U+00D7), bullet, plus-minus, degree, section sign and
+// the straight and curly quotes (251 . . 555 . . 0100, 251 ( 555 ) 0100,
+// 251 x 555 x 0100, 251 \u2022 555 \u2022 0100, 251\u00d7555\u00d70100). They are
+// listed one by one: a blanket non-alphanumeric class would also join
+// "Suites 201-204, 1200 SF". Or it is joined across one of
 // , / _ ~ | : * or the bullet (251/555/0100, 251|555|0100). A country code or
 // leading +1 in front stays outside the join and the ten digits still read as
 // a phone. Only the 3-3-4 shape joins across wide separators, so year and count
 // ranges do not ("Renovated 2021 - 2026 (12 suites)"), and a comma joins only
 // a single-comma 3-3-4 group, so thousands do not (120,000 SF).
 export const CLIENT_TEXT_PHONE_JOIN = Object.freeze({
-  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().xX${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{3})(?:[ ().xX${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{4})(?![0-9])`,
+  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{4})(?![0-9])`,
   replacement: "$1$2$3$4",
 });
 // Then any digits separated by one or two of space . and any dash are joined,
@@ -109,10 +118,12 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   // or (at) / [at] before a dotted domain. "4,200 RSF @ $28.50/SF" and
   // "Rate @ market" are not one.
   Object.freeze({ rule: "email", target: "raw", pattern: "[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}|[A-Za-z0-9._%+-]( @|@ ?)[A-Za-z0-9_-]*[A-Za-z]|[A-Za-z0-9._%+-] ?[(\\[] ?at ?[)\\]] ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}" }),
-  // a URL, a bare web domain (its name holds a letter: "Hwy 90.US 29" is a
-  // road), a spaced .com/.net/.org ("landlord .com"), or a spelled-out
-  // "dot com" / "[dot] com"
-  Object.freeze({ rule: "url", target: "raw", pattern: `https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)` }),
+  // a URL (http, https, ftp), a bare web domain (its name holds a letter:
+  // "Hwy 90.US 29" is a road), a spaced .com/.net/.org ("landlord .com"), a
+  // spelled-out "dot com" / "[dot] com", a bracketed dot ("landlord[.]com"),
+  // or any dotted name followed by a path, as link shorteners are written
+  // ("bit.ly/abc", "goo.gl/x"; "$28.50/SF" has no letter before the dot)
+  Object.freeze({ rule: "url", target: "raw", pattern: `(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\\[] ?[.] ?[)\\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.][A-Za-z]{2,}/[A-Za-z0-9]` }),
   // a North-American phone number, however its ten digits are grouped
   Object.freeze({ rule: "phone", target: "digits", pattern: "(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)" }),
   // a seven-digit local number: 555-0100, 555 - 0100 (exchange 2-9, as NANP requires)
@@ -120,8 +131,13 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   // an international number: +44 20 7946 0958, + 44 ..., 011 44 ...
   Object.freeze({ rule: "international_phone", target: "digits", pattern: "[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)" }),
   // access-code wording, as whole words: gate code, door combo, entry PIN,
-  // alarm code, keypad code ("Westgate Pines", "Fire alarm system" pass)
-  Object.freeze({ rule: "access_code", target: "raw", pattern: "(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)" }),
+  // alarm code, keypad code ("Westgate Pines", "Fire alarm system" pass); or a
+  // gate/door/keypad/alarm/lock/code/combo/PIN/passcode word next to three or
+  // more digits ("Gate #4411", "PIN 4411", "Front gate 4411"). "Door 3",
+  // "Gate 2 parking" and "garage 250 spaces" pass; "zip code 36602" is not a
+  // code (the one place this rule reads backwards: a lookbehind, which
+  // PostgreSQL ARE and JavaScript read alike)
+  Object.freeze({ rule: "access_code", target: "raw", pattern: "(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(?<!zip )(?<!zip)(gate|door|keypad|alarm|lock|code|combo|pin|passcode) ?[:#]? ?[0-9]{3,}" }),
   Object.freeze({ rule: "lockbox", target: "raw", pattern: "(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)" }),
   // internal-note wording (a free-text note cannot be recognised in general;
   // the length cap bounds the rest)
@@ -140,22 +156,37 @@ const ROUTE_LABEL = new RegExp(CLIENT_ROUTE_LABEL_PATTERN);
 const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 
 /**
- * The text every client rule reads and every client surface shows: NFKC,
- * space runs collapsed to one space, ends trimmed. Only meaningful for a value
- * the allowlist admits. Mirrors ops.tour_client_text_normalize.
+ * NFKC, then the Unicode hyphen (U+2010, which NFKC also makes of the
+ * non-breaking hyphen U+2011) read as the ASCII hyphen. Mirrors
+ * ops.tour_client_text_fold.
  */
-export function normalizeClientText(value) {
-  return value.normalize("NFKC").replace(/ +/g, " ").replace(/^ | $/g, "");
+function foldClientText(value) {
+  return value.normalize("NFKC").replace(/\u2010/g, "-");
 }
 
 /**
- * "U+202E" for the first character outside the allowlist -- first in the
- * stored value (the source set), then in NFKC(value) -- or null.
+ * The text every client rule reads and every client surface shows: folded
+ * (NFKC, Unicode hyphen as ASCII), space runs collapsed to one space, ends
+ * trimmed. Only meaningful for a value the allowlist admits. Mirrors
+ * ops.tour_client_text_normalize.
+ */
+export function normalizeClientText(value) {
+  return foldClientText(value).replace(/ +/g, " ").replace(/^ | $/g, "");
+}
+
+/**
+ * "U+00AD at position 7" for the first character outside the allowlist, or
+ * null. The position counts code points from 1, in the value as stored (the
+ * source set is checked there first); a character that only the fold produces
+ * is reported at its position in the folded text.
  */
 export function firstDisallowedCodePoint(value) {
-  for (const [text, pattern] of [[value, DISALLOWED_SOURCE], [value.normalize("NFKC"), DISALLOWED]]) {
+  for (const [text, pattern] of [[value, DISALLOWED_SOURCE], [foldClientText(value), DISALLOWED]]) {
     const match = pattern.exec(text);
-    if (match) return `U+${text.codePointAt(match.index).toString(16).toUpperCase().padStart(4, "0")}`;
+    if (match) {
+      const hex = text.codePointAt(match.index).toString(16).toUpperCase().padStart(4, "0");
+      return `U+${hex} at position ${Array.from(text.slice(0, match.index)).length + 1}`;
+    }
   }
   return null;
 }
