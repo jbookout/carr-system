@@ -2,10 +2,10 @@
 -- lifecycle -- Prospect through Client/Engagement/Assignment/Deal (requirements
 -- Q069, Q072, Q077-Q083, Q094-Q096, Q103; gate journey-one-production-accepted).
 --
--- NUMBERED AS migrations/0630_cre_lifecycle.sql, byte for byte. This file is
+-- NUMBERED AS migrations/0704_cre_lifecycle.sql, byte for byte. This file is
 -- the reviewed source; the migration is an exact copy of it (the store parity
 -- suite asserts the two are identical), applied in one transaction with its SCAC
--- seal, 0631. It creates no role and no user.
+-- seal, 0705. It creates no role and no user.
 --
 -- WHAT THIS IS. cre-lifecycle.v5.js can judge a transition against loaded state
 -- and loaded evidence, and cre-lifecycle-store.v5.js can build the exact

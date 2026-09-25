@@ -487,7 +487,7 @@ test("the registration description is a description, and it says what the parent
     assert.ok(V5_J102_OPERATIONS.includes(entry.store_operation));
     assert.ok(entry.role.length > 0, `${entry.name} states its role`);
     assert.ok(entry.handler.length > 0);
-    // Registered, sealed (v78) and migration-bound (0630); never accepted.
+    // Registered, sealed (v80) and migration-bound (0704); never accepted.
     assert.equal(entry.registered_in_scac, true);
     assert.equal(entry.registered_in_mutation_registry, true);
     assert.equal(entry.migration_bound, true);
@@ -2621,20 +2621,20 @@ test("the store requires an injected handle and opens no connection of its own",
 // the second.
 //
 // NOTHING HERE EXECUTES SQL. These assertions are about the reviewed source's
-// bytes; the live suite and the db-gate execute it as migration 0630.
+// bytes; the live suite and the db-gate execute it as migration 0704.
 // ---------------------------------------------------------------------------
 
 const CANDIDATE_SQL = readFileSync(
   new URL("../../ops/cre-lifecycle.candidate.sql", import.meta.url), "utf8");
 
-test("migration 0630 IS the reviewed candidate, byte for byte", () => {
+test("migration 0704 IS the reviewed candidate, byte for byte", () => {
   // Everything this suite proves about the candidate is only a proof about what
   // runs if the numbered migration is the same bytes. A hand edit to either one
   // alone fails here.
   const migration = readFileSync(
-    new URL("../../migrations/0630_cre_lifecycle.sql", import.meta.url), "utf8");
+    new URL("../../migrations/0704_cre_lifecycle.sql", import.meta.url), "utf8");
   assert.equal(migration, CANDIDATE_SQL);
-  assert.match(CANDIDATE_SQL, /NUMBERED AS migrations\/0630_cre_lifecycle\.sql, byte for byte/);
+  assert.match(CANDIDATE_SQL, /NUMBERED AS migrations\/0704_cre_lifecycle\.sql, byte for byte/);
 });
 
 /** The admission map, read out of the candidate SQL's dollar-quoted JSON. */

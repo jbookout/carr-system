@@ -391,16 +391,37 @@ export const REGISTRY_V76_VERSION = "scac-mutation-registry.v76";
 // group re-digests its external-admin row. The runtime selector
 // (mutation-registry.js) moves to v77.
 export const REGISTRY_V77_VERSION = "scac-mutation-registry.v77";
-// v78 admits DoctorCRE V5-J102, chained from v77 (migration 0627): migration
-// 0630 installs the healthcare CRE lifecycle store (SECURITY DEFINER writers and
+// v78 admits the DoctorCRE v5 slice done-record (migration 0628):
+// register-slice-criteria-from-catalog, bind-slice-criterion-evidence,
+// record-release-slice-members, propose-slice-completion,
+// list-shipped-releases, pending-slice-completion-proposals
+// (writer/reader) and rebind-slice-criterion-evidence,
+// set-slice-mark-hold, confirm-slice-completions (authorityOnly), and
+// narrows register-slice-checkable-done's evidence kinds. Automation
+// proposes; only a partner confirms complete. Chained over v77 (0627) by
+// migration 0629. The runtime selector (mutation-registry.js) moves to v78.
+export const REGISTRY_V78_VERSION = "scac-mutation-registry.v78";
+// v79 admits DoctorCRE V5-J103's governed correspondence store, chained from
+// v78 (migration 0629): four new mcp-tool ingresses in
+// mcp-server/src/governed-correspondence-store.v5.js -- correspondence-readiness
+// and read-correspondence-thread (reads), and the humanOnly pair
+// record-correspondence-adapter-consent / revoke-correspondence-adapter-consent.
+// There is no send verb and no draft path that can dispatch. 0700 adds the
+// store's SECURITY DEFINER writers and readers (the read-receipt writer is
+// granted to nobody), so those and v79's registration function move the
+// catalog; tools/migrate.py's row moves because it pairs (0700, 0701).
+// The runtime selector (mutation-registry.js) moves to v79.
+export const REGISTRY_V79_VERSION = "scac-mutation-registry.v79";
+// v80 admits DoctorCRE V5-J102, chained from v79 (migration 0701): migration
+// 0704 installs the healthcare CRE lifecycle store (SECURITY DEFINER writers and
 // readers with EXECUTE to carr_reader, carr_writer and the carr_authority
 // group), and twenty-one new mcp-tool ingresses in
 // mcp-server/src/cre-lifecycle-store.v5.js front them: read-cre-lifecycle (a
 // read on the writer connection) and twenty writes, one of them humanOnly and
 // authorityOnly (record-lifecycle-correction) and five more authorityOnly.
-// tools/migrate.py's (0630, 0631) atomic group re-digests its external-admin
-// row. The runtime selector (mutation-registry.js) moves to v78.
-export const REGISTRY_V78_VERSION = "scac-mutation-registry.v78";
+// tools/migrate.py's (0704, 0705) atomic group re-digests its external-admin
+// row. The runtime selector (mutation-registry.js) moves to v80.
+export const REGISTRY_V80_VERSION = "scac-mutation-registry.v80";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1587,15 +1608,32 @@ export const POST_0627_FORWARD_V77_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v77",
   secdef_execute: { count: 961, digest: "sha256:8442a08543c99d4fff6530b5a2b2959cb21024439bd5cb47b1d5d406f38c02f1" },
 });
-// Measured on the disposable PostgreSQL 17 migration lane by drift readback
-// over migrations 0001-0631 on top of main's v77 predecessor (0627). 0630
-// installs the V5-J102 SECURITY DEFINER doors with EXECUTE to carr_reader,
-// carr_writer and the carr_authority group (never to a login role); with v78's
-// own registration function and its runtime EXECUTE grants they move the catalog.
-export const POST_0631_FORWARD_V78_DB_CATALOG_BASELINE = Object.freeze({
+// Measured on the PG17 migration lane by drift readback over 0001-0629 on
+// top of main's v77 predecessor (0627): 0628's SECURITY DEFINER doors and
+// their EXECUTE grants, plus v78's own registration function and grants.
+export const POST_0629_FORWARD_V78_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0627_FORWARD_V77_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v78",
-  secdef_execute: { count: 1013, digest: "sha256:dc66c5ca3484666a7a5b158ce22148e3bf5f646586912d1352cb5da90f3d3287" },
+  secdef_execute: { count: 975, digest: "sha256:7964b99334d8a156d6736ef5f7fbf4c7181838f86ea2824ee7e4ab008dedb6ad" },
+});
+// Measured on the disposable PostgreSQL 17 migration lane by drift readback
+// over migrations 0001-0701 on top of main's v78 predecessor (0629). 0700's
+// SECURITY DEFINER writers and readers, their grants, and v79's registration
+// function with its runtime EXECUTE grants are what move the catalog.
+export const POST_0701_FORWARD_V79_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0629_FORWARD_V78_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v79",
+  secdef_execute: { count: 988, digest: "sha256:a9d7257c9b57245d929798894a443ef97b1a8130b761d8547ce9bc2f2a29c180" },
+});
+// Measured on the disposable PostgreSQL 17 migration lane by drift readback
+// over migrations 0001-0705 on top of main's v79 predecessor (0701). 0704
+// installs the V5-J102 SECURITY DEFINER doors with EXECUTE to carr_reader,
+// carr_writer and the carr_authority group (never to a login role); with v80's
+// own registration function and its runtime EXECUTE grants they move the catalog.
+export const POST_0705_FORWARD_V80_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0701_FORWARD_V79_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v80",
+  secdef_execute: { count: 1040, digest: "sha256:44c3f709d67b3108a3daf04ebe33b0d559419aec570bcdcb7a7393e9cf76e133" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -2322,6 +2360,8 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V76_VERSION]: "v76",
   [REGISTRY_V77_VERSION]: "v77",
   [REGISTRY_V78_VERSION]: "v78",
+  [REGISTRY_V79_VERSION]: "v79",
+  [REGISTRY_V80_VERSION]: "v80",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2414,7 +2454,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V78_VERSION) {
+  version = REGISTRY_V80_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -2502,7 +2542,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
     REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
     REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION].includes(version))
+    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION, REGISTRY_V79_VERSION, REGISTRY_V80_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -16762,8 +16802,7 @@ export function renderRecordSourceAuthorityRegistrySql(rows,
   return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
 }
 
-
-export function renderCreLifecycleRegistrySql(rows,
+export function renderV5SliceDoneMarkerRegistrySql(rows,
   predecessorSql = null) {
   const predecessorPath = "migrations/0627_f01_record_source_authority_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
@@ -16771,7 +16810,7 @@ export function renderCreLifecycleRegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v78 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0627_FORWARD_V77_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0631_FORWARD_V78_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0629_FORWARD_V78_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V77_VERSION,
     frozenInventory(REGISTRY_V77_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V78_VERSION, rows, newCatalogBaseline);
@@ -16785,14 +16824,14 @@ export function renderCreLifecycleRegistrySql(rows,
   const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
   if (start < 0) throw new Error("v78 predecessor DDL boundary missing");
   let sql = predecessor.slice(start + 1)
-    .replaceAll("$record_source_authority_v77", "$cre_lifecycle_v78")
+    .replaceAll("$record_source_authority_v77", "$v5_slice_done_marker_v78")
     .replaceAll("scac-mutation-registry.v77", "scac-mutation-registry.v78")
     .replaceAll("scac-db-catalog-projection.v77", "scac-db-catalog-projection.v78")
     .replaceAll("_v77", "_v78")
     .replaceAll("v76_current", "v77_current")
     .replaceAll("v76_live_at_seal", "v77_live_at_seal")
     .replaceAll("snapshot_v76", "snapshot_v77")
-    .replaceAll("Record source authority", "CRE lifecycle")
+    .replaceAll("Record source authority", "V5 slice done marker")
     .replaceAll(oldSeal.digest, newSeal.digest)
     .replaceAll(oldEntrySet, newEntrySet)
     .replaceAll(oldCatalog.replaceAll("v77", "v78"), newCatalog)
@@ -16804,8 +16843,8 @@ export function renderCreLifecycleRegistrySql(rows,
     .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
     .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
       `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
-    .replaceAll("CRE lifecycle v77 seed or entry-set seal drifted",
-      "CRE lifecycle v78 seed or entry-set seal drifted");
+    .replaceAll("V5 slice done marker v77 seed or entry-set seal drifted",
+      "V5 slice done marker v78 seed or entry-set seal drifted");
   const versionListMarker =
     "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v73','scac-mutation-registry.v74','scac-mutation-registry.v75','scac-mutation-registry.v76','scac-mutation-registry.v78'";
   if (sql.split(versionListMarker).length - 1 !== 2)
@@ -16826,26 +16865,192 @@ export function renderCreLifecycleRegistrySql(rows,
     ["     or not ops.scac_mutation_registry_v78_seal_available()",
       "     or not ops.scac_mutation_registry_v77_seal_available()\n     or not ops.scac_mutation_registry_v78_seal_available()", "final seal history"],
   ]) sql = replaceExactlyOnce(sql, before, after, `v78 ${label}`);
-  const seedStart = sql.indexOf("$cre_lifecycle_v78_source$[");
-  const seedEnd = sql.indexOf("]$cre_lifecycle_v78_source$", seedStart);
+  const seedStart = sql.indexOf("$v5_slice_done_marker_v78_source$[");
+  const seedEnd = sql.indexOf("]$v5_slice_done_marker_v78_source$", seedStart);
   if (seedStart < 0 || seedEnd < 0) throw new Error("v78 source seed boundary missing");
   const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
-  sql = `${sql.slice(0, seedStart)}$cre_lifecycle_v78_source$${seed}$cre_lifecycle_v78_source$${sql.slice(seedEnd + "]$cre_lifecycle_v78_source$".length)}`;
-  const preflight = `do $cre_lifecycle_v78_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+  sql = `${sql.slice(0, seedStart)}$v5_slice_done_marker_v78_source$${seed}$v5_slice_done_marker_v78_source$${sql.slice(seedEnd + "]$v5_slice_done_marker_v78_source$".length)}`;
+  const preflight = `do $v5_slice_done_marker_v78_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
-    `    raise exception 'CRE lifecycle v78 requires exact applied 0627'; end if;\n` +
+    `    raise exception 'V5 slice done marker v78 requires exact applied 0627'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V77_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
     `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
-    `    raise exception 'CRE lifecycle v77 predecessor seal drifted'; end if;\n` +
+    `    raise exception 'V5 slice done marker v77 predecessor seal drifted'; end if;\n` +
     `  registration:=ops.scac_mutation_registration_v77('${oldSeal.digest}','mcp-tool:standing-context');\n` +
     `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
-    `    raise exception 'CRE lifecycle v77 predecessor entry drifted'; end if;\n` +
-    `end $cre_lifecycle_v78_preflight$;\n\n`;
+    `    raise exception 'V5 slice done marker v77 predecessor entry drifted'; end if;\n` +
+    `end $v5_slice_done_marker_v78_preflight$;\n\n`;
   return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
 }
 
+
+export function renderGovernedCorrespondenceRegistrySql(rows,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0629_doctorcre_slice_done_marker_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "ca19cc776555ed6a7eaa28981e3e77cf7e2e7142f1bcfb3ed09c8a6515f9b586";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v79 predecessor migration pin drifted");
+  const oldCatalogBaseline = POST_0629_FORWARD_V78_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0701_FORWARD_V79_DB_CATALOG_BASELINE;
+  const oldSeal = registrySeal(REGISTRY_V78_VERSION,
+    frozenInventory(REGISTRY_V78_VERSION), oldCatalogBaseline);
+  const newSeal = registrySeal(REGISTRY_V79_VERSION, rows, newCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V78_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V79_VERSION];
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value ?? "")))
+    throw new Error("v79 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(oldCatalogBaseline);
+  const newCatalog = JSON.stringify(newCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v79 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$v5_slice_done_marker_v78", "$governed_correspondence_v79")
+    .replaceAll("scac-mutation-registry.v78", "scac-mutation-registry.v79")
+    .replaceAll("scac-db-catalog-projection.v78", "scac-db-catalog-projection.v79")
+    .replaceAll("_v78", "_v79")
+    .replaceAll("v77_current", "v78_current")
+    .replaceAll("v77_live_at_seal", "v78_live_at_seal")
+    .replaceAll("snapshot_v77", "snapshot_v78")
+    .replaceAll("V5 slice done marker", "Governed correspondence")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v78", "v79"), newCatalog)
+    .replaceAll(`observed_count<>${oldCatalogBaseline.secdef_execute.count}`,
+      `observed_count<>${newCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(`observed_digest<>'${oldCatalogBaseline.secdef_execute.digest}'`,
+      `observed_digest<>'${newCatalogBaseline.secdef_execute.digest}'`)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
+    .replaceAll("Governed correspondence v78 seed or entry-set seal drifted",
+      "Governed correspondence v79 seed or entry-set seal drifted");
+  const versionListMarker =
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v73','scac-mutation-registry.v74','scac-mutation-registry.v75','scac-mutation-registry.v76','scac-mutation-registry.v77','scac-mutation-registry.v79'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v79 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v73','scac-mutation-registry.v74','scac-mutation-registry.v75','scac-mutation-registry.v76','scac-mutation-registry.v77','scac-mutation-registry.v78','scac-mutation-registry.v79'");
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v79' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v78' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v79' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v79' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v78' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v79' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v79' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v78' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v79' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v77_seal_available()) then",
+      "ops.scac_mutation_registry_v77_seal_available() and ops.scac_mutation_registry_v78_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v79' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v78' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v79' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v79_seal_available()",
+      "     or not ops.scac_mutation_registry_v78_seal_available()\n     or not ops.scac_mutation_registry_v79_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v79 ${label}`);
+  const seedStart = sql.indexOf("$governed_correspondence_v79_source$[");
+  const seedEnd = sql.indexOf("]$governed_correspondence_v79_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v79 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$governed_correspondence_v79_source$${seed}$governed_correspondence_v79_source$${sql.slice(seedEnd + "]$governed_correspondence_v79_source$".length)}`;
+  const preflight = `do $governed_correspondence_v79_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'Governed correspondence v79 requires exact applied 0629'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V78_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'Governed correspondence v78 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v78('${oldSeal.digest}','mcp-tool:standing-context');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'Governed correspondence v78 predecessor entry drifted'; end if;\n` +
+    `end $governed_correspondence_v79_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
+
+export function renderCreLifecycleRegistrySql(rows,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0701_governed_correspondence_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "f1c683b8d359f4ab177a1a79b6a26e9114ce8c120df3a28efa66e054df140228";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v80 predecessor migration pin drifted");
+  const oldCatalogBaseline = POST_0701_FORWARD_V79_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0705_FORWARD_V80_DB_CATALOG_BASELINE;
+  const oldSeal = registrySeal(REGISTRY_V79_VERSION,
+    frozenInventory(REGISTRY_V79_VERSION), oldCatalogBaseline);
+  const newSeal = registrySeal(REGISTRY_V80_VERSION, rows, newCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V79_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V80_VERSION];
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value ?? "")))
+    throw new Error("v80 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(oldCatalogBaseline);
+  const newCatalog = JSON.stringify(newCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v80 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$governed_correspondence_v79", "$cre_lifecycle_v80")
+    .replaceAll("scac-mutation-registry.v79", "scac-mutation-registry.v80")
+    .replaceAll("scac-db-catalog-projection.v79", "scac-db-catalog-projection.v80")
+    .replaceAll("_v79", "_v80")
+    .replaceAll("v78_current", "v79_current")
+    .replaceAll("v78_live_at_seal", "v79_live_at_seal")
+    .replaceAll("snapshot_v78", "snapshot_v79")
+    .replaceAll("Governed correspondence", "CRE lifecycle")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v79", "v80"), newCatalog)
+    .replaceAll(`observed_count<>${oldCatalogBaseline.secdef_execute.count}`,
+      `observed_count<>${newCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(`observed_digest<>'${oldCatalogBaseline.secdef_execute.digest}'`,
+      `observed_digest<>'${newCatalogBaseline.secdef_execute.digest}'`)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
+    .replaceAll("CRE lifecycle v79 seed or entry-set seal drifted",
+      "CRE lifecycle v80 seed or entry-set seal drifted");
+  const versionListMarker =
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v73','scac-mutation-registry.v74','scac-mutation-registry.v75','scac-mutation-registry.v76','scac-mutation-registry.v77','scac-mutation-registry.v78','scac-mutation-registry.v80'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v80 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v73','scac-mutation-registry.v74','scac-mutation-registry.v75','scac-mutation-registry.v76','scac-mutation-registry.v77','scac-mutation-registry.v78','scac-mutation-registry.v79','scac-mutation-registry.v80'");
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v80' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v79' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v80' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v80' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v79' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v80' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v80' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v79' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v80' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v78_seal_available()) then",
+      "ops.scac_mutation_registry_v78_seal_available() and ops.scac_mutation_registry_v79_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v80' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v79' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v80' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v80_seal_available()",
+      "     or not ops.scac_mutation_registry_v79_seal_available()\n     or not ops.scac_mutation_registry_v80_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v80 ${label}`);
+  const seedStart = sql.indexOf("$cre_lifecycle_v80_source$[");
+  const seedEnd = sql.indexOf("]$cre_lifecycle_v80_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v80 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$cre_lifecycle_v80_source$${seed}$cre_lifecycle_v80_source$${sql.slice(seedEnd + "]$cre_lifecycle_v80_source$".length)}`;
+  const preflight = `do $cre_lifecycle_v80_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'CRE lifecycle v80 requires exact applied 0701'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V79_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'CRE lifecycle v79 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v79('${oldSeal.digest}','mcp-tool:standing-context');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'CRE lifecycle v79 predecessor entry drifted'; end if;\n` +
+    `end $cre_lifecycle_v80_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
 
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
@@ -17690,15 +17895,35 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v78.generated.js"] =
     renderRuntimeProjection(v78Rows, {
       version: REGISTRY_V78_VERSION,
-      dbCatalogBaseline: POST_0631_FORWARD_V78_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0629_FORWARD_V78_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0631_cre_lifecycle_scac_successor.sql"] =
-    renderCreLifecycleRegistrySql(v78Rows,
+  artifacts["migrations/0629_doctorcre_slice_done_marker_scac_successor.sql"] =
+    renderV5SliceDoneMarkerRegistrySql(v78Rows,
       artifacts["migrations/0627_f01_record_source_authority_scac_successor.sql"]);
+
+  const v79Rows = frozenInventory(REGISTRY_V79_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v79.generated.js"] =
+    renderRuntimeProjection(v79Rows, {
+      version: REGISTRY_V79_VERSION,
+      dbCatalogBaseline: POST_0701_FORWARD_V79_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0701_governed_correspondence_scac_successor.sql"] =
+    renderGovernedCorrespondenceRegistrySql(v79Rows,
+      artifacts["migrations/0629_doctorcre_slice_done_marker_scac_successor.sql"]);
+
+  const v80Rows = frozenInventory(REGISTRY_V80_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v80.generated.js"] =
+    renderRuntimeProjection(v80Rows, {
+      version: REGISTRY_V80_VERSION,
+      dbCatalogBaseline: POST_0705_FORWARD_V80_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0705_cre_lifecycle_scac_successor.sql"] =
+    renderCreLifecycleRegistrySql(v80Rows,
+      artifacts["migrations/0701_governed_correspondence_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 84 || runtimeCount !== 75 || Object.keys(artifacts).length !== 159)
+  if (migrationCount !== 86 || runtimeCount !== 77 || Object.keys(artifacts).length !== 163)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }

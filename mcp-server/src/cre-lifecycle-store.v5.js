@@ -87,7 +87,7 @@
 // from through creLifecycleStoreTools() at the end of this file: every verb on
 // the writer connection, so mcp.js's setWriterActorContext sets the actor and the
 // server-verified sponsor for each call. The twenty-one verbs are sealed in SCAC
-// v78 (migration 0631) over the store SQL numbered as migration 0630. What stays
+// v80 (migration 0705) over the store SQL numbered as migration 0704. What stays
 // false is `accepted`: registration is not a partner's acceptance.
 //
 // WHAT THIS MODULE IS NOT. It performs no provider call, calls no Salesforce API,
@@ -1211,8 +1211,8 @@ export function v5J102ToolRegistrations() {
     // requirement that is not the operative one.
     ...associationPrerequisite(name),
     ...primarySubjectPrerequisite(name),
-    // Registered in tools.js, sealed in SCAC v78 (0631) and bound to migration
-    // 0630. Acceptance is a partner's act and is never claimed here.
+    // Registered in tools.js, sealed in SCAC v80 (0705) and bound to migration
+    // 0704. Acceptance is a partner's act and is never claimed here.
     registered_in_scac: true,
     registered_in_mutation_registry: true,
     migration_bound: true,

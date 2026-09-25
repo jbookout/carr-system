@@ -3,7 +3,7 @@
 # doctrine: runbook
 """V5-J102 live acceptance on a disposable loopback sibling database.
 
-WHAT IT PROVES. The CRE lifecycle is a numbered migration (0630, sealed by 0631),
+WHAT IT PROVES. The CRE lifecycle is a numbered migration (0704, sealed by 0705),
 so the migrated schema already carries it; the gate refuses to run on a schema that
 does not. Then, against real PostgreSQL:
 
@@ -191,10 +191,10 @@ def main() -> int:
                 cur.execute("select to_regprocedure('ops.f01_principal()') is not null, "
                             "to_regprocedure('ops.j102_sponsoring_partner()') is not null, "
                             "exists(select 1 from public.schema_migrations "
-                            "where filename='0630_cre_lifecycle.sql')")
+                            "where filename='0704_cre_lifecycle.sql')")
                 probe = cur.fetchone()
             if not (probe and all(probe)):
-                return fail("the migrated schema does not carry F01 and J102 (0630); "
+                return fail("the migrated schema does not carry F01 and J102 (0704); "
                             "apply every numbered migration first")
 
             # The SQL fixture: both partners must pass every runnable group; the
